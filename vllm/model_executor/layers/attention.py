@@ -13,6 +13,7 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.triton_kernel.prefix_prefill import (
     context_attention_fwd)
 from vllm.utils import is_hip
+from vllm.worker.comm_utils import KVCacheCommunicator
 
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
@@ -58,6 +59,11 @@ class PagedAttention(nn.Module):
             raise ValueError(f"head_size ({self.head_size}) is not supported. "
                              f"Supported head sizes: {_SUPPORTED_HEAD_SIZES}.")
 
+        self.kvcache_comm : KVCacheCommunicator = None
+
+    def set_kvcache_comm(self, kvcache_comm: KVCacheCommunicator):
+        self.kvcache_comm = kvcache_comm
+
     def forward(
         self,
         query: torch.Tensor,
@@ -100,6 +106,12 @@ class PagedAttention(nn.Module):
                 input_metadata.slot_mapping.flatten(),
                 input_metadata.kv_cache_dtype,
             )
+
+            if input_metadata.is_prompt and len(input_metadata.blocks_to_nw):
+                assert self.kvcache_comm is not None
+                for semid in input_metadata.blocks_to_nw:
+                    for block_start, num_blocks in input_metadata.blocks_to_nw[semid]:
+                        self.kvcache_comm.put(semid, self.layer_id, block_start, num_blocks)
 
         if input_metadata.is_prompt:
             # Prompt run.

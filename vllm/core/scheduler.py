@@ -1,4 +1,4 @@
-from collections import deque
+from collections import defaultdict, deque
 import enum
 import time
 from typing import Deque, Dict, Iterable, List, Optional, Tuple, Union, Set
@@ -11,6 +11,8 @@ from vllm.logger import init_logger
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceStatus)
 from vllm.prefix import PrefixPool
+from vllm.utils import coalesce_blocks_by_id
+from vllm.worker.comm_utils import Seq2SemMapper
 
 logger = init_logger(__name__)
 
@@ -38,6 +40,7 @@ class SchedulerOutputs:
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
+        blocks_to_nw: Dict[int, List[int]],
         ignored_seq_groups: List[SequenceGroup],
     ) -> None:
         self.scheduled_seq_groups = scheduled_seq_groups
@@ -46,6 +49,7 @@ class SchedulerOutputs:
         self.blocks_to_swap_in = blocks_to_swap_in
         self.blocks_to_swap_out = blocks_to_swap_out
         self.blocks_to_copy = blocks_to_copy
+        self.blocks_to_nw = blocks_to_nw
         # Swap in and swap out should never happen at the same time.
         assert not (blocks_to_swap_in and blocks_to_swap_out)
         self.ignored_seq_groups = ignored_seq_groups
@@ -57,7 +61,8 @@ class SchedulerOutputs:
     def is_empty(self) -> bool:
         # NOTE: We do not consider the ignored sequence groups.
         return (not self.scheduled_seq_groups and not self.blocks_to_swap_in
-                and not self.blocks_to_swap_out and not self.blocks_to_copy)
+                and not self.blocks_to_swap_out and not self.blocks_to_copy
+                and not self.blocks_to_nw)
 
     def _sort_by_lora_ids(self) -> bool:
         self.scheduled_seq_groups = sorted(
@@ -77,6 +82,7 @@ class Scheduler:
         scheduler_config: SchedulerConfig,
         cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
+        seq_sem_mapper: Optional[Seq2SemMapper] = None,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
@@ -84,6 +90,7 @@ class Scheduler:
         # simple and NOT fair. It can lead to starvation of some
         # LoRAs. This should be improved in the future.
         self.lora_config = lora_config
+        self.seq_sem_mapper = seq_sem_mapper
 
         self.prompt_limit = min(self.scheduler_config.max_model_len,
                                 self.scheduler_config.max_num_batched_tokens)
@@ -158,10 +165,11 @@ class Scheduler:
         return len(self.waiting) + len(self.running) + len(self.swapped)
 
     def _schedule(self) -> SchedulerOutputs:
-        # Blocks that need to be swaped or copied before model execution.
+        # Blocks that need to be swaped, copied, or networked before model execution.
         blocks_to_swap_in: Dict[int, int] = {}
         blocks_to_swap_out: Dict[int, int] = {}
         blocks_to_copy: Dict[int, List[int]] = {}
+        blocks_to_nw: Dict[int, List[int]] = defaultdict(list)
 
         # Fix the current time.
         now = time.monotonic()
@@ -252,6 +260,14 @@ class Scheduler:
                 self.running.append(seq_group)
                 num_curr_seqs += num_new_seqs
                 scheduled.append(seq_group)
+                if self.seq_sem_mapper is not None:
+                    for seq in seq_group.get_seqs():
+                        # Populate blocks_to_nw for the sequences in prompt phase
+                        # and first step of generation phase
+                        if seq.get_output_len() <= 1:
+                            block_ids = self.block_manager.get_block_table(seq)
+                            sem_id = self.seq_sem_mapper.get_sem_id(seq.seq_id)
+                            blocks_to_nw[sem_id].extend(block_ids)
 
             self.waiting.extendleft(leftover_waiting_sequences)
 
@@ -264,6 +280,7 @@ class Scheduler:
                     blocks_to_swap_in=blocks_to_swap_in,
                     blocks_to_swap_out=blocks_to_swap_out,
                     blocks_to_copy=blocks_to_copy,
+                    blocks_to_nw=coalesce_blocks_by_id(blocks_to_nw),
                     ignored_seq_groups=ignored_seq_groups,
                 )
                 return scheduler_outputs
@@ -349,6 +366,16 @@ class Scheduler:
             seq_group.num_seqs(status=SequenceStatus.RUNNING)
             for seq_group in self.running)
 
+        if self.seq_sem_mapper is not None:
+            for seq_group in self.running:
+                for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+                    # Populate blocks_to_nw for the sequences in prompt phase
+                    # and first step of generation phase
+                    if seq.get_output_len() <= 1:
+                        block_ids = self.block_manager.get_block_table(seq)
+                        sem_id = self.seq_sem_mapper.get_sem_id(seq.seq_id)
+                        blocks_to_nw[sem_id].extend(block_ids)
+
         scheduler_outputs = SchedulerOutputs(
             scheduled_seq_groups=self.running,
             prompt_run=False,
@@ -356,6 +383,7 @@ class Scheduler:
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
+            blocks_to_nw=coalesce_blocks_by_id(blocks_to_nw),
             ignored_seq_groups=[],
         )
         return scheduler_outputs
@@ -393,6 +421,8 @@ class Scheduler:
 
     def free_seq(self, seq: Sequence) -> None:
         self.block_manager.free(seq)
+        if self.seq_sem_mapper is not None:
+            self.seq_sem_mapper.free_seq(seq.seq_id)
 
     def free_finished_seq_groups(self) -> None:
         self.running = deque(seq_group for seq_group in self.running
@@ -402,6 +432,8 @@ class Scheduler:
         self.block_manager.allocate(seq_group)
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             seq.status = SequenceStatus.RUNNING
+            if self.seq_sem_mapper is not None:
+                self.seq_sem_mapper.set_seq(seq.seq_id)
 
     def _append_slot(
         self,

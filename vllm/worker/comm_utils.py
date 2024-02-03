@@ -1,11 +1,33 @@
 import cupy as cp
 import os
 
-from mscclpp.utils import KernelBuilder, pack
+try:
+    from mscclpp.utils import KernelBuilder, pack
+except ImportError:
+    pass
+
 MAX_SEMIDS = 10
 FLUSH_COUNT = 128
 
 KERNEL_DIR = os.path.dirname(os.path.abspath(__file__)) + "/../../csrc"
+
+# Seq2SemMapper is a class that maps sequence ids to semaphore ids
+# It is used to manage the semaphore ids for MSCCL++ proxy channels
+class Seq2SemMapper:
+    def __init__(self):
+        self.available_semids = list(range(MAX_SEMIDS))
+        self.seq_to_sem = {}
+
+    def set_seq(self, seq_id):
+        sem_id = self.available_semids.pop(0)
+        self.seq_to_sem[seq_id] = sem_id
+
+    def free_seq(self, seq_id):
+        sem_id = self.seq_to_sem.pop(seq_id)
+        self.available_semids.insert(0, sem_id)
+
+    def get_sem_id(self, seq_id):
+        return self.seq_to_sem[seq_id]
 
 class SplitCommInfo():
     def __init__(self,

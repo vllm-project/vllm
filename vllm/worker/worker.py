@@ -72,6 +72,10 @@ class Worker:
         self.cache_events = None
         self.gpu_cache = None
 
+        self.split_comm_info = None
+        self.kvcache_comm = None
+        self.mscclpp_group = None
+
     def is_prompt_worker(self) -> bool:
         return self.worker_type == WorkerType.PROMPT
 
@@ -113,34 +117,61 @@ class Worker:
 
     def load_model(self):
         self.model_runner.load_model()
+        if self.parallel_config.sep_prompt_token:
+            # Populate Sampler with dst_rank as driver worker's rank.
+            self.model_runner.model.sampler.dst_rank = self.model_runner.driver_rank
 
     def init_mscclpp_comm(self, mscclpp_init_method: Optional[str] = None) -> None:
         if mscclpp_init_method is not None:
             import mscclpp.comm as mscclpp_comm
+
             self.mscclpp_group = mscclpp_comm.CommGroup(
                 rank=self.rank,
                 size=self.parallel_config.world_size,
-                interfaceIpPortTrio=mscclpp_init_method
+                interfaceIpPortTrio=mscclpp_init_method,
             )
             self.mscclpp_conns = None
-            self.worker_type = WorkerType.PROMPT if self.rank < self.parallel_config.num_prompt_workers else WorkerType.TOKEN
+            self.worker_type = (
+                WorkerType.PROMPT
+                if self.rank < self.parallel_config.num_prompt_workers
+                else WorkerType.TOKEN
+            )
+
+            # Set the driver worker rank for prompt and token workers.
+            self.model_runner.driver_rank = (
+                self.rank // self.parallel_config.num_prompt_workers
+            ) * self.parallel_config.num_prompt_workers
+            if self.rank == self.model_runner.driver_rank:
+                self.is_driver_worker = True
+                self.model_runner.is_driver_worker = True
+
+            # Setup up connections.
+            corr_worker_rank = (
+                self.mscclpp_group.my_rank + self.parallel_config.num_prompt_workers
+            ) % self.mscclpp_group.nranks
+            transport = self.mscclpp_group.my_ib_device(
+                self.mscclpp_group.my_rank % get_total_num_gpus()
+            )
+            self.mscclpp_conns = self.mscclpp_group.make_connection(
+                [corr_worker_rank], transport
+            )
 
     def setup_kvcache_comm(self) -> None:
         # Setup the communication for the KV cache.
-        from vllm.worker.comm_utils import MAX_SEMIDS, SplitCommInfo, KVCacheCommunicator
+        from vllm.worker.comm_utils import (
+            MAX_SEMIDS,
+            SplitCommInfo,
+            KVCacheCommunicator,
+        )
         import mscclpp.comm as mscclpp_comm
 
-        self.model_runner.driver_rank = (self.rank // self.parallel_config.num_prompt_workers) * self.parallel_config.num_prompt_workers
-        if self.rank == self.model_runner.driver_rank:
-            self.model_runner.is_driver_worker = True
-
-        corr_worker_rank = (self.mscclpp_group.my_rank + self.parallel_config.num_prompt_workers) % self.mscclpp_group.nranks
-        transport = self.mscclpp_group.my_ib_device(self.mscclpp_group.my_rank % get_total_num_gpus())
-        self.mscclpp_conns = self.mscclpp_group.make_connection(
-            [corr_worker_rank], transport
-        )
+        corr_worker_rank = (
+            self.mscclpp_group.my_rank + self.parallel_config.num_prompt_workers
+        ) % self.mscclpp_group.nranks
 
         num_layers = self.model_config.get_num_layers(self.parallel_config)
+
+        # Set up proxy service and proxy channels for KV cache communication.
         proxy_service = mscclpp_comm.ProxyService()
         proxy_service.start_proxy()
 
@@ -162,7 +193,9 @@ class Worker:
             )[corr_worker_rank]
             device_handles[sem_id] = proxy_channels[sem_id].device_handle().raw
 
-        all_blocks_size = self.gpu_cache[0][0].numel() * self.gpu_cache[0][0].element_size()
+        all_blocks_size = (
+            self.gpu_cache[0][0].numel() * self.gpu_cache[0][0].element_size()
+        )
         block_size = all_blocks_size // self.gpu_cache[0][0].size(0)
         flush_counter = 0
         self.split_comm_info = SplitCommInfo(
@@ -177,11 +210,20 @@ class Worker:
         )
         self.kvcache_comm = KVCacheCommunicator(self.split_comm_info)
 
+        # Populate the attention modules with the KV cache communicator.
+        attention_modules = list(filter(lambda module: "PagedAttention" in module.__class__.__name__, self.model_runner.model.modules()))
+        for i, attention_module in enumerate(attention_modules):
+            attention_module.set_kvcache_comm(self.kvcache_comm)
+            attention_module.layer_id = i
+
     def dismantle_kvcache_comm(self) -> None:
         self.split_comm_info.proxy_service.stop_proxy()
         del self.split_comm_info
         del self.kvcache_comm
         del self.mscclpp_group
+        attention_modules = list(filter(lambda module: "PagedAttention" in module.__class__.__name__, self.model_runner.model.modules()))
+        for attention_module in attention_modules:
+            del attention_module.kvcache_comm
 
     @torch.inference_mode()
     def profile_num_available_blocks(
@@ -205,30 +247,26 @@ class Worker:
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
+        self.model_runner.profile_run()
 
-        num_gpu_blocks = float("inf")
-        num_cpu_blocks = float("inf")
-        if not self.is_token_worker():
-            self.model_runner.profile_run()
+        # Calculate the number of blocks that can be allocated with the
+        # profiled peak memory.
+        torch.cuda.synchronize()
+        free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
+        peak_memory = total_gpu_memory - free_gpu_memory
 
-            # Calculate the number of blocks that can be allocated with the
-            # profiled peak memory.
-            torch.cuda.synchronize()
-            free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
-            peak_memory = total_gpu_memory - free_gpu_memory
-
-            cache_block_size = CacheEngine.get_cache_block_size(
-                block_size, self.model_config, self.parallel_config)
-            num_gpu_blocks = int(
-                (total_gpu_memory * gpu_memory_utilization - peak_memory) //
-                cache_block_size)
-            num_cpu_blocks = int(cpu_swap_space // cache_block_size)
-            num_gpu_blocks = max(num_gpu_blocks, 0)
-            num_cpu_blocks = max(num_cpu_blocks, 0)
-            if self.model_runner.lora_manager:
-                self.model_runner.remove_all_loras()
-            gc.collect()
-            torch.cuda.empty_cache()
+        cache_block_size = CacheEngine.get_cache_block_size(
+            block_size, self.model_config, self.parallel_config)
+        num_gpu_blocks = int(
+            (total_gpu_memory * gpu_memory_utilization - peak_memory) //
+            cache_block_size)
+        num_cpu_blocks = int(cpu_swap_space // cache_block_size)
+        num_gpu_blocks = max(num_gpu_blocks, 0)
+        num_cpu_blocks = max(num_cpu_blocks, 0)
+        if self.model_runner.lora_manager:
+            self.model_runner.remove_all_loras()
+        gc.collect()
+        torch.cuda.empty_cache()
         return num_gpu_blocks, num_cpu_blocks
 
     def init_cache_engine(self, cache_config: CacheConfig) -> None:
@@ -279,19 +317,29 @@ class Worker:
         blocks_to_swap_in: Optional[Dict[int, int]] = None,
         blocks_to_swap_out: Optional[Dict[int, int]] = None,
         blocks_to_copy: Optional[Dict[int, List[int]]] = None,
+        blocks_to_nw: Optional[Dict[int, List[int]]] = None,
+        seq_to_sem_map: Optional[Dict[int, int]] = None,
     ) -> Optional[SamplerOutput]:
-        is_prompt = seq_group_metadata_list[0].is_prompt
+        is_prompt = False
+        if self.is_driver_worker:
+            is_prompt = seq_group_metadata_list[0].is_prompt
         if self.is_driver_worker and ((is_prompt and self.is_prompt_worker()) or (not is_prompt and self.is_token_worker()) or self.is_mixed_worker()):
             assert seq_group_metadata_list is not None
+            is_prompt = seq_group_metadata_list[0].is_prompt
             num_seq_groups = len(seq_group_metadata_list)
             assert blocks_to_swap_in is not None
             assert blocks_to_swap_out is not None
             assert blocks_to_copy is not None
+            assert blocks_to_nw is not None
+            assert seq_to_sem_map is not None
             data = {
                 "num_seq_groups": num_seq_groups,
                 "blocks_to_swap_in": blocks_to_swap_in,
                 "blocks_to_swap_out": blocks_to_swap_out,
                 "blocks_to_copy": blocks_to_copy,
+                "blocks_to_nw": blocks_to_nw,
+                "seq_to_sem_map": seq_to_sem_map,
+                "is_prompt": is_prompt,
             }
             broadcast_tensor_dict(data,
                                   src=self.model_runner.driver_rank,
@@ -303,6 +351,9 @@ class Worker:
             blocks_to_swap_in = data["blocks_to_swap_in"]
             blocks_to_swap_out = data["blocks_to_swap_out"]
             blocks_to_copy = data["blocks_to_copy"]
+            blocks_to_nw = data["blocks_to_nw"]
+            seq_to_sem_map = data["seq_to_sem_map"]
+            is_prompt = data["is_prompt"]
 
         self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
 
@@ -310,8 +361,16 @@ class Worker:
         if num_seq_groups == 0:
             return {}
 
+        if len(blocks_to_nw) and self.is_token_worker() and not is_prompt:
+            for sem_id in blocks_to_nw:
+                self.kvcache_comm.wait(sem_id)
+
         output = self.model_runner.execute_model(seq_group_metadata_list,
-                                                 self.gpu_cache)
+                                                self.gpu_cache, blocks_to_nw)
+
+        if len(blocks_to_nw) and self.is_prompt_worker() and is_prompt:
+            for sem_id in blocks_to_nw:
+                self.kvcache_comm.signal_and_flush(sem_id)
         return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:

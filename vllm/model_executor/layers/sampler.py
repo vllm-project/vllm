@@ -34,6 +34,7 @@ class Sampler(nn.Module):
         self.vocab_size = vocab_size
         # original vocabulary size (without LoRA).
         self.org_vocab_size = org_vocab_size or vocab_size
+        self.dst_rank = None
 
     def _get_logits(self, hidden_states: torch.Tensor, embedding: torch.Tensor,
                     embedding_bias: Optional[torch.Tensor], dst_rank: int = 0) -> torch.Tensor:
@@ -53,7 +54,6 @@ class Sampler(nn.Module):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
         embedding_bias: Optional[torch.Tensor] = None,
-        dst_rank: Optional[int] = None,
     ) -> Optional[SamplerOutput]:
         # Get the hidden states that we use for sampling.
         hidden_states = _prune_hidden_states(hidden_states, sampling_metadata)

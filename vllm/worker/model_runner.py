@@ -451,6 +451,7 @@ class ModelRunner:
     def prepare_input_tensors(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        blocks_to_nw: Optional[Dict[int, List[int]]],
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, SamplingMetadata,
                Set[int], LoRAMapping]:
         if self.is_driver_worker:
@@ -530,6 +531,7 @@ class ModelRunner:
                 perform_sampling=False,
             )
 
+        input_metadata.blocks_to_nw = blocks_to_nw
         return (input_tokens, input_positions, input_metadata,
                 sampling_metadata, lora_requests, lora_mapping)
 
@@ -538,10 +540,11 @@ class ModelRunner:
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+        blocks_to_nw: Dict[int, List[int]] = {},
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, input_metadata, sampling_metadata,
          lora_requests,
-         lora_mapping) = self.prepare_input_tensors(seq_group_metadata_list)
+         lora_mapping) = self.prepare_input_tensors(seq_group_metadata_list, blocks_to_nw)
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
@@ -563,7 +566,6 @@ class ModelRunner:
         output = self.model.sample(
             hidden_states=hidden_states,
             sampling_metadata=sampling_metadata,
-            dst_rank=self.driver_rank
         )
         return output
 

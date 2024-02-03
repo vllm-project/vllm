@@ -20,6 +20,7 @@ from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                TokenizerGroup)
 from vllm.utils import Counter, set_cuda_visible_devices, get_ip, get_open_port, get_distributed_init_method
+from vllm.worker.comm_utils import Seq2SemMapper
 
 if ray:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -102,6 +103,7 @@ class LLMEngine:
 
         self._init_tokenizer()
         self.seq_counter = Counter()
+        self.seq2sem_mapper = Seq2SemMapper() if self.parallel_config.sep_prompt_token else None
 
         # Create the parallel GPU workers.
         if self.parallel_config.worker_use_ray:
@@ -121,7 +123,7 @@ class LLMEngine:
             self._setup_kvcache_comm()
 
         # Create the scheduler.
-        self.scheduler = Scheduler(scheduler_config, cache_config, lora_config)
+        self.scheduler = Scheduler(scheduler_config, cache_config, lora_config, self.seq2sem_mapper)
 
         # Metric Logging.
         if self.log_stats:
@@ -214,6 +216,21 @@ class LLMEngine:
         worker_node_and_gpu_ids = ray.get(
             [worker.get_node_and_gpu_ids.remote() for worker in self.workers])
 
+        driver_node_workers = []
+        other_node_workers = []
+        driver_worker_node_and_gpu_ids = []
+        other_worker_node_and_gpu_ids = []
+
+        for worker, (node_id, gpu_ids) in zip(self.workers, worker_node_and_gpu_ids):
+            if node_id == driver_node_id:
+                driver_node_workers.append(worker)
+                driver_worker_node_and_gpu_ids.append((node_id, gpu_ids))
+            else:
+                other_node_workers.append(worker)
+                other_worker_node_and_gpu_ids.append((node_id, gpu_ids))
+        self.workers = driver_node_workers + other_node_workers
+        worker_node_and_gpu_ids = driver_worker_node_and_gpu_ids + other_worker_node_and_gpu_ids
+
         node_workers = defaultdict(list)
         node_gpus = defaultdict(list)
 
@@ -225,6 +242,7 @@ class LLMEngine:
             node_gpus[node_id].extend(gpu_ids)
         for node_id, gpu_ids in node_gpus.items():
             node_gpus[node_id] = sorted(gpu_ids)
+
 
         # Set CUDA_VISIBLE_DEVICES for the driver.
         set_cuda_visible_devices(node_gpus[driver_node_id])
@@ -812,7 +830,25 @@ class LLMEngine:
         """
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
 
-        if not scheduler_outputs.is_empty():
+        if scheduler_outputs.is_empty():
+            output = []
+        elif self.parallel_config.sep_prompt_token:
+            prompt_stage = True if seq_group_metadata_list[0].is_prompt else False
+            all_outputs = self._run_stage_workers(
+                "execute_model",
+                prompt_stage=prompt_stage,
+                driver_kwargs={
+                    "seq_group_metadata_list": seq_group_metadata_list,
+                    "blocks_to_swap_in": scheduler_outputs.blocks_to_swap_in,
+                    "blocks_to_swap_out": scheduler_outputs.blocks_to_swap_out,
+                    "blocks_to_copy": scheduler_outputs.blocks_to_copy,
+                    "blocks_to_nw": scheduler_outputs.blocks_to_nw,
+                    "seq_to_sem_map": self.seq2sem_mapper.seq_to_sem,
+                })
+
+            # Only the driver worker returns the sampling results.
+            output = all_outputs[0]
+        else:
             # Execute the model.
             all_outputs = self._run_workers(
                 "execute_model",
@@ -821,12 +857,12 @@ class LLMEngine:
                     "blocks_to_swap_in": scheduler_outputs.blocks_to_swap_in,
                     "blocks_to_swap_out": scheduler_outputs.blocks_to_swap_out,
                     "blocks_to_copy": scheduler_outputs.blocks_to_copy,
+                    "blocks_to_nw": {},
+                    "seq_to_sem_map": {},
                 })
 
             # Only the driver worker returns the sampling results.
             output = all_outputs[0]
-        else:
-            output = []
 
         return self._process_model_outputs(output, scheduler_outputs)
 
@@ -1005,6 +1041,59 @@ class LLMEngine:
                                        method)(*driver_args, **driver_kwargs)
 
         # Get the results of the ray workers.
+        if self.workers:
+            ray_worker_outputs = ray.get(ray_worker_outputs)
+
+        return [driver_worker_output] + ray_worker_outputs
+
+    def _run_stage_workers(
+        self,
+        method: str,
+        prompt_stage: bool,
+        *args,
+        driver_args: Optional[List[Any]] = None,
+        driver_kwargs: Optional[Dict[str, Any]] = None,
+        max_concurrent_workers: Optional[int] = None,
+        **kwargs,
+    ) -> Any:
+        """Runs the given method on prompt workers or token workers."""
+
+        assert self.parallel_config.sep_prompt_token
+        if max_concurrent_workers:
+            raise NotImplementedError(
+                "max_concurrent_workers is not supported yet.")
+
+        if driver_args is None:
+            driver_args = args
+        if driver_kwargs is None:
+            driver_kwargs = kwargs
+
+
+        if prompt_stage:
+            # Prompt workers include 1 driver worker and num_prompt_workers-1 ray workers.
+            ray_worker_outputs = [
+                worker.execute_method.remote(method, *args, **kwargs)
+                for worker in self.workers[:self.parallel_config.num_prompt_workers-1]
+            ]
+
+            # Start the driver worker after all the ray workers.
+            driver_worker_output = getattr(self.driver_worker,
+                                        method)(*driver_args, **driver_kwargs)
+
+        else:
+            # Token workers use worker[num_prompt_workers-1] as driver worker.
+            # Start the ray workers first.
+            ray_worker_outputs = [
+                worker.execute_method.remote(method, *args, **kwargs)
+                for worker in self.workers[self.parallel_config.num_prompt_workers:]
+            ]
+
+            # Start the token driver worker after all the ray workers.
+            driver_worker = self.workers[self.parallel_config.num_prompt_workers-1]
+            driver_worker_output = driver_worker.execute_method.remote(method, *driver_args, **driver_kwargs)
+            driver_worker_output = ray.get(driver_worker_output)
+
+            # Get the results of the ray workers.
         if self.workers:
             ray_worker_outputs = ray.get(ray_worker_outputs)
 
