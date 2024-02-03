@@ -49,7 +49,7 @@ using GroupedGemmKernelNN = typename cutlass::gemm::kernel::DefaultGemmGrouped<
   ::cutlass::layout::RowMajor,
   float,
   ::cutlass::arch::OpClassTensorOp,
-  ::cutlass::arch::Sm80,
+  ::cutlass::arch::Sm90,
   ::cutlass::gemm::GemmShape<32, 128, 64>,
   ::cutlass::gemm::GemmShape<32, 32, 64>,
   ::cutlass::gemm::GemmShape<16, 8, 16>,
