@@ -93,6 +93,7 @@ Documentation
    :maxdepth: 1
    :caption: Splitwise
 
+   splitwise/getting_started
    splitwise/installing_mscclpp
 
 .. toctree::
