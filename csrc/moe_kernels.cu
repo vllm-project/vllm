@@ -29,7 +29,7 @@ namespace vllm {
 #define GROUPED_GEMM_STRINGIFY(x) \
   GROUPED_GEMM_STRINGIFY_HELPER(x)
 
-using DefaultConfig = ::cutlass::gemm::device::DefaultGemmConfiguration<::cutlass::arch::OpClassTensorOp, ::cutlass::arch::Sm90, ::cutlass::bfloat16_t, ::cutlass::bfloat16_t, ::cutlass::bfloat16_t, float>;
+using DefaultConfig = ::cutlass::gemm::device::DefaultGemmConfiguration<::cutlass::arch::OpClassTensorOp, ::cutlass::arch::Sm80, ::cutlass::bfloat16_t, ::cutlass::bfloat16_t, ::cutlass::bfloat16_t, float>;
 
 
 // TODO(tgale): Update this for SM90 when it's supported by CUTLASS.
@@ -49,7 +49,7 @@ using GroupedGemmKernelNN = typename cutlass::gemm::kernel::DefaultGemmGrouped<
   ::cutlass::layout::RowMajor,
   float,
   ::cutlass::arch::OpClassTensorOp,
-  ::cutlass::arch::Sm90,
+  ::cutlass::arch::Sm80,
   ::cutlass::gemm::GemmShape<32, 128, 64>,
   ::cutlass::gemm::GemmShape<32, 32, 64>,
   ::cutlass::gemm::GemmShape<16, 8, 16>,
@@ -64,7 +64,7 @@ using GroupedGemmKernelNN = typename cutlass::gemm::kernel::DefaultGemmGrouped<
   ::cutlass::gemm::threadblock::GemmBatchedIdentityThreadblockSwizzle,
   // TODO(tgale): Experiment with GroupScheduleMode.
   // TODO(tgale): Tune this for SM90.
-  DefaultConfig::kStages>::GemmKernel>;
+  DefaultConfig::kStages>::GemmKernel;
 using GemmGroupedNN = ::cutlass::gemm::device::GemmGrouped<GroupedGemmKernelNN>;
 
 std::vector<cutlass::gemm::GemmCoord> MakeProblemSizes(torch::Tensor b, torch::Tensor batch_sizes) {
