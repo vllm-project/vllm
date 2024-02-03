@@ -64,7 +64,7 @@ using GroupedGemmKernelNN = typename cutlass::gemm::kernel::DefaultGemmGrouped<
   ::cutlass::gemm::threadblock::GemmBatchedIdentityThreadblockSwizzle,
   // TODO(tgale): Experiment with GroupScheduleMode.
   // TODO(tgale): Tune this for SM90.
-  DefaultConfig::kStages>::GemmKernel;
+  DefaultConfig::kStages>::GemmKernel>;
 using GemmGroupedNN = ::cutlass::gemm::device::GemmGrouped<GroupedGemmKernelNN>;
 
 std::vector<cutlass::gemm::GemmCoord> MakeProblemSizes(torch::Tensor b, torch::Tensor batch_sizes) {
