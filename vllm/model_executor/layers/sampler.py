@@ -48,6 +48,9 @@ class Sampler(nn.Module):
             logits = logits[:, :self.org_vocab_size]
         return logits
 
+    def set_dst_rank(self, dst_rank: int) -> None:
+        self.dst_rank = dst_rank
+
     def forward(
         self,
         embedding: torch.Tensor,
