@@ -210,7 +210,7 @@ torch::Tensor CutlassGroupedGemm(torch::Tensor a,
 
   // Check if the problem size is supported or not
   auto status = gemm.can_implement(arguments);
-  TORCH_CHECK(status == kSuccess, cutlassGetStatusString(status));
+  TORCH_CHECK(status == cutlass::Status::kSuccess, cutlass::cutlassGetStatusString(status));
 
   // Initialize the kernel.
   if(gemm.initialize(arguments, workspace.data_ptr()) != cutlass::Status::kSuccess) {
