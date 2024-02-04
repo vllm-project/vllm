@@ -134,12 +134,6 @@ typename Gemm::Arguments MakeArguments(torch::Tensor a,
   // Calculate the number of threadblocks to use and validate the result.
   int64_t num_experts = problem_sizes_host.size();
 
-  // NOTE: This is borrowed from FasterTransformer.
-  int threadblock_count = Gemm::sufficient(problem_sizes_host.data(), num_experts);
-  if (!threadblock_count) {
-    TORCH_CHECK(false, "Grouped GEMM execution not possible with HW");
-  }
-
   // Create the host arrays of leading dimension data and pointer data.
   using LayoutA = typename Gemm::LayoutA;
   using LayoutB = typename Gemm::LayoutB;
@@ -186,7 +180,10 @@ typename Gemm::Arguments MakeArguments(torch::Tensor a,
   torch::Tensor problem_sizes = CopyToDevice(problem_sizes_host, a.device());
 
   typename Gemm::EpilogueOutputOp::Params epilogue_op(/*alpha=*/1.0f, /*beta=*/0.0f);
-  typename Gemm::Arguments arguments((cutlass::gemm::GemmCoord*)problem_sizes.data_ptr(),
+  typename Gemm::Arguments arguments{
+    cutlass::gemm::GemmUniversalMode::kGrouped,
+    {num_experts, problem_sizes.get()}
+  }((cutlass::gemm::GemmCoord*)problem_sizes.data_ptr(),
   				     (int)num_experts,
   				     (int)threadblock_count,
   				     epilogue_op,
@@ -212,6 +209,9 @@ torch::Tensor CutlassGroupedGemm(torch::Tensor a,
   int64_t workspace_size = gemm.get_workspace_size(arguments);
   auto options = torch::TensorOptions().dtype(torch::kInt8).device(a.device());
   torch::Tensor workspace = torch::empty(workspace_size, options);
+
+  // Check if the problem size is supported or not
+  TORCH_CHECK(gemm.can_implement(arguments));
 
   // Initialize the kernel.
   if(gemm.initialize(arguments, workspace.data_ptr()) != cutlass::Status::kSuccess) {
