@@ -111,6 +111,7 @@ class ModelConfig:
         self._verify_tokenizer_mode()
         self._verify_quantization()
         self._verify_cuda_graph()
+        self._verify_flash_attn()
 
     def _verify_load_format(self) -> None:
         load_format = self.load_format.lower()
@@ -186,6 +187,16 @@ class ModelConfig:
             self.max_context_len_to_capture = self.max_model_len
         self.max_context_len_to_capture = min(self.max_context_len_to_capture,
                                               self.max_model_len)
+
+    def _verify_flash_attn(self) -> None:
+        if self.use_flash_attn:
+            if self.dtype not in [torch.float16, torch.bfloat16]:
+                raise ValueError(
+                    f"Flash Attention does not support {self.dtype}.")
+            if is_hip():
+                raise ValueError(
+                    "Please disable Flash Attention because it is currently "
+                    "not supported in ROCm.")
 
     def verify_with_parallel_config(
         self,

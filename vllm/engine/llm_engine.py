@@ -280,6 +280,9 @@ class LLMEngine:
             self.lora_config.verify_with_model_config(self.model_config)
             self.lora_config.verify_with_scheduler_config(
                 self.scheduler_config)
+        if self.model_config.use_flash_attn and self.cache_config.cache_dtype == "fp8_e5m2":
+            raise ValueError(
+                "Flash Attention does not support fp8_e5m2 kv cache.")
 
     def _init_cache(self) -> None:
         """Profiles the memory usage and initializes the KV cache.

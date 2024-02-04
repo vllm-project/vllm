@@ -49,6 +49,7 @@ class EngineArgs:
         if self.tokenizer is None:
             self.tokenizer = self.model
         if self.use_flash_attn:
+            # block_size must be a multiple of 256 under Flash Attention.
             self.block_size = 256
 
     @staticmethod
