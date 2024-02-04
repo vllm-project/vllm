@@ -24,3 +24,10 @@ void moe_mlp(
   const c10::optional<torch::Tensor>& fc1_expert_biases,
   int fc1_activation_type,
   torch::Tensor& fc2_expert_weights);
+
+void unpermute_and_reduce(
+  torch::Tensor& output_tokens,
+  torch::Tensor& experts_output,
+  torch::Tensor& topk_weights,
+  torch::Tensor& topk_indices,
+  torch::Tensor& reverse_permutation_map);
