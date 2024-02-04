@@ -88,6 +88,7 @@ class MistralAttention(nn.Module):
                  num_kv_heads: int,
                  max_position: int = 4096 * 32,
                  rope_theta: float = 10000,
+
                  linear_method: Optional[LinearMethodBase] = None,
                  sliding_window: Optional[int] = None) -> None:
         super().__init__()
@@ -145,13 +146,13 @@ class MistralAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
-        input_metadata: InputMetadata,
+        input_metadata: InputMetadata
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
+        #k_cache, v_cache = kv_cache
+        attn_output = self.attn(q, k, v, kv_cache, input_metadata)
         output, _ = self.o_proj(attn_output)
         return output
 

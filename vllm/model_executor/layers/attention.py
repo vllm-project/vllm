@@ -18,7 +18,7 @@ _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
 
-
+import flashinfer
 class PagedAttention(nn.Module):
     """MHA/MQA/GQA layer with PagedAttention.
 
@@ -63,8 +63,8 @@ class PagedAttention(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        key_cache: Optional[torch.Tensor],
-        value_cache: Optional[torch.Tensor],
+        kv_cache: Optional[torch.Tensor],
+        #value_cache: Optional[torch.Tensor],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
         """PagedAttention forward pass.
@@ -81,9 +81,14 @@ class PagedAttention(nn.Module):
         Returns:
             shape = [batch_size, seq_len, num_heads * head_size]
         """
+
+        prefill_wrapper = input_metadata.prefill_wrapper
+        decode_wrapper = input_metadata.decode_wrapper
+
+        
         batch_size, seq_len, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
-        query = query.view(-1, self.num_heads, self.head_size)
+        query = query.view(-1, self.num_heads, self.head_size).contiguous()
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
@@ -91,15 +96,19 @@ class PagedAttention(nn.Module):
         # If key_cache and value_cache are not provided, the new key and value
         # vectors will not be cached. This happens during the initial memory
         # profiling run.
-        if key_cache is not None and value_cache is not None:
-            cache_ops.reshape_and_cache(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                input_metadata.slot_mapping.flatten(),
-                input_metadata.kv_cache_dtype,
-            )
+        if kv_cache is not None:
+            #flashinfer.page.
+            pass
+            
+            
+            #cache_ops.reshape_and_cache(
+            #    key,
+            #    value,
+            #    key_cache,
+            #    value_cache,
+            #    input_metadata.slot_mapping.flatten(),
+            #    input_metadata.kv_cache_dtype,
+            #)
 
         if input_metadata.is_prompt:
             # Prompt run.
@@ -118,12 +127,12 @@ class PagedAttention(nn.Module):
                                                     self.num_kv_heads,
                                                     self.num_queries_per_kv,
                                                     value.shape[-1])
-            # normal attention
-            if (key_cache is None or value_cache is None
-                    or input_metadata.block_tables.numel() == 0):
+            # old attn
+            if kv_cache is None:
                 # Set attention bias if not provided. This typically happens at
                 # the very attention layer of every iteration.
                 # FIXME(woosuk): This is a hack.
+                
                 if input_metadata.attn_bias is None:
                     if self.alibi_slopes is None:
                         attn_bias = BlockDiagonalCausalMask.from_seqlens(
@@ -147,7 +156,56 @@ class PagedAttention(nn.Module):
                     query = query.unflatten(0, (batch_size, seq_len))
                     key = key.unflatten(0, (batch_size, seq_len))
                     value = value.unflatten(0, (batch_size, seq_len))
+                
+                out = xops.memory_efficient_attention_forward(
+                    query,
+                    key,
+                    value,
+                    attn_bias=input_metadata.attn_bias,
+                    p=0.0,
+                    scale=self.scale,
+                    op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if
+                    (is_hip()) else None,
+                )
+                output = out.view_as(query)
+            elif input_metadata.block_tables.numel() == 0:
+                # Set attention bias if not provided. This typically happens at
+                # the very attention layer of every iteration.
+                # FIXME(woosuk): This is a hack.
+                
+                if input_metadata.attn_bias is None:
+                    if self.alibi_slopes is None:
+                        attn_bias = BlockDiagonalCausalMask.from_seqlens(
+                            [seq_len] * batch_size)
+                        if self.sliding_window is not None:
+                            attn_bias = attn_bias.make_local_attention(
+                                self.sliding_window)
+                        input_metadata.attn_bias = attn_bias
+                    else:
+                        input_metadata.attn_bias = _make_alibi_bias(
+                            self.alibi_slopes, self.num_kv_heads, batch_size,
+                            seq_len, query.dtype)
 
+                # TODO(woosuk): Too many view operations. Let's try to reduce
+                # them in the future for code readability.
+                #if self.alibi_slopes is None:
+                #    query = query.unsqueeze(0)
+                #    key = key.unsqueeze(0)
+                #    value = value.unsqueeze(0)
+                #else:
+                #    query = query.unflatten(0, (batch_size, seq_len))
+                #    key = key.unflatten(0, (batch_size, seq_len))
+                #    value = value.unflatten(0, (batch_size, seq_len))
+
+                #query = query.unflatten(0, (batch_size, seq_len))
+
+                query = query.view(5510, 32, 128).contiguous()
+                out = input_metadata.prefill_wrapper.forward(
+                    query.contiguous(),
+                    kv_cache,
+                    causal=True
+                )
+                exit(0)
                 out = xops.memory_efficient_attention_forward(
                     query,
                     key,
@@ -179,14 +237,26 @@ class PagedAttention(nn.Module):
 
         else:
             # Decoding run.
-            output = _paged_attention(
-                query,
-                key_cache,
-                value_cache,
-                input_metadata,
-                self.num_kv_heads,
-                self.scale,
-                self.alibi_slopes,
+            #output = _paged_attention(
+            #    query,
+            #    key_cache,
+            #    value_cache,
+            #    input_metadata,
+            #    self.num_kv_heads,
+            #    self.scale,
+            #    self.alibi_slopes,
+            #)
+
+            #print(query.shape)
+            #print(input_metadata)
+            #print(key_cache.shape)
+
+            print(kv_cache.shape)
+
+            exit(0)
+
+            output = flashinfer.batch_decode_with_padded_kv_cache(
+                query, key_cache, value_cache,  "NHD", "LLAMA", rope_scale=self.scale,
             )
 
         # Reshape the output tensor.
