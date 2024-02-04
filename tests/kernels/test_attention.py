@@ -15,7 +15,7 @@ FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
 # There may not be enough gpu memory due to large NUM_BLOCKS.
 # Reduce NUM_BLOCKS when it happens.
-NUM_BLOCKS = 863  # Arbitrary values for testing
+NUM_BLOCKS = 4321  # Arbitrary values for testing
 PARTITION_SIZE = 512
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -67,10 +67,7 @@ def ref_single_query_cached_kv_attention(
         block_size = value_cache.shape[1]
         num_kv_heads = value_cache.shape[2]
         head_size = value_cache.shape[3]
-
     num_seqs = query.shape[0]
-    print(f"key_cache.shape: {key_cache.shape}")
-    print(f"value_cache.shape: {value_cache.shape}")
 
     block_tables = block_tables.cpu().tolist()
     context_lens = context_lens.cpu().tolist()
@@ -90,14 +87,12 @@ def ref_single_query_cached_kv_attention(
                 k = k.reshape(num_kv_heads, head_size)
             else:
                 k = key_cache[block_number, block_offset, :, :]
-            # print(f"k.shape: {k.shape}")
             keys.append(k)
 
             if not use_fa:
                 v = value_cache[block_number, :, :, block_offset]
             else:
                 v = value_cache[block_number, block_offset, :, :]
-            # print(f"v.shape: {v.shape}")
             values.append(v)
         keys = torch.stack(keys, dim=0)
         values = torch.stack(values, dim=0)
@@ -115,8 +110,6 @@ def ref_single_query_cached_kv_attention(
                 1, 1, -1)
 
         out = ref_masked_attention(q, keys, values, scale, alibi_bias)
-        print(f"out.shape: {out.shape}")
-        print(f"num_query_heads: {num_query_heads}, head_size: {head_size}")
         out = out.view(num_query_heads, head_size)
         output[i].copy_(out, non_blocking=True)
 
@@ -285,7 +278,7 @@ def test_paged_attention(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_flash_attention(
     kv_cache_factory,
     num_seqs: int,
@@ -304,47 +297,43 @@ def test_flash_attention(
     ]) or (head_size % 256 != 0) or (kv_cache_dtype != "auto") or (
             "AMD" in torch.cuda.get_device_name()):
         pytest.skip()
-    # num_blocks = 863 # Larger mum_blocks will cause OOM.
+    num_blocks = 863  # Larger mum_blocks will cause OOM.
 
     random.seed(seed)
     torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    gpu_id = f"cuda:{device}"
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+    torch.set_default_device(device)
+
     scale = float(1.0 / (head_size**0.5))
     num_query_heads, num_kv_heads = num_heads
-    query = torch.empty(num_seqs,
-                        num_query_heads,
-                        head_size,
-                        dtype=dtype,
-                        device=gpu_id)
+    query = torch.empty(num_seqs, num_query_heads, head_size, dtype=dtype)
     query.uniform_(-scale, scale)
 
     assert num_query_heads % num_kv_heads == 0
     num_queries_per_kv = num_query_heads // num_kv_heads
     alibi_slopes = None
     if use_alibi:
-        alibi_slopes = torch.randn(num_query_heads,
-                                   dtype=torch.float,
-                                   device=gpu_id)
+        alibi_slopes = torch.randn(num_query_heads, dtype=torch.float)
 
     context_lens = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
     context_lens[-1] = MAX_SEQ_LEN
     max_context_len = max(context_lens)
-    context_lens = torch.tensor(context_lens, dtype=torch.int, device=gpu_id)
+    context_lens = torch.tensor(context_lens, dtype=torch.int)
 
     # Create the block tables.
     max_num_blocks_per_seq = (max_context_len + block_size - 1) // block_size
     block_tables = []
     for _ in range(num_seqs):
         block_table = [
-            random.randint(0, NUM_BLOCKS - 1)
+            random.randint(0, num_blocks - 1)
             for _ in range(max_num_blocks_per_seq)
         ]
         block_tables.append(block_table)
-    block_tables = torch.tensor(block_tables, dtype=torch.int, device=gpu_id)
+    block_tables = torch.tensor(block_tables, dtype=torch.int)
 
     # Create the KV caches.
-    key_caches, value_caches = kv_cache_factory(NUM_BLOCKS,
+    key_caches, value_caches = kv_cache_factory(num_blocks,
                                                 block_size,
                                                 1,
                                                 num_kv_heads,
@@ -352,7 +341,7 @@ def test_flash_attention(
                                                 kv_cache_dtype,
                                                 dtype,
                                                 seed,
-                                                gpu_id,
+                                                device,
                                                 use_flash_attn=True)
     key_cache, value_cache = key_caches[0], value_caches[0]
 
