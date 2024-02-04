@@ -15,3 +15,12 @@ void expand_and_permute(
   torch::Tensor& input_tokens,
   torch::Tensor& topk_indices,
   torch::Tensor& token_expert_indices);
+
+void moe_mlp(
+  torch::Tensor& moe_output,
+  torch::Tensor& input_tokens,
+  torch::Tensor& cum_num_tokens_per_expert,
+  torch::Tensor& fc1_expert_weights,
+  const c10::optional<torch::Tensor>& fc1_expert_biases,
+  int fc1_activation_type,
+  torch::Tensor& fc2_expert_weights);
