@@ -1,17 +1,13 @@
-from typing import Any, Dict, List, Optional, Type
-from magic_wand import CompressedStorageFormat
-
 import torch
-import torch.nn.functional as F
-from torch.nn import Parameter
-from torch.sparse import to_sparse_semi_structured, SparseSemiStructuredTensor
 
-from vllm.model_executor.layers.linear import LinearMethodBase, set_weight_attrs
+from typing import Any, Dict, List, Type
+from magic_wand import CompressedStorageFormat
 from vllm.model_executor.layers.sparsity.base_config import SparsityConfig
-from vllm.model_executor.layers.parameters import SparseParameter
-
 from .sparse_w16a16_linear_method import SparseW16A16LinearMethod
-
+from magic_wand import (
+    CompressedStorageFormat,
+    SparseSemiStructuredStorageFormat
+)
 
 class SemiStructuredSparseW16A16Config(SparsityConfig):
     """Config class for SemiStructuredSparseW16A16.
@@ -25,8 +21,8 @@ class SemiStructuredSparseW16A16Config(SparsityConfig):
         return "SemiStructuredSparseW16A16Config()"
 
     @classmethod
-    def get_storage_format_cls(cls) -> Type:
-        return super().get_storage_format_cls()
+    def get_storage_format_cls(cls) -> Type[CompressedStorageFormat]:
+        return SparseSemiStructuredStorageFormat
 
     @classmethod
     def get_name(cls) -> str:
@@ -50,4 +46,4 @@ class SemiStructuredSparseW16A16Config(SparsityConfig):
         return cls()
 
     def get_linear_method(self) -> "SparseW16A16LinearMethod":
-        return SparseW16A16LinearMethod(self)
+        return SparseW16A16LinearMethod(self,self.get_storage_format_cls())

@@ -5,9 +5,10 @@ import torch.nn.functional as F
 
 from vllm.model_executor.layers.linear import LinearMethodBase, set_weight_attrs
 from vllm.model_executor.layers.sparsity.base_config import SparsityConfig
-from vllm.model_executor.layers.parameters import SparseParameter
+from vllm.model_executor.layers.parameters import SparseParameter, SemiStructuredSparseParameter
 from magic_wand import (
-    CompressedStorageFormat
+    CompressedStorageFormat,
+    SparseSemiStructuredStorageFormat
 )
 
 class SparseW16A16LinearMethod(LinearMethodBase):
@@ -30,16 +31,28 @@ class SparseW16A16LinearMethod(LinearMethodBase):
         output_size: int,
         params_dtype: torch.dtype
     ) -> Dict[str, Any]:
-        weight = SparseParameter(
-            shape=torch.Size(
-                (output_size_per_partition, input_size_per_partition)),
-            dtype=params_dtype,
-            storage_format_cls=self.storage_format_cls
-        )
+        if self.storage_format_cls == SparseSemiStructuredStorageFormat:
+            weight = SemiStructuredSparseParameter(
+                shape=torch.Size(
+                    (output_size_per_partition, input_size_per_partition)),
+                dtype=params_dtype,
+                storage_format_cls=self.storage_format_cls
+            )
 
-        set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
+            set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
 
-        return {"weight": weight}
+            return {"weight": weight}
+        else:
+            weight = SparseParameter(
+                shape=torch.Size(
+                    (output_size_per_partition, input_size_per_partition)),
+                dtype=params_dtype,
+                storage_format_cls=self.storage_format_cls
+            )
+
+            set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
+
+            return {"weight": weight}
 
     def apply_weights(
         self,
@@ -49,18 +62,24 @@ class SparseW16A16LinearMethod(LinearMethodBase):
     ) -> torch.Tensor:
         sparse_weight = weights["weight"]
 
-        # Uncompress to dense
-        dense_weight = sparse_weight.to_dense()
+        if self.storage_format_cls == SparseSemiStructuredStorageFormat:
+            if bias is not None:
+                output = F.linear(x, sparse_weight.compressed_data.encapsulated_torch_sparse_tensor, bias)
+            else:
+                output = F.linear(x, sparse_weight.compressed_data.encapsulated_torch_sparse_tensor)
 
-        # # Uncomment to verify sparsity
-        # density = torch.count_nonzero(
-        #     dense_weight).item() / dense_weight.numel()
-        # print(f"sparsity = {1.0 - density}")
-
-        # Standard matrix multiply
-        if bias is not None:
-            output = F.linear(x, dense_weight, bias)
+            return output
         else:
-            output = F.linear(x, dense_weight)
+            # # Uncomment to verify sparsity
+            # density = torch.count_nonzero(
+            #     dense_weight).item() / dense_weight.numel()
+            # print(f"sparsity = {1.0 - density}")
 
-        return output
+            # Standard matrix multiply
+            # Uncompress to dense
+            if bias is not None:
+                output = F.linear(x, sparse_weight.to_dense(), bias)
+            else:
+                output = F.linear(x, sparse_weight.to_dense())
+
+            return output
