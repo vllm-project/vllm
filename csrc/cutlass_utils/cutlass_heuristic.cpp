@@ -14,20 +14,11 @@
  * limitations under the License.
  */
 
-#include "tensorrt_llm/kernels/cutlass_kernels/cutlass_heuristic.h"
-#include "tensorrt_llm/common/cudaBf16Wrapper.h"
-
-#ifndef _WIN32
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wstrict-aliasing"
-#endif // #ifndef _WIN32
+#include "cutlass_heuristic.h"
+#include <cuda_bf16.h>
 
 #include "cutlass/gemm/gemm.h"
 #include "cutlass/numeric_types.h"
-
-#ifndef _WIN32
-#pragma GCC diagnostic pop
-#endif // #ifndef _WIN32
 
 #include <cuda_runtime_api.h>
 #include <vector>

@@ -53,7 +53,8 @@
 #include "cutlass/platform/platform.h"
 
 #include "cutlass_extensions/weight_only_quant_op.h"
-#include "tensorrt_llm/common/cudaBf16Wrapper.h"
+// FIXME(woosuk)
+#include <cuda_bf16.h>
 
 ////////////////////////////////////////////////////////////////////////////////
 

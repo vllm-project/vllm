@@ -13,10 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
-// Ignore CUTLASS warnings about type punning
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wstrict-aliasing"
+#pragma once
 
 #include "cutlass/array.h"
 #include "cutlass/numeric_conversion.h"
@@ -30,16 +27,22 @@
 #include "cutlass_extensions/gemm/kernel/moe_cutlass_kernel.h"
 #include "cutlass_extensions/gemm/threadblock/default_mma.h"
 
-#pragma GCC diagnostic pop
+#include "../cutlass_utils/cutlass_heuristic.h"
+#include "moe_gemm_kernels.h"
 
-#include "tensorrt_llm/common/assert.h"
-#include "tensorrt_llm/common/cudaUtils.h"
-#include "../cutlass_kernels/cutlass_heuristic.h"
-#include "../cutlass_kernels/moe_gemm/moe_gemm_kernels.h"
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <math.h>
 #include <sstream>
+
+// FIXME(woosuk)
+#define TLLM_THROW(...)                                                                                                \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        throw std::runtime_error("ERROR!");                                                                         \
+    } while (0)
+
+#define TLLM_CHECK_WITH_INFO(...) ;;\
 
 namespace tensorrt_llm
 {

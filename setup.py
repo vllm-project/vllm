@@ -321,8 +321,11 @@ if _is_cuda():
     ext_modules.append(
         CUDAExtension(
             name="vllm._moe_C",
-            sources=["csrc/moe/moe_ops.cc"] + glob("csrc/moe/*.cu"),
-            include_dirs=[os.path.join(abs_root_dir, "third_party/cutlass/include/")],
+            sources=["csrc/cutlass_utils/cutlass_heuristic.cpp"] + glob("csrc/moe/*.cu") + glob("csrc/moe/*.cc"),
+            include_dirs=[
+                os.path.join(abs_root_dir, "third_party/cutlass/include/"),
+                os.path.join(abs_root_dir, "csrc/"),
+            ],
             extra_compile_args={
                 "cxx": CXX_FLAGS,
                 "nvcc": NVCC_FLAGS_PUNICA, # FIXME
