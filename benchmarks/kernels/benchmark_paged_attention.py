@@ -4,7 +4,7 @@ import random
 import time
 
 import torch
-from flash_attn.flash_attn_interface import flash_attn_with_blocked_kvcache, get_kvcache_block_size
+from flash_attn.flash_attn_interface import flash_attn_with_kvcache
 
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, create_kv_caches_with_random
 from vllm._C import ops
@@ -63,9 +63,16 @@ def main(
     block_tables = torch.tensor(block_tables, dtype=torch.int, device="cuda")
 
     # Create the KV cache.
+    use_flash_attn = version == "flash-attn"
     key_caches, value_caches = create_kv_caches_with_random(
-        NUM_BLOCKS, block_size, 1, num_kv_heads, head_size, kv_cache_dtype,
-        dtype)
+        NUM_BLOCKS,
+        block_size,
+        1,
+        num_kv_heads,
+        head_size,
+        kv_cache_dtype,
+        dtype,
+        use_flash_attn=use_flash_attn)
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Prepare for the paged attention kernel.
@@ -91,6 +98,7 @@ def main(
             torch.cuda.cudart().cudaProfilerStart()
         start_time = time.perf_counter()
 
+        nonlocal output
         for _ in range(num_iters):
             if version == "v1":
                 ops.paged_attention_v1(
@@ -126,13 +134,12 @@ def main(
                     kv_cache_dtype,
                 )
             elif version == "flash-attn":
-                flash_attn_with_blocked_kvcache(
+                output = flash_attn_with_kvcache(
                     query.unsqueeze(1),
                     key_cache,
                     value_cache,
-                    block_tables,
-                    context_lens,
-                    out=output.unsqueeze(1),
+                    cache_seqlens=context_lens,
+                    block_table=block_tables,
                     softmax_scale=scale,
                     causal=True,
                     alibi_slopes=alibi_slopes,
@@ -164,9 +171,9 @@ if __name__ == '__main__':
     parser.add_argument("--version",
                         type=str,
                         choices=["v1", "v2", "flash-attn"],
-                        default="v2")
+                        default="flash-attn")
     parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--context-len", type=int, default=4096)
+    parser.add_argument("--context-len", type=int, default=1024)
     parser.add_argument("--num-query-heads", type=int, default=64)
     parser.add_argument("--num-kv-heads", type=int, default=8)
     parser.add_argument("--head-size",
@@ -190,7 +197,8 @@ if __name__ == '__main__':
         'Data type for kv cache storage. If "auto", will use model data type.')
     args = parser.parse_args()
     if args.version == "flash-attn":
-        args.block_size = get_kvcache_block_size(args.head_size)
+        # Paged KV cache block size in Flash Attention must be divisible by 256.
+        args.block_size = 256
     print(args)
 
     if args.num_query_heads % args.num_kv_heads != 0:

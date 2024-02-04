@@ -17,9 +17,9 @@ void copy_blocks(
 
 void cache(
   torch::Tensor& key,
-  c10::optional<torch::Tensor>& value,
+  torch::Tensor& value,
   torch::Tensor& key_cache,
-  c10::optional<torch::Tensor>& value_cache,
+  torch::Tensor& value_cache,
   torch::Tensor& slot_mapping,
   const std::string& kv_cache_dtype);
 

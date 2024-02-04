@@ -165,20 +165,18 @@ __global__ void cache_kernel(
     const int64_t src_idx = token_idx * stride + i;
     const int64_t tgt_idx = slot_idx * n + i;
     key_cache[tgt_idx] = key[src_idx];
-    if (value) {
-      value_cache[tgt_idx] = value[src_idx];
-    }
+    value_cache[tgt_idx] = value[src_idx];
   }
 }
 
 } // namespace vllm
 
 void cache(
-  torch::Tensor& key,                         // [num_tokens, num_heads, head_size]
-  c10::optional<torch::Tensor>& value,        // [num_tokens, num_heads, head_size]
-  torch::Tensor& key_cache,                   // [num_blocks, block_size, num_heads, head_size]
-  c10::optional<torch::Tensor>& value_cache,  // [num_blocks, block_size, num_heads, head_size]
-  torch::Tensor& slot_mapping,                // [num_tokens]
+  torch::Tensor& key,                  // [num_tokens, num_heads, head_size]
+  torch::Tensor& value,                // [num_tokens, num_heads, head_size]
+  torch::Tensor& key_cache,            // [num_blocks, block_size, num_heads, head_size]
+  torch::Tensor& value_cache,          // [num_blocks, block_size, num_heads, head_size]
+  torch::Tensor& slot_mapping,         // [num_tokens]
   const std::string& kv_cache_dtype)
 {
   int num_tokens = key.size(0);
@@ -197,9 +195,9 @@ void cache(
       [&] {
         vllm::cache_kernel<scalar_t><<<grid, block, 0, stream>>>(
           key.data_ptr<scalar_t>(),
-          value ? value.value().data_ptr<scalar_t>() : nullptr,
+          value.data_ptr<scalar_t>(),
           key_cache.data_ptr<scalar_t>(),
-          value_cache ? value_cache.value().data_ptr<scalar_t>() : nullptr,
+          value_cache.data_ptr<scalar_t>(),
           slot_mapping.data_ptr<int64_t>(),
           stride,
           num_heads,
