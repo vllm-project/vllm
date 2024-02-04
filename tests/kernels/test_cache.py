@@ -164,7 +164,7 @@ def test_reshape_and_cache(
 @pytest.mark.parametrize("num_blocks", [1023])
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_cache(
     kv_cache_factory,
@@ -175,7 +175,7 @@ def test_cache(
     num_blocks: int,
     dtype: torch.dtype,
     seed: int,
-    device: int,
+    device: str,
 ) -> None:
     if (dtype not in [
             torch.float16, torch.bfloat16
@@ -184,19 +184,15 @@ def test_cache(
 
     random.seed(seed)
     torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    gpu_id = f"cuda:{device}"
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+    torch.set_default_device(device)
     # Create a random slot mapping.
     num_slots = block_size * num_blocks
     slot_mapping = random.sample(range(num_slots), num_tokens)
-    slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device=gpu_id)
+    slot_mapping = torch.tensor(slot_mapping, dtype=torch.long)
 
-    qkv = torch.randn(num_tokens,
-                      3,
-                      num_heads,
-                      head_size,
-                      dtype=dtype,
-                      device=gpu_id)
+    qkv = torch.randn(num_tokens, 3, num_heads, head_size, dtype=dtype)
     _, key, value = qkv.unbind(dim=1)
 
     # Create the KV caches.
@@ -208,7 +204,7 @@ def test_cache(
                                                 dtype,
                                                 None,
                                                 seed,
-                                                gpu_id,
+                                                device,
                                                 use_flash_attn=True)
     key_cache, value_cache = key_caches[0], value_caches[0]
 

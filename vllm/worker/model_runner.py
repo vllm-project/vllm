@@ -74,7 +74,7 @@ class ModelRunner:
         # cache in_wsl result
         self.in_wsl = in_wsl()
         self.kv_cache_dtype = kv_cache_dtype
-        self.use_flash_attn = model_config.use_flash_attn
+        self.use_flash_attn = model_config.use_flash_attn if self.model_config else False
 
     def load_model(self) -> None:
         self.model = get_model(self.model_config, self.device_config,
