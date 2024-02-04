@@ -328,7 +328,7 @@ if _is_cuda():
             ],
             extra_compile_args={
                 "cxx": CXX_FLAGS,
-                "nvcc": NVCC_FLAGS_PUNICA, # FIXME
+                "nvcc": NVCC_FLAGS_PUNICA + ["-DENABLE_BF16"], # FIXME
             },
         ))
 
