@@ -100,6 +100,19 @@ void gptq_shuffle(
   torch::Tensor q_weight,
   torch::Tensor q_perm);
 
+torch::Tensor group_gptq_gemm(
+    torch::Tensor a,
+    torch::Tensor b_q_weight,
+    torch::Tensor b_gptq_qzeros,
+    torch::Tensor b_gptq_scales,
+    torch::Tensor b_g_idx,
+    torch::Tensor topk_weights,
+    torch::Tensor sorted_token_ids_ptr,
+    torch::Tensor expert_ids_ptr,
+    bool mul_weights,
+    bool use_exllama
+);
+
 void moe_align_block_size(
   torch::Tensor topk_ids,
   int num_experts,

@@ -822,6 +822,421 @@ void shuffle_exllama_weight
     shuffle_kernel<<<gridDim, blockDim, 0, stream>>>(q_weight, height, width);
 }
 
+
+template <int m_count>
+__global__ void group_gemm_half_q_half_gptq_kernel
+(
+    const half* __restrict__ a,
+    const uint32_t* __restrict__ b_q_weight,
+    const uint32_t* __restrict__ b_gptq_qzeros,
+    const half* __restrict__ b_gptq_scales,
+    half* __restrict__ c,
+    const int size_m,
+    const int size_n,
+    const int size_k,
+    const int groups,
+    const int* __restrict__ b_q_perm,
+    const half* __restrict__ topk_weights,
+    const int* __restrict__ sorted_token_ids_ptr,
+    const int* __restrict__ expert_ids_ptr,
+    const int num_valid_tokens,
+    const int top_k
+)
+{
+    int expert_id = expert_ids_ptr[blockIdx.y];
+    b_q_weight = b_q_weight + size_k * size_n / 8 * expert_id;
+    b_gptq_qzeros = b_gptq_qzeros + groups * size_n / 8 * expert_id;
+    b_gptq_scales = b_gptq_scales + groups * size_n * expert_id;
+
+    MatrixView_half a_(a, size_m, size_k);
+    MatrixView_half_rw c_(c, size_m, size_n);
+    MatrixView_q4_row b_gptq_qzeros_(b_gptq_qzeros, groups, size_n);
+    MatrixView_half b_gptq_scales_(b_gptq_scales, groups, size_n);
+
+    int t = threadIdx.x;
+
+    // Block
+    int offset_n = blockIdx.x * BLOCK_KN_SIZE * 4;
+    int offset_m = blockIdx.y * m_count;
+    int offset_k = blockIdx.z * BLOCK_KN_SIZE;
+
+    int end_n = min(offset_n + BLOCK_KN_SIZE * 4, size_n);
+    int end_m = min(offset_m + m_count, size_m);
+    int end_k = min(offset_k + BLOCK_KN_SIZE, size_k);
+
+    int n = offset_n + t * 4;
+
+    // Preload block_a
+    __shared__ half block_a[m_count][BLOCK_KN_SIZE];
+    int token_a[m_count];
+
+    int valid_count = m_count;
+    for (int m = 0; m < m_count; ++m) {
+        int token_id = sorted_token_ids_ptr[offset_m + m];
+        if (token_id >= num_valid_tokens) {
+            valid_count = m;
+            break;
+        }
+        token_a[m] = token_id;
+    }
+
+    if (offset_k + t < end_k)
+    {
+        for (int m = 0; m < valid_count; ++m)
+        {
+            const half* a_ptr = a_.item_ptr(token_a[m] / top_k, 0);
+            half* block_a_ptr = block_a[m];
+
+            half a0;
+            if (b_q_perm) a0 = a_ptr[b_q_perm[offset_k + t]];
+            else a0 = a_ptr[offset_k + t];
+            block_a_ptr[t] = a0;
+        }
+    }
+
+    // Zero output
+    if (n >= size_n) return;
+
+    __syncthreads();
+
+    // Find initial group
+    int groupsize = size_k / groups;
+    int group = offset_k / groupsize;
+    int nextgroup = offset_k + groupsize;
+
+    // a, b offset
+    int qk = offset_k / (32 / 4);
+
+    const uint32_t* b_ptr = b_q_weight + qk * size_n + n;
+    const half* a_ptr = &block_a[0][0];
+    int a_stride = BLOCK_KN_SIZE;
+
+    // Initial group
+    int zeros[4];
+    float scales[4];
+    half2 z1z16[4][2];
+    half2 y1y16[4][2];
+    b_gptq_qzeros_.item4(zeros, group, n);
+    b_gptq_scales_.item4_f(scales, group, n);
+    dequant_4bit_8_prep_zero(zeros[0] + 1, z1z16[0], y1y16[0]);
+    dequant_4bit_8_prep_zero(zeros[1] + 1, z1z16[1], y1y16[1]);
+    dequant_4bit_8_prep_zero(zeros[2] + 1, z1z16[2], y1y16[2]);
+    dequant_4bit_8_prep_zero(zeros[3] + 1, z1z16[3], y1y16[3]);
+
+    // Column result
+    float block_c[m_count][4] = {};
+
+    // Dequantize and multiply
+    int k = offset_k;
+    while (k < end_k)
+    {
+        if (k == nextgroup)
+        {
+            group++;
+            nextgroup += groupsize;
+            b_gptq_qzeros_.item4(zeros, group, n);
+            b_gptq_scales_.item4_f(scales, group, n);
+            dequant_4bit_8_prep_zero(zeros[0] + 1, z1z16[0], y1y16[0]);
+            dequant_4bit_8_prep_zero(zeros[1] + 1, z1z16[1], y1y16[1]);
+            dequant_4bit_8_prep_zero(zeros[2] + 1, z1z16[2], y1y16[2]);
+            dequant_4bit_8_prep_zero(zeros[3] + 1, z1z16[3], y1y16[3]);
+        }
+
+        #pragma unroll
+        for (int j = 0; j < 4; j++)
+        {
+            const int4* b_ptr4 = (int4*) b_ptr;
+            int4 load_int4 = *b_ptr4;
+
+            half2 dq[4][4];
+            dequant_4bit_8_gptq(load_int4.x, dq[0], z1z16[0], y1y16[0], size_n, false);
+            dequant_4bit_8_gptq(load_int4.y, dq[1], z1z16[1], y1y16[1], size_n, false);
+            dequant_4bit_8_gptq(load_int4.z, dq[2], z1z16[2], y1y16[2], size_n, false);
+            dequant_4bit_8_gptq(load_int4.w, dq[3], z1z16[3], y1y16[3], size_n, false);
+
+            #pragma unroll
+            for (int m = 0; m < m_count; m++)
+            {
+                if (m >= valid_count) break;
+                block_c[m][0] = fma(dot22_8_f(dq[0], a_ptr + m * a_stride), scales[0], block_c[m][0]);
+                block_c[m][1] = fma(dot22_8_f(dq[1], a_ptr + m * a_stride), scales[1], block_c[m][1]);
+                block_c[m][2] = fma(dot22_8_f(dq[2], a_ptr + m * a_stride), scales[2], block_c[m][2]);
+                block_c[m][3] = fma(dot22_8_f(dq[3], a_ptr + m * a_stride), scales[3], block_c[m][3]);
+            }
+
+            b_ptr += size_n;
+            a_ptr += 8;
+        }
+
+        k += 32;
+    }
+
+    for (int m = 0; m < valid_count; m++)
+    {
+        half2 *out = (half2*) c_.item_ptr(token_a[m], n);
+        half2 result01 = __halves2half2(__float2half_rn(block_c[m][0]), __float2half_rn(block_c[m][1]));
+        half2 result23 = __halves2half2(__float2half_rn(block_c[m][2]), __float2half_rn(block_c[m][3]));
+        if (topk_weights) {
+            half2 topk_weight = __half2half2(topk_weights[token_a[m]]);
+            result01 = __hmul2(result01, topk_weight);
+            result23 = __hmul2(result23, topk_weight);
+        }
+        atomicAdd(out    , result01);
+        atomicAdd(out + 1, result23);
+    }
+}
+
+void group_gemm_half_q_half_cuda
+(
+    const half* a,
+    const uint32_t* b_q_weight,
+    const uint32_t* b_gptq_qzeros,
+    const half* b_gptq_scales,
+    const int* b_q_perm,
+    half* c,
+    const half* __restrict__ topk_weights,
+    const int* __restrict__ sorted_token_ids_ptr,
+    const int* __restrict__ expert_ids_ptr,
+    const int num_valid_tokens,
+    const int top_k,
+    int size_m,
+    int size_n,
+    int size_k,
+    int pad_size_m,
+    int groups
+)
+{
+    dim3 blockDim, gridDim;
+    blockDim.x = BLOCK_KN_SIZE;
+    blockDim.y = 1;
+    blockDim.z = 1;
+    gridDim.x = DIVIDE(size_n, BLOCK_KN_SIZE * 4);
+    gridDim.y = DIVIDE(pad_size_m, BLOCK_M_SIZE_MAX);
+    gridDim.z = DIVIDE(size_k, BLOCK_KN_SIZE);
+
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    group_gemm_half_q_half_gptq_kernel<BLOCK_M_SIZE_MAX><<<gridDim, blockDim, 0, stream>>>
+    (
+        a,
+        b_q_weight,
+        b_gptq_qzeros,
+        b_gptq_scales,
+        c,
+        size_m,
+        size_n,
+        size_k,
+        groups,
+        b_q_perm,
+        topk_weights,
+        sorted_token_ids_ptr,
+        expert_ids_ptr,
+        num_valid_tokens,
+        top_k
+    );
+}
+
+__global__ void group_gemm_half_q_half_alt_kernel(
+    const half2* __restrict__ vec,
+    const uint32_t* __restrict__ mat,
+    half* __restrict__ mul,
+    const half* __restrict__ scales,
+    const uint32_t* __restrict__ zeros,
+    const int* __restrict__ g_idx,
+    int batch,
+    int height,
+    int width,
+    int groups,
+    const half* __restrict__ topk_weights,
+    const int* __restrict__ sorted_token_ids_ptr,
+    const int* __restrict__ expert_ids_ptr,
+    const int num_valid_tokens,
+    const int top_k
+)
+{
+    int expert_id = expert_ids_ptr[blockIdx.y];
+    mat = mat + height * width * expert_id;
+    scales = scales + groups * width * expert_id;
+    zeros = zeros + groups * width / 8 * expert_id;
+    g_idx = g_idx + height * 8 * expert_id;
+
+    int zero_width = width / 8;
+    int vec_height = height * 4;
+    const int blockwidth2 = BLOCK_KN_SIZE / 2;
+    int b = blockIdx.y * BLOCK_M_SIZE_MAX;
+    int b_end = min(BLOCK_M_SIZE_MAX, batch - b);
+    int h = BLOCK_KN_SIZE * blockIdx.z / 8;
+    int h_end = min(BLOCK_KN_SIZE / 8, height - h) * 4;
+    int w = BLOCK_KN_SIZE * blockIdx.x + threadIdx.x;
+
+    int token_a[BLOCK_M_SIZE_MAX];
+    for (int m = 0; m < b_end; ++m) {
+        int token_id = sorted_token_ids_ptr[b + m];
+        if (token_id >= num_valid_tokens) {
+            b_end = m;
+            break;
+        }
+        token_a[m] = token_id;
+    }
+
+    __shared__ half2 blockvec[BLOCK_M_SIZE_MAX][blockwidth2];
+    if (threadIdx.x < h_end) {
+        for (int m = 0; m < b_end; ++m) {
+            blockvec[m][threadIdx.x] =
+              vec[token_a[m] / top_k * vec_height + blockIdx.z * BLOCK_KN_SIZE / 2 +
+                  threadIdx.x];
+        }
+    }
+
+    __shared__ half2 deq2[256][8];
+    int val = threadIdx.x / 8;
+    int off = threadIdx.x % 8;
+    for (; val < 256; val += BLOCK_KN_SIZE / 8) {
+        deq2[val][off] = __halves2half2(
+            __int2half_rn(val & 0xF), __int2half_rn(val >> 4)
+        );
+    }
+
+    __syncthreads();
+
+    int i = width * h + w;
+    int g_h = h * 8;
+    int k = 0;
+    int z_w = w / 8;
+    int z_mod = (w % 8) * 4;
+    half2 res2;
+    half res[BLOCK_M_SIZE_MAX] = {};
+
+    unsigned int tmp;
+    while (k < h_end) {
+        tmp = mat[i];
+        half2 scales_tmp[4];
+        half2 zeros_tmp[4];
+        for (int tmp_k = 0; tmp_k < 4; tmp_k++) {
+            int g = g_idx[g_h + (k + tmp_k) * 2];
+            int g2 = g_idx[g_h + (k + tmp_k) * 2 + 1];
+            half scale_f = scales[g * width + w];
+            half scale_f2 = scales[g2 * width + w];
+            half2 scale = __halves2half2(scale_f, scale_f2);
+            half2 zero = __halves2half2(
+                __hmul(scale_f, __int2half_rn(-((zeros[g * zero_width + z_w] >> z_mod) & 0xF) - 1)),
+                __hmul(scale_f2, __int2half_rn(-((zeros[g2 * zero_width + z_w] >> z_mod) & 0xF) - 1))
+            );
+            scales_tmp[tmp_k] = scale;
+            zeros_tmp[tmp_k] = zero;
+        }
+        for (int m = 0; m < b_end; m++) {
+#ifndef USE_ROCM
+            res2 = {};
+#else
+            res2.x = __half_as_ushort(__float2half(0));
+            res2.y = __half_as_ushort(__float2half(0));
+#endif
+            res2 = __hfma2(__hfma2(deq2[(tmp >>  0) & 0xff][off], scales_tmp[0], zeros_tmp[0]), blockvec[m][k + 0], res2);
+            res2 = __hfma2(__hfma2(deq2[(tmp >>  8) & 0xff][off], scales_tmp[1], zeros_tmp[1]), blockvec[m][k + 1], res2);
+            res2 = __hfma2(__hfma2(deq2[(tmp >> 16) & 0xff][off], scales_tmp[2], zeros_tmp[2]), blockvec[m][k + 2], res2);
+            res2 = __hfma2(__hfma2(deq2[(tmp >> 24) & 0xff][off], scales_tmp[3], zeros_tmp[3]), blockvec[m][k + 3], res2);
+#ifndef USE_ROCM
+            res[m] = __hadd(res[m], __hadd(res2.x, res2.y));
+#else
+            res[m] = __hadd(res[m], __hadd(__ushort_as_half(res2.x), __ushort_as_half(res2.y)));
+#endif
+            if (topk_weights) {
+                res[m] = __hmul(res[m], topk_weights[token_a[m]]);
+            }
+        }
+        i += width;
+        k += 4;
+    }
+    for (int m = 0; m < b_end; m++) {
+        atomicAdd(&mul[token_a[m] * width + w], res[m]);
+    }
+}
+
+
+void group_gemm_half_q_half_alt
+(
+    const half* a,
+    const uint32_t* b_q_weight,
+    const uint32_t* b_gptq_qzeros,
+    const half* b_gptq_scales,
+    const int* b_g_idx,
+    half* c,
+    const half* __restrict__ topk_weights,
+    const int* __restrict__ sorted_token_ids_ptr,
+    const int* __restrict__ expert_ids_ptr,
+    const int num_valid_tokens,
+    const int top_k,
+    int size_m,
+    int size_n,
+    int size_k,
+    int pad_size_m,
+    int groups
+)
+{
+    dim3 blockDim, gridDim;
+    blockDim.x = BLOCK_KN_SIZE;
+    blockDim.y = 1;
+    blockDim.z = 1;
+    gridDim.x = DIVIDE(size_n, BLOCK_KN_SIZE);
+    gridDim.y = DIVIDE(pad_size_m, BLOCK_M_SIZE_MAX);
+    gridDim.z = DIVIDE(size_k, BLOCK_KN_SIZE);
+
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    group_gemm_half_q_half_alt_kernel<<<gridDim, blockDim, 0, stream>>>
+    (
+        (const half2*) a,
+        b_q_weight,
+        c,
+        b_gptq_scales,
+        b_gptq_qzeros,
+        b_g_idx,
+        size_m,
+        size_k / 8,
+        size_n,
+        groups,
+        topk_weights,
+        sorted_token_ids_ptr,
+        expert_ids_ptr,
+        num_valid_tokens,
+        top_k
+    );
+}
+
+void group_gemm_half_q_half_cuda
+(
+    const half* a,
+    const uint32_t* b_q_weight,
+    const uint32_t* b_gptq_qzeros,
+    const half* b_gptq_scales,
+    const int* b_g_idx,
+    half* c,
+    const half* __restrict__ topk_weights,
+    const int* __restrict__ sorted_token_ids_ptr,
+    const int* __restrict__ expert_ids_ptr,
+    const int num_valid_tokens,
+    const int top_k,
+    int size_m,
+    int size_n,
+    int size_k,
+    int pad_size_m,
+    int groups,
+    bool use_exllama
+) {
+    if (use_exllama) {
+        group_gemm_half_q_half_cuda(
+            a, b_q_weight, b_gptq_qzeros, b_gptq_scales, b_g_idx, c,
+            topk_weights, sorted_token_ids_ptr, expert_ids_ptr, num_valid_tokens,
+            top_k, size_m, size_n, size_k, pad_size_m, groups
+        );
+    } else {
+        group_gemm_half_q_half_alt(
+            a, b_q_weight, b_gptq_qzeros, b_gptq_scales, b_g_idx, c,
+            topk_weights, sorted_token_ids_ptr, expert_ids_ptr, num_valid_tokens,
+            top_k, size_m, size_n, size_k, pad_size_m, groups
+        );
+    }
+}
+
 }  // namespace gptq
 }  // namespace vllm
 
@@ -872,4 +1287,46 @@ void gptq_shuffle
         q_weight.size(0) * 8,
         q_weight.size(1)
     );
+}
+
+torch::Tensor group_gptq_gemm
+(
+    torch::Tensor a,
+    torch::Tensor b_q_weight,
+    torch::Tensor b_gptq_qzeros,
+    torch::Tensor b_gptq_scales,
+    torch::Tensor b_g_idx,
+    torch::Tensor topk_weights,
+    torch::Tensor sorted_token_ids_ptr,
+    torch::Tensor expert_ids_ptr,
+    bool mul_weights,
+    bool use_exllama
+)
+{
+    const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
+
+    auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
+    at::Tensor c = torch::empty({a.size(0), topk_weights.size(1), b_q_weight.size(2)}, options);
+
+    vllm::gptq::group_gemm_half_q_half_cuda
+    (
+        (const half*) a.data_ptr(),
+        (const uint32_t*) b_q_weight.data_ptr(),
+        (const uint32_t*)b_gptq_qzeros.data_ptr(),
+        (const half*) b_gptq_scales.data_ptr(),
+        b_g_idx.device().is_meta() ? NULL : (const int*) b_g_idx.data_ptr(),
+        (half*) c.data_ptr(),
+        mul_weights ? (const half*) topk_weights.data_ptr() : NULL,
+        (const int*) sorted_token_ids_ptr.data_ptr(),
+        (const int*) expert_ids_ptr.data_ptr(),
+        topk_weights.numel(), // num tokens
+        topk_weights.size(1) / a.size(1), // top_k
+        a.size(0) * a.size(1),  // m
+        c.size(1),  // n
+        a.size(2),  // k
+        b_gptq_qzeros.size(1),  // group number
+        sorted_token_ids_ptr.size(0),
+        use_exllama
+    );
+    return c;
 }

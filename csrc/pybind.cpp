@@ -54,6 +54,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   ops.def("awq_dequantize", &awq_dequantize, "Dequantization for AWQ");
 #endif
   ops.def("gptq_gemm", &gptq_gemm, "Quantized GEMM for GPTQ");
+  ops.def("group_gptq_gemm", &group_gptq_gemm, "Quantized GEMM for GPTQ");
   ops.def("gptq_shuffle", &gptq_shuffle, "Post processing for GPTQ");
   ops.def("squeezellm_gemm", &squeezellm_gemm, "Quantized GEMM for SqueezeLLM");
   ops.def(
