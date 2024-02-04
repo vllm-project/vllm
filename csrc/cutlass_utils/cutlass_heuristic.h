@@ -17,7 +17,16 @@
 #pragma once
 
 #include "cutlass_extensions/gemm_configs.h"
-#include "tensorrt_llm/common/cudaUtils.h"
+
+#include <cinttypes>
+#include <cublasLt.h>
+#include <cublas_v2.h>
+#include <cuda_runtime.h>
+#include <fstream>
+#include <iostream>
+#include <memory>
+#include <string>
+#include <vector>
 
 namespace tensorrt_llm
 {
