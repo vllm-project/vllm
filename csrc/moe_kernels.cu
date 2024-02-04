@@ -16,6 +16,8 @@
 #include "cutlass/gemm/kernel/default_gemm_grouped.h"
 #include "cutlass/gemm/device/gemm_grouped.h"
 
+using namespace cute;
+
 namespace vllm {
 
 #define CUDA_CALL(code)					                    \
@@ -29,43 +31,61 @@ namespace vllm {
 #define GROUPED_GEMM_STRINGIFY(x) \
   GROUPED_GEMM_STRINGIFY_HELPER(x)
 
-using DefaultConfig = ::cutlass::gemm::device::DefaultGemmConfiguration<::cutlass::arch::OpClassTensorOp, ::cutlass::arch::Sm90, ::cutlass::bfloat16_t, ::cutlass::bfloat16_t, ::cutlass::bfloat16_t, float>;
+using ProblemShape = cutlass::gemm::GroupProblemShape<Shape<int,int,int>>;  // <M,N,K> per group
+using ElementA = cutlass::bfloat16_t;                                       // Element type for A matrix operand
+using ElementB = cutlass::bfloat16_t;                                       // Element type for B matrix operand
+using ElementC = float;                                                     // Element type for C and D matrix operands
 
+// A matrix configuration
+using         LayoutA     = cutlass::layout::RowMajor;                      // Layout type for A matrix operand
+constexpr int AlignmentA  = 128 / cutlass::sizeof_bits<ElementA>::value;    // Memory access granularity/alignment of A matrix in units of elements (up to 16 bytes)
 
-// TODO(tgale): Update this for SM90 when it's supported by CUTLASS.
-using GroupedGemmKernelNN = typename cutlass::gemm::kernel::DefaultGemmGrouped<
-  // Non-transposed A operand.
-  ::cutlass::bfloat16_t,
-  ::cutlass::layout::RowMajor,
-  ::cutlass::ComplexTransform::kNone,
-  8,
-  // Non-transposed B operand.
-  ::cutlass::bfloat16_t,
-  ::cutlass::layout::RowMajor,
-  ::cutlass::ComplexTransform::kNone,
-  8,
-  // C operand.
-  ::cutlass::bfloat16_t,
-  ::cutlass::layout::RowMajor,
-  float,
-  ::cutlass::arch::OpClassTensorOp,
-  ::cutlass::arch::Sm90,
-  ::cutlass::gemm::GemmShape<32, 128, 64>,
-  ::cutlass::gemm::GemmShape<32, 32, 64>,
-  ::cutlass::gemm::GemmShape<16, 8, 16>,
-  // DefaultConfig::ThreadblockShape,
-  // DefaultConfig::WarpShape,
-  // DefaultConfig::InstructionShape,
-  // ::cutlass::epilogue::thread::LinearCombination<::cutlass::bfloat16_t, 8, float, float>,
-  DefaultConfig::EpilogueOutputOp,
-  // NOTE: Threadblock swizzling is currently not supported by CUTLASS's grouped kernels.
-  // This parameter is passed in at present to match the APIs of other kernels. The parameter
-  // is unused within the kernel.
-  ::cutlass::gemm::threadblock::GemmBatchedIdentityThreadblockSwizzle,
-  // TODO(tgale): Experiment with GroupScheduleMode.
-  // TODO(tgale): Tune this for SM90.
-  DefaultConfig::kStages>::GemmKernel;
-using GemmGroupedNN = ::cutlass::gemm::device::GemmGrouped<GroupedGemmKernelNN>;
+// B matrix configuration
+using         LayoutB     = cutlass::layout::RowMajor;                   // Layout type for B matrix operand
+constexpr int AlignmentB  = 128 / cutlass::sizeof_bits<ElementB>::value;    // Memory access granularity/alignment of B matrix in units of elements (up to 16 bytes)
+
+// C/D matrix configuration
+using         LayoutC     = cutlass::layout::RowMajor;                   // Layout type for C and D matrix operands
+constexpr int AlignmentC  = 128 / cutlass::sizeof_bits<ElementC>::value;    // Memory access granularity/alignment of C matrix in units of elements (up to 16 bytes)
+
+// Core kernel configurations
+using ElementAccumulator  = float;                                          // Element type for internal accumulation
+using ArchTag             = cutlass::arch::Sm90;                            // Tag indicating the minimum SM that supports the intended feature
+using OperatorClass       = cutlass::arch::OpClassTensorOp;                 // Operator class tag
+using TileShape           = Shape<_256,_128,_64>;                           // Threadblock-level tile size
+using ClusterShape        = Shape<_1,_2,_1>;                                // Shape of the threadblocks in a cluster
+using StageCountType = cutlass::gemm::collective::StageCountAuto;           // Stage count maximized based on the tile size
+using KernelSchedule = cutlass::gemm::KernelGroupTmaWarpSpecializedCooperative; // Kernel to launch
+using EpilogueSchedule = cutlass::epilogue::NoSmemWarpSpecializedGroup;                     // Epilogue to launch
+
+using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
+    cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp,
+    TileShape, ClusterShape,
+    cutlass::epilogue::collective::EpilogueTileAuto,
+    ElementAccumulator, ElementAccumulator,
+    ElementC, LayoutC, AlignmentC,
+    ElementC, LayoutC, AlignmentC,
+    EpilogueSchedule
+  >::CollectiveOp;
+
+using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
+    ArchTag, OperatorClass,
+    ElementA, LayoutA, AlignmentA,
+    ElementB, LayoutB, AlignmentB,
+    ElementAccumulator,
+    TileShape, ClusterShape,
+    cutlass::gemm::collective::StageCountAutoCarveout<
+      static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
+    KernelSchedule
+  >::CollectiveOp;
+
+using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
+    ProblemShape,
+    CollectiveMainloop,
+    CollectiveEpilogue
+>;
+
+using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
 
 std::vector<cutlass::gemm::GemmCoord> MakeProblemSizes(torch::Tensor b, torch::Tensor batch_sizes) {
   const size_t num_experts = batch_sizes.size(0);
