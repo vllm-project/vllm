@@ -180,7 +180,7 @@ typename Gemm::Arguments MakeArguments(torch::Tensor a,
   torch::Tensor problem_sizes = CopyToDevice(problem_sizes_host, a.device());
 
   cutlass::KernelHardwareInfo hw_info;
-  hw_info.device_id = b.device();
+  hw_info.device_id = b.device().index();
   hw_info.sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(hw_info.device_id);
 
   typename Gemm::Arguments arguments{
