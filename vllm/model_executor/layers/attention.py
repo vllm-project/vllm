@@ -98,7 +98,34 @@ class PagedAttention(nn.Module):
         # profiling run.
         if kv_cache is not None:
             #flashinfer.page.
+
             pass
+            """
+
+            print(key.shape)
+            print(value.shape)
+
+            append_indptr = torch.zeros(
+                (batch_size + 1,), dtype=torch.int32, device="cuda"
+            )
+            if input_metadata.is_prompt:
+                append_indptr[1:] = torch.cumsum(input_metadata.prompt_lens, dim=0)
+            else:
+                append_indptr[1:] = torch.arange(1, batch_size + 1)
+
+            print(append_indptr)
+
+            
+            flashinfer.page.append_paged_kv_cache(
+                key.contiguous(),
+                value.contiguous(),
+                append_indptr,
+                kv_cache,
+                input_metadata.paged_kv_indices,
+                input_metadata.paged_kv_indptr,
+                input_metadata.paged_kv_last_page_len
+            )
+            """
             
             
             #cache_ops.reshape_and_cache(
@@ -199,24 +226,14 @@ class PagedAttention(nn.Module):
 
                 #query = query.unflatten(0, (batch_size, seq_len))
 
-                query = query.view(5510, 32, 128).contiguous()
+                query = query.view(-1, 32, 128).contiguous()
                 out = input_metadata.prefill_wrapper.forward(
                     query.contiguous(),
                     kv_cache,
                     causal=True
                 )
-                exit(0)
-                out = xops.memory_efficient_attention_forward(
-                    query,
-                    key,
-                    value,
-                    attn_bias=input_metadata.attn_bias,
-                    p=0.0,
-                    scale=self.scale,
-                    op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if
-                    (is_hip()) else None,
-                )
                 output = out.view_as(query)
+
             else:
                 # prefix-enabled attention
                 output = torch.empty_like(query)
@@ -251,12 +268,9 @@ class PagedAttention(nn.Module):
             #print(input_metadata)
             #print(key_cache.shape)
 
-            print(kv_cache.shape)
-
-            exit(0)
-
-            output = flashinfer.batch_decode_with_padded_kv_cache(
-                query, key_cache, value_cache,  "NHD", "LLAMA", rope_scale=self.scale,
+            output = input_metadata.decode_wrapper.forward(
+                query.contiguous(),
+                kv_cache,
             )
 
         # Reshape the output tensor.

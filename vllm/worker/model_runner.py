@@ -556,28 +556,44 @@ class ModelRunner:
             batch_size = input_tokens.shape[0]
             
             prefix_lens = input_metadata.prompt_lens
-            seq_lens = [a + b for a, b in zip(input_metadata.prompt_lens, input_metadata.context_lens)]
+
+            if input_metadata.is_prompt:
+                seq_lens = torch.stack([a + b for a, b in zip(input_metadata.prompt_lens, input_metadata.context_lens)], dim=0)
+            else:
+                seq_lens = input_metadata.context_lens
+                print(input_metadata.context_lens)
             extend_seq_lens = input_metadata.context_lens
-            
-            qo_indptr = torch.zeros(
-                (batch_size + 1,), dtype=torch.int32, device="cuda"
-            )
-            qo_indptr[1:] = torch.cumsum(input_metadata.prompt_lens, dim=0)
 
-            paged_kv_indices = input_metadata.slot_mapping.view(-1).type(torch.int32)
+
+            if input_metadata.is_prompt:
+                qo_indptr = torch.zeros(
+                    (batch_size + 1,), dtype=torch.int32, device="cuda"
+                )
+                
+                qo_indptr[1:] = torch.cumsum(input_metadata.prompt_lens, dim=0)
+
+                input_metadata.qo_indptr = qo_indptr
+
+            kvi = input_metadata.slot_mapping.view(-1).type(torch.int32).to("cuda:0")
+            paged_kv_indices = kvi // 16
+            if not input_metadata.is_prompt:
+                paged_kv_indices += 1 
             paged_kv_indptr = torch.zeros(
-            (batch_size + 1,), dtype=torch.int32, device="cuda"
-        )
-            paged_kv_indptr[1:] = torch.cumsum(torch.stack(seq_lens, dim=0), dim=0)
-            paged_kv_last_page_len = torch.ones((batch_size,), dtype=torch.int32, device="cuda")
+            (batch_size + 1,), dtype=torch.int32, device="cuda:0"
+            )
+            paged_kv_indptr[1:] = torch.cumsum(seq_lens, dim=0)
+            #paged_kv_last_page_len = torch.ones((batch_size,), dtype=torch.int32, device="cuda:0")
 
+            paged_kv_last_page_len = kvi[paged_kv_indptr[1:] - 1] % 16
 
-            input_metadata.qo_indptr = qo_indptr
             input_metadata.paged_kv_indptr = paged_kv_indptr
             input_metadata.paged_kv_indices = paged_kv_indices
             input_metadata.paged_kv_last_page_len = paged_kv_last_page_len
     
             if input_metadata.is_prompt:
+
+                #print(paged_kv_indices)
+
                 input_metadata.prefill_wrapper.begin_forward(
                     qo_indptr,
                     paged_kv_indptr,
@@ -585,7 +601,18 @@ class ModelRunner:
                     paged_kv_last_page_len,
                     num_qo_heads,
                     num_kv_heads
-                )                
+                )  
+            else:
+                input_metadata.decode_wrapper.begin_forward(
+                    paged_kv_indptr,
+                    paged_kv_indices,
+                    paged_kv_last_page_len,
+                    num_qo_heads,
+                    num_kv_heads,
+                    128,
+                    16,
+                    "LLAMA"
+                )  
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)

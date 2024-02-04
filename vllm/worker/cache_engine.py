@@ -47,7 +47,7 @@ class CacheEngine:
 
         # Initialize the cache.
         self.gpu_cache = self.allocate_gpu_cache()
-        self.cpu_cache = self.allocate_cpu_cache()
+        #self.cpu_cache = self.allocate_cpu_cache()
 
     def get_kv_block_shape(self) -> Tuple[int, int, int, int]:
         element_size = torch.tensor([], dtype=self.dtype).element_size()
@@ -65,10 +65,6 @@ class CacheEngine:
             gpu_cache.append(gpu_blocks)
         return gpu_cache
         
-    def allocate_cpu_cache(self) -> List[KVCache]:
-        kv_block_shape = self.get_kv_block_shape()
-        return torch.empty(self.num_gpu_blocks, 2, self.block_size, *kv_block_shape, dtype=self.dtype, device="cpu")
-
     def _swap(
         self,
         src: List[KVCache],
