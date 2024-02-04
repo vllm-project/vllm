@@ -179,23 +179,21 @@ typename Gemm::Arguments MakeArguments(torch::Tensor a,
   torch::Tensor ptr_c = CopyToDevice(ptr_c_host, a.device());
   torch::Tensor problem_sizes = CopyToDevice(problem_sizes_host, a.device());
 
-  typename Gemm::EpilogueOutputOp::Params epilogue_op(/*alpha=*/1.0f, /*beta=*/0.0f);
+  cutlass::KernelHardwareInfo hw_info;
+  hw_info.device_id = b.device();
+  hw_info.sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(hw_info.device_id);
+
   typename Gemm::Arguments arguments{
     cutlass::gemm::GemmUniversalMode::kGrouped,
-    {num_experts, problem_sizes.get()}
-  }((cutlass::gemm::GemmCoord*)problem_sizes.data_ptr(),
-  				     (int)num_experts,
-  				     (int)threadblock_count,
-  				     epilogue_op,
-  				     (ElementA**)ptr_a.data_ptr(),
-  				     (ElementB**)ptr_b.data_ptr(),
-  				     (ElementC**)ptr_c.data_ptr(),
-  				     (ElementC**)ptr_c.data_ptr(),
-  				     /*lda=*/(int64_t*)lda.data_ptr(),
-  				     /*ldb=*/(int64_t*)ldb.data_ptr(),
-  				     /*ldc=*/(int64_t*)ldc.data_ptr(),
-  				     /*ldd=*/(int64_t*)ldc.data_ptr(),
-  				     (cutlass::gemm::GemmCoord*)problem_sizes_host.data());
+    {num_experts, problem_sizes.data_ptr(), problem_sizes_host.data()},
+    {(ElementA**)ptr_a.data_ptr(), /*lda=*/(int64_t*)lda.data_ptr(),
+     (ElementB**)ptr_b.data_ptr(), /*ldb=*/(int64_t*)ldb.data_ptr()},
+    {{/*alpha=*/1.0f, /*beta=*/0.0f},
+     (ElementC**)ptr_c.data_ptr(), /*ldc=*/(int64_t*)ldc.data_ptr(),
+     (ElementC**)ptr_c.data_ptr(), /*ldc=*/(int64_t*)ldc.data_ptr()},
+    hw_info
+  };
+
   return arguments;
 }
 
