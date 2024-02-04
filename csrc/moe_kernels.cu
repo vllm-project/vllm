@@ -206,7 +206,6 @@ torch::Tensor CutlassGroupedGemm(torch::Tensor a,
 				 torch::Tensor b,
 				 torch::Tensor c,
 				 torch::Tensor batch_sizes) {
-  using Gemm = GemmGroupedNN;
   Gemm gemm;
 
   auto arguments = MakeArguments<Gemm>(a, b, c, batch_sizes);
