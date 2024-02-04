@@ -11,16 +11,13 @@ from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
 from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
 from vllm.model_executor.parallel_utils import custom_all_reduce
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_group,
-)
+from vllm.model_executor.parallel_utils.parallel_state import get_stage_parallel_group
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.utils import in_wsl
-
 
 logger = init_logger(__name__)
 
@@ -454,6 +451,7 @@ class ModelRunner:
         blocks_to_nw: Optional[Dict[int, List[int]]],
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, SamplingMetadata,
                Set[int], LoRAMapping]:
+        stage_group = get_stage_parallel_group()
         if self.is_driver_worker:
             # NOTE: We assume that all sequences in the group are all prompts or
             # all decodes.
@@ -503,9 +501,9 @@ class ModelRunner:
                 "lora_requests": lora_requests,
                 "lora_mapping": lora_mapping,
             }
-            broadcast_tensor_dict(metadata_dict, src=self.driver_rank, group=get_tensor_model_parallel_group())
+            broadcast_tensor_dict(metadata_dict, src=self.driver_rank, group=stage_group)
         else:
-            metadata_dict = broadcast_tensor_dict(src=self.driver_rank, group=get_tensor_model_parallel_group())
+            metadata_dict = broadcast_tensor_dict(src=self.driver_rank, group=stage_group)
             input_tokens = metadata_dict["input_tokens"]
             input_positions = metadata_dict["input_positions"]
             lora_mapping = metadata_dict["lora_mapping"]

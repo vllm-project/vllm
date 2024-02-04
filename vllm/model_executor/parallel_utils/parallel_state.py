@@ -10,6 +10,8 @@ import torch
 _TENSOR_MODEL_PARALLEL_GROUP = None
 # Pipeline model parallel group that the current rank belongs to.
 _PIPELINE_MODEL_PARALLEL_GROUP = None
+# Stage parallel group that the current rank belongs to.
+_STAGE_PARALLEL_GROUP = None
 
 # A list of global ranks for each pipeline group to ease calculation of the
 # source rank when broadcasting from the first or last pipeline stage.
@@ -86,6 +88,18 @@ def initialize_model_parallel(
             _PIPELINE_MODEL_PARALLEL_GROUP = group
             _PIPELINE_GLOBAL_RANKS = ranks
 
+    if sep_prompt_token:
+        global _STAGE_PARALLEL_GROUP
+        if num_tensor_model_parallel_groups == 2:
+            _STAGE_PARALLEL_GROUP = _TENSOR_MODEL_PARALLEL_GROUP
+        else:
+            prompt_group = torch.distributed.new_group(range(world_size // 2))
+            token_group = torch.distributed.new_group(range(world_size // 2, world_size))
+            if rank < world_size // 2:
+                _STAGE_PARALLEL_GROUP = prompt_group
+            else:
+                _STAGE_PARALLEL_GROUP = token_group
+
 
 def ensure_model_parallel_initialized(
     tensor_model_parallel_size: int,
@@ -134,6 +148,12 @@ def get_pipeline_model_parallel_group():
     return _PIPELINE_MODEL_PARALLEL_GROUP
 
 
+def get_stage_parallel_group():
+    """Get the stage parallel group the caller rank belongs to."""
+    # _STAGE_PARALLEL_GROUP can be None (indicating no stage parallelism)
+    return _STAGE_PARALLEL_GROUP
+
+
 def get_tensor_model_parallel_world_size():
     """Return world size for the tensor model parallel group."""
     return torch.distributed.get_world_size(
@@ -146,6 +166,12 @@ def get_pipeline_model_parallel_world_size():
         group=get_pipeline_model_parallel_group())
 
 
+def get_stage_parallel_world_size():
+    """Return world size for the stage parallel group."""
+    return torch.distributed.get_world_size(
+        group=get_stage_parallel_group())
+
+
 def get_tensor_model_parallel_rank():
     """Return my rank for the tensor model parallel group."""
     return torch.distributed.get_rank(group=get_tensor_model_parallel_group())
@@ -155,6 +181,12 @@ def get_pipeline_model_parallel_rank():
     """Return my rank for the pipeline model parallel group."""
     return torch.distributed.get_rank(
         group=get_pipeline_model_parallel_group())
+
+
+def get_stage_parallel_rank():
+    """Return my rank for the pipeline model parallel group."""
+    return torch.distributed.get_rank(
+        group=get_stage_parallel_group())
 
 
 def get_tensor_model_parallel_src_rank():
@@ -212,3 +244,7 @@ def destroy_model_parallel():
     _PIPELINE_MODEL_PARALLEL_GROUP = None
     global _PIPELINE_GLOBAL_RANKS
     _PIPELINE_GLOBAL_RANKS = None
+    global _STAGE_PARALLEL_GROUP
+    if _STAGE_PARALLEL_GROUP:
+        torch.distributed.destroy_process_group(_STAGE_PARALLEL_GROUP)
+    _STAGE_PARALLEL_GROUP = None

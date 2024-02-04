@@ -794,6 +794,7 @@ class SamplerWithLoRA(BaseLayerWithLoRA):
         self.hidden_size = hidden_size
         self.dtype = dtype
         self.device = device
+        self.dst_rank = 0
 
     @property
     def vocab_size(self):
@@ -897,7 +898,7 @@ class SamplerWithLoRA(BaseLayerWithLoRA):
         logits = torch.matmul(hidden_states, embedding.t())
         if embedding_bias is not None:
             logits += embedding_bias
-        logits = tensor_model_parallel_gather(logits)
+        logits = tensor_model_parallel_gather(logits, dst=self.dst_rank)
         if logits is None:
             return None
 
@@ -937,6 +938,9 @@ class SamplerWithLoRA(BaseLayerWithLoRA):
         logits = logits[:, :self.base_layer.vocab_size]
 
         return logits
+
+    def set_dst_rank(self, dst_rank: int) -> None:
+        self.dst_rank = dst_rank
 
     def forward(self, *args, **kwargs):
         return type(self.base_layer).forward(self, *args, **kwargs)
