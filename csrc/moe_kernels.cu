@@ -9,12 +9,25 @@
 #include <c10/util/BFloat16.h>
 #include <c10/cuda/CUDAStream.h>
 
-#include "cutlass/platform/platform.h"
-#include "cutlass/bfloat16.h"
-#include "cutlass/complex.h"
-#include "cutlass/gemm/kernel/gemm_grouped.h"
-#include "cutlass/gemm/kernel/default_gemm_grouped.h"
-#include "cutlass/gemm/device/gemm_grouped.h"
+// #include "cutlass/platform/platform.h"
+// #include "cutlass/bfloat16.h"
+// #include "cutlass/complex.h"
+// #include "cutlass/gemm/kernel/gemm_grouped.h"
+// #include "cutlass/gemm/kernel/default_gemm_grouped.h"
+// #include "cutlass/gemm/device/gemm_grouped.h"
+
+#include "cutlass/cutlass.h"
+
+#include "cute/tensor.hpp"
+#include "cutlass/tensor_ref.h"
+#include "cutlass/epilogue/collective/default_epilogue.hpp"
+#include "cutlass/epilogue/thread/linear_combination.h"
+#include "cutlass/gemm/dispatch_policy.hpp"
+#include "cutlass/gemm/group_array_problem_shape.hpp"
+#include "cutlass/gemm/collective/collective_builder.hpp"
+#include "cutlass/epilogue/collective/collective_builder.hpp"
+#include "cutlass/gemm/device/gemm_universal_adapter.h"
+#include "cutlass/gemm/kernel/gemm_universal.hpp"
 
 using namespace cute;
 
