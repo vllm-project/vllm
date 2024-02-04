@@ -1,5 +1,5 @@
 """CacheEngine class for managing the KV cache."""
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import torch
 
@@ -54,22 +54,19 @@ class CacheEngine:
         # Initialize the events for stream synchronization.
         self.events = [torch.cuda.Event() for _ in range(self.num_layers)]
 
-    def get_key_block_shape(self) -> Tuple[int, int, int, int]:
+    def get_key_block_shape(self) -> Tuple[int, int, int, Optional[int]]:
         element_size = torch.tensor([], dtype=self.dtype).element_size()
         x = 16 // element_size
-        return (
-            self.num_heads,
-            self.head_size // x,
-            self.block_size,
-            x,
-        )
+        block_shape = (self.num_heads, self.head_size // x, self.block_size, x)
+        if self.model_config.use_flash_attn:
+            block_shape = (self.block_size, self.num_heads, self.head_size)
+        return block_shape
 
     def get_value_block_shape(self) -> Tuple[int, int, int]:
-        return (
-            self.num_heads,
-            self.head_size,
-            self.block_size,
-        )
+        block_shape = (self.num_heads, self.head_size, self.block_size)
+        if self.model_config.use_flash_attn:
+            block_shape = (self.block_size, self.num_heads, self.head_size)
+        return block_shape
 
     def allocate_gpu_cache(self) -> List[KVCache]:
         gpu_cache: List[KVCache] = []

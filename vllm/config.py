@@ -57,6 +57,7 @@ class ModelConfig:
         max_context_len_to_capture: Maximum context len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
             to eager mode.
+        use_flash_attn: Use paged kv cache flash attention.
     """
 
     def __init__(
@@ -75,6 +76,7 @@ class ModelConfig:
         quantization: Optional[str] = None,
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
+        use_flash_attn: bool = False,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -88,6 +90,7 @@ class ModelConfig:
         self.quantization = quantization
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
+        self.use_flash_attn = use_flash_attn
 
         if os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true":
             # download model from ModelScope hub,
@@ -108,6 +111,7 @@ class ModelConfig:
         self._verify_tokenizer_mode()
         self._verify_quantization()
         self._verify_cuda_graph()
+        self._verify_flash_attn()
 
     def _verify_load_format(self) -> None:
         load_format = self.load_format.lower()
@@ -183,6 +187,16 @@ class ModelConfig:
             self.max_context_len_to_capture = self.max_model_len
         self.max_context_len_to_capture = min(self.max_context_len_to_capture,
                                               self.max_model_len)
+
+    def _verify_flash_attn(self) -> None:
+        if self.use_flash_attn:
+            if self.dtype not in [torch.float16, torch.bfloat16]:
+                raise ValueError(
+                    f"Flash Attention does not support {self.dtype}.")
+            if is_hip():
+                raise ValueError(
+                    "Please disable Flash Attention because it is currently "
+                    "not supported in ROCm.")
 
     def verify_with_parallel_config(
         self,

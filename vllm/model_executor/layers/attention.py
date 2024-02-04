@@ -3,6 +3,7 @@ from typing import List, Optional
 
 import torch
 import torch.nn as nn
+from flash_attn.flash_attn_interface import flash_attn_with_kvcache
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
                                          LowerTriangularMaskWithTensorBias)
@@ -74,9 +75,11 @@ class PagedAttention(nn.Module):
             key: shape = [batch_size, seq_len, num_kv_heads * head_size]
             value: shape = [batch_size, seq_len, num_kv_heads * head_size]
             key_cache: shape = [num_blocks, num_kv_heads, head_size/x,
-                block_size, x]
+                block_size, x] or [num_blocks, block_size, num_kv_heads,
+                head_size]
             value_cache: shape = [num_blocks, num_kv_heads, head_size,
-                block_size]
+                block_size] or [num_blocks, block_size, num_kv_heads,
+                head_size]
             input_metadata: metadata for the inputs.
         Returns:
             shape = [batch_size, seq_len, num_heads * head_size]
@@ -92,14 +95,24 @@ class PagedAttention(nn.Module):
         # vectors will not be cached. This happens during the initial memory
         # profiling run.
         if key_cache is not None and value_cache is not None:
-            cache_ops.reshape_and_cache(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                input_metadata.slot_mapping.flatten(),
-                input_metadata.kv_cache_dtype,
-            )
+            if not input_metadata.use_flash_attn:
+                cache_ops.reshape_and_cache(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    input_metadata.slot_mapping.flatten(),
+                    input_metadata.kv_cache_dtype,
+                )
+            else:
+                cache_ops.cache(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    input_metadata.slot_mapping.flatten(),
+                    input_metadata.kv_cache_dtype,
+                )
 
         if input_metadata.is_prompt:
             # Prompt run.
@@ -179,15 +192,27 @@ class PagedAttention(nn.Module):
 
         else:
             # Decoding run.
-            output = _paged_attention(
-                query,
-                key_cache,
-                value_cache,
-                input_metadata,
-                self.num_kv_heads,
-                self.scale,
-                self.alibi_slopes,
-            )
+            if not input_metadata.use_flash_attn:
+                output = _paged_attention(
+                    query,
+                    key_cache,
+                    value_cache,
+                    input_metadata,
+                    self.num_kv_heads,
+                    self.scale,
+                    self.alibi_slopes,
+                )
+            else:
+                output = flash_attn_with_kvcache(
+                    query.unsqueeze(1),
+                    key_cache,
+                    value_cache,
+                    cache_seqlens=input_metadata.context_lens,
+                    block_table=input_metadata.block_tables,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    alibi_slopes=self.alibi_slopes,
+                )
 
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)

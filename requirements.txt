@@ -6,6 +6,7 @@ numpy
 torch == 2.1.2
 transformers >= 4.37.0 # Required for Qwen2
 xformers == 0.0.23.post1  # Required for CUDA 12.1.
+flash_attn >= 2.5.0
 fastapi
 uvicorn[standard]
 pydantic >= 2.0  # Required for OpenAI server.

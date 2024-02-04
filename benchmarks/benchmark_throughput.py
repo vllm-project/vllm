@@ -72,6 +72,7 @@ def run_vllm(
     max_model_len: Optional[int],
     enforce_eager: bool,
     kv_cache_dtype: str,
+    use_flash_attn: bool,
     device: str,
 ) -> float:
     from vllm import LLM, SamplingParams
@@ -86,6 +87,7 @@ def run_vllm(
         max_model_len=max_model_len,
         enforce_eager=enforce_eager,
         kv_cache_dtype=kv_cache_dtype,
+        use_flash_attn=use_flash_attn,
         device=device,
     )
 
@@ -211,7 +213,8 @@ def main(args: argparse.Namespace):
                                 args.seed, args.n, args.use_beam_search,
                                 args.trust_remote_code, args.dtype,
                                 args.max_model_len, args.enforce_eager,
-                                args.kv_cache_dtype, args.device)
+                                args.kv_cache_dtype, args.use_flash_attn,
+                                args.device)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -290,12 +293,16 @@ if __name__ == "__main__":
                         action="store_true",
                         help="enforce eager execution")
     parser.add_argument(
-        "--kv-cache-dtype",
+        '--kv-cache-dtype',
         type=str,
         choices=["auto", "fp8_e5m2"],
         default="auto",
         help=
         'Data type for kv cache storage. If "auto", will use model data type.')
+    parser.add_argument('--use-flash-attn',
+                        action='store_true',
+                        help='Use paged kv cache flash attention kernel. '
+                        'Note this will rewrite block_size of kv cache.')
     parser.add_argument(
         "--device",
         type=str,

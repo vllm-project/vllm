@@ -25,6 +25,7 @@ def main(args: argparse.Namespace):
         dtype=args.dtype,
         enforce_eager=args.enforce_eager,
         kv_cache_dtype=args.kv_cache_dtype,
+        use_flash_attn=args.use_flash_attn,
         device=args.device,
     )
 
@@ -120,12 +121,16 @@ if __name__ == '__main__':
                         action='store_true',
                         help='enforce eager mode and disable CUDA graph')
     parser.add_argument(
-        "--kv-cache-dtype",
+        '--kv-cache-dtype',
         type=str,
         choices=['auto', 'fp8_e5m2'],
         default='auto',
         help=
         'Data type for kv cache storage. If "auto", will use model data type.')
+    parser.add_argument('--use-flash-attn',
+                        action='store_true',
+                        help='Use paged kv cache flash attention kernel. '
+                        'Note this will rewrite block_size of kv cache.')
     parser.add_argument(
         '--profile',
         action='store_true',

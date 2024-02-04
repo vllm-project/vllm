@@ -15,7 +15,7 @@ FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
 # There may not be enough gpu memory due to large NUM_BLOCKS.
 # Reduce NUM_BLOCKS when it happens.
-NUM_BLOCKS = 4321  # Arbitrary values for testing
+NUM_BLOCKS = 863  # Arbitrary values for testing
 PARTITION_SIZE = 512
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -57,12 +57,20 @@ def ref_single_query_cached_kv_attention(
     context_lens: torch.Tensor,
     scale: float,
     alibi_slopes: Optional[torch.Tensor],
+    use_fa: bool = False,
 ) -> None:
     num_query_heads = query.shape[1]
     num_kv_heads = value_cache.shape[1]
     head_size = value_cache.shape[2]
     block_size = value_cache.shape[3]
+    if use_fa:
+        block_size = value_cache.shape[1]
+        num_kv_heads = value_cache.shape[2]
+        head_size = value_cache.shape[3]
+
     num_seqs = query.shape[0]
+    print(f"key_cache.shape: {key_cache.shape}")
+    print(f"value_cache.shape: {value_cache.shape}")
 
     block_tables = block_tables.cpu().tolist()
     context_lens = context_lens.cpu().tolist()
@@ -77,11 +85,19 @@ def ref_single_query_cached_kv_attention(
             block_number = int(block_table[j // block_size])
             block_offset = j % block_size
 
-            k = key_cache[block_number, :, :, block_offset, :]
-            k = k.reshape(num_kv_heads, head_size)
+            if not use_fa:
+                k = key_cache[block_number, :, :, block_offset, :]
+                k = k.reshape(num_kv_heads, head_size)
+            else:
+                k = key_cache[block_number, block_offset, :, :]
+            # print(f"k.shape: {k.shape}")
             keys.append(k)
 
-            v = value_cache[block_number, :, :, block_offset]
+            if not use_fa:
+                v = value_cache[block_number, :, :, block_offset]
+            else:
+                v = value_cache[block_number, block_offset, :, :]
+            # print(f"v.shape: {v.shape}")
             values.append(v)
         keys = torch.stack(keys, dim=0)
         values = torch.stack(values, dim=0)
@@ -99,6 +115,8 @@ def ref_single_query_cached_kv_attention(
                 1, 1, -1)
 
         out = ref_masked_attention(q, keys, values, scale, alibi_bias)
+        print(f"out.shape: {out.shape}")
+        print(f"num_query_heads: {num_query_heads}, head_size: {head_size}")
         out = out.view(num_query_heads, head_size)
         output[i].copy_(out, non_blocking=True)
 
@@ -256,6 +274,122 @@ def test_paged_attention(
     atol, rtol = 1e-3, 1e-5
     if kv_cache_dtype == "fp8_e5m2":
         atol, rtol = 1e-2, 1e-5
+    assert torch.allclose(output, ref_output, atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize("num_seqs", NUM_GEN_SEQS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("use_alibi", USE_ALIBI)
+@pytest.mark.parametrize("block_size", [256, 512])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", DEVICES)
+def test_flash_attention(
+    kv_cache_factory,
+    num_seqs: int,
+    num_heads: Tuple[int, int],
+    head_size: int,
+    use_alibi: bool,
+    block_size: int,
+    dtype: torch.dtype,
+    kv_cache_dtype: str,
+    seed: int,
+    device: int,
+) -> None:
+    # Paged KV cache block size in Flash Attention must be divisible by 256.
+    if (dtype not in [
+            torch.float16, torch.bfloat16
+    ]) or (head_size % 256 != 0) or (kv_cache_dtype != "auto") or (
+            "AMD" in torch.cuda.get_device_name()):
+        pytest.skip()
+    # num_blocks = 863 # Larger mum_blocks will cause OOM.
+
+    random.seed(seed)
+    torch.random.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    gpu_id = f"cuda:{device}"
+    scale = float(1.0 / (head_size**0.5))
+    num_query_heads, num_kv_heads = num_heads
+    query = torch.empty(num_seqs,
+                        num_query_heads,
+                        head_size,
+                        dtype=dtype,
+                        device=gpu_id)
+    query.uniform_(-scale, scale)
+
+    assert num_query_heads % num_kv_heads == 0
+    num_queries_per_kv = num_query_heads // num_kv_heads
+    alibi_slopes = None
+    if use_alibi:
+        alibi_slopes = torch.randn(num_query_heads,
+                                   dtype=torch.float,
+                                   device=gpu_id)
+
+    context_lens = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
+    context_lens[-1] = MAX_SEQ_LEN
+    max_context_len = max(context_lens)
+    context_lens = torch.tensor(context_lens, dtype=torch.int, device=gpu_id)
+
+    # Create the block tables.
+    max_num_blocks_per_seq = (max_context_len + block_size - 1) // block_size
+    block_tables = []
+    for _ in range(num_seqs):
+        block_table = [
+            random.randint(0, NUM_BLOCKS - 1)
+            for _ in range(max_num_blocks_per_seq)
+        ]
+        block_tables.append(block_table)
+    block_tables = torch.tensor(block_tables, dtype=torch.int, device=gpu_id)
+
+    # Create the KV caches.
+    key_caches, value_caches = kv_cache_factory(NUM_BLOCKS,
+                                                block_size,
+                                                1,
+                                                num_kv_heads,
+                                                head_size,
+                                                kv_cache_dtype,
+                                                dtype,
+                                                seed,
+                                                gpu_id,
+                                                use_flash_attn=True)
+    key_cache, value_cache = key_caches[0], value_caches[0]
+
+    # Call the paged attention kernel.
+    output = torch.empty_like(query)
+    from flash_attn.flash_attn_interface import flash_attn_with_kvcache
+    output = flash_attn_with_kvcache(
+        query.unsqueeze(1),
+        key_cache,
+        value_cache,
+        cache_seqlens=context_lens,
+        block_table=block_tables,
+        softmax_scale=scale,
+        causal=True,
+        alibi_slopes=alibi_slopes,
+    )
+
+    # Run the reference implementation.
+    ref_output = torch.empty_like(query)
+    ref_single_query_cached_kv_attention(
+        ref_output,
+        query,
+        num_queries_per_kv,
+        key_cache,
+        value_cache,
+        block_tables,
+        context_lens,
+        scale,
+        alibi_slopes,
+        use_fa=True,
+    )
+
+    # print(f"Output max diff: {(output - ref_output).abs().max().item()}")
+    # print(f"Output mean diff: {(output - ref_output).abs().mean().item()}")
+    atol, rtol = 5e-3, 5e-4
+    if use_alibi:
+        atol, rtol = 2e-1, 5e-2
     assert torch.allclose(output, ref_output, atol=atol, rtol=rtol)
 
 
