@@ -85,6 +85,7 @@ class LLMEngine:
             f"quantization={model_config.quantization}, "
             f"enforce_eager={model_config.enforce_eager}, "
             f"kv_cache_dtype={cache_config.cache_dtype}, "
+            f"kv_quant_params_path={cache_config.cache_quant_params_path}, "
             f"seed={model_config.seed})")
         # TODO(woosuk): Print more configs in debug mode.
 
@@ -143,6 +144,7 @@ class LLMEngine:
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
+            kv_quant_params_path=self.cache_config.cache_quant_params_path,
             is_driver_worker=True,
         )
         self._run_workers("init_model")
@@ -249,6 +251,8 @@ class LLMEngine:
                     distributed_init_method,
                     lora_config=self.lora_config,
                     kv_cache_dtype=self.cache_config.cache_dtype,
+                    kv_quant_params_path=self.cache_config.
+                    cache_quant_params_path,
                 ))
 
         driver_rank = 0
@@ -262,6 +266,7 @@ class LLMEngine:
             distributed_init_method,
             lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
+            kv_quant_params_path=self.cache_config.cache_quant_params_path,
             is_driver_worker=True,
         )
 

@@ -4,12 +4,15 @@
 
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
+#include "quantization/int8_kvcache/quant_utils.cuh"
 #include "quantization/fp8_e5m2_kvcache/quant_utils.cuh"
 
 #include <algorithm>
 #include <cassert>
 #include <map>
 #include <vector>
+
+enum kv_cache_dtype {AUTO, FP8_E5M2, INT8};
 
 void swap_blocks(
   torch::Tensor& src,
@@ -142,9 +145,10 @@ void copy_blocks(
     }));
 }
 
+
 namespace vllm {
 
-template<typename scalar_t, typename cache_t, bool is_fp8_e5m2_kv_cache>
+template<typename scalar_t, typename cache_t, kv_cache_dtype KV_CACHE_DTYPE>
 __global__ void reshape_and_cache_kernel(
   const scalar_t* __restrict__ key,           // [num_tokens, num_heads, head_size]
   const scalar_t* __restrict__ value,         // [num_tokens, num_heads, head_size]
@@ -156,7 +160,11 @@ __global__ void reshape_and_cache_kernel(
   const int num_heads,
   const int head_size,
   const int block_size,
-  const int x) {
+  const int x,
+  const float k_scale,
+  const float k_zp,
+  const float v_scale,
+  const float v_zp) {
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
   if (slot_idx < 0) {
@@ -178,34 +186,36 @@ __global__ void reshape_and_cache_kernel(
     const int x_offset = head_offset % x;
 
     const int64_t tgt_key_idx = block_idx * num_heads * (head_size / x) * block_size * x
-                                + head_idx * (head_size / x) * block_size * x
-                                + x_idx * block_size * x
-                                + block_offset * x
-                                + x_offset;
+                            + head_idx * (head_size / x) * block_size * x
+                            + x_idx * block_size * x
+                            + block_offset * x
+                            + x_offset;
     const int64_t tgt_value_idx = block_idx * num_heads * head_size * block_size
                                   + head_idx * head_size * block_size
                                   + head_offset * block_size
                                   + block_offset;
     scalar_t tgt_key = key[src_key_idx];
     scalar_t tgt_value = value[src_value_idx];
-    if constexpr (is_fp8_e5m2_kv_cache) {
+    if constexpr (KV_CACHE_DTYPE == FP8_E5M2) {
 #ifdef ENABLE_FP8_E5M2
       key_cache[tgt_key_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_key);
       value_cache[tgt_value_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_value);
 #else
       assert(false);
 #endif
+    } else if constexpr (KV_CACHE_DTYPE == INT8) {
+      key_cache[tgt_key_idx] = int8::quant(tgt_key, k_scale, k_zp);
+      value_cache[tgt_value_idx] = int8::quant(tgt_value, v_scale, v_zp);
     } else {
       key_cache[tgt_key_idx] = tgt_key;
       value_cache[tgt_value_idx] = tgt_value;
     }
   }
 }
-
 } // namespace vllm
 
-#define CALL_RESHAPE_AND_CACHE(KV_T, CACHE_T, IS_FP8_E5M2_KV_CACHE)                                \
-  vllm::reshape_and_cache_kernel<KV_T, CACHE_T, IS_FP8_E5M2_KV_CACHE><<<grid, block, 0, stream>>>( \
+#define CALL_RESHAPE_AND_CACHE(KV_T, CACHE_T, KV_CACHE_DTYPE)                                      \
+  vllm::reshape_and_cache_kernel<KV_T, CACHE_T, KV_CACHE_DTYPE><<<grid, block, 0, stream>>>(       \
     reinterpret_cast<KV_T*>(key.data_ptr()),                                                       \
     reinterpret_cast<KV_T*>(value.data_ptr()),                                                     \
     reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),                                              \
@@ -216,7 +226,11 @@ __global__ void reshape_and_cache_kernel(
     num_heads,                                                                                     \
     head_size,                                                                                     \
     block_size,                                                                                    \
-    x);
+    x,                                                                                             \
+    k_scale,                                                                                       \
+    k_zp,                                                                                          \
+    v_scale,                                                                                       \
+    v_zp);
 
 void reshape_and_cache(
   torch::Tensor& key,           // [num_tokens, num_heads, head_size]
@@ -224,7 +238,11 @@ void reshape_and_cache(
   torch::Tensor& key_cache,     // [num_blocks, num_heads, head_size/x, block_size, x]
   torch::Tensor& value_cache,   // [num_blocks, num_heads, head_size, block_size]
   torch::Tensor& slot_mapping,  // [num_tokens]
-  const std::string& kv_cache_dtype)
+  const std::string& kv_cache_dtype,
+  const float k_scale = 1.0f,
+  const float k_zp = 0.0f,
+  const float v_scale = 1.0f,
+  const float v_zp = 0.0f)
 {
   int num_tokens = key.size(0);
   int num_heads = key.size(1);
@@ -241,19 +259,27 @@ void reshape_and_cache(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   if (kv_cache_dtype == "auto") {
     if (key.dtype() == at::ScalarType::Float) {
-      CALL_RESHAPE_AND_CACHE(float, float, false);
+      CALL_RESHAPE_AND_CACHE(float, float, AUTO);
     } else if (key.dtype() == at::ScalarType::Half) {
-      CALL_RESHAPE_AND_CACHE(uint16_t, uint16_t, false);
+      CALL_RESHAPE_AND_CACHE(uint16_t, uint16_t, AUTO);
     } else if (key.dtype() == at::ScalarType::BFloat16) {
-      CALL_RESHAPE_AND_CACHE(__nv_bfloat16, __nv_bfloat16, false);
+      CALL_RESHAPE_AND_CACHE(__nv_bfloat16, __nv_bfloat16, AUTO);
     }
   } else if (kv_cache_dtype == "fp8_e5m2") {
     if (key.dtype() == at::ScalarType::Float) {
-      CALL_RESHAPE_AND_CACHE(float, uint8_t, true);
+      CALL_RESHAPE_AND_CACHE(float, uint8_t, FP8_E5M2);
     } else if (key.dtype() == at::ScalarType::Half) {
-      CALL_RESHAPE_AND_CACHE(uint16_t, uint8_t, true);
+      CALL_RESHAPE_AND_CACHE(uint16_t, uint8_t, FP8_E5M2);
     } else if (key.dtype() == at::ScalarType::BFloat16) {
-      CALL_RESHAPE_AND_CACHE(__nv_bfloat16, uint8_t, true);
+      CALL_RESHAPE_AND_CACHE(__nv_bfloat16, uint8_t, FP8_E5M2);
+    }
+  } else if (kv_cache_dtype == "int8") {
+    if (key.dtype() == at::ScalarType::Float) {
+      CALL_RESHAPE_AND_CACHE(float, int8_t, INT8);
+    } else if (key.dtype() == at::ScalarType::Half) {
+      CALL_RESHAPE_AND_CACHE(uint16_t, int8_t, INT8);
+    } else if (key.dtype() == at::ScalarType::BFloat16) {
+      CALL_RESHAPE_AND_CACHE(__nv_bfloat16, int8_t, INT8);
     }
   } else {
     TORCH_CHECK(false, "Unsupported data type of kv cache: ", kv_cache_dtype);

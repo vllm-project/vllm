@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List
 
 import torch
 
@@ -13,6 +13,7 @@ class InputMetadata:
         context_lens: the length of attention context for each sequence.
         block_tables: The block tables. (Seq id -> list of physical block)
         kv_cache_dtype: Data type to store kv cache.
+        kv_quant_params: KV quant scales and zero points for kv_cache_dtype=int8.
     """
 
     def __init__(
@@ -27,6 +28,7 @@ class InputMetadata:
         block_tables: Optional[torch.Tensor],
         use_cuda_graph: bool,
         kv_cache_dtype: str,
+        kv_quant_params: List[List[float]],
     ) -> None:
         self.is_prompt = is_prompt
         self.prompt_lens = prompt_lens
@@ -38,6 +40,7 @@ class InputMetadata:
         self.block_tables = block_tables
         self.use_cuda_graph = use_cuda_graph
         self.kv_cache_dtype = kv_cache_dtype
+        self.kv_quant_params = kv_quant_params
 
         # Set during the execution of the first attention op.
         # FIXME(woosuk): This is a hack.
@@ -51,4 +54,5 @@ class InputMetadata:
                 f"context_lens={self.context_lens}, "
                 f"block_tables={self.block_tables}, "
                 f"use_cuda_graph={self.use_cuda_graph}, "
-                f"kv_cache_dtype={self.kv_cache_dtype})")
+                f"kv_cache_dtype={self.kv_cache_dtype}, "
+                f"kv_quant_params={self.kv_quant_params})")

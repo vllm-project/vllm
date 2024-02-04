@@ -67,7 +67,7 @@ class ModelConfig:
         trust_remote_code: bool,
         download_dir: Optional[str],
         load_format: str,
-        dtype: Union[str, torch.dtype],
+        dtype: str,
         seed: int,
         revision: Optional[str] = None,
         tokenizer_revision: Optional[str] = None,
@@ -277,6 +277,7 @@ class CacheConfig:
             vLLM execution.
         swap_space: Size of the CPU swap space per GPU (in GiB).
         cache_dtype: Data type for kv cache storage.
+        cache_quant_params_path: Path to scales and zero points of kv cache quantizaiton when cache_dtype is int8.
     """
 
     def __init__(
@@ -285,12 +286,14 @@ class CacheConfig:
         gpu_memory_utilization: float,
         swap_space: int,
         cache_dtype: str,
+        cache_quant_params_path: Optional[str] = None,
         sliding_window: Optional[int] = None,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
         self.swap_space_bytes = swap_space * _GB
         self.cache_dtype = cache_dtype
+        self.cache_quant_params_path = cache_quant_params_path
         self.sliding_window = sliding_window
         self._verify_args()
         self._verify_cache_dtype()
@@ -306,7 +309,7 @@ class CacheConfig:
                 f"{self.gpu_memory_utilization}.")
 
     def _verify_cache_dtype(self) -> None:
-        if self.cache_dtype == "auto":
+        if self.cache_dtype == "auto" or self.cache_dtype == "int8":
             pass
         elif self.cache_dtype == "fp8_e5m2":
             nvcc_cuda_version = get_nvcc_cuda_version()
