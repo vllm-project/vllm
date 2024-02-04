@@ -1,5 +1,5 @@
 import torch
-from vllm.model_executor.layers.parameters.sparsity import SparseParameter, SemiStructuredSparseParameter
+from vllm.model_executor.layers.parameters.sparsity import SparseParameter
 
 
 def get_param_data(param: torch.nn.Parameter) -> torch.Tensor:
