@@ -20,11 +20,16 @@
 #include <cublasLt.h>
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
+
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <vector>
+
+#include <cerrno>
+#include <cstdarg>
+#include <cstring>
 
 namespace tensorrt_llm::common
 {
@@ -62,13 +67,36 @@ static const char* _cudaGetErrorEnum(cublasStatus_t error)
     return "<unknown>";
 }
 
+static std::string vformat(char const* fmt, va_list args)
+{
+    va_list args0;
+    va_copy(args0, args);
+    auto const size = std::vsnprintf(nullptr, 0, fmt, args0);
+    if (size <= 0)
+        return "";
+
+    std::string stringBuf(size, char{});
+    auto const size2 = std::vsnprintf(&stringBuf[0], size + 1, fmt, args);
+    return stringBuf;
+}
+
+static std::string fmtstr(char const* format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    std::string result = vformat(format, args);
+    va_end(args);
+    return result;
+};
+
 // FIXME(woosuk)
 template <typename T>
 void check(T result, char const* const func, const char* const file, int const line)
 {
     if (result)
     {
-        throw std::runtime_error("ERROR!");
+        throw std::runtime_error(
+            fmtstr("[ERROR] CUDA runtime error in %s: %s %s:%d\n", func, _cudaGetErrorEnum(result), file, line));
     }
 }
 
