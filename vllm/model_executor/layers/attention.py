@@ -199,6 +199,8 @@ class PagedAttention(nn.Module):
                 # Set attention bias if not provided. This typically happens at
                 # the very attention layer of every iteration.
                 # FIXME(woosuk): This is a hack.
+
+                """
                 
                 if input_metadata.attn_bias is None:
                     if self.alibi_slopes is None:
@@ -212,6 +214,7 @@ class PagedAttention(nn.Module):
                         input_metadata.attn_bias = _make_alibi_bias(
                             self.alibi_slopes, self.num_kv_heads, batch_size,
                             seq_len, query.dtype)
+                """
 
                 # TODO(woosuk): Too many view operations. Let's try to reduce
                 # them in the future for code readability.
@@ -226,13 +229,18 @@ class PagedAttention(nn.Module):
 
                 #query = query.unflatten(0, (batch_size, seq_len))
 
-                query = query.view(-1, 32, 128).contiguous()
-                out = input_metadata.prefill_wrapper.forward(
-                    query.contiguous(),
+                query = query.view(-1, 32, 128)
+                output = input_metadata.prefill_wrapper.forward(
+                    query,
                     kv_cache,
-                    causal=True
+                    causal=True,
+                    allow_fp16_qk_reduction=True
                 )
-                output = out.view_as(query)
+
+                #print(query.shape)
+                #print(out.shape)
+                #exit(0)
+                #output = out.view_as(query)
 
             else:
                 # prefix-enabled attention
@@ -269,7 +277,7 @@ class PagedAttention(nn.Module):
             #print(key_cache.shape)
 
             output = input_metadata.decode_wrapper.forward(
-                query.contiguous(),
+                query,
                 kv_cache,
             )
 
