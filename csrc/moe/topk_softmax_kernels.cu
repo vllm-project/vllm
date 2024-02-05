@@ -30,10 +30,11 @@ static constexpr int WARP_SIZE = 32;
 
 /// Aligned array type
 template <
-  /// Number of elements in the array
-  int N,
-  /// Alignment requirement in bytes
-  int Alignment = 4 * N / 8
+    typename T,
+    /// Number of elements in the array
+    int N,
+    /// Alignment requirement in bytes
+    int Alignment = sizeof(T) * N
 >
 class alignas(Alignment) AlignedArray {
     float data[N];
@@ -66,7 +67,7 @@ __launch_bounds__(TPB) __global__
     for (int ii = threadIdx.x; ii < num_cols; ii += TPB)
     {
         const int idx = thread_row_offset + ii;
-        threadData = max(input[idx], threadData);
+        threadData = max(static_cast<float>(input[idx]), threadData);
     }
 
     const float maxElem = BlockReduce(tmpStorage).Reduce(threadData, cub::Max());
@@ -239,7 +240,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
     // this can support all powers of 2 up to 16.
     // NOTE(woosuk): The original implementation uses CUTLASS aligned array here.
     // We defined our own aligned array and use it here to avoid the dependency on CUTLASS.
-    using AccessType = AlignedArray<ELTS_PER_LDG>;
+    using AccessType = AlignedArray<float, ELTS_PER_LDG>;
 
     // Finally, we pull in the data from global mem
     float row_chunk[VPT];
