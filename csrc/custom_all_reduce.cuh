@@ -25,12 +25,10 @@ namespace vllm {
 
 struct Signal {
   alignas(64) union {
-    uint64_t flag;
-    unsigned char data[8];
+    unsigned int data[8];
   } start;
   alignas(64) union {
-    uint64_t flag;
-    unsigned char data[8];
+    unsigned int data[8];
   } end;
 };
 
@@ -135,27 +133,19 @@ DINLINE O downcast(array_t<float, O::size> val) {
   }
 }
 
-// compute flag at compile time
-__host__ __device__ constexpr uint64_t compute_flag(int ngpus) {
-  auto m = std::numeric_limits<uint64_t>::max();
-  return m >> ((8 - ngpus) * 8);
-}
-
 template <int ngpus>
 DINLINE void start_sync(const RankSignals &sg, volatile Metadata *meta,
                         int rank) {
-  constexpr auto FLAG = compute_flag(ngpus);
   if (blockIdx.x == 0) {
-    if (threadIdx.x < ngpus)
+    if (threadIdx.x < ngpus) {
       // simultaneously write to the corresponding byte to all other ranks.
       // Latency = 1 p2p write
+      sg.signals[rank]->end.data[threadIdx.x] = 0;
       sg.signals[threadIdx.x]->start.data[rank] = 255;
-    else if (threadIdx.x == 32)
-      // reset
-      meta->sg.end.flag = 0;
+    }
   }
-  if (threadIdx.x == 0) {
-    while (meta->sg.start.flag != FLAG)
+  if (threadIdx.x < ngpus) {
+    while (meta->sg.start.data[threadIdx.x] != 255)
       ;
   }
   __syncthreads();
@@ -164,7 +154,6 @@ DINLINE void start_sync(const RankSignals &sg, volatile Metadata *meta,
 template <int ngpus, bool final_sync = false>
 DINLINE void end_sync(const RankSignals &sg, volatile Metadata *meta,
                       int rank) {
-  constexpr auto FLAG = compute_flag(ngpus);
   __syncthreads();
   __shared__ int num;
   if (threadIdx.x == 0) num = atomicAdd((int *)&meta->counter, 1);
@@ -177,24 +166,24 @@ DINLINE void end_sync(const RankSignals &sg, volatile Metadata *meta,
     if (threadIdx.x == 32) {
       // reset in a different warp
       meta->counter = 0;
-      meta->sg.start.flag = 0;
     } else if (threadIdx.x < ngpus) {
       // simultaneously write to the corresponding byte to all other ranks.
       // Latency = 1 p2p write
+      sg.signals[rank]->start.data[threadIdx.x] = 0;
       sg.signals[threadIdx.x]->end.data[rank] = 255;
     }
     // if this is the final sync, only one block needs it
     // because kernel exit can serve as sync
     if constexpr (final_sync) {
-      if (threadIdx.x == 0) {
-        while (meta->sg.end.flag != FLAG)
+      if (threadIdx.x < ngpus) {
+        while (meta->sg.end.data[threadIdx.x] != 255)
           ;
       }
     }
   }
   if constexpr (!final_sync) {
-    if (threadIdx.x == 0) {
-      while (meta->sg.end.flag != FLAG)
+    if (threadIdx.x < ngpus) {
+      while (meta->sg.end.data[threadIdx.x] != 255)
         ;
     }
     __syncthreads();
