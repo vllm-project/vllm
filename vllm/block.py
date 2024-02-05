@@ -55,12 +55,15 @@ class PhysicalTokenBlock:
         device: Device,
         block_number: int,
         block_size: int,
+        block_hash: int,
     ) -> None:
         self.device = device
         self.block_number = block_number
         self.block_size = block_size
 
         self.ref_count = 0
+
+        self.block_hash = block_hash
 
     def __repr__(self) -> str:
         return (f'PhysicalTokenBlock(device={self.device}, '

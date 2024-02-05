@@ -23,21 +23,26 @@ class Evictor:
         # Initialize the free blocks.
         self.free_blocks: Deque[PhysicalTokenBlock] = deque()
 
-    def evict(self, table: Dict[int,
-                                PhysicalTokenBlock]) -> PhysicalTokenBlock:
-        if self.eviction_policy == EvictionPolicy.LRU:
-            assert (len(self.free_blocks))
-            # Find the block in the main hash table
-            block = self.free_blocks.pop()
-            key = list(table.keys())[list(table.values()).index()]
-            del table[key]
-            return block
-        else:
-            raise ValueError(
-                f"Unknown cache eviction policy: {self.eviction_policy}")
+    def evict(
+        self,
+        table: Dict[int, PhysicalTokenBlock]
+    ) -> PhysicalTokenBlock:
+            if self.eviction_policy == EvictionPolicy.LRU:
+                assert (len(self.free_blocks))
+                # Find the block in the main hash table
+                block = self.free_blocks.pop()
+
+                # Continue poping blocks until we find one with a ref_count of 0
+                while block.ref_count != 0:
+                    block = self.free_blocks.pop()
+                
+                del table[block.block_hash]
+                return block
+            else:
+                raise ValueError(f"Unknown cache eviction policy: {self.eviction_policy}")
 
     def return_block(self, block: PhysicalTokenBlock) -> None:
-        self.free_blocks.append(block)
+        self.free_blocks.appendleft(block)
 
 
 class BlockAllocator:
@@ -65,19 +70,22 @@ class BlockAllocator:
     def evict(self) -> PhysicalTokenBlock:
         return self.evictor.evict(self.table)
 
-    def allocate_block(self) -> PhysicalTokenBlock:
+    def allocate_block(self, block_hash: int) -> PhysicalTokenBlock:
         if self.current_num_blocks == self.num_blocks:
-            return self.evict()
+            block = self.evict()
+            block.block_hash = block_hash
+            return block
         block = PhysicalTokenBlock(device=self.device,
                                    block_number=self.current_num_blocks,
-                                   block_size=self.block_size)
+                                   block_size=self.block_size, 
+                                   block_hash = block_hash)
         self.current_num_blocks += 1
         return block
 
-    def allocate(self, i: int) -> PhysicalTokenBlock:
-        if i not in self.table:
-            self.table[i] = self.allocate_block()
-        block = self.table[i]
+    def allocate(self, block_hash: int) -> PhysicalTokenBlock:
+        if block_hash not in self.table:
+            self.table[block_hash] = self.allocate_block(block_hash)
+        block = self.table[block_hash]
         block.ref_count += 1
         # print(f"REFCOUNT ON ALLOCTION: {block}")
         return block
