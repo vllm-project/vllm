@@ -226,8 +226,9 @@ def fused_moe(
     - hidden_states (torch.Tensor): The input tensor to the MoE layer.
     - w1 (torch.Tensor): The first set of expert weights.
     - w2 (torch.Tensor): The second set of expert weights.
-    - topk_weights (torch.Tensor): The weights for the top-k selected experts.
-    - topk_ids (torch.Tensor): The indices of the top-k selected experts.
+    - gating_output (torch.Tensor): The output of the gating operation (before softmax).
+    - topk (int): The number of top-k experts to select.
+    - renormalize (bool): If True, renormalize the top-k weights to sum to 1.
     - inplace (bool): If True, perform the operation in-place. Defaults to False.
     
     Returns:
