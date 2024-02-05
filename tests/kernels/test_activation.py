@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.activation import FastGELU, NewGELU, SiluAndMul
+from allclose_default import get_default_atol, get_default_rtol
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 2048]  # Arbitrary values for testing
@@ -33,7 +34,10 @@ def test_silu_and_mul(
     layer = SiluAndMul()
     out = layer(x)
     ref_out = layer._forward(x)
-    assert torch.allclose(out, ref_out, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(out,
+                          ref_out,
+                          atol=get_default_atol(out),
+                          rtol=get_default_rtol(out))
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -57,7 +61,10 @@ def test_gelu_new(
     layer = NewGELU()
     out = layer(x)
     ref_out = layer._forward(x)
-    assert torch.allclose(out, ref_out, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(out,
+                          ref_out,
+                          atol=get_default_atol(out),
+                          rtol=get_default_rtol(out))
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -80,4 +87,7 @@ def test_gelu_fast(
     layer = FastGELU()
     out = layer(x)
     ref_out = layer._forward(x)
-    assert torch.allclose(out, ref_out, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(out,
+                          ref_out,
+                          atol=get_default_atol(out),
+                          rtol=get_default_rtol(out))
