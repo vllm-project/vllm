@@ -8,7 +8,7 @@ from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config
-from vllm.utils import get_cpu_memory, is_hip, get_nvcc_cuda_version
+from vllm.utils import get_cpu_memory, is_hip, is_neuron, get_nvcc_cuda_version
 
 logger = init_logger(__name__)
 
@@ -380,13 +380,17 @@ class ParallelConfig:
         disable_custom_all_reduce: bool = False,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
-        self.tensor_parallel_size = tensor_parallel_size
+        if is_neuron():
+            self.tensor_parallel_size = 1
+            self.neuron_tp_degree = tensor_parallel_size
+        else:
+            self.tensor_parallel_size = tensor_parallel_size
         self.worker_use_ray = worker_use_ray
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
 
-        self.world_size = pipeline_parallel_size * tensor_parallel_size
-        if self.world_size > 1:
+        self.world_size = pipeline_parallel_size * self.tensor_parallel_size
+        if self.world_size > 1 and not is_neuron():
             self.worker_use_ray = True
         self._verify_args()
 

@@ -10,6 +10,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata, SamplingTens
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (PromptLogprobs, SampleLogprobs, SamplerOutput,
                            SequenceData, SequenceGroupOutput, SequenceOutput)
+from vllm.utils import is_neuron
 
 
 class Sampler(nn.Module):
@@ -32,6 +33,7 @@ class Sampler(nn.Module):
                  org_vocab_size: Optional[int] = None) -> None:
         super().__init__()
         self.vocab_size = vocab_size
+        self.is_neuron = is_neuron()
         # original vocabulary size (without LoRA).
         self.org_vocab_size = org_vocab_size or vocab_size
 
@@ -55,10 +57,14 @@ class Sampler(nn.Module):
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[SamplerOutput]:
         # Get the hidden states that we use for sampling.
-        hidden_states = _prune_hidden_states(hidden_states, sampling_metadata)
+        if self.is_neuron:
+            logits = hidden_states
+        else:
+            hidden_states = _prune_hidden_states(hidden_states,
+                                                 sampling_metadata)
 
-        # Get the logits for the next tokens.
-        logits = self._get_logits(hidden_states, embedding, embedding_bias)
+            # Get the logits for the next tokens.
+            logits = self._get_logits(hidden_states, embedding, embedding_bias)
 
         # Only perform sampling in the driver worker.
         # Note: `_get_logits` is still distributed across TP workers because

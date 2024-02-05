@@ -20,7 +20,7 @@ from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
                            SequenceGroupOutput, SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                TokenizerGroup)
-from vllm.utils import Counter, set_cuda_visible_devices, get_ip, get_open_port, get_distributed_init_method
+from vllm.utils import Counter, set_cuda_visible_devices, get_ip, get_open_port, get_distributed_init_method, is_neuron
 
 if ray:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -140,7 +140,10 @@ class LLMEngine:
     def _init_workers(self):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
-        from vllm.worker.worker import Worker
+        if is_neuron():
+            from vllm.worker.neuron_worker import Worker
+        else:
+            from vllm.worker.worker import Worker
 
         assert self.parallel_config.world_size == 1, (
             "Ray is required if parallel_config.world_size > 1.")
@@ -242,7 +245,10 @@ class LLMEngine:
 
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
-        from vllm.worker.worker import Worker
+        if is_neuron():
+            from vllm.worker.neuron_worker import Worker
+        else:
+            from vllm.worker.worker import Worker
 
         # Initialize torch distributed process group for the workers.
         model_config = copy.deepcopy(self.model_config)
@@ -357,7 +363,8 @@ class LLMEngine:
         self._run_workers("init_cache_engine", cache_config=self.cache_config)
         # Warm up the model. This includes capturing the model into CUDA graph
         # if enforce_eager is False.
-        self._run_workers("warm_up_model")
+        if not is_neuron():
+            self._run_workers("warm_up_model")
 
     @classmethod
     def from_engine_args(cls, engine_args: EngineArgs) -> "LLMEngine":
