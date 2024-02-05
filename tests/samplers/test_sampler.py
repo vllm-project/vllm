@@ -19,10 +19,11 @@ class MockLogitsSampler(Sampler):
         self.fake_logits = fake_logits
 
     def forward(self, *args, **kwargs):
-        with patch("vllm.model_executor.layers.sampler._prune_hidden_states",
-                   lambda x, y: x), patch(
-                       "vllm.model_executor.layers.sampler._get_logits",
-                       lambda *args, **kwargs: self.fake_logits):
+        with patch(
+                "vllm.model_executor.layers.sampler._prune_hidden_states",
+                lambda x, y: x), patch(
+                    "vllm.model_executor.layers.sampler.Sampler._get_logits",
+                    lambda *args, **kwargs: self.fake_logits):
             return super().forward(*args, **kwargs)
 
 
@@ -30,24 +31,26 @@ def _prepare_test(
     batch_size: int
 ) -> Tuple[torch.Tensor, torch.Tensor, MockLogitsSampler, ModelRunner]:
     vocab_size = 32000
-    input_tensor = torch.rand((batch_size, 1024),
-                              device="cuda",
-                              dtype=torch.float16)
+    input_tensor = torch.rand((batch_size, 1024), dtype=torch.float16)
     fake_logits = torch.full((batch_size, vocab_size),
                              1e-2,
-                             device=input_tensor.device,
                              dtype=input_tensor.dtype)
     sampler = MockLogitsSampler(32000, fake_logits)
-    model_runner = ModelRunner(None, None, None)
+    model_runner = ModelRunner(None, None, None, None, None)
     return input_tensor, fake_logits, sampler, model_runner
 
 
 RANDOM_SEEDS = list(range(128))
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
+]
 
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
-def test_sampler_all_greedy(seed: int):
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_sampler_all_greedy(seed: int, device: str):
     set_random_seed(seed)
+    torch.set_default_device(device)
     batch_size = random.randint(1, 256)
     input_tensor, fake_logits, sampler, model_runner = _prepare_test(
         batch_size)
@@ -80,8 +83,10 @@ def test_sampler_all_greedy(seed: int):
 
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
-def test_sampler_all_random(seed: int):
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_sampler_all_random(seed: int, device: str):
     set_random_seed(seed)
+    torch.set_default_device(device)
     batch_size = random.randint(1, 256)
     input_tensor, fake_logits, sampler, model_runner = _prepare_test(
         batch_size)
@@ -119,8 +124,10 @@ def test_sampler_all_random(seed: int):
 
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
-def test_sampler_all_beam(seed: int):
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_sampler_all_beam(seed: int, device: str):
     set_random_seed(seed)
+    torch.set_default_device(device)
     batch_size = random.randint(1, 256)
     input_tensor, _, sampler, model_runner = _prepare_test(batch_size)
 
@@ -155,8 +162,10 @@ def test_sampler_all_beam(seed: int):
 
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
-def test_sampler_mixed(seed: int):
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_sampler_mixed(seed: int, device: str):
     set_random_seed(seed)
+    torch.set_default_device(device)
     batch_size = random.randint(1, 256)
     input_tensor, fake_logits, sampler, model_runner = _prepare_test(
         batch_size)
@@ -211,8 +220,10 @@ def test_sampler_mixed(seed: int):
 
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
-def test_sampler_logits_processors(seed: int):
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_sampler_logits_processors(seed: int, device: str):
     set_random_seed(seed)
+    torch.set_default_device(device)
     batch_size = random.randint(1, 256)
     input_tensor, _, sampler, model_runner = _prepare_test(batch_size)
 
@@ -251,14 +262,15 @@ def test_sampler_logits_processors(seed: int):
 
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
-def test_sampler_top_k_top_p(seed: int):
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_sampler_top_k_top_p(seed: int, device: str):
     set_random_seed(seed)
     batch_size = random.randint(1, 256)
     top_k = random.randint(100, 500)
     top_p = random.random() * 0.1
     vocab_size = 32000
     input_tensor = torch.rand((batch_size, 1024),
-                              device="cuda",
+                              device=device,
                               dtype=torch.float16)
     fake_logits = torch.normal(0,
                                5,
@@ -266,7 +278,7 @@ def test_sampler_top_k_top_p(seed: int):
                                device=input_tensor.device,
                                dtype=input_tensor.dtype)
     sampler = MockLogitsSampler(32000, fake_logits)
-    model_runner = ModelRunner(None, None, None)
+    model_runner = ModelRunner(None, None, None, None, None)
 
     generation_model = GenerationMixin()
     generation_config = GenerationConfig(top_k=top_k,

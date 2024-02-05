@@ -43,7 +43,7 @@ try:
 except ImportError as e:
     logger.warning(f"Failed to import Ray with {e!r}. "
                    "For distributed inference, please install Ray with "
-                   "`pip install ray pandas pyarrow`.")
+                   "`pip install ray`.")
     ray = None
     RayWorkerVllm = None
 
@@ -65,10 +65,9 @@ def initialize_cluster(
             the default Ray cluster address.
 
     Returns:
-        A tuple of (`distributed_init_method`, `placement_group`). The
-        `distributed_init_method` is the address for initializing the
-        distributed backend. `placement_group` includes the specification
-        of the resources for each distributed worker.
+        An optional `PlacementGroup`. It includes the specification
+        of the resources for each distributed worker. None if Ray is
+        not used.
     """
     if parallel_config.worker_use_ray or engine_use_ray:
         if ray is None:
