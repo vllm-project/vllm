@@ -846,6 +846,7 @@ class LLMEngine:
         num_prompt_tokens = 0
         num_generation_tokens = 0
         num_prompt_tokens_lst = []
+        num_generation_tokens_lst = []
         max_tokens = []
         request_n = []
         time_to_first_tokens = []
@@ -858,8 +859,17 @@ class LLMEngine:
             # Number of Tokens
             if prompt_run:
                 num_prompt_tokens = scheduler_outputs.num_batched_tokens
+                num_prompt_tokens_lst = [
+                    len(seq_group.prompt_token_ids)
+                    for seq_group in scheduler_outputs.scheduled_seq_groups
+                ]
             else:
                 num_generation_tokens = scheduler_outputs.num_batched_tokens
+                num_generation_tokens_lst = [
+                    seq.get_output_len()
+                    for seq_group in scheduler_outputs.scheduled_seq_groups
+                    for seq in seq_group.get_finished_seqs()
+                ]
 
             # Sampling Params
             if prompt_run:
@@ -869,10 +879,6 @@ class LLMEngine:
                 ]
                 request_n = [
                     seq_group.sampling_params.n
-                    for seq_group in scheduler_outputs.scheduled_seq_groups
-                ]
-                num_prompt_tokens_lst = [
-                    len(seq_group.prompt_token_ids)
                     for seq_group in scheduler_outputs.scheduled_seq_groups
                 ]
 
@@ -908,6 +914,7 @@ class LLMEngine:
             num_prompt_tokens=num_prompt_tokens,
             num_generation_tokens=num_generation_tokens,
             num_prompt_tokens_lst=num_prompt_tokens_lst,
+            num_generation_tokens_lst=num_generation_tokens_lst,
             max_tokens=max_tokens,
             request_n=request_n,
             time_to_first_tokens=time_to_first_tokens,

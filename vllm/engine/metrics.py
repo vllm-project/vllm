@@ -55,6 +55,14 @@ histogram_prompt_tokens = Histogram(
         20_000, 50_000, 100_000
     ],
 )
+histogram_generation_tokens = Histogram(
+    "vllm:generation_tokens",
+    "Number of generation tokens processed.",
+    buckets=[
+        1, 2, 5, 10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000,
+        20_000, 50_000, 100_000
+    ],
+)
 histogram_time_to_first_token = Histogram(
     "vllm:time_to_first_token_seconds",
     "Histogram of time to first token in seconds.",
@@ -106,6 +114,7 @@ class Stats:
     num_prompt_tokens: int
     num_generation_tokens: int
     num_prompt_tokens_lst: List[int]
+    num_generation_tokens_lst: List[int]
     max_tokens: List[int]
     request_n: List[int]
     time_to_first_tokens: List[float]
@@ -145,7 +154,8 @@ class StatLogger:
         counter_generation_tokens.add(labels, stats.num_generation_tokens)
         for val in stats.num_prompt_tokens_lst:
             histogram_prompt_tokens.observe(labels, val)
-
+        for val in stats.num_generation_tokens_lst:
+            histogram_generation_tokens.observe(labels, val)
         for finished_reason, count in stats.finished_reason_counter.items():
             counter_request_success.add(
                 {
