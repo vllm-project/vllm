@@ -317,18 +317,14 @@ if _is_cuda():
     vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
     vllm_extension_sources.append("csrc/custom_all_reduce.cu")
 
-    abs_root_dir = os.path.abspath(ROOT_DIR)
+    # Add MoE kernels.
     ext_modules.append(
         CUDAExtension(
             name="vllm._moe_C",
-            sources=["csrc/cutlass_utils/cutlass_heuristic.cpp"] + glob("csrc/moe/*.cu") + glob("csrc/moe/*.cc"),
-            include_dirs=[
-                os.path.join(abs_root_dir, "third_party/cutlass/include/"),
-                os.path.join(abs_root_dir, "csrc/"),
-            ],
+            sources=glob("csrc/moe/*.cu") + glob("csrc/moe/*.cpp"),
             extra_compile_args={
                 "cxx": CXX_FLAGS,
-                "nvcc": NVCC_FLAGS_PUNICA + ["-DENABLE_BF16"], # FIXME
+                "nvcc": NVCC_FLAGS,
             },
         ))
 
