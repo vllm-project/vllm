@@ -23,23 +23,22 @@ class Evictor:
         # Initialize the free blocks.
         self.free_blocks: Deque[PhysicalTokenBlock] = deque()
 
-    def evict(
-        self,
-        table: Dict[int, PhysicalTokenBlock]
-    ) -> PhysicalTokenBlock:
-            if self.eviction_policy == EvictionPolicy.LRU:
-                assert (len(self.free_blocks))
-                # Find the block in the main hash table
+    def evict(self, table: Dict[int,
+                                PhysicalTokenBlock]) -> PhysicalTokenBlock:
+        if self.eviction_policy == EvictionPolicy.LRU:
+            assert (len(self.free_blocks))
+            # Find the block in the main hash table
+            block = self.free_blocks.pop()
+
+            # Continue poping blocks until we find one with a ref_count of 0
+            while block.ref_count != 0:
                 block = self.free_blocks.pop()
 
-                # Continue poping blocks until we find one with a ref_count of 0
-                while block.ref_count != 0:
-                    block = self.free_blocks.pop()
-                
-                del table[block.block_hash]
-                return block
-            else:
-                raise ValueError(f"Unknown cache eviction policy: {self.eviction_policy}")
+            del table[block.block_hash]
+            return block
+        else:
+            raise ValueError(
+                f"Unknown cache eviction policy: {self.eviction_policy}")
 
     def return_block(self, block: PhysicalTokenBlock) -> None:
         self.free_blocks.appendleft(block)
@@ -77,8 +76,8 @@ class BlockAllocator:
             return block
         block = PhysicalTokenBlock(device=self.device,
                                    block_number=self.current_num_blocks,
-                                   block_size=self.block_size, 
-                                   block_hash = block_hash)
+                                   block_size=self.block_size,
+                                   block_hash=block_hash)
         self.current_num_blocks += 1
         return block
 
