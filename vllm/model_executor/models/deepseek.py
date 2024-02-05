@@ -25,7 +25,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
-import torch.nn.functional as F
 from transformers import PretrainedConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
