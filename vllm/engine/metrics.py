@@ -47,16 +47,16 @@ gauge_cpu_cache_usage = Gauge(
     "vllm:cpu_cache_usage_perc",
     "CPU KV-cache usage. 1 means 100 percent usage.")
 
-histogram_prompt_tokens = Histogram(
-    "vllm:prompt_tokens",
+histogram_request_prompt_tokens = Histogram(
+    "vllm:request_prompt_tokens",
     "Number of prefill tokens processed.",
     buckets=[
         1, 2, 5, 10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000,
         20_000, 50_000, 100_000
     ],
 )
-histogram_generation_tokens = Histogram(
-    "vllm:generation_tokens",
+histogram_request_generation_tokens = Histogram(
+    "vllm:request_generation_tokens",
     "Number of generation tokens processed.",
     buckets=[
         1, 2, 5, 10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000,
@@ -163,9 +163,9 @@ class StatLogger:
 
         # Observe number of tokens in histograms.
         for val in stats.num_prompt_tokens_lst:
-            histogram_prompt_tokens.observe(labels, val)
+            histogram_request_prompt_tokens.observe(labels, val)
         for val in stats.num_generation_tokens_lst:
-            histogram_generation_tokens.observe(labels, val)
+            histogram_request_generation_tokens.observe(labels, val)
 
         # Observe sampling params in histograms.
         for val in stats.max_tokens:
