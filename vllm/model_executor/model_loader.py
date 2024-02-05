@@ -1,13 +1,11 @@
 """Utilities for selecting and loading models."""
 import contextlib
-from typing import Type
+from typing import Optional, Type
 
-import numpy as np
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
 
-from vllm.config import ModelConfig, ParallelConfig
+from vllm.config import ModelConfig, LoRAConfig
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.weight_utils import (get_quant_config,
                                               initialize_dummy_weights)
@@ -22,8 +20,14 @@ def _set_default_torch_dtype(dtype: torch.dtype):
     torch.set_default_dtype(old_dtype)
 
 
-def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
-    architectures = getattr(config, "architectures", [])
+def _get_model_architecture(model_config: ModelConfig) -> Type[nn.Module]:
+    architectures = getattr(model_config.hf_config, "architectures", [])
+    # Special handling for quantized Mixtral.
+    # FIXME(woosuk): This is a temporary hack.
+    if (model_config.quantization is not None
+            and "MixtralForCausalLM" in architectures):
+        architectures = ["QuantMixtralForCausalLM"]
+
     for arch in architectures:
         model_cls = ModelRegistry.load_model_cls(arch)
         if model_cls is not None:
@@ -33,15 +37,9 @@ def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
         f"Supported architectures: {ModelRegistry.get_supported_archs()}")
 
 
-def _is_support_kv_quant(config: PretrainedConfig) -> bool:
-    architectures = getattr(config, "architectures", [])
-    supported_archs = ModelRegistry.get_supported_kv_quant_archs()
-    return any(arch in supported_archs for arch in architectures)
-
-
 def get_model(model_config: ModelConfig,
-              parallel_config: ParallelConfig) -> nn.Module:
-    model_class = _get_model_architecture(model_config.hf_config)
+              lora_config: Optional[LoRAConfig] = None) -> nn.Module:
+    model_class = _get_model_architecture(model_config)
 
     # Get the (maybe quantized) linear method.
     linear_method = None
@@ -69,21 +67,16 @@ def get_model(model_config: ModelConfig,
     with _set_default_torch_dtype(model_config.dtype):
         # Create a model instance.
         # The weights will be initialized as empty tensors.
-        num_layers = model_config.get_num_layers(parallel_config)
-        kv_quant_params_list = []
-        if model_config.quant_kv_cache:
-            for i in range(num_layers):
-                # FIXME(Zhang Ying): all ranks share the same kv-quant params now, so set rank = 0
-                rank = 0
-                path = model_config.kv_quant_params_path + \
-                       f"/layers.{i}.past_kv_scale.{rank}.weight"
-                kv_quant_params = list(np.fromfile(path, dtype=np.float32))
-                kv_quant_params_list.append(kv_quant_params)
         with torch.device("cuda"):
-            if _is_support_kv_quant(model_config.hf_config):
+            if getattr(model_class, "supports_lora", False):
                 model = model_class(model_config.hf_config, linear_method,
-                                    model_config.quant_kv_cache,
-                                    kv_quant_params_list)
+                                    lora_config)
+            elif lora_config:
+                raise ValueError(
+                    f"Model {model_class.__name__} does not support LoRA, "
+                    "but LoRA is enabled. Support for this model may "
+                    "be added in the future. If this is important to you, "
+                    "please open an issue on github.")
             else:
                 model = model_class(model_config.hf_config, linear_method)
         if model_config.load_format == "dummy":

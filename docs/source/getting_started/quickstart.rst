@@ -11,6 +11,14 @@ This guide shows how to use vLLM to:
 
 Be sure to complete the :ref:`installation instructions <installation>` before continuing with this guide.
 
+.. note::
+
+    By default, vLLM downloads model from `HuggingFace <https://huggingface.co/>`_. If you would like to use models from `ModelScope <https://www.modelscope.cn>`_ in the following examples, please set the environment variable:
+
+    .. code-block:: shell
+
+        export VLLM_USE_MODELSCOPE=True
+
 Offline Batched Inference
 -------------------------
 
@@ -40,16 +48,6 @@ Initialize vLLM's engine for offline inference with the ``LLM`` class and the `O
 
     llm = LLM(model="facebook/opt-125m")
 
-Use model from www.modelscope.cn
-
-.. code-block:: shell
-
-    export VLLM_USE_MODELSCOPE=True
-
-.. code-block:: python
-
-    llm = LLM(model="qwen/Qwen-7B-Chat", revision="v1.1.8", trust_remote_code=True)
-
 Call ``llm.generate`` to generate the outputs. It adds the input prompts to vLLM engine's waiting queue and executes the vLLM engine to generate the outputs with high throughput. The outputs are returned as a list of ``RequestOutput`` objects, which include all the output tokens.
 
 .. code-block:: python
@@ -65,49 +63,11 @@ Call ``llm.generate`` to generate the outputs. It adds the input prompts to vLLM
 
 The code example can also be found in `examples/offline_inference.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference.py>`_.
 
-
-API Server
-----------
-
-vLLM can be deployed as an LLM service. We provide an example `FastAPI <https://fastapi.tiangolo.com/>`_ server. Check `vllm/entrypoints/api_server.py <https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/api_server.py>`_ for the server implementation. The server uses ``AsyncLLMEngine`` class to support asynchronous processing of incoming requests.
-
-Start the server:
-
-.. code-block:: console
-
-    $ python -m vllm.entrypoints.api_server
-
-Use model from www.modelscope.cn
-
-.. code-block:: console
-
-    $ VLLM_USE_MODELSCOPE=True python -m vllm.entrypoints.api_server \
-    $    --model="qwen/Qwen-7B-Chat" \
-    $    --revision="v1.1.8" \
-    $    --trust-remote-code
-
-
-By default, this command starts the server at ``http://localhost:8000`` with the OPT-125M model.
-
-Query the model in shell:
-
-.. code-block:: console
-
-    $ curl http://localhost:8000/generate \
-    $     -d '{
-    $         "prompt": "San Francisco is a",
-    $         "use_beam_search": true,
-    $         "n": 4,
-    $         "temperature": 0
-    $     }'
-
-See `examples/api_client.py <https://github.com/vllm-project/vllm/blob/main/examples/api_client.py>`_ for a more detailed client example.
-
 OpenAI-Compatible Server
 ------------------------
 
-vLLM can be deployed as a server that mimics the OpenAI API protocol. This allows vLLM to be used as a drop-in replacement for applications using OpenAI API.
-By default, it starts the server at ``http://localhost:8000``. You can specify the address with ``--host`` and ``--port`` arguments. The server currently hosts one model at a time (OPT-125M in the above command) and implements `list models <https://platform.openai.com/docs/api-reference/models/list>`_, `create chat completion <https://platform.openai.com/docs/api-reference/chat/completions/create>`_, and `create completion <https://platform.openai.com/docs/api-reference/completions/create>`_ endpoints. We are actively adding support for more endpoints.
+vLLM can be deployed as a server that implements the OpenAI API protocol. This allows vLLM to be used as a drop-in replacement for applications using OpenAI API.
+By default, it starts the server at ``http://localhost:8000``. You can specify the address with ``--host`` and ``--port`` arguments. The server currently hosts one model at a time (OPT-125M in the command below) and implements `list models <https://platform.openai.com/docs/api-reference/models/list>`_, `create chat completion <https://platform.openai.com/docs/api-reference/chat/completions/create>`_, and `create completion <https://platform.openai.com/docs/api-reference/completions/create>`_ endpoints. We are actively adding support for more endpoints.
 
 Start the server:
 
@@ -115,13 +75,6 @@ Start the server:
 
     $ python -m vllm.entrypoints.openai.api_server \
     $     --model facebook/opt-125m
-
-Use model from www.modelscope.cn
-
-.. code-block:: console
-
-    $ VLLM_USE_MODELSCOPE=True python -m vllm.entrypoints.openai.api_server \
-    $     --model="qwen/Qwen-7B-Chat" --revision="v1.1.8" --trust-remote-code
 
 By default, the server uses a predefined chat template stored in the tokenizer. You can override this template by using the ``--chat-template`` argument:
 
@@ -136,6 +89,8 @@ This server can be queried in the same format as OpenAI API. For example, list t
 .. code-block:: console
 
     $ curl http://localhost:8000/v1/models
+
+You can pass in the argument ``--api-key`` or environment variable ``VLLM_API_KEY`` to enable the server to check for API key in the header.
 
 Using OpenAI Completions API with vLLM
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

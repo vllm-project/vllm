@@ -3,18 +3,22 @@ import random
 import pytest
 import torch
 
+from typing import Tuple
+
 from vllm._C import cache_ops
 
+COPYING_DIRECTION = [('cuda', 'cpu'), ('cuda', 'cuda'), ('cpu', 'cuda')]
 DTYPES = [torch.half, torch.bfloat16, torch.float]
-NUM_TOKENS = [83]  # Arbitrary values for testing
+NUM_TOKENS = [42]  # Arbitrary values for testing
 NUM_LAYERS = [1]  # Arbitrary values for testing
 NUM_HEADS = [8]  # Arbitrary values for testing
 HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 BLOCK_SIZES = [8, 16, 32]
-NUM_BLOCKS = [1024, 36000]  # Arbitrary values for testing
+NUM_BLOCKS = [1024, 3600]  # Arbitrary values for testing
 NUM_MAPPINGS = [256]  # Arbitrary values for testing
 SEEDS = [0]
 DEVICES = [i for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+KV_CACHE_DTYPE = ["auto", "fp8_e5m2", "int8"]
 
 
 @pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
@@ -26,6 +30,7 @@ DEVICES = [i for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
 @torch.inference_mode()
 def test_copy_blocks(
     kv_cache_factory,
@@ -38,6 +43,7 @@ def test_copy_blocks(
     dtype: torch.dtype,
     seed: int,
     device: int,
+    kv_cache_dtype: str,
 ) -> None:
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -59,7 +65,8 @@ def test_copy_blocks(
     # Create the KV caches.
     key_caches, value_caches = kv_cache_factory(num_blocks, block_size,
                                                 num_layers, num_heads,
-                                                head_size, dtype, seed, gpu_id)
+                                                head_size, kv_cache_dtype,
+                                                dtype, seed, gpu_id)
 
     # Clone the KV caches.
     cloned_key_caches = [key_cache.clone() for key_cache in key_caches]
@@ -124,7 +131,7 @@ def test_reshape_and_cache(
     # Create the KV caches.
     key_caches, value_caches = kv_cache_factory(num_blocks, block_size, 1,
                                                 num_heads, head_size, dtype,
-                                                seed, gpu_id)
+                                                None, seed, gpu_id)
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Clone the KV caches.
@@ -133,7 +140,7 @@ def test_reshape_and_cache(
 
     # Call the reshape_and_cache kernel.
     cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
-                                slot_mapping)
+                                slot_mapping, "auto")
 
     # Run the reference implementation.
     reshaped_key = key.reshape(num_tokens, *key_cache[0, :, :, 0, :].shape)
@@ -151,89 +158,66 @@ def test_reshape_and_cache(
     assert torch.allclose(value_cache, cloned_value_cache)
 
 
-@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("direction", COPYING_DIRECTION)
+@pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("dtype", DTYPES)
-# @pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
-def test_reshape_and_cache_quantized(
-    num_tokens: int,
+def test_swap_blocks(
+    kv_cache_factory,
+    direction: Tuple[str, str],
+    num_mappings: int,
     num_heads: int,
     head_size: int,
     block_size: int,
     num_blocks: int,
     dtype: torch.dtype,
-    k_scale: float = 3.0,
-    k_zp: float = 0.0,
-    v_scale: float = 3.0,
-    v_zp: float = 0.0,
+    seed: int,
+    device: int,
 ) -> None:
-    num_slots = block_size * num_blocks
-    slot_mapping = random.sample(range(num_slots), num_tokens)
-    slot_mapping = torch.tensor(slot_mapping, dtype=torch.int, device="cuda")
+    random.seed(seed)
+    torch.random.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    src_device = f"{direction[0]}:{device}" if direction[
+        0] == "cuda" else direction[0]
+    dst_device = f"{direction[1]}:{device}" if direction[
+        1] == "cuda" else direction[1]
 
-    qkv = torch.randn(num_tokens,
-                      3,
-                      num_heads,
-                      head_size,
-                      dtype=dtype,
-                      device="cuda")
-    _, key, value = qkv.unbind(dim=1)
+    src_blocks = random.sample(range(num_blocks), num_mappings)
+    # For the same device, mapping must not overlap
+    if src_device == dst_device:
+        remaining_blocks = list(set(range(num_blocks)) - set(src_blocks))
+        dst_blocks = random.sample(remaining_blocks, num_mappings)
+    else:
+        dst_blocks = random.sample(range(num_blocks), num_mappings)
 
-    x = 16 // torch.tensor([], dtype=torch.int8).element_size()
-    key_cache_shape = (num_blocks, num_heads, head_size // x, block_size, x)
-    key_cache = torch.randint(-10,
-                              10,
-                              size=key_cache_shape,
-                              dtype=torch.int8,
-                              device="cuda")  ## change to int8
-    cloned_key_cache = key_cache.clone()
+    block_mapping = dict(zip(src_blocks, dst_blocks))
 
-    value_cache_shape = (num_blocks, num_heads, head_size, block_size)
-    value_cache = torch.randint(
-        -10,
-        10,
-        size=value_cache_shape,
-        dtype=torch.int8,  ## change to int8
-        device="cuda")
-    cloned_value_cache = value_cache.clone()
+    # Create the KV caches on the first device.
+    src_key_caches, src_value_caches = kv_cache_factory(
+        num_blocks, block_size, 1, num_heads, head_size, dtype, None, seed,
+        src_device)
 
-    cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
-                                slot_mapping, True, k_scale, k_zp, v_scale,
-                                v_zp)
-    lower_bound, upper_bound = torch.tensor([-128.0],
-                                            dtype=dtype,
-                                            device="cuda"), torch.tensor(
-                                                [127.0],
-                                                dtype=dtype,
-                                                device="cuda")
-    ## quantize and store here
-    ## quantize and store here
-    quantized_key = key.reshape(num_tokens, num_heads, head_size // x, x)
-    quantized_key = quantized_key.to(torch.float32)
-    quantized_key = torch.maximum(
-        lower_bound,
-        torch.minimum(upper_bound, (quantized_key - k_zp) / k_scale))
-    quantized_key = torch.round(quantized_key)
-    quantized_key = quantized_key.to(torch.int8)  ## change to int8
+    # Create the KV caches on the second device.
+    dist_key_caches, dist_value_caches = kv_cache_factory(
+        num_blocks, block_size, 1, num_heads, head_size, dtype, None, seed,
+        dst_device)
 
-    quantized_value = value.to(torch.float32)
-    quantized_value = torch.maximum(
-        lower_bound,
-        torch.minimum(upper_bound, (quantized_value - v_zp) / v_scale))
-    quantized_value = torch.round(quantized_value)
-    quantized_value = quantized_value.to(torch.int8)
+    src_key_caches_clone = src_key_caches[0].clone()
+    src_value_caches_clone = src_value_caches[0].clone()
 
-    for i in range(num_tokens):
-        block_idx = torch.div(slot_mapping[i],
-                              block_size,
-                              rounding_mode="floor")
-        block_offset = slot_mapping[i] % block_size
-        cloned_key_cache[block_idx, :, :, block_offset, :] = quantized_key[i]
-        cloned_value_cache[block_idx, :, :, block_offset] = quantized_value[i]
+    # Call the swap_blocks kernel.
+    cache_ops.swap_blocks(src_key_caches[0], dist_key_caches[0], block_mapping)
+    cache_ops.swap_blocks(src_value_caches[0], dist_value_caches[0],
+                          block_mapping)
 
-    assert torch.allclose(key_cache, cloned_key_cache)
-    assert torch.allclose(value_cache, cloned_value_cache)
+    for src, dst in block_mapping.items():
+        assert torch.allclose(src_key_caches_clone[src].cpu(),
+                              dist_key_caches[0][dst].cpu())
+        assert torch.allclose(src_value_caches_clone[src].cpu(),
+                              dist_value_caches[0][dst].cpu())
