@@ -12,15 +12,14 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.models.mixtral import MixtralMoE
 
 
-def torch_moe(a, w1, w2, topk_weight, topk_ids):
+def torch_moe(a, w1, w2, score, topk):
     B, D = a.shape
-    a = a.view(B, -1, D).repeat(1, topk_ids.shape[1], 1).reshape(-1, D)
-    out = torch.zeros(B * topk_ids.shape[1],
-                      w2.shape[1],
-                      dtype=a.dtype,
-                      device=a.device)
-    topk_ids = topk_ids.view(-1)
+    a = a.view(B, -1, D).repeat(1, topk, 1).reshape(-1, D)
+    out = torch.zeros(B * topk, w2.shape[1], dtype=a.dtype, device=a.device)
+    score = torch.softmax(score, dim=-1, dtype=torch.float32)
+    topk_weight, topk_ids = torch.topk(score, topk)
     topk_weight = topk_weight.view(-1)
+    topk_ids = topk_ids.view(-1)
     for i in range(w1.shape[0]):
         mask = topk_ids == i
         if mask.sum():
@@ -50,10 +49,7 @@ def test_fused_moe(
 
     score = torch.randn((m, e), device='cuda', dtype=dtype)
     triton_output = fused_moe(a, w1, w2, score, topk, renormalize=False)
-
-    score = torch.softmax(score, dim=-1, dtype=torch.float32)
-    topk_weight, topk_ids = torch.topk(score, topk)
-    torch_output = torch_moe(a, w1, w2, topk_weight, topk_ids)
+    torch_output = torch_moe(a, w1, w2, score, topk)
     assert torch.allclose(triton_output, torch_output, atol=1e-2, rtol=0)
 
 
