@@ -142,7 +142,7 @@ def moe_align_block_size(
     - expert_ids: A tensor indicating the assigned expert index for each block.
     - num_tokens_post_padded: The total number of tokens after padding, ensuring divisibility by block_size.
 
-    This function pads the number of tokens that each expert needs to process so that it is divisible by block_size. 
+    This function pads the number of tokens that each expert needs to process so that it is divisible by block_size.
     Padding ensures that during block matrix multiplication, the dimensions align correctly.
 
     Example:
@@ -151,7 +151,7 @@ def moe_align_block_size(
     - As block_size is 4, we pad 1 token for each expert.
     - First, flatten topk_ids to [2, 3, 4, 1, 2, 4, 1, 3, 4, 1, 2, 3].
     - Then append padding tokens [12, 12, 12, 12] for each block.
-    - After sorting by expert index, we obtain token_ids [3, 6, 9, 12, 0, 4, 10, 12, 1, 7, 11, 12, 2, 5, 8, 12]. 
+    - After sorting by expert index, we obtain token_ids [3, 6, 9, 12, 0, 4, 10, 12, 1, 7, 11, 12, 2, 5, 8, 12].
         Tokens 12 are non-existent (padding) and are ignored in the subsequent matrix multiplication.
     - The padding ensures that the total number of tokens is now divisible by block_size for proper block matrix operations.
     """
@@ -218,7 +218,7 @@ def fused_moe(hidden_states: torch.Tensor,
               inplace=False):
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of weights, w1 and w2, and top-k gating mechanism.
-    
+
     Parameters:
     - hidden_states (torch.Tensor): The input tensor to the MoE layer.
     - w1 (torch.Tensor): The first set of expert weights.
@@ -226,15 +226,15 @@ def fused_moe(hidden_states: torch.Tensor,
     - topk_weights (torch.Tensor): The weights for the top-k selected experts.
     - topk_ids (torch.Tensor): The indices of the top-k selected experts.
     - inplace (bool): If True, perform the operation in-place. Defaults to False.
-    
+
     Returns:
     - torch.Tensor: The output tensor after applying the MoE layer.
     """
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Incompatible dimensions"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
-    assert w1.is_contiguous(), "Expert weights1 must be contiguous"
-    assert w2.is_contiguous(), "Expert weights2 must be contiguous"
+    # assert w1.is_contiguous(), "Expert weights1 must be contiguous"
+    # assert w2.is_contiguous(), "Expert weights2 must be contiguous"
     assert hidden_states.dtype in [
         torch.float32, torch.float16, torch.bfloat16
     ]

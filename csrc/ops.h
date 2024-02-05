@@ -114,6 +114,14 @@ torch::Tensor group_gptq_gemm(
     bool use_exllama
 );
 
+torch::Tensor dequant_gptq(
+    torch::Tensor b_q_weight,
+    torch::Tensor b_gptq_qzeros,
+    torch::Tensor b_gptq_scales,
+    torch::Tensor b_g_idx,
+    bool use_exllama
+);
+
 void moe_align_block_size(
   torch::Tensor topk_ids,
   int num_experts,
