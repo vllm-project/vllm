@@ -38,13 +38,14 @@ from vllm.model_executor.layers.linear import (LinearMethodBase,
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding, ParallelLMHead)
+    VocabParallelEmbedding, ParallelLMHead, DEFAULT_VOCAB_PADDING_SIZE)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_world_size)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
+from vllm.config import LoRAConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -81,16 +82,16 @@ class LlamaMLP(nn.Module):
 
 class LlamaAttention(nn.Module):
 
-    def __init__(self,
-                 hidden_size: int,
-                 num_heads: int,
-                 num_kv_heads: int,
-                 rope_theta: float = 10000,
-                 rope_scaling: Optional[Dict[str, Any]] = None,
-                 max_position_embeddings: int = 8192,
-                 linear_method: Optional[LinearMethodBase] = None,
-                 quant_kv_cache: bool = False,
-                 kv_quant_params: List[float] = None) -> None:
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        rope_theta: float = 10000,
+        rope_scaling: Optional[Dict[str, Any]] = None,
+        max_position_embeddings: int = 8192,
+        linear_method: Optional[LinearMethodBase] = None,
+    ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -139,9 +140,7 @@ class LlamaAttention(nn.Module):
         self.attn = PagedAttention(self.num_heads,
                                    self.head_dim,
                                    self.scaling,
-                                   num_kv_heads=self.num_kv_heads,
-                                   quant_kv_cache=quant_kv_cache,
-                                   kv_quant_params=kv_quant_params)
+                                   num_kv_heads=self.num_kv_heads)
 
     def forward(
         self,
@@ -149,23 +148,25 @@ class LlamaAttention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
+        kv_quant_param: List[float],
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
+        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata,
+                                kv_quant_param)
         output, _ = self.o_proj(attn_output)
         return output
 
 
 class LlamaDecoderLayer(nn.Module):
 
-    def __init__(self,
-                 config: LlamaConfig,
-                 linear_method: Optional[LinearMethodBase] = None,
-                 quant_kv_cache: bool = False,
-                 kv_quant_params: List[float] = None) -> None:
+    def __init__(
+        self,
+        config: LlamaConfig,
+        linear_method: Optional[LinearMethodBase] = None,
+    ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
@@ -180,8 +181,6 @@ class LlamaDecoderLayer(nn.Module):
             rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
             linear_method=linear_method,
-            quant_kv_cache=quant_kv_cache,
-            kv_quant_params=kv_quant_params,
         )
         self.mlp = LlamaMLP(
             hidden_size=self.hidden_size,
@@ -201,6 +200,7 @@ class LlamaDecoderLayer(nn.Module):
         kv_cache: KVCache,
         input_metadata: InputMetadata,
         residual: Optional[torch.Tensor],
+        kv_quant_param: List[float],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
@@ -214,6 +214,7 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
+            kv_quant_param=kv_quant_param,
         )
 
         # Fully Connected
@@ -229,22 +230,23 @@ class LlamaModel(nn.Module):
         self,
         config: LlamaConfig,
         linear_method: Optional[LinearMethodBase] = None,
-        quant_kv_cache: bool = False,
-        kv_quant_params_list: List[List[float]] = None,
+        lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
         self.config = config
         self.padding_idx = config.pad_token_id
-        self.vocab_size = config.vocab_size
+        lora_vocab = (lora_config.lora_extra_vocab_size *
+                      (lora_config.max_loras or 1)) if lora_config else 0
+        self.vocab_size = config.vocab_size + lora_vocab
+        self.org_vocab_size = config.vocab_size
         self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
+            self.vocab_size,
             config.hidden_size,
+            org_num_embeddings=config.vocab_size,
         )
         self.layers = nn.ModuleList([
-            LlamaDecoderLayer(
-                config, linear_method, quant_kv_cache,
-                kv_quant_params_list[i] if quant_kv_cache else None)
-            for i in range(config.num_hidden_layers)
+            LlamaDecoderLayer(config, linear_method)
+            for _ in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -265,27 +267,38 @@ class LlamaModel(nn.Module):
                 kv_caches[i],
                 input_metadata,
                 residual,
+                input_metadata.kv_quant_params[i],
             )
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
 
 class LlamaForCausalLM(nn.Module):
+    supports_lora = True
 
     def __init__(
         self,
         config: LlamaConfig,
         linear_method: Optional[LinearMethodBase] = None,
-        quant_kv_cache: bool = False,
-        kv_quant_params_list: List[List[float]] = None,
+        lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
         self.config = config
         self.linear_method = linear_method
-        self.model = LlamaModel(config, linear_method, quant_kv_cache,
-                                kv_quant_params_list)
-        self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
-        self.sampler = Sampler(config.vocab_size)
+        self.model = LlamaModel(config, linear_method, lora_config=lora_config)
+        unpadded_vocab_size = config.vocab_size
+        if lora_config:
+            unpadded_vocab_size += lora_config.lora_extra_vocab_size
+        self.lm_head = ParallelLMHead(
+            unpadded_vocab_size,
+            config.hidden_size,
+            org_num_embeddings=config.vocab_size,
+            padding_size=DEFAULT_VOCAB_PADDING_SIZE
+            # We need bigger padding if using lora for kernel
+            # compatibility
+            if not lora_config else lora_config.lora_vocab_padding_size,
+        )
+        self.sampler = Sampler(unpadded_vocab_size, config.vocab_size)
 
     def forward(
         self,

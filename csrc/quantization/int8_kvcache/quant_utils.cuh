@@ -5,18 +5,11 @@
 #include <stdint.h>
 #include <float.h>
 #include <type_traits>
-#include "attention/attention_dtypes.h"
-#include "attention/dtype_float32.cuh"
-using namespace vllm;
+#include "../../attention/attention_dtypes.h"
 
-// this function is for function matching, delete it after writing customized dispatch functions
-inline __device__ int8_t quant(double a, const float scale, const float zp)
-{
-    int8_t int8;
-    int8 = round(max(-128.f, min(127.f, (a - zp) / scale)));
-    return int8;
-}
-
+namespace vllm {
+namespace int8 {
+// float32 to int8
 inline __device__ int8_t quant(float a, const float scale, const float zp)
 {
     int8_t int8;
@@ -24,6 +17,7 @@ inline __device__ int8_t quant(float a, const float scale, const float zp)
     return int8;
 }
 
+// float32x2 to int8x2
 inline __device__ short quant(float2 a, const float scale, const float zp)
 {
     union {
@@ -31,11 +25,12 @@ inline __device__ short quant(float2 a, const float scale, const float zp)
         short  int16;
     };
 
-    int8[0] = round(max(-128.f, min(127.f, (a.x - zp) / scale)));
-    int8[1] = round(max(-128.f, min(127.f, (a.y - zp) / scale)));
+    int8[0] = quant(a.x, scale, zp);
+    int8[1] = quant(a.y, scale, zp);
     return int16;
 }
 
+// float32x4 to int8x4
 inline __device__ int32_t quant(float4 a, const float scale, const float zp)
 {
     union {
@@ -43,10 +38,10 @@ inline __device__ int32_t quant(float4 a, const float scale, const float zp)
         int32_t int32;
     };
 
-    int8[0] = round(max(-128.f, min(127.f, (a.x - zp) / scale)));
-    int8[1] = round(max(-128.f, min(127.f, (a.y - zp) / scale)));
-    int8[2] = round(max(-128.f, min(127.f, (a.z - zp) / scale)));
-    int8[3] = round(max(-128.f, min(127.f, (a.w - zp) / scale)));
+    int8[0] = quant(a.x, scale, zp);
+    int8[1] = quant(a.y, scale, zp);
+    int8[2] = quant(a.z, scale, zp);
+    int8[3] = quant(a.w, scale, zp);
     return int32;
 }
 
@@ -55,7 +50,7 @@ inline __device__ int8_t quant(uint16_t a, const float scale, const float zp)
 {
     int8_t int8;
     float  b = half_to_float(a);
-    int8     = round(max(-128.f, min(127.f, (b - zp) / scale)));
+    int8     = quant(b, scale, zp);
     return int8;
 }
 
@@ -68,8 +63,8 @@ inline __device__ int16_t quant(uint32_t a, const float scale, const float zp)
     };
     float2 b = half2_to_float2(a);
 
-    int8[0] = round(max(-128.f, min(127.f, (b.x - zp) / scale)));
-    int8[1] = round(max(-128.f, min(127.f, (b.y - zp) / scale)));
+    int8[0] = quant(b.x, scale, zp);
+    int8[1] = quant(b.y, scale, zp);
     return int16;
 }
 
@@ -88,6 +83,57 @@ inline __device__ int32_t quant(uint2 a, const float scale, const float zp)
 
 // float16x8 to int8x8
 inline __device__ int64_t quant(uint4 a, const float scale, const float zp)
+{
+    union {
+        int16_t int16[4];
+        int64_t int64;
+    };
+
+    int16[0] = quant(a.x, scale, zp);
+    int16[1] = quant(a.y, scale, zp);
+    int16[2] = quant(a.z, scale, zp);
+    int16[3] = quant(a.w, scale, zp);
+    return int64;
+}
+
+// bf16 to int8
+inline __device__ int8_t quant(__nv_bfloat16 a, const float scale, const float zp)
+{
+    int8_t int8;
+    float  b = to_float(a);
+    int8     = quant(b, scale, zp);
+    return int8;
+}
+
+//bf16x2 to int8x2
+inline __device__ int16_t quant(__nv_bfloat162 a, const float scale, const float zp)
+{
+    union {
+        int8_t int8[2];
+        short  int16;
+    };
+    float2 b = bf1622float2(a);
+
+    int8[0] = quant(b.x, scale, zp);
+    int8[1] = quant(b.y, scale, zp);
+    return int16;
+}
+
+// bf16x4 to int8x4
+inline __device__ int32_t quant(bf16_4_t a, const float scale, const float zp)
+{
+    union {
+        int16_t int16[2];
+        int32_t int32;
+    };
+    
+    int16[0] = quant(a.x, scale, zp);
+    int16[1] = quant(a.y, scale, zp);
+    return int32;
+}
+
+// bf16x8 to int8x8
+inline __device__ int64_t quant(bf16_8_t a, const float scale, const float zp)
 {
     union {
         int16_t int16[4];
@@ -140,6 +186,7 @@ inline __device__ Float4_ dequant(int32_t a, const float scale, const float zp)
     return b;
 }
 
+// int8x8 ot float32x8
 inline __device__ Float8_ dequant(int64_t a, const float scale, const float zp)
 {
     union {
@@ -234,3 +281,5 @@ __inline__ __device__ bf16_8_t vec_conversion<bf16_8_t, Float8_>(const Float8_ &
     b.w = vec_conversion<__nv_bfloat162, float2>(a.w);
     return b;
 }
+} // namespace int8
+} // namespace vllm

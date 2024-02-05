@@ -33,11 +33,15 @@ async def generate(request: Request) -> Response:
     """
     request_dict = await request.json()
     prompt = request_dict.pop("prompt")
+    prefix_pos = request_dict.pop("prefix_pos", None)
     stream = request_dict.pop("stream", False)
     sampling_params = SamplingParams(**request_dict)
     request_id = random_uuid()
 
-    results_generator = engine.generate(prompt, sampling_params, request_id)
+    results_generator = engine.generate(prompt,
+                                        sampling_params,
+                                        request_id,
+                                        prefix_pos=prefix_pos)
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
@@ -74,12 +78,18 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--ssl-keyfile", type=str, default=None)
     parser.add_argument("--ssl-certfile", type=str, default=None)
+    parser.add_argument(
+        "--root-path",
+        type=str,
+        default=None,
+        help="FastAPI root_path when app is behind a path based routing proxy")
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)
 
+    app.root_path = args.root_path
     uvicorn.run(app,
                 host=args.host,
                 port=args.port,

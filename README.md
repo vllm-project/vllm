@@ -16,8 +16,18 @@ Easy, fast, and cheap LLM serving for everyone
 
 ---
 
+**The Second vLLM Bay Area Meetup (Jan 31st 5pm-7:30pm PT)**
+
+We are thrilled to announce our second vLLM Meetup!
+The vLLM team will share recent updates and roadmap.
+We will also have vLLM collaborators from IBM coming up to the stage to discuss their insights on LLM optimizations.
+Please register [here](https://lu.ma/ygxbpzhl) and join us!
+
+---
+
 *Latest News* 🔥
-- [2023/12] Added ROCm support to vLLM.
+- [2024/01] Added ROCm 6.0 support to vLLM.
+- [2023/12] Added ROCm 5.7 support to vLLM.
 - [2023/10] We hosted [the first vLLM meetup](https://lu.ma/first-vllm-meetup) in SF! Please find the meetup slides [here](https://docs.google.com/presentation/d/1QL-XPFXiFpDBh86DbEegFXBXFXjix4v032GhShbKf3s/edit?usp=sharing).
 - [2023/09] We created our [Discord server](https://discord.gg/jz7wjKhh6g)! Join us to discuss vLLM and LLM serving! We will also post the latest announcements and updates there.
 - [2023/09] We released our [PagedAttention paper](https://arxiv.org/abs/2309.06180) on arXiv!
@@ -36,7 +46,7 @@ vLLM is fast with:
 - Efficient management of attention key and value memory with **PagedAttention**
 - Continuous batching of incoming requests
 - Fast model execution with CUDA/HIP graph
-- Quantization: [GPTQ](https://arxiv.org/abs/2210.17323), [AWQ](https://arxiv.org/abs/2306.00978), [SqueezeLLM](https://arxiv.org/abs/2306.07629)
+- Quantization: [GPTQ](https://arxiv.org/abs/2210.17323), [AWQ](https://arxiv.org/abs/2306.00978), [SqueezeLLM](https://arxiv.org/abs/2306.07629), FP8 KV Cache
 - Optimized CUDA kernels
 
 vLLM is flexible and easy to use with:
@@ -47,6 +57,8 @@ vLLM is flexible and easy to use with:
 - Streaming outputs
 - OpenAI-compatible API server
 - Support NVIDIA GPUs and AMD GPUs
+- (Experimental) Prefix caching support
+- (Experimental) Multi-lora support
 
 vLLM seamlessly supports many Hugging Face models, including the following architectures:
 
@@ -68,6 +80,8 @@ vLLM seamlessly supports many Hugging Face models, including the following archi
 - OPT (`facebook/opt-66b`, `facebook/opt-iml-max-30b`, etc.)
 - Phi (`microsoft/phi-1_5`, `microsoft/phi-2`, etc.)
 - Qwen (`Qwen/Qwen-7B`, `Qwen/Qwen-7B-Chat`, etc.)
+- Qwen2 (`Qwen/Qwen2-7B-beta`, `Qwen/Qwen-7B-Chat-beta`, etc.)
+- StableLM(`stabilityai/stablelm-3b-4e1t`, `stabilityai/stablelm-base-alpha-7b-v2`, etc.)
 - Yi (`01-ai/Yi-6B`, `01-ai/Yi-34B`, etc.)
 
 Install vLLM with pip or [from source](https://vllm.readthedocs.io/en/latest/getting_started/installation.html#build-from-source):
