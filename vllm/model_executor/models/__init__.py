@@ -11,7 +11,7 @@ logger = init_logger(__name__)
 # Architecture -> (module, class).
 _MODELS = {
     "AquilaModel": ("llama", "LlamaForCausalLM"),
-    "AquilaForCausalLM": ("aquila", "AquilaForCausalLM"),  # AquilaChat2
+    "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
     "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),  # baichuan-7b
     "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),  # baichuan-13b
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
@@ -24,12 +24,12 @@ _MODELS = {
     "GPTBigCodeForCausalLM": ("gpt_bigcode", "GPTBigCodeForCausalLM"),
     "GPTJForCausalLM": ("gpt_j", "GPTJForCausalLM"),
     "GPTNeoXForCausalLM": ("gpt_neox", "GPTNeoXForCausalLM"),
-    "InternLMForCausalLM": ("internlm", "InternLMForCausalLM"),
+    "InternLMForCausalLM": ("llama", "LlamaForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
     # For decapoda-research/llama-*
     "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
-    "MistralForCausalLM": ("mistral", "MistralForCausalLM"),
+    "MistralForCausalLM": ("llama", "LlamaForCausalLM"),
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
     "QuantMixtralForCausalLM": ("mixtral_quant", "MixtralForCausalLM"),
     # transformers's mpt class has lower case

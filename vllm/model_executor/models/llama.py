@@ -25,12 +25,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import LlamaConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import PagedAttention
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import RMSNorm, NormBase
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -91,6 +91,8 @@ class LlamaAttention(nn.Module):
         rope_scaling: Optional[Dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
         linear_method: Optional[LinearMethodBase] = None,
+        sliding_window: Optional[int] = None,
+        attn_bias: Optional[bool] = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -114,19 +116,20 @@ class LlamaAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
+        self.sliding_window = sliding_window
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
             self.head_dim,
             self.total_num_heads,
             self.total_num_kv_heads,
-            bias=False,
+            bias=attn_bias,
             linear_method=linear_method,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
-            bias=False,
+            bias=attn_bias,
             linear_method=linear_method,
         )
 
@@ -140,7 +143,8 @@ class LlamaAttention(nn.Module):
         self.attn = PagedAttention(self.num_heads,
                                    self.head_dim,
                                    self.scaling,
-                                   num_kv_heads=self.num_kv_heads)
+                                   num_kv_heads=self.num_kv_heads,
+                                   sliding_window=self.sliding_window)
 
     def forward(
         self,
@@ -162,8 +166,9 @@ class LlamaDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: LlamaConfig,
         linear_method: Optional[LinearMethodBase] = None,
+        norm_method: Optional[NormBase] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -171,25 +176,32 @@ class LlamaDecoderLayer(nn.Module):
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
+        num_heads = getattr(config, "num_attention_heads", None)
+        num_kv_heads = getattr(config, "num_key_value_heads", num_heads)
+        hidden_act = getattr(config, "hidden_act", "silu")
+        sliding_window = getattr(config, "sliding_window", False)
+        attn_bias = getattr(config, "bias", False)
+
         self.self_attn = LlamaAttention(
             hidden_size=self.hidden_size,
-            num_heads=config.num_attention_heads,
-            num_kv_heads=config.num_key_value_heads,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
             rope_theta=rope_theta,
             rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
             linear_method=linear_method,
-        )
+            sliding_window=sliding_window,
+            attn_bias=attn_bias)
         self.mlp = LlamaMLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
-            hidden_act=config.hidden_act,
+            hidden_act=hidden_act,
             linear_method=linear_method,
         )
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)
+        self.input_layernorm = norm_method(self.hidden_size,
+                                           eps=config.rms_norm_eps)
+        self.post_attention_layernorm = norm_method(self.hidden_size,
+                                                    eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -224,8 +236,9 @@ class LlamaModel(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: LlamaConfig,
         linear_method: Optional[LinearMethodBase] = None,
+        norm_method: Optional[NormBase] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
@@ -241,10 +254,10 @@ class LlamaModel(nn.Module):
             org_num_embeddings=config.vocab_size,
         )
         self.layers = nn.ModuleList([
-            LlamaDecoderLayer(config, linear_method)
+            LlamaDecoderLayer(config, linear_method, norm_method)
             for _ in range(config.num_hidden_layers)
         ])
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = norm_method(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -273,14 +286,18 @@ class LlamaForCausalLM(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: LlamaConfig,
         linear_method: Optional[LinearMethodBase] = None,
+        norm_method: Optional[NormBase] = RMSNorm,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
         self.config = config
         self.linear_method = linear_method
-        self.model = LlamaModel(config, linear_method, lora_config=lora_config)
+        self.model = LlamaModel(config,
+                                linear_method,
+                                norm_method=norm_method,
+                                lora_config=lora_config)
         unpadded_vocab_size = config.vocab_size
         if lora_config:
             unpadded_vocab_size += lora_config.lora_extra_vocab_size
