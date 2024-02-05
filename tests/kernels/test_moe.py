@@ -73,7 +73,7 @@ def test_mixtral_moe(dtype: torch.dtype):
         intermediate_size=config.intermediate_size,
         params_dtype=dtype,
         tp_size=1,
-    )
+    ).cuda()
 
     # Load the weights
     vllm_moe.gate.linear_weights["weight"][:] = hf_moe.gate.weight.data
