@@ -6,8 +6,8 @@ from typing import Dict, List, Tuple, Set, Optional
 import torch
 import torch.distributed
 
-from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, LoRAConfig)
+from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig, LoRAConfig)
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
@@ -33,6 +33,7 @@ class Worker:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
+        device_config: DeviceConfig,
         local_rank: int,
         rank: int,
         distributed_init_method: str,
@@ -43,6 +44,7 @@ class Worker:
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
+        self.device_config = device_config
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
@@ -54,6 +56,7 @@ class Worker:
         self.model_runner = ModelRunner(model_config,
                                         parallel_config,
                                         scheduler_config,
+                                        device_config,
                                         lora_config=self.lora_config,
                                         kv_cache_dtype=kv_cache_dtype,
                                         is_driver_worker=is_driver_worker)
@@ -65,21 +68,24 @@ class Worker:
         self.gpu_cache = None
 
     def init_model(self) -> None:
-        # torch.distributed.all_reduce does not free the input tensor until
-        # the synchronization point. This causes the memory usage to grow
-        # as the number of all_reduce calls increases. This env var disables
-        # this behavior.
-        # Related issue:
-        # https://discuss.pytorch.org/t/cuda-allocation-lifetime-for-inputs-to-distributed-all-reduce/191573
-        os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
+        if self.device_config.device.type == "cuda":
+            # torch.distributed.all_reduce does not free the input tensor until
+            # the synchronization point. This causes the memory usage to grow
+            # as the number of all_reduce calls increases. This env var disables
+            # this behavior.
+            # Related issue:
+            # https://discuss.pytorch.org/t/cuda-allocation-lifetime-for-inputs-to-distributed-all-reduce/191573
+            os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
 
-        # This env var set by Ray causes exceptions with graph building.
-        os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
-        self.device = torch.device(f"cuda:{self.local_rank}")
-        torch.cuda.set_device(self.device)
+            # This env var set by Ray causes exceptions with graph building.
+            os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
+            self.device = torch.device(f"cuda:{self.local_rank}")
+            torch.cuda.set_device(self.device)
 
-        _check_if_gpu_supports_dtype(self.model_config.dtype)
-
+            _check_if_gpu_supports_dtype(self.model_config.dtype)
+        else:
+            raise RuntimeError(
+                f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
         init_distributed_environment(self.parallel_config, self.rank,
                                      self.distributed_init_method)
