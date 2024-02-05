@@ -7,6 +7,40 @@ from vllm.block import BlockTable, PhysicalTokenBlock
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
 
+class EvictionPolicy(enum.Enum):
+    """Enum for eviction policy used by BlockAllocator."""
+    LRU = enum.auto()
+
+
+class Evictor:
+    """Evicts physical blocks on cache based on eviction policy."""
+
+    def __init__(
+        self,
+        eviction_policy: EvictionPolicy = EvictionPolicy.LRU
+    ) -> None:
+        self.eviction_policy = eviction_policy
+
+        # Initialize the free blocks.
+        self.free_blocks: Deque[PhysicalTokenBlock] = deque()
+
+    def evict(
+        self,
+        table: Dict[int, PhysicalTokenBlock]
+    ) -> PhysicalTokenBlock:
+        match(self.eviction_policy):
+            case EvictionPolicy.LRU:
+                assert (len(self.free_blocks))
+                # Find the block in the main hash table
+                block = self.free_blocks.pop()
+                key = list(table.keys())[list(table.values()).index()]
+                del table[key]
+                return block
+            case _:
+                raise ValueError(f"Unknown cache eviction policy: {self.eviction_policy}")
+
+    def return_block(self, block: PhysicalTokenBlock) -> None:
+        self.free_blocks.append(block)
 
 class BlockAllocator:
     """Manages free physical token blocks for a device.
@@ -21,23 +55,19 @@ class BlockAllocator:
         device: Device,
         block_size: int,
         num_blocks: int,
+        eviction_policy: EvictionPolicy = EvictionPolicy.LRU
     ) -> None:
         self.device = device
         self.block_size = block_size
         self.num_blocks = num_blocks
 
+        self.evictor = Evictor(eviction_policy)
+
         self.current_num_blocks = 0
         self.table: Dict[int, PhysicalTokenBlock] = {}
-        # Initialize the free blocks.
-        self.free_blocks: Deque[PhysicalTokenBlock] = deque()
 
     def evict(self) -> PhysicalTokenBlock:
-        assert (len(self.free_blocks))
-        # Find the block in the main hash table
-        block = self.free_blocks.pop()
-        key = list(self.table.keys())[list(self.table.values()).index()]
-        del self.table[key]
-        return block
+        return self.evictor.evict(self.table)
 
     def allocate_block(self) -> PhysicalTokenBlock:
         if self.current_num_blocks == self.num_blocks:
@@ -62,7 +92,7 @@ class BlockAllocator:
             raise ValueError(f"Double free! {block} is already freed.")
         block.ref_count -= 1
         if block.ref_count == 0:
-            self.free_blocks.append(block)
+            self.evictor.return_block(block)
 
     def get_num_free_blocks(self) -> int:
         return self.num_blocks - self.current_num_blocks
