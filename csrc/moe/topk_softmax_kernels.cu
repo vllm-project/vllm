@@ -19,11 +19,6 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 
-#include <cuda.h>
-#include <cuda_fp16.h>
-#include <math.h>
-#include <sstream>
-
 #include <cub/cub.cuh>
 #include <cub/util_type.cuh>
 

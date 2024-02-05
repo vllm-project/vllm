@@ -4,6 +4,7 @@ import triton
 import triton.language as tl
 
 from vllm._C import ops
+from vllm.utils import is_hip
 
 
 @triton.jit
@@ -177,7 +178,6 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
                             expert_ids: torch.Tensor,
                             num_tokens_post_padded: torch.Tensor,
                             mul_routed_weight: bool, top_k: int, config: dict):
-
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
 
@@ -210,12 +210,15 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
     )
 
 
-def fused_moe(hidden_states: torch.Tensor,
-              w1: torch.Tensor,
-              w2: torch.Tensor,
-              topk_weights: torch.Tensor,
-              topk_ids: torch.Tensor,
-              inplace=False):
+def fused_moe(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    inplace: bool = False,
+) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of weights, w1 and w2, and top-k gating mechanism.
     
@@ -240,6 +243,27 @@ def fused_moe(hidden_states: torch.Tensor,
     ]
     M, _ = hidden_states.shape
     E, N, _ = w1.shape
+
+    if is_hip():
+        # The MoE kernels are not yet supported on ROCm.
+        routing_weights = torch.softmax(gating_output, dim=-1, dtype=torch.float32)
+        topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
+    else:
+        import vllm._moe_C as moe_kernels
+
+        num_tokens = hidden_states.numel() // hidden_states.shape[-1]
+        topk_weights = torch.empty(num_tokens, topk, dtype=torch.float32, device=hidden_states.device)
+        topk_ids = torch.empty(num_tokens, topk, dtype=torch.int32, device=hidden_states.device)
+        token_expert_indicies = torch.empty(num_tokens, topk, dtype=torch.int32, device=hidden_states.device)
+        moe_kernels.topk_softmax(
+            topk_weights,
+            topk_ids,
+            token_expert_indicies,
+            gating_output.float(),
+        )
+        del token_expert_indicies # Not used. Will be used in the future.
+    if renormalize:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
     config = {
         'BLOCK_SIZE_M': 64,
@@ -287,65 +311,3 @@ def fused_moe(hidden_states: torch.Tensor,
                          out=hidden_states)
     return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
                      dim=1)
-
-
-import vllm._moe_C as moe_kernels
-
-def fused_moe_(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    gating_output: torch.Tensor,
-    topk: int,
-    renormalize: bool,
-) -> torch.Tensor:
-    num_tokens = gating_output.shape[:-1].numel()
-    num_experts = gating_output.shape[-1]
-    hidden_size = hidden_states.shape[-1]
-    dtype = hidden_states.dtype
-    device = hidden_states.device
-    # print(hidden_states.shape, w1.shape, w2.shape, gating_output.shape)
-
-    topk_weights = torch.empty(num_tokens, topk, dtype=torch.float32, device=device)
-    topk_indices = torch.empty(num_tokens, topk, dtype=torch.int32, device=device)
-    token_expert_indicies = torch.empty_like(topk_indices)
-    moe_kernels.topk_softmax(
-        topk_weights,
-        topk_indices,
-        token_expert_indicies,
-        gating_output.float(),
-    )
-
-    permuted_tokens = torch.empty(num_tokens * topk, hidden_size, dtype=dtype, device=device)
-    cum_num_tokens_per_expert = torch.empty(num_experts, dtype=torch.long, device=device)
-    reverse_permutation_map = torch.empty(num_tokens * topk, dtype=torch.int32, device=device)
-    moe_kernels.expand_and_permute(
-        permuted_tokens,
-        cum_num_tokens_per_expert,
-        reverse_permutation_map,
-        hidden_states,
-        topk_indices,
-        token_expert_indicies,
-    )
-
-    mlp_output = torch.empty_like(permuted_tokens)
-    moe_kernels.moe_mlp(
-        mlp_output,
-        permuted_tokens,
-        cum_num_tokens_per_expert,
-        w1,
-        None,
-        3,
-        w2,
-    )
-
-    output_tokens = torch.empty_like(hidden_states)
-    moe_kernels.unpermute_and_reduce(
-        output_tokens,
-        mlp_output,
-        topk_weights,
-        topk_indices,
-        reverse_permutation_map,
-        renormalize,
-    )
-    return output_tokens
