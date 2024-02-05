@@ -255,11 +255,11 @@ typename Gemm::Arguments MakeArguments(torch::Tensor a,
   typename Gemm::Arguments arguments{
     cutlass::gemm::GemmUniversalMode::kGrouped,
     {static_cast<int>(num_experts), reinterpret_cast<typename ProblemShape::UnderlyingProblemShape*>(problem_sizes.data_ptr()), problem_sizes_host.data()},
-    {const_cast<ElementA**>(reinterpret_cast<const ElementA**>(ptr_a.data_ptr())), (StrideA*)stride_a.data_ptr(),
-     const_cast<ElementB**>(reinterpret_cast<const ElementB**>(ptr_b.data_ptr())), (StrideB*)stride_b.data_ptr()},
+    {reinterpret_cast<const ElementA**>(ptr_a.mutable_data_ptr()), (StrideA*)stride_a.data_ptr(),
+     reinterpret_cast<const ElementB**>(ptr_b.mutable_data_ptr()), (StrideB*)stride_b.data_ptr()},
     {{/*alpha=*/1.0f, /*beta=*/0.0f},
-     const_cast<ElementC**>(reinterpret_cast<const ElementC**>(ptr_c.data_ptr())), (StrideC*)stride_c.data_ptr(),
-     const_cast<ElementC**>(reinterpret_cast<const ElementC**>(ptr_c.data_ptr())), (StrideC*)stride_c.data_ptr()},
+     reinterpret_cast<const ElementC**>(ptr_c.mutable_data_ptr()), (StrideC*)stride_c.data_ptr(),
+     reinterpret_cast<const ElementC**>(ptr_c.mutable_data_ptr()), (StrideC*)stride_c.data_ptr()},
     hw_info
   };
 
