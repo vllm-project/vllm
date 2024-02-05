@@ -7,40 +7,38 @@ from vllm.block import BlockTable, PhysicalTokenBlock
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
 
+
 class EvictionPolicy(enum.Enum):
     """Enum for eviction policy used by BlockAllocator."""
     LRU = enum.auto()
 
 
 class Evictor:
-    """Evicts physical blocks on cache based on eviction policy."""
+    """Evicts physical blocks from cache based on eviction policy."""
 
-    def __init__(
-        self,
-        eviction_policy: EvictionPolicy = EvictionPolicy.LRU
-    ) -> None:
+    def __init__(self,
+                 eviction_policy: EvictionPolicy = EvictionPolicy.LRU) -> None:
         self.eviction_policy = eviction_policy
 
         # Initialize the free blocks.
         self.free_blocks: Deque[PhysicalTokenBlock] = deque()
 
-    def evict(
-        self,
-        table: Dict[int, PhysicalTokenBlock]
-    ) -> PhysicalTokenBlock:
-        match(self.eviction_policy):
-            case EvictionPolicy.LRU:
-                assert (len(self.free_blocks))
-                # Find the block in the main hash table
-                block = self.free_blocks.pop()
-                key = list(table.keys())[list(table.values()).index()]
-                del table[key]
-                return block
-            case _:
-                raise ValueError(f"Unknown cache eviction policy: {self.eviction_policy}")
+    def evict(self, table: Dict[int,
+                                PhysicalTokenBlock]) -> PhysicalTokenBlock:
+        if self.eviction_policy == EvictionPolicy.LRU:
+            assert (len(self.free_blocks))
+            # Find the block in the main hash table
+            block = self.free_blocks.pop()
+            key = list(table.keys())[list(table.values()).index()]
+            del table[key]
+            return block
+        else:
+            raise ValueError(
+                f"Unknown cache eviction policy: {self.eviction_policy}")
 
     def return_block(self, block: PhysicalTokenBlock) -> None:
         self.free_blocks.append(block)
+
 
 class BlockAllocator:
     """Manages free physical token blocks for a device.
@@ -50,13 +48,11 @@ class BlockAllocator:
     the reference count becomes zero, the block is added back to the free list.
     """
 
-    def __init__(
-        self,
-        device: Device,
-        block_size: int,
-        num_blocks: int,
-        eviction_policy: EvictionPolicy = EvictionPolicy.LRU
-    ) -> None:
+    def __init__(self,
+                 device: Device,
+                 block_size: int,
+                 num_blocks: int,
+                 eviction_policy: EvictionPolicy = EvictionPolicy.LRU) -> None:
         self.device = device
         self.block_size = block_size
         self.num_blocks = num_blocks
