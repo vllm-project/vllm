@@ -12,7 +12,7 @@ Requirements
 
 * OS: Linux
 * Python: 3.8 -- 3.11
-* GPU: MI200s (gfx90a), MI300 (gfx942), navi31 (gfx1100)
+* GPU: MI200s (gfx90a), MI300 (gfx942), Radeon RX 7900 series (gfx1100)
 * Pytorch 2.0.1/2.1.1/2.2
 * ROCm 5.7 (Verified on python 3.10) or ROCm 6.0 (Verified on python 3.9)
 

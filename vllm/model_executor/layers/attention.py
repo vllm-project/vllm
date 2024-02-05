@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
-                                             LowerTriangularMaskWithTensorBias)
+                                         LowerTriangularMaskWithTensorBias)
 
 from vllm._C import ops
 from vllm._C import cache_ops
