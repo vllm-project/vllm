@@ -235,7 +235,10 @@ def fused_moe(
     - torch.Tensor: The output tensor after applying the MoE layer.
     """
     # Check constraints.
-    assert hidden_states.shape[1] == w1.shape[2], "Incompatible dimensions"
+    assert hidden_states.shape[0] == gating_output.shape[0], (
+        "Number of tokens mismatch")
+    assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
+    assert gating_output.shape[1] == w1.shape[0], "Number of experts mismatch"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
     assert w1.is_contiguous(), "Expert weights1 must be contiguous"
     assert w2.is_contiguous(), "Expert weights2 must be contiguous"
@@ -254,16 +257,15 @@ def fused_moe(
     else:
         import vllm._moe_C as moe_kernels
 
-        num_tokens = hidden_states.numel() // hidden_states.shape[-1]
-        topk_weights = torch.empty(num_tokens,
+        topk_weights = torch.empty(M,
                                    topk,
                                    dtype=torch.float32,
                                    device=hidden_states.device)
-        topk_ids = torch.empty(num_tokens,
+        topk_ids = torch.empty(M,
                                topk,
                                dtype=torch.int32,
                                device=hidden_states.device)
-        token_expert_indicies = torch.empty(num_tokens,
+        token_expert_indicies = torch.empty(M,
                                             topk,
                                             dtype=torch.int32,
                                             device=hidden_states.device)
