@@ -7,7 +7,6 @@ import os
 
 _FORMAT = "%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s"
 _DATE_FORMAT = "%m-%d %H:%M:%S"
-_LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
 
 class NewLineFormatter(logging.Formatter):
@@ -34,7 +33,7 @@ def _setup_logger():
     if _default_handler is None:
         _default_handler = logging.StreamHandler(sys.stdout)
         _default_handler.flush = sys.stdout.flush  # type: ignore
-        _default_handler.setLevel(_LOG_LEVEL)
+        _default_handler.setLevel(logging.INFO)
         _root_logger.addHandler(_default_handler)
     fmt = NewLineFormatter(_FORMAT, datefmt=_DATE_FORMAT)
     _default_handler.setFormatter(fmt)
@@ -52,7 +51,7 @@ _setup_logger()
 def init_logger(name: str):
     # Use the same settings as above for root logger
     logger = logging.getLogger(name)
-    logger.setLevel(_LOG_LEVEL)
+    logger.setLevel(os.getenv("LOG_LEVEL", "DEBUG"))
     logger.addHandler(_default_handler)
     logger.propagate = False
     return logger
