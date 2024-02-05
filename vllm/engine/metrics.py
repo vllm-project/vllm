@@ -47,6 +47,14 @@ gauge_cpu_cache_usage = Gauge(
     "vllm:cpu_cache_usage_perc",
     "CPU KV-cache usage. 1 means 100 percent usage.")
 
+histogram_prompt_tokens = Histogram(
+    "vllm:prompt_tokens",
+    "Number of prefill tokens processed.",
+    buckets=[
+        1, 2, 5, 10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000,
+        20_000, 50_000, 100_000
+    ],
+)
 histogram_time_to_first_token = Histogram(
     "vllm:time_to_first_token_seconds",
     "Histogram of time to first token in seconds.",
@@ -97,6 +105,7 @@ class Stats:
     finished_reason_counter: CollectionsCounter[str, int]
     num_prompt_tokens: int
     num_generation_tokens: int
+    num_prompt_tokens_lst: List[int]
     max_tokens: List[int]
     request_n: List[int]
     time_to_first_tokens: List[float]
@@ -134,6 +143,8 @@ class StatLogger:
         # Add to token counters.
         counter_prompt_tokens.add(labels, stats.num_prompt_tokens)
         counter_generation_tokens.add(labels, stats.num_generation_tokens)
+        for val in stats.num_prompt_tokens_lst:
+            histogram_prompt_tokens.observe(labels, val)
 
         for finished_reason, count in stats.finished_reason_counter.items():
             counter_request_success.add(
