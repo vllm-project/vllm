@@ -135,13 +135,16 @@ typename Gemm::Arguments MakeArguments(torch::Tensor a,
   int64_t num_experts = problem_sizes_host.size();
 
   // Create the host arrays of leading dimension data and pointer data.
-  using LayoutA = typename Gemm::LayoutA;
-  using LayoutB = typename Gemm::LayoutB;
-  using LayoutC = typename Gemm::LayoutC;
+  using StrideA = typename Gemm::GemmKernel::StrideA;
+  using StrideB = typename Gemm::GemmKernel::StrideB;
+  using StrideC = typename Gemm::GemmKernel::StrideC;
 
-  std::vector<int64_t> lda_host(num_experts), offsets_a(num_experts);
-  std::vector<int64_t> ldb_host(num_experts), offsets_b(num_experts);
-  std::vector<int64_t> ldc_host(num_experts), offsets_c(num_experts);
+  std::vector<int64_t>  offsets_a(num_experts);
+  std::vector<int64_t> offsets_b(num_experts);
+  std::vector<int64_t> offsets_c(num_experts);
+  std::vector<StrideA> stride_a_host;
+  std::vector<StrideB> stride_b_host;
+  std::vector<StrideC> stride_c_host;
   int64_t elements_a = 0, elements_b = 0, elements_c = 0;
 
   using ElementA = typename Gemm::ElementA;
@@ -157,9 +160,9 @@ typename Gemm::Arguments MakeArguments(torch::Tensor a,
     auto N = get<1>(problem);
     auto K = get<2>(problem);
 
-    lda_host[i] = LayoutA::packed({M, K}).stride(0);
-    ldb_host[i] = LayoutB::packed({K, N}).stride(0);
-    ldc_host[i] = LayoutC::packed({M, N}).stride(0);
+    stride_a_host.push_back(cutlass::make_cute_packed_stride(StrideA{}, cute::make_shape(M, K, Int<1>{})));
+    stride_b_host.push_back(cutlass::make_cute_packed_stride(StrideB{}, cute::make_shape(N, K, Int<1>{})));
+    stride_c_host.push_back(cutlass::make_cute_packed_stride(StrideC{}, cute::make_shape(M, N, Int<1>{})));
 
     offsets_a[i] = elements_a;
     offsets_b[i] = elements_b;
@@ -175,9 +178,9 @@ typename Gemm::Arguments MakeArguments(torch::Tensor a,
   }
 
   // Copy the problem sizes, pointers and leading dimension data to the device.
-  torch::Tensor lda = CopyToDevice(lda_host, a.device());
-  torch::Tensor ldb = CopyToDevice(ldb_host, a.device());
-  torch::Tensor ldc = CopyToDevice(ldc_host, a.device());
+  torch::Tensor stride_a = CopyToDevice(stride_a_host, a.device());
+  torch::Tensor stride_b = CopyToDevice(stride_b_host, a.device());
+  torch::Tensor stride_c = CopyToDevice(stride_c_host, a.device());
   torch::Tensor ptr_a = CopyToDevice(ptr_a_host, a.device());
   torch::Tensor ptr_b = CopyToDevice(ptr_b_host, a.device());
   torch::Tensor ptr_c = CopyToDevice(ptr_c_host, a.device());
@@ -190,11 +193,11 @@ typename Gemm::Arguments MakeArguments(torch::Tensor a,
   typename Gemm::Arguments arguments{
     cutlass::gemm::GemmUniversalMode::kGrouped,
     {static_cast<int>(num_experts), reinterpret_cast<typename ProblemShape::UnderlyingProblemShape*>(problem_sizes.data_ptr()), problem_sizes_host.data()},
-    {(ElementA**)ptr_a.data_ptr(), /*lda=*/(int64_t*)lda.data_ptr(),
-     (ElementB**)ptr_b.data_ptr(), /*ldb=*/(int64_t*)ldb.data_ptr()},
+    {(ElementA**)ptr_a.data_ptr(), (StrideA*)stride_a.data_ptr(),
+     (ElementB**)ptr_b.data_ptr(), (StrideB*)stride_b.data_ptr()},
     {{/*alpha=*/1.0f, /*beta=*/0.0f},
-     (ElementC**)ptr_c.data_ptr(), /*ldc=*/(int64_t*)ldc.data_ptr(),
-     (ElementC**)ptr_c.data_ptr(), /*ldc=*/(int64_t*)ldc.data_ptr()},
+     (ElementC**)ptr_c.data_ptr(), (StrideC*)stride_c.data_ptr(),
+     (ElementC**)ptr_c.data_ptr(), (StrideC*)stride_c.data_ptr()},
     hw_info
   };
 
