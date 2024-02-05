@@ -76,7 +76,8 @@ class ModelRunner:
         self.in_wsl = in_wsl()
         self.kv_cache_dtype = kv_cache_dtype
         self.kv_quant_params = self.load_kv_quant_params(
-            model_config, kv_quant_params_path)
+            model_config,
+            kv_quant_params_path) if model_config is not None else None
 
     def load_kv_quant_params(self, model_config: ModelConfig,
                              kv_quant_params_path: str) -> List[List[float]]:

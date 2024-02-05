@@ -138,8 +138,10 @@ def test_reshape_and_cache(
     cloned_value_cache = value_cache.clone()
 
     # Call the reshape_and_cache kernel.
+    # NOTE(zhangying): The params `1.0, 0.0, 1.0, 0.0` are to fit function argument list.
+    # They only work when the kv_cache_dtype is int8.
     cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
-                                slot_mapping, "auto")
+                                slot_mapping, "auto", 1.0, 0.0, 1.0, 0.0)
 
     # Run the reference implementation.
     reshaped_key = key.reshape(num_tokens, *key_cache[0, :, :, 0, :].shape)
@@ -177,16 +179,14 @@ def test_swap_blocks(
     num_blocks: int,
     dtype: torch.dtype,
     seed: int,
-    device: int,
+    device: str,
 ) -> None:
     random.seed(seed)
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
-    src_device = f"{direction[0]}:{device}" if direction[
-        0] == "cuda" else direction[0]
-    dst_device = f"{direction[1]}:{device}" if direction[
-        1] == "cuda" else direction[1]
+    src_device = device if direction[0] == "cuda" else "cpu"
+    dst_device = device if direction[1] == "cuda" else "cpu"
 
     src_blocks = random.sample(range(num_blocks), num_mappings)
     # For the same device, mapping must not overlap

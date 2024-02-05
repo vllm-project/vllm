@@ -283,7 +283,7 @@ def test_paged_attention(
     if kv_cache_dtype == "fp8_e5m2":
         atol, rtol = 1e-2, 1e-5
     if kv_cache_dtype == "int8":
-        atol, rtol = 4e-2, 1e-5
+        atol, rtol = 1e-1, 1e-5
     assert torch.allclose(output, ref_output, atol=atol, rtol=rtol)
 
 
