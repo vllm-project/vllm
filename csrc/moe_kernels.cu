@@ -124,6 +124,28 @@ torch::Tensor CopyToDevice(const std::vector<T> &x, const torch::Device &device)
   return out;
 }
 
+template <class IntT>
+CUTLASS_HOST_DEVICE
+cute::Stride<IntT, cute::Int<1>>
+make_cute_packed_stride(cute::Stride<IntT, cute::Int<1>> s, cute::Shape<int,int,int> shape_MKL) {
+  static_assert(std::is_integral_v<IntT>,
+    "Stride must have an integral type so it can be set dynamically. Static strides not supported.");
+  auto s_copy = s;
+  cute::get<0>(s_copy) = static_cast<IntT>(cute::get<1>(shape_MKL));
+  return s_copy;
+}
+
+template <class IntT>
+CUTLASS_HOST_DEVICE
+cute::Stride<cute::Int<1>, IntT>
+make_cute_packed_stride(cute::Stride<cute::Int<1>, IntT> s, cute::Shape<int,int,int> shape_MKL) {
+  static_assert(std::is_integral_v<IntT>,
+    "Stride must have an integral type so it can be set dynamically. Static strides not supported.");
+  auto s_copy = s;
+  cute::get<1>(s_copy) = static_cast<IntT>(cute::get<0>(shape_MKL));
+  return s_copy;
+}
+
 template <typename Gemm>
 typename Gemm::Arguments MakeArguments(torch::Tensor a,
 				       torch::Tensor b,
@@ -160,9 +182,9 @@ typename Gemm::Arguments MakeArguments(torch::Tensor a,
     auto N = get<1>(problem);
     auto K = get<2>(problem);
 
-    stride_a_host.push_back(cute::make_shape(M, K, Int<1>{}));
-    stride_b_host.push_back(cute::make_shape(N, K, Int<1>{}));
-    stride_c_host.push_back(cute::make_shape(M, N, Int<1>{}));
+    stride_a_host.push_back(make_cute_packed_stride(StrideA{}, cute::make_shape(M, K, Int<1>{})));
+    stride_b_host.push_back(make_cute_packed_stride(StrideB{}, cute::make_shape(N, K, Int<1>{})));
+    stride_c_host.push_back(make_cute_packed_stride(StrideC{}, cute::make_shape(M, N, Int<1>{})));
 
     offsets_a[i] = elements_a;
     offsets_b[i] = elements_b;
