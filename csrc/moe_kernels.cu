@@ -153,9 +153,13 @@ typename Gemm::Arguments MakeArguments(torch::Tensor a,
 
   for (int i = 0; i < num_experts; ++i) {
     auto problem = problem_sizes_host[i];
-    lda_host[i] = LayoutA::packed({problem.m(), problem.k()}).stride(0);
-    ldb_host[i] = LayoutB::packed({problem.k(), problem.n()}).stride(0);
-    ldc_host[i] = LayoutC::packed({problem.m(), problem.n()}).stride(0);
+    auto M = get<0>(problem);
+    auto N = get<1>(problem);
+    auto K = get<2>(problem);
+
+    lda_host[i] = LayoutA::packed({M, K}).stride(0);
+    ldb_host[i] = LayoutB::packed({K, N}).stride(0);
+    ldc_host[i] = LayoutC::packed({M, N}).stride(0);
 
     offsets_a[i] = elements_a;
     offsets_b[i] = elements_b;
@@ -165,9 +169,9 @@ typename Gemm::Arguments MakeArguments(torch::Tensor a,
     ptr_b_host[i] = (ElementB*)b.data_ptr() + offsets_b[i];
     ptr_c_host[i] = (ElementC*)c.data_ptr() + offsets_c[i];
 
-    elements_a += problem.m() * problem.k();
-    elements_b += problem.k() * problem.n();
-    elements_c += problem.m() * problem.n();
+    elements_a += M * K;
+    elements_b += K * N;
+    elements_c += M * N;
   }
 
   // Copy the problem sizes, pointers and leading dimension data to the device.
