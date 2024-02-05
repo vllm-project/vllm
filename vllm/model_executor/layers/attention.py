@@ -122,14 +122,10 @@ class PagedAttention(nn.Module):
             )
             """
 
-            print(kv_cache.shape)
-            exit(0)
-            
             cache_ops.reshape_and_cache(
                 key,
                 value,
-                key_cache,
-                value_cache,
+                kv_cache,
                 input_metadata.slot_mapping.flatten(),
                 input_metadata.kv_cache_dtype,
             )

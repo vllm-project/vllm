@@ -157,13 +157,13 @@ __global__ void reshape_and_cache_kernel(
   const scalar_t* __restrict__ value,         // [num_tokens, num_heads, head_size]
   //cache_t* __restrict__ key_cache,            // [num_blocks, num_heads, head_size/x, block_size, x]
   //cache_t* __restrict__ value_cache,          // [num_blocks, num_heads, head_size, block_size]
-  cacht_t* __restrict__ kv_cache,             // [num_blocks, 2, block_size, num_heads, head_size]
+  cache_t* __restrict__ kv_cache,             // [num_blocks, 2, block_size, num_heads, head_size]
   const int64_t* __restrict__ slot_mapping,   // [num_tokens]
   const int key_stride,
   const int value_stride,
   const int num_heads,
   const int head_size,
-  const int block_size,
+  const int block_size
   ) {
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
@@ -205,7 +205,7 @@ __global__ void reshape_and_cache_kernel(
                                 + head_idx * head_size
                                 + head_offset;
 
-    const int64_t tgt_key_idx = block_idx * 2 * block_size * num_heads * head_size
+    const int64_t tgt_value_idx = block_idx * 2 * block_size * num_heads * head_size
                                 + 2 * block_size * num_heads * head_size + 
                                 + block_offset * num_heads * head_size
                                 + head_idx * head_size
@@ -239,8 +239,7 @@ __global__ void reshape_and_cache_kernel(
     value_stride,                                                                                  \
     num_heads,                                                                                     \
     head_size,                                                                                     \
-    block_size,                                                                                    
-    );
+    block_size);
 
 void reshape_and_cache(
   torch::Tensor& key,           // [num_tokens, num_heads, head_size]
