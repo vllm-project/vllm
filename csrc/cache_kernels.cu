@@ -199,7 +199,7 @@ __global__ void reshape_and_cache_kernel(
    [num_blocks, 2, block_size, num_heads, head_size] 
    [num_blocks, num_heads, head_size, block_size]
     */
-    const int64_t tgt_key_idx = block_idx * 1 * block_size * num_heads * head_size
+    const int64_t tgt_key_idx = block_idx * 2 * block_size * num_heads * head_size
                                 + 1 * block_size * num_heads * head_size + 
                                 + block_offset * num_heads * head_size
                                 + head_idx * head_size
