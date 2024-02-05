@@ -5,7 +5,9 @@
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
 #include "quantization/int8_kvcache/quant_utils.cuh"
+#ifdef ENABLE_FP8_E5M2
 #include "quantization/fp8_e5m2_kvcache/quant_utils.cuh"
+#endif
 
 #include <algorithm>
 #include <cassert>
@@ -13,6 +15,11 @@
 #include <vector>
 
 enum kv_cache_dtype {AUTO, FP8_E5M2, INT8};
+
+#ifdef USE_ROCM
+  #include <hip/hip_bf16.h>
+  typedef __hip_bfloat16 __nv_bfloat16;
+#endif
 
 void swap_blocks(
   torch::Tensor& src,
