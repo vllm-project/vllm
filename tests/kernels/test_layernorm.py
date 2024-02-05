@@ -5,7 +5,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 4096]  # Arbitrary values for testing
-HIDDEN_SIZES = [768, 5120, 8192]  # Arbitrary values for testing
+HIDDEN_SIZES = [768, 5120, 8192, 65536]  # Arbitrary values for testing
 ADD_RESIDUAL = [False, True]
 SEEDS = [0]
 CUDA_DEVICES = [
