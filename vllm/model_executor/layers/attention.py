@@ -132,23 +132,24 @@ class PagedAttention(nn.Module):
 
         if input_metadata.is_prompt:
             # Prompt run.
-            if self.num_kv_heads != self.num_heads:
-                # As of Nov 2023, xformers only supports MHA. For MQA/GQA,
-                # project the key and value tensors to the desired number of
-                # heads.
-                # TODO(woosuk): Use MQA/GQA kernels for higher performance.
-                query = query.view(query.shape[0], self.num_kv_heads,
-                                   self.num_queries_per_kv, query.shape[-1])
-                key = key[:, :,
-                          None, :].expand(key.shape[0], self.num_kv_heads,
-                                          self.num_queries_per_kv,
-                                          key.shape[-1])
-                value = value[:, :, None, :].expand(value.shape[0],
-                                                    self.num_kv_heads,
-                                                    self.num_queries_per_kv,
-                                                    value.shape[-1])
+
             # old attn
             if kv_cache is None:
+                if self.num_kv_heads != self.num_heads:
+                    # As of Nov 2023, xformers only supports MHA. For MQA/GQA,
+                    # project the key and value tensors to the desired number of
+                    # heads.
+                    # TODO(woosuk): Use MQA/GQA kernels for higher performance.
+                    query = query.view(query.shape[0], self.num_kv_heads,
+                                    self.num_queries_per_kv, query.shape[-1])
+                    key = key[:, :,
+                            None, :].expand(key.shape[0], self.num_kv_heads,
+                                            self.num_queries_per_kv,
+                                            key.shape[-1])
+                    value = value[:, :, None, :].expand(value.shape[0],
+                                                        self.num_kv_heads,
+                                                        self.num_queries_per_kv,
+                                                        value.shape[-1])
                 # Set attention bias if not provided. This typically happens at
                 # the very attention layer of every iteration.
                 # FIXME(woosuk): This is a hack.
