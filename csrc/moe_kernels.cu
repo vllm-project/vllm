@@ -189,7 +189,7 @@ typename Gemm::Arguments MakeArguments(torch::Tensor a,
 
   typename Gemm::Arguments arguments{
     cutlass::gemm::GemmUniversalMode::kGrouped,
-    {static_cast<int>(num_experts), problem_sizes.data_ptr(), problem_sizes_host.data()},
+    {static_cast<int>(num_experts), reinterpret_cast<typename ProblemShape::UnderlyingProblemShape*>(problem_sizes.data_ptr()), problem_sizes_host.data()},
     {(ElementA**)ptr_a.data_ptr(), /*lda=*/(int64_t*)lda.data_ptr(),
      (ElementB**)ptr_b.data_ptr(), /*ldb=*/(int64_t*)ldb.data_ptr()},
     {{/*alpha=*/1.0f, /*beta=*/0.0f},
