@@ -24,6 +24,8 @@ def main(args: argparse.Namespace):
         trust_remote_code=args.trust_remote_code,
         dtype=args.dtype,
         enforce_eager=args.enforce_eager,
+        kv_cache_dtype=args.kv_cache_dtype,
+        device=args.device,
     )
 
     sampling_params = SamplingParams(
@@ -118,6 +120,13 @@ if __name__ == '__main__':
                         action='store_true',
                         help='enforce eager mode and disable CUDA graph')
     parser.add_argument(
+        "--kv-cache-dtype",
+        type=str,
+        choices=['auto', 'fp8_e5m2'],
+        default='auto',
+        help=
+        'Data type for kv cache storage. If "auto", will use model data type.')
+    parser.add_argument(
         '--profile',
         action='store_true',
         help='profile the generation process of a single batch')
@@ -127,5 +136,11 @@ if __name__ == '__main__':
         default=None,
         help=('path to save the pytorch profiler output. Can be visualized '
               'with ui.perfetto.dev or Tensorboard.'))
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda",
+        choices=["cuda"],
+        help='device type for vLLM execution, supporting CUDA only currently.')
     args = parser.parse_args()
     main(args)
