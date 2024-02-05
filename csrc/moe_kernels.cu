@@ -29,17 +29,6 @@
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
 
-// CHECK THESE:
-
-#include "cutlass/util/command_line.h"
-#include "cutlass/util/distribution.h"
-#include "cutlass/util/host_tensor.h"
-#include "cutlass/util/packed_stride.hpp"
-#include "cutlass/util/tensor_view_io.h"
-#include "cutlass/util/reference/device/gemm.h"
-#include "cutlass/util/reference/device/tensor_compare.h"
-#include "cutlass/util/reference/device/tensor_fill.h"
-
 using namespace cute;
 
 namespace vllm {
@@ -192,8 +181,7 @@ typename Gemm::Arguments MakeArguments(torch::Tensor a,
   torch::Tensor ptr_a = CopyToDevice(ptr_a_host, a.device());
   torch::Tensor ptr_b = CopyToDevice(ptr_b_host, a.device());
   torch::Tensor ptr_c = CopyToDevice(ptr_c_host, a.device());
-  cutlass::DeviceAllocation<typename ProblemShape::UnderlyingProblemShape> problem_sizes;
-  problem_sizes.copy_from_host(problem_sizes_host.data());
+  torch::Tensor problem_sizes = CopyToDevice(problem_sizes_host, a.device());
 
   cutlass::KernelHardwareInfo hw_info;
   hw_info.device_id = b.device().index();
@@ -201,7 +189,7 @@ typename Gemm::Arguments MakeArguments(torch::Tensor a,
 
   typename Gemm::Arguments arguments{
     cutlass::gemm::GemmUniversalMode::kGrouped,
-    {static_cast<int>(num_experts), problem_sizes.get(), problem_sizes_host.data()},
+    {static_cast<int>(num_experts), problem_sizes.data_ptr(), problem_sizes_host.data()},
     {(ElementA**)ptr_a.data_ptr(), /*lda=*/(int64_t*)lda.data_ptr(),
      (ElementB**)ptr_b.data_ptr(), /*ldb=*/(int64_t*)ldb.data_ptr()},
     {{/*alpha=*/1.0f, /*beta=*/0.0f},
