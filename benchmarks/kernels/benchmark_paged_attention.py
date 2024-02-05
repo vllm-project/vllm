@@ -66,15 +66,16 @@ def main(
 
     # Create the KV cache.
     use_flash_attn = version == "flash-attn"
-    key_caches, value_caches = create_kv_caches_with_random(NUM_BLOCKS,
-                                                            block_size,
-                                                            1,
-                                                            num_kv_heads,
-                                                            head_size,
-                                                            kv_cache_dtype,
-                                                            dtype,
-                                                            use_flash_attn=use_flash_attn,
-                                                            device=device)
+    key_caches, value_caches = create_kv_caches_with_random(
+        NUM_BLOCKS,
+        block_size,
+        1,
+        num_kv_heads,
+        head_size,
+        kv_cache_dtype,
+        dtype,
+        use_flash_attn=use_flash_attn,
+        device=device)
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Prepare for the paged attention kernel.
