@@ -30,4 +30,5 @@ void unpermute_and_reduce(
   torch::Tensor& experts_output,
   torch::Tensor& topk_weights,
   torch::Tensor& topk_indices,
-  torch::Tensor& reverse_permutation_map);
+  torch::Tensor& reverse_permutation_map,
+  bool renormalize);

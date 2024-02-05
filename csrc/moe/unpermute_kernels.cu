@@ -156,12 +156,14 @@ void finalizeMoeRoutingKernelLauncherSelectBias(const T* expanded_permuted_rows,
 template <typename T>
 void finalizeMoeRoutingKernelLauncher(const T* expanded_permuted_rows, T* reduced_unpermuted_output,
     const float* topk_weights,  const int* expanded_source_row_to_expanded_dest_row, const int* expert_for_source_row,
-    const int num_rows, const int cols, const int k, cudaStream_t stream)
+    const int num_rows, const int cols, const int k, bool renormalize, cudaStream_t stream)
 {
+    const MOEExpertScaleNormalizationMode normalization_mode = renormalize ? MOEExpertScaleNormalizationMode::RENORMALIZE
+                                                                         : MOEExpertScaleNormalizationMode::NONE;
     finalizeMoeRoutingKernelLauncherSelectBias<T, 0>(
         expanded_permuted_rows, reduced_unpermuted_output, nullptr, nullptr, nullptr,
         topk_weights, expanded_source_row_to_expanded_dest_row, expert_for_source_row,
-        num_rows, cols, k, nullptr, false, MOEExpertScaleNormalizationMode::RENORMALIZE, stream);
+        num_rows, cols, k, nullptr, false, normalization_mode, stream);
 }
 
 } // namespace moe
@@ -172,7 +174,8 @@ void unpermute_and_reduce(
     torch::Tensor& experts_output,              // [num_tokens * topk, hidden_size]
     torch::Tensor& topk_weights,                // [num_tokens, topk]
     torch::Tensor& topk_indices,                // [num_tokens, topk]
-    torch::Tensor& reverse_permutation_map)     // [num_tokens * topk]
+    torch::Tensor& reverse_permutation_map,     // [num_tokens * topk]
+    bool renormalize)
 {
     const int hidden_size = output_tokens.size(-1);
     const int num_tokens = output_tokens.numel() / hidden_size;
@@ -192,6 +195,7 @@ void unpermute_and_reduce(
                 num_tokens,
                 hidden_size,
                 topk,
+                renormalize,
                 stream);
         });
 }
