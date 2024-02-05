@@ -152,10 +152,8 @@ class StatLogger:
         # Add to token counters.
         counter_prompt_tokens.add(labels, stats.num_prompt_tokens)
         counter_generation_tokens.add(labels, stats.num_generation_tokens)
-        for val in stats.num_prompt_tokens_lst:
-            histogram_prompt_tokens.observe(labels, val)
-        for val in stats.num_generation_tokens_lst:
-            histogram_generation_tokens.observe(labels, val)
+
+        # Add to request counters.
         for finished_reason, count in stats.finished_reason_counter.items():
             counter_request_success.add(
                 {
@@ -163,11 +161,19 @@ class StatLogger:
                     "finished_reason": finished_reason,
                 }, count)
 
-        # Observe request level latencies in histograms.
+        # Observe number of tokens in histograms.
+        for val in stats.num_prompt_tokens_lst:
+            histogram_prompt_tokens.observe(labels, val)
+        for val in stats.num_generation_tokens_lst:
+            histogram_generation_tokens.observe(labels, val)
+
+        # Observe sampling params in histograms.
         for val in stats.max_tokens:
             histogram_max_tokens.observe(labels, val)
         for n in stats.request_n:
             histogram_request_n.observe(labels, n)
+
+        # Observe request level latencies in histograms.
         for ttft in stats.time_to_first_tokens:
             histogram_time_to_first_token.observe(labels, ttft)
         for tpot in stats.time_per_output_tokens:
