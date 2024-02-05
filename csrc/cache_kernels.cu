@@ -155,15 +155,16 @@ template<typename scalar_t, typename cache_t, bool is_fp8_e5m2_kv_cache>
 __global__ void reshape_and_cache_kernel(
   const scalar_t* __restrict__ key,           // [num_tokens, num_heads, head_size]
   const scalar_t* __restrict__ value,         // [num_tokens, num_heads, head_size]
-  cache_t* __restrict__ key_cache,            // [num_blocks, num_heads, head_size/x, block_size, x]
-  cache_t* __restrict__ value_cache,          // [num_blocks, num_heads, head_size, block_size]
+  //cache_t* __restrict__ key_cache,            // [num_blocks, num_heads, head_size/x, block_size, x]
+  //cache_t* __restrict__ value_cache,          // [num_blocks, num_heads, head_size, block_size]
+  cacht_t* __restrict__ kv_cache,             // [num_blocks, 2, block_size, num_heads, head_size]
   const int64_t* __restrict__ slot_mapping,   // [num_tokens]
   const int key_stride,
   const int value_stride,
   const int num_heads,
   const int head_size,
   const int block_size,
-  const int x) {
+  ) {
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
   if (slot_idx < 0) {
@@ -176,14 +177,16 @@ __global__ void reshape_and_cache_kernel(
 
   const int n = num_heads * head_size;
   for (int i = threadIdx.x; i < n; i += blockDim.x) {
+    //ok
     const int64_t src_key_idx = token_idx * key_stride + i;
     const int64_t src_value_idx = token_idx * value_stride + i;
 
+    //ok
     const int head_idx = i / head_size;
     const int head_offset = i % head_size;
-    const int x_idx = head_offset / x;
-    const int x_offset = head_offset % x;
-
+    //const int x_idx = head_offset / x;
+    //const int x_offset = head_offset % x;
+    /*
     const int64_t tgt_key_idx = block_idx * num_heads * (head_size / x) * block_size * x
                                 + head_idx * (head_size / x) * block_size * x
                                 + x_idx * block_size * x
@@ -193,18 +196,33 @@ __global__ void reshape_and_cache_kernel(
                                   + head_idx * head_size * block_size
                                   + head_offset * block_size
                                   + block_offset;
+   [num_blocks, 2, block_size, num_heads, head_size] 
+   [num_blocks, num_heads, head_size, block_size]
+    */
+    const int64_t tgt_key_idx = block_idx * 1 * block_size * num_heads * head_size
+                                + 1 * block_size * num_heads * head_size + 
+                                + block_offset * num_heads * head_size
+                                + head_idx * head_size
+                                + head_offset;
+
+    const int64_t tgt_key_idx = block_idx * 2 * block_size * num_heads * head_size
+                                + 2 * block_size * num_heads * head_size + 
+                                + block_offset * num_heads * head_size
+                                + head_idx * head_size
+                                + head_offset;
+
     scalar_t tgt_key = key[src_key_idx];
     scalar_t tgt_value = value[src_value_idx];
     if constexpr (is_fp8_e5m2_kv_cache) {
 #ifdef ENABLE_FP8_E5M2
-      key_cache[tgt_key_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_key);
-      value_cache[tgt_value_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_value);
+      kv_cache[tgt_key_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_key);
+      kv_cache[tgt_value_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_value);
 #else
       assert(false);
 #endif
     } else {
-      key_cache[tgt_key_idx] = tgt_key;
-      value_cache[tgt_value_idx] = tgt_value;
+      kv_cache[tgt_key_idx] = tgt_key;
+      kv_cache[tgt_value_idx] = tgt_value;
     }
   }
 }
@@ -215,29 +233,29 @@ __global__ void reshape_and_cache_kernel(
   vllm::reshape_and_cache_kernel<KV_T, CACHE_T, IS_FP8_E5M2_KV_CACHE><<<grid, block, 0, stream>>>( \
     reinterpret_cast<KV_T*>(key.data_ptr()),                                                       \
     reinterpret_cast<KV_T*>(value.data_ptr()),                                                     \
-    reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),                                              \
-    reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),                                            \
+    reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),                                              \
     slot_mapping.data_ptr<int64_t>(),                                                              \
     key_stride,                                                                                    \
     value_stride,                                                                                  \
     num_heads,                                                                                     \
     head_size,                                                                                     \
-    block_size,                                                                                    \
-    x);
+    block_size,                                                                                    
+    );
 
 void reshape_and_cache(
   torch::Tensor& key,           // [num_tokens, num_heads, head_size]
   torch::Tensor& value,         // [num_tokens, num_heads, head_size]
-  torch::Tensor& key_cache,     // [num_blocks, num_heads, head_size/x, block_size, x]
-  torch::Tensor& value_cache,   // [num_blocks, num_heads, head_size, block_size]
+  //torch::Tensor& key_cache,     // [num_blocks, num_heads, head_size/x, block_size, x]
+  //torch::Tensor& value_cache,   // [num_blocks, num_heads, head_size, block_size]
+  torch::Tensor& kv_cache,   // [num_blocks, 2, block_size, num_heads, head_size]
   torch::Tensor& slot_mapping,  // [num_tokens]
   const std::string& kv_cache_dtype)
 {
   int num_tokens = key.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);
-  int block_size = key_cache.size(3);
-  int x = key_cache.size(4);
+  int block_size = kv_cache.size(3);
+  //int x = kv_cache.size(4);
 
   int key_stride = key.stride(0);
   int value_stride = value.stride(0);

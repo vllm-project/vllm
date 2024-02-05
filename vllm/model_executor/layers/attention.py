@@ -98,20 +98,15 @@ class PagedAttention(nn.Module):
         # profiling run.
         if kv_cache is not None:
             #flashinfer.page.
-
-            pass
             """
-
-            print(key.shape)
-            print(value.shape)
-
             append_indptr = torch.zeros(
                 (batch_size + 1,), dtype=torch.int32, device="cuda"
             )
             if input_metadata.is_prompt:
                 append_indptr[1:] = torch.cumsum(input_metadata.prompt_lens, dim=0)
             else:
-                append_indptr[1:] = torch.arange(1, batch_size + 1)
+                append_indptr = torch.arange(batch_size + 1, dtype=torch.int32).to("cuda:0")
+                #append_indptr[1:] = torch.arange(1, batch_size + 1)
 
             print(append_indptr)
 
@@ -126,16 +121,18 @@ class PagedAttention(nn.Module):
                 input_metadata.paged_kv_last_page_len
             )
             """
+
+            print(kv_cache.shape)
+            exit(0)
             
-            
-            #cache_ops.reshape_and_cache(
-            #    key,
-            #    value,
-            #    key_cache,
-            #    value_cache,
-            #    input_metadata.slot_mapping.flatten(),
-            #    input_metadata.kv_cache_dtype,
-            #)
+            cache_ops.reshape_and_cache(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                input_metadata.slot_mapping.flatten(),
+                input_metadata.kv_cache_dtype,
+            )
 
         if input_metadata.is_prompt:
             # Prompt run.
