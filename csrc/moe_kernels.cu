@@ -100,13 +100,13 @@ using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
 
 using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
 
-std::vector<cutlass::gemm::GemmCoord> MakeProblemSizes(torch::Tensor b, torch::Tensor batch_sizes) {
+std::vector<typename ProblemShape::UnderlyingProblemShape> MakeProblemSizes(torch::Tensor b, torch::Tensor batch_sizes) {
   const size_t num_experts = batch_sizes.size(0);
   const size_t k = b.size(1), n = b.size(2);
-  std::vector<cutlass::gemm::GemmCoord> problem_sizes(num_experts);
+  std::vector<typename ProblemShape::UnderlyingProblemShape> problem_sizes(num_experts);
   for (int i = 0; i < num_experts; ++i) {
     int64_t batch_size = batch_sizes.data_ptr<int64_t>()[i];
-    problem_sizes[i] = cutlass::gemm::GemmCoord(batch_size, n, k);
+    problem_sizes[i] = {batch_size, n, k};
   }
   return problem_sizes;
 }
@@ -177,7 +177,8 @@ typename Gemm::Arguments MakeArguments(torch::Tensor a,
   torch::Tensor ptr_a = CopyToDevice(ptr_a_host, a.device());
   torch::Tensor ptr_b = CopyToDevice(ptr_b_host, a.device());
   torch::Tensor ptr_c = CopyToDevice(ptr_c_host, a.device());
-  torch::Tensor problem_sizes = CopyToDevice(problem_sizes_host, a.device());
+  cutlass::DeviceAllocation<typename ProblemShape::UnderlyingProblemShape> problem_sizes;
+  problem_sizes.copy_from_host(problem_sizes_host.data());
 
   cutlass::KernelHardwareInfo hw_info;
   hw_info.device_id = b.device().index();
@@ -185,7 +186,7 @@ typename Gemm::Arguments MakeArguments(torch::Tensor a,
 
   typename Gemm::Arguments arguments{
     cutlass::gemm::GemmUniversalMode::kGrouped,
-    {num_experts, problem_sizes.data_ptr(), problem_sizes_host.data()},
+    {static_cast<int>(num_experts), problem_sizes.get(), problem_sizes_host.data()},
     {(ElementA**)ptr_a.data_ptr(), /*lda=*/(int64_t*)lda.data_ptr(),
      (ElementB**)ptr_b.data_ptr(), /*ldb=*/(int64_t*)ldb.data_ptr()},
     {{/*alpha=*/1.0f, /*beta=*/0.0f},
