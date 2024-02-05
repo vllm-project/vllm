@@ -31,7 +31,7 @@ from transformers import PretrainedConfig
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import PagedAttention
-from vllm.model_executor.layers.fused_moe import fused_moe
+from vllm.model_executor.layers.fused_moe import fused_moe, fused_moe_
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                MergedColumnParallelLinear,
@@ -156,20 +156,30 @@ class DeepseekMoE(nn.Module):
         # router_logits: (batch * sequence_length, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
-        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
-        routing_weights, selected_experts = torch.topk(routing_weights,
-                                                       self.top_k,
-                                                       dim=-1)
+        if False:
+            routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+            routing_weights, selected_experts = torch.topk(routing_weights,
+                                                        self.top_k,
+                                                        dim=-1)
 
-        if self.config.norm_topk_prob:
-            routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+            if self.config.norm_topk_prob:
+                routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
 
-        final_hidden_states = fused_moe(hidden_states,
-                                        self.w1,
-                                        self.w2,
-                                        routing_weights,
-                                        selected_experts,
-                                        inplace=True)
+            final_hidden_states = fused_moe(hidden_states,
+                                            self.w1,
+                                            self.w2,
+                                            routing_weights,
+                                            selected_experts,
+                                            inplace=True)
+        else:
+            final_hidden_states = fused_moe_(
+                hidden_states,
+                self.w1,
+                self.w2,
+                router_logits,
+                self.top_k,
+                renormalize=self.config.norm_topk_prob,
+            )
 
         if self.config.n_shared_experts is not None:
             final_hidden_states = final_hidden_states + shared_output

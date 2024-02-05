@@ -287,3 +287,65 @@ def fused_moe(hidden_states: torch.Tensor,
                          out=hidden_states)
     return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
                      dim=1)
+
+
+import vllm._moe_C as moe_kernels
+
+def fused_moe_(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+) -> torch.Tensor:
+    num_tokens = gating_output.shape[:-1].numel()
+    num_experts = gating_output.shape[-1]
+    hidden_size = hidden_states.shape[-1]
+    dtype = hidden_states.dtype
+    device = hidden_states.device
+    # print(hidden_states.shape, w1.shape, w2.shape, gating_output.shape)
+
+    topk_weights = torch.empty(num_tokens, topk, dtype=torch.float32, device=device)
+    topk_indices = torch.empty(num_tokens, topk, dtype=torch.int32, device=device)
+    token_expert_indicies = torch.empty_like(topk_indices)
+    moe_kernels.topk_softmax(
+        topk_weights,
+        topk_indices,
+        token_expert_indicies,
+        gating_output.float(),
+    )
+
+    permuted_tokens = torch.empty(num_tokens * topk, hidden_size, dtype=dtype, device=device)
+    cum_num_tokens_per_expert = torch.empty(num_experts, dtype=torch.long, device=device)
+    reverse_permutation_map = torch.empty(num_tokens * topk, dtype=torch.int32, device=device)
+    moe_kernels.expand_and_permute(
+        permuted_tokens,
+        cum_num_tokens_per_expert,
+        reverse_permutation_map,
+        hidden_states,
+        topk_indices,
+        token_expert_indicies,
+    )
+
+    mlp_output = torch.empty_like(permuted_tokens)
+    moe_kernels.moe_mlp(
+        mlp_output,
+        permuted_tokens,
+        cum_num_tokens_per_expert,
+        w1,
+        None,
+        3,
+        w2,
+    )
+
+    output_tokens = torch.empty_like(hidden_states)
+    moe_kernels.unpermute_and_reduce(
+        output_tokens,
+        mlp_output,
+        topk_weights,
+        topk_indices,
+        reverse_permutation_map,
+        renormalize,
+    )
+    return output_tokens
