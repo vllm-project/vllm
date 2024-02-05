@@ -160,9 +160,9 @@ typename Gemm::Arguments MakeArguments(torch::Tensor a,
     auto N = get<1>(problem);
     auto K = get<2>(problem);
 
-    stride_a_host.push_back(cutlass::make_cute_packed_stride(StrideA{}, cute::make_shape(M, K, Int<1>{})));
-    stride_b_host.push_back(cutlass::make_cute_packed_stride(StrideB{}, cute::make_shape(N, K, Int<1>{})));
-    stride_c_host.push_back(cutlass::make_cute_packed_stride(StrideC{}, cute::make_shape(M, N, Int<1>{})));
+    stride_a_host.push_back(cute::make_shape(M, K, Int<1>{}));
+    stride_b_host.push_back(cute::make_shape(N, K, Int<1>{}));
+    stride_c_host.push_back(cute::make_shape(M, N, Int<1>{}));
 
     offsets_a[i] = elements_a;
     offsets_b[i] = elements_b;
