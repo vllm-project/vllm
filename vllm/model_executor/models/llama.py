@@ -179,7 +179,7 @@ class LlamaDecoderLayer(nn.Module):
         num_heads = getattr(config, "num_attention_heads", None)
         num_kv_heads = getattr(config, "num_key_value_heads", num_heads)
         hidden_act = getattr(config, "hidden_act", "silu")
-        sliding_window = getattr(config, "sliding_window", False)
+        sliding_window = getattr(config, "sliding_window", None)
         attn_bias = getattr(config, "bias", False)
 
         self.self_attn = LlamaAttention(
@@ -198,9 +198,9 @@ class LlamaDecoderLayer(nn.Module):
             hidden_act=hidden_act,
             linear_method=linear_method,
         )
-        self.input_layernorm = norm_method(self.hidden_size,
+        self.input_layernorm = norm_method(config.hidden_size,
                                            eps=config.rms_norm_eps)
-        self.post_attention_layernorm = norm_method(self.hidden_size,
+        self.post_attention_layernorm = norm_method(config.hidden_size,
                                                     eps=config.rms_norm_eps)
 
     def forward(
@@ -288,12 +288,14 @@ class LlamaForCausalLM(nn.Module):
         self,
         config: LlamaConfig,
         linear_method: Optional[LinearMethodBase] = None,
-        norm_method: Optional[NormBase] = RMSNorm,
+        norm_method: Optional[NormBase] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
         self.config = config
         self.linear_method = linear_method
+        if norm_method is None:
+            norm_method = RMSNorm
         self.model = LlamaModel(config,
                                 linear_method,
                                 norm_method=norm_method,
