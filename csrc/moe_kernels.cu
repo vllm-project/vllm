@@ -255,11 +255,11 @@ typename Gemm::Arguments MakeArguments(torch::Tensor a,
   typename Gemm::Arguments arguments{
     cutlass::gemm::GemmUniversalMode::kGrouped,
     {static_cast<int>(num_experts), reinterpret_cast<typename ProblemShape::UnderlyingProblemShape*>(problem_sizes.data_ptr()), problem_sizes_host.data()},
-    {(ElementA**)ptr_a.data_ptr(), (StrideA*)stride_a.data_ptr(),
-     (ElementB**)ptr_b.data_ptr(), (StrideB*)stride_b.data_ptr()},
+    {ptr_a.data_ptr(), (StrideA*)stride_a.data_ptr(),
+     ptr_b.data_ptr(), (StrideB*)stride_b.data_ptr()},
     {{/*alpha=*/1.0f, /*beta=*/0.0f},
-     (ElementC**)ptr_c.data_ptr(), (StrideC*)stride_c.data_ptr(),
-     (ElementC**)ptr_c.data_ptr(), (StrideC*)stride_c.data_ptr()},
+     ptr_c.data_ptr(), (StrideC*)stride_c.data_ptr(),
+     ptr_c.data_ptr(), (StrideC*)stride_c.data_ptr()},
     hw_info
   };
 
