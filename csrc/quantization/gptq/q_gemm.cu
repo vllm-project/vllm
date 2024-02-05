@@ -839,14 +839,20 @@ __global__ void group_gemm_half_q_half_gptq_kernel
     const half* __restrict__ topk_weights,
     const int* __restrict__ sorted_token_ids_ptr,
     const int* __restrict__ expert_ids_ptr,
+    const int* __restrict__ num_tokens_post_padded,
     const int num_valid_tokens,
     const int top_k
 )
 {
+    int num_tokens = *num_tokens_post_padded;
+    int offset_m = blockIdx.y * m_count;
+    if (offset_m >= num_tokens) return
+
     int expert_id = expert_ids_ptr[blockIdx.y];
     b_q_weight = b_q_weight + size_k * size_n / 8 * expert_id;
     b_gptq_qzeros = b_gptq_qzeros + groups * size_n / 8 * expert_id;
     b_gptq_scales = b_gptq_scales + groups * size_n * expert_id;
+    b_q_perm = b_q_perm + size_k * expert_id;
 
     MatrixView_half a_(a, size_m, size_k);
     MatrixView_half_rw c_(c, size_m, size_n);
@@ -857,7 +863,6 @@ __global__ void group_gemm_half_q_half_gptq_kernel
 
     // Block
     int offset_n = blockIdx.x * BLOCK_KN_SIZE * 4;
-    int offset_m = blockIdx.y * m_count;
     int offset_k = blockIdx.z * BLOCK_KN_SIZE;
 
     int end_n = min(offset_n + BLOCK_KN_SIZE * 4, size_n);
@@ -954,10 +959,8 @@ __global__ void group_gemm_half_q_half_gptq_kernel
             dequant_4bit_8_gptq(load_int4.z, dq[2], z1z16[2], y1y16[2], size_n, false);
             dequant_4bit_8_gptq(load_int4.w, dq[3], z1z16[3], y1y16[3], size_n, false);
 
-            #pragma unroll
-            for (int m = 0; m < m_count; m++)
+            for (int m = 0; m < valid_count; m++)
             {
-                if (m >= valid_count) break;
                 block_c[m][0] = fma(dot22_8_f(dq[0], a_ptr + m * a_stride), scales[0], block_c[m][0]);
                 block_c[m][1] = fma(dot22_8_f(dq[1], a_ptr + m * a_stride), scales[1], block_c[m][1]);
                 block_c[m][2] = fma(dot22_8_f(dq[2], a_ptr + m * a_stride), scales[2], block_c[m][2]);
@@ -997,6 +1000,7 @@ void group_gemm_half_q_half_cuda
     const half* __restrict__ topk_weights,
     const int* __restrict__ sorted_token_ids_ptr,
     const int* __restrict__ expert_ids_ptr,
+    const int* __restrict__ num_tokens_post_padded,
     const int num_valid_tokens,
     const int top_k,
     int size_m,
@@ -1030,6 +1034,7 @@ void group_gemm_half_q_half_cuda
         topk_weights,
         sorted_token_ids_ptr,
         expert_ids_ptr,
+        num_tokens_post_padded,
         num_valid_tokens,
         top_k
     );
@@ -1049,10 +1054,15 @@ __global__ void group_gemm_half_q_half_alt_kernel(
     const half* __restrict__ topk_weights,
     const int* __restrict__ sorted_token_ids_ptr,
     const int* __restrict__ expert_ids_ptr,
+    const int* __restrict__ num_tokens_post_padded,
     const int num_valid_tokens,
     const int top_k
 )
 {
+    int num_tokens = *num_tokens_post_padded;
+    int b = blockIdx.y * BLOCK_M_SIZE_MAX;
+    if (b >= num_tokens) return;
+
     int expert_id = expert_ids_ptr[blockIdx.y];
     mat = mat + height * width * expert_id;
     scales = scales + groups * width * expert_id;
@@ -1062,8 +1072,7 @@ __global__ void group_gemm_half_q_half_alt_kernel(
     int zero_width = width / 8;
     int vec_height = height * 4;
     const int blockwidth2 = BLOCK_KN_SIZE / 2;
-    int b = blockIdx.y * BLOCK_M_SIZE_MAX;
-    int b_end = min(BLOCK_M_SIZE_MAX, batch - b);
+    int b_end = BLOCK_M_SIZE_MAX;
     int h = BLOCK_KN_SIZE * blockIdx.z / 8;
     int h_end = min(BLOCK_KN_SIZE / 8, height - h) * 4;
     int w = BLOCK_KN_SIZE * blockIdx.x + threadIdx.x;
@@ -1140,14 +1149,14 @@ __global__ void group_gemm_half_q_half_alt_kernel(
 #else
             res[m] = __hadd(res[m], __hadd(__ushort_as_half(res2.x), __ushort_as_half(res2.y)));
 #endif
-            if (topk_weights) {
-                res[m] = __hmul(res[m], topk_weights[token_a[m]]);
-            }
         }
         i += width;
         k += 4;
     }
     for (int m = 0; m < b_end; m++) {
+        if (topk_weights) {
+            res[m] = __hmul(res[m], topk_weights[token_a[m]]);
+        }
         atomicAdd(&mul[token_a[m] * width + w], res[m]);
     }
 }
@@ -1164,6 +1173,7 @@ void group_gemm_half_q_half_alt
     const half* __restrict__ topk_weights,
     const int* __restrict__ sorted_token_ids_ptr,
     const int* __restrict__ expert_ids_ptr,
+    const int* __restrict__ num_tokens_post_padded,
     const int num_valid_tokens,
     const int top_k,
     int size_m,
@@ -1197,6 +1207,7 @@ void group_gemm_half_q_half_alt
         topk_weights,
         sorted_token_ids_ptr,
         expert_ids_ptr,
+        num_tokens_post_padded,
         num_valid_tokens,
         top_k
     );
@@ -1213,6 +1224,7 @@ void group_gemm_half_q_half_cuda
     const half* __restrict__ topk_weights,
     const int* __restrict__ sorted_token_ids_ptr,
     const int* __restrict__ expert_ids_ptr,
+    const int* __restrict__ num_tokens_post_padded,
     const int num_valid_tokens,
     const int top_k,
     int size_m,
@@ -1225,13 +1237,15 @@ void group_gemm_half_q_half_cuda
     if (use_exllama) {
         group_gemm_half_q_half_cuda(
             a, b_q_weight, b_gptq_qzeros, b_gptq_scales, b_g_idx, c,
-            topk_weights, sorted_token_ids_ptr, expert_ids_ptr, num_valid_tokens,
+            topk_weights, sorted_token_ids_ptr, expert_ids_ptr,
+            num_tokens_post_padded, num_valid_tokens,
             top_k, size_m, size_n, size_k, pad_size_m, groups
         );
     } else {
         group_gemm_half_q_half_alt(
             a, b_q_weight, b_gptq_qzeros, b_gptq_scales, b_g_idx, c,
-            topk_weights, sorted_token_ids_ptr, expert_ids_ptr, num_valid_tokens,
+            topk_weights, sorted_token_ids_ptr, expert_ids_ptr,
+            num_tokens_post_padded, num_valid_tokens,
             top_k, size_m, size_n, size_k, pad_size_m, groups
         );
     }
@@ -1299,6 +1313,7 @@ torch::Tensor group_gptq_gemm
     torch::Tensor topk_weights,
     torch::Tensor sorted_token_ids_ptr,
     torch::Tensor expert_ids_ptr,
+    torch::Tensor num_tokens_post_padded,
     bool mul_weights,
     bool use_exllama
 )
@@ -1306,7 +1321,7 @@ torch::Tensor group_gptq_gemm
     const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
 
     auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
-    at::Tensor c = torch::empty({a.size(0), topk_weights.size(1), b_q_weight.size(2)}, options);
+    at::Tensor c = torch::zeros({a.size(0), topk_weights.size(1), b_q_weight.size(2)}, options);
 
     vllm::gptq::group_gemm_half_q_half_cuda
     (
@@ -1319,13 +1334,14 @@ torch::Tensor group_gptq_gemm
         mul_weights ? (const half*) topk_weights.data_ptr() : NULL,
         (const int*) sorted_token_ids_ptr.data_ptr(),
         (const int*) expert_ids_ptr.data_ptr(),
+        (const int*) num_tokens_post_padded.data_ptr(),
         topk_weights.numel(), // num tokens
         topk_weights.size(1) / a.size(1), // top_k
         a.size(0) * a.size(1),  // m
-        c.size(1),  // n
+        c.size(2),  // n
         a.size(2),  // k
-        b_gptq_qzeros.size(1),  // group number
         sorted_token_ids_ptr.size(0),
+        b_gptq_qzeros.size(1),  // group number
         use_exllama
     );
     return c;

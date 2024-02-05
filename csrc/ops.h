@@ -109,6 +109,7 @@ torch::Tensor group_gptq_gemm(
     torch::Tensor topk_weights,
     torch::Tensor sorted_token_ids_ptr,
     torch::Tensor expert_ids_ptr,
+    torch::Tensor num_tokens_post_padded,
     bool mul_weights,
     bool use_exllama
 );
