@@ -1,11 +1,12 @@
 """Multi-head attention."""
 from typing import List, Optional
 
+import importlib
 import torch
 import torch.nn as nn
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
-                                         LowerTriangularMaskWithTensorBias)
+                                             LowerTriangularMaskWithTensorBias)
 
 from vllm._C import ops
 from vllm._C import cache_ops
@@ -60,20 +61,15 @@ class PagedAttention(nn.Module):
 
         self.use_ref_attention = self.check_use_ref_attention()
 
-    def check_use_ref_attention(self):
+    def check_use_ref_attention(self) -> bool:
         if not is_hip():
             return False
         # For ROCm, check whether flash attention is installed or not.
         # if not, use_ref_attention needs to be True
-        try:
-            import flash_attn
-            return False
-        except ImportError:
-            print("Flash attention is not available, using reference attention")
-            return True
+        return importlib.util.find_spec("flash_attn") is None
 
-
-    def ref_masked_attention(self,
+    def ref_masked_attention(
+        self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
@@ -83,16 +79,19 @@ class PagedAttention(nn.Module):
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
         seq_len, _, _ = query.shape
-        attn_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=query.dtype, device=query.device),
+        attn_mask = torch.triu(torch.ones(seq_len,
+                                          seq_len,
+                                          dtype=query.dtype,
+                                          device=query.device),
                                diagonal=1)
         attn_mask = attn_mask * torch.finfo(query.dtype).min
 
-        attn_weights = self.scale * torch.einsum("qhd,khd->hqk", query, key).float()
+        attn_weights = self.scale * torch.einsum("qhd,khd->hqk", query,
+                                                 key).float()
         attn_weights = attn_weights + attn_mask.float()
         attn_weights = torch.softmax(attn_weights, dim=-1).to(value.dtype)
         out = torch.einsum("hqk,khd->qhd", attn_weights, value)
         return out
-
 
     def forward(
         self,
@@ -178,7 +177,7 @@ class PagedAttention(nn.Module):
                         query,
                         key,
                         value,
-                        )
+                    )
                     # Using view got RuntimeError: view size is not compatible with input tensor's size and stride
                     # (at least one dimension spans across two contiguous subspaces). Use reshape instead
                     return output.reshape(batch_size, seq_len, hidden_size)
