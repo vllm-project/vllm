@@ -1,37 +1,20 @@
 """Custom normalization layers."""
 from typing import Optional, Tuple, Union
 
-from abc import ABC, abstractmethod
-
 import torch
 import torch.nn as nn
 
 from vllm._C import ops
 
-
-class NormBase(nn.Module):
-
-    @abstractmethod
-    def forward(
-        self,
-        x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        """normalization."""
-        raise NotImplementedError
-
-
-class LayerNorm(NormBase):
+class LayerNorm(nn.LayerNorm):
 
     def __init__(
         self,
         hidden_size: int,
         eps: float = 1e-6,
     ) -> None:
-        super().__init__()
-        self.norm = nn.LayerNorm(hidden_size, eps=eps)
+        super().__init__(hidden_size, eps=eps)
 
-    @abstractmethod
     def forward(
         self,
         x: torch.Tensor,
@@ -39,12 +22,15 @@ class LayerNorm(NormBase):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """normalization."""
         if residual is not None:
-            x = self.norm(x)
+            x = x + residual
+            residual = x
+        x = super().forward(x)
+        if residual is None:
+            return x
+        else:
             return x, residual
-        return self.norm(x)
 
-
-class RMSNorm(NormBase):
+class RMSNorm(nn.Module):
     """Root mean square normalization.
 
     Computes x -> w * x / sqrt(E[x^2] + eps) where w is the learned weight.
