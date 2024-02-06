@@ -2,10 +2,8 @@
 
 Run `pytest tests/kernels/test_moe.py`.
 """
-
 import pytest
 import torch
-
 from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
@@ -14,22 +12,21 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.models.mixtral import MixtralMoE
 
 
-def torch_moe(a, w1, w2, topk_weight, topk_ids):
+def torch_moe(a, w1, w2, score, topk):
     B, D = a.shape
-    a = a.view(B, -1, D).repeat(1, topk_ids.shape[1], 1).reshape(-1, D)
-    out = torch.zeros(B * topk_ids.shape[1],
-                      w2.shape[1],
-                      dtype=a.dtype,
-                      device=a.device)
-    topk_ids = topk_ids.view(-1)
+    a = a.view(B, -1, D).repeat(1, topk, 1).reshape(-1, D)
+    out = torch.zeros(B * topk, w2.shape[1], dtype=a.dtype, device=a.device)
+    score = torch.softmax(score, dim=-1, dtype=torch.float32)
+    topk_weight, topk_ids = torch.topk(score, topk)
     topk_weight = topk_weight.view(-1)
+    topk_ids = topk_ids.view(-1)
     for i in range(w1.shape[0]):
         mask = topk_ids == i
         if mask.sum():
             out[mask] = SiluAndMul()(
                 a[mask] @ w1[i].transpose(0, 1)) @ w2[i].transpose(0, 1)
     return (out.view(B, -1, w2.shape[1]) *
-            topk_weight.view(B, -1, 1)).sum(dim=1)
+            topk_weight.view(B, -1, 1).to(out.dtype)).sum(dim=1)
 
 
 @pytest.mark.parametrize("m", [512, 222, 33, 1])
@@ -51,11 +48,8 @@ def test_fused_moe(
     w2 = torch.randn((e, k, n), device='cuda', dtype=dtype) / 10
 
     score = torch.randn((m, e), device='cuda', dtype=dtype)
-    score = torch.softmax(score, dim=-1)
-    topk_weight, topk_ids = torch.topk(score, topk)
-
-    triton_output = fused_moe(a, w1, w2, topk_weight, topk_ids, False)
-    torch_output = torch_moe(a, w1, w2, topk_weight, topk_ids)
+    triton_output = fused_moe(a, w1, w2, score, topk, renormalize=False)
+    torch_output = torch_moe(a, w1, w2, score, topk)
     assert torch.allclose(triton_output, torch_output, atol=1e-2, rtol=0)
 
 
@@ -75,7 +69,7 @@ def test_mixtral_moe(dtype: torch.dtype):
         intermediate_size=config.intermediate_size,
         params_dtype=dtype,
         tp_size=1,
-    )
+    ).cuda()
 
     # Load the weights
     vllm_moe.gate.linear_weights["weight"][:] = hf_moe.gate.weight.data
