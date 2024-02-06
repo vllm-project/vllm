@@ -24,8 +24,6 @@
 from typing import List, Optional, Tuple
 
 import torch
-import torch.nn.functional as F
-
 from torch import nn
 from transformers import MixtralConfig
 
@@ -128,18 +126,12 @@ class MixtralMoE(nn.Module):
         hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (batch * sequence_length, n_experts)
         router_logits, _ = self.gate(hidden_states)
-
-        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
-        routing_weights, selected_experts = torch.topk(routing_weights,
-                                                       self.top_k,
-                                                       dim=-1)
-        routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
-
         final_hidden_states = fused_moe(hidden_states,
                                         self.ws,
                                         self.w2s,
-                                        routing_weights,
-                                        selected_experts,
+                                        router_logits,
+                                        self.top_k,
+                                        renormalize=True,
                                         inplace=True)
 
         if self.tp_size > 1:
