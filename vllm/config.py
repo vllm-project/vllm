@@ -49,6 +49,9 @@ class ModelConfig:
             the default version.
         max_model_len: Maximum length of a sequence (including prompt and
             output). If None, will be derived from the model.
+        allow_override_max_model_len: If true, allows the engine to override the
+            provided or derived maximum sequence length depending on the
+            measured amount of free GPU memory.
         quantization: Quantization method that was used to quantize the model
             weights. If None, we assume the model weights are not quantized.
         enforce_eager: Whether to enforce eager execution. If True, we will
@@ -72,6 +75,7 @@ class ModelConfig:
         revision: Optional[str] = None,
         tokenizer_revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
+        allow_override_max_model_len: bool = False,
         quantization: Optional[str] = None,
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
@@ -107,6 +111,7 @@ class ModelConfig:
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
         self.max_model_len = _get_and_verify_max_len(self.hf_config,
                                                      max_model_len)
+        self.allow_override_max_model_len = allow_override_max_model_len
         self._verify_load_format()
         self._verify_tokenizer_mode()
         self._verify_quantization()

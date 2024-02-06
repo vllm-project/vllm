@@ -20,6 +20,7 @@ class EngineArgs:
     kv_cache_dtype: str = 'auto'
     seed: int = 0
     max_model_len: Optional[int] = None
+    allow_override_max_model_len: bool = False
     worker_use_ray: bool = False
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
@@ -137,6 +138,12 @@ class EngineArgs:
                             default=EngineArgs.max_model_len,
                             help='model context length. If unspecified, '
                             'will be automatically derived from the model.')
+        parser.add_argument(
+            '--allow-override-max-model-len',
+            action='store_true',
+            help='If true, allows the engine to override the provided or '
+                 'derived maximum sequence length depending on the measured '
+                 'amount of free GPU memory.')
         # Parallel arguments
         parser.add_argument('--worker-use-ray',
                             action='store_true',
@@ -284,6 +291,7 @@ class EngineArgs:
                                    self.download_dir, self.load_format,
                                    self.dtype, self.seed, self.revision,
                                    self.tokenizer_revision, self.max_model_len,
+                                   self.allow_override_max_model_len,
                                    self.quantization, self.enforce_eager,
                                    self.max_context_len_to_capture)
         cache_config = CacheConfig(self.block_size,
