@@ -18,7 +18,7 @@ from vllm.utils import str_to_int_tuple
 @dataclass
 class TensorizerArgs:
     download_dir: Union[io.BufferedIOBase, io.RawIOBase, typing.BinaryIO, str,
-                        bytes, os.PathLike, int, ]
+                        bytes, os.PathLike, int]
     device: Optional[Union[torch.device, str]] = None
     dtype: Optional[torch.dtype] = None
     ## Commenting out serializer_encryption until I work out how I want to implement it
@@ -32,12 +32,20 @@ class TensorizerArgs:
 
     def __post_init__(self):
         self.file_obj = self.download_dir
+        self.s3_access_key_id = os.environ.get("S3_ACCESS_KEY_ID") or None
+        self.s3_secret_access_key = os.environ.get("S3_SECRET_ACCESS_KEY") or None
+        self.s3_endpoint = os.environ.get("S3_ENDPOINT_URL") or None
         self.serializer_params = {
-            #    "encryption": self.serializer_encryption
+            "s3_access_key_id": self.s3_access_key_id,
+            "s3_secret_access_key": self.s3_secret_access_key,
+            "s3_endpoint": self.s3_endpoint,
         }
 
         # Omitting self.dtype and self.device as this behaves weirdly
         self.deserializer_params = {
+            "s3_access_key_id": self.s3_access_key_id,
+            "s3_secret_access_key": self.s3_secret_access_key,
+            "s3_endpoint": self.s3_endpoint,
             "filter_func": self.filter_func,
             "lazy_load": self.lazy_load,
             "plaid_mode": self.plaid_mode,
@@ -244,8 +252,9 @@ class EngineArgs:
             'a numpy cache to speed up the loading. '
             '"dummy" will initialize the weights with random values, '
             'which is mainly for profiling.'
-            '"tensorizer" will load the weights using tensorizer from CoreWeave,'
-            'which assumes tensorizer_path is set to the location of the serialized weights.'
+            '"tensorizer" will load the weights using tensorizer from CoreWeave'
+            'which assumes tensorizer_uri is set to the location of the '
+                 'serialized weights.'
         )
         parser.add_argument(
             '--dtype',
@@ -529,8 +538,8 @@ class EngineArgs:
             self.trust_remote_code, self.download_dir, self.load_format,
             self.dtype, self.seed, self.revision, self.code_revision,
             self.tokenizer_revision, self.max_model_len, self.quantization,
-            self.quantization_param_path,self.enforce_eager, self.max_context_len_to_capture, self.tensorizer_args,
-            self.max_logprobs)
+            self.quantization_param_path,self.enforce_eager, self.max_context_len_to_capture,
+            self.tensorizer_args, self.max_logprobs)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
