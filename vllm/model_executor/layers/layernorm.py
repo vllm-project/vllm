@@ -6,6 +6,7 @@ import torch.nn as nn
 
 from vllm._C import ops
 
+
 class LayerNorm(nn.LayerNorm):
 
     def __init__(
@@ -29,6 +30,7 @@ class LayerNorm(nn.LayerNorm):
             return x
         else:
             return x, residual
+
 
 class RMSNorm(nn.Module):
     """Root mean square normalization.

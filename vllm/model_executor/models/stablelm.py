@@ -26,6 +26,7 @@ from vllm.model_executor.layers.layernorm import LayerNorm
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.config import LoRAConfig
 
+
 class StablelmForCausalLM(LlamaForCausalLM):
 
     def __init__(
@@ -35,4 +36,7 @@ class StablelmForCausalLM(LlamaForCausalLM):
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         norm = LayerNorm(config.hidden_size, config.norm_eps)
-        super().__init__(config=config, linear_method=linear_method, norm=norm, lora_config=lora_config)
+        super().__init__(config=config,
+                         linear_method=linear_method,
+                         norm=norm,
+                         lora_config=lora_config)

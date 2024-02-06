@@ -21,7 +21,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -96,7 +96,8 @@ class LlamaAttention(nn.Module):
         self.num_heads = self.total_num_heads // tp_size
 
         # defaut to mha
-        self.total_num_kv_heads = getattr(config, "num_key_value_heads", self.total_num_heads)
+        self.total_num_kv_heads = getattr(config, "num_key_value_heads",
+                                          self.total_num_heads)
         if self.total_num_kv_heads >= tp_size:
             # Number of KV heads is greater than TP size, so we partition
             # the KV heads across multiple tensor parallel GPUs.
@@ -140,7 +141,7 @@ class LlamaAttention(nn.Module):
 
         # stablelm
         rope_pct = getattr(config, "rope_pct", 1)
-        
+
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=int(self.head_dim * rope_pct),
@@ -151,7 +152,7 @@ class LlamaAttention(nn.Module):
 
         # mistral
         sliding_window = getattr(config, "sliding_window", None)
-        
+
         self.attn = PagedAttention(self.num_heads,
                                    self.head_dim,
                                    self.scaling,
@@ -288,7 +289,10 @@ class LlamaForCausalLM(nn.Module):
         self.linear_method = linear_method
         if norm is None:
             norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
-        self.model = LlamaModel(config, linear_method, norm=norm, lora_config=lora_config)
+        self.model = LlamaModel(config,
+                                linear_method,
+                                norm=norm,
+                                lora_config=lora_config)
         unpadded_vocab_size = config.vocab_size
         if lora_config:
             unpadded_vocab_size += lora_config.lora_extra_vocab_size
