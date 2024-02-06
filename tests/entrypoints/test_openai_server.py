@@ -139,7 +139,13 @@ async def test_single_completion(server, client: openai.AsyncOpenAI,
         completion.choices[0].text) >= 5
 
 
-async def test_single_chat_session(server, client: openai.AsyncOpenAI):
+@pytest.mark.parametrize(
+    # just test 1 lora hereafter
+    "model_name",
+    [MODEL_NAME, "zephyr-lora"],
+)
+async def test_single_chat_session(server, client: openai.AsyncOpenAI,
+                                   model_name: str):
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -150,7 +156,7 @@ async def test_single_chat_session(server, client: openai.AsyncOpenAI):
 
     # test single completion
     chat_completion = await client.chat.completions.create(
-        model=MODEL_NAME,
+        model=model_name,
         messages=messages,
         max_tokens=10,
     )
@@ -174,11 +180,17 @@ async def test_single_chat_session(server, client: openai.AsyncOpenAI):
     assert message.content is not None and len(message.content) >= 0
 
 
-async def test_completion_streaming(server, client: openai.AsyncOpenAI):
+@pytest.mark.parametrize(
+    # just test 1 lora hereafter
+    "model_name",
+    [MODEL_NAME, "zephyr-lora"],
+)
+async def test_completion_streaming(server, client: openai.AsyncOpenAI,
+                                    model_name: str):
     prompt = "What is an LLM?"
 
     single_completion = await client.completions.create(
-        model=MODEL_NAME,
+        model=model_name,
         prompt=prompt,
         max_tokens=5,
         temperature=0.0,
@@ -187,7 +199,7 @@ async def test_completion_streaming(server, client: openai.AsyncOpenAI):
     single_usage = single_completion.usage
 
     stream = await client.completions.create(
-        model=MODEL_NAME,
+        model=model_name,
         prompt=prompt,
         max_tokens=5,
         temperature=0.0,
@@ -201,7 +213,13 @@ async def test_completion_streaming(server, client: openai.AsyncOpenAI):
     assert "".join(chunks) == single_output
 
 
-async def test_chat_streaming(server, client: openai.AsyncOpenAI):
+@pytest.mark.parametrize(
+    # just test 1 lora hereafter
+    "model_name",
+    [MODEL_NAME, "zephyr-lora"],
+)
+async def test_chat_streaming(server, client: openai.AsyncOpenAI,
+                              model_name: str):
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -212,7 +230,7 @@ async def test_chat_streaming(server, client: openai.AsyncOpenAI):
 
     # test single completion
     chat_completion = await client.chat.completions.create(
-        model=MODEL_NAME,
+        model=model_name,
         messages=messages,
         max_tokens=10,
         temperature=0.0,
@@ -222,7 +240,7 @@ async def test_chat_streaming(server, client: openai.AsyncOpenAI):
 
     # test streaming
     stream = await client.chat.completions.create(
-        model=MODEL_NAME,
+        model=model_name,
         messages=messages,
         max_tokens=10,
         temperature=0.0,
@@ -239,10 +257,16 @@ async def test_chat_streaming(server, client: openai.AsyncOpenAI):
     assert "".join(chunks) == output
 
 
-async def test_batch_completions(server, client: openai.AsyncOpenAI):
+@pytest.mark.parametrize(
+    # just test 1 lora hereafter
+    "model_name",
+    [MODEL_NAME, "zephyr-lora"],
+)
+async def test_batch_completions(server, client: openai.AsyncOpenAI,
+                                 model_name: str):
     # test simple list
     batch = await client.completions.create(
-        model=MODEL_NAME,
+        model=model_name,
         prompt=["Hello, my name is", "Hello, my name is"],
         max_tokens=5,
         temperature=0.0,
@@ -252,7 +276,7 @@ async def test_batch_completions(server, client: openai.AsyncOpenAI):
 
     # test n = 2
     batch = await client.completions.create(
-        model=MODEL_NAME,
+        model=model_name,
         prompt=["Hello, my name is", "Hello, my name is"],
         n=2,
         max_tokens=5,
@@ -271,7 +295,7 @@ async def test_batch_completions(server, client: openai.AsyncOpenAI):
 
     # test streaming
     batch = await client.completions.create(
-        model=MODEL_NAME,
+        model=model_name,
         prompt=["Hello, my name is", "Hello, my name is"],
         max_tokens=5,
         temperature=0.0,
