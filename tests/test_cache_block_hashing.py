@@ -23,24 +23,20 @@ prefixes = [start + prefix_common for start in prefix_start]
 
 # Sample prompts.
 sample_prompts = [
-    "Hello, my name is",
-    "The president of the United States is",
-    "The capital of France is",
-    "The future of AI is"
+    "Hello, my name is", "The president of the United States is",
+    "The capital of France is", "The future of AI is"
 ]
 
+
 # Helper function.
-def flatten_2d(l):
-    return [lss for ls in l for lss in ls]
+def flatten_2d(li):
+    return [lss for ls in li for lss in ls]
+
 
 @pytest.mark.parametrize("model", ["facebook/opt-125m"])
 @pytest.mark.parametrize("block_size", [16])
 @pytest.mark.parametrize("max_num_seqs", [256])
-def test_auto_prefix_caching(
-    model: str,
-    block_size: int,
-    max_num_seqs: int
-):
+def test_auto_prefix_caching(model: str, block_size: int, max_num_seqs: int):
 
     tokenizer = TokenizerGroup(
         tokenizer_id="facebook/opt-125m",
@@ -59,11 +55,11 @@ def test_auto_prefix_caching(
             hashes[-1].append([])
             prompt_token_ids = tokenizer.encode(prompt)
             seq = Sequence(seq_id, prompt, prompt_token_ids, block_size)
-            
+
             num_blocks = len(prompt_token_ids) // block_size
             for idx in range(num_blocks):
                 hashes[-1][-1].append(seq.hash(idx))
-            
+
             seq_id += 1
 
     # Check that hashes made with two prefixes with different first blocks are
@@ -76,5 +72,5 @@ def test_auto_prefix_caching(
     for hash_pref in hashes:
         same_hashes = [tuple(h[:-1]) for h in hash_pref]
         different_hashes = [h[-1] for h in hash_pref]
-        assert(len(set(same_hashes)) == 1)
-        assert(len(set(different_hashes)) == len(different_hashes))
+        assert (len(set(same_hashes)) == 1)
+        assert (len(set(different_hashes)) == len(different_hashes))
