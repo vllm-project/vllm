@@ -62,6 +62,7 @@ Documentation
 
    getting_started/installation
    getting_started/amd-installation
+   getting_started/neuron-installation
    getting_started/quickstart
 
 .. toctree::
