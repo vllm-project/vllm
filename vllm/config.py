@@ -93,9 +93,12 @@ class ModelConfig:
             # download model from ModelScope hub,
             # lazy import so that modelscope is not required for normal use.
             from modelscope.hub.snapshot_download import snapshot_download  # pylint: disable=C
-            model_path = snapshot_download(model_id=model,
-                                           cache_dir=download_dir,
-                                           revision=revision)
+            if not os.path.exists(model):
+                model_path = snapshot_download(model_id=model,
+                                               cache_dir=download_dir,
+                                               revision=revision)
+            else:
+                model_path = model
             self.model = model_path
             self.download_dir = model_path
             self.tokenizer = model_path
