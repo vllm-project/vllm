@@ -80,6 +80,18 @@ torch::Tensor awq_dequantize(
     int split_k_iters,
     int thx,
     int thy);
+
+torch::Tensor awq_group_gemm(
+    torch::Tensor _in_feats,
+    torch::Tensor _kernel,
+    torch::Tensor _scaling_factors,
+    torch::Tensor _zeros,
+    torch::Tensor _topk_weights,
+    torch::Tensor _sorted_token_ids_ptr,
+    torch::Tensor _expert_ids_ptr,
+    torch::Tensor _num_tokens_post_padded,
+    bool mul_weights,
+    int split_k_iters);
 #endif
 
 void squeezellm_gemm(

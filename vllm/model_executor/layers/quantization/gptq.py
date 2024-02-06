@@ -88,6 +88,7 @@ class GPTQLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: GPTQConfig):
         self.quant_config = quant_config
+        self.support_fused_moe = True
 
     def create_weights(
         self,
@@ -235,7 +236,7 @@ class GPTQLinearMethod(LinearMethodBase):
                             "meta") else w["g_idx"],
                     )
 
-        if x.shape[0] >= 100:
+        if x.shape[0] >= 128:
             dequant_w1 = ops.dequant_gptq(
                 w1["qweight"], w1["qzeros"], w1["scales"], w1["g_idx"],
                 w1["exllama_state"] == ExllamaState.READY

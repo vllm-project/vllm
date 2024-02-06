@@ -4,6 +4,8 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm._C import ops
+from vllm.model_executor.layers.fused_moe import (
+    moe_align_block_size, fused_moe)
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
@@ -76,6 +78,7 @@ class AWQLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: AWQConfig):
         self.quant_config = quant_config
+        self.support_fused_moe = True
 
     def create_weights(self, input_size_per_partition: int,
                        output_size_per_partition: int, input_size: int,
@@ -163,3 +166,41 @@ class AWQLinearMethod(LinearMethodBase):
         if bias is not None:
             out = out + bias
         return out.reshape(out_shape)
+
+    def apply_moe_weights(self,
+                          w1: Dict[str, torch.Tensor],
+                          w2: Dict[str, torch.Tensor],
+                          x: torch.Tensor,
+                          topk_weights: torch.Tensor,
+                          topk_ids: torch.Tensor) -> torch.Tensor:
+        FP16_MATMUL_HEURISTIC_CONDITION = x.shape[:-1].numel() >= 1024
+        if FP16_MATMUL_HEURISTIC_CONDITION:
+            dequant_w1 = ops.awq_dequantize(
+                w1["qweight"], w1["scales"], w1["qzeros"], 0, 0, 0
+            ).permute(0, 2, 1)
+            dequant_w2 = ops.awq_dequantize(
+                w2["qweight"], w2["scales"], w2["qzeros"], 0, 0, 0
+            ).permute(0, 2, 1)
+            return fused_moe(x, dequant_w1, dequant_w2, topk_weights, topk_ids)
+
+        (sorted_token_ids, expert_ids, num_tokens_post_padded) = moe_align_block_size(
+            topk_ids, 16, w1["qweight"].shape[0])
+
+        x = x.view(x.shape[0], 1, *x.shape[1:])
+        pack_factor = self.quant_config.pack_factor
+
+        gate_up = ops.awq_group_gemm(
+            x, w1["qweight"], w1["scales"], w1["qzeros"],
+            topk_weights, sorted_token_ids, expert_ids, num_tokens_post_padded,
+            False, pack_factor)
+
+        out = torch.empty((gate_up.shape[:-1] + (gate_up.shape[-1] // 2, )),
+                          dtype=x.dtype, device=x.device)
+        ops.silu_and_mul(out, gate_up)
+
+        out = ops.awq_group_gemm(
+            out, w2["qweight"], w2["scales"], w2["qzeros"],
+            topk_weights, sorted_token_ids, expert_ids, num_tokens_post_padded,
+            True, pack_factor)
+
+        return torch.sum(out, dim=1)

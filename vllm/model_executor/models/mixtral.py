@@ -136,7 +136,7 @@ class MixtralMoE(nn.Module):
                                      params_dtype=self.params_dtype,
                                      linear_method=None)
 
-        if not hasattr(self.linear_method, "apply_moe_weights"):
+        if not self.linear_method.support_fused_moe:
             if self.tp_size > self.num_total_experts:
                 raise ValueError(
                     f"Tensor parallel size {self.tp_size} is greater than "
@@ -181,7 +181,7 @@ class MixtralMoE(nn.Module):
                                                        dim=-1)
         routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
 
-        if not hasattr(self.linear_method, "apply_moe_weights"):
+        if not self.linear_method.support_fused_moe:
             final_hidden_states = None
             for expert_idx in self.expert_indicies:
                 expert_layer = self.experts[expert_idx]
@@ -444,8 +444,7 @@ class MixtralForCausalLM(nn.Module):
             )
             for expert_id in range(self.config.num_local_experts)
             for weight_name, shard_id in [("w1", 0), ("w3", 1), ("w2", None)]
-        ] if self.linear_method is None or hasattr(
-            self.linear_method, "apply_moe_weights") else []
+        ] if self.linear_method is None or self.linear_method.support_fused_moe else []
 
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
@@ -490,6 +489,10 @@ class MixtralForCausalLM(nn.Module):
                 else:
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    # Skip experts that are not assigned to this worker.
+                    if ("block_sparse_moe.experts." in name
+                            and name not in params_dict):
                         continue
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",

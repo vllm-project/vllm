@@ -66,6 +66,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
 
     def __init__(self, separate_bias_add: bool = False):
         self.separate_bias_add = separate_bias_add
+        self.support_fused_moe = True
 
     def create_weights(self, input_size_per_partition: int,
                        output_size_per_partition: int, input_size: int,

@@ -66,6 +66,7 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: SqueezeLLMConfig):
         self.quant_config = quant_config
+        self.support_fused_moe = False
 
     def create_weights(self, input_size_per_partition: int,
                        output_size_per_partition: int, input_size: int,
