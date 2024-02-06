@@ -200,13 +200,13 @@ __global__ void reshape_and_cache_kernel(
    [num_blocks, num_heads, head_size, block_size]
     */
     const int64_t tgt_key_idx = block_idx * 2 * block_size * num_heads * head_size
-                                + 1 * block_size * num_heads * head_size + 
+                                + 0 * block_size * num_heads * head_size + 
                                 + block_offset * num_heads * head_size
                                 + head_idx * head_size
                                 + head_offset;
 
     const int64_t tgt_value_idx = block_idx * 2 * block_size * num_heads * head_size
-                                + 2 * block_size * num_heads * head_size + 
+                                + 1 * block_size * num_heads * head_size + 
                                 + block_offset * num_heads * head_size
                                 + head_idx * head_size
                                 + head_offset;
@@ -253,7 +253,7 @@ void reshape_and_cache(
   int num_tokens = key.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);
-  int block_size = kv_cache.size(3);
+  int block_size = kv_cache.size(2);
   //int x = kv_cache.size(4);
 
   int key_stride = key.stride(0);

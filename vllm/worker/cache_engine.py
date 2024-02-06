@@ -39,7 +39,6 @@ class CacheEngine:
         self.block_size = cache_config.block_size
         self.num_gpu_blocks = cache_config.num_gpu_blocks
         self.num_cpu_blocks = cache_config.num_cpu_blocks
-
         if cache_config.cache_dtype == "auto":
             self.dtype = model_config.dtype
         else:
