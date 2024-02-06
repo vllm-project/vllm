@@ -6,8 +6,8 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm._C import ops
-from vllm.model_executor.layers.fused_moe import (
-    moe_align_block_size, fused_moe)
+from vllm.model_executor.layers.fused_moe import (moe_align_block_size,
+                                                  fused_moe)
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
@@ -223,8 +223,8 @@ class GPTQLinearMethod(LinearMethodBase):
         for w in [w1, w2]:
             if w["exllama_state"] == ExllamaState.UNINITIALIZED:
                 if self.quant_config.desc_act:
-                    w["g_idx"] = torch.argsort(w["g_idx"], dim=-1).to(
-                        torch.int)
+                    w["g_idx"] = torch.argsort(w["g_idx"],
+                                               dim=-1).to(torch.int)
                 else:
                     w["g_idx"] = torch.empty((1, 1), device="meta")
                 w["exllama_state"] = ExllamaState.READY
@@ -232,23 +232,23 @@ class GPTQLinearMethod(LinearMethodBase):
                 for i in range(w["qweight"].shape[0]):
                     ops.gptq_shuffle(
                         w["qweight"][i],
-                        w["g_idx"][i] if w["g_idx"].device != torch.device(
-                            "meta") else w["g_idx"],
+                        w["g_idx"][i]
+                        if w["g_idx"].device != torch.device("meta") else
+                        w["g_idx"],
                     )
 
         if x.shape[0] >= 128:
             dequant_w1 = ops.dequant_gptq(
                 w1["qweight"], w1["qzeros"], w1["scales"], w1["g_idx"],
-                w1["exllama_state"] == ExllamaState.READY
-            ).permute(0, 2, 1)
+                w1["exllama_state"] == ExllamaState.READY).permute(0, 2, 1)
             dequant_w2 = ops.dequant_gptq(
                 w2["qweight"], w2["qzeros"], w2["scales"], w2["g_idx"],
-                w2["exllama_state"] == ExllamaState.READY
-            ).permute(0, 2, 1)
+                w2["exllama_state"] == ExllamaState.READY).permute(0, 2, 1)
             return fused_moe(x, dequant_w1, dequant_w2, topk_weights, topk_ids)
 
-        (sorted_token_ids, expert_ids, num_tokens_post_padded) = moe_align_block_size(
-            topk_ids, 8, w1["qweight"].shape[0])
+        (sorted_token_ids, expert_ids,
+         num_tokens_post_padded) = moe_align_block_size(
+             topk_ids, 8, w1["qweight"].shape[0])
 
         x = x.view(x.shape[0], 1, *x.shape[1:])
         gate_up = ops.group_gptq_gemm(
@@ -257,12 +257,14 @@ class GPTQLinearMethod(LinearMethodBase):
             False, w1["exllama_state"] == ExllamaState.READY)
 
         out = torch.empty((gate_up.shape[:-1] + (gate_up.shape[-1] // 2, )),
-                          dtype=x.dtype, device=x.device)
+                          dtype=x.dtype,
+                          device=x.device)
         ops.silu_and_mul(out, gate_up)
 
-        out = ops.group_gptq_gemm(
-            out, w2["qweight"], w2["qzeros"], w2["scales"], w2["g_idx"],
-            topk_weights, sorted_token_ids, expert_ids, num_tokens_post_padded,
-            True, w2["exllama_state"] == ExllamaState.READY)
+        out = ops.group_gptq_gemm(out, w2["qweight"], w2["qzeros"],
+                                  w2["scales"], w2["g_idx"], topk_weights,
+                                  sorted_token_ids, expert_ids,
+                                  num_tokens_post_padded, True,
+                                  w2["exllama_state"] == ExllamaState.READY)
 
         return torch.sum(out, dim=1)

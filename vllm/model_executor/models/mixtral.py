@@ -32,14 +32,10 @@ from transformers import MixtralConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention import PagedAttention
-from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
-                                               LinearMethodBase,
-                                               QKVParallelLinear,
-                                               ReplicatedLinear,
-                                               RowParallelLinear,
-                                               UnquantizedLinearMethod)
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear, LinearMethodBase, QKVParallelLinear,
+    ReplicatedLinear, RowParallelLinear, UnquantizedLinearMethod)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -49,7 +45,6 @@ from vllm.model_executor.parallel_utils.communication_op import (
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.utils import set_weight_attrs
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
@@ -142,8 +137,9 @@ class MixtralMoE(nn.Module):
                     f"Tensor parallel size {self.tp_size} is greater than "
                     f"the number of experts {self.num_total_experts}.")
             # Split experts equally between ranks
-            self.expert_indicies = np.array_split(range(
-                self.num_total_experts), self.tp_size)[self.rank].tolist()
+            self.expert_indicies = np.array_split(
+                range(self.num_total_experts),
+                self.tp_size)[self.rank].tolist()
             if not self.expert_indicies:
                 raise ValueError(
                     f"Rank {self.rank} has no experts assigned to it.")
@@ -157,17 +153,16 @@ class MixtralMoE(nn.Module):
                 for idx in range(self.num_total_experts)
             ])
         else:
-            self.ws = MergedColumnParallelLinear(
-                hidden_size, [intermediate_size] * 2,
-                bias=False,
-                linear_method=linear_method,
-                num_experts=num_experts)
-            self.w2s = RowParallelLinear(
-                intermediate_size,
-                hidden_size,
-                bias=False,
-                linear_method=linear_method,
-                num_experts=num_experts)
+            self.ws = MergedColumnParallelLinear(hidden_size,
+                                                 [intermediate_size] * 2,
+                                                 bias=False,
+                                                 linear_method=linear_method,
+                                                 num_experts=num_experts)
+            self.w2s = RowParallelLinear(intermediate_size,
+                                         hidden_size,
+                                         bias=False,
+                                         linear_method=linear_method,
+                                         num_experts=num_experts)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, sequence_length, hidden_size = hidden_states.shape
@@ -186,8 +181,8 @@ class MixtralMoE(nn.Module):
             for expert_idx in self.expert_indicies:
                 expert_layer = self.experts[expert_idx]
                 expert_mask = (selected_experts == expert_idx)
-                expert_weights = (routing_weights * expert_mask).sum(dim=-1,
-                                                                     keepdim=True)
+                expert_weights = (routing_weights * expert_mask).sum(
+                    dim=-1, keepdim=True)
 
                 current_hidden_states = expert_layer(hidden_states).mul_(
                     expert_weights)

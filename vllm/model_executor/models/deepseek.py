@@ -32,14 +32,10 @@ from transformers import PretrainedConfig
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import PagedAttention
-from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (UnquantizedLinearMethod,
-                                               LinearMethodBase,
-                                               MergedColumnParallelLinear,
-                                               ReplicatedLinear,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    UnquantizedLinearMethod, LinearMethodBase, MergedColumnParallelLinear,
+    ReplicatedLinear, QKVParallelLinear, RowParallelLinear)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -156,8 +152,7 @@ class DeepseekMoE(nn.Module):
                     intermediate_size=config.moe_intermediate_size,
                     hidden_act=config.hidden_act,
                     linear_method=linear_method,
-                )
-                if idx in self.expert_indicies else None
+                ) if idx in self.expert_indicies else None
                 for idx in range(self.n_routed_experts)
             ])
         else:
@@ -166,12 +161,11 @@ class DeepseekMoE(nn.Module):
                 bias=False,
                 linear_method=linear_method,
                 num_experts=self.n_routed_experts)
-            self.w2 = RowParallelLinear(
-                config.moe_intermediate_size,
-                config.hidden_size,
-                bias=False,
-                linear_method=linear_method,
-                num_experts=self.n_routed_experts)
+            self.w2 = RowParallelLinear(config.moe_intermediate_size,
+                                        config.hidden_size,
+                                        bias=False,
+                                        linear_method=linear_method,
+                                        num_experts=self.n_routed_experts)
 
         self.gate = ReplicatedLinear(config.hidden_size,
                                      self.n_routed_experts,
@@ -209,8 +203,8 @@ class DeepseekMoE(nn.Module):
             for expert_idx in self.expert_indicies:
                 expert_layer = self.experts[expert_idx]
                 expert_mask = (selected_experts == expert_idx)
-                expert_weights = (routing_weights * expert_mask).sum(dim=-1,
-                                                                     keepdim=True)
+                expert_weights = (routing_weights * expert_mask).sum(
+                    dim=-1, keepdim=True)
 
                 current_hidden_states = expert_layer(hidden_states).mul_(
                     expert_weights)
@@ -534,8 +528,9 @@ class DeepseekForCausalLM(nn.Module):
                     if name.endswith(".bias") and name not in params_dict:
                         continue
                     # Skip experts that are not assigned to this worker.
-                    if (("mlp.experts." in name or "mlp.shared_experts." in name)
-                           and name not in params_dict):
+                    if (("mlp.experts." in name
+                         or "mlp.shared_experts." in name)
+                            and name not in params_dict):
                         continue
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",
