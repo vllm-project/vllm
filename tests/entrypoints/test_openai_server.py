@@ -72,6 +72,7 @@ def server(zephyr_lora_files):
         "8192",
         "--enforce-eager",
         # lora config below
+        "--enable-lora",
         "--lora-modules",
         f"zephyr-lora={zephyr_lora_files}",
         f"zephyr-lora2={zephyr_lora_files}",

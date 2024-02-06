@@ -127,7 +127,7 @@ class OpenAIServing:
     async def _check_model(self, request) -> Optional[ErrorResponse]:
         if request.model == self.served_model:
             return
-        if request.model in [lora.name for lora in self.lora_requests]:
+        if request.model in [lora.lora_name for lora in self.lora_requests]:
             return
         return self.create_error_response(
             message=f"The model `{request.model}` does not exist.",
@@ -138,7 +138,7 @@ class OpenAIServing:
         if request.model == self.served_model:
             return
         for lora in self.lora_requests:
-            if request.model == lora.name:
+            if request.model == lora.lora_name:
                 return lora
         # if _check_model has been called earlier, this will be unreachable
         raise ValueError("The model `{request.model}` does not exist.")
