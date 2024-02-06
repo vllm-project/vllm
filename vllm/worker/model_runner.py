@@ -46,6 +46,9 @@ class ModelRunner:
         self.lora_config = lora_config
         self.is_driver_worker = is_driver_worker
 
+        self.paged_kv_index = torch.arange(12572).int().to("cuda:0") 
+
+
         # model_config can be None in tests/samplers/test_sampler.py.
         # FIXME(woosuk): This is a hack to make the tests work. Refactor this.
         self.sliding_window = (model_config.get_sliding_window()
@@ -562,7 +565,6 @@ class ModelRunner:
 
             if input_metadata.is_prompt:
                 seq_lens = input_metadata.prompt_lens
-                #seq_lens = torch.stack([a + b for a, b in zip(input_metadata.prompt_lens, input_metadata.context_lens)], dim=0)
             else:
                 seq_lens = input_metadata.context_lens
             extend_seq_lens = input_metadata.context_lens
@@ -575,42 +577,24 @@ class ModelRunner:
                 qo_indptr[1:] = torch.cumsum(input_metadata.prompt_lens, dim=0)
 
             kvi = input_metadata.slot_mapping.view(-1).type(torch.int32).to("cuda:0")
-            #paged_kv_indices = torch.div(kvi, 16, rounding_mode="floor")
 
             paged_kv_indptr = torch.zeros(
             (batch_size + 1,), dtype=torch.int32, device="cuda:0"
             )
 
-            #paged_kv_indptr[0] = slot_mapping[0][0]
-            #if input_metadata.is_prompt:
-            #    paged_kv_indptr[1:] = torch.cumsum(seq_lens, dim=0)
-            #else:
-            #    paged_kv_indptr[1:] = torch.arange(1, batch_size + 1)
-            #paged_kv_last_page_len = torch.ones((batch_size,), dtype=torch.int32, device="cuda:0")
+            paged_kv_indptr = input_metadata.slot_mapping[:, -1].flip(dims=[0]) // 16
+            paged_kv_indptr = torch.cat([paged_kv_indptr, (paged_kv_indptr[-1] + 1).unsqueeze(0)]).int()
 
-            if input_metadata.is_prompt:
-                paged_kv_indptr = torch.tensor([input_metadata.slot_mapping[0][0], input_metadata.slot_mapping[0][batch_size] + 16  ] , dtype=torch.int32).to("cuda:0") // 16
-            else:
-                paged_kv_indptr = torch.tensor([input_metadata.slot_mapping[0][0], input_metadata.slot_mapping[0][0] + 16  ] , dtype=torch.int32).to("cuda:0") // 16
             if input_metadata.is_prompt:
                 paged_kv_last_page_len = (kvi[qo_indptr[1:] - 1] % 16) + 1
             else:
                 paged_kv_last_page_len = (kvi % 16) + 1
-            
-            paged_kv_indices = torch.arange(12572).int().to("cuda:0") 
+            paged_kv_indices = self.paged_kv_index 
 
             input_metadata.paged_kv_indptr = paged_kv_indptr
-            input_metadata.paged_kv_indices = paged_kv_indices 
+            input_metadata.paged_kv_indices = paged_kv_indices
             input_metadata.paged_kv_last_page_len = paged_kv_last_page_len
 
-            #print(qo_indptr)
-            #print(paged_kv_indptr)
-            #print(paged_kv_indices)
-            #print(paged_kv_last_page_len)
-            #exit(0)
-            #print(qo_indptr)
-            #exit(0)
-            
             if input_metadata.is_prompt:
                 input_metadata.prefill_wrapper.begin_forward(
                     qo_indptr,
