@@ -10,8 +10,8 @@ import openai  # use the official client for correctness check
 from huggingface_hub import snapshot_download  # downloading lora to test lora requests
 
 MAX_SERVER_START_WAIT_S = 600  # wait for server to start for 60 seconds
-MODEL_NAME = "mistralai/Mistral-7B-v0.1"  # any model with a chat template should work here
-LORA_NAME = "typeof/zephyr-7b-beta-lora"  # lora trained to replace the zephyr-mistral delta
+MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"  # any model with a chat template should work here
+LORA_NAME = "typeof/zephyr-7b-beta-lora"  # technically this needs Mistral-7B-v0.1 as base, but we're not testing generation quality here
 
 pytestmark = pytest.mark.asyncio
 
