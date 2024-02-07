@@ -22,6 +22,12 @@ NVIDIA_SUPPORTED_ARCHS = {"7.0", "7.5", "8.0", "8.6", "8.9", "9.0"}
 ROCM_SUPPORTED_ARCHS = {"gfx90a", "gfx942"}
 # SUPPORTED_ARCHS = NVIDIA_SUPPORTED_ARCHS.union(ROCM_SUPPORTED_ARCHS)
 
+# You can use
+# VLLM_INCREMENTAL_BUILD_TORCH_PATH=`python -c "import torch; print(torch.__path__[0])"` pip install -e . --verbose
+# to do an incremental build of vLLM. Alternatively, you can use
+# `python setup.py develop` without extra environment variables, which
+# has even less overhead, but is unfortunately deprecated upstream
+# (https://github.com/pypa/setuptools/issues/917).
 if "VLLM_INCREMENTAL_BUILD_TORCH_PATH" in os.environ:
     torch_cpp_ext._TORCH_PATH = os.environ["VLLM_INCREMENTAL_BUILD_TORCH_PATH"]
 
