@@ -57,13 +57,11 @@ class LinearMethodBase(ABC):
         return linear_weights
 
     @abstractmethod
-    def apply_moe_weights(self,
-                          w1: Dict[str, torch.Tensor],
-                          w2: Dict[str, torch.Tensor],
-                          x: torch.Tensor,
-                          gating_output: torch.Tensor,
-                          topk: int,
-                          renormalize: bool) -> torch.Tensor:
+    def apply_moe_weights(self, w1: Dict[str,
+                                         torch.Tensor], w2: Dict[str,
+                                                                 torch.Tensor],
+                          x: torch.Tensor, gating_output: torch.Tensor,
+                          topk: int, renormalize: bool) -> torch.Tensor:
         """Apply the weights to the input tensor."""
         raise NotImplementedError
 
@@ -102,13 +100,11 @@ class UnquantizedLinearMethod(LinearMethodBase):
             return F.linear(x, weight)
         return F.linear(x, weight, bias)
 
-    def apply_moe_weights(self,
-                          w1: Dict[str, torch.Tensor],
-                          w2: Dict[str, torch.Tensor],
-                          x: torch.Tensor,
-                          gating_output: torch.Tensor,
-                          topk: int,
-                          renormalize: bool) -> torch.Tensor:
+    def apply_moe_weights(self, w1: Dict[str,
+                                         torch.Tensor], w2: Dict[str,
+                                                                 torch.Tensor],
+                          x: torch.Tensor, gating_output: torch.Tensor,
+                          topk: int, renormalize: bool) -> torch.Tensor:
         return fused_moe(x, w1["weight"], w2["weight"], gating_output, topk,
                          renormalize)
 

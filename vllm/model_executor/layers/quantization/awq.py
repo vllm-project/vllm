@@ -167,13 +167,11 @@ class AWQLinearMethod(LinearMethodBase):
             out = out + bias
         return out.reshape(out_shape)
 
-    def apply_moe_weights(self,
-                          w1: Dict[str, torch.Tensor],
-                          w2: Dict[str, torch.Tensor],
-                          x: torch.Tensor,
-                          gating_output: torch.Tensor,
-                          topk: int,
-                          renormalize: bool) -> torch.Tensor:
+    def apply_moe_weights(self, w1: Dict[str,
+                                         torch.Tensor], w2: Dict[str,
+                                                                 torch.Tensor],
+                          x: torch.Tensor, gating_output: torch.Tensor,
+                          topk: int, renormalize: bool) -> torch.Tensor:
         FP16_MATMUL_HEURISTIC_CONDITION = x.shape[:-1].numel() >= 1024
         if FP16_MATMUL_HEURISTIC_CONDITION:
             dequant_w1 = ops.awq_dequantize(w1["qweight"], w1["scales"],

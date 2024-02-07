@@ -213,13 +213,11 @@ class GPTQLinearMethod(LinearMethodBase):
             output = output + bias
         return output.reshape(out_shape)
 
-    def apply_moe_weights(self,
-                          w1: Dict[str, torch.Tensor],
-                          w2: Dict[str, torch.Tensor],
-                          x: torch.Tensor,
-                          gating_output: torch.Tensor,
-                          topk: int,
-                          renormalize: bool) -> torch.Tensor:
+    def apply_moe_weights(self, w1: Dict[str,
+                                         torch.Tensor], w2: Dict[str,
+                                                                 torch.Tensor],
+                          x: torch.Tensor, gating_output: torch.Tensor,
+                          topk: int, renormalize: bool) -> torch.Tensor:
         # shuffle weights for exllama
         for w in [w1, w2]:
             if w["exllama_state"] == ExllamaState.UNINITIALIZED:
