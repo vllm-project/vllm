@@ -1,6 +1,8 @@
 """Utilities for selecting and loading models."""
 import contextlib
 from typing import Optional, Type
+import gc
+from contextlib import nullcontext
 
 import torch
 import torch.nn as nn
@@ -9,6 +11,8 @@ from vllm.config import DeviceConfig, ModelConfig, LoRAConfig
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.weight_utils import (get_quant_config,
                                               initialize_dummy_weights)
+from vllm.model_executor.layers.quantization.auto_quant import \
+    (AutoQuantLinearMethod, replace_quant_params)
 
 
 @contextlib.contextmanager
@@ -65,7 +69,9 @@ def get_model(model_config: ModelConfig,
     with _set_default_torch_dtype(model_config.dtype):
         # Create a model instance.
         # The weights will be initialized as empty tensors.
-        with torch.device(device_config.device):
+        with torch.device(device_config.device) if not \
+            (isinstance(linear_method, AutoQuantLinearMethod) and
+             linear_method.quant_config.from_float) else nullcontext():
             if getattr(model_class, "supports_lora", False):
                 model = model_class(model_config.hf_config, linear_method,
                                     lora_config)
@@ -85,4 +91,17 @@ def get_model(model_config: ModelConfig,
             # Load the weights from the cached or downloaded files.
             model.load_weights(model_config.model, model_config.download_dir,
                                model_config.load_format, model_config.revision)
+        if isinstance(linear_method, AutoQuantLinearMethod):
+            replace_quant_params(model,
+                                 quant_config=linear_method.quant_config,
+                                 modules_to_not_convert="lm_head")
+            torch.cuda.synchronize()
+            if linear_method.quant_config.from_float:
+                model = model.cuda()
+            gc.collect()
+            torch.cuda.empty_cache()
+            print("Memory allocated:",
+                  torch.cuda.memory_allocated(torch.cuda.current_device()))
+            print("Memory reserved:",
+                  torch.cuda.memory_reserved(torch.cuda.current_device()))
     return model.eval()

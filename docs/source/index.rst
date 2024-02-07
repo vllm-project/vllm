@@ -88,6 +88,7 @@ Documentation
    :caption: Quantization
 
    quantization/auto_awq
+   quantization/auto_quant
 
 .. toctree::
    :maxdepth: 2

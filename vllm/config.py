@@ -149,8 +149,8 @@ class ModelConfig:
         self.tokenizer_mode = tokenizer_mode
 
     def _verify_quantization(self) -> None:
-        supported_quantization = ["awq", "gptq", "squeezellm"]
-        rocm_not_supported_quantization = ["awq"]
+        supported_quantization = ["awq", "gptq", "squeezellm", "autoquant"]
+        rocm_not_supported_quantization = ["awq", "autoquant"]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
 

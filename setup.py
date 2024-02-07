@@ -138,7 +138,7 @@ def get_pytorch_rocm_arch() -> Set[str]:
     if env_arch_list is None:
         command = "rocm_agent_enumerator"
         env_arch_list = subprocess.check_output([command]).decode('utf-8')\
-                        .strip().replace("\n", ";")
+            .strip().replace("\n", ";")
         arch_source_str = "rocm_agent_enumerator"
     else:
         arch_source_str = "PYTORCH_ROCM_ARCH env variable"
@@ -337,6 +337,10 @@ vllm_extension_sources = [
 
 if _is_cuda():
     vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
+    vllm_extension_sources.append(
+        "csrc/quantization/autoquant/int4_fp16_gemm_kernels.cu")
+    vllm_extension_sources.append("csrc/quantization/autoquant/format.cu")
+    vllm_extension_sources.append("csrc/quantization/autoquant/gemm_s4_f16.cu")
     vllm_extension_sources.append("csrc/custom_all_reduce.cu")
 
     # Add MoE kernels.

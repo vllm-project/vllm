@@ -249,10 +249,11 @@ if __name__ == "__main__":
                         "output length from the dataset.")
     parser.add_argument("--model", type=str, default="facebook/opt-125m")
     parser.add_argument("--tokenizer", type=str, default=None)
-    parser.add_argument('--quantization',
-                        '-q',
-                        choices=['awq', 'gptq', 'squeezellm', None],
-                        default=None)
+    parser.add_argument(
+        '--quantization',
+        '-q',
+        choices=['awq', 'gptq', 'squeezellm', 'autoquant', None],
+        default=None)
     parser.add_argument("--tensor-parallel-size", "-tp", type=int, default=1)
     parser.add_argument("--n",
                         type=int,
