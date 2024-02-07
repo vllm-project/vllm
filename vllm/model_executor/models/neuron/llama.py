@@ -78,7 +78,10 @@ class LlamaForCausalLM(nn.Module):
                      **kwargs):
         from transformers_neuronx.llama.model import LlamaForSampling
 
-        if not os.path.exists(f"{model_name_or_path}-split"):
+        split_model_dir = f"{model_name_or_path}-split"
+        if os.path.isdir(os.path.join(model_name_or_path, "pytorch_model.bin")):
+            split_model_dir = model_name_or_path
+        elif not os.path.exists(f"{model_name_or_path}-split"):
             from transformers.models.llama import LlamaForCausalLM
             from transformers_neuronx.module import save_pretrained_split
 
@@ -86,6 +89,5 @@ class LlamaForCausalLM(nn.Module):
                                                         low_cpu_mem_usage=True)
             save_pretrained_split(hf_model, f"{model_name_or_path}-split")
 
-        self.model = LlamaForSampling.from_pretrained(
-            f"{model_name_or_path}-split", **kwargs)
+        self.model = LlamaForSampling.from_pretrained(split_model_dir, **kwargs)
         self.model.to_neuron()
