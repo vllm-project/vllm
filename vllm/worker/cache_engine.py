@@ -6,7 +6,7 @@ import torch
 from vllm._C import cache_ops
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import in_wsl, STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
 logger = init_logger(__name__)
 
