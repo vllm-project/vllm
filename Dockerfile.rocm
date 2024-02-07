@@ -65,7 +65,7 @@ RUN mkdir libs \
 COPY ./ /app/vllm
 
 RUN python3 -m pip install --upgrade pip
-RUN python3 -m pip install xformers==0.0.23 --no-deps
+RUN python3 -m pip install xformers==0.0.24 --no-deps
 
 # Error related to odd state for numpy 1.20.3 where there is no METADATA etc, but an extra LICENSES_bundled.txt.
 # Manually removed it so that later steps of numpy upgrade can continue

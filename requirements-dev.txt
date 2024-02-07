@@ -15,6 +15,7 @@ pytest-forked
 pytest-asyncio
 httpx
 einops # required for MPT
+wheel # required for flash_attn
 flash_attn # required for HuggingFace's llama implementation
 openai
 requests
