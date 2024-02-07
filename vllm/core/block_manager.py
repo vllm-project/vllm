@@ -1,7 +1,7 @@
 """A block manager that manages token blocks."""
 import enum
-from collections import deque
-from typing import Dict, List, Optional, Set, Tuple, Deque
+from time import monotonic
+from typing import Dict, List, Optional, Set, Tuple
 
 from vllm.block import BlockTable, PhysicalTokenBlock
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
@@ -21,27 +21,42 @@ class Evictor:
         self.eviction_policy = eviction_policy
 
         # Initialize the free blocks.
-        self.free_blocks: Deque[PhysicalTokenBlock] = deque()
+        self.free_blocks: Dict[int, PhysicalTokenBlock] = {}
 
     def evict(self, table: Dict[int,
                                 PhysicalTokenBlock]) -> PhysicalTokenBlock:
         if self.eviction_policy == EvictionPolicy.LRU:
-            assert (len(self.free_blocks))
-            # Find the block in the main hash table
-            block = self.free_blocks.pop()
+            all_blocks: List[PhysicalTokenBlock] = list(
+                self.free_blocks.values())
+            assert (len(all_blocks) > 0)
 
-            # Continue poping blocks until we find one with a ref_count of 0
-            while block.ref_count != 0:
-                block = self.free_blocks.pop()
+            # Find lowest timestamp
+            lowest_timestamp = all_blocks[0].last_accessed
+            for block in all_blocks:
+                assert (block.last_accessed != 0)
+                if block.last_accessed < lowest_timestamp:
+                    lowest_timestamp = block.last_accessed
 
-            del table[block.block_hash]
-            return block
+            # Find all blocks with the lowest timestamp
+            eviction_candidates: List[PhysicalTokenBlock] = []
+            for block in all_blocks:
+                if block.last_accessed == lowest_timestamp:
+                    eviction_candidates.append(block)
+
+            # Arbitrarily evict the first candidate
+            # TODO: Evict based on the number of prefix tokens in the block
+            assert (len(eviction_candidates) > 0)
+            evicted_block = eviction_candidates[0]
+            del table[evicted_block.block_hash]
+            del self.free_blocks[evicted_block.block_hash]
+
+            return evicted_block
         else:
             raise ValueError(
                 f"Unknown cache eviction policy: {self.eviction_policy}")
 
     def return_block(self, block: PhysicalTokenBlock) -> None:
-        self.free_blocks.appendleft(block)
+        self.free_blocks[block.block_hash] = block
 
 
 class BlockAllocator:
@@ -85,16 +100,23 @@ class BlockAllocator:
         if block_hash not in self.table:
             self.table[block_hash] = self.allocate_block(block_hash)
         block = self.table[block_hash]
+        if self.evictor.free_blocks.get(block_hash) is not None:
+            del self.evictor.free_blocks[block_hash]
+
         block.ref_count += 1
         # print(f"REFCOUNT ON ALLOCTION: {block}")
         return block
 
-    def free(self, block: PhysicalTokenBlock) -> None:
-        # print(f"FREEING: {block}")
+    def free(self,
+             block: PhysicalTokenBlock,
+             now: Optional[int] = None) -> None:
         if block.ref_count == 0:
             raise ValueError(f"Double free! {block} is already freed.")
         block.ref_count -= 1
         if block.ref_count == 0:
+            if now is None:
+                now = monotonic()
+            block.last_accessed = now
             self.evictor.return_block(block)
 
     def get_num_free_blocks(self) -> int:
@@ -198,7 +220,9 @@ class BlockSpaceManager:
         num_seqs = seq_group.num_seqs(status=SequenceStatus.RUNNING)
         return num_seqs <= num_free_gpu_blocks
 
-    def append_slot(self, seq: Sequence) -> Optional[Tuple[int, int]]:
+    def append_slot(self,
+                    seq: Sequence,
+                    now: Optional[float] = None) -> Optional[Tuple[int, int]]:
         """Allocate a physical slot for a new token."""
         logical_blocks = seq.logical_token_blocks
         block_table = self.block_tables[seq.seq_id]
@@ -229,7 +253,7 @@ class BlockSpaceManager:
             new_block = self.gpu_allocator.allocate(
                 seq.hash(len(logical_blocks) - 1))
             block_table[-1] = new_block
-            self.gpu_allocator.free(last_block)
+            self.gpu_allocator.free(last_block, now)
             return last_block.block_number, new_block.block_number
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
@@ -261,7 +285,9 @@ class BlockSpaceManager:
         num_required_blocks = len(blocks) + num_swapped_seqs
         return num_free_blocks - num_required_blocks >= self.watermark_blocks
 
-    def swap_in(self, seq_group: SequenceGroup) -> Dict[int, int]:
+    def swap_in(self,
+                seq_group: SequenceGroup,
+                now: Optional[float] = None) -> Dict[int, int]:
         # CPU block -> GPU block.
         if seq_group.prefix is not None:
             # make sure to swap in the prefix first
@@ -286,7 +312,7 @@ class BlockSpaceManager:
                     mapping[cpu_block] = gpu_block
                 new_block_table.append(gpu_block)
                 # Free the CPU block swapped in to GPU.
-                self.cpu_allocator.free(cpu_block)
+                self.cpu_allocator.free(cpu_block, now)
             self.block_tables[seq.seq_id] = new_block_table
 
         block_number_mapping = {
@@ -299,7 +325,9 @@ class BlockSpaceManager:
         blocks = self._get_physical_blocks(seq_group)
         return len(blocks) <= self.cpu_allocator.get_num_free_blocks()
 
-    def swap_out(self, seq_group: SequenceGroup) -> Dict[int, int]:
+    def swap_out(self,
+                 seq_group: SequenceGroup,
+                 now: Optional[float] = None) -> Dict[int, int]:
         # GPU block -> CPU block.
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
@@ -310,7 +338,7 @@ class BlockSpaceManager:
                 if (seq_group.prefix is not None
                         and gpu_block in seq_group.prefix.block_table):
                     # NOTE: We do not swap out the prefix blocks for now.
-                    self.gpu_allocator.free(gpu_block)
+                    self.gpu_allocator.free(gpu_block, now)
                     continue
 
                 if gpu_block in mapping:
@@ -322,7 +350,7 @@ class BlockSpaceManager:
                     mapping[gpu_block] = cpu_block
                 new_block_table.append(cpu_block)
                 # Free the GPU block swapped out to CPU.
-                self.gpu_allocator.free(gpu_block)
+                self.gpu_allocator.free(gpu_block, now)
             self.block_tables[seq.seq_id] = new_block_table
 
         block_number_mapping = {
@@ -331,19 +359,21 @@ class BlockSpaceManager:
         }
         return block_number_mapping
 
-    def _free_block_table(self, block_table: BlockTable) -> None:
+    def _free_block_table(self,
+                          block_table: BlockTable,
+                          now: Optional[float] = None) -> None:
         for block in set(block_table):
             if block.device == Device.GPU:
-                self.gpu_allocator.free(block)
+                self.gpu_allocator.free(block, now)
             else:
-                self.cpu_allocator.free(block)
+                self.cpu_allocator.free(block, now)
 
-    def free(self, seq: Sequence) -> None:
+    def free(self, seq: Sequence, now: Optional[float] = None) -> None:
         if seq.seq_id not in self.block_tables:
             # Already freed or haven't been scheduled yet.
             return
         block_table = self.block_tables[seq.seq_id]
-        self._free_block_table(block_table)
+        self._free_block_table(block_table, now)
         del self.block_tables[seq.seq_id]
 
     def reset(self) -> None:

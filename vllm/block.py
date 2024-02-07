@@ -65,6 +65,9 @@ class PhysicalTokenBlock:
 
         self.block_hash = block_hash
 
+        #TODO: is this a good default?
+        self.last_accessed = 0
+
     def __repr__(self) -> str:
         return (f'PhysicalTokenBlock(device={self.device}, '
                 f'block_number={self.block_number}, '

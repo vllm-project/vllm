@@ -72,7 +72,7 @@ def test_block_allocator(
     # Free the second block and confirm that the block ends up on the free list
     block_allocator.free(second_block)
     assert (len(block_allocator.evictor.free_blocks) == 1)
-    free_block = block_allocator.evictor.free_blocks[0]
+    free_block = block_allocator.evictor.free_blocks[block_hash]
     assert (free_block == second_block)
 
     # Reallocate the first block and confirm that, even after the block had its ref_count go to 0, we still get the same block back
