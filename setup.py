@@ -15,6 +15,11 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME, 
 
 ROOT_DIR = os.path.dirname(__file__)
 
+# If you are developing the C++ backend of vLLM, consider building vLLM with
+# `python setup.py develop` since it will give you incremental builds.
+# The downside is that this method is deprecated, see
+# https://github.com/pypa/setuptools/issues/917
+
 MAIN_CUDA_VERSION = "12.1"
 
 # Supported NVIDIA GPU architectures.
