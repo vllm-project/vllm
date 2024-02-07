@@ -172,7 +172,7 @@ void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
   double *nccl_result, *my_result;
   CUDACHECK(cudaMallocHost(&nccl_result, data_size * sizeof(double)));
   CUDACHECK(cudaMallocHost(&my_result, data_size * sizeof(double)));
-  bool performance_test = false;
+  bool performance_test = true;
   if (performance_test) {
     dummy_kernel<<<1, 1, 0, stream>>>();
     constexpr int warmup_iters = 5;
@@ -307,7 +307,7 @@ int main(int argc, char **argv) {
   //     run<half>(myRank, nRanks, comm, threads, block_limit, 4096 * 1024);
   //   }
   // }
-  for (int sz = 512; sz <= (32 << 20); sz *= 2) {
+  for (int sz = 512; sz <= (8 << 20); sz *= 2) {
     run<half>(myRank, nRanks, comm, 512, 36, sz + 8 * 50);
   }
 
