@@ -22,6 +22,34 @@ from vllm.lora.request import LoRARequest
 from vllm.utils import is_hip
 
 
+def get_memory_info() -> Tuple[int, int]:
+    try:
+        import pynvml
+    except ImportError:
+        # For AMD GPUs
+        pynvml = None
+    if pynvml is None:
+        # fallback is case pynvml is not available
+        free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
+        peak_memory = total_gpu_memory - free_gpu_memory
+        return peak_memory, total_gpu_memory
+    else:
+        try:
+            pynvml.nvmlInit()
+            device = torch.cuda.current_device()
+            pid = os.getpid()
+            h = pynvml.nvmlDeviceGetHandleByIndex(device)
+            mem_info = pynvml.nvmlDeviceGetMemoryInfo(h)
+            infos = pynvml.nvmlDeviceGetComputeRunningProcesses(h)
+            for info in infos:
+                if info.pid == pid:
+                    return info.usedGpuMemory, mem_info.total
+            raise ValueError(
+                f"Unable to find process {pid} on device {device}.")
+        finally:
+            pynvml.nvmlShutdown()
+
+
 class Worker:
     """A worker class that executes (a partition of) the model on a GPU.
 
@@ -86,7 +114,6 @@ class Worker:
 
             _check_if_gpu_supports_dtype(self.model_config.dtype)
             torch.cuda.empty_cache()
-            self.init_gpu_memory = torch.cuda.mem_get_info()[0]
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
@@ -126,15 +153,12 @@ class Worker:
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
         torch.cuda.synchronize()
-        free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
-        # NOTE(woosuk): Here we assume that the other processes using the same
-        # GPU did not change their memory usage during the profiling.
-        peak_memory = self.init_gpu_memory - free_gpu_memory
+        used_memory, total_gpu_memory = get_memory_info()
 
         cache_block_size = CacheEngine.get_cache_block_size(
             block_size, cache_dtype, self.model_config, self.parallel_config)
         num_gpu_blocks = int(
-            (total_gpu_memory * gpu_memory_utilization - peak_memory) //
+            (total_gpu_memory * gpu_memory_utilization - used_memory) //
             cache_block_size)
         num_cpu_blocks = int(cpu_swap_space // cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
