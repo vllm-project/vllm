@@ -854,6 +854,10 @@ class LLMEngine:
             # Number of Tokens.
             if prompt_run:
                 num_prompt_tokens = scheduler_outputs.num_batched_tokens
+                num_generation_tokens = sum([
+                    seq_group.num_seqs()
+                    for seq_group in scheduler_outputs.scheduled_seq_groups
+                ])
             else:
                 num_generation_tokens = scheduler_outputs.num_batched_tokens
 
