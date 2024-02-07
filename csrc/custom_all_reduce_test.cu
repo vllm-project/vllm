@@ -92,7 +92,7 @@ __global__ void gen_data(curandState_t *state, T *data, double *ground_truth,
 
 template <typename T>
 void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
-         int data_size) {
+         int data_size, bool performance_test) {
   T *result;
   cudaStream_t stream;
   CUDACHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
@@ -172,7 +172,6 @@ void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
   double *nccl_result, *my_result;
   CUDACHECK(cudaMallocHost(&nccl_result, data_size * sizeof(double)));
   CUDACHECK(cudaMallocHost(&my_result, data_size * sizeof(double)));
-  bool performance_test = true;
   if (performance_test) {
     dummy_kernel<<<1, 1, 0, stream>>>();
     constexpr int warmup_iters = 5;
@@ -301,6 +300,7 @@ int main(int argc, char **argv) {
                      MPI_COMM_WORLD));
   NCCLCHECK(ncclCommInitRank(&comm, nRanks, id, myRank));
 
+  bool performance_test = true;
   cudaProfilerStart();
   // for (int threads : {256, 512}) {
   //   for (int block_limit = 16; block_limit < 112; block_limit += 4) {
@@ -308,7 +308,7 @@ int main(int argc, char **argv) {
   //   }
   // }
   for (int sz = 512; sz <= (8 << 20); sz *= 2) {
-    run<half>(myRank, nRanks, comm, 512, 36, sz + 8 * 50);
+    run<half>(myRank, nRanks, comm, 512, 36, sz + 8 * 50, performance_test);
   }
 
   cudaProfilerStop();

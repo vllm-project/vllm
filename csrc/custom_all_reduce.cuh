@@ -24,10 +24,12 @@
 
 namespace vllm {
 
+// use system scope since we're synchronizating with other devices
 using atomic_flag = cuda::atomic<bool, cuda::thread_scope_system>;
+constexpr int kMaxBlocks = 64;
 struct Signal {
-  alignas(128) atomic_flag start[36][8];
-  alignas(128) atomic_flag end[36][8];
+  alignas(128) atomic_flag start[kMaxBlocks][8];
+  alignas(128) atomic_flag end[kMaxBlocks][8];
 };
 
 struct __align__(16) RankData { const void *__restrict__ ptrs[8]; };
@@ -122,47 +124,9 @@ DINLINE O downcast(array_t<float, O::size> val) {
   }
 }
 
-// template <int ngpus>
-// DINLINE void start_sync(const RankSignals &sg, volatile Signal *self_sg,
-//                         int rank) {
-//   if (threadIdx.x < ngpus) {
-//     // simultaneously write to the corresponding flag of all ranks.
-//     // Latency = 1 p2p write
-//     self_sg->end[blockIdx.x][threadIdx.x].store(false,
-//                                                 cuda::memory_order_relaxed);
-//     sg.signals[threadIdx.x]->start[blockIdx.x][rank].store(
-//         true, cuda::memory_order_relaxed);
-//     sg.signals[threadIdx.x]->start[blockIdx.x][rank].notify_all();
-//     self_sg->start[blockIdx.x][threadIdx.x].wait(false,
-//                                                  cuda::memory_order_relaxed);
-//   }
-//   __syncthreads();
-// }
-
-// template <int ngpus, bool final = false>
-// DINLINE void end_sync(const RankSignals &sg, volatile Signal *self_sg,
-//                       int rank) {
-//   if (threadIdx.x < ngpus) {
-//     // simultaneously write to the corresponding flag of all ranks.
-//     // Latency = 1 p2p write
-//     self_sg->start[blockIdx.x][threadIdx.x].store(false,
-//                                                   cuda::memory_order_relaxed);
-//     auto &target_signal = sg.signals[threadIdx.x]->end[blockIdx.x][rank];
-//     if constexpr (final) {
-//       target_signal.store(true, cuda::memory_order_relaxed);
-//       target_signal.notify_all();
-//       self_sg->end[blockIdx.x][threadIdx.x].wait(false,
-//                                                  cuda::memory_order_relaxed);
-//     } else {
-//       target_signal.store(true, cuda::memory_order_release);
-//       target_signal.notify_all();
-//       self_sg->end[blockIdx.x][threadIdx.x].wait(false,
-//                                                  cuda::memory_order_acquire);
-//     }
-//   }
-//   __syncthreads();
-// }
-
+// This function is meant to be used as the first synchronization in the all
+// reduce kernel. Thus, it doesn't need to make any visibility guarantees for
+// prior memory accesses, and we're free to use relaxed memory order.
 template <int ngpus>
 DINLINE void start_sync(const RankSignals &sg, volatile Signal *self_sg,
                         int rank) {
@@ -172,6 +136,8 @@ DINLINE void start_sync(const RankSignals &sg, volatile Signal *self_sg,
     sg.signals[threadIdx.x]->start[blockIdx.x][rank].store(
         true, cuda::memory_order_relaxed);
     bool expected = true;
+    // wait until we got true from all ranks, and then reset flag to false for
+    // next time.
     while (!self_sg->start[blockIdx.x][threadIdx.x].compare_exchange_weak(
         expected, false, cuda::memory_order_relaxed)) {
       expected = true;
@@ -180,7 +146,11 @@ DINLINE void start_sync(const RankSignals &sg, volatile Signal *self_sg,
   __syncthreads();
 }
 
-template <int ngpus, bool final = false>
+// This function is meant to be used as the second or the final synchronization
+// barrier in the all reduce kernel. If it's the final synchronization barrier,
+// we don't need to make any visibility guarantees for prior memory accesses,
+// and we're free to use relaxed memory order.
+template <int ngpus, bool final_sync = false>
 DINLINE void end_sync(const RankSignals &sg, volatile Signal *self_sg,
                       int rank) {
   __syncthreads();
@@ -188,14 +158,20 @@ DINLINE void end_sync(const RankSignals &sg, volatile Signal *self_sg,
     // simultaneously write to the corresponding flag of all ranks.
     // Latency = 1 p2p write
     sg.signals[threadIdx.x]->end[blockIdx.x][rank].store(
-        true, cuda::memory_order_relaxed);
+        true,
+        final_sync ? cuda::memory_order_relaxed : cuda::memory_order_release);
     bool expected = true;
+    // wait until we got true from all ranks, and then reset flag to false for
+    // next time.
     while (!self_sg->end[blockIdx.x][threadIdx.x].compare_exchange_weak(
-        expected, false, cuda::memory_order_relaxed)) {
+        expected, false,
+        final_sync ? cuda::memory_order_relaxed : cuda::memory_order_acquire)) {
       expected = true;
     }
   }
-  __syncthreads();
+  if constexpr (!final_sync) {
+    __syncthreads();
+  }
 }
 
 template <typename P, int ngpus, typename A>
@@ -487,6 +463,10 @@ class CustomAllreduce {
           "custom allreduce currently requires input length to be multiple "
           "of " +
           std::to_string(d));
+    if (block_limit > kMaxBlocks)
+      throw std::runtime_error("max supported block limit is " +
+                               std::to_string(kMaxBlocks) + ". Got " +
+                               std::to_string(block_limit));
 
     RankData *ptrs;
     cudaStreamCaptureStatus status;
