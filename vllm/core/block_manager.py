@@ -13,42 +13,30 @@ class EvictionPolicy(enum.Enum):
     LRU = enum.auto()
 
 
-class Evictor:
-    """Evicts physical blocks from cache based on eviction policy."""
+def lru_eviction(table: Dict[int, PhysicalTokenBlock]) -> PhysicalTokenBlock:
+    all_blocks: List[PhysicalTokenBlock] = list(table.values())
+    assert (len(all_blocks) > 0)
 
-    def __init__(self,
-                 eviction_policy: EvictionPolicy = EvictionPolicy.LRU) -> None:
-        self.eviction_policy = eviction_policy
+    # Find lowest timestamp
+    lowest_timestamp = monotonic()
+    for block in all_blocks:
+        if block.ref_count == 0 and block.last_accessed < lowest_timestamp:
+            lowest_timestamp = block.last_accessed
 
-    def evict(self, table: Dict[int,
-                                PhysicalTokenBlock]) -> PhysicalTokenBlock:
-        if self.eviction_policy == EvictionPolicy.LRU:
-            all_blocks: List[PhysicalTokenBlock] = list(
-                table.values())
-            assert (len(all_blocks) > 0)
+    # Find all blocks with the lowest timestamp
+    eviction_candidates: List[PhysicalTokenBlock] = []
+    for block in all_blocks:
+        if block.ref_count == 0 and block.last_accessed == lowest_timestamp:
+            eviction_candidates.append(block)
 
-            # Find lowest timestamp
-            lowest_timestamp = monotonic()
-            for block in all_blocks:
-                if block.ref_count == 0 and block.last_accessed < lowest_timestamp:
-                    lowest_timestamp = block.last_accessed
+    # Arbitrarily evict the first candidate
+    # TODO: Evict based on the number of prefix tokens in the block
+    assert (len(eviction_candidates) > 0)
+    evicted_block = eviction_candidates[0]
+    del table[evicted_block.block_hash]
 
-            # Find all blocks with the lowest timestamp
-            eviction_candidates: List[PhysicalTokenBlock] = []
-            for block in all_blocks:
-                if block.ref_count == 0 and block.last_accessed == lowest_timestamp:
-                    eviction_candidates.append(block)
+    return evicted_block
 
-            # Arbitrarily evict the first candidate
-            # TODO: Evict based on the number of prefix tokens in the block
-            assert (len(eviction_candidates) > 0)
-            evicted_block = eviction_candidates[0]
-            del table[evicted_block.block_hash]
-
-            return evicted_block
-        else:
-            raise ValueError(
-                f"Unknown cache eviction policy: {self.eviction_policy}")
 
 class BlockAllocator:
     """Manages free physical token blocks for a device.
@@ -67,13 +55,17 @@ class BlockAllocator:
         self.block_size = block_size
         self.num_blocks = num_blocks
 
-        self.evictor = Evictor(eviction_policy)
+        self.eviction_policy = eviction_policy
 
         self.current_num_blocks = 0
         self.table: Dict[int, PhysicalTokenBlock] = {}
 
     def evict(self) -> PhysicalTokenBlock:
-        return self.evictor.evict(self.table)
+        if self.eviction_policy == EvictionPolicy.LRU:
+            return lru_eviction(self.table)
+        else:
+            raise ValueError(
+                f"Unknown cache eviction policy: {self.eviction_policy}")
 
     def allocate_block(self, block_hash: int) -> PhysicalTokenBlock:
         if self.current_num_blocks == self.num_blocks:
