@@ -5,7 +5,7 @@ from torch.nn.parameter import Parameter
 
 from vllm._C import ops
 from vllm.model_executor.layers.fused_moe import (moe_align_block_size,
-                                                  fused_moe)
+                                                  fused_moe, fused_topk)
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
@@ -171,8 +171,9 @@ class AWQLinearMethod(LinearMethodBase):
                           w1: Dict[str, torch.Tensor],
                           w2: Dict[str, torch.Tensor],
                           x: torch.Tensor,
-                          topk_weights: torch.Tensor,
-                          topk_ids: torch.Tensor) -> torch.Tensor:
+                          gating_output: torch.Tensor,
+                          topk: int,
+                          renormalize: bool) -> torch.Tensor:
         FP16_MATMUL_HEURISTIC_CONDITION = x.shape[:-1].numel() >= 1024
         if FP16_MATMUL_HEURISTIC_CONDITION:
             dequant_w1 = ops.awq_dequantize(w1["qweight"], w1["scales"],
@@ -181,8 +182,10 @@ class AWQLinearMethod(LinearMethodBase):
             dequant_w2 = ops.awq_dequantize(w2["qweight"], w2["scales"],
                                             w2["qzeros"], 0, 0,
                                             0).permute(0, 2, 1)
-            return fused_moe(x, dequant_w1, dequant_w2, topk_weights, topk_ids)
+            return fused_moe(x, dequant_w1, dequant_w2, gating_output, topk,
+                             renormalize)
 
+        topk_weights, topk_ids = fused_topk(gating_output, topk, renormalize)
         (sorted_token_ids, expert_ids,
          num_tokens_post_padded) = moe_align_block_size(
              topk_ids, 16, w1["qweight"].shape[0])

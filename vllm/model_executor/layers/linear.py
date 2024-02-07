@@ -56,6 +56,17 @@ class LinearMethodBase(ABC):
                 linear_weights[name] = new_param
         return linear_weights
 
+    @abstractmethod
+    def apply_moe_weights(self,
+                          w1: Dict[str, torch.Tensor],
+                          w2: Dict[str, torch.Tensor],
+                          x: torch.Tensor,
+                          gating_output: torch.Tensor,
+                          topk: int,
+                          renormalize: bool) -> torch.Tensor:
+        """Apply the weights to the input tensor."""
+        raise NotImplementedError
+
 
 class UnquantizedLinearMethod(LinearMethodBase):
     """Linear method without quantization.
@@ -95,9 +106,11 @@ class UnquantizedLinearMethod(LinearMethodBase):
                           w1: Dict[str, torch.Tensor],
                           w2: Dict[str, torch.Tensor],
                           x: torch.Tensor,
-                          topk_weights: torch.Tensor,
-                          topk_ids: torch.Tensor) -> torch.Tensor:
-        return fused_moe(x, w1["weight"], w2["weight"], topk_weights, topk_ids)
+                          gating_output: torch.Tensor,
+                          topk: int,
+                          renormalize: bool) -> torch.Tensor:
+        return fused_moe(x, w1["weight"], w2["weight"], gating_output, topk,
+                         renormalize)
 
 
 class ReplicatedLinear(torch.nn.Module):

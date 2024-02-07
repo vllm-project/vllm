@@ -26,12 +26,12 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 from torch import nn
-import torch.nn.functional as F
 from transformers import PretrainedConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import PagedAttention
+from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     UnquantizedLinearMethod, LinearMethodBase, MergedColumnParallelLinear,
@@ -190,15 +190,11 @@ class DeepseekMoE(nn.Module):
         # router_logits: (batch * sequence_length, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
-        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
-        routing_weights, selected_experts = torch.topk(routing_weights,
-                                                       self.top_k,
-                                                       dim=-1)
-
-        if self.config.norm_topk_prob:
-            routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
-
         if not self.linear_method.support_fused_moe:
+            routing_weights, selected_experts = fused_topk(
+                router_logits,
+                self.top_k,
+                renormalize=self.config.norm_topk_prob)
             final_hidden_states = None
             for expert_idx in self.expert_indicies:
                 expert_layer = self.experts[expert_idx]
@@ -217,8 +213,9 @@ class DeepseekMoE(nn.Module):
                 self.w1.linear_weights,
                 self.w2.linear_weights,
                 hidden_states,
-                routing_weights,
-                selected_experts,
+                router_logits,
+                self.top_k,
+                renormalize=self.config.norm_topk_prob,
             )
 
         if self.config.n_shared_experts is not None:

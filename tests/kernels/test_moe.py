@@ -2,10 +2,8 @@
 
 Run `pytest tests/kernels/test_moe.py`.
 """
-
 import pytest
 import torch
-
 from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
@@ -21,22 +19,21 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.models.mixtral import MixtralMoE
 
 
-def torch_moe(a, w1, w2, topk_weight, topk_ids):
+def torch_moe(a, w1, w2, score, topk):
     B, D = a.shape
-    a = a.view(B, -1, D).repeat(1, topk_ids.shape[1], 1).reshape(-1, D)
-    out = torch.zeros(B * topk_ids.shape[1],
-                      w2.shape[1],
-                      dtype=a.dtype,
-                      device=a.device)
-    topk_ids = topk_ids.view(-1)
+    a = a.view(B, -1, D).repeat(1, topk, 1).reshape(-1, D)
+    out = torch.zeros(B * topk, w2.shape[1], dtype=a.dtype, device=a.device)
+    score = torch.softmax(score, dim=-1, dtype=torch.float32)
+    topk_weight, topk_ids = torch.topk(score, topk)
     topk_weight = topk_weight.view(-1)
+    topk_ids = topk_ids.view(-1)
     for i in range(w1.shape[0]):
         mask = topk_ids == i
         if mask.sum():
             out[mask] = SiluAndMul()(
                 a[mask] @ w1[i].transpose(0, 1)) @ w2[i].transpose(0, 1)
     return (out.view(B, -1, w2.shape[1]) *
-            topk_weight.view(B, -1, 1)).sum(dim=1)
+            topk_weight.view(B, -1, 1).to(out.dtype)).sum(dim=1)
 
 
 @pytest.mark.parametrize("m", [512, 222, 33, 1])
@@ -58,11 +55,8 @@ def test_fused_moe(
     w2 = torch.randn((e, k, n), device='cuda', dtype=dtype) / 10
 
     score = torch.randn((m, e), device='cuda', dtype=dtype)
-    score = torch.softmax(score, dim=-1)
-    topk_weight, topk_ids = torch.topk(score, topk)
-
-    triton_output = fused_moe(a, w1, w2, topk_weight, topk_ids, False)
-    torch_output = torch_moe(a, w1, w2, topk_weight, topk_ids)
+    triton_output = fused_moe(a, w1, w2, score, topk, renormalize=False)
+    torch_output = torch_moe(a, w1, w2, score, topk)
     assert torch.allclose(triton_output, torch_output, atol=1e-2, rtol=0)
 
 
@@ -82,7 +76,7 @@ def test_mixtral_moe(dtype: torch.dtype):
         intermediate_size=config.intermediate_size,
         params_dtype=dtype,
         tp_size=1,
-    )
+    ).cuda()
 
     # Load the weights
     vllm_moe.gate.linear_weights["weight"][:] = hf_moe.gate.weight.data
@@ -112,7 +106,9 @@ def test_mixtral_moe(dtype: torch.dtype):
 
 
 def torch_moe_gptq(a, w1, w1_gidx, w1_scale, w1_zero, w2, w2_gidx, w2_scale,
-                   w2_zero, topk_weight, topk_ids):
+                   w2_zero, score, topk):
+    score = torch.softmax(score.float(), dim=-1)
+    topk_weight, topk_ids = torch.topk(score, topk)
     (B, D) = a.shape
     a = a.view(B, -1, D).repeat(1, topk_ids.shape[1], 1).reshape(-1, D)
     out = torch.zeros(B * topk_ids.shape[1],
@@ -142,8 +138,9 @@ def torch_moe_gptq(a, w1, w1_gidx, w1_scale, w1_zero, w2, w2_gidx, w2_scale,
 @pytest.mark.parametrize("exstate",
                          [ExllamaState.UNINITIALIZED, ExllamaState.UNUSED])
 @pytest.mark.parametrize("groupsize", [-1, 128])
+@pytest.mark.parametrize("actorder", [True, False])
 def test_fused_moe_gptq(m: int, n: int, k: int, e: int, topk: int,
-                        exstate: ExllamaState, groupsize: int):
+                        exstate: ExllamaState, groupsize: int, actorder: bool):
     RANGE = 1000000000
     a = torch.randn((m, k), device='cuda', dtype=torch.half) / 10
     qw1 = torch.randint(-RANGE,
@@ -193,20 +190,19 @@ def test_fused_moe_gptq(m: int, n: int, k: int, e: int, topk: int,
     }
 
     score = torch.randn((m, e), device='cuda', dtype=torch.half)
-    score = torch.softmax(score, dim=-1).float()
-    topk_weight, topk_ids = torch.topk(score, topk)
 
-    gptq_method = GPTQLinearMethod(GPTQConfig(4, groupsize, False))
+    gptq_method = GPTQLinearMethod(GPTQConfig(4, groupsize, actorder))
     torch_output = torch_moe_gptq(a, qw1, gidx1, scale1, zero1, qw2, gidx2,
-                                  scale2, zero2, topk_weight, topk_ids)
-    cuda_output = gptq_method.apply_moe_weights(w1, w2, a, topk_weight,
-                                                topk_ids)
+                                  scale2, zero2, score, topk)
+    cuda_output = gptq_method.apply_moe_weights(w1, w2, a, score, topk, False)
     # gptq kernels have large variance in output
     assert torch.allclose(cuda_output, torch_output, atol=5e-2, rtol=0)
 
 
-def torch_moe_awq(a, w1, w1_scale, w1_zero, w2, w2_scale, w2_zero, topk_weight,
-                  topk_ids):
+def torch_moe_awq(a, w1, w1_scale, w1_zero, w2, w2_scale, w2_zero, score,
+                  topk):
+    score = torch.softmax(score.float(), dim=-1)
+    topk_weight, topk_ids = torch.topk(score, topk)
     (B, D) = a.shape
     a = a.view(B, -1, D).repeat(1, topk_ids.shape[1], 1).reshape(-1, D)
     out = torch.zeros(B * topk_ids.shape[1],
@@ -267,12 +263,9 @@ def test_fused_moe_awq(
     w2 = {"qweight": qw2, "scales": scale2, "qzeros": zero2}
 
     score = torch.randn((m, e), device='cuda', dtype=torch.half)
-    score = torch.softmax(score, dim=-1).float()
-    topk_weight, topk_ids = torch.topk(score, topk)
 
     awq_method = AWQLinearMethod(AWQConfig(4, groupsize, False))
     torch_output = torch_moe_awq(a, qw1, scale1, zero1, qw2, scale2, zero2,
-                                 topk_weight, topk_ids)
-    cuda_output = awq_method.apply_moe_weights(w1, w2, a, topk_weight,
-                                               topk_ids)
-    assert torch.allclose(cuda_output, torch_output, atol=5e-2, rtol=0)
+                                 score, topk)
+    cuda_output = awq_method.apply_moe_weights(w1, w2, a, score, topk, False)
+    assert torch.allclose(cuda_output, torch_output, atol=1e-2, rtol=0)

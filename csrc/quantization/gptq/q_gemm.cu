@@ -320,7 +320,7 @@ __global__ void reconstruct_exllama_kernel
         b_q_weight = b_q_weight + blockIdx.z * size_k * size_n / 8;
         b_gptq_scales = b_gptq_scales + blockIdx.z * groups * size_n;
         b_gptq_qzeros = b_gptq_qzeros + blockIdx.z * groups * size_n / 8;
-        b_q_perm = b_q_perm + blockIdx.z * size_k;
+        if (b_q_perm) b_q_perm = b_q_perm + blockIdx.z * size_k;
         b = b + blockIdx.z * size_k * size_n;
     }
 
@@ -769,6 +769,12 @@ __global__ void make_sequential_kernel
     const int w_width
 )
 {
+    if (blockIdx.z > 0){
+        w = w + blockIdx.z * w_height * w_width;
+        w_new = w_new + blockIdx.z * w_height * w_width;
+        q_perm = q_perm + blockIdx.z * w_height * 8;
+    }
+
     const uint64_t* w2 = (uint64_t*) w;
     uint64_t* w_new2 = (uint64_t*) w_new;
     int w2_stride = w_width >> 1;
@@ -803,19 +809,21 @@ void shuffle_exllama_weight
     uint32_t* q_weight,
     int* q_perm,
     int height,
-    int width
+    int width,
+    int num_experts
 )
 {
     if (q_perm)
     {
         uint32_t* new_qweight = NULL;
-        cudaMalloc(&new_qweight, height / 8 * width * sizeof(uint32_t));
+        cudaMalloc(&new_qweight, num_experts * height / 8 * width * sizeof(uint32_t));
 
         dim3 blockDim, gridDim;
         blockDim.x = THREADS_X;
         blockDim.y = 1;
         gridDim.x = DIVIDE(width, THREADS_X);
         gridDim.y = height / 8;
+        gridDim.z = num_experts;
 
         const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
         make_sequential_kernel<<<gridDim, blockDim, 0, stream>>>
@@ -827,7 +835,7 @@ void shuffle_exllama_weight
             width
         );
         // Replace qweights
-        cudaMemcpyAsync(q_weight, new_qweight, height / 8 * width * sizeof(uint32_t), cudaMemcpyDeviceToDevice);
+        cudaMemcpyAsync(q_weight, new_qweight, num_experts * height / 8 * width * sizeof(uint32_t), cudaMemcpyDeviceToDevice);
         // Cleanup
         cudaDeviceSynchronize();
         cudaFree(new_qweight);
@@ -838,7 +846,7 @@ void shuffle_exllama_weight
     gridDim.x = DIVIDE(width, THREADS_X);
     gridDim.y = 1;
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-    shuffle_kernel<<<gridDim, blockDim, 0, stream>>>(q_weight, height, width);
+    shuffle_kernel<<<gridDim, blockDim, 0, stream>>>(q_weight, height * num_experts, width);
 }
 
 
@@ -871,7 +879,7 @@ __global__ void group_gemm_half_q_half_gptq_kernel
     b_q_weight = b_q_weight + size_k * size_n / 8 * expert_id;
     b_gptq_qzeros = b_gptq_qzeros + groups * size_n / 8 * expert_id;
     b_gptq_scales = b_gptq_scales + groups * size_n * expert_id;
-    b_q_perm = b_q_perm + size_k * expert_id;
+    if (b_q_perm) b_q_perm = b_q_perm + size_k * expert_id;
 
     MatrixView_half a_(a, size_m, size_k);
     MatrixView_half_rw c_(c, size_m, size_n);
@@ -1340,11 +1348,17 @@ void gptq_shuffle
 )
 {
     const at::cuda::OptionalCUDAGuard device_guard(device_of(q_weight));
+
+    int num_experts = q_weight.dim() == 3 ? q_weight.size(0) : 1;
+    int size_k = q_weight.dim() == 3 ? q_weight.size(1) * 8 : q_weight.size(0) * 8;
+    int size_n = q_weight.dim() == 3 ? q_weight.size(2) : q_weight.size(1);
+
     vllm::gptq::shuffle_exllama_weight(
         (uint32_t*) q_weight.data_ptr(),
         q_perm.device().is_meta() ? NULL : (int*) q_perm.data_ptr(),
-        q_weight.size(0) * 8,
-        q_weight.size(1)
+        size_k,
+        size_n,
+        num_experts
     );
 }
 
