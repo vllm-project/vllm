@@ -15,22 +15,17 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME, 
 
 ROOT_DIR = os.path.dirname(__file__)
 
+# If you are developing the C++ backend of vLLM, consider building vLLM with
+# `python setup.py develop` since it will give you incremental builds.
+# The downside is that this method is deprecated, see
+# https://github.com/pypa/setuptools/issues/917
+
 MAIN_CUDA_VERSION = "12.1"
 
 # Supported NVIDIA GPU architectures.
 NVIDIA_SUPPORTED_ARCHS = {"7.0", "7.5", "8.0", "8.6", "8.9", "9.0"}
 ROCM_SUPPORTED_ARCHS = {"gfx90a", "gfx942"}
 # SUPPORTED_ARCHS = NVIDIA_SUPPORTED_ARCHS.union(ROCM_SUPPORTED_ARCHS)
-
-# You can use
-# VLLM_INCREMENTAL_BUILD_TORCH_PATH=`python -c "import torch; print(torch.__path__[0])"` pip install -e . --verbose
-# to do an incremental build of vLLM. Alternatively, you can use
-# `python setup.py develop` without extra environment variables, which
-# has even less overhead, but is unfortunately deprecated upstream
-# (https://github.com/pypa/setuptools/issues/917).
-if "VLLM_INCREMENTAL_BUILD_TORCH_PATH" in os.environ:
-    torch_cpp_ext._TORCH_PATH = os.environ["VLLM_INCREMENTAL_BUILD_TORCH_PATH"]
-
 
 def _is_hip() -> bool:
     return torch.version.hip is not None
@@ -441,19 +436,6 @@ if os.environ.get("VLLM_USE_PRECOMPILED"):
     ext_modules = []
     package_data["vllm"].append("*.so")
 
-if "VLLM_INCREMENTAL_BUILD_TORCH_PATH" in os.environ:
-    # This is an optional hack to allow incremental compilation.
-    class VllmBuildExtension(BuildExtension):
-
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-
-        def build_extensions(self) -> None:
-            self.build_temp = "/tmp/vllmcompile/"
-            super().build_extensions()
-else:
-    VllmBuildExtension = BuildExtension
-
 setuptools.setup(
     name="vllm",
     version=get_vllm_version(),
@@ -481,6 +463,6 @@ setuptools.setup(
     python_requires=">=3.8",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
-    cmdclass={"build_ext": VllmBuildExtension} if not _is_neuron() else {},
+    cmdclass={"build_ext": BuildExtension} if not _is_neuron() else {},
     package_data=package_data,
 )

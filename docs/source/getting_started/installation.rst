@@ -69,12 +69,11 @@ You can also build and install vLLM from source:
         $ docker run --gpus all -it --rm --ipc=host nvcr.io/nvidia/pytorch:23.10-py3
 
 .. note::
-    If you are developing on the C++ code in vLLM, you can use the following flag to
-    do incremental compilation.
+    If you are developing the C++ backend of vLLM, consider building vLLM with
 
     .. code-block:: console
 
-        $ VLLM_INCREMENTAL_BUILD_TORCH_PATH=`python -c "import torch; print(torch.__path__[0])"` pip install -e . --verbose
+        $ python setup.py develop
 
-    Alternatively, you can use ``python setup.py develop`` which is even faster but
-    deprecated by setuptools.
+    since it will give you incremental builds. The downside is that this method
+    is `deprecated by setuptools <https://github.com/pypa/setuptools/issues/917>`_.
