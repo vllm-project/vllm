@@ -141,12 +141,9 @@ DINLINE void start_sync(const RankSignals &sg, volatile Metadata *meta,
   __syncthreads();
 }
 
-template <int ngpus, bool final_sync = false>
+template <int ngpus>
 DINLINE void end_sync(const RankSignals &sg, volatile Metadata *meta,
                       int rank) {
-  // Only the last completing block can perform the end synchronization
-  // This can ensures when the final busy wait ends, all ranks must have
-  // finished reading each other's buffer.
   if (threadIdx.x < ngpus) {
     // simultaneously write to the corresponding byte to all other ranks.
     // Latency = 1 p2p write
@@ -184,7 +181,7 @@ __global__ void __launch_bounds__(512, 1)
     ((P *)result)[idx] =
         packed_reduce<P, ngpus, A>((const P **)&dp.ptrs[0], idx);
   }
-  end_sync<ngpus, true>(sg, meta, rank);
+  end_sync<ngpus>(sg, meta, rank);
 }
 
 template <typename P>
@@ -218,8 +215,6 @@ __global__ void __launch_bounds__(512, 1)
   for (int idx = start + tid; idx < end; idx += stride) {
     tmp_out[idx - start] = packed_reduce<P, ngpus, A>(ptrs, idx);
   }
-  // Maybe TODO: replace this with per-block release-acquire
-  // can save about 1-2us (not a lot though)
   end_sync<ngpus>(sg, meta, rank);
 
   // stage 2: allgather
@@ -480,10 +475,10 @@ class CustomAllreduce {
           (world_size_ <= 8 && bytes < 256 * 1024)) { \
         KL(ngpus, cross_device_reduce_1stage);        \
       } else {                                        \
-        KL(ngpus, cross_device_reduce_1stage);        \
+        KL(ngpus, cross_device_reduce_2stage);        \
       }                                               \
     } else {                                          \
-      KL(ngpus, cross_device_reduce_1stage);  \
+      KL(ngpus, cross_device_reduce_half_butterfly);  \
     }                                                 \
     break;                                            \
   }
