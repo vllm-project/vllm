@@ -3,9 +3,8 @@ from aioprometheus import Counter, Gauge, Histogram
 
 import time
 import numpy as np
-from typing import List
+from typing import List, Counter as CollectionsCounter
 from dataclasses import dataclass
-from collections import Counter as CollectionsCounter
 
 logger = init_logger(__name__)
 
@@ -110,7 +109,7 @@ class Stats:
     cpu_cache_usage: float
 
     # Raw stats from last model iteration.
-    finished_reason_counter: CollectionsCounter[str, int]
+    finished_reason_counter: CollectionsCounter[str]
     num_prompt_tokens: int
     num_generation_tokens: int
     num_prompt_tokens_lst: List[int]
