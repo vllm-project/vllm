@@ -24,20 +24,15 @@
 namespace vllm {
 
 struct Signal {
-  alignas(64) union {
-    unsigned int data[8];
-  } start;
-  alignas(64) union {
-    unsigned int data[8];
-  } end;
+  int start[36][8];
+  int end[36][8];
 };
 
 struct Metadata {
-  alignas(128) Signal sg;
-  alignas(128) int counter;
+  alignas(256) Signal sg;
 };
-static_assert(offsetof(Metadata, counter) == 128);
-static_assert(sizeof(Metadata) == 256);
+// static_assert(offsetof(Metadata, counter) == 128);
+// static_assert(sizeof(Metadata) == 256);
 
 struct __align__(16) RankData { const void *__restrict__ ptrs[8]; };
 
@@ -136,17 +131,12 @@ DINLINE O downcast(array_t<float, O::size> val) {
 template <int ngpus>
 DINLINE void start_sync(const RankSignals &sg, volatile Metadata *meta,
                         int rank) {
-  if (blockIdx.x == 0) {
-    if (threadIdx.x < ngpus) {
-      // simultaneously write to the corresponding byte to all other ranks.
-      // Latency = 1 p2p write
-      sg.signals[rank]->end.data[threadIdx.x] = 0;
-      sg.signals[threadIdx.x]->start.data[rank] = 255;
-    }
-  }
   if (threadIdx.x < ngpus) {
-    while (meta->sg.start.data[threadIdx.x] != 255)
-      ;
+    // simultaneously write to the corresponding byte to all other ranks.
+    // Latency = 1 p2p write
+    meta->sg.end[blockIdx.x][threadIdx.x] = 0;
+    sg.signals[threadIdx.x]->start[blockIdx.x][rank] = 255;
+    while (meta->sg.start[blockIdx.x][threadIdx.x] != 255);
   }
   __syncthreads();
 }
@@ -154,40 +144,17 @@ DINLINE void start_sync(const RankSignals &sg, volatile Metadata *meta,
 template <int ngpus, bool final_sync = false>
 DINLINE void end_sync(const RankSignals &sg, volatile Metadata *meta,
                       int rank) {
-  __syncthreads();
-  __shared__ int num;
-  if (threadIdx.x == 0) num = atomicAdd((int *)&meta->counter, 1);
-  __syncthreads();
-
   // Only the last completing block can perform the end synchronization
   // This can ensures when the final busy wait ends, all ranks must have
   // finished reading each other's buffer.
-  if (num == gridDim.x - 1) {
-    if (threadIdx.x == 32) {
-      // reset in a different warp
-      meta->counter = 0;
-    } else if (threadIdx.x < ngpus) {
-      // simultaneously write to the corresponding byte to all other ranks.
-      // Latency = 1 p2p write
-      sg.signals[rank]->start.data[threadIdx.x] = 0;
-      sg.signals[threadIdx.x]->end.data[rank] = 255;
-    }
-    // if this is the final sync, only one block needs it
-    // because kernel exit can serve as sync
-    if constexpr (final_sync) {
-      if (threadIdx.x < ngpus) {
-        while (meta->sg.end.data[threadIdx.x] != 255)
-          ;
-      }
-    }
+  if (threadIdx.x < ngpus) {
+    // simultaneously write to the corresponding byte to all other ranks.
+    // Latency = 1 p2p write
+    meta->sg.start[blockIdx.x][threadIdx.x] = 0;
+    sg.signals[threadIdx.x]->end[blockIdx.x][rank] = 255;
+    while (meta->sg.end[blockIdx.x][threadIdx.x] != 255);
   }
-  if constexpr (!final_sync) {
-    if (threadIdx.x < ngpus) {
-      while (meta->sg.end.data[threadIdx.x] != 255)
-        ;
-    }
-    __syncthreads();
-  }
+  __syncthreads();
 }
 
 template <typename P, int ngpus, typename A>
@@ -513,10 +480,10 @@ class CustomAllreduce {
           (world_size_ <= 8 && bytes < 256 * 1024)) { \
         KL(ngpus, cross_device_reduce_1stage);        \
       } else {                                        \
-        KL(ngpus, cross_device_reduce_2stage);        \
+        KL(ngpus, cross_device_reduce_1stage);        \
       }                                               \
     } else {                                          \
-      KL(ngpus, cross_device_reduce_half_butterfly);  \
+      KL(ngpus, cross_device_reduce_1stage);  \
     }                                                 \
     break;                                            \
   }
