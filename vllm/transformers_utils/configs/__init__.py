@@ -12,5 +12,5 @@ from vllm.transformers_utils.configs.orion import OrionConfig
 
 __all__ = [
     "AquilaConfig", "BaiChuanConfig", "ChatGLMConfig", "MPTConfig",
-    "QWenConfig", "RWConfig", "YiConfig", "OrionConfig"
+    "OrionConfig", "QWenConfig", "RWConfig", "YiConfig"
 ]
