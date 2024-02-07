@@ -14,7 +14,12 @@
 #include <map>
 #include <vector>
 
-enum kv_cache_dtype {AUTO, FP8_E5M2, INT8};
+enum kv_cache_dtype {
+  AUTO,
+#ifdef ENABLE_FP8_E5M2
+  FP8_E5M2,
+#endif
+  INT8};
 
 #ifdef USE_ROCM
   #include <hip/hip_bf16.h>
@@ -203,16 +208,14 @@ __global__ void reshape_and_cache_kernel(
                                   + block_offset;
     scalar_t tgt_key = key[src_key_idx];
     scalar_t tgt_value = value[src_value_idx];
-    if constexpr (KV_CACHE_DTYPE == FP8_E5M2) {
-#ifdef ENABLE_FP8_E5M2
-      key_cache[tgt_key_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_key);
-      value_cache[tgt_value_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_value);
-#else
-      assert(false);
-#endif
-    } else if constexpr (KV_CACHE_DTYPE == INT8) {
+    if constexpr (KV_CACHE_DTYPE == INT8) {
       key_cache[tgt_key_idx] = int8::quant(tgt_key, k_scale, k_zp);
       value_cache[tgt_value_idx] = int8::quant(tgt_value, v_scale, v_zp);
+#ifdef ENABLE_FP8_E5M2
+    } else if constexpr (KV_CACHE_DTYPE == FP8_E5M2) {
+      key_cache[tgt_key_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_key);
+      value_cache[tgt_value_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_value);
+#endif
     } else {
       key_cache[tgt_key_idx] = tgt_key;
       value_cache[tgt_value_idx] = tgt_value;
@@ -272,6 +275,7 @@ void reshape_and_cache(
     } else if (key.dtype() == at::ScalarType::BFloat16) {
       CALL_RESHAPE_AND_CACHE(__nv_bfloat16, __nv_bfloat16, AUTO);
     }
+#ifdef ENABLE_FP8_E5M2
   } else if (kv_cache_dtype == "fp8_e5m2") {
     if (key.dtype() == at::ScalarType::Float) {
       CALL_RESHAPE_AND_CACHE(float, uint8_t, FP8_E5M2);
@@ -280,6 +284,7 @@ void reshape_and_cache(
     } else if (key.dtype() == at::ScalarType::BFloat16) {
       CALL_RESHAPE_AND_CACHE(__nv_bfloat16, uint8_t, FP8_E5M2);
     }
+#endif
   } else if (kv_cache_dtype == "int8") {
     if (key.dtype() == at::ScalarType::Float) {
       CALL_RESHAPE_AND_CACHE(float, int8_t, INT8);

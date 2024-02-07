@@ -186,7 +186,7 @@ inline __device__ Float4_ dequant(int32_t a, const float scale, const float zp)
     return b;
 }
 
-// int8x8 ot float32x8
+// int8x8 to float32x8
 inline __device__ Float8_ dequant(int64_t a, const float scale, const float zp)
 {
     union {

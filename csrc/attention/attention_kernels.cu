@@ -41,7 +41,12 @@
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define DIVIDE_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
 
-enum kv_cache_dtype {AUTO, FP8_E5M2, INT8};
+enum kv_cache_dtype {
+  AUTO,
+#ifdef ENABLE_FP8_E5M2
+  FP8_E5M2,
+#endif
+  INT8};
 namespace vllm {
 
 // Utility function for attention softmax.
@@ -109,7 +114,7 @@ __device__ void paged_attention_kernel(
   const float k_scale = 1.0f,
   const float k_zp = 0.0f,
   const float v_scale = 1.0f,
-  const float v_zp = 0.0f) {  
+  const float v_zp = 0.0f) {
   const int seq_idx = blockIdx.y;
   const int partition_idx = blockIdx.z;
   const int max_num_partitions = gridDim.z;
@@ -215,8 +220,8 @@ __device__ void paged_attention_kernel(
 #pragma unroll
       for (int j = 0; j < NUM_VECS_PER_THREAD; j++) {
         const cache_t* k_ptr = k_cache + physical_block_number * kv_block_stride
-                                        + kv_head_idx * kv_head_stride
-                                        + physical_block_offset * x;
+                                       + kv_head_idx * kv_head_stride
+                                       + physical_block_offset * x;
         const int vec_idx = thread_group_offset + j * THREAD_GROUP_SIZE;
         const int offset1 = (vec_idx * VEC_SIZE) / x;
         const int offset2 = (vec_idx * VEC_SIZE) % x;
@@ -225,13 +230,11 @@ __device__ void paged_attention_kernel(
           using Dequant_vec = typename FloatVec<Quant_vec>::Type;
           Dequant_vec k_vec_dequant = int8::dequant(k_vec_quant, k_scale, k_zp);
           k_vecs[j] = int8::vec_conversion<K_vec, Dequant_vec>(k_vec_dequant);
-        } else if constexpr (KV_CACHE_DTYPE == FP8_E5M2) {
 #ifdef ENABLE_FP8_E5M2
+        } else if constexpr (KV_CACHE_DTYPE == FP8_E5M2) {
           Quant_vec k_vec_quant = *reinterpret_cast<const Quant_vec*>(k_ptr + offset1 * BLOCK_SIZE * x + offset2);
           // Vector conversion from Quant_vec to K_vec.
           k_vecs[j] = fp8_e5m2_unscaled::vec_conversion<K_vec, Quant_vec>(k_vec_quant);
-#else
-          assert(false);
 #endif
         } else {
           k_vecs[j] = *reinterpret_cast<const K_vec*>(k_ptr + offset1 * BLOCK_SIZE * x + offset2);
@@ -309,7 +312,7 @@ __device__ void paged_attention_kernel(
   constexpr int V_VEC_SIZE = MIN(16 / sizeof(scalar_t), BLOCK_SIZE);
   using V_vec = typename Vec<scalar_t, V_VEC_SIZE>::Type;
   using L_vec = typename Vec<scalar_t, V_VEC_SIZE>::Type;
-  using V_quant_vec = typename Vec<cache_t, V_VEC_SIZE>::Type; 
+  using V_quant_vec = typename Vec<cache_t, V_VEC_SIZE>::Type;
   using Float_L_vec = typename FloatVec<L_vec>::Type;
 
   constexpr int NUM_V_VECS_PER_ROW = BLOCK_SIZE / V_VEC_SIZE;
@@ -346,16 +349,14 @@ __device__ void paged_attention_kernel(
         if constexpr (KV_CACHE_DTYPE == INT8) {
           // dequant and conversion
           V_quant_vec v_vec_quant = *reinterpret_cast<const V_quant_vec*>(v_ptr + offset);
-          using V_dequant_vec = typename FloatVec<V_quant_vec>::Type; 
+          using V_dequant_vec = typename FloatVec<V_quant_vec>::Type;
           V_dequant_vec v_vec_dequant = int8::dequant(v_vec_quant, v_scale, v_zp);
-          v_vec = int8::vec_conversion<V_vec, V_dequant_vec>(v_vec_dequant);        
-        } else if constexpr (KV_CACHE_DTYPE == FP8_E5M2) {
+          v_vec = int8::vec_conversion<V_vec, V_dequant_vec>(v_vec_dequant);
 #ifdef ENABLE_FP8_E5M2
+        } else if constexpr (KV_CACHE_DTYPE == FP8_E5M2) {
           V_quant_vec v_quant_vec = *reinterpret_cast<const V_quant_vec*>(v_ptr + offset);
           // Vector conversion from V_quant_vec to V_vec.
           v_vec = fp8_e5m2_unscaled::vec_conversion<V_vec, V_quant_vec>(v_quant_vec);
-#else
-          assert(false);
 #endif
         } else {
           v_vec = *reinterpret_cast<const V_vec*>(v_ptr + offset);
@@ -623,7 +624,7 @@ __global__ void paged_attention_v2_reduce_kernel(
     q_stride,                                                                                 \
     kv_block_stride,                                                                          \
     kv_head_stride,                                                                           \
-    k_scale,                                                                                  \                                                                          
+    k_scale,                                                                                  \
     k_zp,                                                                                     \
     v_scale,                                                                                  \
     v_zp);
@@ -774,6 +775,7 @@ void paged_attention_v1(
     } else {
       TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
     }
+#ifdef ENABLE_FP8_E5M2
   } else if (kv_cache_dtype == "fp8_e5m2") {
     if (query.dtype() == at::ScalarType::Float) {
       CALL_V1_LAUNCHER_BLOCK_SIZE(float, uint8_t, FP8_E5M2);
@@ -784,6 +786,7 @@ void paged_attention_v1(
     } else {
       TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
     }
+#endif
   } else if (kv_cache_dtype == "int8") {
     if (query.dtype() == at::ScalarType::Float) {
       CALL_V1_LAUNCHER_BLOCK_SIZE(float, int8_t, INT8);
@@ -944,7 +947,7 @@ void paged_attention_v2_launcher(
     k_zp,                                                                        \
     v_scale,                                                                     \
     v_zp);
-    
+
 // NOTE(woosuk): To reduce the compilation time, we omitted block sizes
 // 1, 2, 4, 64, 128, 256.
 #define CALL_V2_LAUNCHER_BLOCK_SIZE(T, CACHE_T, KV_CACHE_DTYPE)             \
@@ -993,6 +996,7 @@ void paged_attention_v2(
     } else {
       TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
     }
+#ifdef ENABLE_FP8_E5M2
   } else if (kv_cache_dtype == "fp8_e5m2") {
     if (query.dtype() == at::ScalarType::Float) {
       CALL_V2_LAUNCHER_BLOCK_SIZE(float, uint8_t, FP8_E5M2);
@@ -1003,16 +1007,17 @@ void paged_attention_v2(
     } else {
       TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
     }
+#endif
   } else if (kv_cache_dtype == "int8") {
     if (query.dtype() == at::ScalarType::Float) {
       CALL_V2_LAUNCHER_BLOCK_SIZE(float, int8_t, INT8);
     } else if (query.dtype() == at::ScalarType::Half) {
       CALL_V2_LAUNCHER_BLOCK_SIZE(uint16_t, int8_t, INT8);
     } else if (query.dtype() == at::ScalarType::BFloat16) {
-      CALL_V2_LAUNCHER_BLOCK_SIZE(__nv_bfloat16, int8_t, INT8); 
+      CALL_V2_LAUNCHER_BLOCK_SIZE(__nv_bfloat16, int8_t, INT8);
     } else {
       TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
-    } 
+    }
   } else {
     TORCH_CHECK(false, "Unsupported data type of kv cache: ", kv_cache_dtype);
   }

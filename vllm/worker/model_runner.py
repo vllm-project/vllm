@@ -76,11 +76,20 @@ class ModelRunner:
         self.in_wsl = in_wsl()
         self.kv_cache_dtype = kv_cache_dtype
         self.kv_quant_params = self.load_kv_quant_params(
-            model_config,
-            kv_quant_params_path) if model_config is not None else None
+            model_config, kv_quant_params_path)
 
     def load_kv_quant_params(self, model_config: ModelConfig,
                              kv_quant_params_path: str) -> List[List[float]]:
+        if model_config is None:
+            return None
+        # Remove it when all models support kv cache int8.
+        architectures = model_config.hf_config.architectures
+        for arch in architectures:
+            if arch not in ["LlamaForCausalLM", "LLaMAForCausalLM"]:
+                raise ValueError(
+                    f"KV CACHE INT8 is not supported for model architectures {arch} for now. "
+                    f"Supported architectures: LlamaForCausalLM and LLaMAForCausalLM."
+                )
         num_layers = model_config.hf_config.num_hidden_layers
         kv_quant_params = []
         for i in range(num_layers):

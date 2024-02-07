@@ -86,7 +86,6 @@ inline __device__ float4 add(float4 a, float4 b) {
   return c;
 }
 
-// for compiling, the above function seems to be useless
 inline __device__ Float4_ add(Float4_ a, Float4_ b) {
   Float4_ c;
   c.x = add(a.x, b.x);

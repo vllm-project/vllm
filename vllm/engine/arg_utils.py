@@ -138,7 +138,7 @@ class EngineArgs:
             type=str,
             default=EngineArgs.kv_quant_params_path,
             help=
-            'Path to scales and zero points of kv cache quantizaiton when kv cache dtype is int8'
+            'Path to scales and zero points of kv cache quantizaiton when kv cache dtype is int8.'
         )
         parser.add_argument('--max-model-len',
                             type=int,
