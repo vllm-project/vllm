@@ -26,7 +26,7 @@ from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import Qwen2Config
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -161,7 +161,7 @@ class Qwen2DecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: Qwen2Config,
         layer_idx: int,
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
@@ -223,7 +223,7 @@ class Qwen2Model(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: Qwen2Config,
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
@@ -267,7 +267,7 @@ class Qwen2ForCausalLM(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: Qwen2Config,
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
