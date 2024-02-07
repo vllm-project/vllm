@@ -29,7 +29,7 @@ fptr_t init_custom_ar(torch::Tensor &meta, torch::Tensor &rank_data,
     std::memcpy(&ipc_handles[i], handles[i].data(), sizeof(cudaIpcMemHandle_t));
   }
   return (fptr_t) new vllm::CustomAllreduce(
-      reinterpret_cast<vllm::Metadata *>(meta.data_ptr()), rank_data.data_ptr(),
+      reinterpret_cast<vllm::Signal *>(meta.data_ptr()), rank_data.data_ptr(),
       rank_data.numel(), ipc_handles, offsets, rank, full_nvlink);
 }
 
@@ -126,7 +126,7 @@ void dispose(fptr_t _fa) {
   delete fa;
 }
 
-int meta_size() { return sizeof(vllm::Metadata); }
+int meta_size() { return sizeof(vllm::Signal); }
 
 void register_buffer(fptr_t _fa, torch::Tensor &t,
                      const std::vector<std::string> &handles,

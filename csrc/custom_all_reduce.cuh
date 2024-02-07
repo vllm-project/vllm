@@ -5,6 +5,7 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
+#include <cuda/atomic>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -23,22 +24,15 @@
 
 namespace vllm {
 
+using atomic_flag = cuda::atomic<bool, cuda::thread_scope_system>;
 struct Signal {
-  int start[36][8];
-  int end[36][8];
+  alignas(128) atomic_flag start[36][8];
+  alignas(128) atomic_flag end[36][8];
 };
-
-struct Metadata {
-  alignas(256) Signal sg;
-};
-// static_assert(offsetof(Metadata, counter) == 128);
-// static_assert(sizeof(Metadata) == 256);
 
 struct __align__(16) RankData { const void *__restrict__ ptrs[8]; };
 
-struct RankSignals {
-  volatile Signal *signals[8];
-};
+struct __align__(16) RankSignals { volatile Signal *signals[8]; };
 
 // like std::array, but aligned
 template <typename T, int sz>
@@ -128,28 +122,78 @@ DINLINE O downcast(array_t<float, O::size> val) {
   }
 }
 
+// template <int ngpus>
+// DINLINE void start_sync(const RankSignals &sg, volatile Signal *self_sg,
+//                         int rank) {
+//   if (threadIdx.x < ngpus) {
+//     // simultaneously write to the corresponding flag of all ranks.
+//     // Latency = 1 p2p write
+//     self_sg->end[blockIdx.x][threadIdx.x].store(false,
+//                                                 cuda::memory_order_relaxed);
+//     sg.signals[threadIdx.x]->start[blockIdx.x][rank].store(
+//         true, cuda::memory_order_relaxed);
+//     sg.signals[threadIdx.x]->start[blockIdx.x][rank].notify_all();
+//     self_sg->start[blockIdx.x][threadIdx.x].wait(false,
+//                                                  cuda::memory_order_relaxed);
+//   }
+//   __syncthreads();
+// }
+
+// template <int ngpus, bool final = false>
+// DINLINE void end_sync(const RankSignals &sg, volatile Signal *self_sg,
+//                       int rank) {
+//   if (threadIdx.x < ngpus) {
+//     // simultaneously write to the corresponding flag of all ranks.
+//     // Latency = 1 p2p write
+//     self_sg->start[blockIdx.x][threadIdx.x].store(false,
+//                                                   cuda::memory_order_relaxed);
+//     auto &target_signal = sg.signals[threadIdx.x]->end[blockIdx.x][rank];
+//     if constexpr (final) {
+//       target_signal.store(true, cuda::memory_order_relaxed);
+//       target_signal.notify_all();
+//       self_sg->end[blockIdx.x][threadIdx.x].wait(false,
+//                                                  cuda::memory_order_relaxed);
+//     } else {
+//       target_signal.store(true, cuda::memory_order_release);
+//       target_signal.notify_all();
+//       self_sg->end[blockIdx.x][threadIdx.x].wait(false,
+//                                                  cuda::memory_order_acquire);
+//     }
+//   }
+//   __syncthreads();
+// }
+
 template <int ngpus>
-DINLINE void start_sync(const RankSignals &sg, volatile Metadata *meta,
+DINLINE void start_sync(const RankSignals &sg, volatile Signal *self_sg,
                         int rank) {
   if (threadIdx.x < ngpus) {
-    // simultaneously write to the corresponding byte to all other ranks.
+    // simultaneously write to the corresponding flag of all ranks.
     // Latency = 1 p2p write
-    meta->sg.end[blockIdx.x][threadIdx.x] = 0;
-    sg.signals[threadIdx.x]->start[blockIdx.x][rank] = 255;
-    while (meta->sg.start[blockIdx.x][threadIdx.x] != 255);
+    sg.signals[threadIdx.x]->start[blockIdx.x][rank].store(
+        true, cuda::memory_order_relaxed);
+    bool expected = true;
+    while (!self_sg->start[blockIdx.x][threadIdx.x].compare_exchange_weak(
+        expected, false, cuda::memory_order_relaxed)) {
+      expected = true;
+    }
   }
   __syncthreads();
 }
 
-template <int ngpus>
-DINLINE void end_sync(const RankSignals &sg, volatile Metadata *meta,
+template <int ngpus, bool final = false>
+DINLINE void end_sync(const RankSignals &sg, volatile Signal *self_sg,
                       int rank) {
+  __syncthreads();
   if (threadIdx.x < ngpus) {
-    // simultaneously write to the corresponding byte to all other ranks.
+    // simultaneously write to the corresponding flag of all ranks.
     // Latency = 1 p2p write
-    meta->sg.start[blockIdx.x][threadIdx.x] = 0;
-    sg.signals[threadIdx.x]->end[blockIdx.x][rank] = 255;
-    while (meta->sg.end[blockIdx.x][threadIdx.x] != 255);
+    sg.signals[threadIdx.x]->end[blockIdx.x][rank].store(
+        true, cuda::memory_order_relaxed);
+    bool expected = true;
+    while (!self_sg->end[blockIdx.x][threadIdx.x].compare_exchange_weak(
+        expected, false, cuda::memory_order_relaxed)) {
+      expected = true;
+    }
   }
   __syncthreads();
 }
@@ -167,32 +211,32 @@ DINLINE P packed_reduce(const P *ptrs[], int idx) {
 template <typename T, int ngpus>
 __global__ void __launch_bounds__(512, 1)
     cross_device_reduce_1stage(RankData *_dp, RankSignals sg,
-                               volatile Metadata *meta, T *__restrict__ result,
+                               volatile Signal *self_sg, T *__restrict__ result,
                                int rank, int size) {
   using P = typename packed_t<T>::P;
   using A = typename packed_t<T>::A;
   // note: we don't reorder the address so the accumulation order is the same
   // for all ranks, ensuring bitwise identical results
   auto dp = *_dp;
-  start_sync<ngpus>(sg, meta, rank);
+  start_sync<ngpus>(sg, self_sg, rank);
   // do the actual reduction
   for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size;
        idx += gridDim.x * blockDim.x) {
     ((P *)result)[idx] =
         packed_reduce<P, ngpus, A>((const P **)&dp.ptrs[0], idx);
   }
-  end_sync<ngpus>(sg, meta, rank);
+  end_sync<ngpus, true>(sg, self_sg, rank);
 }
 
 template <typename P>
 DINLINE P *get_tmp_buf(volatile Signal *sg) {
-  return (P *)(((Metadata *)sg) + 1);
+  return (P *)(((Signal *)sg) + 1);
 }
 
 template <typename T, int ngpus>
 __global__ void __launch_bounds__(512, 1)
     cross_device_reduce_2stage(RankData *_dp, RankSignals sg,
-                               volatile Metadata *meta, T *__restrict__ result,
+                               volatile Signal *self_sg, T *__restrict__ result,
                                int rank, int size) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = gridDim.x * blockDim.x;
@@ -210,12 +254,12 @@ __global__ void __launch_bounds__(512, 1)
     tmps[i] = get_tmp_buf<P>(sg.signals[target]);
   }
   auto tmp_out = tmps[0];
-  start_sync<ngpus>(sg, meta, rank);
+  start_sync<ngpus>(sg, self_sg, rank);
   // stage 1: reduce scatter
   for (int idx = start + tid; idx < end; idx += stride) {
     tmp_out[idx - start] = packed_reduce<P, ngpus, A>(ptrs, idx);
   }
-  end_sync<ngpus>(sg, meta, rank);
+  end_sync<ngpus>(sg, self_sg, rank);
 
   // stage 2: allgather
   for (int idx = tid; idx < part; idx += stride) {
@@ -243,7 +287,7 @@ __global__ void __launch_bounds__(512, 1)
 template <typename T, int ngpus>
 __global__ void __launch_bounds__(512, 1)
     cross_device_reduce_half_butterfly(RankData *_dp, RankSignals sg,
-                                       volatile Metadata *meta,
+                                       volatile Signal *self_sg,
                                        T *__restrict__ result, int rank,
                                        int size) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -264,11 +308,11 @@ __global__ void __launch_bounds__(512, 1)
       ptrs[i] = (const P *)_dp->ptrs[i + start];
     }
   }
-  start_sync<ngpus>(sg, meta, rank);
+  start_sync<ngpus>(sg, self_sg, rank);
   for (int idx = tid; idx < size; idx += stride) {
     tmp_out[idx] = packed_reduce<P, hg, A>(ptrs, idx);
   }
-  end_sync<ngpus>(sg, meta, rank);
+  end_sync<ngpus>(sg, self_sg, rank);
 
   auto src = get_tmp_buf<P>(sg.signals[(ngpus - 1) - rank % ngpus]);
   // do the cross group reduction
@@ -292,7 +336,7 @@ class CustomAllreduce {
   // below are device pointers
   RankSignals sg_;
   std::unordered_map<void *, RankData *> buffers_;
-  Metadata *meta_;
+  Signal *self_sg_;
 
   // stores the registered device pointers from all ranks
   RankData *d_rank_data_base_, *d_rank_data_end_;
@@ -303,32 +347,32 @@ class CustomAllreduce {
   /**
    * meta is a pointer to device metadata and temporary buffer for allreduce.
    *
-   * There's a total of sizeof(Metadata) of prefix before the actual data,
+   * There's a total of sizeof(Signal) of prefix before the actual data,
    * so meta + 1 points to actual temporary buffer.
    *
    * note: this class does not own any device memory. Any required buffers
    * are passed in from the constructor
    */
-  CustomAllreduce(Metadata *meta, void *rank_data, size_t rank_data_sz,
+  CustomAllreduce(Signal *meta, void *rank_data, size_t rank_data_sz,
                   const cudaIpcMemHandle_t *handles,
                   const std::vector<int64_t> &offsets, int rank,
                   bool full_nvlink = true)
       : rank_(rank),
         world_size_(offsets.size()),
         full_nvlink_(full_nvlink),
-        meta_(meta),
+        self_sg_(meta),
         d_rank_data_base_(reinterpret_cast<RankData *>(rank_data)),
         d_rank_data_end_(d_rank_data_base_ + rank_data_sz / sizeof(RankData)) {
     for (int i = 0; i < world_size_; i++) {
-      Metadata *rank_meta;
+      Signal *rank_sg;
       if (i != rank_) {
         char *handle = open_ipc_handle(&handles[i]);
         handle += offsets[i];
-        rank_meta = (Metadata *)handle;
+        rank_sg = (Signal *)handle;
       } else {
-        rank_meta = meta_;
+        rank_sg = self_sg_;
       }
-      sg_.signals[i] = &rank_meta->sg;
+      sg_.signals[i] = rank_sg;
     }
   }
 
@@ -463,9 +507,9 @@ class CustomAllreduce {
     size /= d;
     auto bytes = size * sizeof(typename packed_t<T>::P);
     int blocks = std::min(block_limit, (size + threads - 1) / threads);
-#define KL(ngpus, name) \
-  name<T, ngpus>        \
-      <<<blocks, threads, 0, stream>>>(ptrs, sg_, meta_, output, rank_, size);
+#define KL(ngpus, name)                                                       \
+  name<T, ngpus><<<blocks, threads, 0, stream>>>(ptrs, sg_, self_sg_, output, \
+                                                 rank_, size);
 #define REDUCE_CASE(ngpus)                            \
   case ngpus: {                                       \
     if (world_size_ == 2) {                           \
@@ -507,7 +551,7 @@ class CustomAllreduce {
 /**
  * To inspect PTX/SASS, copy paste this header file to compiler explorer and add
  a template instantiation:
- * template void CustomAllreduce::allreduce<half>(cudaStream_t, half *, half *,
- int, int, int);
+ * template void vllm::CustomAllreduce::allreduce<half>(cudaStream_t, half *,
+ half *, int, int, int);
 */
 }  // namespace vllm
