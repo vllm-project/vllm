@@ -21,6 +21,10 @@ async def health() -> Response:
     """Health check."""
     return Response(status_code=200)
 
+def ensure_suffix(s, suffix="<reserved_107>"):
+    if not s.endswith(suffix):
+        s += suffix
+    return s
 
 @app.post("/generate")
 async def generate(request: Request) -> Response:
@@ -35,6 +39,12 @@ async def generate(request: Request) -> Response:
     prompt = request_dict.pop("prompt")
     prefix_pos = request_dict.pop("prefix_pos", None)
     stream = request_dict.pop("stream", False)
+    request_dict["temperature"] = request_dict.get("temperature", 0.3)
+    request_dict["max_tokens"] = request_dict.get("max_tokens", 2048)
+    request_dict["top_k"] = request_dict.get("top_k", 5)
+    request_dict["top_p"] = request_dict.get("top_p", 0.85)
+    request_dict["repetition_penalty"] = request_dict.get("repetition_penalty", 1.05)
+    prompt = ensure_suffix(prompt)
     sampling_params = SamplingParams(**request_dict)
     request_id = random_uuid()
 
