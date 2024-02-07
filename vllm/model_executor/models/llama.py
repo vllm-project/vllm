@@ -23,6 +23,7 @@
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 from typing import List, Optional, Tuple
 
+import math
 import torch
 from torch import nn
 from transformers import LlamaConfig
@@ -40,7 +41,7 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, ParallelLMHead, DEFAULT_VOCAB_PADDING_SIZE)
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_world_size)
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
@@ -50,6 +51,31 @@ from vllm.config import LoRAConfig
 from copy import deepcopy
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
+
+
+def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
+    closest_power_of_2 = 2**math.floor(math.log2(total_num_heads))
+    base = torch.tensor(
+        2**(-(2**-(math.log2(closest_power_of_2) - 3))),
+        dtype=torch.float32,
+    )
+    powers = torch.arange(1, 1 + closest_power_of_2, dtype=torch.int32)
+    slopes = torch.pow(base, powers)
+
+    if closest_power_of_2 != total_num_heads:
+        extra_base = torch.tensor(
+            2**(-(2**-(math.log2(2 * closest_power_of_2) - 3))),
+            dtype=torch.float32,
+        )
+        num_remaining_heads = min(closest_power_of_2,
+                                  total_num_heads - closest_power_of_2)
+        extra_powers = torch.arange(start=1,
+                                    end=1 + 2 * num_remaining_heads,
+                                    step=2,
+                                    dtype=torch.int32)
+        slopes = torch.cat(
+            [slopes, torch.pow(extra_base, extra_powers)], dim=0)
+    return slopes
 
 
 class LlamaMLP(nn.Module):
@@ -111,7 +137,6 @@ class LlamaAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = config.rope_theta
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
         self.max_position_embeddings = config.max_position_embeddings
@@ -136,28 +161,40 @@ class LlamaAttention(nn.Module):
             linear_method=linear_method,
         )
 
-        rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
-
-        # stablelm
-        rope_pct = getattr(config, "rope_pct", 1)
-
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            rotary_dim=int(self.head_dim * rope_pct),
-            max_position=max_position_embeddings,
-            base=rope_theta,
-            rope_scaling=rope_scaling,
-        )
-
         # mistral
         sliding_window = getattr(config, "sliding_window", None)
 
-        self.attn = PagedAttention(self.num_heads,
-                                   self.head_dim,
-                                   self.scaling,
-                                   num_kv_heads=self.num_kv_heads,
-                                   sliding_window=sliding_window)
+        self.postion_embedding = getattr(config, "postion_embedding", "ROPE")
+        # Create the alibi slopes and slice them.
+        if self.postion_embedding == "ALIBI":
+            tp_rank = get_tensor_model_parallel_rank()
+            head_start = tp_rank * self.num_heads
+            head_end = (tp_rank + 1) * self.num_heads
+            alibi_slopes = _get_alibi_slopes(self.total_num_heads)
+            alibi_slopes = alibi_slopes[head_start:head_end].tolist()
+
+            self.attn = PagedAttention(self.num_heads,
+                                       self.head_dim,
+                                       self.scaling,
+                                       alibi_slopes=alibi_slopes,
+                                       sliding_window=sliding_window)
+        else:
+            rope_theta = getattr(config, "rope_theta", 10000)
+            rope_scaling = getattr(config, "rope_scaling", None)
+            # stablelm
+            rope_pct = getattr(config, "rope_pct", 1)
+            self.rotary_emb = get_rope(
+                self.head_dim,
+                rotary_dim=int(self.head_dim * rope_pct),
+                max_position=max_position_embeddings,
+                base=rope_theta,
+                rope_scaling=rope_scaling,
+            )
+            self.attn = PagedAttention(self.num_heads,
+                                       self.head_dim,
+                                       self.scaling,
+                                       num_kv_heads=self.num_kv_heads,
+                                       sliding_window=sliding_window)
 
     def forward(
         self,
@@ -168,7 +205,8 @@ class LlamaAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
+        if self.postion_embedding != "ALIBI":
+            q, k = self.rotary_emb(positions, q, k)
         k_cache, v_cache = kv_cache
         attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
         output, _ = self.o_proj(attn_output)
