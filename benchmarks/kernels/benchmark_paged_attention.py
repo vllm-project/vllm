@@ -74,6 +74,18 @@ def main(
                                                             device=device)
     key_cache, value_cache = key_caches[0], value_caches[0]
 
+    # Prepare kv quant parameters for kv_cache_dtype=int8.
+    # NOTE(zhangying): The four parameters only work when kv_cache_dtype is int8.
+    # They have no influence on other kv_cache_dtypes, like auto and fp8_e5m2.
+    # For Llama-13B, we find that the key scale distribution range is [0.05, 0.15],
+    # the value scale distribution range is [0.005, 0.10],
+    # the key zero point distribution range is [-1.5, 1.5],
+    # the value zero point distribution range is [-2.0, 2.0].
+    k_scale = random.random() * 0.10 + 0.05
+    v_scale = random.random() * 0.095 + 0.005
+    k_zp = random.random() * 3.0 - 1.5
+    v_zp = random.random() * 4.0 - 2.0
+
     # Prepare for the paged attention kernel.
     output = torch.empty_like(query)
     if version == "v2":
@@ -112,6 +124,10 @@ def main(
                     max_context_len,
                     alibi_slopes,
                     kv_cache_dtype,
+                    k_scale,
+                    k_zp,
+                    v_scale,
+                    v_zp,
                 )
             elif version == "v2":
                 ops.paged_attention_v2(
@@ -130,6 +146,10 @@ def main(
                     max_context_len,
                     alibi_slopes,
                     kv_cache_dtype,
+                    k_scale,
+                    k_zp,
+                    v_scale,
+                    v_zp,
                 )
             else:
                 raise ValueError(f"Invalid version: {version}")
@@ -179,7 +199,7 @@ if __name__ == '__main__':
     parser.add_argument(
         "--kv-cache-dtype",
         type=str,
-        choices=["auto", "fp8_e5m2"],
+        choices=["auto", "fp8_e5m2", "int8"],
         default="auto",
         help=
         'Data type for kv cache storage. If "auto", will use model data type.')
