@@ -113,6 +113,8 @@ def test_reshape_and_cache(
     device: int,
     kv_cache_dtype: str,
 ) -> None:
+    if kv_cache_dtype != "auto":
+        return # No alternative fp8 operation to compare to
     random.seed(seed)
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -169,6 +171,7 @@ def test_reshape_and_cache(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
 @torch.inference_mode()
 def test_swap_blocks(
     kv_cache_factory,
@@ -181,7 +184,10 @@ def test_swap_blocks(
     dtype: torch.dtype,
     seed: int,
     device: int,
+    kv_cache_dtype: str,
 ) -> None:
+    if kv_cache_dtype == "fp8_e5m2" and "cpu" in direction:
+        return
     random.seed(seed)
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -202,12 +208,12 @@ def test_swap_blocks(
 
     # Create the KV caches on the first device.
     src_key_caches, src_value_caches = kv_cache_factory(
-        num_blocks, block_size, 1, num_heads, head_size, dtype, None, seed,
+        num_blocks, block_size, 1, num_heads, head_size, kv_cache_dtype, dtype, seed,
         src_device)
 
     # Create the KV caches on the second device.
     dist_key_caches, dist_value_caches = kv_cache_factory(
-        num_blocks, block_size, 1, num_heads, head_size, dtype, None, seed,
+        num_blocks, block_size, 1, num_heads, head_size, kv_cache_dtype, dtype, seed,
         dst_device)
 
     src_key_caches_clone = src_key_caches[0].clone()
