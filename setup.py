@@ -23,6 +23,10 @@ ROCM_SUPPORTED_ARCHS = {"gfx90a", "gfx942"}
 # SUPPORTED_ARCHS = NVIDIA_SUPPORTED_ARCHS.union(ROCM_SUPPORTED_ARCHS)
 
 
+if "VLLM_INCREMENTAL_BUILD_TORCH_PATH" in os.environ:
+    torch_cpp_ext._TORCH_PATH = os.environ["VLLM_INCREMENTAL_BUILD_TORCH_PATH"]
+
+
 def _is_hip() -> bool:
     return torch.version.hip is not None
 
@@ -432,6 +436,27 @@ if os.environ.get("VLLM_USE_PRECOMPILED"):
     ext_modules = []
     package_data["vllm"].append("*.so")
 
+
+if "VLLM_INCREMENTAL_BUILD_TORCH_PATH" in os.environ:
+    # This is an optional hack to allow incremental compilation.
+    class VllmBuildExtension(BuildExtension):
+        def __init__(self, *args, **kwargs):
+            old_write_ninja_file = torch_cpp_ext._write_ninja_file
+            def write_ninja_file(*args, **kwargs):
+                result = old_write_ninja_file(*args, **kwargs)
+                # Back date the build file to the unix epoch
+                os.utime("/tmp/vllmcompile/build.ninja", (0, 0))
+                return result
+            torch_cpp_ext._write_ninja_file = write_ninja_file
+            super().__init__(*args, **kwargs)
+
+        def build_extensions(self) -> None:
+            self.build_temp = "/tmp/vllmcompile/"
+            super().build_extensions()
+else:
+    VllmBuildExtension = BuildExtension
+
+
 setuptools.setup(
     name="vllm",
     version=get_vllm_version(),
@@ -459,6 +484,7 @@ setuptools.setup(
     python_requires=">=3.8",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
-    cmdclass={"build_ext": BuildExtension} if not _is_neuron() else {},
+    cmdclass={"build_ext": VllmBuildExtension} if not _is_neuron() else {},
     package_data=package_data,
 )
+
