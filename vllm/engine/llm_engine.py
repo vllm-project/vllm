@@ -130,7 +130,7 @@ class LLMEngine:
         # Stores the DAG definition to run VLLM workers.
         self.forward_dag = None
         if USE_RAY_COMPILED_DAG:
-            self.forward_dag = self._compiled_dag_init_dag()
+            self.forward_dag = self._compiled_ray_dag()
 
     def get_tokenizer_for_seq(self, sequence: Sequence):
         return self.tokenizer.get_lora_tokenizer(sequence.lora_request)
@@ -976,6 +976,8 @@ class LLMEngine:
                 "max_concurrent_workers is not supported yet.")
 
         if use_ray_compiled_dag:
+            # Right now, compiled DAG can only accept a single
+            # input. TODO(sang): Fix it.
             output_channels = self.forward_dag.execute(1)
         else:
             # Start the ray workers first.
@@ -1010,7 +1012,15 @@ class LLMEngine:
 
         return [driver_worker_output] + ray_worker_outputs
 
-    def _compiled_dag_init_dag(self):
+    def _compiled_ray_dag(self):
+        import pkg_resources
+        required_version = "2.9"
+        current_version = pkg_resources.get_distribution("ray").version
+        if current_version < required_version:
+            raise ValueError(
+                f"Ray version {required_version} or greater is "
+                f"required, but found {current_version}")
+
         from ray.dag import MultiOutputNode, InputNode
         assert self.parallel_config.worker_use_ray
 
