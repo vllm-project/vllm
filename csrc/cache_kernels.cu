@@ -307,7 +307,13 @@ void convert_fp8_e5m2(
       src_device.index() == dst_device.index(),
       "src and dst must be on the same GPU");
   }
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(src_cache));
+  at::cuda::OptionalCUDAGuard device_guard;
+  
+  if (src_device.is_cuda()) {
+    device_guard.set_device(src_device);
+  } else if (dst_device.is_cuda()) {
+    device_guard.set_device(dst_device);
+  }
   int64_t num_blocks = src_cache.size(0);
   int64_t block_stride = src_cache.stride(0);
 
