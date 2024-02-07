@@ -440,15 +440,6 @@ if "VLLM_INCREMENTAL_BUILD_TORCH_PATH" in os.environ:
     class VllmBuildExtension(BuildExtension):
 
         def __init__(self, *args, **kwargs):
-            old_write_ninja_file = torch_cpp_ext._write_ninja_file
-
-            def write_ninja_file(*args, **kwargs):
-                result = old_write_ninja_file(*args, **kwargs)
-                # Back date the build file to the unix epoch
-                os.utime("/tmp/vllmcompile/build.ninja", (0, 0))
-                return result
-
-            torch_cpp_ext._write_ninja_file = write_ninja_file
             super().__init__(*args, **kwargs)
 
         def build_extensions(self) -> None:
