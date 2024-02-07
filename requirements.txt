@@ -11,3 +11,5 @@ uvicorn[standard]
 pydantic >= 2.0  # Required for OpenAI server.
 aioprometheus[starlette]
 pynvml == 11.5.0
+flashinfer @ https://github.com/flashinfer-ai/flashinfer/releases/download/v0.0.1/flashinfer-0.0.1+cu121-cp310-cp310-linux_x86_64.whl
+

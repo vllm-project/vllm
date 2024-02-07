@@ -547,8 +547,14 @@ class ModelRunner:
          lora_requests,
          lora_mapping) = self.prepare_input_tensors(seq_group_metadata_list)
 
-        num_qo_heads = self.model.config.num_attention_heads
-        num_kv_heads = self.model.config.num_key_value_heads
+
+        if "num_key_value_heads" in self.model.config.__dict__.keys():
+            num_qo_heads = self.model.config.num_attention_heads
+            num_kv_heads = self.model.config.num_key_value_heads
+
+        else:
+            num_qo_heads = self.model.config.num_attention_heads
+            num_kv_heads = self.model.config.num_attention_heads
 
         if not profile and input_metadata.is_prompt and input_metadata.decode_wrapper:
             input_metadata.decode_wrapper.end_forward()
