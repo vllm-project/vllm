@@ -3,6 +3,7 @@
 """Logging configuration for vLLM."""
 import logging
 import sys
+import os
 
 _FORMAT = "%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s"
 _DATE_FORMAT = "%m-%d %H:%M:%S"
@@ -50,7 +51,7 @@ _setup_logger()
 def init_logger(name: str):
     # Use the same settings as above for root logger
     logger = logging.getLogger(name)
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(os.getenv("LOG_LEVEL", "DEBUG"))
     logger.addHandler(_default_handler)
     logger.propagate = False
     return logger

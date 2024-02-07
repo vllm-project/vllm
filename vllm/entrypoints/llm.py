@@ -3,6 +3,7 @@ from typing import List, Optional, Union
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
+from vllm.lora.request import LoRARequest
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.outputs import RequestOutput
@@ -63,6 +64,7 @@ class LLM:
         max_context_len_to_capture: Maximum context len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
             to eager mode.
+        disable_custom_all_reduce: See ParallelConfig
     """
 
     def __init__(
@@ -81,6 +83,7 @@ class LLM:
         swap_space: int = 4,
         enforce_eager: bool = False,
         max_context_len_to_capture: int = 8192,
+        disable_custom_all_reduce: bool = False,
         **kwargs,
     ) -> None:
         if "disable_log_stats" not in kwargs:
@@ -100,6 +103,7 @@ class LLM:
             swap_space=swap_space,
             enforce_eager=enforce_eager,
             max_context_len_to_capture=max_context_len_to_capture,
+            disable_custom_all_reduce=disable_custom_all_reduce,
             **kwargs,
         )
         self.llm_engine = LLMEngine.from_engine_args(engine_args)
@@ -107,20 +111,22 @@ class LLM:
 
     def get_tokenizer(
             self) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
-        return self.llm_engine.tokenizer
+        return self.llm_engine.tokenizer.tokenizer
 
     def set_tokenizer(
         self,
         tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     ) -> None:
-        self.llm_engine.tokenizer = tokenizer
+        self.llm_engine.tokenizer.tokenizer = tokenizer
 
     def generate(
         self,
         prompts: Optional[Union[str, List[str]]] = None,
         sampling_params: Optional[SamplingParams] = None,
         prompt_token_ids: Optional[List[List[int]]] = None,
+        prefix_pos: Optional[Union[int, List[int]]] = None,
         use_tqdm: bool = True,
+        lora_request: Optional[LoRARequest] = None,
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -134,7 +140,13 @@ class LLM:
                 None, we use the default sampling parameters.
             prompt_token_ids: A list of token IDs for the prompts. If None, we
                 use the tokenizer to convert the prompts to token IDs.
+            prefix_pos: If not None, we use the given position as the prefix
+                position for each prompt. We will cache the prefix's KV
+                cache and reuse it for the next request with the same prefix.
+                This is an experimental feature, and may be replaced with
+                automatic prefix caching in the future.
             use_tqdm: Whether to use tqdm to display the progress bar.
+            lora_request: LoRA request to use for generation, if any.
 
         Returns:
             A list of `RequestOutput` objects containing the generated
@@ -159,9 +171,14 @@ class LLM:
             prompt_token_ids)
         for i in range(num_requests):
             prompt = prompts[i] if prompts is not None else None
+            prefix_pos_i = prefix_pos[i] if prefix_pos is not None else None
             token_ids = None if prompt_token_ids is None else prompt_token_ids[
                 i]
-            self._add_request(prompt, sampling_params, token_ids)
+            self._add_request(prompt,
+                              sampling_params,
+                              token_ids,
+                              lora_request=lora_request,
+                              prefix_pos=prefix_pos_i)
         return self._run_engine(use_tqdm)
 
     def _add_request(
@@ -169,10 +186,16 @@ class LLM:
         prompt: Optional[str],
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]],
+        lora_request: Optional[LoRARequest] = None,
+        prefix_pos: Optional[int] = None,
     ) -> None:
         request_id = str(next(self.request_counter))
-        self.llm_engine.add_request(request_id, prompt, sampling_params,
-                                    prompt_token_ids)
+        self.llm_engine.add_request(request_id,
+                                    prompt,
+                                    sampling_params,
+                                    prompt_token_ids,
+                                    lora_request=lora_request,
+                                    prefix_pos=prefix_pos)
 
     def _run_engine(self, use_tqdm: bool) -> List[RequestOutput]:
         # Initialize tqdm.
