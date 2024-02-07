@@ -548,6 +548,8 @@ class ModelRunner:
          lora_mapping) = self.prepare_input_tensors(seq_group_metadata_list)
 
 
+        hidden_size = self.model.config.hidden_size
+
         if "num_key_value_heads" in self.model.config.__dict__.keys():
             num_qo_heads = self.model.config.num_attention_heads
             num_kv_heads = self.model.config.num_key_value_heads
@@ -616,7 +618,7 @@ class ModelRunner:
                     paged_kv_last_page_len,
                     num_qo_heads,
                     num_kv_heads,
-                    128,
+                    hidden_size // num_kv_heads,
                     16,
                 )
 

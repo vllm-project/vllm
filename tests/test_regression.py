@@ -15,7 +15,8 @@ def test_duplicated_ignored_sequence_group():
                                      max_tokens=256)
     llm = LLM(model="facebook/opt-125m",
               max_num_batched_tokens=4096,
-              tensor_parallel_size=1)
+              tensor_parallel_size=1,
+              enforce_eager=True)
     prompts = ["This is a short prompt", "This is a very long prompt " * 1000]
     outputs = llm.generate(prompts, sampling_params=sampling_params)
 
@@ -28,7 +29,8 @@ def test_max_tokens_none():
                                      max_tokens=None)
     llm = LLM(model="facebook/opt-125m",
               max_num_batched_tokens=4096,
-              tensor_parallel_size=1)
+              tensor_parallel_size=1,
+              enforce_eager=True)
     prompts = ["Just say hello!"]
     outputs = llm.generate(prompts, sampling_params=sampling_params)
 

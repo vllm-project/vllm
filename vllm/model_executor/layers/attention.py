@@ -161,7 +161,7 @@ class PagedAttention(nn.Module):
                 # the very attention layer of every iteration.
                 # FIXME(woosuk): This is a hack.
 
-                query = query.view(-1, 32, 128)
+                query = query.view(-1, self.num_kv_heads, self.head_size)
                 output = input_metadata.prefill_wrapper.forward(
                     query, kv_cache, causal=True, allow_fp16_qk_reduction=True)
 
