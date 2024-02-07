@@ -568,33 +568,46 @@ class ModelRunner:
             else:
                 seq_lens = input_metadata.context_lens
             extend_seq_lens = input_metadata.context_lens
+            
+            if input_metadata.is_prompt:
+                seq_lens = input_metadata.prompt_lens
+                #seq_lens = torch.stack([a + b for a, b in zip(input_metadata.prompt_lens, input_metadata.context_lens)], dim=0)
+            else:
+                seq_lens = input_metadata.context_lens
+            extend_seq_lens = input_metadata.context_lens
 
             if input_metadata.is_prompt:
                 qo_indptr = torch.zeros(
                     (batch_size + 1,), dtype=torch.int32, device="cuda"
                 )
-
+                
                 qo_indptr[1:] = torch.cumsum(input_metadata.prompt_lens, dim=0)
 
-            kvi = input_metadata.slot_mapping.view(-1).type(torch.int32).to("cuda:0")
+                input_metadata.qo_indptr = qo_indptr
 
+            kvi = input_metadata.slot_mapping.view(-1).type(torch.int32).to("cuda:0")
+            paged_kv_indices = torch.div(kvi, 16, rounding_mode="floor")
+            
             paged_kv_indptr = torch.zeros(
             (batch_size + 1,), dtype=torch.int32, device="cuda:0"
             )
+            
+            #print(block_sizes_per_seq)
+            
+            if input_metadata.is_prompt:
+                block_sizes_per_seq = torch.tensor([len(input_metadata.slot_mapping[i].unique()) for i in range(batch_size)])
 
-            paged_kv_indptr = input_metadata.slot_mapping[:, -1].flip(dims=[0]) // 16
-            paged_kv_indptr = torch.cat([paged_kv_indptr, (paged_kv_indptr[-1] + 1).unsqueeze(0)]).int()
+                paged_kv_indptr[1:] = torch.cumsum(block_sizes_per_seq, dim=0)
+                
+            else:
+                paged_kv_indptr[1:] = torch.arange(1, batch_size + 1)
 
             if input_metadata.is_prompt:
-                paged_kv_last_page_len = (kvi[qo_indptr[1:] - 1] % 16) + 1
+                paged_kv_last_page_len = (kvi[paged_kv_indptr[1:] - 1] % 16) + 1
             else:
                 paged_kv_last_page_len = (kvi % 16) + 1
-            paged_kv_indices = self.paged_kv_index 
-
-            input_metadata.paged_kv_indptr = paged_kv_indptr
-            input_metadata.paged_kv_indices = paged_kv_indices
-            input_metadata.paged_kv_last_page_len = paged_kv_last_page_len
-
+            
+            
             if input_metadata.is_prompt:
                 input_metadata.prefill_wrapper.begin_forward(
                     qo_indptr,

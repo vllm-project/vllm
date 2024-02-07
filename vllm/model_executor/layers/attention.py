@@ -106,8 +106,6 @@ class PagedAttention(nn.Module):
             )
 
         if input_metadata.is_prompt:
-            # Prompt run.
-
             # old attn
             if kv_cache is None:
                 if self.num_kv_heads != self.num_heads:
@@ -169,63 +167,6 @@ class PagedAttention(nn.Module):
                 # the very attention layer of every iteration.
                 # FIXME(woosuk): This is a hack.
 
-                if kv_cache is not None:
-
-                    if self.num_kv_heads != self.num_heads:
-                        # As of Nov 2023, xformers only supports MHA. For MQA/GQA,
-                        # project the key and value tensors to the desired number of
-                        # heads.
-                        # TODO(woosuk): Use MQA/GQA kernels for higher performance.
-                        query = query.view(query.shape[0], self.num_kv_heads,
-                                        self.num_queries_per_kv, query.shape[-1])
-                        key = key[:, :,
-                                None, :].expand(key.shape[0], self.num_kv_heads,
-                                                self.num_queries_per_kv,
-                                                key.shape[-1])
-                        value = value[:, :, None, :].expand(value.shape[0],
-                                                            self.num_kv_heads,
-                                                            self.num_queries_per_kv,
-                                                            value.shape[-1])
-
-                    # Set attention bias if not provided. This typically happens at
-                    # the very attention layer of every iteration.
-                    # FIXME(woosuk): This is a hack.
-                    if input_metadata.attn_bias is None:
-                        if self.alibi_slopes is None:
-                            attn_bias = BlockDiagonalCausalMask.from_seqlens(
-                                [seq_len] * batch_size)
-                            if self.sliding_window is not None:
-                                attn_bias = attn_bias.make_local_attention(
-                                    self.sliding_window)
-                            input_metadata.attn_bias = attn_bias
-                        else:
-                            input_metadata.attn_bias = _make_alibi_bias(
-                                self.alibi_slopes, self.num_kv_heads, batch_size,
-                                seq_len, query.dtype)
-
-                    # TODO(woosuk): Too many view operations. Let's try to reduce
-                    # them in the future for code readability.
-                    if self.alibi_slopes is None:
-                        query = query.unsqueeze(0)
-                        key = key.unsqueeze(0)
-                        value = value.unsqueeze(0)
-                    else:
-                        query = query.unflatten(0, (batch_size, seq_len))
-                        key = key.unflatten(0, (batch_size, seq_len))
-                        value = value.unflatten(0, (batch_size, seq_len))
-
-                    out = xops.memory_efficient_attention_forward(
-                        query,
-                        value,
-                        key,
-                        attn_bias=input_metadata.attn_bias,
-                        p=0.0,
-                        scale=self.scale,
-                        op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if
-                        (is_hip()) else None,
-                    )
-                    output = out.view_as(query)
-
                 query = query.view(-1, 32, 128)
                 output = input_metadata.prefill_wrapper.forward(
                     query,
@@ -233,6 +174,9 @@ class PagedAttention(nn.Module):
                     causal=True,
                     allow_fp16_qk_reduction=True
                 )
+
+                #output = flashinfer.single_prefill_with_kv_cache(query, key.contiguous(), value.contiguous(), causal=True,
+                #allow_fp16_qk_reduction=True)
 
             else:
                 # prefix-enabled attention
