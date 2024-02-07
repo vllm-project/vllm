@@ -141,6 +141,7 @@ class Sequence:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
     def hash(self, logical_idx: int) -> int:
+        # Compute the number of tokens in the sequence
         num_tokens = (logical_idx * self.block_size) + (
             self.block_size -
             self.logical_token_blocks[logical_idx].get_num_empty_slots())

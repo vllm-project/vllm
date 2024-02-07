@@ -20,27 +20,23 @@ class Evictor:
                  eviction_policy: EvictionPolicy = EvictionPolicy.LRU) -> None:
         self.eviction_policy = eviction_policy
 
-        # Initialize the free blocks.
-        self.free_blocks: Dict[int, PhysicalTokenBlock] = {}
-
     def evict(self, table: Dict[int,
                                 PhysicalTokenBlock]) -> PhysicalTokenBlock:
         if self.eviction_policy == EvictionPolicy.LRU:
             all_blocks: List[PhysicalTokenBlock] = list(
-                self.free_blocks.values())
+                table.values())
             assert (len(all_blocks) > 0)
 
             # Find lowest timestamp
-            lowest_timestamp = all_blocks[0].last_accessed
+            lowest_timestamp = monotonic()
             for block in all_blocks:
-                assert (block.last_accessed != 0)
-                if block.last_accessed < lowest_timestamp:
+                if block.ref_count == 0 and block.last_accessed < lowest_timestamp:
                     lowest_timestamp = block.last_accessed
 
             # Find all blocks with the lowest timestamp
             eviction_candidates: List[PhysicalTokenBlock] = []
             for block in all_blocks:
-                if block.last_accessed == lowest_timestamp:
+                if block.ref_count == 0 and block.last_accessed == lowest_timestamp:
                     eviction_candidates.append(block)
 
             # Arbitrarily evict the first candidate
@@ -48,16 +44,11 @@ class Evictor:
             assert (len(eviction_candidates) > 0)
             evicted_block = eviction_candidates[0]
             del table[evicted_block.block_hash]
-            del self.free_blocks[evicted_block.block_hash]
 
             return evicted_block
         else:
             raise ValueError(
                 f"Unknown cache eviction policy: {self.eviction_policy}")
-
-    def return_block(self, block: PhysicalTokenBlock) -> None:
-        self.free_blocks[block.block_hash] = block
-
 
 class BlockAllocator:
     """Manages free physical token blocks for a device.
@@ -100,9 +91,6 @@ class BlockAllocator:
         if block_hash not in self.table:
             self.table[block_hash] = self.allocate_block(block_hash)
         block = self.table[block_hash]
-        if self.evictor.free_blocks.get(block_hash) is not None:
-            del self.evictor.free_blocks[block_hash]
-
         block.ref_count += 1
         # print(f"REFCOUNT ON ALLOCTION: {block}")
         return block
@@ -113,11 +101,9 @@ class BlockAllocator:
         if block.ref_count == 0:
             raise ValueError(f"Double free! {block} is already freed.")
         block.ref_count -= 1
-        if block.ref_count == 0:
-            if now is None:
-                now = monotonic()
-            block.last_accessed = now
-            self.evictor.return_block(block)
+        if now is None:
+            now = monotonic()
+        block.last_accessed = now
 
     def get_num_free_blocks(self) -> int:
         return self.num_blocks - self.current_num_blocks
