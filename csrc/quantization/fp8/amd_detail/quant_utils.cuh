@@ -10,7 +10,7 @@
 
 namespace vllm
 {
-
+namespace fp8_e4m3 {
 template <typename Tout, typename Tin>
 __inline__ __device__ Tout vec_conversion(const Tin& x)
 {
@@ -289,5 +289,6 @@ __inline__ __device__ bf16_8_t vec_conversion<bf16_8_t, Float8_>(const Float8_& 
     b.z = __float22bfloat162_rn(a.z);
     b.w = __float22bfloat162_rn(a.w);
     return b;
+}
 }
 } // namespace vllm

@@ -6,6 +6,8 @@
 #include "dispatch_utils.h"
 #ifdef ENABLE_FP8_E5M2
 #include "quantization/fp8_e5m2_kvcache/quant_utils.cuh"
+#else
+#include "quantization/fp8/amd_detail/quant_utils.cuh"
 #endif
 
 #include <algorithm>
@@ -200,7 +202,8 @@ __global__ void reshape_and_cache_kernel(
       key_cache[tgt_key_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_key);
       value_cache[tgt_value_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_value);
 #else
-      assert(false);
+      key_cache[tgt_key_idx] = fp8_e4m3::vec_conversion<uint8_t, scalar_t>(tgt_key);
+      value_cache[tgt_value_idx] = fp8_e4m3::vec_conversion<uint8_t, scalar_t>(tgt_value);
 #endif
     } else {
       key_cache[tgt_key_idx] = tgt_key;
@@ -438,10 +441,10 @@ __global__ void convert_fp8_e5m2_kernel(
   const int64_t block_idx = blockIdx.x;
   for (int i = threadIdx.x; i < block_stride; i += blockDim.x) {
     int64_t idx = block_idx * block_stride + i;
-#ifdef ENABLE_FP8_E5M2
+    #ifdef ENABLE_FP8_E5M2
     dst_cache[idx] = fp8_e5m2_unscaled::vec_conversion<Tout, Tin>(src_cache[idx]);
 #else
-    assert(false);
+    dst_cache[idx] = fp8_e4m3::vec_conversion<Tout, Tin>(src_cache[idx]);
 #endif
   }
 }
@@ -458,13 +461,21 @@ void convert_fp8_e5m2(
   torch::Tensor& src_cache,
   torch::Tensor& dst_cache)
 {
+  torch::Device src_device = src_cache.device();
+  torch::Device dst_device = dst_cache.device();
+  if (src_device.is_cuda() && dst_device.is_cuda()) {
+    TORCH_CHECK(
+      src_device.index() == dst_device.index(),
+      "src and dst must be on the same GPU");
+  }
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(src_cache));
   int64_t num_blocks = src_cache.size(0);
   int64_t block_stride = src_cache.stride(0);
 
   dim3 grid(num_blocks);
   dim3 block(std::min(block_stride, int64_t(512)));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-
+  
   if (src_cache.dtype() == at::ScalarType::Float) {
     CALL_CONVERT_FP8_E5M2(uint8_t, float);
   } else if (src_cache.dtype() == at::ScalarType::Half) {

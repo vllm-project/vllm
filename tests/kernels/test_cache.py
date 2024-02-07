@@ -99,6 +99,7 @@ def test_copy_blocks(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
 @torch.inference_mode()
 def test_reshape_and_cache(
     kv_cache_factory,
@@ -110,6 +111,7 @@ def test_reshape_and_cache(
     dtype: torch.dtype,
     seed: int,
     device: int,
+    kv_cache_dtype: str,
 ) -> None:
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -130,8 +132,8 @@ def test_reshape_and_cache(
 
     # Create the KV caches.
     key_caches, value_caches = kv_cache_factory(num_blocks, block_size, 1,
-                                                num_heads, head_size, dtype,
-                                                None, seed, gpu_id)
+                                                num_heads, head_size, kv_cache_dtype,
+                                                dtype, seed, gpu_id)
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Clone the KV caches.
@@ -140,7 +142,7 @@ def test_reshape_and_cache(
 
     # Call the reshape_and_cache kernel.
     cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
-                                slot_mapping, "auto")
+                                slot_mapping, kv_cache_dtype)
 
     # Run the reference implementation.
     reshaped_key = key.reshape(num_tokens, *key_cache[0, :, :, 0, :].shape)
