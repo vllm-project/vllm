@@ -33,21 +33,34 @@ void paged_attention_v2(
   const c10::optional<torch::Tensor>& alibi_slopes,
   const std::string& kv_cache_dtype);
 
-void rms_norm(torch::Tensor &out, torch::Tensor &input, torch::Tensor &weight,
-              float epsilon);
+void rms_norm(
+  torch::Tensor &out, 
+  torch::Tensor &input, 
+  torch::Tensor &weight,
+  float epsilon);
 
-void fused_add_rms_norm(torch::Tensor &input, torch::Tensor &residual,
-                        torch::Tensor &weight, float epsilon);
+void fused_add_rms_norm(
+  torch::Tensor &input, 
+  torch::Tensor &residual,
+  torch::Tensor &weight, 
+  float epsilon);
 
-void rotary_embedding(torch::Tensor &positions, torch::Tensor &query,
-                      torch::Tensor &key, int head_size,
-                      torch::Tensor &cos_sin_cache, bool is_neox);
+void rotary_embedding(
+  torch::Tensor &positions, torch::Tensor &query,
+  torch::Tensor &key, int head_size,
+  torch::Tensor &cos_sin_cache, bool is_neox);
 
-void silu_and_mul(torch::Tensor &out, torch::Tensor &input);
+void silu_and_mul(
+  torch::Tensor &out, 
+  torch::Tensor &input);
 
-void gelu_new(torch::Tensor &out, torch::Tensor &input);
+void gelu_new(
+  torch::Tensor &out, 
+  torch::Tensor &input);
 
-void gelu_fast(torch::Tensor &out, torch::Tensor &input);
+void gelu_fast(
+  torch::Tensor &out, 
+  torch::Tensor &input);
 
 #ifndef USE_ROCM
 torch::Tensor awq_gemm(
@@ -65,13 +78,19 @@ torch::Tensor awq_dequantize(
     int thx,
     int thy);
 
-void squeezellm_gemm(torch::Tensor vec, torch::Tensor mat, torch::Tensor mul,
-                     torch::Tensor lookup_table);
+void squeezellm_gemm(
+  torch::Tensor vec, 
+  torch::Tensor mat, 
+  torch::Tensor mul,
+  torch::Tensor lookup_table);
 
-torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
-                        torch::Tensor b_gptq_qzeros,
-                        torch::Tensor b_gptq_scales, torch::Tensor b_g_idx,
-                        bool use_exllama);
+torch::Tensor gptq_gemm(
+  torch::Tensor a, 
+  torch::Tensor b_q_weight,
+  torch::Tensor b_gptq_qzeros,
+  torch::Tensor b_gptq_scales, 
+  torch::Tensor b_g_idx,
+  bool use_exllama);
 
 void gptq_shuffle(
   torch::Tensor q_weight,
