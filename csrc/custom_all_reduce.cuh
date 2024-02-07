@@ -221,6 +221,7 @@ __global__ void __launch_bounds__(512, 1)
   int part = size / ngpus;
   int start = rank * part;
   int end = rank == ngpus - 1 ? size : start + part;
+  int largest_part = part + size % ngpus;
   const P *ptrs[ngpus];
   P *tmps[ngpus];
 #pragma unroll
@@ -237,27 +238,21 @@ __global__ void __launch_bounds__(512, 1)
   }
   end_sync<ngpus>(sg, self_sg, rank);
 
-  // stage 2: allgather
-  for (int idx = tid; idx < part; idx += stride) {
+  // stage 2: allgather. Note: it's important to match the tid between
+  // the two stages, because visibility across devices is only guaranteed
+  // between threads that have the same tid. If thread i computes the sum of
+  // start + i in the first stage, then thread i also gathers start + i from all
+  // ranks.
+  for (int idx = tid; idx < largest_part; idx += stride) {
 #pragma unroll
     for (int i = 0; i < ngpus; i++) {
-      int dst_idx = ((rank + i) % ngpus) * part + idx;
-      ((P *)result)[dst_idx] = tmps[i][idx];
+      int gather_from_rank = ((rank + i) % ngpus);
+      if (gather_from_rank == ngpus - 1 || idx < part) {
+        int dst_idx = gather_from_rank * part + idx;
+        ((P *)result)[dst_idx] = tmps[i][idx];
+      }
     }
   }
-  // process the last larger partition
-  int remaining = size - part * ngpus;
-  if (tid < remaining) {
-    int dst_idx = tid + part * ngpus;
-    ((P *)result)[dst_idx] = get_tmp_buf<P>(sg.signals[ngpus - 1])[part + tid];
-  }
-
-  // faster than this
-  // for (int idx = tid; idx < size; idx += stride) {
-  //   int target_rank = idx / part;
-  //   if (target_rank == ngpus) target_rank -= 1;
-  //   ((P *)result)[idx] = tmps[target_rank][idx - target_rank * part];
-  // }
 }
 
 template <typename T, int ngpus>

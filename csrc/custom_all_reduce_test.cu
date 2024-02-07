@@ -175,7 +175,7 @@ void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
   if (performance_test) {
     dummy_kernel<<<1, 1, 0, stream>>>();
     constexpr int warmup_iters = 5;
-    constexpr int num_iters = 25;
+    constexpr int num_iters = 100;
     // warmup
     for (int i = 0; i < warmup_iters; i++) {
       NCCLCHECK(ncclAllReduce(result, result, data_size, ncclDtype, ncclSum,
@@ -308,7 +308,7 @@ int main(int argc, char **argv) {
   //   }
   // }
   for (int sz = 512; sz <= (8 << 20); sz *= 2) {
-    run<half>(myRank, nRanks, comm, 512, 36, sz + 8 * 50, performance_test);
+    run<half>(myRank, nRanks, comm, 512, 36, sz + 8 * 47, performance_test);
   }
 
   cudaProfilerStop();
