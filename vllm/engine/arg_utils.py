@@ -35,17 +35,19 @@ class TensorizerArgs:
         self.s3_access_key_id = os.environ.get("S3_ACCESS_KEY_ID") or None
         self.s3_secret_access_key = os.environ.get("S3_SECRET_ACCESS_KEY") or None
         self.s3_endpoint = os.environ.get("S3_ENDPOINT_URL") or None
-        self.serializer_params = {
+
+        self.credentials = {
             "s3_access_key_id": self.s3_access_key_id,
             "s3_secret_access_key": self.s3_secret_access_key,
             "s3_endpoint": self.s3_endpoint,
         }
+        self.serializer_params = {
+            # Placeholder for now
+        }
+
 
         # Omitting self.dtype and self.device as this behaves weirdly
         self.deserializer_params = {
-            "s3_access_key_id": self.s3_access_key_id,
-            "s3_secret_access_key": self.s3_secret_access_key,
-            "s3_endpoint": self.s3_endpoint,
             "filter_func": self.filter_func,
             "lazy_load": self.lazy_load,
             "plaid_mode": self.plaid_mode,

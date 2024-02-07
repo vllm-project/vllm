@@ -15,6 +15,7 @@ from huggingface_hub import HfFileSystem, snapshot_download
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
 from tensorizer.serialization import TensorDeserializer
+from tensorizer.stream_io import open_stream
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
@@ -291,7 +292,9 @@ def hf_model_weights_iterator(
             yield name, torch.from_numpy(param)
     elif load_format == "tensorizer":
         deserializer_args = tensorizer_args.deserializer_params
-        with TensorDeserializer(cache_dir, **deserializer_args) as state:
+        credentials = tensorizer_args.credentials
+        stream = open_stream(cache_dir, **credentials)
+        with TensorDeserializer(stream, **deserializer_args) as state:
             for name, param in state.items():
                 yield name, param
         del state
