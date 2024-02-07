@@ -18,6 +18,7 @@ from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.utils import in_wsl
+
 logger = init_logger(__name__)
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -45,10 +46,7 @@ class ModelRunner:
         self.scheduler_config = scheduler_config
         self.lora_config = lora_config
         self.is_driver_worker = is_driver_worker
-
-        self.paged_kv_index = torch.arange(12572).int().to("cuda:0") 
-
-
+        
         # model_config can be None in tests/samplers/test_sampler.py.
         # FIXME(woosuk): This is a hack to make the tests work. Refactor this.
         self.sliding_window = (model_config.get_sliding_window()
@@ -78,13 +76,13 @@ class ModelRunner:
         self.in_wsl = in_wsl()
         self.kv_cache_dtype = kv_cache_dtype
 
-        workspace_buffer = torch.empty(16 * 1024 * 1024, dtype=torch.uint8, device="cuda:0")
+        workspace_buffer = torch.empty(16 * 1024 * 1024,
+                                       dtype=torch.uint8,
+                                       device="cuda:0")
         self.prefill_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-            workspace_buffer, "NHD"
-        )
-        self.decode_wrapper  = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
-            workspace_buffer, "NHD"
-        )
+            workspace_buffer, "NHD")
+        self.decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
+            workspace_buffer, "NHD")
 
     def load_model(self) -> None:
         self.model = get_model(self.model_config, self.device_config,
@@ -540,83 +538,71 @@ class ModelRunner:
                 sampling_metadata, lora_requests, lora_mapping)
 
     @torch.inference_mode()
-    def execute_model(
-        self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
-        profile = False
-    ) -> Optional[SamplerOutput]:
+    def execute_model(self,
+                      seq_group_metadata_list: Optional[
+                          List[SequenceGroupMetadata]],
+                      kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+                      profile=False) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, input_metadata, sampling_metadata,
          lora_requests,
          lora_mapping) = self.prepare_input_tensors(seq_group_metadata_list)
 
-        num_qo_heads = 32
-        num_kv_heads = 8
-        if not profile and input_metadata.is_prompt:
-            if input_metadata.decode_wrapper:
-                input_metadata.decode_wrapper.end_forward()
+        num_qo_heads = self.model.config.num_attention_heads
+        num_kv_heads = self.model.config.num_key_value_heads
+
+        if not profile and input_metadata.is_prompt and input_metadata.decode_wrapper:
+            input_metadata.decode_wrapper.end_forward()
 
         if not profile:
             input_metadata.prefill_wrapper = self.prefill_wrapper
             input_metadata.decode_wrapper = self.decode_wrapper
             batch_size = input_tokens.shape[0]
-            
-            prefix_lens = input_metadata.prompt_lens
+
+            #if input_metadata.is_prompt:
+            #    seq_lens = input_metadata.prompt_lens
+            #else:
+            #    seq_lens = input_metadata.context_lens
 
             if input_metadata.is_prompt:
-                seq_lens = input_metadata.prompt_lens
-            else:
-                seq_lens = input_metadata.context_lens
-            extend_seq_lens = input_metadata.context_lens
-            
-            if input_metadata.is_prompt:
-                seq_lens = input_metadata.prompt_lens
-                #seq_lens = torch.stack([a + b for a, b in zip(input_metadata.prompt_lens, input_metadata.context_lens)], dim=0)
-            else:
-                seq_lens = input_metadata.context_lens
-            extend_seq_lens = input_metadata.context_lens
+                qo_indptr = torch.zeros((batch_size + 1, ),
+                                        dtype=torch.int32,
+                                        device="cuda")
 
-            if input_metadata.is_prompt:
-                qo_indptr = torch.zeros(
-                    (batch_size + 1,), dtype=torch.int32, device="cuda"
-                )
-                
                 qo_indptr[1:] = torch.cumsum(input_metadata.prompt_lens, dim=0)
 
                 input_metadata.qo_indptr = qo_indptr
 
-            kvi = input_metadata.slot_mapping.view(-1).type(torch.int32).to("cuda:0")
+            kvi = input_metadata.slot_mapping.view(-1).type(
+                torch.int32).to("cuda:0")
+
             paged_kv_indices = torch.div(kvi, 16, rounding_mode="floor")
-            
-            paged_kv_indptr = torch.zeros(
-            (batch_size + 1,), dtype=torch.int32, device="cuda:0"
-            )
-            
+
+            paged_kv_indptr = torch.zeros((batch_size + 1, ),
+                                          dtype=torch.int32,
+                                          device="cuda:0")
             #print(block_sizes_per_seq)
-            
+
             if input_metadata.is_prompt:
-                block_sizes_per_seq = torch.tensor([len(input_metadata.slot_mapping[i].unique()) for i in range(batch_size)])
+                block_sizes_per_seq = torch.tensor([
+                    len(input_metadata.slot_mapping[i].unique())
+                    for i in range(batch_size)
+                ])
 
                 paged_kv_indptr[1:] = torch.cumsum(block_sizes_per_seq, dim=0)
-                
+
             else:
                 paged_kv_indptr[1:] = torch.arange(1, batch_size + 1)
 
             if input_metadata.is_prompt:
-                paged_kv_last_page_len = (kvi[paged_kv_indptr[1:] - 1] % 16) + 1
+                paged_kv_last_page_len = (kvi[paged_kv_indptr[1:] - 1] %
+                                          16) + 1
             else:
                 paged_kv_last_page_len = (kvi % 16) + 1
-            
-            
+
             if input_metadata.is_prompt:
                 input_metadata.prefill_wrapper.begin_forward(
-                    qo_indptr,
-                    paged_kv_indptr,
-                    paged_kv_indices,
-                    paged_kv_last_page_len,
-                    num_qo_heads,
-                    num_kv_heads
-                )  
+                    qo_indptr, paged_kv_indptr, paged_kv_indices,
+                    paged_kv_last_page_len, num_qo_heads, num_kv_heads)
             else:
                 input_metadata.decode_wrapper.begin_forward(
                     paged_kv_indptr,
@@ -626,7 +612,7 @@ class ModelRunner:
                     num_kv_heads,
                     128,
                     16,
-                )  
+                )
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
@@ -706,7 +692,9 @@ class ModelRunner:
 
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
-        kv_caches = [None] * num_layers #torch.zeros(1, 2, )[(None, None)] * num_layers
+        kv_caches = [
+            None
+        ] * num_layers  #torch.zeros(1, 2, )[(None, None)] * num_layers
         self.execute_model(seqs, kv_caches, profile=True)
         torch.cuda.synchronize()
         return

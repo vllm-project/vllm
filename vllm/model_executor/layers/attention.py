@@ -18,7 +18,7 @@ _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
 
-import flashinfer
+
 class PagedAttention(nn.Module):
     """MHA/MQA/GQA layer with PagedAttention.
 
@@ -82,10 +82,6 @@ class PagedAttention(nn.Module):
             shape = [batch_size, seq_len, num_heads * head_size]
         """
 
-        prefill_wrapper = input_metadata.prefill_wrapper
-        decode_wrapper = input_metadata.decode_wrapper
-
-        
         batch_size, seq_len, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size).contiguous()
@@ -97,13 +93,9 @@ class PagedAttention(nn.Module):
         # vectors will not be cached. This happens during the initial memory
         # profiling run.
         if kv_cache is not None:
-            cache_ops.reshape_and_cache(
-                key,
-                value,
-                kv_cache,
-                input_metadata.slot_mapping.flatten(),
-                "auto"
-            )
+            cache_ops.reshape_and_cache(key, value, kv_cache,
+                                        input_metadata.slot_mapping.flatten(),
+                                        "auto")
 
         if input_metadata.is_prompt:
             # old attn
@@ -114,19 +106,21 @@ class PagedAttention(nn.Module):
                     # heads.
                     # TODO(woosuk): Use MQA/GQA kernels for higher performance.
                     query = query.view(query.shape[0], self.num_kv_heads,
-                                    self.num_queries_per_kv, query.shape[-1])
+                                       self.num_queries_per_kv,
+                                       query.shape[-1])
                     key = key[:, :,
-                            None, :].expand(key.shape[0], self.num_kv_heads,
-                                            self.num_queries_per_kv,
-                                            key.shape[-1])
-                    value = value[:, :, None, :].expand(value.shape[0],
-                                                        self.num_kv_heads,
-                                                        self.num_queries_per_kv,
-                                                        value.shape[-1])
+                              None, :].expand(key.shape[0], self.num_kv_heads,
+                                              self.num_queries_per_kv,
+                                              key.shape[-1])
+                    value = value[:, :,
+                                  None, :].expand(value.shape[0],
+                                                  self.num_kv_heads,
+                                                  self.num_queries_per_kv,
+                                                  value.shape[-1])
                 # Set attention bias if not provided. This typically happens at
                 # the very attention layer of every iteration.
                 # FIXME(woosuk): This is a hack.
-                
+
                 if input_metadata.attn_bias is None:
                     if self.alibi_slopes is None:
                         attn_bias = BlockDiagonalCausalMask.from_seqlens(
@@ -150,7 +144,7 @@ class PagedAttention(nn.Module):
                     query = query.unflatten(0, (batch_size, seq_len))
                     key = key.unflatten(0, (batch_size, seq_len))
                     value = value.unflatten(0, (batch_size, seq_len))
-                
+
                 out = xops.memory_efficient_attention_forward(
                     query,
                     key,
@@ -169,11 +163,7 @@ class PagedAttention(nn.Module):
 
                 query = query.view(-1, 32, 128)
                 output = input_metadata.prefill_wrapper.forward(
-                    query,
-                    kv_cache,
-                    causal=True,
-                    allow_fp16_qk_reduction=True
-                )
+                    query, kv_cache, causal=True, allow_fp16_qk_reduction=True)
 
                 #output = flashinfer.single_prefill_with_kv_cache(query, key.contiguous(), value.contiguous(), causal=True,
                 #allow_fp16_qk_reduction=True)
@@ -186,8 +176,8 @@ class PagedAttention(nn.Module):
                     key,
                     value,
                     output,
-                    key_cache,
-                    value_cache,
+                    #key_cache,
+                    #value_cache,
                     input_metadata.block_tables,  # [BS, max_block_per_request]
                     input_metadata.start_loc,
                     input_metadata.prompt_lens,

@@ -2,7 +2,6 @@
 from typing import Dict, List, Tuple
 
 import torch
-import flashinfer 
 
 from vllm._C import cache_ops
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig
@@ -46,24 +45,40 @@ class CacheEngine:
 
         # Initialize the cache.
         self.gpu_cache = self.allocate_gpu_cache()
-        #self.cpu_cache = self.allocate_cpu_cache()
+        self.cpu_cache = self.allocate_cpu_cache()
 
     def get_kv_block_shape(self) -> Tuple[int, int, int, int]:
-        element_size = torch.tensor([], dtype=self.dtype).element_size()
-        x = 16 // element_size
         return (
             self.num_heads,
             self.head_size,
         )
-        
+
     def allocate_gpu_cache(self) -> List[KVCache]:
         kv_block_shape = self.get_kv_block_shape()
         gpu_cache = []
         for _ in range(self.num_layers):
-            gpu_blocks =  torch.empty(self.num_gpu_blocks, 2, self.block_size, *kv_block_shape, dtype=self.dtype, device="cuda")
+            gpu_blocks = torch.empty(self.num_gpu_blocks,
+                                     2,
+                                     self.block_size,
+                                     *kv_block_shape,
+                                     dtype=self.dtype,
+                                     device="cuda")
             gpu_cache.append(gpu_blocks)
         return gpu_cache
-        
+
+    def allocate_cpu_cache(self) -> List[KVCache]:
+        kv_block_shape = self.get_kv_block_shape()
+        cpu_cache = []
+        for _ in range(self.num_layers):
+            cpu_blocks = torch.empty(self.num_gpu_blocks,
+                                     2,
+                                     self.block_size,
+                                     *kv_block_shape,
+                                     dtype=self.dtype,
+                                     device="cpu")
+            cpu_cache.append(cpu_blocks)
+        return cpu_cache
+
     def _swap(
         self,
         src: List[KVCache],
