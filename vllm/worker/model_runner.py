@@ -76,7 +76,8 @@ class ModelRunner:
         self.in_wsl = in_wsl()
         self.kv_cache_dtype = kv_cache_dtype
         self.kv_quant_params = self.load_kv_quant_params(
-            model_config, kv_quant_params_path)
+            model_config,
+            kv_quant_params_path) if self.kv_cache_dtype == "int8" else None
 
     def load_kv_quant_params(self, model_config: ModelConfig,
                              kv_quant_params_path: str) -> List[List[float]]:
@@ -93,8 +94,6 @@ class ModelRunner:
         num_layers = model_config.hf_config.num_hidden_layers
         kv_quant_params = []
         for i in range(num_layers):
-            # default quant scales and zero points for kv int8 quant
-            kv_quant_param = [1.0, 0.0, 1.0, 0.0]
             if kv_quant_params_path is not None:
                 path = kv_quant_params_path + f"/layers.{i}.past_kv_scale.0.weight"
                 kv_quant_param = list(np.fromfile(path, dtype=np.float32))

@@ -267,7 +267,8 @@ class LlamaModel(nn.Module):
                 kv_caches[i],
                 input_metadata,
                 residual,
-                input_metadata.kv_quant_params[i],
+                input_metadata.kv_quant_params[i]
+                if input_metadata.kv_quant_params is not None else None,
             )
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
