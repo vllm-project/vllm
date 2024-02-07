@@ -96,7 +96,7 @@ def main(work_dir: str,
 
     Args:
         work_dir (Union[str, Path]): Directory path where the stats are saved.
-        turbomind_dir (Union[str, Path]): Directory path where to
+        kv_params_dir (Union[str, Path]): Directory path where to
             save the results.
         kv_bits (int, optional): Number of bits for quantization.
             Defaults to 8.
@@ -108,7 +108,7 @@ def main(work_dir: str,
     work_dir = Path(work_dir)
 
     tm_dir = Path(kv_params_dir)
-    assert tm_dir.exists(), 'The specified TurboMind directory does not exist.'
+    tm_dir.mkdir(parents=True, exist_ok=True)
 
     key_stats = torch.load(work_dir / 'key_stats.pth')
     value_stats = torch.load(work_dir / 'value_stats.pth')
