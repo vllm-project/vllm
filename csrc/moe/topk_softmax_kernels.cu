@@ -1,4 +1,6 @@
 /*
+ * Adapted from https://github.com/NVIDIA/TensorRT-LLM/blob/v0.7.1/cpp/tensorrt_llm/kernels/mixtureOfExperts/moe_kernels.cu
+ * Copyright (c) 2024, The vLLM team.
  * SPDX-FileCopyrightText: Copyright (c) 1993-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
@@ -14,17 +16,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 
-#include <cuda.h>
-#include <cuda_fp16.h>
-#include <math.h>
-#include <sstream>
-
-#include "cutlass/array.h"
 #include <cub/cub.cuh>
 #include <cub/util_type.cuh>
 
@@ -32,6 +27,18 @@ namespace vllm {
 namespace moe {
 
 static constexpr int WARP_SIZE = 32;
+
+/// Aligned array type
+template <
+    typename T,
+    /// Number of elements in the array
+    int N,
+    /// Alignment requirement in bytes
+    int Alignment = sizeof(T) * N
+>
+class alignas(Alignment) AlignedArray {
+    float data[N];
+};
 
 // ====================== Softmax things ===============================
 // We have our own implementation of softmax here so we can support transposing the output
@@ -60,7 +67,7 @@ __launch_bounds__(TPB) __global__
     for (int ii = threadIdx.x; ii < num_cols; ii += TPB)
     {
         const int idx = thread_row_offset + ii;
-        threadData = max(input[idx], threadData);
+        threadData = max(static_cast<float>(input[idx]), threadData);
     }
 
     const float maxElem = BlockReduce(tmpStorage).Reduce(threadData, cub::Max());
@@ -231,10 +238,12 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
 
     // Determine the pointer type to use to read in the data depending on the BYTES_PER_LDG template param. In theory,
     // this can support all powers of 2 up to 16.
-    using AccessType = cutlass::AlignedArray<float, ELTS_PER_LDG>;
+    // NOTE(woosuk): The original implementation uses CUTLASS aligned array here.
+    // We defined our own aligned array and use it here to avoid the dependency on CUTLASS.
+    using AccessType = AlignedArray<float, ELTS_PER_LDG>;
 
     // Finally, we pull in the data from global mem
-    cutlass::Array<float, VPT> row_chunk;
+    float row_chunk[VPT];
     AccessType* row_chunk_vec_ptr = reinterpret_cast<AccessType*>(&row_chunk);
     const AccessType* vec_thread_read_ptr = reinterpret_cast<const AccessType*>(thread_read_ptr);
 #pragma unroll
