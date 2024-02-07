@@ -25,7 +25,7 @@ class QWenLMHeadModel(LlamaForCausalLM):
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         norm = RMSNorm(config.hidden_size, config.layer_norm_epsilon)
-        setattr(config, "use_qkv_bias", True)
+        config.use_qkv_bias = True
         config.intermediate_size = config.intermediate_size // 2
         super().__init__(config=config,
                          linear_method=linear_method,

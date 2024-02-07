@@ -95,7 +95,7 @@ class BaichuanForCausalLM(BaiChuanBaseForCausalLM):
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         if config.hidden_size != 4096:  # baichuan 13b, baichuan2 13b
-            setattr(config, "postion_embedding", "ALIBI")
+            config.postion_embedding = "ALIBI"
         super().__init__(config=config,
                          linear_method=linear_method,
                          lora_config=lora_config)
