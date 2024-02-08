@@ -100,6 +100,12 @@ class BlockAllocator:
     def get_num_free_blocks(self) -> int:
         return self.num_blocks - self.current_num_blocks
 
+    def update_hash(self, block_hash: int, block: PhysicalTokenBlock) -> None:
+        old_hash = block.block_hash
+        del self.table[old_hash]
+        self.table[block_hash] = block
+        block.block_hash = block_hash
+
 
 class AllocStatus(enum.Enum):
     """Result for BlockSpaceManager.can_allocate
@@ -146,6 +152,7 @@ class BlockSpaceManager:
                                             num_cpu_blocks)
         # Mapping: seq_id -> BlockTable.
         self.block_tables: Dict[int, BlockTable] = {}
+        self.partial_block_table: Dict[int, PhysicalTokenBlock] = {}
 
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
         # FIXME(woosuk): Here we assume that all sequences in the group share
@@ -173,7 +180,6 @@ class BlockSpaceManager:
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
 
         # Allocate new physical token blocks that will store the prompt tokens.
-        # num_prompt_blocks = seq.get_prompt_len() // self.block_size
 
         num_prompt_blocks = len(seq.logical_token_blocks)
 
@@ -184,15 +190,13 @@ class BlockSpaceManager:
                     and logical_idx >= self.block_sliding_window):
                 block = block_table[logical_idx % self.block_sliding_window]
             else:
-                print(f"hash allocate {logical_idx}")
                 block = self.gpu_allocator.allocate(seq.hash(logical_idx))
+                if logical_idx * self.block_size + self.block_size > len(
+                        seq.data.get_token_ids()):
+                    self.partial_block_table[seq.seq_id] = block
             # Set the reference counts of the token blocks.
             # block.ref_count = seq_group.num_seqs()
             block_table.append(block)
-
-        # Append incomplete block to seq if any
-        # if num_prompt_blocks * self.block_size < seq.get_prompt_len():
-        #     # TODO
 
         # Assign the block table for each sequence.
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
@@ -212,6 +216,7 @@ class BlockSpaceManager:
         logical_blocks = seq.logical_token_blocks
         block_table = self.block_tables[seq.seq_id]
 
+        # If we need to allocate a new physical block
         if len(block_table) < len(logical_blocks):
             if (self.block_sliding_window
                     and len(block_table) >= self.block_sliding_window):
@@ -221,10 +226,10 @@ class BlockSpaceManager:
             else:
                 # The sequence has a new logical block.
                 # Allocate a new physical block.
-                print("hash append_slot 1")
-                block = self.gpu_allocator.allocate(
-                    seq.hash(len(logical_blocks) - 1))
-                block_table.append(block)
+                assert (seq.seq_id not in self.partial_block_table)
+                self.partial_block_table[
+                    seq.seq_id] = self.gpu_allocator.allocate(seq.seq_id)
+                block_table.append(self.partial_block_table[seq.seq_id])
                 return None
 
         # We want to append the token to the last physical block.
@@ -232,13 +237,17 @@ class BlockSpaceManager:
         assert last_block.device == Device.GPU
         if last_block.ref_count == 1:
             # Not shared with other sequences. Appendable.
-            return None
+            if len(seq.data.get_token_ids()) % seq.block_size == 0:
+                del self.partial_block_table[seq.seq_id]
+                new_hash = seq.hash(len(logical_blocks) - 1)
+                self.gpu_allocator.update_hash(new_hash, last_block)
+                return None
         else:
             # The last block is shared with other sequences.
             # Copy on Write: Allocate a new block and copy the tokens.
-            print("hash append_slot 2")
             new_block = self.gpu_allocator.allocate(
                 seq.hash(len(logical_blocks) - 1))
+            assert (new_block.ref_count == 1)
             block_table[-1] = new_block
             self.gpu_allocator.free(last_block, now)
             return last_block.block_number, new_block.block_number
@@ -294,7 +303,6 @@ class BlockSpaceManager:
                     gpu_block = mapping[cpu_block]
                     gpu_block.ref_count += 1
                 else:
-                    print("hash swap_in 1")
                     gpu_block = self.gpu_allocator.allocate(
                         seq.hash(len(seq.logical_blocks) - 1))
                     mapping[cpu_block] = gpu_block
@@ -333,7 +341,6 @@ class BlockSpaceManager:
                     cpu_block = mapping[gpu_block]
                     cpu_block.ref_count += 1
                 else:
-                    print("hash swap_in 2")
                     cpu_block = self.cpu_allocator.allocate(
                         seq.hash(len(seq.logical_blocks) - 1))
                     mapping[gpu_block] = cpu_block

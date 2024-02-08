@@ -172,8 +172,6 @@ class ModelRunner:
                     slot_mapping[-1].append(_PAD_SLOT_ID)
                     continue
 
-                print(block_table)
-                print(f"prepare {i}")
                 block_number = block_table[i // self.block_size]
                 block_offset = i % self.block_size
                 slot = block_number * self.block_size + block_offset
@@ -202,8 +200,6 @@ class ModelRunner:
         context_lens_tensor = torch.tensor(context_lens,
                                            dtype=torch.int,
                                            device=self.device)
-
-        print("prefix block tables:", prefix_block_tables)
         # Prepare prefix block tables
         max_prompt_block_table_len = max(len(t) for t in prefix_block_tables)
         block_tables = _make_tensor_with_pad(
