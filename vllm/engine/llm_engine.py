@@ -21,7 +21,8 @@ from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                TokenizerGroup)
 from vllm.utils import Counter, set_cuda_visible_devices, get_ip, get_open_port, get_distributed_init_method
-
+from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
+from multiprocessing import Process
 if ray:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
@@ -63,6 +64,7 @@ class LLMEngine:
         placement_group: Ray placement group for distributed execution.
             Required for distributed execution.
         log_stats: Whether to log statistics.
+        usage_context: Specified entry point, used for usage info collection
     """
 
     def __init__(
@@ -75,6 +77,7 @@ class LLMEngine:
         lora_config: Optional[LoRAConfig],
         placement_group: Optional["PlacementGroup"],
         log_stats: bool,
+        usage_context: UsageContext = UsageContext.UNKNOWN_CONTEXT
     ) -> None:
         logger.info(
             "Initializing an LLM engine with config: "
@@ -108,6 +111,11 @@ class LLMEngine:
 
         self._init_tokenizer()
         self.seq_counter = Counter()
+
+        #If usage stat is enabled, collect relevant info.
+        if is_usage_stats_enabled():
+            usage_message.report_usage(model_config.model, usage_context)
+            p = Process(usage_message.send_to_server())
 
         # Create the parallel GPU workers.
         if self.parallel_config.worker_use_ray:
@@ -360,7 +368,7 @@ class LLMEngine:
         self._run_workers("warm_up_model")
 
     @classmethod
-    def from_engine_args(cls, engine_args: EngineArgs) -> "LLMEngine":
+    def from_engine_args(cls, engine_args: EngineArgs, usage_context: UsageContext=UsageContext.UNKNOWN_CONTEXT) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.
         engine_configs = engine_args.create_engine_configs()
@@ -370,7 +378,9 @@ class LLMEngine:
         # Create the LLM engine.
         engine = cls(*engine_configs,
                      placement_group,
-                     log_stats=not engine_args.disable_log_stats)
+                     log_stats=not engine_args.disable_log_stats,
+                     usage_context = usage_context
+                     )
         return engine
 
     def encode_request(

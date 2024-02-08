@@ -6,7 +6,6 @@ from typing import Optional, Tuple
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, LoRAConfig)
 
-
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
