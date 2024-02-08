@@ -676,6 +676,12 @@ class ModelRunner:
 
         # NOTE: Capturing the largest batch size first may help reduce the
         # memory usage of CUDA graph.
+        # NOTE(woosuk): There are 3 backends for all-reduce: custom all-reduce
+        # kernel, CuPy NCCL, and PyTorch NCCL. When using CUDA graph, we use
+        # either custom all-reduce kernel or CuPy NCCL. When not using CUDA
+        # graph, we use either custom all-reduce kernel or PyTorch NCCL.
+        # We always prioritize using custom all-reduce kernel but fall back
+        # to PyTorch or CuPy NCCL if it is disabled or not supported.
         with custom_all_reduce.capture():
             for batch_size in reversed(batch_size_capture_list):
                 # Create dummy input_metadata.
