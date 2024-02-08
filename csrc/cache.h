@@ -31,6 +31,6 @@ void gather_cached_kv(
   torch::Tensor& slot_mapping);
 
 // Just for unittest
-void convert_fp8_e5m2(
+void convert_fp8(
   torch::Tensor& src_cache,
   torch::Tensor& dst_cache);

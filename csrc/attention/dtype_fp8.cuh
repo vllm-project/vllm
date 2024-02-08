@@ -8,7 +8,7 @@
 #endif
 
 namespace vllm {
-//#ifdef ENABLE_FP8_E5M2
+#if defined(ENABLE_FP8_E5M2) || defined(ENABLE_FP8_E4M3)
 // fp8 vector types for quantization of kv cache
 
 template<>
@@ -30,6 +30,6 @@ template<>
 struct Vec<uint8_t, 8> {
     using Type = uint2;
 };
-//#endif // ENABLE_FP8_E5M2
+#endif // ENABLE_FP8_E5M2
 
 } // namespace vllm

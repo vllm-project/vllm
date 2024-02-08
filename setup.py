@@ -296,6 +296,7 @@ elif _is_hip():
                 f"Only the following arch is supported: {ROCM_SUPPORTED_ARCHS}"
                 f"amdgpu_arch_found: {arch}")
         NVCC_FLAGS += [f"--offload-arch={arch}"]
+    NVCC_FLAGS += ["-DENABLE_FP8_E4M3"]
 
 elif _is_neuron():
     neuronxcc_version = get_neuronxcc_version()

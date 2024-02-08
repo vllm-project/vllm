@@ -230,14 +230,14 @@ def test_paged_attention(
         dequantized_key_cache = torch.empty(size=key_cache_shape,
                                             dtype=dtype,
                                             device=gpu_id)
-        cache_ops.convert_fp8_e5m2(key_cache, dequantized_key_cache)
+        cache_ops.convert_fp8(key_cache, dequantized_key_cache)
         key_cache = dequantized_key_cache
 
         value_cache_shape = value_cache.shape
         dequantized_value_cache = torch.empty(size=value_cache_shape,
                                               dtype=dtype,
                                               device=gpu_id)
-        cache_ops.convert_fp8_e5m2(value_cache, dequantized_value_cache)
+        cache_ops.convert_fp8(value_cache, dequantized_value_cache)
         value_cache = dequantized_value_cache
 
     ref_output = torch.empty_like(query)
