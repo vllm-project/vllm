@@ -92,6 +92,7 @@ class BlockAllocator:
             raise ValueError(f"Double free! {block} is already freed.")
         block.ref_count -= 1
 
+    # TODO: Should this account for the number of blocks with a ref count of 0?
     def get_num_free_blocks(self) -> int:
         return self.num_blocks - self.current_num_blocks
 

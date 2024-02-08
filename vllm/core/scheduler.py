@@ -127,7 +127,6 @@ class Scheduler:
         if isinstance(request_id, str):
             request_id = (request_id, )
         request_ids = set(request_id)
-
         for state_queue in [self.waiting, self.running, self.swapped]:
             aborted_groups: List[SequenceGroup] = []
             for seq_group in state_queue:
@@ -280,13 +279,12 @@ class Scheduler:
                 if self.running:
                     # Preempt the lowest-priority sequence groups.
                     victim_seq_group = self.running.pop()
-                    self._preempt(victim_seq_group, blocks_to_swap_out, None,
-                                  now)
+                    self._preempt(victim_seq_group, blocks_to_swap_out)
                     preempted.append(victim_seq_group)
                 else:
                     # No other sequence groups can be preempted.
                     # Preempt the current sequence group.
-                    self._preempt(seq_group, blocks_to_swap_out, None, now)
+                    self._preempt(seq_group, blocks_to_swap_out)
                     preempted.append(seq_group)
                     break
             else:

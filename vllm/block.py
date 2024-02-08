@@ -2,6 +2,7 @@
 from typing import List
 
 from vllm.utils import Device
+from time import monotonic
 
 _BLANK_TOKEN_ID = -1
 
@@ -65,8 +66,7 @@ class PhysicalTokenBlock:
 
         self.block_hash = block_hash
 
-        #TODO: is this a good default?
-        self.last_accessed = 0
+        self.last_accessed = monotonic
 
     def __repr__(self) -> str:
         return (f'PhysicalTokenBlock(device={self.device}, '
