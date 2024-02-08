@@ -150,10 +150,10 @@ typename Gemm::Arguments MakeArguments(ProblemData<Gemm>& problem_data,
 				       torch::Tensor b,
 				       torch::Tensor c,
 				       torch::Tensor batch_sizes) {
-  auto problem_sizes_host = MakeProblemSizes(b, batch_sizes);
+  problem_data.problem_sizes_host = MakeProblemSizes(b, batch_sizes);
 
   // Calculate the number of threadblocks to use and validate the result.
-  int64_t num_experts = problem_sizes_host.size();
+  int64_t num_experts = problem_data.problem_sizes_host.size();
 
   std::cout << "num_experts = " << num_experts << std::endl;
 
@@ -178,7 +178,7 @@ typename Gemm::Arguments MakeArguments(ProblemData<Gemm>& problem_data,
   std::vector<ElementC *> ptr_c_host(num_experts);
 
   for (int i = 0; i < num_experts; ++i) {
-    auto problem = problem_sizes_host[i];
+    auto problem = problem_data.problem_sizes_host[i];
     auto M = get<0>(problem);
     auto N = get<1>(problem);
     auto K = get<2>(problem);
@@ -210,7 +210,7 @@ typename Gemm::Arguments MakeArguments(ProblemData<Gemm>& problem_data,
   }
 
   // Copy the problem sizes, pointers and leading dimension data to the device.
-  CopyDataToDevice(problem_sizes_host, problem_data.problem_sizes);
+  CopyDataToDevice(problem_data.problem_sizes_host, problem_data.problem_sizes);
 
   CopyDataToDevice(ptr_a_host, problem_data.ptr_A);
   CopyDataToDevice(ptr_b_host, problem_data.ptr_B);
@@ -226,7 +226,7 @@ typename Gemm::Arguments MakeArguments(ProblemData<Gemm>& problem_data,
 
   typename Gemm::Arguments arguments{
     cutlass::gemm::GemmUniversalMode::kGrouped,
-    {static_cast<int>(num_experts), reinterpret_cast<typename ProblemShape::UnderlyingProblemShape*>(problem_sizes.data_ptr()), problem_sizes_host.data()},
+    {static_cast<int>(num_experts), problem_data.problem_sizes.get(), problem_data.problem_sizes_host.data()},
     {problem_data.ptr_A.get(), problem_data.stride_A.get(),
      problem_data.ptr_B.get(), problem_data.stride_B.get()},
     {{/*alpha=*/1.0f, /*beta=*/0.0f},
