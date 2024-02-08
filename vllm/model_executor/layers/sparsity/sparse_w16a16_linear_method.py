@@ -58,10 +58,6 @@ class SparseW16A16LinearMethod(LinearMethodBase):
 
             return output
         else:
-            # # Uncomment to verify sparsity
-            # density = torch.count_nonzero(
-            #     dense_weight).item() / dense_weight.numel()
-            # print(f"sparsity = {1.0 - density}")
 
             # Standard matrix multiply
             # Uncompress to dense

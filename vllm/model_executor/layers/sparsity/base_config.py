@@ -9,7 +9,6 @@ from magic_wand import CompressedStorageFormat
 
 class SparsityConfig(ABC):
     """Base class for sparsity configs."""
-    # storage_format_cls: Type[CompressedStorageFormat] = CompressedStorageFormat
 
     @abstractmethod
     def get_storage_format_cls(self) -> Type[CompressedStorageFormat]:

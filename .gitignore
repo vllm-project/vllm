@@ -1,6 +1,3 @@
-# Dependency repos
-magic_wand
-
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

@@ -14,7 +14,6 @@ class SemiStructuredSparseW16A16Config(SparsityConfig):
     """
 
     def __init__(self) -> None:
-        # TODO: Add new configs here
         pass
 
     def __repr__(self) -> str:
