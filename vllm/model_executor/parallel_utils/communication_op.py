@@ -37,7 +37,7 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
         cupy_utils.all_reduce(input_)
     else:
         torch.distributed.all_reduce(input_,
-                                    group=get_tensor_model_parallel_group())
+                                     group=get_tensor_model_parallel_group())
     return input_
 
 
