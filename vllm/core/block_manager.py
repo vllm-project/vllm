@@ -240,7 +240,6 @@ class BlockSpaceManager:
             # Copy on Write: Allocate a new block and copy the tokens.
             new_block = self.gpu_allocator.allocate(
                 seq.hash(len(logical_blocks) - 1))
-            assert (new_block.ref_count == 1)
             block_table[-1] = new_block
             self.gpu_allocator.free(last_block)
             return last_block.block_number, new_block.block_number
