@@ -247,6 +247,9 @@ if _is_cuda():
                     "-gencode", f"arch=compute_{num},code=compute_{num}"
                 ]
 
+    NVCC_FLAGS += ["-gencode", "arch=compute_90a,code=sm_90a"]
+    NVCC_FLAGS += ["-gencode", "arch=compute_90a,code=compute_90a"]
+
     # Use NVCC threads to parallelize the build.
     if nvcc_cuda_version >= Version("11.2"):
         nvcc_threads = int(os.getenv("NVCC_THREADS", 8))
