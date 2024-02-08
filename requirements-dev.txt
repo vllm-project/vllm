@@ -2,6 +2,7 @@
 yapf==0.32.0
 toml==0.10.2
 ruff==0.1.5
+codespell==2.2.6
 
 # type checking
 mypy==0.991

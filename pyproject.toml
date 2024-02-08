@@ -32,3 +32,17 @@ ignore = [
     # line too long, handled by black formatting
     "E501",
 ]
+
+[tool.mypy]
+python_version = "3.8"
+
+ignore_missing_imports = true
+
+files = "vllm"
+# TODO(woosuk): Include the code from Megatron and HuggingFace.
+exclude = "vllm/model_executor/parallel_utils/|vllm/model_executor/models/"
+
+
+[tool.codespell]
+ignore-words-list = "dout, te, indicies"
+skip = "./tests/prompts"
