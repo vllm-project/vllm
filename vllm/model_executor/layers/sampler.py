@@ -153,7 +153,8 @@ def _apply_logits_processors(
                 logits_row = logits[logits_row_idx]
                 token_ids = sampling_metadata.seq_data[seq_id].output_token_ids
                 for logits_processor in logits_processors:
-                    logits_row = logits_processor(token_ids, logits_row)
+                    logits_row = logits_processor(token_ids, logits_row,
+                                                  seq_id)
                 logits[logits_row_idx] = logits_row
                 logits_row_idx += 1
         else:
