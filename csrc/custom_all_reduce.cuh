@@ -150,15 +150,15 @@ template <int ngpus, bool final_sync = false>
 DINLINE void end_sync(const RankSignals &sg, volatile Signal *self_sg,
                       int rank) {
   __syncthreads();
+  // eliminate the case that prior writes are not visible after signals become
+  // visible
+  if constexpr (!final_sync) __threadfence_system();
   if (threadIdx.x < ngpus) {
     // reset flag for next time
     self_sg->start[blockIdx.x][threadIdx.x] = 0;
     // simultaneously write to the corresponding flag of all ranks.
     // Latency = 1 p2p write
     sg.signals[threadIdx.x]->end[blockIdx.x][rank] = 1;
-  }
-  if constexpr (!final_sync) __threadfence_system();
-  if (threadIdx.x < ngpus) {
     // wait until we got true from all ranks
     while (!self_sg->end[blockIdx.x][threadIdx.x])
       ;
