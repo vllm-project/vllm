@@ -565,12 +565,7 @@ class ModelRunner:
             input_metadata.prefill_wrapper = self.prefill_wrapper
             input_metadata.decode_wrapper = self.decode_wrapper
             batch_size = input_tokens.shape[0]
-
-            #if input_metadata.is_prompt:
-            #    seq_lens = input_metadata.prompt_lens
-            #else:
-            #    seq_lens = input_metadata.context_lens
-
+            
             if input_metadata.is_prompt:
                 qo_indptr = torch.zeros((batch_size + 1, ),
                                         dtype=torch.int32,
@@ -583,29 +578,50 @@ class ModelRunner:
             kvi = input_metadata.slot_mapping.view(-1).type(
                 torch.int32).to("cuda:0")
 
-            paged_kv_indices = torch.div(kvi, 16, rounding_mode="floor")
-
-            paged_kv_indptr = torch.zeros((batch_size + 1, ),
-                                          dtype=torch.int32,
-                                          device="cuda:0")
-            #print(block_sizes_per_seq)
+            kvd = input_metadata.block_tables.view(-1)
 
             if input_metadata.is_prompt:
+                paged_kv_indices = torch.div(kvi, 16, rounding_mode="floor")
                 block_sizes_per_seq = torch.tensor([
                     len(input_metadata.slot_mapping[i].unique())
                     for i in range(batch_size)
                 ])
-
-                paged_kv_indptr[1:] = torch.cumsum(block_sizes_per_seq, dim=0)
-
             else:
-                paged_kv_indptr[1:] = torch.arange(1, batch_size + 1)
+                paged_kv_indices = kvd #torch.div(kvd, 16, rounding_mode="floor")
+                block_sizes_per_seq = torch.tensor([
+                    len(input_metadata.block_tables[i])
+                    for i in range(batch_size)
+                ])
+
+            paged_kv_indptr = torch.zeros((batch_size + 1, ),
+                                          dtype=torch.int32,
+                                          device="cuda:0")
+
+            paged_kv_indices = torch.where(paged_kv_indices == -1, torch.tensor(1), paged_kv_indices)
+            paged_kv_indptr[1:] = torch.cumsum(block_sizes_per_seq, dim=0)
+
+            #if input_metadata.is_prompt:
+            #    paged_kv_indptr[1:] = torch.cumsum(block_sizes_per_seq, dim=0)
+            #
+            #else:
+            #    paged_kv_indptr[1:] = torch.arange(1, batch_size + 1)
 
             if input_metadata.is_prompt:
                 paged_kv_last_page_len = (kvi[paged_kv_indptr[1:] - 1] %
                                           16) + 1
             else:
                 paged_kv_last_page_len = (kvi % 16) + 1
+
+            if not input_metadata.is_prompt:
+                print(f"indptr: {paged_kv_indptr}")
+                print(paged_kv_indices)
+                print(paged_kv_last_page_len)
+                print(f"kvi: {kvi // 16}")
+                print(f"kvd: {kvd // 16}")
+
+                print()
+                print(input_metadata.block_tables)
+                print()
 
             if input_metadata.is_prompt:
                 input_metadata.prefill_wrapper.begin_forward(
