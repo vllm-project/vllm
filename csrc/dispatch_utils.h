@@ -1,4 +1,12 @@
 /*
+ * @Author: zhangpeng156 zhangpeng156@meituan.com
+ * @Date: 2024-02-06 16:01:31
+ * @LastEditors: zhangpeng156 zhangpeng156@meituan.com
+ * @LastEditTime: 2024-02-08 11:45:59
+ * @FilePath: /project_v/csrc/dispatch_utils.h
+ * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
+ */
+/*
  * Adapted from
  * https://github.com/pytorch/pytorch/blob/v2.0.1/aten/src/ATen/Dispatch.h
  */
