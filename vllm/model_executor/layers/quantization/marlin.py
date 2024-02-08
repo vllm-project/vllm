@@ -148,13 +148,12 @@ class MarlinLinearMethod(LinearMethodBase):
             },
         )
 
-        # Scales in Float16.
-        group_size = self.quant_config.group_size
-        if group_size == -1:
-            group_size = input_size
+        # Determine if channelwise or not
+        input_groups = 1 if self.quant_config.group_size == -1 else input_size_per_partition // self.quant_config.group_size
+
         scales = Parameter(
             torch.empty(
-                input_size_per_partition // group_size,
+                input_groups,
                 output_size_per_partition,
                 device="cuda",
                 dtype=params_dtype,
@@ -164,8 +163,7 @@ class MarlinLinearMethod(LinearMethodBase):
         set_weight_attrs(
             scales,
             {
-                "input_dim":
-                None if input_size == input_size_per_partition else 0,
+                "input_dim": None if input_groups == 1 else 0,
                 "output_dim": 1,
             },
         )
