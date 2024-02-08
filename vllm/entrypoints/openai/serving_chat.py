@@ -12,6 +12,7 @@ from vllm.entrypoints.openai.protocol import (
     UsageInfo)
 from vllm.outputs import RequestOutput
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from .serving_completion import get_struct_gen_logits_processor
 
 logger = init_logger(__name__)
 
@@ -64,6 +65,11 @@ class OpenAIServingChat(OpenAIServing):
             token_ids = self._validate_prompt_and_tokenize(request,
                                                            prompt=prompt)
             sampling_params = request.to_sampling_params()
+            if request.extra_body: # check for structured generation
+                sampling_params.logits_processors = \
+                    get_struct_gen_logits_processor(
+                        request.extra_body,
+                        self.engine.engine.tokenizer.tokenizer)
         except ValueError as e:
             return self.create_error_response(str(e))
 
