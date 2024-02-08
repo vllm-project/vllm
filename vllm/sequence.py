@@ -144,6 +144,9 @@ class Sequence:
         num_tokens = (logical_idx * self.block_size) + (
             self.block_size -
             self.logical_token_blocks[logical_idx].get_num_empty_slots())
+        # num_tokens = logical_idx * self.block_size + self.block_size
+        # if num_tokens > len(self.data.get_token_ids()):
+        #     raise ValueError(f"Can't hash incomplete block (block {logical_idx} needs hashing {num_tokens} tokens, but only {len(self.data.get_token_ids())} are present).")
         return hash(tuple(self.data.get_token_ids()[0:num_tokens]))
 
     def _append_logical_block(self) -> None:

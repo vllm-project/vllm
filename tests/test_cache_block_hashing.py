@@ -60,6 +60,10 @@ def test_auto_prefix_caching(model: str, block_size: int, max_num_seqs: int):
             for idx in range(num_blocks):
                 hashes[-1][-1].append(seq.hash(idx))
 
+            # Check that we can't hash incomplete blocks
+            with pytest.raises(ValueError) as e:
+                _ = seq.hash(num_blocks + 1)
+
             seq_id += 1
 
     # Check that hashes made with two prefixes with different first blocks are
