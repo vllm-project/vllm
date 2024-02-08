@@ -24,6 +24,6 @@ void reshape_and_cache(
   const std::string& kv_cache_dtype);
 
 // Just for unittest
-void convert_fp8_e5m2(
+void convert_fp8(
   torch::Tensor& src_cache,
   torch::Tensor& dst_cache);

@@ -324,6 +324,18 @@ if _is_cuda():
                     "nvcc": NVCC_FLAGS_PUNICA,
                 },
             ))
+elif _is_hip():
+    amd_archs = os.getenv("GPU_ARCHS")
+    if amd_archs is None:
+        amd_archs = get_amdgpu_offload_arch()
+    for arch in amd_archs.split(";"):
+        if arch not in ROCM_SUPPORTED_ARCHS:
+            raise RuntimeError(
+                f"Only the following arch is supported: {ROCM_SUPPORTED_ARCHS}"
+                f"amdgpu_arch_found: {arch}")
+        NVCC_FLAGS += [f"--offload-arch={arch}"]
+    NVCC_FLAGS += ["-DENABLE_FP8_E4M3"]
+
 elif _is_neuron():
     neuronxcc_version = get_neuronxcc_version()
 

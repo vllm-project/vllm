@@ -4,9 +4,9 @@
 
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
-#ifdef ENABLE_FP8_E5M2
+#if defined(ENABLE_FP8_E5M2)
 #include "quantization/fp8_e5m2_kvcache/quant_utils.cuh"
-#else
+#else if defined(ENABLE_FP8_E4M3)
 #include "quantization/fp8/amd_detail/quant_utils.cuh"
 #endif
 
@@ -198,12 +198,14 @@ __global__ void reshape_and_cache_kernel(
     scalar_t tgt_key = key[src_key_idx];
     scalar_t tgt_value = value[src_value_idx];
     if constexpr (is_fp8_e5m2_kv_cache) {
-#ifdef ENABLE_FP8_E5M2
+#if defined(ENABLE_FP8_E5M2)
       key_cache[tgt_key_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_key);
       value_cache[tgt_value_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_value);
-#else
+#elif defined(ENABLE_FP8_E4M3)
       key_cache[tgt_key_idx] = fp8_e4m3::vec_conversion<uint8_t, scalar_t>(tgt_key);
       value_cache[tgt_value_idx] = fp8_e4m3::vec_conversion<uint8_t, scalar_t>(tgt_value);
+#else
+      assert(false);
 #endif
     } else {
       key_cache[tgt_key_idx] = tgt_key;
@@ -273,30 +275,32 @@ void reshape_and_cache(
 namespace vllm {
 
 template<typename Tout, typename Tin>
-__global__ void convert_fp8_e5m2_kernel(
+__global__ void convert_fp8_kernel(
   const Tin* __restrict__ src_cache,
   Tout* __restrict__ dst_cache,
   const int64_t block_stride) {
   const int64_t block_idx = blockIdx.x;
   for (int i = threadIdx.x; i < block_stride; i += blockDim.x) {
     int64_t idx = block_idx * block_stride + i;
-    #ifdef ENABLE_FP8_E5M2
+#if defined(ENABLE_FP8_E5M2)
     dst_cache[idx] = fp8_e5m2_unscaled::vec_conversion<Tout, Tin>(src_cache[idx]);
-#else
+#elif defined(ENABLE_FP8_E4M3)
     dst_cache[idx] = fp8_e4m3::vec_conversion<Tout, Tin>(src_cache[idx]);
+#else
+    assert(false);
 #endif
   }
 }
 
 } // namespace vllm
 
-#define CALL_CONVERT_FP8_E5M2(Tout, Tin)                                 \
-  vllm::convert_fp8_e5m2_kernel<Tout, Tin><<<grid, block, 0, stream>>>(  \
+#define CALL_CONVERT_FP8(Tout, Tin)                                 \
+  vllm::convert_fp8_kernel<Tout, Tin><<<grid, block, 0, stream>>>(  \
     reinterpret_cast<Tin*>(src_cache.data_ptr()),                        \
     reinterpret_cast<Tout*>(dst_cache.data_ptr()),                       \
     block_stride);
 
-void convert_fp8_e5m2(
+void convert_fp8(
   torch::Tensor& src_cache,
   torch::Tensor& dst_cache)
 {
@@ -322,16 +326,16 @@ void convert_fp8_e5m2(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   
   if (src_cache.dtype() == at::ScalarType::Float) {
-    CALL_CONVERT_FP8_E5M2(uint8_t, float);
+    CALL_CONVERT_FP8(uint8_t, float);
   } else if (src_cache.dtype() == at::ScalarType::Half) {
-    CALL_CONVERT_FP8_E5M2(uint8_t, uint16_t);
+    CALL_CONVERT_FP8(uint8_t, uint16_t);
   } else if (src_cache.dtype() == at::ScalarType::BFloat16) {
-    CALL_CONVERT_FP8_E5M2(uint8_t, __nv_bfloat16);
+    CALL_CONVERT_FP8(uint8_t, __nv_bfloat16);
   } else if (dst_cache.dtype() == at::ScalarType::Float) {
-    CALL_CONVERT_FP8_E5M2(float, uint8_t);
+    CALL_CONVERT_FP8(float, uint8_t);
   } else if (dst_cache.dtype() == at::ScalarType::Half) {
-    CALL_CONVERT_FP8_E5M2(uint16_t, uint8_t);
+    CALL_CONVERT_FP8(uint16_t, uint8_t);
   } else if (dst_cache.dtype() == at::ScalarType::BFloat16) {
-    CALL_CONVERT_FP8_E5M2(__nv_bfloat16, uint8_t);
+    CALL_CONVERT_FP8(__nv_bfloat16, uint8_t);
   }
 }

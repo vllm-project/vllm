@@ -120,8 +120,6 @@ def test_reshape_and_cache(
     device: int,
     kv_cache_dtype: str,
 ) -> None:
-    if kv_cache_dtype != "auto":
-        return # No alternative fp8 operation to compare to
     random.seed(seed)
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
@@ -142,12 +140,24 @@ def test_reshape_and_cache(
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Clone the KV caches.
-    cloned_key_cache = key_cache.clone()
-    cloned_value_cache = value_cache.clone()
+    if kv_cache_dtype == "fp8_e5m2":
+        cloned_key_cache = torch.empty_like(key_cache, dtype=torch.float16)
+        cache_ops.convert_fp8(key_cache, cloned_key_cache)
+        cloned_value_cache = torch.empty_like(value_cache, dtype=torch.float16)
+        cache_ops.convert_fp8(value_cache, cloned_value_cache)
+    else:
+        cloned_key_cache = key_cache.clone()
+        cloned_value_cache = value_cache.clone()
 
     # Call the reshape_and_cache kernel.
     cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
                                 slot_mapping, kv_cache_dtype)
+    
+    if kv_cache_dtype == "fp8_e5m2":
+        result_key_cache = torch.empty_like(key_cache, dtype=torch.float16)
+        cache_ops.convert_fp8(key_cache, result_key_cache)
+        result_value_cache = torch.empty_like(value_cache, dtype=torch.float16)
+        cache_ops.convert_fp8(value_cache, result_value_cache)
 
     # Run the reference implementation.
     reshaped_key = key.reshape(num_tokens, *key_cache[0, :, :, 0, :].shape)
@@ -160,9 +170,13 @@ def test_reshape_and_cache(
         block_offset = block_offsets[i]
         cloned_key_cache[block_idx, :, :, block_offset, :] = reshaped_key[i]
         cloned_value_cache[block_idx, :, :, block_offset] = value[i]
-
-    assert torch.allclose(key_cache, cloned_key_cache)
-    assert torch.allclose(value_cache, cloned_value_cache)
+    
+    if kv_cache_dtype == "fp8_e5m2":
+        assert torch.allclose(result_key_cache, cloned_key_cache, atol=0.01, rtol=0.1)
+        assert torch.allclose(result_value_cache, cloned_value_cache, atol=0.01, rtol=0.1)
+    else:
+        assert torch.allclose(key_cache, cloned_key_cache)
+        assert torch.allclose(value_cache, cloned_value_cache)
 
 
 @pytest.mark.parametrize("direction", COPYING_DIRECTION)
@@ -232,3 +246,40 @@ def test_swap_blocks(
                               dist_key_caches[0][dst].cpu())
         assert torch.allclose(src_value_caches_clone[src].cpu(),
                               dist_value_caches[0][dst].cpu())
+
+
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", DEVICES)
+@torch.inference_mode()
+def test_fp8_conversion(
+    num_heads: int,
+    head_size: int,
+    block_size: int,
+    num_blocks: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: int,
+) -> None:
+    random.seed(seed)
+    torch.random.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    gpu_id = f"cuda:{device}"
+
+    low = -240.0
+    high = 240.0
+    shape = (num_blocks, num_heads, head_size, block_size)
+    cache = torch.empty(shape, dtype=dtype, device=gpu_id)
+    cache.uniform_(low, high)
+
+    cache_fp8 = torch.empty_like(cache, dtype=torch.uint8)
+    cache_ops.convert_fp8(cache, cache_fp8)
+
+    converted_cache = torch.empty_like(cache)
+    cache_ops.convert_fp8(cache_fp8, converted_cache)
+
+    assert torch.allclose(cache, converted_cache, atol=0.01, rtol=0.1)
