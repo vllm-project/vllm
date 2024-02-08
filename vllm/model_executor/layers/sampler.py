@@ -150,13 +150,14 @@ def _apply_logits_processors(
         logits_processors = sampling_params.logits_processors
         if logits_processors:
             found_logits_processors = True
+            logits_processor_argc = [len(fn_signature(fn).parameters) for fn in logits_processors]
             for seq_id in seq_ids:
                 logits_row = logits[logits_row_idx]
                 token_ids = sampling_metadata.seq_data[seq_id].output_token_ids
-                for logits_processor in logits_processors:
-                    if len(fn_signature(logits_processor).parameters) == 3:
+                for i, logits_processor in enumerate(logits_processors):
+                    if logits_processor_argc[i] == 3:
                         logits_row = logits_processor(seq_id, token_ids, logits_row)
-                    else: # params len == 2
+                    else: # args len == 2
                         logits_row = logits_processor(token_ids, logits_row)
                 logits[logits_row_idx] = logits_row
                 logits_row_idx += 1
