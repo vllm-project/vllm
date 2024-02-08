@@ -457,8 +457,8 @@ __global__ void convert_fp8_kernel(
 
 #define CALL_CONVERT_FP8(Tout, Tin)                                 \
   vllm::convert_fp8_kernel<Tout, Tin><<<grid, block, 0, stream>>>(  \
-    reinterpret_cast<Tin*>(src_cache.data_ptr()),                        \
-    reinterpret_cast<Tout*>(dst_cache.data_ptr()),                       \
+    reinterpret_cast<Tin*>(src_cache.data_ptr()),                   \
+    reinterpret_cast<Tout*>(dst_cache.data_ptr()),                  \
     block_stride);
 
 void convert_fp8(
@@ -473,7 +473,6 @@ void convert_fp8(
       "src and dst must be on the same GPU");
   }
   at::cuda::OptionalCUDAGuard device_guard;
-  
   if (src_device.is_cuda()) {
     device_guard.set_device(src_device);
   } else if (dst_device.is_cuda()) {
@@ -485,7 +484,7 @@ void convert_fp8(
   dim3 grid(num_blocks);
   dim3 block(std::min(block_stride, int64_t(512)));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  
+
   if (src_cache.dtype() == at::ScalarType::Float) {
     CALL_CONVERT_FP8(uint8_t, float);
   } else if (src_cache.dtype() == at::ScalarType::Half) {
