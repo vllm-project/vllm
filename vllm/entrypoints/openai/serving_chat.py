@@ -60,23 +60,13 @@ class OpenAIServingChat(OpenAIServing):
         if "chatglm3" in request.model:
             [*history, query] = request.messages
             query = query["content"]
-            prompt_ids = (self.tokenizer.build_chat_input(
+            token_ids = (self.tokenizer.build_chat_input(
                 query=query, history=history,
                 role="user").input_ids.squeeze().tolist())
-            prompt = self.tokenizer.decode(prompt_ids)
-            try:
-                token_ids = self._validate_prompt_and_tokenize(
-                    request, prompt_ids=prompt_ids)
-            except ValueError as e:
-                return self.create_error_response(str(e))
+            prompt = self.tokenizer.decode(token_ids)
         elif "Baichuan" in request.model:
-            prompt_ids = self.tokenizer.build_chat_input(request.messages)
-            prompt = self.tokenizer.decode(prompt_ids)
-            try:
-                token_ids = self._validate_prompt_and_tokenize(
-                    request, prompt_ids=prompt_ids)
-            except ValueError as e:
-                return self.create_error_response(str(e))
+            token_ids = self.tokenizer.build_chat_input(request.messages)
+            prompt = self.tokenizer.decode(token_ids)
         else:
             try:
                 prompt = self.tokenizer.apply_chat_template(
@@ -89,11 +79,12 @@ class OpenAIServingChat(OpenAIServing):
                     f"Error in applying chat template from request: {str(e)}")
                 return self.create_error_response(str(e))
 
-            try:
-                token_ids = self._validate_prompt_and_tokenize(request,
-                                                               prompt=prompt)
-            except ValueError as e:
-                return self.create_error_response(str(e))
+            token_ids = self.tokenizer(prompt).input_ids
+
+        try:
+            self._validate_prompt(request, prompt_ids=token_ids)
+        except ValueError as e:
+            return self.create_error_response(str(e))
 
         sampling_params = request.to_sampling_params()
         request_id = f"cmpl-{random_uuid()}"

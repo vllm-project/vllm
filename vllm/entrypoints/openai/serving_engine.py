@@ -104,20 +104,10 @@ class OpenAIServing:
             err_type="NotFoundError",
             status_code=HTTPStatus.NOT_FOUND)
 
-    def _validate_prompt_and_tokenize(
-            self,
-            request: Union[ChatCompletionRequest, CompletionRequest],
-            prompt: Optional[str] = None,
-            prompt_ids: Optional[List[int]] = None) -> List[int]:
-        if not (prompt or prompt_ids):
-            raise ValueError("Either prompt or prompt_ids should be provided.")
-        if (prompt and prompt_ids):
-            raise ValueError(
-                "Only one of prompt or prompt_ids should be provided.")
-
-        input_ids = prompt_ids if prompt_ids is not None else self.tokenizer(
-            prompt).input_ids
-        token_num = len(input_ids)
+    def _validate_prompt(self, request: Union[ChatCompletionRequest,
+                                              CompletionRequest],
+                         prompt_ids: List[int]):
+        token_num = len(prompt_ids)
 
         if request.max_tokens is None:
             request.max_tokens = self.max_model_len - token_num
@@ -129,5 +119,3 @@ class OpenAIServing:
                 f"({token_num} in the messages, "
                 f"{request.max_tokens} in the completion). "
                 f"Please reduce the length of the messages or completion.", )
-        else:
-            return input_ids
