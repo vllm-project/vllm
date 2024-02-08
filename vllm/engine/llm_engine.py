@@ -1028,9 +1028,8 @@ class LLMEngine:
         required_version = "2.9"
         current_version = pkg_resources.get_distribution("ray").version
         if current_version < required_version:
-            raise ValueError(
-                f"Ray version {required_version} or greater is "
-                f"required, but found {current_version}")
+            raise ValueError(f"Ray version {required_version} or greater is "
+                             f"required, but found {current_version}")
 
         from ray.dag import MultiOutputNode, InputNode
         assert self.parallel_config.worker_use_ray
