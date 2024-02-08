@@ -150,7 +150,7 @@ class LLMEngine:
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )
-        self._run_workers("init_model")
+        self._run_workers("init_model", cupy_port=get_open_port())
         self._run_workers("load_model")
 
     def _init_tokenizer(self, **tokenizer_init_kwargs):
