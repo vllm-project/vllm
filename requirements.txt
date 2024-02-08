@@ -10,4 +10,4 @@ fastapi
 uvicorn[standard]
 pydantic >= 2.0  # Required for OpenAI server.
 aioprometheus[starlette]
-cupy-cuda12x  # Required for CUDA graphs. CUDA 11.8 users should install cupy-cuda11x instead. # FIXME: Fix this in setup.py.
+cupy-cuda12x == 13.0.0  # Required for CUDA graphs. CUDA 11.8 users should install cupy-cuda11x instead.
