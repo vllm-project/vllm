@@ -10,6 +10,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
+from vllm.model_executor.guided_decoding import GuidedDecodingEngine, GuidedDecodingMode, get_logits_processor
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
 app = FastAPI()
@@ -28,6 +29,8 @@ async def generate(request: Request) -> Response:
 
     The request should be a JSON object with the following fields:
     - prompt: the prompt to use for the generation.
+    - schema: the JSON schema to use for the generation (if regex is not provided).
+    - regex: the regex to use for the generation (if schema is not provided).
     - stream: whether to stream the results or not.
     - other fields: the sampling parameters (See `SamplingParams` for details).
     """
@@ -35,6 +38,11 @@ async def generate(request: Request) -> Response:
     prompt = request_dict.pop("prompt")
     prefix_pos = request_dict.pop("prefix_pos", None)
     stream = request_dict.pop("stream", False)
+
+    if args.guided_decoding_engine is not None:
+        # Add logits processors if guided decoding is requested
+        _setup_guided_decoding(request_dict)
+
     sampling_params = SamplingParams(**request_dict)
     request_id = random_uuid()
 
@@ -72,6 +80,28 @@ async def generate(request: Request) -> Response:
     return JSONResponse(ret)
 
 
+def _setup_guided_decoding(request_dict):
+    json_schema = request_dict.pop("schema", None)
+    regex_string = request_dict.pop("regex", None)
+
+    if json_schema is not None or regex_string is not None:
+        assert json_schema is None or regex_string is None, \
+            "Only one of 'schema' and 'regex' can be provided."
+
+        guided_decoding_engine = GuidedDecodingEngine(
+            args.guided_decoding_engine)
+        mode = GuidedDecodingMode(
+            "schema" if json_schema is not None else "regex")
+        logits_processors = [
+            get_logits_processor(json_schema or regex_string, mode,
+                                 guided_decoding_engine, engine.engine)
+        ]
+        if request_dict.get("logits_processors") is None:
+            request_dict["logits_processors"] = logits_processors
+        else:
+            request_dict["logits_processors"].extend(logits_processors)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default=None)
@@ -83,6 +113,13 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="FastAPI root_path when app is behind a path based routing proxy")
+    parser.add_argument(
+        "--guided-decoding-engine",
+        type=str,
+        default=None,
+        help=
+        "What engine for guided decoding to use. Currently only `oulines` is supported."
+    )
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
 
