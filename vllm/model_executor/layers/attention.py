@@ -17,7 +17,7 @@ from vllm.utils import is_hip
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
-
+import flashinfer
 
 class PagedAttention(nn.Module):
     """MHA/MQA/GQA layer with PagedAttention.
@@ -162,10 +162,10 @@ class PagedAttention(nn.Module):
                 # FIXME(woosuk): This is a hack.
 
                 query = query.view(-1, self.num_kv_heads, self.head_size)
-                output = input_metadata.prefill_wrapper.forward(
-                    query, kv_cache, causal=True, allow_fp16_qk_reduction=True)
+                #output = input_metadata.prefill_wrapper.forward(
+                #    query, kv_cache, causal=True)
 
-                #output = flashinfer.single_prefill_with_kv_cache(query, key.contiguous(), value.contiguous(), causal=True,
+                output = flashinfer.single_prefill_with_kv_cache(query, key.contiguous(), value.contiguous(), causal=True)
                 #allow_fp16_qk_reduction=True)
 
             else:

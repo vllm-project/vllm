@@ -75,7 +75,7 @@ class ModelRunner:
         # cache in_wsl result
         self.in_wsl = in_wsl()
         self.kv_cache_dtype = kv_cache_dtype
-
+        self.forward_set = False
         workspace_buffer = torch.empty(16 * 1024 * 1024,
                                        dtype=torch.uint8,
                                        device="cuda:0")
@@ -547,7 +547,6 @@ class ModelRunner:
          lora_requests,
          lora_mapping) = self.prepare_input_tensors(seq_group_metadata_list)
 
-
         hidden_size = self.model.config.hidden_size
 
         if "num_key_value_heads" in self.model.config.__dict__.keys():
@@ -560,84 +559,48 @@ class ModelRunner:
 
         if not profile and input_metadata.is_prompt and input_metadata.decode_wrapper:
             input_metadata.decode_wrapper.end_forward()
+            self.forward_set = False
 
-        if not profile:
-            input_metadata.prefill_wrapper = self.prefill_wrapper
+        if not profile and not input_metadata.is_prompt:
             input_metadata.decode_wrapper = self.decode_wrapper
             batch_size = input_tokens.shape[0]
-            
-            if input_metadata.is_prompt:
-                qo_indptr = torch.zeros((batch_size + 1, ),
-                                        dtype=torch.int32,
-                                        device="cuda")
-
-                qo_indptr[1:] = torch.cumsum(input_metadata.prompt_lens, dim=0)
-
-                input_metadata.qo_indptr = qo_indptr
 
             kvi = input_metadata.slot_mapping.view(-1).type(
                 torch.int32).to("cuda:0")
 
-            kvd = input_metadata.block_tables.view(-1)
+            kvd = input_metadata.block_tables.to("cuda:0")
 
-            if input_metadata.is_prompt:
-                paged_kv_indices = torch.div(kvi, 16, rounding_mode="floor")
-                block_sizes_per_seq = torch.tensor([
-                    len(input_metadata.slot_mapping[i].unique())
-                    for i in range(batch_size)
-                ])
-            else:
-                paged_kv_indices = kvd #torch.div(kvd, 16, rounding_mode="floor")
-                block_sizes_per_seq = torch.tensor([
-                    len(input_metadata.block_tables[i])
-                    for i in range(batch_size)
-                ])
+            kvi = kvi[kvi != -1]
+            kvd = kvd[kvd != 0]
+
+
+            paged_kv_indices = kvd
+            bsi = []
+            for i in range(batch_size):
+                mask = input_metadata.block_tables[i] != 0
+                bsi.append(len(input_metadata.block_tables[i][mask].unique_consecutive()))
+
+        
+            block_sizes_per_seq = torch.tensor(bsi)
 
             paged_kv_indptr = torch.zeros((batch_size + 1, ),
                                           dtype=torch.int32,
                                           device="cuda:0")
 
-            paged_kv_indices = torch.where(paged_kv_indices == -1, torch.tensor(1), paged_kv_indices)
-            paged_kv_indptr[1:] = torch.cumsum(block_sizes_per_seq, dim=0)
-
-            #if input_metadata.is_prompt:
-            #    paged_kv_indptr[1:] = torch.cumsum(block_sizes_per_seq, dim=0)
-            #
-            #else:
-            #    paged_kv_indptr[1:] = torch.arange(1, batch_size + 1)
-
-            if input_metadata.is_prompt:
-                paged_kv_last_page_len = (kvi[paged_kv_indptr[1:] - 1] %
-                                          16) + 1
-            else:
-                paged_kv_last_page_len = (kvi % 16) + 1
-
-            if not input_metadata.is_prompt:
-                print(f"indptr: {paged_kv_indptr}")
-                print(paged_kv_indices)
-                print(paged_kv_last_page_len)
-                print(f"kvi: {kvi // 16}")
-                print(f"kvd: {kvd // 16}")
-
-                print()
-                print(input_metadata.block_tables)
-                print()
-
-            if input_metadata.is_prompt:
-                input_metadata.prefill_wrapper.begin_forward(
-                    qo_indptr, paged_kv_indptr, paged_kv_indices,
-                    paged_kv_last_page_len, num_qo_heads, num_kv_heads)
-            else:
-                input_metadata.decode_wrapper.begin_forward(
-                    paged_kv_indptr,
-                    paged_kv_indices,
-                    paged_kv_last_page_len,
-                    num_qo_heads,
-                    num_kv_heads,
-                    hidden_size // num_kv_heads,
-                    16,
-                )
-
+            paged_kv_indptr[1:] = torch.cumsum(block_sizes_per_seq, dim=0
+            
+            paged_kv_last_page_len = kvi % 16 + 1
+            
+            input_metadata.decode_wrapper.begin_forward(
+                paged_kv_indptr,
+                paged_kv_indices,
+                paged_kv_last_page_len,
+                num_qo_heads,
+                num_kv_heads,
+                hidden_size // num_kv_heads,
+                16,
+            )
+                
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
 
@@ -659,10 +622,6 @@ class ModelRunner:
             hidden_states=hidden_states,
             sampling_metadata=sampling_metadata,
         )
-
-        #if not profile:
-        #    if input_metadata.is_prompt:
-        #        input_metadata.prefill_wrapper.end_forward()
 
         return output
 
