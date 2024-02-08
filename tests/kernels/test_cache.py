@@ -172,8 +172,8 @@ def test_reshape_and_cache(
         cloned_value_cache[block_idx, :, :, block_offset] = value[i]
     
     if kv_cache_dtype == "fp8_e5m2":
-        assert torch.allclose(result_key_cache, cloned_key_cache, atol=0.01, rtol=0.1)
-        assert torch.allclose(result_value_cache, cloned_value_cache, atol=0.01, rtol=0.1)
+        assert torch.allclose(result_key_cache, cloned_key_cache, atol=0.001, rtol=0.1)
+        assert torch.allclose(result_value_cache, cloned_value_cache, atol=0.001, rtol=0.1)
     else:
         assert torch.allclose(key_cache, cloned_key_cache)
         assert torch.allclose(value_cache, cloned_value_cache)
@@ -282,4 +282,4 @@ def test_fp8_conversion(
     converted_cache = torch.empty_like(cache)
     cache_ops.convert_fp8(cache_fp8, converted_cache)
 
-    assert torch.allclose(cache, converted_cache, atol=0.01, rtol=0.1)
+    assert torch.allclose(cache, converted_cache, atol=0.001, rtol=0.1)
