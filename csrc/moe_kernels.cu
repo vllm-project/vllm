@@ -30,6 +30,7 @@
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
 
 #include "cutlass/util/packed_stride.hpp"
+#include "cutlass/util/device_memory.hpp"
 
 using namespace cute;
 
@@ -127,7 +128,25 @@ torch::Tensor CopyToDevice(const std::vector<T> &x, const torch::Device &device)
 }
 
 template <typename Gemm>
-typename Gemm::Arguments MakeArguments(torch::Tensor a,
+struct ProblemData {
+  std::vector<typename ProblemShape::UnderlyingProblemShape> problem_sizes_host;
+  cutlass::DeviceAllocation<typename Gemm::ElementA *> ptr_A;
+  cutlass::DeviceAllocation<typename Gemm::ElementB *> ptr_B;
+  cutlass::DeviceAllocation<typename Gemm::ElementC *> ptr_C;
+  cutlass::DeviceAllocation<StrideA> stride_A;
+  cutlass::DeviceAllocation<StrideB> stride_B;
+  cutlass::DeviceAllocation<StrideC> stride_C;
+};
+
+template <typename T>
+void CopyDataToDevice(const std::vector<T> &src, cutlass::DeviceAllocation<T> &target) {
+  target.resize(src.size());
+  target.copy_from_host(target.data());
+}
+
+template <typename Gemm>
+typename Gemm::Arguments MakeArguments(ProblemData<Gemm>& problem_data,
+               torch::Tensor a,
 				       torch::Tensor b,
 				       torch::Tensor c,
 				       torch::Tensor batch_sizes) {
@@ -222,8 +241,9 @@ torch::Tensor CutlassGroupedGemm(torch::Tensor a,
 				 torch::Tensor c,
 				 torch::Tensor batch_sizes) {
   Gemm gemm;
+  ProblemData<Gemm> problem_data;
 
-  auto arguments = MakeArguments<Gemm>(a, b, c, batch_sizes);
+  auto arguments = MakeArguments<Gemm>(problem_data, a, b, c, batch_sizes);
   int64_t workspace_size = gemm.get_workspace_size(arguments);
   auto options = torch::TensorOptions().dtype(torch::kInt8).device(a.device());
   torch::Tensor workspace = torch::empty(workspace_size, options);
