@@ -5,7 +5,6 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
-#include <cuda/atomic>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -24,12 +23,12 @@
 
 namespace vllm {
 
-// use system scope since we're synchronizating with other devices
-using atomic_flag = cuda::atomic<bool, cuda::thread_scope_system>;
 constexpr int kMaxBlocks = 64;
+// note: we don't want to use atomics for signals because peer atomics are no
+// supported on PCIe links
 struct Signal {
-  alignas(128) atomic_flag start[kMaxBlocks][8];
-  alignas(128) atomic_flag end[kMaxBlocks][8];
+  alignas(128) uint32_t start[kMaxBlocks][8];
+  alignas(128) uint32_t end[kMaxBlocks][8];
 };
 
 struct __align__(16) RankData { const void *__restrict__ ptrs[8]; };
@@ -126,52 +125,44 @@ DINLINE O downcast(array_t<float, O::size> val) {
 
 // This function is meant to be used as the first synchronization in the all
 // reduce kernel. Thus, it doesn't need to make any visibility guarantees for
-// prior memory accesses, and we're free to use relaxed memory order.
+// prior memory accesses.
 template <int ngpus>
 DINLINE void start_sync(const RankSignals &sg, volatile Signal *self_sg,
                         int rank) {
   if (threadIdx.x < ngpus) {
+    // reset flag for next time
+    self_sg->end[blockIdx.x][threadIdx.x] = 0;
     // simultaneously write to the corresponding flag of all ranks.
     // Latency = 1 p2p write
-    sg.signals[threadIdx.x]->start[blockIdx.x][rank].store(
-        true, cuda::memory_order_relaxed);
-    bool expected = true;
-    // wait until we got true from all ranks, and then reset flag to false for
-    // next time.
-    while (!self_sg->start[blockIdx.x][threadIdx.x].compare_exchange_weak(
-        expected, false, cuda::memory_order_relaxed)) {
-      expected = true;
-    }
+    sg.signals[threadIdx.x]->start[blockIdx.x][rank] = 1;
+    // wait until we got true from all ranks
+    while (!self_sg->start[blockIdx.x][threadIdx.x])
+      ;
   }
   __syncthreads();
 }
 
 // This function is meant to be used as the second or the final synchronization
 // barrier in the all reduce kernel. If it's the final synchronization barrier,
-// we don't need to make any visibility guarantees for prior memory accesses,
-// and we're free to use relaxed memory order.
+// we don't need to make any visibility guarantees for prior memory accesses.
 template <int ngpus, bool final_sync = false>
 DINLINE void end_sync(const RankSignals &sg, volatile Signal *self_sg,
                       int rank) {
   __syncthreads();
   if (threadIdx.x < ngpus) {
+    // reset flag for next time
+    self_sg->start[blockIdx.x][threadIdx.x] = 0;
     // simultaneously write to the corresponding flag of all ranks.
     // Latency = 1 p2p write
-    sg.signals[threadIdx.x]->end[blockIdx.x][rank].store(
-        true,
-        final_sync ? cuda::memory_order_relaxed : cuda::memory_order_release);
-    bool expected = true;
-    // wait until we got true from all ranks, and then reset flag to false for
-    // next time.
-    while (!self_sg->end[blockIdx.x][threadIdx.x].compare_exchange_weak(
-        expected, false,
-        final_sync ? cuda::memory_order_relaxed : cuda::memory_order_acquire)) {
-      expected = true;
-    }
+    sg.signals[threadIdx.x]->end[blockIdx.x][rank] = 1;
   }
-  if constexpr (!final_sync) {
-    __syncthreads();
+  if constexpr (!final_sync) __threadfence_system();
+  if (threadIdx.x < ngpus) {
+    // wait until we got true from all ranks
+    while (!self_sg->end[blockIdx.x][threadIdx.x])
+      ;
   }
+  if constexpr (!final_sync) __syncthreads();
 }
 
 template <typename P, int ngpus, typename A>
