@@ -7,12 +7,10 @@ import importlib
 import inspect
 
 from multiprocessing import cpu_count
-from typing import Optional, Dict
 from aioprometheus import MetricsMiddleware
 from aioprometheus.asgi.starlette import metrics
 import fastapi
 import uvicorn
-import gunicorn
 from http import HTTPStatus
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
