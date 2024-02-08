@@ -15,11 +15,14 @@ from vllm.model_executor.parallel_utils.communication_op import (
 from vllm.model_executor.parallel_utils.custom_all_reduce import init_custom_ar
 from vllm.model_executor.parallel_utils.parallel_state import (
     ensure_model_parallel_initialized)
+from vllm.logger import init_logger
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
 from vllm.lora.request import LoRARequest
 from vllm.utils import is_hip
+
+logger = init_logger(__name__)
 
 
 def get_memory_info() -> Tuple[int, int]:
@@ -44,8 +47,14 @@ def get_memory_info() -> Tuple[int, int]:
             for info in infos:
                 if info.pid == pid:
                     return info.usedGpuMemory, mem_info.total
-            raise ValueError(
-                f"Unable to find process {pid} on device {device}.")
+            # We probably use docker and pynvml returns pids from the host https://github.com/gpuopenanalytics/pynvml/issues/36
+            logger.warning(
+                f"Unable to find current pid {pid} among running processes {list(map(lambda x: x.pid, infos))} on device {device}. "
+                "If you use docker run with '--pid host' to get the correct memory allocation per process."
+            )
+            free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
+            peak_memory = total_gpu_memory - free_gpu_memory
+            return peak_memory, total_gpu_memory
         finally:
             pynvml.nvmlShutdown()
 
