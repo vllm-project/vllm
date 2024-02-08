@@ -127,6 +127,8 @@ class Scheduler:
         if isinstance(request_id, str):
             request_id = (request_id, )
         request_ids = set(request_id)
+
+        now = time.monotonic()
         for state_queue in [self.waiting, self.running, self.swapped]:
             aborted_groups: List[SequenceGroup] = []
             for seq_group in state_queue:
@@ -145,7 +147,7 @@ class Scheduler:
                     if seq.is_finished():
                         continue
                     seq.status = SequenceStatus.FINISHED_ABORTED
-                    self.free_seq(seq)
+                    self.free_seq(seq, now)
 
     def has_unfinished_seqs(self) -> bool:
         return self.waiting or self.running or self.swapped
@@ -279,17 +281,18 @@ class Scheduler:
                 if self.running:
                     # Preempt the lowest-priority sequence groups.
                     victim_seq_group = self.running.pop()
-                    self._preempt(victim_seq_group, blocks_to_swap_out)
+                    self._preempt(victim_seq_group, blocks_to_swap_out, None,
+                                  now)
                     preempted.append(victim_seq_group)
                 else:
                     # No other sequence groups can be preempted.
                     # Preempt the current sequence group.
-                    self._preempt(seq_group, blocks_to_swap_out)
+                    self._preempt(seq_group, blocks_to_swap_out, None, now)
                     preempted.append(seq_group)
                     break
             else:
                 # Append new slots to the sequence group.
-                self._append_slot(seq_group, blocks_to_copy)
+                self._append_slot(seq_group, blocks_to_copy, now)
                 running.append(seq_group)
         self.running = running
 
@@ -331,7 +334,7 @@ class Scheduler:
                 if lora_int_id > 0:
                     curr_loras.add(lora_int_id)
                 self.swapped.popleft()
-                self._swap_in(seq_group, blocks_to_swap_in)
+                self._swap_in(seq_group, blocks_to_swap_in, now)
                 self._append_slot(seq_group, blocks_to_copy)
                 num_curr_seqs += num_new_seqs
                 self.running.append(seq_group)
@@ -386,8 +389,8 @@ class Scheduler:
     def fork_seq(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         self.block_manager.fork(parent_seq, child_seq)
 
-    def free_seq(self, seq: Sequence) -> None:
-        self.block_manager.free(seq)
+    def free_seq(self, seq: Sequence, now: Optional[float] = None) -> None:
+        self.block_manager.free(seq, now)
 
     def free_finished_seq_groups(self) -> None:
         self.running = deque(seq_group for seq_group in self.running
@@ -402,9 +405,10 @@ class Scheduler:
         self,
         seq_group: SequenceGroup,
         blocks_to_copy: Dict[int, List[int]],
+        now: Optional[float] = None,
     ) -> None:
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-            ret = self.block_manager.append_slot(seq)
+            ret = self.block_manager.append_slot(seq, now)
             if ret is not None:
                 src_block, dst_block = ret
                 if src_block in blocks_to_copy:
@@ -417,6 +421,7 @@ class Scheduler:
         seq_group: SequenceGroup,
         blocks_to_swap_out: Dict[int, int],
         preemption_mode: Optional[PreemptionMode] = None,
+        now: Optional[float] = None,
     ) -> None:
         # If preemption mode is not specified, we determine the mode as follows:
         # We use recomputation by default since it incurs lower overhead than
@@ -435,7 +440,7 @@ class Scheduler:
             else:
                 preemption_mode = PreemptionMode.SWAP
         if preemption_mode == PreemptionMode.RECOMPUTE:
-            self._preempt_by_recompute(seq_group)
+            self._preempt_by_recompute(seq_group, now)
         elif preemption_mode == PreemptionMode.SWAP:
             self._preempt_by_swap(seq_group, blocks_to_swap_out)
         else:
@@ -444,12 +449,13 @@ class Scheduler:
     def _preempt_by_recompute(
         self,
         seq_group: SequenceGroup,
+        now: Optional[float] = None,
     ) -> None:
         seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
         assert len(seqs) == 1
         for seq in seqs:
             seq.status = SequenceStatus.WAITING
-            self.block_manager.free(seq)
+            self.block_manager.free(seq, now)
         # NOTE: For FCFS, we insert the preempted sequence group to the front
         # of the waiting queue.
         self.waiting.appendleft(seq_group)
@@ -466,24 +472,24 @@ class Scheduler:
         self,
         seq_group: SequenceGroup,
         blocks_to_swap_in: Dict[int, int],
+        now: Optional[float] = None,
     ) -> None:
-        mapping = self.block_manager.swap_in(seq_group)
+        mapping = self.block_manager.swap_in(seq_group, now)
         blocks_to_swap_in.update(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
             seq.status = SequenceStatus.RUNNING
 
-    def _swap_out(
-        self,
-        seq_group: SequenceGroup,
-        blocks_to_swap_out: Dict[int, int],
-    ) -> None:
+    def _swap_out(self,
+                  seq_group: SequenceGroup,
+                  blocks_to_swap_out: Dict[int, int],
+                  now: Optional[float] = None) -> None:
         if not self.block_manager.can_swap_out(seq_group):
             # FIXME(woosuk): Abort the sequence group instead of aborting the
             # entire engine.
             raise RuntimeError(
                 "Aborted due to the lack of CPU swap space. Please increase "
                 "the swap space to avoid this error.")
-        mapping = self.block_manager.swap_out(seq_group)
+        mapping = self.block_manager.swap_out(seq_group, now)
         blocks_to_swap_out.update(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             seq.status = SequenceStatus.SWAPPED
