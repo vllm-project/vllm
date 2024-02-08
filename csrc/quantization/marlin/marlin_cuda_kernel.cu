@@ -24,6 +24,8 @@
 
 #include <iostream>
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+
 template <typename T> inline std::string str(T x) { return std::to_string(x); }
 
 namespace marlin {
@@ -1110,3 +1112,22 @@ torch::Tensor marlin_gemm(torch::Tensor &a, torch::Tensor &b_q_weight,
 
   return c;
 }
+
+#else
+
+torch::Tensor marlin_gemm(torch::Tensor &a, torch::Tensor &b_q_weight,
+                          torch::Tensor &b_scales, torch::Tensor &workspace,
+                          int64_t size_m, int64_t size_n, int64_t size_k) {
+
+  throw std::runtime_error(
+        "Marlin quantization kernel requires compute capability at least 8.0");
+  
+  // Dummy code
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
+  auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
+  torch::Tensor c = torch::empty({size_m, size_n}, options);
+
+  return c;
+}
+
+#endif
