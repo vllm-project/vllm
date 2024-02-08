@@ -10,5 +10,4 @@ fastapi
 uvicorn[standard]
 pydantic >= 2.0  # Required for OpenAI server.
 aioprometheus[starlette]
-pynvml == 11.5.0
-triton >= 2.1.0
+cupy-cuda12x  # Required for CUDA graphs. CUDA 11.8 users should install cupy-cuda11x instead. # FIXME: Fix this in setup.py.
