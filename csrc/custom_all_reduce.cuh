@@ -125,7 +125,8 @@ DINLINE O downcast(array_t<float, O::size> val) {
 
 // This function is meant to be used as the first synchronization in the all
 // reduce kernel. Thus, it doesn't need to make any visibility guarantees for
-// prior memory accesses.
+// prior memory accesses. Note: volatile writes will not be reordered against
+// other volatile writes.
 template <int ngpus>
 DINLINE void start_sync(const RankSignals &sg, volatile Signal *self_sg,
                         int rank) {
