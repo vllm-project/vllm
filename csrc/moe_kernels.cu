@@ -30,7 +30,7 @@
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
 
 #include "cutlass/util/packed_stride.hpp"
-#include "cutlass/util/device_memory.hpp"
+#include "cutlass/util/device_memory.h"
 
 using namespace cute;
 
@@ -133,9 +133,9 @@ struct ProblemData {
   cutlass::DeviceAllocation<typename Gemm::ElementA *> ptr_A;
   cutlass::DeviceAllocation<typename Gemm::ElementB *> ptr_B;
   cutlass::DeviceAllocation<typename Gemm::ElementC *> ptr_C;
-  cutlass::DeviceAllocation<StrideA> stride_A;
-  cutlass::DeviceAllocation<StrideB> stride_B;
-  cutlass::DeviceAllocation<StrideC> stride_C;
+  cutlass::DeviceAllocation<typename Gemm::GemmKernel::StrideA> stride_A;
+  cutlass::DeviceAllocation<typename Gemm::GemmKernel::StrideB> stride_B;
+  cutlass::DeviceAllocation<typename Gemm::GemmKernel::StrideC> stride_C;
 };
 
 template <typename T>
@@ -210,13 +210,15 @@ typename Gemm::Arguments MakeArguments(ProblemData<Gemm>& problem_data,
   }
 
   // Copy the problem sizes, pointers and leading dimension data to the device.
-  torch::Tensor stride_a = CopyToDevice(stride_a_host, a.device());
-  torch::Tensor stride_b = CopyToDevice(stride_b_host, a.device());
-  torch::Tensor stride_c = CopyToDevice(stride_c_host, a.device());
-  torch::Tensor ptr_a = CopyToDevice(ptr_a_host, a.device());
-  torch::Tensor ptr_b = CopyToDevice(ptr_b_host, a.device());
-  torch::Tensor ptr_c = CopyToDevice(ptr_c_host, a.device());
-  torch::Tensor problem_sizes = CopyToDevice(problem_sizes_host, a.device());
+  CopyDataToDevice(problem_sizes_host, problem_data.problem_sizes);
+
+  CopyDataToDevice(ptr_a_host, problem_data.ptr_A);
+  CopyDataToDevice(ptr_b_host, problem_data.ptr_B);
+  CopyDataToDevice(ptr_c_host, problem_data.ptr_C);
+
+  CopyDataToDevice(stride_a_host, problem_data.stride_A);
+  CopyDataToDevice(stride_b_host, problem_data.stride_B);
+  CopyDataToDevice(stride_c_host, problem_data.stride_C);
 
   cutlass::KernelHardwareInfo hw_info;
   hw_info.device_id = b.device().index();
@@ -225,11 +227,11 @@ typename Gemm::Arguments MakeArguments(ProblemData<Gemm>& problem_data,
   typename Gemm::Arguments arguments{
     cutlass::gemm::GemmUniversalMode::kGrouped,
     {static_cast<int>(num_experts), reinterpret_cast<typename ProblemShape::UnderlyingProblemShape*>(problem_sizes.data_ptr()), problem_sizes_host.data()},
-    {(ElementA**)ptr_a.data_ptr(), (StrideA*)stride_a.data_ptr(),
-     (ElementB**)ptr_b.data_ptr(), (StrideB*)stride_b.data_ptr()},
+    {problem_data.ptr_A.get(), problem_data.stride_A.get(),
+     problem_data.ptr_B.get(), problem_data.stride_B.get()},
     {{/*alpha=*/1.0f, /*beta=*/0.0f},
-     (ElementC**)ptr_c.data_ptr(), (StrideC*)stride_c.data_ptr(),
-     (ElementC**)ptr_c.data_ptr(), (StrideC*)stride_c.data_ptr()},
+     problem_data.ptr_C.get(), problem_data.stride_C.get(),
+     problem_data.ptr_C.get(), problem_data.stride_C.get()},
     hw_info
   };
 
