@@ -29,6 +29,8 @@
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
 
+#include "cutlass/util/packed_stride.hpp"
+
 using namespace cute;
 
 namespace vllm {
@@ -65,8 +67,8 @@ constexpr int AlignmentC  = 128 / cutlass::sizeof_bits<ElementC>::value;    // M
 using ElementAccumulator  = float;                                          // Element type for internal accumulation
 using ArchTag             = cutlass::arch::Sm90;                            // Tag indicating the minimum SM that supports the intended feature
 using OperatorClass       = cutlass::arch::OpClassTensorOp;                 // Operator class tag
-using TileShape           = Shape<_256,_128,_64>;                           // Threadblock-level tile size
-using ClusterShape        = Shape<_1,_2,_1>;                                // Shape of the threadblocks in a cluster
+using TileShape           = Shape<_128,_128,_64>;                           // Threadblock-level tile size
+using ClusterShape        = Shape<_1,_1,_1>;                                // Shape of the threadblocks in a cluster
 using StageCountType = cutlass::gemm::collective::StageCountAuto;           // Stage count maximized based on the tile size
 using KernelSchedule = cutlass::gemm::KernelGroupTmaWarpSpecializedCooperative; // Kernel to launch
 using EpilogueSchedule = cutlass::epilogue::NoSmemWarpSpecializedGroup;                     // Epilogue to launch
@@ -124,68 +126,6 @@ torch::Tensor CopyToDevice(const std::vector<T> &x, const torch::Device &device)
   return out;
 }
 
-// Strides without batch mode
-
-template <class IntT>
-CUTLASS_HOST_DEVICE
-cute::Stride<IntT, cute::Int<1>>
-make_cute_packed_stride(cute::Stride<IntT, cute::Int<1>> s, cute::Shape<int,int,int> shape_MKL) {
-  static_assert(std::is_integral_v<IntT>,
-    "Stride must have an integral type so it can be set dynamically. Static strides not supported.");
-  auto s_copy = s;
-  cute::get<0>(s_copy) = static_cast<IntT>(cute::get<1>(shape_MKL));
-  return s_copy;
-}
-
-template <class IntT>
-CUTLASS_HOST_DEVICE
-cute::Stride<cute::Int<1>, IntT>
-make_cute_packed_stride(cute::Stride<cute::Int<1>, IntT> s, cute::Shape<int,int,int> shape_MKL) {
-  static_assert(std::is_integral_v<IntT>,
-    "Stride must have an integral type so it can be set dynamically. Static strides not supported.");
-  auto s_copy = s;
-  cute::get<1>(s_copy) = static_cast<IntT>(cute::get<0>(shape_MKL));
-  return s_copy;
-}
-
-// Strides with batch mode
-
-template <class IntT>
-CUTLASS_HOST_DEVICE
-cute::Stride<IntT, cute::Int<1>, int64_t>
-make_cute_packed_stride(cute::Stride<IntT, cute::Int<1>, int64_t> s, cute::Shape<int,int,int> shape_MKL) {
-  static_assert(std::is_integral_v<IntT>,
-    "Stride must have an integral type so it can be set dynamically. Static strides not supported.");
-  auto s_copy = s;
-  cute::get<0>(s_copy) = static_cast<IntT>(cute::get<1>(shape_MKL));
-  int batch_count =  cute::get<2>(shape_MKL);
-  if (batch_count > 1) {
-    cute::get<2>(s_copy) = static_cast<IntT>(cute::get<0>(shape_MKL) * cute::get<1>(shape_MKL));
-  }
-  else {
-    cute::get<2>(s_copy) = static_cast<IntT>(0);
-  }
-  return s_copy;
-}
-
-template <class IntT>
-CUTLASS_HOST_DEVICE
-cute::Stride<cute::Int<1>, IntT, int64_t>
-make_cute_packed_stride(cute::Stride<cute::Int<1>, IntT, int64_t> s, cute::Shape<int,int,int> shape_MKL) {
-  static_assert(std::is_integral_v<IntT>,
-    "Stride must have an integral type so it can be set dynamically. Static strides not supported.");
-  auto s_copy = s;
-  cute::get<1>(s_copy) = static_cast<IntT>(cute::get<0>(shape_MKL));
-  int batch_count =  cute::get<2>(shape_MKL);
-  if (batch_count > 1) {
-    cute::get<2>(s_copy) = static_cast<IntT>(cute::get<0>(shape_MKL) * cute::get<1>(shape_MKL));
-  }
-  else {
-    cute::get<2>(s_copy) = static_cast<IntT>(0);
-  }
-  return s_copy;
-}
-
 template <typename Gemm>
 typename Gemm::Arguments MakeArguments(torch::Tensor a,
 				       torch::Tensor b,
@@ -195,6 +135,8 @@ typename Gemm::Arguments MakeArguments(torch::Tensor a,
 
   // Calculate the number of threadblocks to use and validate the result.
   int64_t num_experts = problem_sizes_host.size();
+
+  std::cout << "num_experts = " << num_experts << std::endl;
 
   // Create the host arrays of leading dimension data and pointer data.
   using StrideA = typename Gemm::GemmKernel::StrideA;
@@ -222,9 +164,18 @@ typename Gemm::Arguments MakeArguments(torch::Tensor a,
     auto N = get<1>(problem);
     auto K = get<2>(problem);
 
-    stride_a_host.push_back(make_cute_packed_stride(StrideA{}, cute::make_shape(M, K, Int<1>{})));
-    stride_b_host.push_back(make_cute_packed_stride(StrideB{}, cute::make_shape(N, K, Int<1>{})));
-    stride_c_host.push_back(make_cute_packed_stride(StrideC{}, cute::make_shape(M, N, Int<1>{})));
+    std::cout << "i = " << i << std::endl;
+    std::cout << "M = " << M << std::endl;
+    std::cout << "N = " << N << std::endl;
+    std::cout << "K = " << K << std::endl;
+
+    auto sa = cutlass::make_cute_packed_stride(StrideA{}, cute::make_shape(M, K, Int<1>{}));
+    std::cout << "sa[0]" << get<0>(sa) << std::endl;
+    std::cout << "sa[1]" << get<1>(sa) << std::endl;
+    std::cout << "sa[2]" << get<2>(sa) << std::endl;
+    stride_a_host.push_back(sa);
+    stride_b_host.push_back(cutlass::make_cute_packed_stride(StrideB{}, cute::make_shape(N, K, Int<1>{})));
+    stride_c_host.push_back(cutlass::make_cute_packed_stride(StrideC{}, cute::make_shape(M, N, Int<1>{})));
 
     offsets_a[i] = elements_a;
     offsets_b[i] = elements_b;
