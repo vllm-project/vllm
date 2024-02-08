@@ -141,8 +141,8 @@ struct ProblemData {
 
 template <typename T>
 void CopyDataToDevice(const std::vector<T> &src, cutlass::DeviceAllocation<T> &target) {
-  target.resize(src.size());
-  target.copy_from_host(target.data());
+  target.reset(src.size());
+  target.copy_from_host(src.data());
 }
 
 template <typename Gemm>
