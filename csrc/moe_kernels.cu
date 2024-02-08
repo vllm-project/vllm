@@ -130,6 +130,7 @@ torch::Tensor CopyToDevice(const std::vector<T> &x, const torch::Device &device)
 template <typename Gemm>
 struct ProblemData {
   std::vector<typename ProblemShape::UnderlyingProblemShape> problem_sizes_host;
+  cutlass::DeviceAllocation<typename ProblemShape::UnderlyingProblemShape> problem_sizes;
   cutlass::DeviceAllocation<typename Gemm::ElementA *> ptr_A;
   cutlass::DeviceAllocation<typename Gemm::ElementB *> ptr_B;
   cutlass::DeviceAllocation<typename Gemm::ElementC *> ptr_C;
