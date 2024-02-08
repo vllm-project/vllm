@@ -19,3 +19,4 @@ flash_attn # required for HuggingFace's llama implementation
 openai
 requests
 ray
+gunicorn[gevent]
