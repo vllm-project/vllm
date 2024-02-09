@@ -26,6 +26,7 @@ from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
+MAX_GUNICORN_WORKERS_PROCESSES = 17
 
 openai_serving_chat: OpenAIServingChat = None
 openai_serving_completion: OpenAIServingCompletion = None
@@ -262,7 +263,7 @@ if __name__ == "__main__":
         options = {
             "bind" : f"{args.host}:{args.port}",
             "loglevel" : "info",
-            "workers" : max(12, 2 * cpu_count() + 1),
+            "workers" : min(MAX_GUNICORN_WORKERS_PROCESSES, 2 * cpu_count() + 1),
             "worker_class" : "gevent",
             "graceful_timeout" : TIMEOUT_KEEP_ALIVE,
             "keyfile" : args.keyfile,
