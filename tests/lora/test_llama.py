@@ -14,8 +14,8 @@ class ModelWithQuantization:
 
 MODELS: List[ModelWithQuantization] = [
     ModelWithQuantization(model_path="meta-llama/Llama-2-7b-hf", quantization=None),
-    ModelWithQuantization(model_path="TheBloke/Llama-2-7B-Chat-AWQ", quantization="AWQ"),
-    ModelWithQuantization(model_path="TheBloke/Llama-2-7B-Chat-GPTQ", quantization="GPTQ"),
+    ModelWithQuantization(model_path="TheBloke/Llama-2-7B-AWQ", quantization="AWQ"),
+    ModelWithQuantization(model_path="TheBloke/Llama-2-7B-GPTQ", quantization="GPTQ"),
     ModelWithQuantization(model_path="squeeze-ai-lab/sq-llama-2-7b-w4-s0", quantization="SQUEEZELLM"),
 ]
 
