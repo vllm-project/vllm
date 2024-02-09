@@ -97,8 +97,9 @@ class OlmoAttention(nn.Module):
         self.att_proj = QKVParallelLinear(
             config.d_model,
             self.head_dim,
+            self.total_num_heads,
             bias=config.include_bias,
-            device=config.init_device,
+            linear_method=linear_method,
         )
 
         # Rotary embeddings.
@@ -193,7 +194,7 @@ class OlmoMLP(nn.Module):
         # shape: (batch_size, seq_len, d_model)
         og_x = x
         x = self.ff_norm(x)
-        x = self.ff_proj(x)
+        x, _ = self.ff_proj(x)
         x = self.act(x)
         x, _ = self.ff_out(x)
         x = og_x + x
@@ -231,7 +232,7 @@ class OlmoBlock(nn.Module):
 
         # MLP block.
         hidden_states = self.mlp(x)
-        return hidden_states, None
+        return hidden_states
 
 
 class OlmoModel(nn.Module):
@@ -308,7 +309,9 @@ class OLMoForCausalLM(nn.Module):
     def __init__(
         self, config: OLMoConfig, linear_method: Optional[LinearMethodBase] = None
     ):
-        super().__init__(config)
+        super().__init__()
+        self.config = config
+        self.linear_method = linear_method
         self.model = OlmoModel(config, linear_method)
         self.lm_head_weight = (
             self.model.transformer.wte.weight
