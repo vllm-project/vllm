@@ -22,7 +22,7 @@ from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                TokenizerGroup)
 from vllm.utils import Counter, set_cuda_visible_devices, get_ip, get_open_port, get_distributed_init_method
-from vllm.usage.usage_lib import is_usage_stats_enabled, usage_message
+from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
 import torch
 from cloud_detect import provider
 if ray:
@@ -78,6 +78,7 @@ class LLMEngine:
         lora_config: Optional[LoRAConfig],
         placement_group: Optional["PlacementGroup"],
         log_stats: bool,
+        usage_context: UsageContext = UsageContext.UNKNOWN_CONTEXT
     ) -> None:
         logger.info(
             "Initializing an LLM engine with config: "
@@ -114,9 +115,9 @@ class LLMEngine:
 
         #If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
-            usage_message.report_usage()
-            usage_message.update_model(model_config.model)
+            usage_message.report_usage(model_config.model, usage_context)
             usage_message.write_to_file()
+
         # Create the parallel GPU workers.
         if self.parallel_config.worker_use_ray:
             # Disable Ray usage stats collection.
@@ -378,7 +379,8 @@ class LLMEngine:
         # Create the LLM engine.
         engine = cls(*engine_configs,
                      placement_group,
-                     log_stats=not engine_args.disable_log_stats)
+                     log_stats=not engine_args.disable_log_stats,
+                     usage_context = engine_args.usage_context)
         return engine
 
     def encode_request(

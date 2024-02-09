@@ -629,7 +629,9 @@ class AsyncLLMEngine:
                      log_requests=not engine_args.disable_log_requests,
                      log_stats=not engine_args.disable_log_stats,
                      max_log_len=engine_args.max_log_len,
-                     start_engine_loop=start_engine_loop)
+                     start_engine_loop=start_engine_loop,
+                     usage_context = engine_args.usage_context
+                     )
         return engine
 
     async def do_log_stats(self) -> None:

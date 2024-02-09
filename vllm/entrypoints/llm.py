@@ -9,7 +9,7 @@ from vllm.engine.llm_engine import LLMEngine
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.utils import Counter
-
+from vllm.usage.usage_lib import UsageContext
 
 class LLM:
     """An LLM for generating texts from given prompts and sampling parameters.
@@ -104,6 +104,7 @@ class LLM:
             enforce_eager=enforce_eager,
             max_context_len_to_capture=max_context_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
+            usage_context=UsageContext.LLM,
             **kwargs,
         )
         self.llm_engine = LLMEngine.from_engine_args(engine_args)

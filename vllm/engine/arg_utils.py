@@ -5,7 +5,7 @@ from typing import Optional, Tuple
 
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, LoRAConfig)
-
+from vllm.usage.usage_lib import UsageContext
 
 @dataclass
 class EngineArgs:
@@ -44,7 +44,7 @@ class EngineArgs:
     lora_dtype = 'auto'
     max_cpu_loras: Optional[int] = None
     device: str = 'cuda'
-
+    usage_context: Optional[UsageContext] = UsageContext.UNKNOWN_CONTEXT
     def __post_init__(self):
         if self.tokenizer is None:
             self.tokenizer = self.model
@@ -267,9 +267,10 @@ class EngineArgs:
         return parser
 
     @classmethod
-    def from_cli_args(cls, args: argparse.Namespace) -> 'EngineArgs':
+    def from_cli_args(cls, args: argparse.Namespace, context: UsageContext=UsageContext.UNKNOWN_CONTEXT) -> 'EngineArgs':
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
+        args.usage_context = context
         # Set the attributes from the parsed arguments.
         engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
         return engine_args
