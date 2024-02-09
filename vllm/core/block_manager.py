@@ -238,7 +238,8 @@ class BlockSpaceManager:
         new_hash = seq.hash(len(seq.logical_token_blocks) - 1)
         self.gpu_allocator.update_hash(new_hash, block)
 
-    def append_slot(self, seq: Sequence, prefix_len: int) -> Optional[Tuple[int, int]]:
+    def append_slot(self, seq: Sequence,
+                    prefix_len: int) -> Optional[Tuple[int, int]]:
         """Allocate a physical slot for a new token."""
         logical_blocks = seq.logical_token_blocks
         block_table = self.block_tables[seq.seq_id]
