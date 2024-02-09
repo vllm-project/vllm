@@ -477,7 +477,7 @@ class DeviceConfig:
             elif is_neuron():
                 self.device_type = "neuron"
             else:
-                raise RuntimeError(f"No supported device detected.")
+                raise RuntimeError("No supported device detected.")
         else:
             # Device type is assigned explicitly
             self.device_type = device

@@ -1,5 +1,4 @@
 """Utilities for selecting and loading models."""
-import contextlib
 from typing import Type
 
 import torch
