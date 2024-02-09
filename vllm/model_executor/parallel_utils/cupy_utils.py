@@ -72,8 +72,8 @@ def init_process_group(world_size: int, rank: int, host: str,
     assert not is_initialized()
 
     if isinstance(cupy, Exception):
-        raise ImportError(
-            "NCCLBackend is not available. Please install cupy==13.0.0.") from cupy
+        raise ImportError("NCCLBackend is not available. Please install "
+                          "cupy-cuda12x==13.0.0.") from cupy
 
     # TODO(woosuk): Create TP and PP process groups for CuPy.
     global _NCCL_BACKEND
