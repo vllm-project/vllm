@@ -10,7 +10,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
-from vllm.vllm.model_executor.guided_decoding import GuidedDecodingMode, get_guided_decoding_logits_processor
+from vllm.model_executor.guided_decoding import GuidedDecodingMode, get_guided_decoding_logits_processor
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
 app = FastAPI()

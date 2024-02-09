@@ -16,7 +16,7 @@ from .protocol import (
 )
 from vllm.outputs import RequestOutput
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
-from vllm.vllm.model_executor.guided_decoding import GuidedDecodingMode, get_guided_decoding_logits_processor
+from vllm.model_executor.guided_decoding import GuidedDecodingMode, get_guided_decoding_logits_processor
 
 logger = init_logger(__name__)
 
