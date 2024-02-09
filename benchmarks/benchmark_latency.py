@@ -125,7 +125,7 @@ if __name__ == '__main__':
     parser.add_argument(
         "--kv-cache-dtype",
         type=str,
-        choices=['auto', 'fp8_e5m2'],
+        choices=['auto', 'fp8'],
         default='auto',
         help=
         'Data type for kv cache storage. If "auto", will use model data type.')

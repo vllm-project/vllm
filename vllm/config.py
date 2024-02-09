@@ -329,18 +329,15 @@ class CacheConfig:
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":
             pass
-        elif self.cache_dtype == "fp8_e5m2":
-            nvcc_cuda_version = get_nvcc_cuda_version()
-            if nvcc_cuda_version and nvcc_cuda_version < Version("11.8"):
-                raise ValueError(
-                    "FP8 is not supported when cuda version is lower than 11.8."
-                )
-            device_name = torch.cuda.get_device_name()
-            if "AMD" in device_name:
-                raise NotImplementedError(
-                    "FP8_E5M2 KV Cache on AMD GPU has not been supported yet.")
+        elif self.cache_dtype == "fp8":
+            if not is_hip():
+                nvcc_cuda_version = get_nvcc_cuda_version()
+                if nvcc_cuda_version < Version("11.8"):
+                    raise ValueError(
+                        "FP8 is not supported when cuda version is lower than 11.8."
+                    )
             logger.info(
-                "Using fp8_e5m2 data type to store kv cache. It reduces "
+                "Using fp8 data type to store kv cache. It reduces "
                 "the GPU memory footprint and boosts the performance. "
                 "But it may cause slight accuracy drop. "
                 "Currently we only support fp8 without scaling factors and "

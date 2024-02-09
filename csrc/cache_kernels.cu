@@ -259,7 +259,7 @@ void reshape_and_cache(
     } else if (key.dtype() == at::ScalarType::BFloat16) {
       CALL_RESHAPE_AND_CACHE(__nv_bfloat16, __nv_bfloat16, false);
     }
-  } else if (kv_cache_dtype == "fp8_e5m2" || kv_cache_dtype == "fp8_e4m3") {
+  } else if (kv_cache_dtype == "fp8") {
     if (key.dtype() == at::ScalarType::Float) {
       CALL_RESHAPE_AND_CACHE(float, uint8_t, true);
     } else if (key.dtype() == at::ScalarType::Half) {
@@ -306,17 +306,13 @@ void convert_fp8(
 {
   torch::Device src_device = src_cache.device();
   torch::Device dst_device = dst_cache.device();
-  if (src_device.is_cuda() && dst_device.is_cuda()) {
-    TORCH_CHECK(
-      src_device.index() == dst_device.index(),
-      "src and dst must be on the same GPU");
-  }
-  at::cuda::OptionalCUDAGuard device_guard;
-  if (src_device.is_cuda()) {
-    device_guard.set_device(src_device);
-  } else if (dst_device.is_cuda()) {
-    device_guard.set_device(dst_device);
-  }
+  TORCH_CHECK(src_device.is_cuda(), "src must be on a GPU")
+  TORCH_CHECK(dst_device.is_cuda(), "dst must be on a GPU")
+  TORCH_CHECK(
+    src_device.index() == dst_device.index(),
+    "src and dst must be on the same GPU");
+  at::cuda::OptionalCUDAGuard device_guard(src_device);
+
   int64_t num_blocks = src_cache.size(0);
   int64_t block_stride = src_cache.stride(0);
 
