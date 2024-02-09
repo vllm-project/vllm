@@ -128,9 +128,9 @@ class EngineArgs:
             type=str,
             choices=['auto', 'fp8'],
             default='auto',
-            help='Data type for kv cache storage. If "auto", will use model '
-            'data type. Note FP8 is not supported when cuda version is '
-            'lower than 11.8.')
+            help='Data type for kv cache storage. If "auto", will use model data '
+            'type. FP8_E5M2 is only supported on cuda version greater than 11.8. '
+            'On AMD GPUs, only a more standard FP8_E4M3 is supported for inference.')
         parser.add_argument('--max-model-len',
                             type=int,
                             default=None,
