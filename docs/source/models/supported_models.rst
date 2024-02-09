@@ -47,6 +47,9 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`InternLMForCausalLM`
     - InternLM
     - :code:`internlm/internlm-7b`, :code:`internlm/internlm-chat-7b`, etc.
+  * - :code:`InternLM2ForCausalLM`
+    - InternLM2
+    - :code:`internlm/internlm2-7b`, :code:`internlm/internlm2-chat-7b`, etc.
   * - :code:`LlamaForCausalLM`
     - LLaMA, LLaMA-2, Vicuna, Alpaca, Koala, Guanaco
     - :code:`meta-llama/Llama-2-13b-hf`, :code:`meta-llama/Llama-2-70b-hf`, :code:`openlm-research/open_llama_13b`, :code:`lmsys/vicuna-13b-v1.3`, :code:`young-geng/koala`, etc.

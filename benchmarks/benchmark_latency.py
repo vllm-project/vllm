@@ -25,6 +25,7 @@ def main(args: argparse.Namespace):
         dtype=args.dtype,
         enforce_eager=args.enforce_eager,
         kv_cache_dtype=args.kv_cache_dtype,
+        device=args.device,
     )
 
     sampling_params = SamplingParams(
@@ -36,7 +37,10 @@ def main(args: argparse.Namespace):
         max_tokens=args.output_len,
     )
     print(sampling_params)
-    dummy_prompt_token_ids = [[0] * args.input_len] * args.batch_size
+    dummy_prompt_token_ids = np.random.randint(10000,
+                                               size=(args.batch_size,
+                                                     args.input_len))
+    dummy_prompt_token_ids = dummy_prompt_token_ids.tolist()
 
     def run_to_completion(profile_dir: Optional[str] = None):
         if profile_dir:
@@ -70,7 +74,7 @@ def main(args: argparse.Namespace):
                 "."
             ) / "vllm_benchmark_result" / f"latency_result_{time.time()}"
         print(f"Profiling (results will be saved to '{profile_dir}')...")
-        run_to_completion(profile_dir=args.profile_result_dir)
+        run_to_completion(profile_dir=profile_dir)
         return
 
     # Benchmark.
@@ -135,5 +139,11 @@ if __name__ == '__main__':
         default=None,
         help=('path to save the pytorch profiler output. Can be visualized '
               'with ui.perfetto.dev or Tensorboard.'))
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda",
+        choices=["cuda"],
+        help='device type for vLLM execution, supporting CUDA only currently.')
     args = parser.parse_args()
     main(args)

@@ -186,10 +186,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     &rotary_embedding_dispatch,
     "Apply GPT-NeoX or GPT-J style rotary embedding to query and key");
 
-#ifndef USE_ROCM
   // Quantization ops
-  ops.def("awq_gemm", &awq_gemm_dispatch, "Quantized GEMM for AWQ");
-  ops.def("awq_dequantize", &awq_dequantize_dispatch, "Dequantization for AWQ");
+#ifndef USE_ROCM
+  ops.def("awq_gemm", &awq_gemm, "Quantized GEMM for AWQ");
+  ops.def("awq_dequantize", &awq_dequantize, "Dequantization for AWQ");
 #endif
   ops.def("gptq_gemm", &gptq_gemm_dispatch, "Quantized GEMM for GPTQ");
   ops.def("gptq_shuffle", &gptq_shuffle_dispatch, "Post processing for GPTQ");
