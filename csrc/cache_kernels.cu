@@ -259,7 +259,7 @@ void reshape_and_cache(
     } else if (key.dtype() == at::ScalarType::BFloat16) {
       CALL_RESHAPE_AND_CACHE(__nv_bfloat16, __nv_bfloat16, false);
     }
-  } else if (kv_cache_dtype == "fp8_e5m2") {
+  } else if (kv_cache_dtype == "fp8_e5m2" or "fp8_e4m3") {
     if (key.dtype() == at::ScalarType::Float) {
       CALL_RESHAPE_AND_CACHE(float, uint8_t, true);
     } else if (key.dtype() == at::ScalarType::Half) {
