@@ -1,4 +1,5 @@
 import typer
+from typing import Optional, List
 from vllm.entrypoints.openai.api_server import run_server
 # Assuming `run_server` is a suitable entry function to start your API server
 
@@ -10,10 +11,10 @@ def serve(model_name: str):
     Serve a specified model using the API server.
     """
     # Logic to start the server with the specified model
-    run_server(model_name)
+    
 
 @app.command()
-def query(operation: str, args: list[str] = typer.Argument(None)):
+def query(operation: str, args: Optional[List[str]] = None):
     """
     Query the server with 'chat' or 'complete' operations.
     """

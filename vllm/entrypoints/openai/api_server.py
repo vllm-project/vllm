@@ -231,3 +231,25 @@ if __name__ == "__main__":
                 timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
                 ssl_keyfile=args.ssl_keyfile,
                 ssl_certfile=args.ssl_certfile)
+
+#     def create_engine(args):
+#         engine_args = AsyncEngineArgs.from_cli_args(args)
+#         return AsyncLLMEngine.from_engine_args(engine_args)
+
+#     def start_server(host: str = "127.0.0.1", port: int = 8000, ssl_keyfile: str = None, ssl_certfile: str = None, root_path: str = ""):
+#         global engine
+#         parser = argparse.ArgumentParser()
+#         parser.add_argument("--host", type=str, default=host)
+#         parser.add_argument("--port", type=int, default=port)
+#         parser.add_argument("--ssl-keyfile", type=str, default=ssl_keyfile)
+#         parser.add_argument("--ssl-certfile", type=str, default=ssl_certfile)
+#         parser.add_argument("--root-path", type=str, default=root_path, help="FastAPI root_path when app is behind a path based routing proxy")
+#         parser = AsyncEngineArgs.add_cli_args(parser)
+#         args = parser.parse_args()
+
+#         engine = create_engine(args)
+#         app.root_path = args.root_path
+#         uvicorn.run(app, host=args.host, port=args.port, log_level="debug", timeout_keep_alive=TIMEOUT_KEEP_ALIVE, ssl_keyfile=args.ssl_keyfile, ssl_certfile=args.ssl_certfile)
+
+# if __name__ == "__main__":
+#     start_server()
