@@ -33,11 +33,11 @@ def _get_lora_device(base_layer: nn.Module) -> torch.device:
     """Returns the device for where to place the LoRA tensors."""
     if hasattr(base_layer, "weight"):
         return base_layer.weight.device
-    if hasattr(base_layer, "linear_weights"):
-        if isinstance(base_layer.linear_weights, dict):
-            values = list(base_layer.linear_weights.values())
-            if len(values) and isinstance(values[0], torch.Tensor):
-                return values[0].device
+    if hasattr(base_layer, "linear_weights") and isinstance(
+            base_layer.linear_weights, dict):
+        values = list(base_layer.linear_weights.values())
+        if len(values) and isinstance(values[0], torch.Tensor):
+            return values[0].device
     raise ValueError(f"Unsupported base layer: {base_layer}")
 
 
