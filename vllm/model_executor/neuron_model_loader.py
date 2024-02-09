@@ -10,13 +10,17 @@ from vllm.config import ModelConfig
 from vllm.model_executor.models import ModelRegistry
 
 
-@contextlib.contextmanager
-def _set_default_torch_dtype(dtype: torch.dtype):
-    """Sets the default torch dtype to the given dtype."""
-    old_dtype = torch.get_default_dtype()
-    torch.set_default_dtype(dtype)
-    yield
-    torch.set_default_dtype(old_dtype)
+TORCH_DTYPE_TO_NEURON_AMP = {
+    "auto": "f32",
+    "half": "f16",
+    "float16": "f16",
+    "bfloat16": "bf16",
+    "float": "f32",
+    "float32": "f32",
+    torch.float16: "f16",
+    torch.bfloat16: "bf16",
+    torch.float32: "f32",
+}
 
 
 def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
@@ -32,37 +36,30 @@ def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
 
 def get_model(model_config: ModelConfig, parallel_config,
               scheduler_config) -> nn.Module:
+    from transformers_neuronx.config import NeuronConfig, ContinuousBatchingConfig
+
     model_class = _get_model_architecture(model_config.hf_config)
     linear_method = None
 
-    with _set_default_torch_dtype(model_config.dtype):
-        # Create a model instance.
-        # The weights will be initialized as empty tensors.
-        with torch.device("cuda"):
-            model = model_class(model_config.hf_config, linear_method)
-        if model_config.load_format == "dummy":
-            # NOTE(woosuk): For accurate performance evaluation, we assign
-            # random values to the weights.
-            for param in model.state_dict().values():
-                if torch.is_floating_point(param):
-                    param.data.uniform_(-1e-3, 1e-3)
-        else:
-            # Load the weights from the cached or downloaded files.
-            from transformers_neuronx.config import NeuronConfig, ContinuousBatchingConfig
+    # Create a model instance.
+    model = model_class(model_config.hf_config, linear_method)
 
-            continuous_batching_config = ContinuousBatchingConfig(
-                batch_size_for_shared_caches=scheduler_config.max_num_seqs)
-            neuron_config = NeuronConfig(
-                continuous_batching=continuous_batching_config)
-            model.load_weights(
-                model_config.model,
-                model_config.download_dir,
-                model_config.load_format,
-                model_config.revision,
-                tp_degree=parallel_config.neuron_tp_degree,
-                amp='f32',
-                neuron_config=neuron_config,
-                context_length_estimate=[scheduler_config.max_model_len],
-                n_positions=[scheduler_config.max_model_len],
-                batch_size=scheduler_config.max_num_seqs)
+    continuous_batching_config = ContinuousBatchingConfig(
+        batch_size_for_shared_caches=scheduler_config.max_num_seqs)
+    neuron_config = NeuronConfig(
+        continuous_batching=continuous_batching_config)
+
+    # Load the weights from the cached or downloaded files.
+    model.load_weights(
+        model_config.model,
+        model_config.download_dir,
+        model_config.load_format,
+        model_config.revision,
+        tp_degree=parallel_config.neuron_tp_degree,
+        amp=TORCH_DTYPE_TO_NEURON_AMP[model_config.dtype],
+        neuron_config=neuron_config,
+        context_length_estimate=[scheduler_config.max_model_len],
+        n_positions=[scheduler_config.max_model_len],
+        batch_size=scheduler_config.max_num_seqs)
+
     return model.eval()
