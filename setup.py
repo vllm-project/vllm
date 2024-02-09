@@ -437,6 +437,12 @@ if os.environ.get("VLLM_USE_PRECOMPILED"):
     ext_modules = []
     package_data["vllm"].append("*.so")
 
+entry_points = {
+    "console_scripts": [
+        "vllm = vllm.entrypoints.cli:cli",
+    ],
+}
+
 setuptools.setup(
     name="vllm",
     version=get_vllm_version(),
