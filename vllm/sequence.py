@@ -243,7 +243,7 @@ class SequenceGroup:
         sampling_params: The sampling parameters used to generate the outputs.
         arrival_time: The arrival time of the request.
         lora_request: LoRA request.
-        prefix: The prefix of the prompt of the sequence group.
+        prefix_pos: The end of prefix of the prompt of the sequence group.
     """
 
     def __init__(
@@ -253,6 +253,7 @@ class SequenceGroup:
         sampling_params: SamplingParams,
         arrival_time: float,
         lora_request: Optional[LoRARequest] = None,
+        prefix_pos: Optional[int] = None,
     ) -> None:
         self.request_id = request_id
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
@@ -260,6 +261,7 @@ class SequenceGroup:
         self.arrival_time = arrival_time
         self.last_token_time = arrival_time
         self.lora_request = lora_request
+        self.prefix_pos: Optional[int] = prefix_pos
         self.prompt_logprobs: Optional[PromptLogprobs] = None
 
     @property
@@ -347,6 +349,9 @@ class SequenceGroup:
     def is_finished(self) -> bool:
         return all(seq.is_finished() for seq in self.get_seqs())
 
+    def get_prefix_len(self) -> int:
+        return self.prefix_pos if self.prefix_pos is not None else 0
+
     def __repr__(self) -> str:
         return (f"SequenceGroup(request_id={self.request_id}, "
                 f"sampling_params={self.sampling_params}, "
@@ -364,6 +369,7 @@ class SequenceGroupMetadata:
         block_tables: The block tables. (Seq id -> list of physical block
             numbers)
         lora_request: LoRA request.
+        prefix_pos: The end of prefix of the prompt of the sequence group.
     """
 
     def __init__(
@@ -374,6 +380,7 @@ class SequenceGroupMetadata:
         sampling_params: SamplingParams,
         block_tables: Dict[int, List[int]],
         lora_request: Optional[LoRARequest] = None,
+        prefix_pos: Optional[int] = None,
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
@@ -381,6 +388,7 @@ class SequenceGroupMetadata:
         self.sampling_params = sampling_params
         self.block_tables = block_tables
         self.lora_request = lora_request
+        self.prefix_pos = prefix_pos
 
     @property
     def lora_int_id(self) -> int:

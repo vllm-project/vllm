@@ -24,13 +24,24 @@ def lru_eviction(table: Dict[int, PhysicalTokenBlock]) -> PhysicalTokenBlock:
             lowest_timestamp = block.last_accessed
 
     # Find all blocks with the lowest timestamp
-    eviction_candidates: List[PhysicalTokenBlock] = []
+    least_recent: List[PhysicalTokenBlock] = []
     for block in all_blocks:
         if block.ref_count == 0 and block.last_accessed == lowest_timestamp:
+            least_recent.append(block)
+
+    # Find highest prefix count per block
+    highest_prefix_count = 0
+    for block in least_recent:
+        if block.ref_count == 0 and block.prefix_len > highest_prefix_count:
+            highest_prefix_count = block.prefix_len
+
+    # Find all blocks with the lowest timestamp
+    eviction_candidates: List[PhysicalTokenBlock] = []
+    for block in least_recent:
+        if block.ref_count == 0 and block.prefix_len == highest_prefix_count:
             eviction_candidates.append(block)
 
     # Arbitrarily evict the first candidate
-    # TODO: Evict based on the number of prefix tokens in the block
     assert (len(eviction_candidates) > 0)
     evicted_block = eviction_candidates[0]
     del table[evicted_block.block_hash]
@@ -67,7 +78,8 @@ class BlockAllocator:
             raise ValueError(
                 f"Unknown cache eviction policy: {self.eviction_policy}")
 
-    def allocate_block(self, block_hash: int) -> PhysicalTokenBlock:
+    def allocate_block(self, block_hash: int,
+                       prefix_len: int) -> PhysicalTokenBlock:
         if self.current_num_blocks == self.num_blocks:
             block = self.evict()
             block.block_hash = block_hash
@@ -75,13 +87,15 @@ class BlockAllocator:
         block = PhysicalTokenBlock(device=self.device,
                                    block_number=self.current_num_blocks,
                                    block_size=self.block_size,
-                                   block_hash=block_hash)
+                                   block_hash=block_hash,
+                                   prefix_len=prefix_len)
         self.current_num_blocks += 1
         return block
 
-    def allocate(self, block_hash: int) -> PhysicalTokenBlock:
+    def allocate(self, block_hash: int, prefix_len: int) -> PhysicalTokenBlock:
         if block_hash not in self.table:
-            self.table[block_hash] = self.allocate_block(block_hash)
+            self.table[block_hash] = self.allocate_block(
+                block_hash, prefix_len)
         block = self.table[block_hash]
         block.ref_count += 1
         # print(f"REFCOUNT ON ALLOCTION: {block}")
@@ -190,7 +204,8 @@ class BlockSpaceManager:
                     and logical_idx >= self.block_sliding_window):
                 block = block_table[logical_idx % self.block_sliding_window]
             else:
-                block = self.gpu_allocator.allocate(seq.hash(logical_idx))
+                block = self.gpu_allocator.allocate(seq.hash(logical_idx),
+                                                    seq_group.get_prefix_len())
                 if logical_idx * self.block_size + self.block_size > len(
                         seq.data.get_token_ids()):
                     self.partial_block_table[seq.seq_id] = block
@@ -211,6 +226,7 @@ class BlockSpaceManager:
 
     def append_slot(self,
                     seq: Sequence,
+                    prefix_len: int,
                     now: Optional[float] = None) -> Optional[Tuple[int, int]]:
         """Allocate a physical slot for a new token."""
         logical_blocks = seq.logical_token_blocks
@@ -228,7 +244,8 @@ class BlockSpaceManager:
                 # Allocate a new physical block.
                 assert (seq.seq_id not in self.partial_block_table)
                 self.partial_block_table[
-                    seq.seq_id] = self.gpu_allocator.allocate(seq.seq_id)
+                    seq.seq_id] = self.gpu_allocator.allocate(
+                        seq.seq_id, prefix_len)
                 block_table.append(self.partial_block_table[seq.seq_id])
                 return None
 
@@ -246,7 +263,7 @@ class BlockSpaceManager:
             # The last block is shared with other sequences.
             # Copy on Write: Allocate a new block and copy the tokens.
             new_block = self.gpu_allocator.allocate(
-                seq.hash(len(logical_blocks) - 1))
+                seq.hash(len(logical_blocks) - 1), prefix_len)
             assert (new_block.ref_count == 1)
             block_table[-1] = new_block
             self.gpu_allocator.free(last_block, now)
@@ -304,7 +321,8 @@ class BlockSpaceManager:
                     gpu_block.ref_count += 1
                 else:
                     gpu_block = self.gpu_allocator.allocate(
-                        seq.hash(len(seq.logical_blocks) - 1))
+                        seq.hash(len(seq.logical_blocks) - 1),
+                        seq_group.get_prefix_len())
                     mapping[cpu_block] = gpu_block
                 new_block_table.append(gpu_block)
                 # Free the CPU block swapped in to GPU.
@@ -342,7 +360,8 @@ class BlockSpaceManager:
                     cpu_block.ref_count += 1
                 else:
                     cpu_block = self.cpu_allocator.allocate(
-                        seq.hash(len(seq.logical_blocks) - 1))
+                        seq.hash(len(seq.logical_blocks) - 1),
+                        seq_group.get_prefix_len())
                     mapping[gpu_block] = cpu_block
                 new_block_table.append(cpu_block)
                 # Free the GPU block swapped out to CPU.

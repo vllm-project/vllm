@@ -56,6 +56,7 @@ class PhysicalTokenBlock:
         block_number: int,
         block_size: int,
         block_hash: int,
+        prefix_len: int,
     ) -> None:
         self.device = device
         self.block_number = block_number
@@ -67,6 +68,8 @@ class PhysicalTokenBlock:
 
         #TODO: is this a good default?
         self.last_accessed = 0
+
+        self.prefix_len = prefix_len
 
     def __repr__(self) -> str:
         return (f'PhysicalTokenBlock(device={self.device}, '

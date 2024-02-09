@@ -408,7 +408,8 @@ class Scheduler:
         now: Optional[float] = None,
     ) -> None:
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-            ret = self.block_manager.append_slot(seq, now)
+            ret = self.block_manager.append_slot(seq, now,
+                                                 seq_group.get_prefix_len())
             if ret is not None:
                 src_block, dst_block = ret
                 if src_block in blocks_to_copy:
