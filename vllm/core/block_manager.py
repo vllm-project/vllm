@@ -101,16 +101,12 @@ class BlockAllocator:
         # print(f"REFCOUNT ON ALLOCTION: {block}")
         return block
 
-    def free(self,
-             block: PhysicalTokenBlock,
-             now: Optional[int] = None) -> None:
+    def free(self, block: PhysicalTokenBlock) -> None:
         if block.ref_count == 0:
             raise ValueError(f"Double free! {block} is already freed.")
         block.ref_count -= 1
-        if now is None:
-            now = monotonic()
-        block.last_accessed = now
 
+    # TODO: Should this account for the number of blocks with a ref count of 0?
     def get_num_free_blocks(self) -> int:
         return self.num_blocks - self.current_num_blocks
 
@@ -224,10 +220,8 @@ class BlockSpaceManager:
         num_seqs = seq_group.num_seqs(status=SequenceStatus.RUNNING)
         return num_seqs <= num_free_gpu_blocks
 
-    def append_slot(self,
-                    seq: Sequence,
-                    prefix_len: int,
-                    now: Optional[float] = None) -> Optional[Tuple[int, int]]:
+    def append_slot(self, seq: Sequence,
+                    prefix_len: int) -> Optional[Tuple[int, int]]:
         """Allocate a physical slot for a new token."""
         logical_blocks = seq.logical_token_blocks
         block_table = self.block_tables[seq.seq_id]
@@ -264,9 +258,8 @@ class BlockSpaceManager:
             # Copy on Write: Allocate a new block and copy the tokens.
             new_block = self.gpu_allocator.allocate(
                 seq.hash(len(logical_blocks) - 1), prefix_len)
-            assert (new_block.ref_count == 1)
             block_table[-1] = new_block
-            self.gpu_allocator.free(last_block, now)
+            self.gpu_allocator.free(last_block)
             return last_block.block_number, new_block.block_number
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
@@ -298,9 +291,7 @@ class BlockSpaceManager:
         num_required_blocks = len(blocks) + num_swapped_seqs
         return num_free_blocks - num_required_blocks >= self.watermark_blocks
 
-    def swap_in(self,
-                seq_group: SequenceGroup,
-                now: Optional[float] = None) -> Dict[int, int]:
+    def swap_in(self, seq_group: SequenceGroup) -> Dict[int, int]:
         # CPU block -> GPU block.
         if seq_group.prefix is not None:
             # make sure to swap in the prefix first
@@ -326,7 +317,7 @@ class BlockSpaceManager:
                     mapping[cpu_block] = gpu_block
                 new_block_table.append(gpu_block)
                 # Free the CPU block swapped in to GPU.
-                self.cpu_allocator.free(cpu_block, now)
+                self.cpu_allocator.free(cpu_block)
             self.block_tables[seq.seq_id] = new_block_table
 
         block_number_mapping = {
@@ -339,9 +330,7 @@ class BlockSpaceManager:
         blocks = self._get_physical_blocks(seq_group)
         return len(blocks) <= self.cpu_allocator.get_num_free_blocks()
 
-    def swap_out(self,
-                 seq_group: SequenceGroup,
-                 now: Optional[float] = None) -> Dict[int, int]:
+    def swap_out(self, seq_group: SequenceGroup) -> Dict[int, int]:
         # GPU block -> CPU block.
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
@@ -352,7 +341,7 @@ class BlockSpaceManager:
                 if (seq_group.prefix is not None
                         and gpu_block in seq_group.prefix.block_table):
                     # NOTE: We do not swap out the prefix blocks for now.
-                    self.gpu_allocator.free(gpu_block, now)
+                    self.gpu_allocator.free(gpu_block)
                     continue
 
                 if gpu_block in mapping:
@@ -365,7 +354,7 @@ class BlockSpaceManager:
                     mapping[gpu_block] = cpu_block
                 new_block_table.append(cpu_block)
                 # Free the GPU block swapped out to CPU.
-                self.gpu_allocator.free(gpu_block, now)
+                self.gpu_allocator.free(gpu_block)
             self.block_tables[seq.seq_id] = new_block_table
 
         block_number_mapping = {
@@ -374,21 +363,19 @@ class BlockSpaceManager:
         }
         return block_number_mapping
 
-    def _free_block_table(self,
-                          block_table: BlockTable,
-                          now: Optional[float] = None) -> None:
+    def _free_block_table(self, block_table: BlockTable) -> None:
         for block in set(block_table):
             if block.device == Device.GPU:
-                self.gpu_allocator.free(block, now)
+                self.gpu_allocator.free(block)
             else:
-                self.cpu_allocator.free(block, now)
+                self.cpu_allocator.free(block)
 
-    def free(self, seq: Sequence, now: Optional[float] = None) -> None:
+    def free(self, seq: Sequence) -> None:
         if seq.seq_id not in self.block_tables:
             # Already freed or haven't been scheduled yet.
             return
         block_table = self.block_tables[seq.seq_id]
-        self._free_block_table(block_table, now)
+        self._free_block_table(block_table)
         del self.block_tables[seq.seq_id]
 
     def reset(self) -> None:
@@ -405,3 +392,9 @@ class BlockSpaceManager:
 
     def get_num_free_cpu_blocks(self) -> int:
         return self.cpu_allocator.get_num_free_blocks()
+
+    def access_all_blocks_in_seq(self, seq: Sequence,
+                                 access_time: float) -> None:
+        block_table = self.block_tables[seq.seq_id]
+        for block in block_table:
+            block.last_accessed = access_time
