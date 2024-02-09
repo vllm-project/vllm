@@ -104,10 +104,9 @@ class LLM:
             enforce_eager=enforce_eager,
             max_context_len_to_capture=max_context_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
-            usage_context=UsageContext.LLM,
             **kwargs,
         )
-        self.llm_engine = LLMEngine.from_engine_args(engine_args)
+        self.llm_engine = LLMEngine.from_engine_args(engine_args,usage_context=UsageContext.LLM)
         self.request_counter = Counter()
 
     def get_tokenizer(

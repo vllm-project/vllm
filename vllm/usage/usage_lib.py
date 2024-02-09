@@ -8,7 +8,8 @@ import pkg_resources
 from cloud_detect import provider
 from typing import Optional
 from enum import Enum
-_USAGE_STATS_FILE = 'usage_stats.json'
+from pathlib import Path
+_USAGE_STATS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'usage_stats.json')
 _USAGE_STATS_ENABLED = None
 _USAGE_STATS_SEVER = os.environ.get('VLLM_USAGE_STATS_SERVER', 'https://stats.vllm.ai')
 

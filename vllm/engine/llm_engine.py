@@ -369,7 +369,7 @@ class LLMEngine:
         self._run_workers("warm_up_model")
 
     @classmethod
-    def from_engine_args(cls, engine_args: EngineArgs) -> "LLMEngine":
+    def from_engine_args(cls, engine_args: EngineArgs, usage_context: UsageContext=UsageContext.UNKNOWN_CONTEXT) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.
         engine_configs = engine_args.create_engine_configs()
@@ -380,7 +380,8 @@ class LLMEngine:
         engine = cls(*engine_configs,
                      placement_group,
                      log_stats=not engine_args.disable_log_stats,
-                     usage_context = engine_args.usage_context)
+                     usage_context = usage_context
+                     )
         return engine
 
     def encode_request(
