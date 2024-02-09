@@ -78,7 +78,7 @@ class ModelRunner:
         self.forward_set = False
         workspace_buffer = torch.empty(16 * 1024 * 1024,
                                        dtype=torch.uint8,
-                                       device="cuda:0")
+                                       device=self.device)
         self.prefill_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
             workspace_buffer, "NHD")
         self.decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
@@ -566,9 +566,9 @@ class ModelRunner:
             batch_size = input_tokens.shape[0]
 
             kvi = input_metadata.slot_mapping.view(-1).type(
-                torch.int32).to("cuda:0")
+                torch.int32).to(self.device)
 
-            kvd = input_metadata.block_tables.to("cuda:0")
+            kvd = input_metadata.block_tables.to(self.device)
 
             kvi = kvi[kvi != -1]
             kvd = kvd[kvd != 0]
@@ -585,9 +585,9 @@ class ModelRunner:
 
             paged_kv_indptr = torch.zeros((batch_size + 1, ),
                                           dtype=torch.int32,
-                                          device="cuda:0")
+                                          device=self.device)
 
-            paged_kv_indptr[1:] = torch.cumsum(block_sizes_per_seq, dim=0
+            paged_kv_indptr[1:] = torch.cumsum(block_sizes_per_seq, dim=0)
             
             paged_kv_last_page_len = kvi % 16 + 1
             
