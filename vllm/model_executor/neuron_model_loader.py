@@ -9,7 +9,6 @@ from transformers import PretrainedConfig
 from vllm.config import ModelConfig
 from vllm.model_executor.models import ModelRegistry
 
-
 TORCH_DTYPE_TO_NEURON_AMP = {
     "auto": "f32",
     "half": "f16",

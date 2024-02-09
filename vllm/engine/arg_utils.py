@@ -264,12 +264,11 @@ class EngineArgs:
             help=('Maximum number of LoRAs to store in CPU memory. '
                   'Must be >= than max_num_seqs. '
                   'Defaults to max_num_seqs.'))
-        parser.add_argument(
-            "--device",
-            type=str,
-            default=EngineArgs.device,
-            choices=["auto", "cuda", "neuron"],
-            help=('Device type for vLLM execution.'))
+        parser.add_argument("--device",
+                            type=str,
+                            default=EngineArgs.device,
+                            choices=["auto", "cuda", "neuron"],
+                            help=('Device type for vLLM execution.'))
         return parser
 
     @classmethod
