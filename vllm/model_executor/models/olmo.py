@@ -53,10 +53,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
@@ -344,3 +341,25 @@ class OLMoForCausalLM(nn.Module):
             self.lm_head_weight, hidden_states, sampling_metadata
         )
         return next_tokens
+
+    def load_weights(
+        self,
+        model_name_or_path: str,
+        cache_dir: Optional[str] = None,
+        load_format: str = "auto",
+        revision: Optional[str] = None,
+    ):
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        for name, loaded_weight in hf_model_weights_iterator(
+            model_name_or_path, cache_dir, load_format, revision
+        ):
+            # attention
+            if ".att" in name:
+                name = name.replace(".att", ".attn.att")
+            # mlp
+            if ".ff" in name:
+                name = name.replace(".ff", ".mlp.ff")
+            # there is no bias in olmo
+            param = params_dict[name]
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader(param, loaded_weight)
