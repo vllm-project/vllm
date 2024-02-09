@@ -82,7 +82,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   cache_ops.def(
     "convert_fp8",
     &convert_fp8,
-    "Convert the key and value cache to fp8_e5m2 data type");
+    "Convert the key and value cache to fp8 data type");
 
   // Cuda utils
   pybind11::module cuda_utils = m.def_submodule("cuda_utils", "vLLM cuda utils");
