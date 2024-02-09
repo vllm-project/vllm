@@ -135,8 +135,8 @@ class EngineArgs:
         parser.add_argument(
             '--kv-cache-dtype',
             type=str,
-            choices=['auto', 'fp8_e5m2'],
-            default=EngineArgs.kv_cache_dtype,
+            choices=['auto', 'fp8_e5m2', 'fp8_e4m3'],
+            default='auto',
             help='Data type for kv cache storage. If "auto", will use model '
             'data type. Note FP8 is not supported when cuda version is '
             'lower than 11.8.')
