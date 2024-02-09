@@ -212,7 +212,7 @@ def _generate_random_fp8_e5m2(
     from vllm._C import cache_ops
     tensor_tmp = torch.empty_like(tensor, dtype=torch.float16)
     tensor_tmp.uniform_(low, high)
-    cache_ops.convert_fp8_e5m2(tensor_tmp, tensor)
+    cache_ops.convert_fp8(tensor_tmp, tensor)
     del tensor_tmp
 
 

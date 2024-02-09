@@ -80,8 +80,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     &gather_cached_kv,
     "Gather key and value from the cache into contiguous QKV tensors");
   cache_ops.def(
-    "convert_fp8_e5m2",
-    &convert_fp8_e5m2,
+    "convert_fp8",
+    &convert_fp8,
     "Convert the key and value cache to fp8_e5m2 data type");
 
   // Cuda utils

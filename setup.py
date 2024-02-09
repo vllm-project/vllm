@@ -19,7 +19,7 @@ MAIN_CUDA_VERSION = "12.1"
 
 # Supported NVIDIA GPU architectures.
 NVIDIA_SUPPORTED_ARCHS = {"7.0", "7.5", "8.0", "8.6", "8.9", "9.0"}
-ROCM_SUPPORTED_ARCHS = {"gfx90a", "gfx908", "gfx906", "gfx1030", "gfx1100"}
+ROCM_SUPPORTED_ARCHS = {"gfx90a", "gfx908", "gfx906", "gfx942", "gfx1030", "gfx1100"}
 # SUPPORTED_ARCHS = NVIDIA_SUPPORTED_ARCHS.union(ROCM_SUPPORTED_ARCHS)
 
 
@@ -296,6 +296,7 @@ elif _is_hip():
                 f"Only the following arch is supported: {ROCM_SUPPORTED_ARCHS}"
                 f"amdgpu_arch_found: {arch}")
         NVCC_FLAGS += [f"--offload-arch={arch}"]
+    NVCC_FLAGS += ["-DENABLE_FP8_E4M3"]
 
 elif _is_neuron():
     neuronxcc_version = get_neuronxcc_version()
