@@ -231,7 +231,7 @@ def test_sampler_logits_processors(seed: int, device: str):
     # where i is the length of the input sequence.
     # We therefore expect the output token sequence to be [0, 1, 2, ...]
     # Since this processor is stateless, the seq_id is not used
-    def pick_ith(token_ids, logits, seq_id):
+    def pick_ith(token_ids, logits):
         logits[len(token_ids)] = float("inf")
         return logits
 

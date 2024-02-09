@@ -2,7 +2,6 @@ import asyncio
 import time
 from fastapi import Request
 from typing import AsyncGenerator, AsyncIterator, Callable, List, Optional, Dict, Tuple
-from outlines.serve.vllm import JSONLogitsProcessor, RegexLogitsProcessor
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -17,7 +16,7 @@ from .protocol import (
 )
 from vllm.outputs import RequestOutput
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
-from vllm.entrypoints.llm import LLM
+from vllm.vllm.model_executor.guided_decoding import GuidedDecodingMode, get_guided_decoding_logits_processor
 
 logger = init_logger(__name__)
 
@@ -249,27 +248,6 @@ def merge_async_iterators(*iterators):
     return consumer()
 
 
-def get_struct_gen_logits_processor(extra_body, tokenizer):
-    def dummy_llm():
-        return LLM(model="dummy", tokenizer=tokenizer)
-
-    if "json" in extra_body:
-        from pydantic import BaseModel
-        assert type(extra_body["json"]) in (str, dict, BaseModel), "JSON schema error"
-        return [JSONLogitsProcessor(extra_body["json"], dummy_llm())]
-    elif "regex" in extra_body:
-        assert type(extra_body["regex"]) is str, "Regex must be string"
-        return [RegexLogitsProcessor(extra_body["regex"], dummy_llm())]
-    elif "grammar" in extra_body:
-        # TODO
-        pass
-    elif "choice" in extra_body:
-        # TODO
-        pass
-    else:
-        return None
-
-
 class OpenAIServingCompletion(OpenAIServing):
 
     def __init__(self, engine: AsyncLLMEngine, served_model: str):
@@ -307,11 +285,7 @@ class OpenAIServingCompletion(OpenAIServing):
         generators = []
         try:
             sampling_params = request.to_sampling_params()
-            if request.extra_body: # check for structured generation
-                sampling_params.logits_processors = \
-                    get_struct_gen_logits_processor(
-                        request.extra_body,
-                        self.engine.engine.tokenizer.tokenizer)
+            sampling_params.logits_processors = self._get_guided_decoding_logits_processor(request)
             prompt_is_tokens, prompts = parse_prompt_format(request.prompt)
 
             for i, prompt in enumerate(prompts):
@@ -375,3 +349,16 @@ class OpenAIServingCompletion(OpenAIServing):
             return fake_stream_generator()
 
         return response
+
+    def _get_guided_decoding_logits_processor(self, request: CompletionRequest):
+        # should this go inside CompletionRequest.to_sampling_params() instead?
+        if request.guided_json:
+            return get_guided_decoding_logits_processor(
+                    request.guided_json, GuidedDecodingMode("json"),
+                    self.engine.engine.tokenizer.tokenizer)
+        elif request.guided_regex:
+            return get_guided_decoding_logits_processor(
+                    request.guided_regex, GuidedDecodingMode("regex"),
+                    self.engine.engine.tokenizer.tokenizer)
+        else:
+            return None

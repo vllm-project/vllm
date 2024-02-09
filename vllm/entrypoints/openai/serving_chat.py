@@ -12,7 +12,7 @@ from vllm.entrypoints.openai.protocol import (
     UsageInfo)
 from vllm.outputs import RequestOutput
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
-from .serving_completion import get_struct_gen_logits_processor
+from vllm.vllm.model_executor.guided_decoding import GuidedDecodingMode, get_guided_decoding_logits_processor
 
 logger = init_logger(__name__)
 
@@ -65,11 +65,7 @@ class OpenAIServingChat(OpenAIServing):
             token_ids = self._validate_prompt_and_tokenize(request,
                                                            prompt=prompt)
             sampling_params = request.to_sampling_params()
-            if request.extra_body: # check for structured generation
-                sampling_params.logits_processors = \
-                    get_struct_gen_logits_processor(
-                        request.extra_body,
-                        self.engine.engine.tokenizer.tokenizer)
+            sampling_params.logits_processors = self._get_struct_gen_logits_processor(request)
         except ValueError as e:
             return self.create_error_response(str(e))
 
@@ -269,3 +265,15 @@ class OpenAIServingChat(OpenAIServing):
         else:
             logger.warning(
                 "No chat template provided. Chat API will not work.")
+
+    def _get_guided_decoding_logits_processor(self, request: ChatCompletionRequest):
+        if request.guided_json:
+            return get_guided_decoding_logits_processor(
+                    request.guided_json, GuidedDecodingMode("json"),
+                    self.engine.engine.tokenizer.tokenizer)
+        elif request.guided_regex:
+            return get_guided_decoding_logits_processor(
+                    request.guided_regex, GuidedDecodingMode("regex"),
+                    self.engine.engine.tokenizer.tokenizer)
+        else:
+            return None

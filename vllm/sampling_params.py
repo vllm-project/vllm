@@ -14,11 +14,13 @@ class SamplingType(IntEnum):
     BEAM = 2
 
 
-LogitsProcessor = Callable[[List[int], torch.Tensor, int], torch.Tensor]
+LogitsProcessor = Union[Callable[[List[int], torch.Tensor], torch.Tensor],
+                        Callable[[int, List[int], torch.Tensor], torch.Tensor]]
 """LogitsProcessor is a function that takes a list of previously generated
-tokens, a tensor of the logits for the next token and an integer sequence id, 
-and returns a modified tensor of logits to sample from. The sequence id is used
-to distinguish different generations, in case the processor is stateful."""
+tokens and a tensor of the logits for the next token, and returns a modified
+tensor of logits to sample from. Some processors may also take in an integer
+sequence id, which is used to distinguish different generations, in case the
+processor is stateful (such as for guided decoding)."""
 
 
 class SamplingParams:

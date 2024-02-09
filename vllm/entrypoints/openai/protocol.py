@@ -66,7 +66,6 @@ class ChatCompletionRequest(BaseModel):
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
-    extra_body: dict = None # for structured generation
     # Additional parameters supported by vLLM
     best_of: Optional[int] = None
     top_k: Optional[int] = -1
@@ -81,6 +80,8 @@ class ChatCompletionRequest(BaseModel):
     min_p: Optional[float] = 0.0
     include_stop_str_in_output: Optional[bool] = False
     length_penalty: Optional[float] = 1.0
+    guided_json: Optional[dict] = None
+    guided_regex: Optional[str] = None
 
     def to_sampling_params(self) -> SamplingParams:
         return SamplingParams(
@@ -123,7 +124,6 @@ class CompletionRequest(BaseModel):
     best_of: Optional[int] = None
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
-    extra_body: dict = None # for structured generation
     # Additional parameters supported by vLLM
     top_k: Optional[int] = -1
     ignore_eos: Optional[bool] = False
@@ -135,6 +135,8 @@ class CompletionRequest(BaseModel):
     min_p: Optional[float] = 0.0
     include_stop_str_in_output: Optional[bool] = False
     length_penalty: Optional[float] = 1.0
+    guided_json: Optional[Union[str, dict, BaseModel]] = None
+    guided_regex: Optional[str] = None
 
     def to_sampling_params(self):
         echo_without_generation = self.echo and self.max_tokens == 0
