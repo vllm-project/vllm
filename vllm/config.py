@@ -340,18 +340,8 @@ class CacheConfig:
                 "Using fp8 data type to store kv cache. It reduces "
                 "the GPU memory footprint and boosts the performance. "
                 "But it may cause slight accuracy drop. "
-                "Currently we only support fp8 without scaling factors and "
-                "make e5m2 as a default format.")
-        elif self.cache_dtype == "fp8_e4m3":
-            device_name = torch.cuda.get_device_name()
-            if not "AMD" in device_name:
-                raise NotImplementedError(
-                        "FP8_E4M3 KV Cache on NVIDIA GPU has not been supported yet.")
-            logger.info(
-                "Using fp8_e4m3 data type to store kv cache. It reduces "
-                "the GPU memory footprint and boosts the performance. "
-                "But it may cause slight accuracy drop. "
-                "Currently we only support fp8 without scaling factors") 
+                "FP8_E5M2 is only supported on cuda version greater than 11.8."
+                "On AMD GPUs, only a more standard FP8_E4M3 is supported for inference.")
         else:
             raise ValueError(f"Unknown kv cache dtype: {self.cache_dtype}")
 
