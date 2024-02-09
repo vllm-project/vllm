@@ -6,7 +6,7 @@
 #include "dispatch_utils.h"
 #if defined(ENABLE_FP8_E5M2)
 #include "quantization/fp8_e5m2_kvcache/quant_utils.cuh"
-#else if defined(ENABLE_FP8_E4M3)
+#elif defined(ENABLE_FP8_E4M3)
 #include "quantization/fp8/amd_detail/quant_utils.cuh"
 #endif
 
@@ -216,8 +216,8 @@ __global__ void reshape_and_cache_kernel(
 
 } // namespace vllm
 
-#define CALL_RESHAPE_AND_CACHE(KV_T, CACHE_T, IS_FP8_E5M2_KV_CACHE)                                \
-  vllm::reshape_and_cache_kernel<KV_T, CACHE_T, IS_FP8_E5M2_KV_CACHE><<<grid, block, 0, stream>>>( \
+#define CALL_RESHAPE_AND_CACHE(KV_T, CACHE_T, IS_FP8_KV_CACHE)                                \
+  vllm::reshape_and_cache_kernel<KV_T, CACHE_T, IS_FP8_KV_CACHE><<<grid, block, 0, stream>>>( \
     reinterpret_cast<KV_T*>(key.data_ptr()),                                                       \
     reinterpret_cast<KV_T*>(value.data_ptr()),                                                     \
     reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),                                              \
