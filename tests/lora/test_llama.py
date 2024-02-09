@@ -1,11 +1,24 @@
 import pytest
 import ray
+from dataclasses import dataclass
+from typing import List, Optional
 
 import vllm
 from vllm.lora.request import LoRARequest
 from .conftest import cleanup
 
-MODEL_PATH = "meta-llama/Llama-2-7b-hf"
+@dataclass
+class ModelWithQuantization:
+    model_path: str
+    quantization: Optional[str]
+
+MODELS: List[ModelWithQuantization] = [
+    ModelWithQuantization(model_path="meta-llama/Llama-2-7b-hf", quantization=None),
+    ModelWithQuantization(model_path="TheBloke/Llama-2-7B-Chat-AWQ", quantization="AWQ"),
+    ModelWithQuantization(model_path="TheBloke/Llama-2-7B-Chat-GPTQ", quantization="GPTQ"),
+    ModelWithQuantization(model_path="squeeze-ai-lab/sq-llama-2-7b-w4-s0", quantization="SQUEEZELLM"),
+]
+
 
 
 def do_sample(llm, lora_path: str, lora_id: int):
@@ -35,17 +48,19 @@ def do_sample(llm, lora_path: str, lora_id: int):
     return generated_texts
 
 
+@pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tp_size", [1])
-def test_llama_lora(sql_lora_files, tp_size):
+def test_llama_lora(sql_lora_files, model, tp_size):
     # Cannot use as it will initialize torch.cuda too early...
     # if torch.cuda.device_count() < tp_size:
     #     pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
 
-    llm = vllm.LLM(MODEL_PATH,
+    llm = vllm.LLM(model=model.model_path,
                    enable_lora=True,
                    max_num_seqs=16,
                    max_loras=4,
-                   tensor_parallel_size=tp_size)
+                   tensor_parallel_size=tp_size,
+                   quantization=model.quantization)
 
     expected_no_lora_output = [
         "\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_75 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_76 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_77 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_78 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user]",
@@ -79,27 +94,30 @@ def test_llama_lora(sql_lora_files, tp_size):
     print("removing lora")
 
 
+@pytest.mark.parametrize("model", MODELS)
 @pytest.mark.skip("Requires multiple GPUs")
-def test_llama_tensor_parallel_equality(sql_lora_files):
+def test_llama_tensor_parallel_equality(sql_lora_files, model):
     # Cannot use as it will initialize torch.cuda too early...
     # if torch.cuda.device_count() < 4:
     #     pytest.skip(f"Not enough GPUs for tensor parallelism {4}")
 
-    llm_tp1 = vllm.LLM(MODEL_PATH,
+    llm_tp1 = vllm.LLM(model=model.model_path,
                        enable_lora=True,
                        max_num_seqs=16,
                        max_loras=4,
-                       tensor_parallel_size=1)
+                       tensor_parallel_size=1,
+                       quantization=model.quantization)
     output_tp1 = do_sample(llm_tp1, sql_lora_files, lora_id=1)
 
     del llm_tp1
     cleanup()
 
-    llm_tp2 = vllm.LLM(MODEL_PATH,
+    llm_tp2 = vllm.LLM(model=model.model_path,
                        enable_lora=True,
                        max_num_seqs=16,
                        max_loras=4,
-                       tensor_parallel_size=2)
+                       tensor_parallel_size=2,
+                       quantization=model.quantization)
     output_tp2 = do_sample(llm_tp2, sql_lora_files, lora_id=1)
 
     del llm_tp2
@@ -107,11 +125,12 @@ def test_llama_tensor_parallel_equality(sql_lora_files):
 
     assert output_tp1 == output_tp2
 
-    llm_tp4 = vllm.LLM(MODEL_PATH,
+    llm_tp4 = vllm.LLM(model=model.model_path,
                        enable_lora=True,
                        max_num_seqs=16,
                        max_loras=4,
-                       tensor_parallel_size=4)
+                       tensor_parallel_size=4,
+                       quantization=model.quantization)
     output_tp4 = do_sample(llm_tp4, sql_lora_files, lora_id=1)
 
     del llm_tp4
@@ -120,18 +139,19 @@ def test_llama_tensor_parallel_equality(sql_lora_files):
     assert output_tp1 == output_tp4
 
 
-def test_llama_lora_warmup(sql_lora_files):
+@pytest.mark.parametrize("model", MODELS)
+def test_llama_lora_warmup(sql_lora_files, model):
     """Test that the LLM initialization works with a warmup LORA path and is more conservative"""
 
     @ray.remote(num_gpus=1)
     def get_num_gpu_blocks_lora():
-        llm = vllm.LLM(MODEL_PATH, enable_lora=True, max_num_seqs=16)
+        llm = vllm.LLM(model=model.model_path, enable_lora=True, max_num_seqs=16, quantization=model.quantization)
         num_gpu_blocks_lora_warmup = llm.llm_engine.cache_config.num_gpu_blocks
         return num_gpu_blocks_lora_warmup
 
     @ray.remote(num_gpus=1)
     def get_num_gpu_blocks_no_lora():
-        llm = vllm.LLM(MODEL_PATH, max_num_seqs=16)
+        llm = vllm.LLM(model=model.model_path, max_num_seqs=16, quantization=model.quantization)
         num_gpu_blocks_no_lora_warmup = llm.llm_engine.cache_config.num_gpu_blocks
         return num_gpu_blocks_no_lora_warmup
 
