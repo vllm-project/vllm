@@ -153,7 +153,7 @@ void copy_blocks(
 
 namespace vllm {
 
-template<typename scalar_t, typename cache_t, bool is_fp8_e5m2_kv_cache>
+template<typename scalar_t, typename cache_t, bool is_fp8_kv_cache>
 __global__ void reshape_and_cache_kernel(
   const scalar_t* __restrict__ key,           // [num_tokens, num_heads, head_size]
   const scalar_t* __restrict__ value,         // [num_tokens, num_heads, head_size]
@@ -197,7 +197,7 @@ __global__ void reshape_and_cache_kernel(
                                   + block_offset;
     scalar_t tgt_key = key[src_key_idx];
     scalar_t tgt_value = value[src_value_idx];
-    if constexpr (is_fp8_e5m2_kv_cache) {
+    if constexpr (is_fp8_kv_cache) {
 #if defined(ENABLE_FP8_E5M2)
       key_cache[tgt_key_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_key);
       value_cache[tgt_value_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_value);
