@@ -347,3 +347,6 @@ class OpenAIServingCompletion(OpenAIServing):
             return fake_stream_generator()
 
         return response
+
+    async def create_embeddings(self, input: str, model: str):
+        raise NotImplementedError

@@ -17,6 +17,11 @@ class ErrorResponse(BaseModel):
     code: int
 
 
+class EmbeddingRequest(BaseModel):
+    input: str
+    model: str
+
+
 class ModelPermission(BaseModel):
     id: str = Field(default_factory=lambda: f"modelperm-{random_uuid()}")
     object: str = "model_permission"
