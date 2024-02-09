@@ -3,8 +3,10 @@ from typing import Union
 from pydantic import BaseModel
 try:
     from outlines.serve.vllm import JSONLogitsProcessor, RegexLogitsProcessor
-except ImportError:
-    raise ValueError("Please install 'outlines' (pip install outlines) to use guided generation.")
+except ImportError as e:
+    raise ValueError(
+        "Please install 'outlines' (pip install outlines) to use guided generation."
+    ) from e
 
 from vllm.entrypoints.llm import LLM
 
