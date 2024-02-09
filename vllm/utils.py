@@ -28,8 +28,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
     "bfloat16": torch.bfloat16,
     "float": torch.float,
-    "fp8_e5m2": torch.uint8,
-    "fp8_e4m3": torch.uint8,
+    "fp8": torch.uint8,
 }
 
 
@@ -197,7 +196,7 @@ def get_nvcc_cuda_version() -> Version:
     return nvcc_cuda_version
 
 
-def _generate_random_fp8_e5m2(
+def _generate_random_fp8(
     tensor: torch.tensor,
     low: float,
     high: float,
@@ -241,7 +240,7 @@ def create_kv_caches_with_random(
                 raise ValueError(f"Invalid model dtype: {model_dtype}")
         elif cache_dtype in ["half", "bfloat16", "float"]:
             torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
-        elif cache_dtype in ["fp8_e5m2", "fp8_e4m3"]:
+        elif cache_dtype == "fp8":
             torch_dtype = torch.uint8
         else:
             raise ValueError(f"Invalid kv cache dtype: {cache_dtype}")
@@ -260,8 +259,8 @@ def create_kv_caches_with_random(
                                 device=device)
         if cache_dtype in ["auto", "half", "bfloat16", "float"]:
             key_cache.uniform_(-scale, scale)
-        elif cache_dtype == 'fp8_e5m2':
-            _generate_random_fp8_e5m2(key_cache, -scale, scale)
+        elif cache_dtype == 'fp8':
+            _generate_random_fp8(key_cache, -scale, scale)
         key_caches.append(key_cache)
 
     value_cache_shape = (num_blocks, num_heads, head_size, block_size)
@@ -272,7 +271,7 @@ def create_kv_caches_with_random(
                                   device=device)
         if cache_dtype in ["auto", "half", "bfloat16", "float"]:
             value_cache.uniform_(-scale, scale)
-        elif cache_dtype == 'fp8_e5m2':
-            _generate_random_fp8_e5m2(value_cache, -scale, scale)
+        elif cache_dtype == 'fp8':
+            _generate_random_fp8(value_cache, -scale, scale)
         value_caches.append(value_cache)
     return key_caches, value_caches

@@ -18,7 +18,7 @@ NUM_BLOCKS = [1024, 3600]  # Arbitrary values for testing
 NUM_MAPPINGS = [256]  # Arbitrary values for testing
 SEEDS = [0]
 DEVICES = [i for i in range(1 if torch.cuda.device_count() == 1 else 2)]
-KV_CACHE_DTYPE = ["auto", "fp8_e5m2"]
+KV_CACHE_DTYPE = ["auto", "fp8"]
 
 
 @pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
@@ -137,7 +137,7 @@ def test_reshape_and_cache(
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Clone the KV caches.
-    if kv_cache_dtype == "fp8_e5m2":
+    if kv_cache_dtype == "fp8":
         cloned_key_cache = torch.empty_like(key_cache, dtype=torch.float16)
         cache_ops.convert_fp8(key_cache, cloned_key_cache)
         cloned_value_cache = torch.empty_like(value_cache, dtype=torch.float16)
@@ -150,7 +150,7 @@ def test_reshape_and_cache(
     cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
                                 slot_mapping, kv_cache_dtype)
     
-    if kv_cache_dtype == "fp8_e5m2":
+    if kv_cache_dtype == "fp8":
         result_key_cache = torch.empty_like(key_cache, dtype=torch.float16)
         cache_ops.convert_fp8(key_cache, result_key_cache)
         result_value_cache = torch.empty_like(value_cache, dtype=torch.float16)
@@ -168,7 +168,7 @@ def test_reshape_and_cache(
         cloned_key_cache[block_idx, :, :, block_offset, :] = reshaped_key[i]
         cloned_value_cache[block_idx, :, :, block_offset] = value[i]
     
-    if kv_cache_dtype == "fp8_e5m2":
+    if kv_cache_dtype == "fp8":
         assert torch.allclose(result_key_cache, cloned_key_cache, atol=0.001, rtol=0.1)
         assert torch.allclose(result_value_cache, cloned_value_cache, atol=0.001, rtol=0.1)
     else:
@@ -200,7 +200,7 @@ def test_swap_blocks(
     device: int,
     kv_cache_dtype: str,
 ) -> None:
-    if kv_cache_dtype == "fp8_e5m2" and "cpu" in direction:
+    if kv_cache_dtype == "fp8" and "cpu" in direction:
         return
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -267,8 +267,8 @@ def test_fp8_conversion(
     torch.cuda.manual_seed(seed)
     gpu_id = f"cuda:{device}"
 
-    low = -240.0
-    high = 240.0
+    low = -224.0
+    high = 224.0
     shape = (num_blocks, num_heads, head_size, block_size)
     cache = torch.empty(shape, dtype=dtype, device=gpu_id)
     cache.uniform_(low, high)
