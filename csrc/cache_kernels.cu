@@ -6,7 +6,7 @@
 #include "dispatch_utils.h"
 #if defined(ENABLE_FP8_E5M2)
 #include "quantization/fp8_e5m2_kvcache/quant_utils.cuh"
-#else if defined(ENABLE_FP8_E4M3)
+#elif defined(ENABLE_FP8_E4M3)
 #include "quantization/fp8/amd_detail/quant_utils.cuh"
 #endif
 

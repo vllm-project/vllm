@@ -25,6 +25,7 @@
 
 #include "attention_dtypes.h"
 #include "attention_utils.cuh"
+
 #if defined(ENABLE_FP8_E5M2)
 #include "../quantization/fp8_e5m2_kvcache/quant_utils.cuh"
 #elif defined(ENABLE_FP8_E4M3)
@@ -32,6 +33,11 @@
 #endif
 
 #include <algorithm>
+
+#ifdef USE_ROCM
+  #include <hip/hip_bf16.h>
+  typedef __hip_bfloat16 __nv_bfloat16;
+#endif
 
 #ifndef USE_ROCM
 #define WARP_SIZE 32
