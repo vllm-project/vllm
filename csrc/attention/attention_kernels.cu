@@ -739,7 +739,7 @@ void paged_attention_v1(
     } else {
       TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
     }
-  } else if (kv_cache_dtype == "fp8_e5m2") {
+  } else if (kv_cache_dtype == "fp8") {
     if (query.dtype() == at::ScalarType::Float) {
       CALL_V1_LAUNCHER_BLOCK_SIZE(float, uint8_t, true);
     } else if (query.dtype() == at::ScalarType::Half) {
@@ -932,7 +932,7 @@ void paged_attention_v2(
     } else {
       TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
     }
-  } else if (kv_cache_dtype == "fp8_e5m2") {
+  } else if (kv_cache_dtype == "fp8") {
     if (query.dtype() == at::ScalarType::Float) {
       CALL_V2_LAUNCHER_BLOCK_SIZE(float, uint8_t, true);
     } else if (query.dtype() == at::ScalarType::Half) {
