@@ -318,9 +318,9 @@ class CacheConfig:
             logger.info(
                 "Using fp8 data type to store kv cache. It reduces "
                 "the GPU memory footprint and boosts the performance. "
-                "But it may cause slight accuracy drop. "
-                "FP8_E5M2 is only supported on cuda version greater than 11.8."
-                "On AMD GPUs, only a more standard FP8_E4M3 is supported for inference.")
+                "But it may cause slight accuracy drop without scaling factors. "
+                "FP8_E5M2 (without scaling) is only supported on cuda version greater than 11.8."
+                "On ROCm (AMD GPU), FP8_E4M3 is instead supported for common inference criteria.")
         else:
             raise ValueError(f"Unknown kv cache dtype: {self.cache_dtype}")
 
