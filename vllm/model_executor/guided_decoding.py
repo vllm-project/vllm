@@ -1,5 +1,6 @@
 from enum import Enum
 from typing import Union
+from types import SimpleNamespace
 from pydantic import BaseModel
 try:
     from outlines.serve.vllm import JSONLogitsProcessor, RegexLogitsProcessor
@@ -7,8 +8,6 @@ except ImportError as e:
     raise ValueError(
         "Please install 'outlines' (pip install outlines) to use guided generation."
     ) from e
-
-from vllm.entrypoints.llm import LLM
 
 
 class GuidedDecodingMode(Enum):
@@ -19,7 +18,11 @@ class GuidedDecodingMode(Enum):
 
 def get_guided_decoding_logits_processor(guided_spec: Union[str, dict, BaseModel], mode: GuidedDecodingMode, tokenizer):
     def dummy_llm():
-        return LLM(model="dummy", tokenizer=tokenizer)
+        x = SimpleNamespace()
+        y = SimpleNamespace()
+        x.tokenizer = tokenizer
+        y.tokenizer = x
+        return y
 
     if mode == GuidedDecodingMode.JSON:
         assert isinstance(guided_spec, (str, dict, BaseModel)), "JSON schema error"
