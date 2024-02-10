@@ -11,7 +11,7 @@ from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               RowParallelLinearWithLoRA,
                               MergedColumnParallelLinearWithLoRA)
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
-from vllm.lora.models import (EMBEDDING_MODULES, LoRAModel, LoRAModelManager,
+from vllm.lora.models import (LoRAModel, LoRAModelManager,
                               LRUCacheLoRAModelManager, LoRAMapping)
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import (LRUCacheWorkerLoRAManager,
@@ -24,12 +24,19 @@ def test_from_lora_tensors(sql_lora_files):
         os.path.join(sql_lora_files, "adapter_model.safetensors"))
     new_embeddings = load_file(
         os.path.join(sql_lora_files, "new_embeddings.safetensors"))
-    lora_model = LoRAModel.from_lora_tensors(1,
-                                             8,
-                                             16,
-                                             tensors,
-                                             "cuda",
-                                             embeddings=new_embeddings)
+    embedding_modules = {
+        "embed_tokens": "input_embeddings",
+        "lm_head": "output_embeddings",
+    }
+    lora_model = LoRAModel.from_lora_tensors(
+        1,
+        8,
+        16,
+        tensors,
+        "cuda",
+        embeddings=new_embeddings,
+        embedding_modules=embedding_modules,
+        embedding_padding_modules=["lm_head"])
     for module_name, lora in lora_model.loras.items():
         assert lora.module_name == module_name
         assert lora.rank == 8
@@ -40,11 +47,11 @@ def test_from_lora_tensors(sql_lora_files):
                 ), f"{lora.lora_a.shape=}, {lora.lora_b.shape=}"
         assert lora.lora_a.shape[1] == 8
         embeddings_module = next(
-            (k for k in EMBEDDING_MODULES if k in module_name), None)
+            (k for k in embedding_modules if k in module_name), None)
         if embeddings_module:
             assert torch.equal(
                 lora.embeddings_tensor,
-                new_embeddings[EMBEDDING_MODULES[embeddings_module]].to(
+                new_embeddings[embedding_modules[embeddings_module]].to(
                     device=lora.embeddings_tensor.device))
         else:
             assert lora.embeddings_tensor is None
@@ -289,8 +296,11 @@ def test_lru_cache_worker_lora_manager(llama_2_7b_model_extra_embeddings,
                                        sql_lora_files):
     lora_config = LoRAConfig(max_lora_rank=8, max_cpu_loras=4, max_loras=4)
     worker_lora_manager = LRUCacheWorkerLoRAManager(
-        4, 2, llama_2_7b_model_extra_embeddings.config.vocab_size, lora_config,
-        torch.device("cuda"))
+        4, 2, llama_2_7b_model_extra_embeddings.unpadded_vocab_size -
+        lora_config.lora_extra_vocab_size, lora_config, torch.device("cuda"), {
+            "embed_tokens": "input_embeddings",
+            "lm_head": "output_embeddings",
+        }, ["lm_head"])
     worker_lora_manager.create_lora_manager(llama_2_7b_model_extra_embeddings)
 
     mapping = LoRAMapping([], [])
@@ -362,8 +372,11 @@ def test_worker_lora_manager(llama_2_7b_model_extra_embeddings,
     # Should remove every LoRA not specified in the request.
     lora_config = LoRAConfig(max_lora_rank=8, max_cpu_loras=4, max_loras=4)
     worker_lora_manager = WorkerLoRAManager(
-        4, 2, llama_2_7b_model_extra_embeddings.config.vocab_size, lora_config,
-        torch.device("cuda"))
+        4, 2, llama_2_7b_model_extra_embeddings.unpadded_vocab_size -
+        lora_config.lora_extra_vocab_size, lora_config, torch.device("cuda"), {
+            "embed_tokens": "input_embeddings",
+            "lm_head": "output_embeddings",
+        }, ["lm_head"])
     worker_lora_manager.create_lora_manager(llama_2_7b_model_extra_embeddings)
 
     mapping = LoRAMapping([], [])
@@ -444,7 +457,12 @@ def test_packed_loras(dist_init, dummy_model_gate_up):
     manager = LoRAModelManager(
         model, 2, 2, 2,
         LoRAConfig(max_lora_rank=8, max_cpu_loras=2, max_loras=2),
-        ["gate_up_proj"])
+        ["gate_up_proj"], {
+            "gate_up_proj": [
+                "gate_proj",
+                "up_proj",
+            ],
+        })
     model = manager.model
 
     assert isinstance(model.get_submodule("gate_up_proj"),

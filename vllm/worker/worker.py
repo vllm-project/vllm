@@ -8,7 +8,7 @@ import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, LoRAConfig)
-from vllm.model_executor import set_random_seed
+from vllm.model_executor import get_model, set_random_seed
 from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
 from vllm.model_executor.parallel_utils.custom_all_reduce import init_custom_ar
@@ -18,6 +18,7 @@ from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
 from vllm.lora.request import LoRARequest
+from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 
 
 class Worker:
@@ -93,6 +94,24 @@ class Worker:
             init_custom_ar()
         # Initialize the model.
         set_random_seed(self.model_config.seed)
+
+        self.model = get_model(self.model_config, self.device_config,
+                               self.lora_config)
+        self.vocab_size = self.model.config.vocab_size
+
+        if self.lora_config:
+            assert hasattr(
+                self.model, "supports_lora"
+            ) and self.model.supports_lora, "Model does not support LoRA"
+            assert hasattr(self.model, "embedding_modules") and hasattr(
+                self.model, "embedding_padding_modules"
+            ), "Model does not have embedding_modules/embedding_padding_modules"
+            self.lora_manager = LRUCacheWorkerLoRAManager(
+                self.scheduler_config.max_num_seqs,
+                self.scheduler_config.max_num_batched_tokens, self.vocab_size,
+                self.lora_config, self.device, self.model.embedding_modules,
+                self.model.embedding_padding_modules)
+            self.model = self.lora_manager.create_lora_adapter(self.model)
 
     def load_model(self):
         self.model_runner.load_model()
