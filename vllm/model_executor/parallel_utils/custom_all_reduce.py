@@ -148,7 +148,11 @@ def _can_p2p(rank: int, world_size: int) -> bool:
 class CustomAllreduce:
 
     # max_size: max supported allreduce size
-    def __init__(self, rank, world_size, full_nvlink, max_size=8192 * 1024) -> None:
+    def __init__(self,
+                 rank,
+                 world_size,
+                 full_nvlink,
+                 max_size=8192 * 1024) -> None:
         # buffers memory are owned by this Python class and passed to C++
         # meta data composes of two parts: meta data for synchronization
         # (256 bytes) and a temporary buffer for storing intermediate
