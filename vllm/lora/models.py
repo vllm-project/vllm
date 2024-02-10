@@ -629,8 +629,7 @@ def create_lora_manager(
         max_num_batched_tokens: int,
         vocab_size: int,
         lora_config: LoRAConfig,
-        target_modules: Optional[Union[str,
-                              List[str]]] = None,
+        target_modules: Optional[Union[str, List[str]]] = None,
         packed_modules_mapping: Optional[Dict[str, List[str]]] = None,
         lora_manager_cls: Type[LoRAModelManager] = LoRAModelManager,
         **kwargs) -> LoRAModelManager:
