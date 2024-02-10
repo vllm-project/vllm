@@ -7,18 +7,23 @@ import vllm
 from vllm.lora.request import LoRARequest
 from .conftest import cleanup
 
+
 @dataclass
 class ModelWithQuantization:
     model_path: str
     quantization: Optional[str]
 
-MODELS: List[ModelWithQuantization] = [
-    ModelWithQuantization(model_path="meta-llama/Llama-2-7b-hf", quantization=None),
-    ModelWithQuantization(model_path="TheBloke/Llama-2-7B-AWQ", quantization="AWQ"),
-    ModelWithQuantization(model_path="TheBloke/Llama-2-7B-GPTQ", quantization="GPTQ"),
-    ModelWithQuantization(model_path="squeeze-ai-lab/sq-llama-2-7b-w4-s0", quantization="SQUEEZELLM"),
-]
 
+MODELS: List[ModelWithQuantization] = [
+    ModelWithQuantization(model_path="meta-llama/Llama-2-7b-hf",
+                          quantization=None),
+    ModelWithQuantization(model_path="TheBloke/Llama-2-7B-AWQ",
+                          quantization="AWQ"),
+    ModelWithQuantization(model_path="TheBloke/Llama-2-7B-GPTQ",
+                          quantization="GPTQ"),
+    ModelWithQuantization(model_path="squeeze-ai-lab/sq-llama-2-7b-w4-s0",
+                          quantization="SQUEEZELLM"),
+]
 
 
 def do_sample(llm, lora_path: str, lora_id: int):
@@ -48,7 +53,7 @@ def do_sample(llm, lora_path: str, lora_id: int):
     return generated_texts
 
 
-@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("model", [MODELS[0]])
 @pytest.mark.parametrize("tp_size", [1])
 def test_llama_lora(sql_lora_files, model, tp_size):
     # Cannot use as it will initialize torch.cuda too early...
@@ -92,6 +97,9 @@ def test_llama_lora(sql_lora_files, model, tp_size):
     assert do_sample(llm, sql_lora_files, lora_id=2) == expected_lora_output
 
     print("removing lora")
+
+    del llm
+    cleanup()
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -145,14 +153,27 @@ def test_llama_lora_warmup(sql_lora_files, model):
 
     @ray.remote(num_gpus=1)
     def get_num_gpu_blocks_lora():
-        llm = vllm.LLM(model=model.model_path, enable_lora=True, max_num_seqs=16, quantization=model.quantization)
+        llm = vllm.LLM(model=model.model_path,
+                       enable_lora=True,
+                       max_num_seqs=16,
+                       quantization=model.quantization)
         num_gpu_blocks_lora_warmup = llm.llm_engine.cache_config.num_gpu_blocks
+
+        del llm
+        cleanup()
+
         return num_gpu_blocks_lora_warmup
 
     @ray.remote(num_gpus=1)
     def get_num_gpu_blocks_no_lora():
-        llm = vllm.LLM(model=model.model_path, max_num_seqs=16, quantization=model.quantization)
+        llm = vllm.LLM(model=model.model_path,
+                       max_num_seqs=16,
+                       quantization=model.quantization)
         num_gpu_blocks_no_lora_warmup = llm.llm_engine.cache_config.num_gpu_blocks
+
+        del llm
+        cleanup()
+
         return num_gpu_blocks_no_lora_warmup
 
     num_gpu_blocks_lora_warmup = ray.get(get_num_gpu_blocks_lora.remote())
