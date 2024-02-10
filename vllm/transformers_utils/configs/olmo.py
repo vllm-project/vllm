@@ -43,7 +43,6 @@ class OLMoConfig(PretrainedConfig):
         pad_token_id=50256,
         **kwargs,
     ):
-        super().__init__(**kwargs)
         self.d_model = d_model
         self.n_heads = n_heads
         self.n_layers = n_layers
@@ -70,3 +69,4 @@ class OLMoConfig(PretrainedConfig):
         self.weight_tying = weight_tying
         self.eos_token_id = eos_token_id
         self.pad_token_id = pad_token_id
+        super().__init__(**kwargs)
