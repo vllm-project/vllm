@@ -247,45 +247,6 @@ __global__ void __launch_bounds__(512, 1)
   }
 }
 
-template <typename T, int ngpus>
-__global__ void __launch_bounds__(512, 1)
-    cross_device_reduce_half_butterfly(RankData *_dp, RankSignals sg,
-                                       volatile Signal *self_sg,
-                                       T *__restrict__ result, int rank,
-                                       int size) {
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  int stride = gridDim.x * blockDim.x;
-  using P = typename packed_t<T>::P;
-  using A = typename packed_t<T>::A;
-  auto tmp_out = get_tmp_buf<P>(sg.signals[rank]);
-  constexpr int hg = ngpus / 2;
-  // Actually not quite half butterfly.
-  // This is an all-to-all within each group containing half of the ranks
-  // followed by cross-group add. Equivalent to half butterfly when there
-  // are 4 GPUs, a common case for PCIe cards like T4 and A10.
-  const P *ptrs[hg];
-  {
-    int start = rank - rank % hg;
-#pragma unroll
-    for (int i = 0; i < hg; i++) {
-      ptrs[i] = (const P *)_dp->ptrs[i + start];
-    }
-  }
-  start_sync<ngpus>(sg, self_sg, rank);
-  for (int idx = tid; idx < size; idx += stride) {
-    tmp_out[idx] = packed_reduce<P, hg, A>(ptrs, idx);
-  }
-  end_sync<ngpus>(sg, self_sg, rank);
-
-  auto src = get_tmp_buf<P>(sg.signals[(ngpus - 1) - rank % ngpus]);
-  // do the cross group reduction
-  for (int idx = tid; idx < size; idx += stride) {
-    auto tmp = tmp_out[idx];
-    packed_assign_add(tmp, src[idx]);
-    ((P *)result)[idx] = tmp;
-  }
-}
-
 using IPC_KEY = std::array<uint8_t, sizeof(cudaIpcMemHandle_t)>;
 static_assert(sizeof(IPC_KEY) == sizeof(cudaIpcMemHandle_t));
 static_assert(alignof(IPC_KEY) == alignof(cudaIpcMemHandle_t));
@@ -488,8 +449,6 @@ class CustomAllreduce {
       } else {                                        \
         KL(ngpus, cross_device_reduce_2stage);        \
       }                                               \
-    } else {                                          \
-      KL(ngpus, cross_device_reduce_half_butterfly);  \
     }                                                 \
     break;                                            \
   }

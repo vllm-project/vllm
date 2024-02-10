@@ -46,7 +46,14 @@ def init_custom_ar() -> None:
             " capability. To slience this warning, specify"
             "disable_custom_all_reduce=True explicitly.")
         return
-    _CA_HANDLE = CustomAllreduce(rank, world_size)
+    full_nvlink = _is_full_nvlink(rank, world_size)
+    if world_size > 2 and not full_nvlink:
+        logger.warn(
+            "Custom allreduce is disabled because it's not supported on more"
+            " than two PCIe-only GPUs. To slience this warning, specify"
+            "disable_custom_all_reduce=True explicitly.")
+        return
+    _CA_HANDLE = CustomAllreduce(rank, world_size, full_nvlink)
 
 
 def begin_capture() -> None:
@@ -141,7 +148,7 @@ def _can_p2p(rank: int, world_size: int) -> bool:
 class CustomAllreduce:
 
     # max_size: max supported allreduce size
-    def __init__(self, rank, world_size, max_size=8192 * 1024) -> None:
+    def __init__(self, rank, world_size, full_nvlink, max_size=8192 * 1024) -> None:
         # buffers memory are owned by this Python class and passed to C++
         # meta data composes of two parts: meta data for synchronization
         # (256 bytes) and a temporary buffer for storing intermediate
@@ -163,11 +170,10 @@ class CustomAllreduce:
         self.max_size = max_size
         self.world_size = world_size
         handles, offsets = self._get_ipc_meta(self.meta)
-        self.full_nvlink = _is_full_nvlink(rank, world_size)
+        self.full_nvlink = full_nvlink
         self._ptr = custom_ar.init_custom_ar(self.meta, self.rank_data,
                                              handles, offsets, rank,
                                              self.full_nvlink)
-        self.fast_cond = self.full_nvlink or world_size <= 2
         self.register_buffer(self.buffer)
 
     def _get_ipc_meta(self, inp: torch.Tensor):

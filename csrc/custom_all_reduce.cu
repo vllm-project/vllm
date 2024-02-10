@@ -62,9 +62,9 @@ bool should_custom_ar(torch::Tensor &inp, int max_size, int world_size,
   if (inp_size % 16 != 0) return false;
   if (!_is_weak_contiguous(inp)) return false;
   if (world_size == 2 || full_nvlink) return inp_size <= max_size;
-  // 4 PCIE GPUs use 2 stage allreduce, and is only faster than NCCL when size
-  // <= 512k
-  return world_size <= 4 && inp_size <= 512 * 1024;
+  // for 4 or more non NVLink-capable GPUs, custom allreduce provides little
+  // performance improvement over NCCL.
+  return false;
 }
 
 void _all_reduce(fptr_t _fa, torch::Tensor &inp, torch::Tensor &out,
