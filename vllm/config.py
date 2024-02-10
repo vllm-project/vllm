@@ -93,9 +93,12 @@ class ModelConfig:
             # download model from ModelScope hub,
             # lazy import so that modelscope is not required for normal use.
             from modelscope.hub.snapshot_download import snapshot_download  # pylint: disable=C
-            model_path = snapshot_download(model_id=model,
-                                           cache_dir=download_dir,
-                                           revision=revision)
+            if not os.path.exists(model):
+                model_path = snapshot_download(model_id=model,
+                                               cache_dir=download_dir,
+                                               revision=revision)
+            else:
+                model_path = model
             self.model = model_path
             self.download_dir = model_path
             self.tokenizer = model_path
@@ -385,16 +388,26 @@ class ParallelConfig:
         if self.pipeline_parallel_size > 1:
             raise NotImplementedError(
                 "Pipeline parallelism is not supported yet.")
-        if is_hip():
+        if not self.disable_custom_all_reduce and self.world_size > 1:
+            if is_hip():
+                self.disable_custom_all_reduce = True
+                logger.info(
+                    "Disabled the custom all-reduce kernel because it is not "
+                    "supported on AMD GPUs.")
+            elif self.pipeline_parallel_size > 1:
+                self.disable_custom_all_reduce = True
+                logger.info(
+                    "Disabled the custom all-reduce kernel because it is not "
+                    "supported with pipeline parallelism.")
+
+        # FIXME(woosuk): Fix the stability issues and re-enable the custom
+        # all-reduce kernel.
+        if not self.disable_custom_all_reduce and self.world_size > 1:
             self.disable_custom_all_reduce = True
             logger.info(
-                "Disabled the custom all-reduce kernel because it is not "
-                "supported on AMD GPUs.")
-        elif self.pipeline_parallel_size > 1:
-            self.disable_custom_all_reduce = True
-            logger.info(
-                "Disabled the custom all-reduce kernel because it is not "
-                "supported with pipeline parallelism.")
+                "Custom all-reduce kernels are temporarily disabled due to "
+                "stability issues. We will re-enable them once the issues are "
+                "resolved.")
 
 
 class SchedulerConfig:
