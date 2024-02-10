@@ -14,6 +14,7 @@ __all__ = [
     "BaiChuanConfig",
     "ChatGLMConfig",
     "MPTConfig",
+    "OLMoConfig",
     "QWenConfig",
     "RWConfig",
     "YiConfig",
