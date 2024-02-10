@@ -39,6 +39,7 @@
 from typing import List, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 from hf_olmo import OLMoConfig
 from torch import nn
 
@@ -67,6 +68,16 @@ from vllm.sequence import SamplerOutput
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
+class SwiGLU(nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x, gate = x.chunk(2, dim=-1)
+        return F.silu(gate) * x
+
+    @property
+    def output_multiplier(self) -> float:
+        return 0.5
+
+
 class OlmoAttention(nn.Module):
     """
     This is the attention block where the output is computed as ``Attention(LN(x))`` in ``MLP(LN(x + Attention(LN(x))))``
@@ -87,7 +98,6 @@ class OlmoAttention(nn.Module):
         assert self.total_num_heads % tensor_model_parallel_world_size == 0
         self.num_heads = self.total_num_heads // tensor_model_parallel_world_size
         self.head_dim = self.hidden_size // self.total_num_heads
-        self.scaling = self.head_dim**-0.5
 
         # Layer norms.
         self.attn_norm = nn.LayerNorm(
@@ -112,7 +122,7 @@ class OlmoAttention(nn.Module):
                 max_position=max_position_embeddings,
                 base=rope_theta,
             )
-
+        self.scaling = self.head_dim**-0.5
         self.attn = PagedAttention(self.num_heads, self.head_dim, scale=self.scaling)
 
         # Attention output projection.
@@ -174,8 +184,9 @@ class OlmoMLP(nn.Module):
         )
 
         # Activation function.
-        self.act = SiluAndMul()
-        self.act.output_multiplier = 0.5
+        # self.act = SiluAndMul()
+        # self.act.output_multiplier = 0.5
+        self.act = SwiGLU()
         assert (self.act.output_multiplier * self.hidden_size) % 1 == 0
 
         # Feed-forward output projection.
