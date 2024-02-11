@@ -17,6 +17,12 @@ RUN echo "FA_GFX_ARCHS is $FA_GFX_ARCHS"
 ARG FA_BRANCH="3d2b6f5"
 RUN echo "FA_BRANCH is $FA_BRANCH"
 
+# whether to build flash-attention
+# if 0, will not build flash attention
+# this is useful for gfx target where flash-attention is not supported
+# In that case, we need to use the python reference attention implementation in vllm
+ARG BUILD_FA="1"
+
 # Install some basic utilities
 RUN apt-get update && apt-get install python3 python3-pip -y
 
@@ -50,7 +56,8 @@ ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/rocm/lib/:/libtorch/lib:
 ENV CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/libtorch/include:/libtorch/include/torch/csrc/api/include/:/opt/rocm/include/:
 
 # Install ROCm flash-attention
-RUN mkdir libs \
+RUN if [ "$BUILD_FA" == "1" ]; then \
+    mkdir libs \
     && cd libs \
     && git clone https://github.com/ROCmSoftwarePlatform/flash-attention.git \
     && cd flash-attention \
@@ -60,7 +67,8 @@ RUN mkdir libs \
     && if [ "$BASE_IMAGE" = "rocm/pytorch:rocm5.7_ubuntu22.04_py3.10_pytorch_2.0.1" ]; then \
         patch /opt/conda/envs/py_3.10/lib/python3.10/site-packages/torch/utils/hipify/hipify_python.py hipify_patch.patch; fi \
     && python3 setup.py install \
-    && cd ..
+    && cd ..; \
+    fi
 
 COPY ./ /app/vllm
 
@@ -75,7 +83,8 @@ RUN if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1" 
 RUN cd /app \
     && cd vllm \
     && pip install -U -r requirements-rocm.txt \
-    && bash patch_xformers.rocm.sh \
+    && if [ "$BUILD_FA" == "1" ]; then \
+       bash patch_xformers.rocm.sh; fi \
     && patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h /app/vllm/rocm_patch/rocm_bf16.patch \
     && python3 setup.py install \
     && cd ..
