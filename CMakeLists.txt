@@ -25,6 +25,26 @@ endif()
 
 list(APPEND CMAKE_PREFIX_PATH ${SITE_PATH})
 
+###############
+
+execute_process(
+    COMMAND
+      "${PYTHON_EXECUTABLE}" "-c"
+      "import torch; print(torch.utils.cmake_prefix_path)"
+    OUTPUT_VARIABLE TORCH_PATH
+    ERROR_VARIABLE TORCH_PATH_ERR
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+
+if(TORCH_PATH STREQUAL "")
+  message(FATAL_ERROR "Failed to locate torch cmake_prefix_path,"
+                      " full error message:\n${TORCH_PATH_ERR}")
+endif()
+
+list(APPEND CMAKE_PREFIX_PATH ${TORCH_PATH})
+
+###############
+
+
 #
 # Find packages needed to compile
 #
