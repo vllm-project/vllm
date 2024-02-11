@@ -6,7 +6,7 @@ project(vllm_extensions LANGUAGES CXX)
 # Find where user site-packages and torch are installed and add it to cmake's search path.
 #
 
-function (append_cmake_prefix_path PKG EXPR)
+macro (append_cmake_prefix_path PKG EXPR)
   if(NOT DEFINED PYTHON_EXECUTABLE)
     set(PYTHON_EXECUTABLE python3)
   endif()
@@ -24,7 +24,7 @@ function (append_cmake_prefix_path PKG EXPR)
   endif()
 
   list(APPEND CMAKE_PREFIX_PATH ${PREFIX_PATH})
-endfunction()
+endmacro()
 
 append_cmake_prefix_path("site" "site.getusersitepackages()")
 append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
