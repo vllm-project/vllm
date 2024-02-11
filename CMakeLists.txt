@@ -3,46 +3,31 @@ cmake_minimum_required(VERSION 3.21)
 project(vllm_extensions LANGUAGES CXX)
 
 #
-# Find where user site-packages are installed and add it to cmake's search path.
+# Find where user site-packages and torch are installed and add it to cmake's search path.
 #
 
-if(NOT DEFINED PYTHON_EXECUTABLE)
-  set(PYTHON_EXECUTABLE python3)
-endif()
+function (append_cmake_prefix_path PKG EXPR)
+  if(NOT DEFINED PYTHON_EXECUTABLE)
+    set(PYTHON_EXECUTABLE python3)
+  endif()
 
-execute_process(
+  execute_process(
     COMMAND
-      "${PYTHON_EXECUTABLE}" "-c"
-      "import site; print(site.getusersitepackages())"
-    OUTPUT_VARIABLE SITE_PATH
-    ERROR_VARIABLE SITE_PATH_ERR
+    "${PYTHON_EXECUTABLE}" "-c" "import ${PKG}; print(${EXPR})"
+    OUTPUT_VARIABLE PREFIX_PATH
+    ERROR_VARIABLE PREFIX_PATH_ERR
     OUTPUT_STRIP_TRAILING_WHITESPACE)
 
-if(SITE_PATH STREQUAL "")
-  message(FATAL_ERROR "Failed to locate site-packages path,"
-                      " full error message:\n${SITE_PATH_ERR}")
-endif()
+  if(PREFIX_PATH STREQUAL "")
+    message(FATAL_ERROR "Failed to locate ${PKG} path,"
+            " full error message:\n${PREFIX_PATH_ERR}")
+  endif()
 
-list(APPEND CMAKE_PREFIX_PATH ${SITE_PATH})
+  list(APPEND CMAKE_PREFIX_PATH ${SITE_PATH})
+endfunction()
 
-###############
-
-execute_process(
-    COMMAND
-      "${PYTHON_EXECUTABLE}" "-c"
-      "import torch; print(torch.utils.cmake_prefix_path)"
-    OUTPUT_VARIABLE TORCH_PATH
-    ERROR_VARIABLE TORCH_PATH_ERR
-    OUTPUT_STRIP_TRAILING_WHITESPACE)
-
-if(TORCH_PATH STREQUAL "")
-  message(FATAL_ERROR "Failed to locate torch cmake_prefix_path,"
-                      " full error message:\n${TORCH_PATH_ERR}")
-endif()
-
-list(APPEND CMAKE_PREFIX_PATH ${TORCH_PATH})
-
-###############
+append_cmake_prefix_path("site" "site.getusersitepackages()")
+append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
 
 
 #
@@ -83,6 +68,10 @@ string(STRIP ${PUNICA_NVCC_FLAGS} PUNICA_NVCC_FLAGS)
 if (CUDA_VERSION VERSION_GREATER_EQUAL 11.8)
   list(APPEND NVCC_FLAGS "-DENABLE_FP8_E5M2")
 endif()
+
+# hack arches to test
+# TODO: need to strip out cuda arches < 8.0 for punica
+set(CMAKE_CUDA_ARCHITECTURES "75;80;86;89;90")
 
 #
 # Check for existence of CUDA/HIP language support
@@ -170,10 +159,6 @@ function(define_module_target MOD_NAME MOD_SRC MOD_NVCC_FLAGS)
   target_link_libraries(${MOD_NAME} PRIVATE ${TORCH_LIBRARIES})
   install(TARGETS ${MOD_NAME} LIBRARY DESTINATION vllm)
 endfunction()
-
-# TODO: hacks punica not supported for less than 8.0
-set(CMAKE_CUDA_ARCHITECTURES "80;86;89;90")
-set(CUDA_ARCHITECTURES "80;86;89;90")
 
 define_module_target(_C "${VLLM_EXT_SRC}" "${NVCC_FLAGS}")
 define_module_target(_moe_C "${VLLM_MOE_EXT_SRC}" "${NVCC_FLAGS}")
