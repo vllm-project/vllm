@@ -22,11 +22,11 @@ class RequestFuncInput:
 
 @dataclass
 class RequestFuncOutput:
-    generated_text: str
-    success: bool
-    latency: float
-    ttft: float
-    prompt_len: int
+    generated_text: str = ""
+    success: bool = False
+    latency: float = 0
+    ttft: float = 0
+    prompt_len: int = 0
 
 
 async def async_request_tgi(

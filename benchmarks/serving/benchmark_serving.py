@@ -133,27 +133,28 @@ def calculate_metrics(
     per_token_latencies = []
     ttfts = []
     for i in range(len(outputs)):
-        if outputs[i]["success"]:
-            output_len = len(tokenizer.encode(outputs[i]["generated_text"]))
+        if outputs[i].success:
+            output_len = len(tokenizer.encode(outputs[i].generated_text))
             total_output += output_len
             total_input += input_requests[i][1]
-            per_token_latencies.append(outputs[i]["latency"] / output_len)
-            ttfts.append(outputs[i]["ttft"])
+            per_token_latencies.append(outputs[i].latency / output_len)
+            ttfts.append(outputs[i].ttft)
             completed += 1
 
-    metrics = BenchmarkMetrics()
-    metrics.completed = completed
-    metrics.total_input = total_input
-    metrics.total_output = total_output
-    metrics.request_throughput = completed / dur_s
-    metrics.input_throughput = total_input / dur_s
-    metrics.output_throughput = total_output / dur_s
-    metrics.mean_ttft_ms = np.mean(ttfts) * 1000
-    metrics.median_ttft_ms = np.median(ttfts) * 1000
-    metrics.p99_ttft_ms = np.percentile(ttfts, 99) * 1000
-    metrics.mean_tpot_ms = np.mean(per_token_latencies) * 1000
-    metrics.median_tpot_ms = np.median(per_token_latencies) * 1000
-    metrics.p99_tpot_ms = np.percentile(per_token_latencies, 99) * 1000
+    metrics = BenchmarkMetrics(
+        completed=completed,
+        total_input=total_input,
+        total_output=total_output,
+        request_throughput=completed / dur_s,
+        input_throughput=total_input / dur_s,
+        output_throughput=total_output / dur_s,
+        mean_ttft_ms=np.mean(ttfts) * 1000,
+        median_ttft_ms=np.median(ttfts) * 1000,
+        p99_ttft_ms=np.percentile(ttfts, 99) * 1000,
+        mean_tpot_ms=np.mean(per_token_latencies) * 1000,
+        median_tpot_ms=np.median(per_token_latencies) * 1000,
+        p99_tpot_ms=np.percentile(per_token_latencies, 99) * 1000,
+    )
 
     return metrics
 
