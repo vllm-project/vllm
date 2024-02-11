@@ -28,7 +28,13 @@ import numpy as np
 from transformers import PreTrainedTokenizerBase
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-from backend_request_func import ASYNC_REQUEST_FUNCS
+from backend_request_func import (
+    ASYNC_REQUEST_FUNCS,
+    RequestFuncInput,
+    RequestFuncOutput,
+)
+
+from .. import common_metrics
 
 
 @dataclass
@@ -117,7 +123,7 @@ async def get_request(
 
 def calculate_metrics(
     input_requests: List[Tuple[str, int, int]],
-    outputs: Dict[str, Union[str, bool, float]],
+    outputs: List[RequestFuncOutput],
     dur_s: float,
     tokenizer: PreTrainedTokenizerBase,
 ) -> BenchmarkMetrics:
@@ -173,57 +179,54 @@ async def throughput_benchmark(
     tasks = []
     async for request in get_request(input_requests, request_rate):
         prompt, prompt_len, output_len = request
-        request_func_kwargs = {
-            "model": model_id,
-            "prompt": prompt,
-            "api_url": api_url,
-            "prompt_len": prompt_len,
-            "output_len": output_len,
-            "best_of": best_of,
-            "use_beam_search": use_beam_search,
-        }
-        tasks.append(asyncio.create_task(request_func(**request_func_kwargs)))
+        request_func_input = RequestFuncInput(
+            model=model_id,
+            prompt=prompt,
+            api_url=api_url,
+            prompt_len=prompt_len,
+            output_len=output_len,
+            best_of=best_of,
+            use_beam_search=use_beam_search,
+        )
+        tasks.append(asyncio.create_task(request_func(request_func_input)))
     outputs = await asyncio.gather(*tasks)
     benchmark_duration = time.perf_counter() - benchmark_start_time
 
-    benchmark_metrics = calculate_metrics(
-        input_requests, outputs, benchmark_duration, tokenizer
+    metrics = calculate_metrics(
+        input_requests=input_requests,
+        outputs=outputs,
+        dur_s=benchmark_duration,
+        tokenizer=tokenizer,
     )
 
-    print(f"Successful requests: {benchmark_metrics.completed}")
+    print(f"Successful requests: {metrics.completed}")
     print(f"Benchmark duration: {benchmark_duration:2f} s")
-    print(f"Total input tokens: {benchmark_metrics.total_input}")
-    print(f"Total generated tokens: {benchmark_metrics.total_output}")
-    print(
-        f"Request throughput: {benchmark_metrics.request_throughput:.2f} requests/s"
-    )
-    print(
-        f"Input token throughput: {benchmark_metrics.input_throughput:.2f} tokens/s"
-    )
-    print(
-        f"Output token throughput: {benchmark_metrics.output_throughput:.2f} tokens/s"
-    )
-    print(f"Mean TTFT: {benchmark_metrics.mean_ttft_ms:.2f} ms")
-    print(f"Median TTFT: {benchmark_metrics.median_ttft_ms:.2f} ms")
-    print(f"P99 TTFT: {benchmark_metrics.p99_ttft_ms:.2f} ms")
-    print(f"Mean TPOT: {benchmark_metrics.mean_tpot_ms:.2f} ms")
-    print(f"Median TPOT: {benchmark_metrics.median_tpot_ms:.2f} ms")
-    print(f"P99 TPOT: {benchmark_metrics.p99_tpot_ms:.2f} ms")
+    print(f"Total input tokens: {metrics.total_input}")
+    print(f"Total generated tokens: {metrics.total_output}")
+    print(f"Request throughput: {metrics.request_throughput:.2f} requests/s")
+    print(f"Input token throughput: {metrics.input_throughput:.2f} tokens/s")
+    print(f"Output token throughput: {metrics.output_throughput:.2f} tokens/s")
+    print(f"Mean TTFT: {metrics.mean_ttft_ms:.2f} ms")
+    print(f"Median TTFT: {metrics.median_ttft_ms:.2f} ms")
+    print(f"P99 TTFT: {metrics.p99_ttft_ms:.2f} ms")
+    print(f"Mean TPOT: {metrics.mean_tpot_ms:.2f} ms")
+    print(f"Median TPOT: {metrics.median_tpot_ms:.2f} ms")
+    print(f"P99 TPOT: {metrics.p99_tpot_ms:.2f} ms")
 
     result = {}
-    result["completed"] = benchmark_metrics.completed
-    result["total_input"] = benchmark_metrics.total_input
-    result["total_output"] = benchmark_metrics.total_output
-    result["request_throughput"] = benchmark_metrics.request_throughput
-    result["input_throughput"] = benchmark_metrics.input_throughput
-    result["output_throughput"] = benchmark_metrics.output_throughput
     result["duration"] = benchmark_duration
-    result["mean_ttft_ms"] = benchmark_metrics.mean_ttft_ms
-    result["median_ttft_ms"] = benchmark_metrics.median_ttft_ms
-    result["p99_ttft_ms"] = benchmark_metrics.p99_ttft_ms
-    result["mean_tpot_ms"] = benchmark_metrics.mean_tpot_ms
-    result["median_tpot_ms"] = benchmark_metrics.median_tpot_ms
-    result["p99_tpot_ms"] = benchmark_metrics.p99_tpot_ms
+    result[common_metrics.COMPLETED] = metrics.completed
+    result[common_metrics.TOTAL_INPUT_TOKENS] = metrics.total_input
+    result[common_metrics.TOTAL_OUTPUT_TOKENS] = metrics.total_output
+    result[common_metrics.REQUEST_INTHROUGPUT] = metrics.request_throughput
+    result[common_metrics.INPUT_THROUGHPUT] = metrics.input_throughput
+    result[common_metrics.OUTPUT_THROUGHPUT] = metrics.output_throughput
+    result[common_metrics.MEAN_TTFT_MS] = metrics.mean_ttft_ms
+    result[common_metrics.MEDIAN_TTFT_MS] = metrics.median_ttft_ms
+    result[common_metrics.P99_TTFT_MS] = metrics.p99_ttft_ms
+    result[common_metrics.MEAN_TPOT_MS] = metrics.mean_tpot_ms
+    result[common_metrics.MEDIAN_TPOT_MS] = metrics.median_tpot_ms
+    result[common_metrics.P99_TPOT_MS] = metrics.p99_tpot_ms
 
     return result
 
