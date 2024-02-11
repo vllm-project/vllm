@@ -129,8 +129,8 @@ class LLMEngine:
         # before CUDA_VISIBLE_DEVICES is set in the Worker
         from vllm.worker.worker import Worker
 
-        assert self.parallel_config.world_size == 1, (
-            "Ray is required if parallel_config.world_size > 1.")
+        # assert self.parallel_config.world_size == 1, (
+        #     "Ray is required if parallel_config.world_size > 1.")
 
         self.workers: List[Worker] = []
         distributed_init_method = get_distributed_init_method(

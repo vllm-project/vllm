@@ -72,7 +72,10 @@ class Worker:
 
         # This env var set by Ray causes exceptions with graph building.
         os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
-        self.device = torch.device(f"cuda:{self.local_rank}")
+        self.rank = self.rank if self.rank is not None else int(
+            os.getenv("RANK", "-1"))
+        local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        self.device = torch.device(f"cuda:{local_rank}")
         torch.cuda.set_device(self.device)
 
         _check_if_gpu_supports_dtype(self.model_config.dtype)
@@ -240,8 +243,9 @@ def _init_distributed_environment(
         torch.distributed.init_process_group(
             backend="nccl",
             world_size=parallel_config.world_size,
-            rank=rank,
-            init_method=distributed_init_method,
+            #rank=rank,
+            #init_method=distributed_init_method,
+            init_method="env://",
         )
 
     # A small all_reduce for warmup.
