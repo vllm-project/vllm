@@ -196,6 +196,13 @@ class SamplingParams:
         if self.prompt_logprobs is not None and self.prompt_logprobs < 0:
             raise ValueError(f"prompt_logprobs must be non-negative, got "
                              f"{self.prompt_logprobs}.")
+        if self.seed is not None:
+            if self.seed < 0:
+                raise ValueError(
+                    f"seed must be non-negative, got {self.seed}.")
+            if self.best_of > 1:
+                raise ValueError("best_of must be 1 when using seed, "
+                                 f"got {self.best_of}.")
 
     def _verify_beam_search(self) -> None:
         if self.best_of == 1:

@@ -125,6 +125,47 @@ def test_sampler_all_random(seed: int, device: str):
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_sampler_all_random_seed(seed: int, device: str):
+    set_random_seed(seed)
+    torch.set_default_device(device)
+    batch_size = random.randint(1, 256)
+    input_tensor, fake_logits, sampler, model_runner = _prepare_test(
+        batch_size)
+
+    for i in range(batch_size):
+        fake_logits[i, i] = 1e2
+
+    seq_group_metadata_list = []
+    prompt_lens = []
+    for i in range(batch_size):
+        seq_group_metadata_list.append(
+            SequenceGroupMetadata(
+                request_id=f"test_{i}",
+                is_prompt=True,
+                seq_data={0: SequenceData([1, 2, 3])},
+                sampling_params=SamplingParams(
+                    temperature=1.0,
+                    seed=random.randint(0, 10000),
+                ),
+                block_tables={0: [1]},
+            ))
+        prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
+
+    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
+                                                     prompt_lens,
+                                                     subquery_lens=prompt_lens)
+    sampler_output = sampler(embedding=None,
+                             hidden_states=input_tensor,
+                             sampling_metadata=sampling_metadata)
+    for i, sequence_output in enumerate(sampler_output):
+        for nth_output in sequence_output.samples:
+            assert nth_output.output_token == i
+
+    del model_runner
+
+
+@pytest.mark.parametrize("seed", RANDOM_SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_sampler_all_beam(seed: int, device: str):
     set_random_seed(seed)
     torch.set_default_device(device)
@@ -175,7 +216,7 @@ def test_sampler_mixed(seed: int, device: str):
     prompt_lens = []
     for i in range(batch_size):
         n = 1
-        sampling_type = random.randint(0, 2)
+        sampling_type = random.randint(0, 3)
         if sampling_type == 0:
             sampling_params = SamplingParams(temperature=0)
         elif sampling_type == 1:
@@ -186,6 +227,14 @@ def test_sampler_mixed(seed: int, device: str):
                 top_k=random.randint(0, 10) or -1,
                 n=n,
                 presence_penalty=random.randint(0, 1),
+            )
+        elif sampling_type == 2:
+            sampling_params = SamplingParams(
+                temperature=random.random() + 0.1,
+                top_p=min(random.random() + 0.1, 1),
+                top_k=random.randint(0, 10) or -1,
+                presence_penalty=random.randint(0, 1),
+                seed=random.randint(0, 10000),
             )
         else:
             sampling_params = SamplingParams(temperature=0,
