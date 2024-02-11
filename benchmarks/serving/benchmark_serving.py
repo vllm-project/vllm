@@ -20,6 +20,7 @@ import asyncio
 import json
 import random
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from typing import AsyncGenerator, Dict, List, Tuple, Union
 
@@ -28,6 +29,22 @@ from transformers import PreTrainedTokenizerBase
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 from backend_request_func import ASYNC_REQUEST_FUNCS
+
+
+@dataclass
+class BenchmarkMetrics:
+    completed: int
+    total_input: int
+    total_output: int
+    request_throughput: float
+    input_throughput: float
+    output_throughput: float
+    mean_ttft_ms: float
+    median_ttft_ms: float
+    p99_ttft_ms: float
+    mean_tpot_ms: float
+    median_tpot_ms: float
+    p99_tpot_ms: float
 
 
 def sample_requests(
@@ -103,7 +120,7 @@ def calculate_metrics(
     outputs: Dict[str, Union[str, bool, float]],
     dur_s: float,
     tokenizer: PreTrainedTokenizerBase,
-) -> Tuple[int, int, int, float, float, float, float, float]:
+) -> BenchmarkMetrics:
     total_output = 0
     total_input = 0
     completed = 0
@@ -118,30 +135,21 @@ def calculate_metrics(
             ttfts.append(outputs[i]["ttft"])
             completed += 1
 
-    request_throughput = completed / dur_s
-    input_throughput = total_input / dur_s
-    output_throughput = total_output / dur_s
-    mean_ttft_ms = np.mean(ttfts) * 1000
-    median_ttft_ms = np.median(ttfts) * 1000
-    p99_ttft_ms = np.percentile(ttfts, 99) * 1000
-    mean_tpot_ms = np.mean(per_token_latencies) * 1000
-    median_tpot_ms = np.median(per_token_latencies) * 1000
-    p99_tpot_ms = np.percentile(per_token_latencies, 99) * 1000
+    metrics = BenchmarkMetrics()
+    metrics.completed = completed
+    metrics.total_input = total_input
+    metrics.total_output = total_output
+    metrics.request_throughput = completed / dur_s
+    metrics.input_throughput = total_input / dur_s
+    metrics.output_throughput = total_output / dur_s
+    metrics.mean_ttft_ms = np.mean(ttfts) * 1000
+    metrics.median_ttft_ms = np.median(ttfts) * 1000
+    metrics.p99_ttft_ms = np.percentile(ttfts, 99) * 1000
+    metrics.mean_tpot_ms = np.mean(per_token_latencies) * 1000
+    metrics.median_tpot_ms = np.median(per_token_latencies) * 1000
+    metrics.p99_tpot_ms = np.percentile(per_token_latencies, 99) * 1000
 
-    return (
-        completed,
-        total_input,
-        total_output,
-        request_throughput,
-        input_throughput,
-        output_throughput,
-        mean_ttft_ms,
-        median_ttft_ms,
-        p99_ttft_ms,
-        mean_tpot_ms,
-        median_tpot_ms,
-        p99_tpot_ms,
-    )
+    return metrics
 
 
 async def throughput_benchmark(
@@ -178,51 +186,44 @@ async def throughput_benchmark(
     outputs = await asyncio.gather(*tasks)
     benchmark_duration = time.perf_counter() - benchmark_start_time
 
-    (
-        completed,
-        total_input,
-        total_output,
-        request_throughput,
-        input_throughput,
-        output_throughput,
-        mean_ttft_ms,
-        median_ttft_ms,
-        p99_ttft_ms,
-        mean_tpot_ms,
-        median_tpot_ms,
-        p99_tpot_ms,
-    ) = calculate_metrics(
+    benchmark_metrics = calculate_metrics(
         input_requests, outputs, benchmark_duration, tokenizer
     )
 
-    print(f"Successful requests: {completed}")
+    print(f"Successful requests: {benchmark_metrics.completed}")
     print(f"Benchmark duration: {benchmark_duration:2f} s")
-    print(f"Total input tokens: {total_input}")
-    print(f"Total generated tokens: {total_output}")
-    print(f"Request throughput: {request_throughput:.2f} requests/s")
-    print(f"Input token throughput: {input_throughput:.2f} tokens/s")
-    print(f"Output token throughput: {output_throughput:.2f} tokens/s")
-    print(f"Mean TTFT: {mean_ttft_ms:.2f} ms")
-    print(f"Median TTFT: {median_ttft_ms:.2f} ms")
-    print(f"P99 TTFT: {p99_ttft_ms:.2f} ms")
-    print(f"Mean TPOT: {mean_tpot_ms:.2f} ms")
-    print(f"Median TPOT: {median_tpot_ms:.2f} ms")
-    print(f"P99 TPOT: {p99_tpot_ms:.2f} ms")
+    print(f"Total input tokens: {benchmark_metrics.total_input}")
+    print(f"Total generated tokens: {benchmark_metrics.total_output}")
+    print(
+        f"Request throughput: {benchmark_metrics.request_throughput:.2f} requests/s"
+    )
+    print(
+        f"Input token throughput: {benchmark_metrics.input_throughput:.2f} tokens/s"
+    )
+    print(
+        f"Output token throughput: {benchmark_metrics.output_throughput:.2f} tokens/s"
+    )
+    print(f"Mean TTFT: {benchmark_metrics.mean_ttft_ms:.2f} ms")
+    print(f"Median TTFT: {benchmark_metrics.median_ttft_ms:.2f} ms")
+    print(f"P99 TTFT: {benchmark_metrics.p99_ttft_ms:.2f} ms")
+    print(f"Mean TPOT: {benchmark_metrics.mean_tpot_ms:.2f} ms")
+    print(f"Median TPOT: {benchmark_metrics.median_tpot_ms:.2f} ms")
+    print(f"P99 TPOT: {benchmark_metrics.p99_tpot_ms:.2f} ms")
 
     result = {}
-    result["completed"] = completed
-    result["total_input"] = total_input
-    result["total_output"] = total_output
-    result["request_throughput"] = request_throughput
-    result["input_throughput"] = input_throughput
-    result["output_throughput"] = output_throughput
+    result["completed"] = benchmark_metrics.completed
+    result["total_input"] = benchmark_metrics.total_input
+    result["total_output"] = benchmark_metrics.total_output
+    result["request_throughput"] = benchmark_metrics.request_throughput
+    result["input_throughput"] = benchmark_metrics.input_throughput
+    result["output_throughput"] = benchmark_metrics.output_throughput
     result["duration"] = benchmark_duration
-    result["mean_ttft_ms"] = mean_ttft_ms
-    result["median_ttft_ms"] = median_ttft_ms
-    result["p99_ttft_ms"] = p99_ttft_ms
-    result["mean_tpot_ms"] = mean_tpot_ms
-    result["median_tpot_ms"] = median_tpot_ms
-    result["p99_tpot_ms"] = p99_tpot_ms
+    result["mean_ttft_ms"] = benchmark_metrics.mean_ttft_ms
+    result["median_ttft_ms"] = benchmark_metrics.median_ttft_ms
+    result["p99_ttft_ms"] = benchmark_metrics.p99_ttft_ms
+    result["mean_tpot_ms"] = benchmark_metrics.mean_tpot_ms
+    result["median_tpot_ms"] = benchmark_metrics.median_tpot_ms
+    result["p99_tpot_ms"] = benchmark_metrics.p99_tpot_ms
 
     return result
 
