@@ -115,10 +115,10 @@ elseif(NOT CMAKE_CUDA_COMPILER STREQUAL "NOTFOUND")
   # TODO: PTX stuff
   if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     # This indicates support for both real architectures (i.e, no ptx).
-    # TODO: punica not supported for less than 8.0
-    #    set(CMAKE_CUDA_ARCHITECTURES "70;75;80;86;89;90")
-    set(CMAKE_CUDA_ARCHITECTURES "80;86;89;90")
+    set(CMAKE_CUDA_ARCHITECTURES "70;75;80;86;89;90")
   endif()
+  # TODO: punica not supported for less than 8.0
+  set(CMAKE_CUDA_ARCHITECTURES "80;86;89;90")
 else()
   message(FATAL_ERROR "Can't find CUDA or HIP installation.")
 endif()
