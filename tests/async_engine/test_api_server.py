@@ -29,8 +29,13 @@ def api_server():
     script_path = Path(__file__).parent.joinpath(
         "api_server_async_engine.py").absolute()
     uvicorn_process = subprocess.Popen([
-        sys.executable, "-u",
-        str(script_path), "--model", "facebook/opt-125m"
+        sys.executable,
+        "-u",
+        str(script_path),
+        "--model",
+        "facebook/opt-125m",
+        "--host",
+        "127.0.0.1",
     ])
     yield
     uvicorn_process.terminate()
@@ -81,6 +86,9 @@ def test_api_server(api_server):
         pool.join()
 
         # check cancellation stats
+        # give it some times to update the stats
+        time.sleep(1)
+
         num_aborted_requests = requests.get(
             "http://localhost:8000/stats").json()["num_aborted_requests"]
         assert num_aborted_requests > 0
