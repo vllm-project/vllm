@@ -51,7 +51,7 @@ list(APPEND CMAKE_PREFIX_PATH ${TORCH_PATH})
 find_package(Python 3.8 REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(Torch 2.1.2 EXACT REQUIRED)
 append_torchlib_if_found(torch_python)
-find_package(MPI REQUIRED)
+find_package(MPI) # find_package(MPI REQUIRED)
 
 execute_process(
     COMMAND
