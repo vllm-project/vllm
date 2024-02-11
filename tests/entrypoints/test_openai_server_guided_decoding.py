@@ -10,6 +10,7 @@ import openai  # use the official client for correctness check
 
 import json
 import jsonschema
+import re
 
 MAX_SERVER_START_WAIT_S = 600  # wait for server to start for 60 seconds
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"  # any model with a chat template should work here
@@ -60,6 +61,10 @@ TEST_SCHEMA = {
         "work history"
     ]
 }
+# NOTE: outlines' underlying regex library (interegular) doesn't support
+# ^ or $ or \b, kinda annoying
+TEST_REGEX = r"((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.){3}" + \
+               "(25[0-5]|(2[0-4]|1\d|[1-9]|)\d)"
 
 pytestmark = pytest.mark.asyncio
 
@@ -105,7 +110,7 @@ class ServerRunner:
 
 @pytest.fixture(scope="session")
 def server():
-    ray.init()
+    ray.init(ignore_reinit_error=True)
     server_runner = ServerRunner.remote([
         "--model",
         MODEL_NAME,
@@ -133,21 +138,125 @@ async def test_guided_json_completion(server, client: openai.AsyncOpenAI):
     completion = await client.completions.create(
         model=MODEL_NAME,
         prompt=f"Give an example JSON for an employee profile that fits this schema: {TEST_SCHEMA}",
-        temperature=0.0,
+        n=3,
+        temperature=1.0,
+        max_tokens=500,
         extra_body=dict(
             guided_json=TEST_SCHEMA
         )
     )
 
     assert completion.id is not None
-    assert completion.choices is not None and len(completion.choices) == 1
-    assert completion.choices[0].text is not None
-    output_json = json.loads(completion.choices[0].text)
-    jsonschema.validate(instance=output_json, schema=TEST_SCHEMA)
+    assert completion.choices is not None and len(completion.choices) == 3
+    for i in range(3):
+        assert completion.choices[i].text is not None
+        output_json = json.loads(completion.choices[i].text)
+        jsonschema.validate(instance=output_json, schema=TEST_SCHEMA)
+
+
+async def test_guided_json_chat(server, client: openai.AsyncOpenAI):
+    messages = [{
+        "role": "system",
+        "content": "you are a helpful assistant"
+    }, {
+        "role": "user",
+        "content": "Give an example JSON for an employee profile that " + \
+                    f"fits this schema: {TEST_SCHEMA}"
+    }]
+    chat_completion = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        max_tokens=500,
+        extra_body=dict(
+            guided_json=TEST_SCHEMA
+        )
+    )
+    message = chat_completion.choices[0].message
+    assert message.content is not None
+    json1 = json.loads(message.content)
+    jsonschema.validate(instance=json1, schema=TEST_SCHEMA)
+
+    messages.append({"role": "assistant", "content": message.content})
+    messages.append({
+        "role": "user",
+        "content": "Give me another one with a different name and age"
+    })
+    chat_completion = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        max_tokens=500,
+        extra_body=dict(
+            guided_json=TEST_SCHEMA
+        )
+    )
+    message = chat_completion.choices[0].message
+    assert message.content is not None
+    json2 = json.loads(message.content)
+    jsonschema.validate(instance=json2, schema=TEST_SCHEMA)
+    assert json1["name"] != json2["name"]
+    assert json1["age"] != json2["age"]
+
+
+async def test_guided_regex_completion(server, client: openai.AsyncOpenAI):
+    completion = await client.completions.create(
+        model=MODEL_NAME,
+        prompt=f"Give an example IPv4 address with this regex: {TEST_REGEX}",
+        n=3,
+        temperature=1.0,
+        max_tokens=20,
+        extra_body=dict(
+            guided_regex=TEST_REGEX
+        )
+    )
+
+    assert completion.id is not None
+    assert completion.choices is not None and len(completion.choices) == 3
+    for i in range(3):
+        assert completion.choices[i].text is not None
+        assert re.fullmatch(TEST_REGEX, completion.choices[i].text) is not None
+
+
+async def test_guided_regex_chat(server, client: openai.AsyncOpenAI):
+    messages = [{
+        "role": "system",
+        "content": "you are a helpful assistant"
+    }, {
+        "role": "user",
+        "content": f"Give an example IP address with this regex: {TEST_REGEX}"
+    }]
+    chat_completion = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        max_tokens=20,
+        extra_body=dict(
+            guided_regex=TEST_REGEX
+        )
+    )
+    ip1 = chat_completion.choices[0].message.content
+    assert ip1 is not None
+    assert re.fullmatch(TEST_REGEX, ip1) is not None
+
+    messages.append({"role": "assistant", "content": ip1})
+    messages.append({
+        "role": "user",
+        "content": "Give me a different one"
+    })
+    chat_completion = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        max_tokens=20,
+        extra_body=dict(
+            guided_regex=TEST_REGEX
+        )
+    )
+    ip2 = chat_completion.choices[0].message.content
+    assert ip2 is not None
+    assert re.fullmatch(TEST_REGEX, ip2) is not None
+    assert ip1 != ip2
 
 
 async def test_guided_decoding_type_error(server, client: openai.AsyncOpenAI):
-    with pytest.raises(TypeError):
+    with pytest.raises(Exception):
         _ = await client.completions.create(
             model=MODEL_NAME,
             prompt="Give an example JSON that fits this schema: 42",
@@ -157,6 +266,15 @@ async def test_guided_decoding_type_error(server, client: openai.AsyncOpenAI):
             )
         )
 
+    with pytest.raises(Exception):
+        _ = await client.completions.create(
+            model=MODEL_NAME,
+            prompt="Give an example string that fits this regex: True",
+            temperature=0.0,
+            extra_body=dict(
+                guided_regex=True
+            )
+        )
 
 
 if __name__ == "__main__":

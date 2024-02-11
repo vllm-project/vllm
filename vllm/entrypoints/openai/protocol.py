@@ -80,7 +80,7 @@ class ChatCompletionRequest(BaseModel):
     min_p: Optional[float] = 0.0
     include_stop_str_in_output: Optional[bool] = False
     length_penalty: Optional[float] = 1.0
-    guided_json: Optional[dict] = None
+    guided_json: Optional[Union[str, dict, BaseModel]] = None
     guided_regex: Optional[str] = None
 
     def to_sampling_params(self) -> SamplingParams:
