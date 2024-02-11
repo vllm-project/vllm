@@ -117,8 +117,6 @@ elseif(NOT CMAKE_CUDA_COMPILER STREQUAL "NOTFOUND")
     # This indicates support for both real architectures (i.e, no ptx).
     set(CMAKE_CUDA_ARCHITECTURES "70;75;80;86;89;90")
   endif()
-  # TODO: punica not supported for less than 8.0
-  set(CMAKE_CUDA_ARCHITECTURES "80;86;89;90")
 else()
   message(FATAL_ERROR "Can't find CUDA or HIP installation.")
 endif()
@@ -172,6 +170,10 @@ function(define_module_target MOD_NAME MOD_SRC MOD_NVCC_FLAGS)
   target_link_libraries(${MOD_NAME} PRIVATE ${TORCH_LIBRARIES})
   install(TARGETS ${MOD_NAME} LIBRARY DESTINATION vllm)
 endfunction()
+
+# TODO: hacks punica not supported for less than 8.0
+set(CMAKE_CUDA_ARCHITECTURES "80;86;89;90")
+set(CUDA_ARCHITECTURES "80;86;89;90")
 
 define_module_target(_C "${VLLM_EXT_SRC}" "${NVCC_FLAGS}")
 define_module_target(_moe_C "${VLLM_MOE_EXT_SRC}" "${NVCC_FLAGS}")
