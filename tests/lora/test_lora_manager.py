@@ -18,16 +18,19 @@ from vllm.lora.worker_manager import (LRUCacheWorkerLoRAManager,
                                       WorkerLoRAManager)
 from vllm.model_executor.layers.linear import RowParallelLinear
 
+EMBEDDING_MODULES = {
+    "embed_tokens": "input_embeddings",
+    "lm_head": "output_embeddings",
+}
+
+EMBEDDING_PADDING_MODULES = ["lm_head"]
+
 
 def test_from_lora_tensors(sql_lora_files):
     tensors = load_file(
         os.path.join(sql_lora_files, "adapter_model.safetensors"))
     new_embeddings = load_file(
         os.path.join(sql_lora_files, "new_embeddings.safetensors"))
-    embedding_modules = {
-        "embed_tokens": "input_embeddings",
-        "lm_head": "output_embeddings",
-    }
     lora_model = LoRAModel.from_lora_tensors(
         1,
         8,
@@ -35,8 +38,8 @@ def test_from_lora_tensors(sql_lora_files):
         tensors,
         "cuda",
         embeddings=new_embeddings,
-        embedding_modules=embedding_modules,
-        embedding_padding_modules=["lm_head"])
+        embedding_modules=EMBEDDING_MODULES,
+        embedding_padding_modules=EMBEDDING_PADDING_MODULES)
     for module_name, lora in lora_model.loras.items():
         assert lora.module_name == module_name
         assert lora.rank == 8
@@ -47,11 +50,11 @@ def test_from_lora_tensors(sql_lora_files):
                 ), f"{lora.lora_a.shape=}, {lora.lora_b.shape=}"
         assert lora.lora_a.shape[1] == 8
         embeddings_module = next(
-            (k for k in embedding_modules if k in module_name), None)
+            (k for k in EMBEDDING_MODULES if k in module_name), None)
         if embeddings_module:
             assert torch.equal(
                 lora.embeddings_tensor,
-                new_embeddings[embedding_modules[embeddings_module]].to(
+                new_embeddings[EMBEDDING_MODULES[embeddings_module]].to(
                     device=lora.embeddings_tensor.device))
         else:
             assert lora.embeddings_tensor is None
@@ -297,10 +300,8 @@ def test_lru_cache_worker_lora_manager(llama_2_7b_model_extra_embeddings,
     lora_config = LoRAConfig(max_lora_rank=8, max_cpu_loras=4, max_loras=4)
     worker_lora_manager = LRUCacheWorkerLoRAManager(
         4, 2, llama_2_7b_model_extra_embeddings.unpadded_vocab_size -
-        lora_config.lora_extra_vocab_size, lora_config, torch.device("cuda"), {
-            "embed_tokens": "input_embeddings",
-            "lm_head": "output_embeddings",
-        }, ["lm_head"])
+        lora_config.lora_extra_vocab_size, lora_config, torch.device("cuda"),
+        EMBEDDING_MODULES, EMBEDDING_PADDING_MODULES)
     worker_lora_manager.create_lora_manager(llama_2_7b_model_extra_embeddings)
 
     mapping = LoRAMapping([], [])
@@ -373,10 +374,8 @@ def test_worker_lora_manager(llama_2_7b_model_extra_embeddings,
     lora_config = LoRAConfig(max_lora_rank=8, max_cpu_loras=4, max_loras=4)
     worker_lora_manager = WorkerLoRAManager(
         4, 2, llama_2_7b_model_extra_embeddings.unpadded_vocab_size -
-        lora_config.lora_extra_vocab_size, lora_config, torch.device("cuda"), {
-            "embed_tokens": "input_embeddings",
-            "lm_head": "output_embeddings",
-        }, ["lm_head"])
+        lora_config.lora_extra_vocab_size, lora_config, torch.device("cuda"),
+        EMBEDDING_MODULES, EMBEDDING_PADDING_MODULES)
     worker_lora_manager.create_lora_manager(llama_2_7b_model_extra_embeddings)
 
     mapping = LoRAMapping([], [])
