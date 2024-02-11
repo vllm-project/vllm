@@ -23,7 +23,7 @@ function (append_cmake_prefix_path PKG EXPR)
             " full error message:\n${PREFIX_PATH_ERR}")
   endif()
 
-  list(APPEND CMAKE_PREFIX_PATH ${SITE_PATH})
+  list(APPEND CMAKE_PREFIX_PATH ${PREFIX_PATH})
 endfunction()
 
 append_cmake_prefix_path("site" "site.getusersitepackages()")
