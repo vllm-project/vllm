@@ -34,7 +34,7 @@ from backend_request_func import (
     RequestFuncOutput,
 )
 
-from .. import common_metrics
+import common_metrics
 
 
 @dataclass
