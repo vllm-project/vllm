@@ -25,10 +25,12 @@ def get_guided_decoding_logits_processor(guided_spec: Union[str, dict, BaseModel
         return y
 
     if mode == GuidedDecodingMode.JSON:
-        assert isinstance(guided_spec, (str, dict, BaseModel)), "JSON schema error"
+        if not isinstance(guided_spec, (str, dict, BaseModel)):
+            raise TypeError("JSON schema must be str, dict, or BaseModel")
         return [JSONLogitsProcessor(guided_spec, dummy_llm())]
     elif mode == GuidedDecodingMode.REGEX:
-        assert isinstance(guided_spec, str), "Regex must be string"
+        if not isinstance(guided_spec, str):
+            raise TypeError("Regex must be string")
         return [RegexLogitsProcessor(guided_spec, dummy_llm())]
     else:
         return None
