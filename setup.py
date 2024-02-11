@@ -10,7 +10,6 @@ from setuptools import setup, find_packages, Extension
 from setuptools.command.build_ext import build_ext
 from shutil import which
 import torch
-# ROCM_HOME needed?
 from torch.utils.cpp_extension import CUDA_HOME
 
 ROOT_DIR = os.path.dirname(__file__)
@@ -18,11 +17,6 @@ ROOT_DIR = os.path.dirname(__file__)
 # vLLM only supports Linux platform
 assert sys.platform.startswith(
     "linux"), "vLLM only supports Linux platform (including WSL)."
-
-# If you are developing the C++ backend of vLLM, consider building vLLM with
-# `python setup.py develop` since it will give you incremental builds.
-# The downside is that this method is deprecated, see
-# https://github.com/pypa/setuptools/issues/917
 
 MAIN_CUDA_VERSION = "12.1"
 
@@ -301,7 +295,7 @@ def get_requirements() -> List[str]:
 ext_modules = []
 
 if _is_cuda():
-#    ext_modules.append(CMakeExtension(name="vllm._moe_C"))
+    ext_modules.append(CMakeExtension(name="vllm._moe_C"))
 
     if _install_punica():
         ext_modules.append(CMakeExtension(name="vllm._punica_C"))
