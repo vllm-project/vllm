@@ -5,7 +5,7 @@ from hipbsolidxgemm import hipb_create_extension,hipb_mm
 import os
 import yaml
 import pandas as pd
-#from vllm import custom_ops
+from vllm import custom_ops
 
 
 class TunedGemm:
@@ -29,7 +29,7 @@ class TunedGemm:
     def apply_custom(self,ds):
         M,N,K = ds['M'],ds['N'],ds['K']
         #apply custom matvec (only for f16 dtype)
-        return ds
+        #return ds
         if N==1:
             ds1 = ds.copy()
             ds1['libtype'] = 'custom'
@@ -58,7 +58,14 @@ class TunedGemm:
     def query_sol(self,m,n,k):
         return self.solids.get((m,n,k),(0,0))
     def mm(self,inp,weights):
-        inp_view=inp.view(-1,inp.size(-1))
+        # F.Linear can take a 3 dimensional input. vllm uses this for linear units.
+        # However, sampler will use torch.matmul with 2 dimensions only
+        if inp.dim() == 3:
+            inp_view=inp.view(-1,inp.size(-1))
+            batched = True
+        else:
+            inp_view = inp
+            batched = False
         #print(f'>>>inp_view {inp_view.shape}')
         if self.extensions_created == False:
             rocb_create_extension()
@@ -86,8 +93,11 @@ class TunedGemm:
             #print(">>> found rocblas")
             out = rocb_mm(inp_view,weights.t(),solidx)
         else:
-            #print('>>>Tgemm Default',inp.shape,weights.shape,soltype,solidx)
+            print('>>>Tgemm Default',inp.shape,weights.shape,soltype,solidx)
             out = F.linear(inp,weights)
-        return out.view(inp.shape[0], inp.shape[1], weights.shape[0])
+        if batched:
+            return out.view(inp.shape[0], inp.shape[1], weights.shape[0])
+        else:
+            return out
 
 tgemm = TunedGemm()
