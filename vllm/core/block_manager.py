@@ -102,7 +102,6 @@ class BlockAllocator:
                 block_hash, prefix_len)
         block = self.table[block_hash]
         block.ref_count += 1
-        # print(f"REFCOUNT ON ALLOCTION: {block}")
         return block
 
     def free(self, block: PhysicalTokenBlock) -> None:
@@ -114,7 +113,11 @@ class BlockAllocator:
     def get_num_free_blocks(self) -> int:
         return self.num_blocks - self.current_num_blocks
 
-    def update_hash(self, block_hash: int, block: PhysicalTokenBlock) -> None:
+    def contains_block(self, block_hash: int) -> bool:
+        return block_hash in self.table
+
+    def update_hash(self, block_hash: int, block: PhysicalTokenBlock):
+        assert (not self.contains_block(block_hash))
         old_hash = block.block_hash
         del self.table[old_hash]
         self.table[block_hash] = block
@@ -204,8 +207,6 @@ class BlockSpaceManager:
             else:
                 block = self.gpu_allocator.allocate(seq.hash(logical_idx),
                                                     seq_group.get_prefix_len())
-            # Set the reference counts of the token blocks.
-            # block.ref_count = seq_group.num_seqs()
             block_table.append(block)
 
         # Assign the block table for each sequence.
@@ -219,12 +220,19 @@ class BlockSpaceManager:
         num_seqs = seq_group.num_seqs(status=SequenceStatus.RUNNING)
         return num_seqs <= num_free_gpu_blocks
 
-    def _promote_last_block(self, seq: Sequence, block: PhysicalTokenBlock):
+    def _promote_last_block(
+            self, seq: Sequence,
+            last_block: PhysicalTokenBlock) -> PhysicalTokenBlock:
         # Compute a new hash for the block so that it can be shared by other Sequences
         new_hash = seq.hash(len(seq.logical_token_blocks) - 1)
 
-        # TODO: What if the hash already exists in the table? If it does, we can free and use that block?
-        self.gpu_allocator.update_hash(new_hash, block)
+        # if new_hash is already in the cached table, then free last_block and return the cached version
+        if self.gpu_allocator.contains_block(new_hash):
+            self.gpu_allocator.free(last_block)
+            return self.gpu_allocator.allocate(new_hash)
+        else:
+            self.gpu_allocator.update_hash(new_hash, last_block)
+            return last_block
 
     def _is_last_block_full(self, seq: Sequence) -> bool:
         return (len(seq.data.get_token_ids())) % seq.block_size == 0
@@ -232,21 +240,19 @@ class BlockSpaceManager:
     def _is_last_block(self, seq: Sequence, index: int) -> bool:
         return index == len(seq.logical_token_blocks) - 1
 
-    def _is_block_full(self, seq: Sequence, index: int) -> bool:
-        return not self._is_last_block(seq,
-                                       index) or self._is_last_block_full(seq)
-
-    def _maybe_promote_last_block(self, seq: Sequence,
-                                  last_block: PhysicalTokenBlock) -> None:
+    def _maybe_promote_last_block(
+            self, seq: Sequence,
+            last_block: PhysicalTokenBlock) -> PhysicalTokenBlock:
         if self._is_last_block_full(seq):
-            self._promote_last_block(seq, last_block)
+            return self._promote_last_block(seq, last_block)
+        else:
+            return last_block
 
     def _allocate_last_physical_block(self, seq: Sequence,
                                       prefix_len: int) -> PhysicalTokenBlock:
         block_hash: Optional[int] = None
-        logical_idx = len(seq.logical_token_blocks) - 1
-        if (self._is_block_full(seq, logical_idx)):
-            block_hash = seq.hash(logical_idx)
+        if (self._is_last_block_full(seq)):
+            block_hash = seq.hash(len(seq.logical_token_blocks) - 1)
         new_block = self.gpu_allocator.allocate(block_hash,
                                                 prefix_len=prefix_len)
         if block_hash is None:
@@ -281,7 +287,8 @@ class BlockSpaceManager:
         if last_block.ref_count == 1:
             # Not shared with other sequences. Appendable.
             # If the last block is now complete, promote it to a full block so that it can be shared
-            self._maybe_promote_last_block(seq, last_block)
+            new_block = self._maybe_promote_last_block(seq, last_block)
+            block_table[-1] = new_block
             return None
         else:
             # The last block is shared with other sequences.
