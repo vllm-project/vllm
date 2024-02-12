@@ -90,16 +90,16 @@ def test_llama_lora(sql_lora_files, model, tp_size):
 
 
     print("lora adapter created")
-    assert do_sample(model, llm, sql_lora_files, lora_id=0) == expected_no_lora_output
+    assert do_sample_peek(model, llm, sql_lora_files, lora_id=0) == expected_no_lora_output
 
     print("lora 1")
-    assert do_sample(model, llm, sql_lora_files, lora_id=1) == expected_lora_output
+    assert do_sample_peek(model, llm, sql_lora_files, lora_id=1) == expected_lora_output
 
     print("no lora")
-    assert do_sample(model, llm, sql_lora_files, lora_id=0) == expected_no_lora_output
+    assert do_sample_peek(model, llm, sql_lora_files, lora_id=0) == expected_no_lora_output
 
     print("lora 2")
-    assert do_sample(model, llm, sql_lora_files, lora_id=2) == expected_lora_output
+    assert do_sample_peek(model, llm, sql_lora_files, lora_id=2) == expected_lora_output
 
     print("removing lora")
 
