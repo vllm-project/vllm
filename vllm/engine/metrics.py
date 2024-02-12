@@ -81,7 +81,7 @@ histogram_e2e_request_latency = Histogram(
     buckets=[1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0])
 
 histogram_max_tokens = Histogram(
-    "vllm:request_max_tokens",
+    "vllm:request_params_max_tokens",
     "Histogram of the max_tokens request parameter.",
     buckets=[
         1, 2, 5, 10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000,
@@ -89,7 +89,7 @@ histogram_max_tokens = Histogram(
     ],
 )
 histogram_request_n = Histogram(
-    "vllm:request_n",
+    "vllm:request_params_n",
     "Histogram of the n request parameter.",
     buckets=[1, 2, 5, 10, 20],
 )
