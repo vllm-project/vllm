@@ -242,7 +242,8 @@ class BlockSpaceManager:
         new_block = self.gpu_allocator.allocate(block_hash,
                                                 prefix_len=prefix_len)
 
-        assert (new_block.ref_count == 1)
+        if block_hash is None:
+            assert (new_block.ref_count == 1)
         return new_block
 
     def append_slot(self, seq: Sequence,
