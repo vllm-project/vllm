@@ -226,18 +226,18 @@ class BlockSpaceManager:
         # TODO: What if the hash already exists in the table? If it does, we can free and use that block?
         self.gpu_allocator.update_hash(new_hash, block)
 
-    def _should_promote_last_block(self, seq: Sequence) -> bool:
+    def _is_last_block_full(self, seq: Sequence) -> bool:
         return (len(seq.data.get_token_ids())) % seq.block_size == 0
 
     def _maybe_promote_last_block(self, seq: Sequence,
                                   last_block: PhysicalTokenBlock) -> None:
-        if self._should_promote_last_block(seq):
+        if self._is_last_block_full(seq):
             self._promote_last_block(seq, last_block)
 
     def _allocate_last_physical_block(self, seq: Sequence,
                                       prefix_len: int) -> PhysicalTokenBlock:
         block_hash: Optional[int] = None
-        if (self._should_promote_last_block(seq)):
+        if (self._is_last_block_full(seq)):
             block_hash = seq.hash(len(seq.logical_token_blocks) - 1)
         new_block = self.gpu_allocator.allocate(block_hash,
                                                 prefix_len=prefix_len)
