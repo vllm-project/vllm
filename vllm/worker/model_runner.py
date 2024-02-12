@@ -644,6 +644,12 @@ class ModelRunner:
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.list_loras()
 
+    def cleanup(self) -> None:
+        torch.cuda.synchronize()
+        self.graph_runners.clear()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
     @torch.inference_mode()
     def capture_model(self, kv_caches: List[KVCache]) -> None:
         assert not self.model_config.enforce_eager
