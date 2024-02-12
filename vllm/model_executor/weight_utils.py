@@ -261,6 +261,22 @@ def hf_model_weights_iterator(
             torch.cuda.empty_cache()
 
 
+def kv_cache_scales_iterator(filename: str) -> Iterator[Tuple[int, torch.Tensor]]:
+    """
+    A simple utility to read in KV cache scaling factors that have been
+    previously serialized to disk. Used by the CacheEngine to populate its
+    caches with the appropriate scaling factors. The first object of the pair
+    is the cache (and model) layer corresponding to the scaling factor, and the 
+    second is the scaling factor itself. Keep this function in sync with the output 
+    of 3rdparty/quantization/extract_scales.py and with the scaling factor structure
+    assumed to hold in worker/cache_engine.py
+    """
+    with open(filename) as f:
+        layer_scale_factor_map = json.load(f, parse_int=int, parse_constant=float)
+        for layer_idx, scale_factor in layer_scale_factor_map.items():
+            yield int(layer_idx), float(scale_factor)
+
+
 def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
     """convert PySafeSlice object from safetensors to torch.Tensor
 
