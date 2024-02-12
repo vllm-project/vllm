@@ -160,6 +160,7 @@ class SamplingParams:
                 self.top_k = -1
                 self.min_p = 0.0
                 self._verify_greedy_sampling()
+        self._generator = None
 
     def _verify_args(self) -> None:
         if self.n < 1:
@@ -196,13 +197,6 @@ class SamplingParams:
         if self.prompt_logprobs is not None and self.prompt_logprobs < 0:
             raise ValueError(f"prompt_logprobs must be non-negative, got "
                              f"{self.prompt_logprobs}.")
-        if self.seed is not None:
-            if self.seed < 0:
-                raise ValueError(
-                    f"seed must be non-negative, got {self.seed}.")
-            if self.best_of > 1:
-                raise ValueError("best_of must be 1 when using seed, "
-                                 f"got {self.best_of}.")
 
     def _verify_beam_search(self) -> None:
         if self.best_of == 1:
@@ -255,6 +249,7 @@ class SamplingParams:
             f"top_p={self.top_p}, "
             f"top_k={self.top_k}, "
             f"min_p={self.min_p}, "
+            f"seed={self.seed}, "
             f"use_beam_search={self.use_beam_search}, "
             f"length_penalty={self.length_penalty}, "
             f"early_stopping={self.early_stopping}, "

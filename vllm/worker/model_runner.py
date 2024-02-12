@@ -66,10 +66,6 @@ class ModelRunner:
         self.graph_runners: Dict[int, CUDAGraphRunner] = {}
         self.graph_memory_pool = None  # Set during graph capture.
 
-        # request_id -> Generator for seeded random sampling,
-        # used only in driver worker
-        self.generators: Dict[str, torch.Generator] = {}
-
         self.max_context_len_to_capture = (
             self.model_config.max_context_len_to_capture
             if self.model_config is not None else 0)
@@ -114,10 +110,6 @@ class ModelRunner:
                           1) // block_size
         self.graph_block_tables = np.zeros(
             (max(_BATCH_SIZES_TO_CAPTURE), max_num_blocks), dtype=np.int32)
-
-    def free_finished_request_state(self, finished_request_ids: List[str]):
-        for request_id in finished_request_ids:
-            self.generators.pop(request_id, None)
 
     def _prepare_prompt(
         self,
@@ -406,7 +398,6 @@ class ModelRunner:
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             seq_ids = list(seq_group_metadata.seq_data.keys())
             sampling_params = seq_group_metadata.sampling_params
-            seed = seq_group_metadata.sampling_params.seed
             seq_groups.append((seq_ids, sampling_params))
 
             if seq_group_metadata.is_prompt:
@@ -430,11 +421,9 @@ class ModelRunner:
                                               subquery_len - 1)
                 selected_token_start_idx += max_subquery_len
 
-                if seed is not None:
-                    generator = torch.Generator(
-                        device="cuda").manual_seed(seed)
-                    self.generators[seq_group_metadata.request_id] = generator
-                    generators.append(generator)
+                if sampling_params.seed is not None:
+                    sampling_params._generator = torch.Generator(
+                        device="cuda").manual_seed(sampling_params.seed)
             else:
                 num_seqs = len(seq_ids)
                 selected_token_indices.extend(
@@ -448,10 +437,8 @@ class ModelRunner:
                               categorized_sample_indices_start_idx + num_seqs))
                 categorized_sample_indices_start_idx += num_seqs
 
-                if seed is not None:
-                    generator = self.generators.get(
-                        seq_group_metadata.request_id)
-                    generators.append(generator)
+            if sampling_params.seed is not None:
+                generators.append(sampling_params._generator)
 
         selected_token_indices = _async_h2d(selected_token_indices,
                                             dtype=torch.long,

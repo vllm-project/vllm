@@ -360,7 +360,7 @@ def _multinomial(
     else:
         sample_idx = 0
         for (seq_ids, _), generator in zip(seq_groups, generators):
-            next_sample_idx = sample_idx + len(seq_ids)
+            next_sample_idx = sample_idx + len(seq_ids) * num_samples
             q[sample_idx:next_sample_idx].exponential_(generator=generator)
             sample_idx = next_sample_idx
     return probs.div_(q).argmax(dim=1).view(-1, num_samples)
@@ -380,6 +380,7 @@ def _sample(
 
     sample_results_dict: Dict[int, Tuple[List[int], List[int]]] = {}
     sample_metadata = {}
+    multinomial_samples = {}
 
     # Counterintiutively, having two loops here is actually faster.
     # The first loop can run without waiting on GPU<->CPU sync.
@@ -405,8 +406,8 @@ def _sample(
                 "seq_groups": seq_groups,
                 "generators": sampling_metadata.generators,
             }
-            multinomial_samples = _multinomial(probs[sample_indices],
-                                               max_best_of, **seeded_args)
+            multinomial_samples[sampling_type] = _multinomial(
+                probs[sample_indices], max_best_of, **seeded_args)
         elif sampling_type == SamplingType.BEAM:
             beam_search_logprobs = logprobs[sample_indices]
         else:
@@ -423,7 +424,7 @@ def _sample(
             sample_results = _greedy_sample(seq_groups, greedy_samples)
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
             sample_results = _random_sample(seq_groups, is_prompts,
-                                            multinomial_samples)
+                                            multinomial_samples[sampling_type])
         elif sampling_type == SamplingType.BEAM:
             sample_results = _beam_search_sample(seq_groups, is_prompts,
                                                  sampling_metadata.seq_data,
