@@ -22,7 +22,7 @@ import random
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import AsyncGenerator, Dict, List, Tuple, Union
+from typing import AsyncGenerator, List, Tuple
 
 import numpy as np
 from tqdm.asyncio import tqdm
@@ -168,13 +168,15 @@ async def benchmark(
     best_of: int,
     use_beam_search: bool,
     request_rate: float,
+    disable_tqdm: bool,
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS.get(backend)
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
-    pbar = tqdm(total=len(input_requests))
+    pbar = None if disable_tqdm else tqdm(total=len(input_requests))
+
     print(f"Traffic request rate: {request_rate}")
 
     benchmark_start_time = time.perf_counter()
@@ -267,6 +269,7 @@ def main(args: argparse.Namespace):
             best_of=args.best_of,
             use_beam_search=args.use_beam_search,
             request_rate=args.request_rate,
+            disable_tqdm=args.disable_tqdm,
         )
     )
 
@@ -372,6 +375,11 @@ if __name__ == "__main__":
         "--trust-remote-code",
         action="store_true",
         help="Trust remote code from huggingface",
+    )
+    parser.add_argument(
+        "--disable-tqdm",
+        action="store_true",
+        help="Specify to disbale tqdm progress bar.",
     )
     parser.add_argument(
         "--save-result",

@@ -2,7 +2,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from typing import Dict, Union
+from typing import Optional
 
 import aiohttp
 from tqdm.asyncio import tqdm
@@ -32,7 +32,7 @@ class RequestFuncOutput:
 
 async def async_request_tgi(
     request_func_input: RequestFuncInput,
-    pbar: tqdm,
+    pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith("generate_stream")
@@ -72,13 +72,14 @@ async def async_request_tgi(
         except (aiohttp.ClientOSError, aiohttp.ServerDisconnectedError):
             output.success = False
 
-        pbar.update(1)
+        if pbar:
+            pbar.update(1)
         return output
 
 
 async def async_request_vllm(
     request_func_input: RequestFuncInput,
-    pbar: tqdm,
+    pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith("generate")
@@ -112,7 +113,7 @@ async def async_request_vllm(
                     # When streaming, '\0' is appended to the end of the response.
                     body = data.decode("utf-8").strip("\0")
                     output.generated_text = json.loads(body)["text"][0][
-                        len(request_func_input.prompt) :
+                        len(request_func_input.prompt):
                     ]
                     output.success = True
 
@@ -121,13 +122,14 @@ async def async_request_vllm(
         except (aiohttp.ClientOSError, aiohttp.ServerDisconnectedError):
             output.success = False
 
-        pbar.update(1)
+        if pbar:
+            pbar.update(1)
         return output
 
 
 async def async_request_trt_llm(
     request_func_input: RequestFuncInput,
-    pbar: tqdm,
+    pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith("generate_stream")
@@ -166,13 +168,14 @@ async def async_request_trt_llm(
         except (aiohttp.ClientOSError, aiohttp.ServerDisconnectedError):
             output.success = False
 
-        pbar.update(1)
+        if pbar:
+            pbar.update(1)
         return output
 
 
 async def async_request_deepspeed_mii(
     request_func_input: RequestFuncInput,
-    pbar: tqdm,
+    pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         assert request_func_input.best_of == 1
@@ -208,13 +211,14 @@ async def async_request_deepspeed_mii(
         except (aiohttp.ClientOSError, aiohttp.ServerDisconnectedError):
             output.success = False
 
-        pbar.update(1)
+        if pbar:
+            pbar.update(1)
         return output
 
 
 async def async_request_openai_completions(
     request_func_input: RequestFuncInput,
-    pbar: tqdm,
+    pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith("v1/completions")
@@ -268,7 +272,8 @@ async def async_request_openai_completions(
         except (aiohttp.ClientOSError, aiohttp.ServerDisconnectedError):
             output.success = False
 
-    pbar.update(1)
+    if pbar:
+        pbar.update(1)
     return output
 
 
