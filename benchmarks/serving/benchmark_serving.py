@@ -198,7 +198,10 @@ async def benchmark(
             )
         )
     outputs = await asyncio.gather(*tasks)
-    pbar.close()
+
+    if not disable_tqdm:
+        pbar.close()
+
     benchmark_duration = time.perf_counter() - benchmark_start_time
 
     metrics = calculate_metrics(
