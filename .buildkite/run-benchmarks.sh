@@ -8,13 +8,14 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
 
-# run python benchmarks and upload the result to buildkite
+# run python-based benchmarks and upload the result to buildkite
 python3 benchmarks/benchmark_latency.py 2>&1 | tee benchmark_latency.txt
 bench_latency_exit_code=$?
 
 python3 benchmarks/benchmark_throughput.py --input-len 256 --output-len 256 2>&1 | tee benchmark_throughput.txt
 bench_throughput_exit_code=$?
 
+# run server-based benchmarks and upload the result to buildkite
 python3 -m vllm.entrypoints.openai.api_server --model meta-llama/Llama-2-7b-chat-hf &
 server_pid=$!
 wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
@@ -40,11 +41,12 @@ sed -n '$p' benchmark_latency.txt >> benchmark_results.md # last line
 echo "### Throughput Benchmarks" >> benchmark_results.md
 sed -n '1p' benchmark_throughput.txt >> benchmark_results.md # first line
 echo "" >> benchmark_results.md
-sed -n '$p' benchmark_throughput.txt >> benchmark_results.md
+sed -n '$p' benchmark_throughput.txt >> benchmark_results.md # last line
+
 echo "### Serving Benchmarks" >> benchmark_results.md
-sed -n '1p' benchmark_serving.txt >> benchmark_results.md
+sed -n '1p' benchmark_serving.txt >> benchmark_results.md # first line
 echo "" >> benchmark_results.md
-tail -n 13 benchmark_serving.txt >> benchmark_results.md
+tail -n 13 benchmark_serving.txt >> benchmark_results.md # last 13 lines
 
 # upload the results to buildkite
 /workspace/buildkite-agent annotate --style "info" --context "benchmark-results" < benchmark_results.md
