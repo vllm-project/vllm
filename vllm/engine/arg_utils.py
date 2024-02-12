@@ -18,6 +18,7 @@ class EngineArgs:
     load_format: str = 'auto'
     dtype: str = 'auto'
     kv_cache_dtype: str = 'auto'
+    kv_cache_scales: str = None
     seed: int = 0
     max_model_len: Optional[int] = None
     worker_use_ray: bool = False
@@ -131,6 +132,15 @@ class EngineArgs:
             help='Data type for kv cache storage. If "auto", will use model data type. '
             'FP8_E5M2 (without scaling) is only supported on cuda version greater than 11.8. '
             'On ROCm (AMD GPU), FP8_E4M3 is instead supported for common inference criteria.')
+        parser.add_argument(
+            '--kv-cache-scales',
+            type=str,
+            default=None,
+            help='Path to the JSON file containing the KV cache scaling factors. '
+            'This should generally be supplied when KV cache dtype is FP8. Otherwise '
+            'the KV cache scaling factors default to 1.0, which will likely cause '
+            'accuracy issues. Note FP8 is not supported when cuda version is '
+            'lower than 11.8.')
         parser.add_argument('--max-model-len',
                             type=int,
                             default=None,
@@ -279,6 +289,7 @@ class EngineArgs:
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
+                                   self.kv_cache_scales,
                                    model_config.get_sliding_window())
         parallel_config = ParallelConfig(self.pipeline_parallel_size,
                                          self.tensor_parallel_size,

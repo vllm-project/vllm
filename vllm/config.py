@@ -285,6 +285,7 @@ class CacheConfig:
         gpu_memory_utilization: float,
         swap_space: int,
         cache_dtype: str,
+        kv_cache_scales: Optional[str] = None,
         sliding_window: Optional[int] = None,
     ) -> None:
         self.block_size = block_size
@@ -292,6 +293,7 @@ class CacheConfig:
         self.swap_space_bytes = swap_space * _GB
         self.cache_dtype = cache_dtype
         self.sliding_window = sliding_window
+        self.kv_cache_scales = kv_cache_scales
         self._verify_args()
         self._verify_cache_dtype()
 
@@ -309,6 +311,11 @@ class CacheConfig:
         if self.cache_dtype == "auto":
             pass
         elif self.cache_dtype == "fp8":
+            if self.kv_cache_scales is None:
+                logger.warn(f"Using cache dtype {self.cache_dtype} but no "
+                            "scaling factors provided. Defaulting to 1.0 "
+                            "scales, be warned that this might lead to "
+                            "inaccurate results!")
             if not is_hip():
                 nvcc_cuda_version = get_nvcc_cuda_version()
                 if nvcc_cuda_version < Version("11.8"):

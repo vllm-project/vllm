@@ -65,6 +65,7 @@ class PagedAttention(nn.Module):
         value: torch.Tensor,
         key_cache: Optional[torch.Tensor],
         value_cache: Optional[torch.Tensor],
+        kv_cache_scaling_factor: Optional[torch.Tensor],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
         """PagedAttention forward pass.
@@ -86,12 +87,17 @@ class PagedAttention(nn.Module):
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
-
+        
         # Reshape the keys and values and store them in the cache.
         # If key_cache and value_cache are not provided, the new key and value
         # vectors will not be cached. This happens during the initial memory
         # profiling run.
         if key_cache is not None and value_cache is not None:
+            if kv_cache_scaling_factor is not None:
+                # Scale the key and value scaling factors for quantization
+                # by cache ops
+                key = key.div_(kv_cache_scaling_factor)
+                value = value.div_(kv_cache_scaling_factor)
             cache_ops.reshape_and_cache(
                 key,
                 value,
