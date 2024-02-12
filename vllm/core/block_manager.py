@@ -336,10 +336,6 @@ class BlockSpaceManager:
 
     def swap_in(self, seq_group: SequenceGroup) -> Dict[int, int]:
         # CPU block -> GPU block.
-        if seq_group.prefix is not None:
-            # make sure to swap in the prefix first
-            assert seq_group.prefix.allocated and seq_group.prefix.computed
-
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
             new_block_table: BlockTable = []
@@ -383,12 +379,6 @@ class BlockSpaceManager:
 
             for i in range(len(block_table)):
                 gpu_block = block_table[i]
-                if (seq_group.prefix is not None
-                        and gpu_block in seq_group.prefix.block_table):
-                    # NOTE: We do not swap out the prefix blocks for now.
-                    self.gpu_allocator.free(gpu_block)
-                    continue
-
                 if gpu_block in mapping:
                     cpu_block = mapping[gpu_block]
                     cpu_block.ref_count += 1
