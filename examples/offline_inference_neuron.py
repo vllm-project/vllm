@@ -18,7 +18,10 @@ llm = LLM(model="openlm-research/open_llama_3b",
           # support in transformers-neuronx.
           # TODO(liangfu): Support paged-attention in transformers-neuronx.
           max_model_len=128,
-          block_size=128)
+          block_size=128,
+          # The device can be automatically detected when AWS Neuron SDK is installed.
+          # The device argument can be either unspecified for automated detection, or explicitly assigned.
+          device="neuron")
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.
 outputs = llm.generate(prompts, sampling_params)
