@@ -162,7 +162,6 @@ class BlockSpaceManager:
                                             num_cpu_blocks)
         # Mapping: seq_id -> BlockTable.
         self.block_tables: Dict[int, BlockTable] = {}
-        self.partial_block_table: Dict[int, PhysicalTokenBlock] = {}
 
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
         # FIXME(woosuk): Here we assume that all sequences in the group share
@@ -201,20 +200,13 @@ class BlockSpaceManager:
             else:
                 block = self.gpu_allocator.allocate(seq.hash(logical_idx),
                                                     seq_group.get_prefix_len())
-                if logical_idx * self.block_size + self.block_size > len(
-                        seq.data.get_token_ids()):
-                    self.partial_block_table[seq.seq_id] = block
             # Set the reference counts of the token blocks.
             # block.ref_count = seq_group.num_seqs()
             block_table.append(block)
 
         # Assign the block table for each sequence.
-        first_id = seq.seq_id
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             self.block_tables[seq.seq_id] = block_table.copy()
-            if first_id in self.partial_block_table and first_id != seq.seq_id:
-                self.partial_block_table[
-                    seq.seq_id] = self.partial_block_table[first_id]
 
     def can_append_slot(self, seq_group: SequenceGroup) -> bool:
         # Simple heuristic: If there is at least one free block
@@ -223,23 +215,13 @@ class BlockSpaceManager:
         num_seqs = seq_group.num_seqs(status=SequenceStatus.RUNNING)
         return num_seqs <= num_free_gpu_blocks
 
-    def replace_partial_block(self, seq: Sequence, block: PhysicalTokenBlock,
-                              old_block: PhysicalTokenBlock):
-        # If there's something already in the partial block table, delete it
-        block_hash: int = seq.seq_id
-        if block_hash in self.partial_block_table:
-            assert self.partial_block_table[block_hash] == old_block
-            del self.partial_block_table[block_hash]
-
-        self.partial_block_table[block_hash] = block
-
-    def promote_partial_block(self, seq: Sequence, block: PhysicalTokenBlock):
-        # Delete the block from the partial table, but don't decrement the ref count
-        del self.partial_block_table[seq.seq_id]
-
+    def promote_last_block(self, seq: Sequence, block: PhysicalTokenBlock):
         # Compute a new hash for the block so that it can be shared by other Sequences
         new_hash = seq.hash(len(seq.logical_token_blocks) - 1)
         self.gpu_allocator.update_hash(new_hash, block)
+
+    def should_promote_last_block(self, seq: Sequence) -> bool:
+        return (len(seq.data.get_token_ids())) % seq.block_size == 0
 
     def append_slot(self, seq: Sequence,
                     prefix_len: int) -> Optional[Tuple[int, int]]:
@@ -256,10 +238,8 @@ class BlockSpaceManager:
             else:
                 # The sequence has a new logical block.
                 # Allocate a new physical block.
-                assert (seq.seq_id not in self.partial_block_table)
                 new_block = self.gpu_allocator.allocate(
                     monotonic(), prefix_len)
-                self.partial_block_table[seq.seq_id] = new_block
                 assert (new_block.ref_count == 1)
                 block_table.append(new_block)
                 return None
@@ -267,24 +247,20 @@ class BlockSpaceManager:
         # We want to append the token to the last physical block.
         last_block = block_table[-1]
         assert last_block.device == Device.GPU
+        should_promote_last_block = self.should_promote_last_block(seq)
         if last_block.ref_count == 1:
             # Not shared with other sequences. Appendable.
             # If the last block is now complete, promote it to a full block so that it can be shared
-            should_promote_partial_block = (len(
-                seq.data.get_token_ids())) % seq.block_size == 0
-            if should_promote_partial_block:
-                self.promote_partial_block(seq, last_block)
+            if (should_promote_last_block):
+                self.promote_last_block(seq, last_block)
             return None
         else:
             # The last block is shared with other sequences.
             # Copy on Write: Allocate a new block and copy the tokens.
             new_block = self.gpu_allocator.allocate(monotonic(), prefix_len)
-            should_promote_partial_block = (len(
-                seq.data.get_token_ids())) % seq.block_size == 0
-            if not should_promote_partial_block:
-                self.replace_partial_block(seq, new_block, last_block)
-            else:
-                del self.partial_block_table[seq.seq_id]
+
+            if (should_promote_last_block):
+                self.promote_last_block(seq, new_block)
             block_table[-1] = new_block
             assert (new_block.ref_count == 1)
             self.gpu_allocator.free(last_block)
@@ -297,9 +273,6 @@ class BlockSpaceManager:
         self.block_tables[child_seq.seq_id] = src_block_table.copy()
         for block in src_block_table:
             block.ref_count += 1
-        if parent_seq.seq_id in self.partial_block_table:
-            self.partial_block_table[
-                child_seq.seq_id] = self.partial_block_table[parent_seq.seq_id]
 
     def _get_physical_blocks(
             self, seq_group: SequenceGroup) -> List[PhysicalTokenBlock]:
