@@ -82,6 +82,7 @@ Documentation
    models/supported_models
    models/adding_model
    models/engine_args
+   models/lora
 
 .. toctree::
    :maxdepth: 1
