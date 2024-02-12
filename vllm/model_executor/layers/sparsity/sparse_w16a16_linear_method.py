@@ -51,19 +51,10 @@ class SparseW16A16LinearMethod(LinearMethodBase):
         sparse_weight = weights["weight"]
 
         if self.storage_format_cls == SparseSemiStructuredStorageFormat:
-            if bias is not None:
-                output = F.linear(x, sparse_weight, bias)
-            else:
-                output = F.linear(x, sparse_weight, bias=None)
-
+            output = F.linear(x, sparse_weight, bias)
             return output
         else:
-
             # Standard matrix multiply
             # Uncompress to dense
-            if bias is not None:
-                output = F.linear(x, sparse_weight.to_dense(), bias)
-            else:
-                output = F.linear(x, sparse_weight.to_dense())
-
+            output = F.linear(x, sparse_weight.to_dense(), bias)
             return output
