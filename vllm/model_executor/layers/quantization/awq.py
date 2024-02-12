@@ -145,8 +145,8 @@ class AWQLinearMethod(LinearMethodBase):
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         qweight = weights["qweight"]
-        qzeros = weights["qzeros"]
         scales = weights["scales"]
+        qzeros = weights["qzeros"]
         pack_factor = self.quant_config.pack_factor
         out_shape = (x.shape[:-1] + (qweight.shape[-1] * pack_factor, ))
         reshaped_x = x.reshape(-1, x.shape[-1])
