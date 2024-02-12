@@ -230,12 +230,12 @@ class BlockSpaceManager:
         return (len(seq.data.get_token_ids())) % seq.block_size == 0
 
     def _maybe_promote_last_block(self, seq: Sequence,
-                                 last_block: PhysicalTokenBlock) -> None:
+                                  last_block: PhysicalTokenBlock) -> None:
         if self._should_promote_last_block(seq):
             self._promote_last_block(seq, last_block)
 
     def _allocate_last_physical_block(self, seq: Sequence,
-                                     prefix_len: int) -> PhysicalTokenBlock:
+                                      prefix_len: int) -> PhysicalTokenBlock:
         block_hash: Optional[int] = None
         if (self._should_promote_last_block(seq)):
             block_hash = seq.hash(len(seq.logical_token_blocks) - 1)
@@ -263,7 +263,7 @@ class BlockSpaceManager:
             else:
                 # The sequence has a new logical block.
                 # Allocate a new physical block.
-                new_block = self.allocate_last_physical_block(seq, prefix_len)
+                new_block = self._allocate_last_physical_block(seq, prefix_len)
                 block_table.append(new_block)
                 return None
 
@@ -273,12 +273,12 @@ class BlockSpaceManager:
         if last_block.ref_count == 1:
             # Not shared with other sequences. Appendable.
             # If the last block is now complete, promote it to a full block so that it can be shared
-            self.maybe_promote_last_block(seq, last_block)
+            self._maybe_promote_last_block(seq, last_block)
             return None
         else:
             # The last block is shared with other sequences.
             # Copy on Write: Allocate a new block and copy the tokens.
-            new_block = self.allocate_last_physical_block(seq, prefix_len)
+            new_block = self._allocate_last_physical_block(seq, prefix_len)
 
             block_table[-1] = new_block
             self.gpu_allocator.free(last_block)
