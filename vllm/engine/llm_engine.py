@@ -970,6 +970,9 @@ class LLMEngine:
     def list_loras(self) -> List[int]:
         return self._run_workers("list_loras")
 
+    def cleanup(self) -> None:
+        return self._run_workers("cleanup")
+
     def _run_workers(
         self,
         method: str,
