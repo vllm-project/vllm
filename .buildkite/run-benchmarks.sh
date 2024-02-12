@@ -16,7 +16,7 @@ MODEL="facebook/opt-125m"
 # start the server in a separate process (need to switch dir to launch vllm server as a module)
 nohup sh -c "cd benchmarks && python3 -m vllm.entrypoints.api_server --model $MODEL --swap-space 16 --disable-log-requests" &
 
-wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+sh -c "wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json"
 
 echo "Waiting for vLLM server to be ready..."
 while :; do

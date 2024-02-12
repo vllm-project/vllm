@@ -37,6 +37,5 @@ steps:
 - label: Benchmarks
   working_dir: "/vllm-workspace/.buildkite"
   commands:
-  - sudo apt install wget
   - pip install aiohttp
   - bash run-benchmarks.sh
