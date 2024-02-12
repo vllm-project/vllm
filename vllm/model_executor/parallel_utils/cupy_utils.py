@@ -4,6 +4,7 @@ We use CuPy all-reduce instead of torch.distributed.all_reduce when capturing
 CUDA graphs, because torch.distributed.all_reduce causes errors when capturing
 CUDA graphs.
 
+NOTE: We use CuPy 12.3 since CuPy 13.0 does not support Python 3.8.
 TODO: Remove this file when torch.distributed.all_reduce is fixed.
 """
 import contextlib
