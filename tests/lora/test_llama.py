@@ -21,8 +21,8 @@ MODELS: List[ModelWithQuantization] = [
                           quantization="AWQ"),
     ModelWithQuantization(model_path="TheBloke/Llama-2-7B-GPTQ",
                           quantization="GPTQ"),
-    ModelWithQuantization(model_path="squeeze-ai-lab/sq-llama-2-7b-w4-s0",
-                          quantization="SQUEEZELLM"),
+    # ModelWithQuantization(model_path="squeeze-ai-lab/sq-llama-2-7b-w4-s0",
+    #                       quantization="SQUEEZELLM"),
 ]
 
 
@@ -52,8 +52,12 @@ def do_sample(llm, lora_path: str, lora_id: int):
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     return generated_texts
 
+def do_sample_peek(model, llm, lora_path: str, lora_id: int):
+    out = do_sample(llm, lora_path, lora_id)
+    print(model.model_path, repr(out))
+    return out
 
-@pytest.mark.parametrize("model", [MODELS[0]])
+@pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tp_size", [1])
 def test_llama_lora(sql_lora_files, model, tp_size):
     # Cannot use as it will initialize torch.cuda too early...
@@ -84,17 +88,18 @@ def test_llama_lora(sql_lora_files, model, tp_size):
         "  SELECT womens_doubles FROM table_28138035_4 WHERE mens_singles = 'Werner Schlager' "
     ]
 
+
     print("lora adapter created")
-    assert do_sample(llm, sql_lora_files, lora_id=0) == expected_no_lora_output
+    assert do_sample(model, llm, sql_lora_files, lora_id=0) == expected_no_lora_output
 
     print("lora 1")
-    assert do_sample(llm, sql_lora_files, lora_id=1) == expected_lora_output
+    assert do_sample(model, llm, sql_lora_files, lora_id=1) == expected_lora_output
 
     print("no lora")
-    assert do_sample(llm, sql_lora_files, lora_id=0) == expected_no_lora_output
+    assert do_sample(model, llm, sql_lora_files, lora_id=0) == expected_no_lora_output
 
     print("lora 2")
-    assert do_sample(llm, sql_lora_files, lora_id=2) == expected_lora_output
+    assert do_sample(model, llm, sql_lora_files, lora_id=2) == expected_lora_output
 
     print("removing lora")
 
