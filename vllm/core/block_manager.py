@@ -92,7 +92,11 @@ class BlockAllocator:
         self.current_num_blocks += 1
         return block
 
-    def allocate(self, block_hash: int, prefix_len: int) -> PhysicalTokenBlock:
+    def allocate(self,
+                 block_hash: Optional[int] = None,
+                 prefix_len: int = 0) -> PhysicalTokenBlock:
+        if block_hash is None:
+            block_hash = monotonic()
         if block_hash not in self.table:
             self.table[block_hash] = self.allocate_block(
                 block_hash, prefix_len)
@@ -215,13 +219,31 @@ class BlockSpaceManager:
         num_seqs = seq_group.num_seqs(status=SequenceStatus.RUNNING)
         return num_seqs <= num_free_gpu_blocks
 
-    def promote_last_block(self, seq: Sequence, block: PhysicalTokenBlock):
+    def _promote_last_block(self, seq: Sequence, block: PhysicalTokenBlock):
         # Compute a new hash for the block so that it can be shared by other Sequences
         new_hash = seq.hash(len(seq.logical_token_blocks) - 1)
+
+        # TODO: What if the hash already exists in the table? If it does, we can free and use that block?
         self.gpu_allocator.update_hash(new_hash, block)
 
-    def should_promote_last_block(self, seq: Sequence) -> bool:
+    def _should_promote_last_block(self, seq: Sequence) -> bool:
         return (len(seq.data.get_token_ids())) % seq.block_size == 0
+
+    def _maybe_promote_last_block(self, seq: Sequence,
+                                 last_block: PhysicalTokenBlock) -> None:
+        if self._should_promote_last_block(seq):
+            self._promote_last_block(seq, last_block)
+
+    def _allocate_last_physical_block(self, seq: Sequence,
+                                     prefix_len: int) -> PhysicalTokenBlock:
+        block_hash: Optional[int] = None
+        if (self._should_promote_last_block(seq)):
+            block_hash = seq.hash(len(seq.logical_token_blocks) - 1)
+        new_block = self.gpu_allocator.allocate(block_hash,
+                                                prefix_len=prefix_len)
+
+        assert (new_block.ref_count == 1)
+        return new_block
 
     def append_slot(self, seq: Sequence,
                     prefix_len: int) -> Optional[Tuple[int, int]]:
@@ -230,6 +252,9 @@ class BlockSpaceManager:
         block_table = self.block_tables[seq.seq_id]
         # If we need to allocate a new physical block
         if len(block_table) < len(logical_blocks):
+            # Currently this code only supports adding one physical block
+            assert len(block_table) == len(logical_blocks) - 1
+
             if (self.block_sliding_window
                     and len(block_table) >= self.block_sliding_window):
                 # re-use a block
@@ -238,31 +263,24 @@ class BlockSpaceManager:
             else:
                 # The sequence has a new logical block.
                 # Allocate a new physical block.
-                new_block = self.gpu_allocator.allocate(
-                    monotonic(), prefix_len)
-                assert (new_block.ref_count == 1)
+                new_block = self.allocate_last_physical_block(seq, prefix_len)
                 block_table.append(new_block)
                 return None
 
         # We want to append the token to the last physical block.
         last_block = block_table[-1]
         assert last_block.device == Device.GPU
-        should_promote_last_block = self.should_promote_last_block(seq)
         if last_block.ref_count == 1:
             # Not shared with other sequences. Appendable.
             # If the last block is now complete, promote it to a full block so that it can be shared
-            if (should_promote_last_block):
-                self.promote_last_block(seq, last_block)
+            self.maybe_promote_last_block(seq, last_block)
             return None
         else:
             # The last block is shared with other sequences.
             # Copy on Write: Allocate a new block and copy the tokens.
-            new_block = self.gpu_allocator.allocate(monotonic(), prefix_len)
+            new_block = self.allocate_last_physical_block(seq, prefix_len)
 
-            if (should_promote_last_block):
-                self.promote_last_block(seq, new_block)
             block_table[-1] = new_block
-            assert (new_block.ref_count == 1)
             self.gpu_allocator.free(last_block)
             return last_block.block_number, new_block.block_number
 
