@@ -10,8 +10,7 @@ from magic_wand import (
 )
 
 class SemiStructuredSparseW16A16Config(SparsityConfig):
-    """Config class for SemiStructuredSparseW16A16.
-    """
+    """Config class for SemiStructuredSparseW16A16."""
 
     def __init__(self) -> None:
         pass
