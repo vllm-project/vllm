@@ -25,16 +25,16 @@ from datetime import datetime
 from typing import AsyncGenerator, Dict, List, Tuple, Union
 
 import numpy as np
+from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
+import common_metrics
 from backend_request_func import (
     ASYNC_REQUEST_FUNCS,
     RequestFuncInput,
     RequestFuncOutput,
 )
-
-import common_metrics
 
 
 @dataclass
@@ -159,7 +159,7 @@ def calculate_metrics(
     return metrics
 
 
-async def throughput_benchmark(
+async def benchmark(
     backend: str,
     api_url: str,
     model_id: str,
@@ -174,6 +174,7 @@ async def throughput_benchmark(
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
+    pbar = tqdm(total=len(input_requests))
     print(f"Traffic request rate: {request_rate}")
 
     benchmark_start_time = time.perf_counter()
@@ -189,8 +190,13 @@ async def throughput_benchmark(
             best_of=best_of,
             use_beam_search=use_beam_search,
         )
-        tasks.append(asyncio.create_task(request_func(request_func_input)))
+        tasks.append(
+            asyncio.create_task(
+                request_func(request_func_input=request_func_input, pbar=pbar)
+            )
+        )
     outputs = await asyncio.gather(*tasks)
+    pbar.close()
     benchmark_duration = time.perf_counter() - benchmark_start_time
 
     metrics = calculate_metrics(
@@ -252,7 +258,7 @@ def main(args: argparse.Namespace):
     input_requests = sample_requests(args.dataset, args.num_prompts, tokenizer)
 
     benchmark_result = asyncio.run(
-        throughput_benchmark(
+        benchmark(
             backend=backend,
             api_url=api_url,
             model_id=model_id,
@@ -314,7 +320,7 @@ if __name__ == "__main__":
         "--base-url",
         type=str,
         default=None,
-        help="Server or API base url if not using host and port.",
+        help="Server or API base url if not using http host and port.",
     )
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
