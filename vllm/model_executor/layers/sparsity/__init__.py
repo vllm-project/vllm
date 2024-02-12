@@ -6,7 +6,7 @@ from vllm.model_executor.layers.sparsity.semi_structured_sparse_w16a16 import Se
 
 _SPARSITY_CONFIG_REGISTRY = {
     "sparse_w16a16": SparseW16A16Config,
-    "semi_structured_sparse_w16a16": SemiStructuredSparseW16A16Config
+    "semi_structured_sparse_w16a16": SemiStructuredSparseW16A16Config,
 }
 
 
