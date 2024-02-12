@@ -241,30 +241,17 @@ class BlockSpaceManager:
         if self._is_last_block_full(seq):
             self._promote_last_block(seq, last_block)
 
-    def _allocate_physical_block(self,
-                                 seq: Sequence,
-                                 index: int,
-                                 prefix_len: int,
-                                 use_gpu: bool = True) -> PhysicalTokenBlock:
+    def _allocate_last_physical_block(self, seq: Sequence,
+                                      prefix_len: int) -> PhysicalTokenBlock:
         block_hash: Optional[int] = None
-        if (self._is_block_full(seq, index)):
-            block_hash = seq.hash(index)
-        if use_gpu:
-            new_block = self.gpu_allocator.allocate(block_hash,
-                                                    prefix_len=prefix_len)
-        else:
-            new_block = self.cpu_allocator.allocate(block_hash,
-                                                    prefix_len=prefix_len)
-
+        logical_idx = len(seq.logical_token_blocks) - 1
+        if (self._is_block_full(seq, logical_idx)):
+            block_hash = seq.hash(logical_idx)
+        new_block = self.gpu_allocator.allocate(block_hash,
+                                                prefix_len=prefix_len)
         if block_hash is None:
             assert (new_block.ref_count == 1)
         return new_block
-
-    def _allocate_last_physical_block(self, seq: Sequence,
-                                      prefix_len: int) -> PhysicalTokenBlock:
-        return self._allocate_physical_block(seq,
-                                             len(seq.logical_token_blocks) - 1,
-                                             prefix_len)
 
     def append_slot(self, seq: Sequence,
                     prefix_len: int) -> Optional[Tuple[int, int]]:
@@ -345,15 +332,13 @@ class BlockSpaceManager:
                     new_block_table.append(block)
                     block.ref_count += 1
 
-            # Assumption that len(block_table) == len(logical_blocks)
-            for i in range(len(block_table)):
-                cpu_block = block_table[i]
+            for cpu_block in block_table:
                 if cpu_block in mapping:
                     gpu_block = mapping[cpu_block]
                     gpu_block.ref_count += 1
                 else:
-                    gpu_block = self._allocate_physical_block(
-                        seq, i, seq_group.get_prefix_len())
+                    gpu_block = self.gpu_allocator.allocate(
+                        cpu_block.block_hash, cpu_block.prefix_len)
                     mapping[cpu_block] = gpu_block
                 new_block_table.append(gpu_block)
                 # Free the CPU block swapped in to GPU.
@@ -377,14 +362,13 @@ class BlockSpaceManager:
             new_block_table: BlockTable = []
             block_table = self.block_tables[seq.seq_id]
 
-            for i in range(len(block_table)):
-                gpu_block = block_table[i]
+            for gpu_block in block_table:
                 if gpu_block in mapping:
                     cpu_block = mapping[gpu_block]
                     cpu_block.ref_count += 1
                 else:
-                    cpu_block = self._allocate_physical_block(
-                        seq, i, seq_group.get_prefix_len(), use_gpu=False)
+                    cpu_block = self.cpu_allocator.allocate(
+                        gpu_block.block_hash, gpu_block.prefix_len)
                     mapping[gpu_block] = cpu_block
                 new_block_table.append(cpu_block)
                 # Free the GPU block swapped out to CPU.
