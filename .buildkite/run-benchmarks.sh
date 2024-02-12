@@ -6,7 +6,7 @@ set -o pipefail
 # cd into parent directory of this file
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-(wget && curl) || (apt-get update && apt-get install -y wget curl)
+(which wget && which curl) || (apt-get update && apt-get install -y wget curl)
 
 # run python benchmarks and upload the result to buildkite
 python3 benchmarks/benchmark_latency.py 2>&1 | tee benchmark_latency.txt
