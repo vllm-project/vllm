@@ -76,14 +76,17 @@ foreach(OPT
   )
   list(REMOVE_ITEM PUNICA_NVCC_FLAGS ${OPT})
 endforeach()
-#string(REPLACE "  " " " PUNICA_NVCC_FLAGS ${PUNICA_NVCC_FLAGS})
 
 # remove gencode flags added by pytorch
 list(FILTER CUDA_NVCC_FLAGS EXCLUDE REGEX "-gencode")
 list(FILTER CUDA_NVCC_FLAGS EXCLUDE REGEX "arch=compute.*")
+#list(FILTER CMAKE_CUDA_FLAGS EXCLUDE REGEX "-gencode")
+#list(FILTER CMAKE_CUDA_FLAGS EXCLUDE REGEX "arch=compute.*")
+string(REGEX REPLACE "-gencode arch=[^ ]+ *" "" CMAKE_CUDA_FLAGS ${CMAKE_CUDA_FLAGS})
 
 
 message("torch nvcc: ${CUDA_NVCC_FLAGS}")
+message("torch cuda_flags: ${CMAKE_CUDA_FLAGS}")
 message("nvcc: ${NVCC_FLAGS}")
 message("punica nvcc: ${PUNICA_NVCC_FLAGS}")
 
@@ -93,7 +96,7 @@ message("punica nvcc: ${PUNICA_NVCC_FLAGS}")
 # https://cliutils.gitlab.io/modern-cmake/chapters/packages/CUDA.html
 include(CheckLanguage)
 check_language(HIP)
-#check_language(CUDA)
+#check_language(CUDA)  # picked up by torch
 
 if(NOT CMAKE_HIP_COMPILER STREQUAL "NOTFOUND")
   enable_language(HIP)
@@ -185,3 +188,9 @@ endfunction()
 define_module_target(_C "${VLLM_EXT_SRC}" "${NVCC_FLAGS}" "${VLLM_CUDA_ARCHES}")
 define_module_target(_moe_C "${VLLM_MOE_EXT_SRC}" "${NVCC_FLAGS}" "${VLLM_CUDA_ARCHES}")
 define_module_target(_punica_C "${VLLM_PUNICA_EXT_SRC}" "${PUNICA_NVCC_FLAGS}" "${VLLM_PUNICA_CUDA_ARCHES}")
+
+#get_cmake_property(_variableNames VARIABLES)
+#list (SORT _variableNames)
+#foreach (_variableName ${_variableNames})
+#    message(STATUS "${_variableName}=${${_variableName}}")
+#endforeach()
