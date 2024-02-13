@@ -33,7 +33,6 @@ class AbstractWorkerLoRAManager(ABC):
     def create_lora_manager(
         self,
         model: torch.nn.Module,
-        target_modules: Optional[Union[str, List[str]]] = None,
     ) -> Any:
         ...
 
@@ -96,14 +95,11 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
     def create_lora_manager(
         self,
         model: torch.nn.Module,
-        target_modules: Optional[Union[str, List[str]]] = None,
     ) -> Any:
         lora_manager = create_lora_manager(
             model,
             max_num_seqs=self.max_num_seqs,
             max_num_batched_tokens=self.max_num_batched_tokens,
-            target_modules=target_modules
-            if target_modules else model.supported_lora_modules,
             vocab_size=self.vocab_size,
             lora_config=self.lora_config,
             lora_manager_cls=self._lora_manager_cls,
@@ -202,11 +198,10 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
     def create_lora_manager(
         self,
         model: torch.nn.Module,
-        target_modules: Optional[Union[str, List[str]]] = None,
+        supported_lora_modules: Optional[Union[str, List[str]]] = None,
     ) -> Any:
         lora_manager = create_lora_manager(
             model,
-            target_modules=target_modules,
             lora_manager_cls=self._lora_manager_cls,
             max_num_seqs=self.max_num_seqs,
             vocab_size=self.vocab_size,

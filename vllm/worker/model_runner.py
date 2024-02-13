@@ -83,8 +83,8 @@ class ModelRunner:
 
         if self.lora_config:
             assert hasattr(
-                self.model, "supports_lora"
-            ) and self.model.supports_lora, "Model does not support LoRA"
+                self.model, "supported_lora_modules"
+            ) and self.model.supported_lora_modules, "Model does not support LoRA"
             assert hasattr(self.model, "embedding_modules") and hasattr(
                 self.model, "embedding_padding_modules"
             ), "Model does not have embedding_modules/embedding_padding_modules"

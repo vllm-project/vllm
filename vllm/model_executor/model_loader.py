@@ -66,7 +66,7 @@ def get_model(model_config: ModelConfig,
         # Create a model instance.
         # The weights will be initialized as empty tensors.
         with torch.device(device_config.device):
-            if getattr(model_class, "supports_lora", False):
+            if getattr(model_class, "supported_lora_modules", False):
                 model = model_class(model_config.hf_config, linear_method,
                                     lora_config)
             elif lora_config:

@@ -250,8 +250,6 @@ class LoRAModelManager:
         max_num_batched_tokens: int,
         vocab_size: int,
         lora_config: LoRAConfig,
-        supported_lora_modules: Optional[List[str]] = None,
-        packed_modules_mapping: Optional[Dict[str, List[str]]] = None,
     ):
         """Create a LoRAModelManager and adapter for a given model.
 
@@ -263,13 +261,6 @@ class LoRAModelManager:
                 in a single batch.
             vocab_size: the vocab size of the model.
             lora_config: the LoRA configuration.
-            supported_lora_modules: the target modules patterns to be adapted.
-                Support both single module name and a list of module names.
-            packed_modules_mapping: the mapping for packed modules. vLLM
-                packs some modules into one module, e.g., qkv_proj
-                is packed of q_proj, k_proj, and v_proj. These modules
-                have a single layer in the original model, but they are split
-                into multiple layers in the adapted model.
         """
         self.lora_config = lora_config
         self.max_num_seqs = max_num_seqs
@@ -567,12 +558,9 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
         max_num_batched_tokens: int,
         vocab_size: int,
         lora_config: LoRAConfig,
-        supported_lora_modules: Optional[Union[str, List[str]]] = None,
-        packed_modules_mapping: Optional[Dict[str, List[str]]] = None,
     ):
         super().__init__(model, max_num_seqs, max_num_batched_tokens,
-                         vocab_size, lora_config, supported_lora_modules,
-                         packed_modules_mapping)
+                         vocab_size, lora_config)
         self._registered_loras: LoRALRUCache = LoRALRUCache(
             self.capacity, self.deactivate_lora)
         self._active_loras: LoRALRUCache = LoRALRUCache(
@@ -618,12 +606,10 @@ def create_lora_manager(
         max_num_batched_tokens: int,
         vocab_size: int,
         lora_config: LoRAConfig,
-        target_modules: Optional[Union[str, List[str]]] = None,
-        packed_modules_mapping: Optional[Dict[str, List[str]]] = None,
         lora_manager_cls: Type[LoRAModelManager] = LoRAModelManager,
         **kwargs) -> LoRAModelManager:
     """Create a LoRA adapter for a given model."""
-    if not getattr(model, "supports_lora", False):
+    if not getattr(model, "supported_lora_modules", False):
         raise ValueError(f"Model {type(model)} is not supported for LoRA.")
     lora_manager = lora_manager_cls(
         model=model,
@@ -631,9 +617,5 @@ def create_lora_manager(
         max_num_batched_tokens=max_num_batched_tokens,
         vocab_size=vocab_size,
         lora_config=lora_config,
-        supported_lora_modules=target_modules
-        if target_modules else model.supported_lora_modules,
-        packed_modules_mapping=packed_modules_mapping
-        if packed_modules_mapping else model.packed_modules_mapping,
         **kwargs)
     return lora_manager
