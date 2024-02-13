@@ -24,8 +24,6 @@
 from typing import List, Optional, Tuple
 
 import torch
-import torch.nn.functional as F
-
 from torch import nn
 from transformers import MixtralConfig
 
@@ -70,13 +68,14 @@ class MixtralMoE(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         params_dtype: Optional[torch.dtype] = None,
+        tp_size: Optional[int] = None,
     ):
         super().__init__()
-        tp_size = get_tensor_model_parallel_world_size()
+        self.tp_size = tp_size or get_tensor_model_parallel_world_size()
         self.num_total_experts = num_experts
         self.top_k = top_k
         self.hidden_size = hidden_size
-        self.intermediate_size = intermediate_size // tp_size
+        self.intermediate_size = intermediate_size // self.tp_size
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -127,22 +126,17 @@ class MixtralMoE(nn.Module):
         hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (batch * sequence_length, n_experts)
         router_logits, _ = self.gate(hidden_states)
-
-        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
-        routing_weights, selected_experts = torch.topk(routing_weights,
-                                                       self.top_k,
-                                                       dim=-1)
-        routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
-
         final_hidden_states = fused_moe(hidden_states,
                                         self.ws,
                                         self.w2s,
-                                        routing_weights,
-                                        selected_experts,
+                                        router_logits,
+                                        self.top_k,
+                                        renormalize=True,
                                         inplace=True)
 
-        final_hidden_states = tensor_model_parallel_all_reduce(
-            final_hidden_states)
+        if self.tp_size > 1:
+            final_hidden_states = tensor_model_parallel_all_reduce(
+                final_hidden_states)
 
         return final_hidden_states.view(batch_size, sequence_length,
                                         hidden_size)
