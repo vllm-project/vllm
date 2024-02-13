@@ -3,24 +3,22 @@ import os
 
 import pytest
 
-from test_models_snapshot import MODELS, DTYPE, MAX_TOKENS
-
-snapshot_path = "./snapshot.json"
+from test_models_snapshot import MODELS, DTYPE, MAX_TOKENS, SNAPSHOT_PATH
 
 
 def update_snapshot(model, dtype, max_tokens, prompt, hf_output_str):
     key = f"{model}-{dtype}-{max_tokens}"
 
-    if not os.path.exists(snapshot_path):
-        with open(snapshot_path, "w") as f:
+    if not os.path.exists(SNAPSHOT_PATH):
+        with open(SNAPSHOT_PATH, "w") as f:
             f.write("{}")
-    with open(snapshot_path) as f:
+    with open(SNAPSHOT_PATH) as f:
         snapshot = json.load(f)
 
     snapshot.setdefault(key, {})
     snapshot[key][prompt] = hf_output_str
 
-    with open(snapshot_path, "w") as f:
+    with open(SNAPSHOT_PATH, "w") as f:
         json.dump(snapshot, f, indent=2, sort_keys=True)
 
 

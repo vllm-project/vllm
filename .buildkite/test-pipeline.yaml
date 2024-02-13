@@ -22,14 +22,14 @@ steps:
 - label: Entrypoints Test
   command: pytest -v -s entrypoints
 
-- label: Kernels Test
-  command: pytest -v -s kernels
-  soft_fail: true
+- label: Kernels Test %N/%t
+  command: pytest -v -s kernels --shard-id=${BUILDKITE_PARALLEL_JOB} --num-shards=${BUILDKITE_PARALLEL_JOB_COUNT}
+  parallelism: 4
 
-- label: Models Test
+- label: Model Snapshot Test
+  working_dir: "/vllm-workspace/tests/models/snapshot-tests"
   commands:
-    - pytest -v -s models --forked
-  soft_fail: true
+    - pytest -v -s test_model_snapshot --forked
 
 - label: Prefix Caching Test
   commands:
