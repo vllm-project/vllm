@@ -5,14 +5,10 @@ from transformers import AutoConfig, PretrainedConfig
 from vllm.transformers_utils.configs import *
 
 _CONFIG_REGISTRY = {
-    "aquila": AquilaConfig,
-    "baichuan": BaiChuanConfig,
     "chatglm": ChatGLMConfig,
     "mpt": MPTConfig,
-    "qwen": QWenConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
-    "yi": YiConfig,
 }
 
 

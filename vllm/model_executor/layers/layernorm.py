@@ -7,6 +7,31 @@ import torch.nn as nn
 from vllm._C import ops
 
 
+class LayerNorm(nn.LayerNorm):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-6,
+    ) -> None:
+        super().__init__(hidden_size, eps=eps)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """normalization."""
+        if residual is not None:
+            x = x + residual
+            residual = x
+        x = super().forward(x)
+        if residual is None:
+            return x
+        else:
+            return x, residual
+
+
 class RMSNorm(nn.Module):
     """Root mean square normalization.
 
