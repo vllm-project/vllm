@@ -196,7 +196,6 @@ class BlockSpaceManager:
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
 
         # Allocate new physical token blocks that will store the prompt tokens.
-
         num_prompt_blocks = len(seq.logical_token_blocks)
 
         block_table: BlockTable = []
@@ -221,8 +220,10 @@ class BlockSpaceManager:
         return num_seqs <= num_free_gpu_blocks
 
     def _promote_last_block(
-            self, seq: Sequence,
-            last_block: PhysicalTokenBlock) -> PhysicalTokenBlock:
+        self,
+        seq: Sequence,
+        last_block: PhysicalTokenBlock,
+    ) -> PhysicalTokenBlock:
         # Compute a new hash for the block so that it can be shared by other Sequences
         new_hash = seq.hash(len(seq.logical_token_blocks) - 1)
 
@@ -234,22 +235,34 @@ class BlockSpaceManager:
             self.gpu_allocator.update_hash(new_hash, last_block)
             return last_block
 
-    def _is_last_block_full(self, seq: Sequence) -> bool:
+    def _is_last_block_full(
+        self,
+        seq: Sequence,
+    ) -> bool:
         return (len(seq.data.get_token_ids())) % seq.block_size == 0
 
-    def _is_last_block(self, seq: Sequence, index: int) -> bool:
+    def _is_last_block(
+        self,
+        seq: Sequence,
+        index: int,
+    ) -> bool:
         return index == len(seq.logical_token_blocks) - 1
 
     def _maybe_promote_last_block(
-            self, seq: Sequence,
-            last_block: PhysicalTokenBlock) -> PhysicalTokenBlock:
+        self,
+        seq: Sequence,
+        last_block: PhysicalTokenBlock,
+    ) -> PhysicalTokenBlock:
         if self._is_last_block_full(seq):
             return self._promote_last_block(seq, last_block)
         else:
             return last_block
 
-    def _allocate_last_physical_block(self, seq: Sequence,
-                                      prefix_len: int) -> PhysicalTokenBlock:
+    def _allocate_last_physical_block(
+        self,
+        seq: Sequence,
+        prefix_len: int,
+    ) -> PhysicalTokenBlock:
         block_hash: Optional[int] = None
         if (self._is_last_block_full(seq)):
             block_hash = seq.hash(len(seq.logical_token_blocks) - 1)
@@ -259,8 +272,11 @@ class BlockSpaceManager:
             assert (new_block.ref_count == 1)
         return new_block
 
-    def append_slot(self, seq: Sequence,
-                    prefix_len: int) -> Optional[Tuple[int, int]]:
+    def append_slot(
+        self,
+        seq: Sequence,
+        prefix_len: int,
+    ) -> Optional[Tuple[int, int]]:
         """Allocate a physical slot for a new token."""
         logical_blocks = seq.logical_token_blocks
         block_table = self.block_tables[seq.seq_id]
@@ -418,8 +434,11 @@ class BlockSpaceManager:
     def get_num_free_cpu_blocks(self) -> int:
         return self.cpu_allocator.get_num_free_blocks()
 
-    def access_all_blocks_in_seq(self, seq: Sequence,
-                                 access_time: float) -> None:
+    def access_all_blocks_in_seq(
+        self,
+        seq: Sequence,
+        access_time: float,
+    ) -> None:
         block_table = self.block_tables[seq.seq_id]
         for block in block_table:
             block.last_accessed = access_time

@@ -400,8 +400,11 @@ class Scheduler:
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             seq.status = SequenceStatus.RUNNING
 
-    def _append_slot(self, seq_group: SequenceGroup,
-                     blocks_to_copy: Dict[int, List[int]]) -> None:
+    def _append_slot(
+        self,
+        seq_group: SequenceGroup,
+        blocks_to_copy: Dict[int, List[int]],
+    ) -> None:
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             ret = self.block_manager.append_slot(seq,
                                                  seq_group.get_prefix_len())
@@ -441,7 +444,10 @@ class Scheduler:
         else:
             raise AssertionError("Invalid preemption mode.")
 
-    def _preempt_by_recompute(self, seq_group: SequenceGroup) -> None:
+    def _preempt_by_recompute(
+        self,
+        seq_group: SequenceGroup,
+    ) -> None:
         seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
         assert len(seqs) == 1
         for seq in seqs:
@@ -459,15 +465,21 @@ class Scheduler:
         self._swap_out(seq_group, blocks_to_swap_out)
         self.swapped.append(seq_group)
 
-    def _swap_in(self, seq_group: SequenceGroup,
-                 blocks_to_swap_in: Dict[int, int]) -> None:
+    def _swap_in(
+        self,
+        seq_group: SequenceGroup,
+        blocks_to_swap_in: Dict[int, int],
+    ) -> None:
         mapping = self.block_manager.swap_in(seq_group)
         blocks_to_swap_in.update(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
             seq.status = SequenceStatus.RUNNING
 
-    def _swap_out(self, seq_group: SequenceGroup,
-                  blocks_to_swap_out: Dict[int, int]) -> None:
+    def _swap_out(
+        self,
+        seq_group: SequenceGroup,
+        blocks_to_swap_out: Dict[int, int],
+    ) -> None:
         if not self.block_manager.can_swap_out(seq_group):
             # FIXME(woosuk): Abort the sequence group instead of aborting the
             # entire engine.
