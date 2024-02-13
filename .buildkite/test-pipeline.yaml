@@ -23,7 +23,7 @@ steps:
   command: pytest -v -s entrypoints
 
 - label: Kernels Test %N/%t
-  command: pytest -v -s kernels --shard-id=${BUILDKITE_PARALLEL_JOB} --num-shards=${BUILDKITE_PARALLEL_JOB_COUNT}
+  command: pytest -v -s kernels --shard-id=\${BUILDKITE_PARALLEL_JOB} --num-shards=\${BUILDKITE_PARALLEL_JOB_COUNT}
   parallelism: 4
 
 - label: Model Snapshot Test
