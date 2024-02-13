@@ -13,38 +13,41 @@ class EvictionPolicy(enum.Enum):
     LRU = enum.auto()
 
 
-def lru_eviction(table: Dict[int, PhysicalTokenBlock]) -> PhysicalTokenBlock:
-    all_blocks: List[PhysicalTokenBlock] = list(table.values())
-    assert (len(all_blocks) > 0)
+def lru_eviction(free_table: Dict[int, PhysicalTokenBlock]) -> PhysicalTokenBlock:
+    free_blocks: List[PhysicalTokenBlock] = list(free_table.values())
+    if len(free_blocks) == 0:
+        raise ValueError("No usable cache memory left")
 
     # Find lowest timestamp
     lowest_timestamp = monotonic()
-    for block in all_blocks:
-        if block.ref_count == 0 and block.last_accessed < lowest_timestamp:
+    for block in free_blocks:
+        if block.last_accessed < lowest_timestamp:
             lowest_timestamp = block.last_accessed
 
     # Find all blocks with the lowest timestamp
     least_recent: List[PhysicalTokenBlock] = []
-    for block in all_blocks:
-        if block.ref_count == 0 and block.last_accessed == lowest_timestamp:
+    for block in free_blocks:
+        if block.last_accessed == lowest_timestamp:
             least_recent.append(block)
 
     # Find highest prefix count per block
     highest_prefix_count = 0
     for block in least_recent:
-        if block.ref_count == 0 and block.prefix_len > highest_prefix_count:
+        if block.prefix_len > highest_prefix_count:
             highest_prefix_count = block.prefix_len
 
     # Find all blocks with the lowest timestamp
     eviction_candidates: List[PhysicalTokenBlock] = []
     for block in least_recent:
-        if block.ref_count == 0 and block.prefix_len == highest_prefix_count:
+        if block.prefix_len == highest_prefix_count:
             eviction_candidates.append(block)
 
     # Arbitrarily evict the first candidate
-    assert (len(eviction_candidates) > 0)
+    if len(eviction_candidates) == 0:
+        raise ValueError("No usable cache memory left")
+
     evicted_block = eviction_candidates[0]
-    del table[evicted_block.block_hash]
+    del free_table[evicted_block.block_hash]
 
     return evicted_block
 
@@ -70,10 +73,11 @@ class BlockAllocator:
 
         self.current_num_blocks = 0
         self.table: Dict[int, PhysicalTokenBlock] = {}
+        self.free_table: Dict[int, PhysicalTokenBlock] = {}
 
     def evict(self) -> PhysicalTokenBlock:
         if self.eviction_policy == EvictionPolicy.LRU:
-            return lru_eviction(self.table)
+            return lru_eviction(self.free_table)
         else:
             raise ValueError(
                 f"Unknown cache eviction policy: {self.eviction_policy}")
@@ -83,6 +87,7 @@ class BlockAllocator:
         if self.current_num_blocks == self.num_blocks:
             block = self.evict()
             block.block_hash = block_hash
+            block.prefix_len = prefix_len
             return block
         block = PhysicalTokenBlock(device=self.device,
                                    block_number=self.current_num_blocks,
@@ -97,6 +102,13 @@ class BlockAllocator:
                  prefix_len: int = 0) -> PhysicalTokenBlock:
         if block_hash is None:
             block_hash = monotonic()
+        if block_hash in self.free_table:
+            assert block_hash not in self.table
+            block = self.free_table[block_hash]
+            self.table[block_hash] = block
+            block.ref_count += 1
+            del self.free_table[block_hash]
+            return block
         if block_hash not in self.table:
             self.table[block_hash] = self.allocate_block(
                 block_hash, prefix_len)
@@ -108,6 +120,9 @@ class BlockAllocator:
         if block.ref_count == 0:
             raise ValueError(f"Double free! {block} is already freed.")
         block.ref_count -= 1
+        if block.ref_count == 0:
+            self.free_table[block.block_hash] = block
+            del self.table[block.block_hash]
 
     # TODO: Should this account for the number of blocks with a ref count of 0?
     def get_num_free_blocks(self) -> int:
