@@ -121,6 +121,11 @@ def sql_lora_files():
     return snapshot_download(repo_id="yard1/llama-2-7b-sql-lora-test")
 
 
+@pytest.fixture(scope="session")
+def mixtral_lora_files():
+    return snapshot_download(repo_id="terrysun/mixtral-lora-adapter")
+
+
 @pytest.fixture
 def llama_2_7b_engine_extra_embeddings() -> nn.Module:
     cleanup()

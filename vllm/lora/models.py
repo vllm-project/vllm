@@ -4,8 +4,7 @@ import logging
 import math
 import os
 import re
-from typing import (Any, Callable, Dict, Hashable, List, Optional, Tuple, Type,
-                    Union)
+from typing import (Any, Callable, Dict, Hashable, List, Optional, Tuple, Type)
 
 import safetensors.torch
 import torch
@@ -19,36 +18,6 @@ from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.utils import parse_fine_tuned_lora_name, replace_submodule
 
 logger = logging.getLogger(__name__)
-
-# TODO: The mappings below should be moved to individual model classes.
-
-PACKED_MODULES_CFG = {
-    "qkv_proj": [
-        "q_proj",
-        "k_proj",
-        "v_proj",
-    ],
-    "gate_up_proj": [
-        "gate_proj",
-        "up_proj",
-    ],
-}
-
-TARGET_MODULES_QKV = [
-    "qkv_proj",
-    "o_proj",
-    "gate_up_proj",
-    "down_proj",
-    "embed_tokens",
-    "lm_head",
-]
-
-EMBEDDING_MODULES = {
-    "embed_tokens": "input_embeddings",
-    "lm_head": "output_embeddings",
-}
-
-EMBEDDING_PADDING_MODULES = ["lm_head"]
 
 _GLOBAL_LORA_ID = 0
 
@@ -169,6 +138,8 @@ class LoRAModel:
         dtype: Optional[torch.dtype] = None,
         embeddings: Optional[Dict[str, torch.Tensor]] = None,
         target_embedding_padding: Optional[int] = None,
+        embedding_modules: Optional[Dict[str, str]] = None,
+        embedding_padding_modules: Optional[List[str]] = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a dictionary of tensors."""
         pin_memory = str(device) == "cpu" and not in_wsl()
@@ -179,11 +150,11 @@ class LoRAModel:
                 lora_embeddings_tensor = None
                 if embeddings:
                     embeddings_module = next(
-                        (k for k in EMBEDDING_MODULES if k in module_name),
+                        (k for k in embedding_modules if k in module_name),
                         None)
                     if embeddings_module:
                         lora_embeddings_tensor = embeddings[
-                            EMBEDDING_MODULES[embeddings_module]].to(
+                            embedding_modules[embeddings_module]].to(
                                 device=device, dtype=dtype)
                         if pin_memory:
                             lora_embeddings_tensor = (
@@ -201,7 +172,7 @@ class LoRAModel:
                 loras[module_name].lora_b = tensor.to(device=device,
                                                       dtype=dtype).t()
                 if any(name in module_name
-                       for name in EMBEDDING_PADDING_MODULES
+                       for name in embedding_padding_modules
                        ) and target_embedding_padding is not None:
                     lora_b = loras[module_name].lora_b
                     assert target_embedding_padding >= lora_b.shape[1]
@@ -218,12 +189,15 @@ class LoRAModel:
 
     @classmethod
     def from_local_checkpoint(
-            cls,
-            lora_dir: str,
-            lora_model_id: Optional[int] = None,
-            device: str = "cuda",
-            dtype: Optional[torch.dtype] = None,
-            target_embedding_padding: Optional[int] = None) -> "LoRAModel":
+        cls,
+        lora_dir: str,
+        lora_model_id: Optional[int] = None,
+        device: str = "cuda",
+        dtype: Optional[torch.dtype] = None,
+        target_embedding_padding: Optional[int] = None,
+        embedding_modules: Optional[Dict[str, str]] = None,
+        embedding_padding_modules: Optional[List[str]] = None,
+    ) -> "LoRAModel":
         """Create a LoRAModel from a local checkpoint."""
         lora_config_path = os.path.join(lora_dir, "adapter_config.json")
         lora_tensor_path = os.path.join(lora_dir, "adapter_model.safetensors")
@@ -260,6 +234,8 @@ class LoRAModel:
             dtype=dtype,
             embeddings=embeddings,
             target_embedding_padding=target_embedding_padding,
+            embedding_modules=embedding_modules,
+            embedding_padding_modules=embedding_padding_modules,
         )
 
 
@@ -273,8 +249,6 @@ class LoRAModelManager:
         max_num_batched_tokens: int,
         vocab_size: int,
         lora_config: LoRAConfig,
-        lora_target_modules: Union[str, List[str]] = TARGET_MODULES_QKV,
-        packed_modules_mapping: Dict[str, List[str]] = PACKED_MODULES_CFG,
     ):
         """Create a LoRAModelManager and adapter for a given model.
 
@@ -286,13 +260,6 @@ class LoRAModelManager:
                 in a single batch.
             vocab_size: the vocab size of the model.
             lora_config: the LoRA configuration.
-            lora_target_modules: the target modules patterns to be adapted.
-                Support both single module name and a list of module names.
-            packed_modules_mapping: the mapping for packed modules. vLLM
-                packs some modules into one module, e.g., qkv_proj
-                is packed of q_proj, k_proj, and v_proj. These modules
-                have a single layer in the original model, but they are split
-                into multiple layers in the adapted model.
         """
         self.lora_config = lora_config
         self.max_num_seqs = max_num_seqs
@@ -320,11 +287,11 @@ class LoRAModelManager:
         self.indices_len = [None] * 4
 
         self.model: nn.Module = model
-        self.lora_target_modules: List[str] = ([
-            lora_target_modules
-        ] if isinstance(lora_target_modules, str) else lora_target_modules)
-        self.lora_target_modules = copy.deepcopy(lora_target_modules)
-        self.packed_modules_mapping = copy.deepcopy(packed_modules_mapping)
+        if hasattr(self.model, "supported_lora_modules"):
+            self.supported_lora_modules = copy.deepcopy(
+                self.model.supported_lora_modules)
+            self.packed_modules_mapping = copy.deepcopy(
+                self.model.packed_modules_mapping)
         self.packed_modules: Dict[str, List[str]] = {}
         self.modules: Dict[str, "BaseLayerWithLoRA"] = {}
         self._registered_loras: Dict[int, LoRAModel] = {}
@@ -468,7 +435,11 @@ class LoRAModelManager:
         assert isinstance(module, BaseLayerWithLoRA)
         self.modules[module_name] = module
 
-    def create_dummy_lora(self, lora_id: int, rank: int) -> LoRAModel:
+    def create_dummy_lora(
+            self,
+            lora_id: int,
+            rank: int,
+            embedding_modules: Optional[Dict[str, str]] = None) -> LoRAModel:
         """Create zero-initialized LoRAModel for warmup."""
         model = LoRAModel(lora_id, rank, {})
         for module_name, module in self.model.named_modules():
@@ -477,7 +448,7 @@ class LoRAModelManager:
                 continue
             parts = module_name.split(".")
             if module_name not in self.packed_modules:
-                if parts[-1] in EMBEDDING_MODULES:
+                if parts[-1] in embedding_modules:
                     input_dim = (module.base_layer.org_vocab_size +
                                  self.lora_config.lora_extra_vocab_size if
                                  hasattr(module.base_layer, "org_vocab_size")
@@ -531,7 +502,7 @@ class LoRAModelManager:
             re.match(
                 r".*\.{target_module}$".format(target_module=target_module),
                 module_name) or target_module == module_name
-            for target_module in self.lora_target_modules)
+            for target_module in self.supported_lora_modules)
 
     def _register_packed_modules(self, module_full_name: str) -> None:
         parts = module_full_name.split(".")
@@ -586,12 +557,9 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
         max_num_batched_tokens: int,
         vocab_size: int,
         lora_config: LoRAConfig,
-        lora_target_modules: Union[str, List[str]] = TARGET_MODULES_QKV,
-        packed_modules_mapping: Dict[str, List[str]] = PACKED_MODULES_CFG,
     ):
         super().__init__(model, max_num_seqs, max_num_batched_tokens,
-                         vocab_size, lora_config, lora_target_modules,
-                         packed_modules_mapping)
+                         vocab_size, lora_config)
         self._registered_loras: LoRALRUCache = LoRALRUCache(
             self.capacity, self.deactivate_lora)
         self._active_loras: LoRALRUCache = LoRALRUCache(
@@ -637,11 +605,10 @@ def create_lora_manager(
         max_num_batched_tokens: int,
         vocab_size: int,
         lora_config: LoRAConfig,
-        target_modules: Union[str, List[str]] = TARGET_MODULES_QKV,
         lora_manager_cls: Type[LoRAModelManager] = LoRAModelManager,
         **kwargs) -> LoRAModelManager:
     """Create a LoRA adapter for a given model."""
-    if not getattr(model, "supports_lora", False):
+    if not hasattr(model, "supported_lora_modules"):
         raise ValueError(f"Model {type(model)} is not supported for LoRA.")
     lora_manager = lora_manager_cls(
         model=model,
@@ -649,6 +616,5 @@ def create_lora_manager(
         max_num_batched_tokens=max_num_batched_tokens,
         vocab_size=vocab_size,
         lora_config=lora_config,
-        lora_target_modules=target_modules,
         **kwargs)
     return lora_manager

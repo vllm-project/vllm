@@ -86,11 +86,20 @@ class ModelRunner:
         vocab_size = self.model.config.vocab_size
 
         if self.lora_config:
+            assert hasattr(
+                self.model, "supported_lora_modules"
+            ) and self.model.supported_lora_modules, "Model does not support LoRA"
+            assert hasattr(
+                self.model,
+                "embedding_modules"), "Model does not have embedding_modules"
+            assert hasattr(self.model, "embedding_padding_modules"
+                           ), "Model does not have embedding_padding_modules"
             self.lora_manager = LRUCacheWorkerLoRAManager(
                 self.scheduler_config.max_num_seqs,
                 self.scheduler_config.max_num_batched_tokens +
                 self.scheduler_config.max_paddings, vocab_size,
-                self.lora_config, self.device)
+                self.lora_config, self.device, self.model.embedding_modules,
+                self.model.embedding_padding_modules)
             self.model = self.lora_manager.create_lora_manager(self.model)
 
     def set_block_size(self, block_size: int) -> None:
