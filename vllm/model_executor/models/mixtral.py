@@ -39,7 +39,7 @@ from vllm.model_executor.layers.linear import (LinearMethodBase,
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding, ParallelLMHead)
+    VocabParallelEmbedding, ParallelLMHead, DEFAULT_VOCAB_PADDING_SIZE)
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_reduce)
 from vllm.model_executor.parallel_utils.parallel_state import (
@@ -289,7 +289,6 @@ class MixtralModel(nn.Module):
         super().__init__()
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-        self.org_vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
@@ -321,8 +320,9 @@ class MixtralModel(nn.Module):
 
 
 class MixtralForCausalLM(nn.Module):
+    # LoRA specific attributes
     supports_lora = True
-    lora_target_modules = [
+    support_lora_modules = [
         "qkv_proj",
         "o_proj",
         "embed_tokens",
@@ -357,9 +357,13 @@ class MixtralForCausalLM(nn.Module):
         self.lm_head = ParallelLMHead(
             self.unpadded_vocab_size,
             config.hidden_size,
-            org_num_embeddings=self.model.org_vocab_size)
-        self.sampler = Sampler(self.unpadded_vocab_size,
-                               self.model.org_vocab_size)
+            org_num_embeddings=config.vocab_size,
+            padding_size=DEFAULT_VOCAB_PADDING_SIZE
+            # We need bigger padding if using lora for kernel
+            # compatibility
+            if not lora_config else lora_config.lora_vocab_padding_size,
+        )
+        self.sampler = Sampler(self.unpadded_vocab_size, config.vocab_size)
 
     def forward(
         self,

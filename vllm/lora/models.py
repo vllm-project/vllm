@@ -250,7 +250,7 @@ class LoRAModelManager:
         max_num_batched_tokens: int,
         vocab_size: int,
         lora_config: LoRAConfig,
-        lora_target_modules: Optional[Union[str, List[str]]] = None,
+        lora_target_modules: Optional[List[str]] = None,
         packed_modules_mapping: Optional[Dict[str, List[str]]] = None,
     ):
         """Create a LoRAModelManager and adapter for a given model.

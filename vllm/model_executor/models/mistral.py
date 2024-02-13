@@ -265,8 +265,9 @@ class MistralModel(nn.Module):
 
 
 class MistralForCausalLM(nn.Module):
+    # LoRA specific attributes
     supports_lora = True
-    lora_target_modules = [
+    support_lora_modules = [
         "qkv_proj",
         "o_proj",
         "gate_up_proj",
