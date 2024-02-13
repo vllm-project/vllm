@@ -74,6 +74,7 @@ class UsageMessage:
             json.dump(vars(self), outfile)
 
     def send_to_server(self):
+        self._write_to_file()
         headers = {'Content-type': 'application/json'}
         payload = json.dumps(vars(self))
         try:
