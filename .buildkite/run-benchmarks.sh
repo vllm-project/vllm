@@ -66,4 +66,4 @@ if [ $bench_serving_exit_code -ne 0 ]; then
     exit $bench_serving_exit_code
 fi
 
-/workspace/buildkite-agent artifact upload *.json
+/workspace/buildkite-agent artifact upload openai-*.json
