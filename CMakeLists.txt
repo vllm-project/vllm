@@ -2,6 +2,36 @@ cmake_minimum_required(VERSION 3.21)
 
 project(vllm_extensions LANGUAGES CXX)
 
+# add comment why it comes before append_cmake_prefix_path
+set(CMAKE_FIND_PACKAGE_SORT_ORDER NATURAL)
+set(CMAKE_FIND_PACKAGE_SORT_DIRECTION ASC)
+find_package(Python 3.8 REQUIRED COMPONENTS Interpreter Development.Module)
+set(CMAKE_FIND_PACKAGE_SORT_ORDER NONE)
+set(CMAKE_FIND_PACKAGE_SORT_DIRECTION DESC)
+find_package(MPI)
+
+if(NOT DEFINED PYTHON_EXECUTABLE)
+  set(PYTHON_EXECUTABLE python3)
+endif()
+
+# HACKS
+execute_process(
+  COMMAND
+  "${PYTHON_EXECUTABLE}" "--version"
+  OUTPUT_VARIABLE JUNK)
+message("junk: ${JUNK}")
+execute_process(
+  COMMAND
+  "which" "-a" "python3"
+  OUTPUT_VARIABLE JUNK)
+message("junk: ${JUNK}")
+# HACKS
+
+#
+# Find where user site-packages and torch are installed and add it to cmake's search path.
+# Find packages needed to compile
+#
+
 # add comment
 macro (append_cmake_prefix_path PKG EXPR)
   execute_process(
@@ -19,18 +49,6 @@ macro (append_cmake_prefix_path PKG EXPR)
   list(APPEND CMAKE_PREFIX_PATH ${PREFIX_PATH})
 endmacro()
 
-# add comment why it comes before append_cmake_prefix_path
-set(CMAKE_FIND_PACKAGE_SORT_ORDER NATURAL)
-set(CMAKE_FIND_PACKAGE_SORT_DIRECTION ASC)
-find_package(Python 3.8 REQUIRED COMPONENTS Interpreter Development.Module)
-set(CMAKE_FIND_PACKAGE_SORT_ORDER NONE)
-set(CMAKE_FIND_PACKAGE_SORT_DIRECTION DESC)
-find_package(MPI)
-
-#
-# Find where user site-packages and torch are installed and add it to cmake's search path.
-# Find packages needed to compile
-#
 append_cmake_prefix_path("site" "site.getusersitepackages()")
 append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
 
