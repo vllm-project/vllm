@@ -15,8 +15,11 @@ def init_test_distributed_environment(
                                      tensor_parallel_size,
                                      worker_use_ray=True)
     distributed_init_method = f"tcp://localhost:{distributed_init_port}"
-    init_distributed_environment(parallel_config, rank,
-                                 distributed_init_method)
+    init_distributed_environment(
+        parallel_config,
+        rank,
+        cupy_port=None,
+        distributed_init_method=distributed_init_method)
 
 
 def multi_process_tensor_parallel(
