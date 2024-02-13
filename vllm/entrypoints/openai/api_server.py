@@ -31,23 +31,6 @@ openai_serving_completion: OpenAIServingCompletion = None
 logger = init_logger(__name__)
 
 
-@asynccontextmanager
-async def lifespan(app: fastapi.FastAPI):
-
-    async def _force_log():
-        while True:
-            await asyncio.sleep(10)
-            await engine.do_log_stats()
-
-    if not engine_args.disable_log_stats:
-        asyncio.create_task(_force_log())
-
-    yield
-
-
-app = fastapi.FastAPI(lifespan=lifespan)
-
-
 def parse_args():
     parser = argparse.ArgumentParser(
         description="vLLM OpenAI-Compatible RESTful API server.")
@@ -120,61 +103,8 @@ def parse_args():
     parser = AsyncEngineArgs.add_cli_args(parser)
     return parser.parse_args()
 
-
-app.add_middleware(MetricsMiddleware)  # Trace HTTP server metrics
-app.add_route("/metrics", metrics)  # Exposes HTTP metrics
-
-
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(_, exc):
-    err = openai_serving_chat.create_error_response(message=str(exc))
-    return JSONResponse(err.model_dump(), status_code=HTTPStatus.BAD_REQUEST)
-
-
-@app.get("/health")
-async def health() -> Response:
-    """Health check."""
-    return Response(status_code=200)
-
-
-@app.get("/v1/models")
-async def show_available_models():
-    models = await openai_serving_chat.show_available_models()
-    return JSONResponse(content=models.model_dump())
-
-
-@app.post("/v1/chat/completions")
-async def create_chat_completion(request: ChatCompletionRequest,
-                                 raw_request: Request):
-    generator = await openai_serving_chat.create_chat_completion(
-        request, raw_request)
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
-    if request.stream:
-        return StreamingResponse(content=generator,
-                                 media_type="text/event-stream")
-    else:
-        return JSONResponse(content=generator.model_dump())
-
-
-@app.post("/v1/completions")
-async def create_completion(request: CompletionRequest, raw_request: Request):
-    generator = await openai_serving_completion.create_completion(
-        request, raw_request)
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
-    if request.stream:
-        return StreamingResponse(content=generator,
-                                 media_type="text/event-stream")
-    else:
-        return JSONResponse(content=generator.model_dump())
-
-
-if __name__ == "__main__":
-    args = parse_args()
-
+def start_server(args):
+    app = create_app(args)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=args.allowed_origins,
@@ -232,24 +162,90 @@ if __name__ == "__main__":
                 ssl_keyfile=args.ssl_keyfile,
                 ssl_certfile=args.ssl_certfile)
 
-#     def create_engine(args):
-#         engine_args = AsyncEngineArgs.from_cli_args(args)
-#         return AsyncLLMEngine.from_engine_args(engine_args)
+def get_lifespan_context_manager(args):
+    engine_args = AsyncEngineArgs.from_cli_args(args)
+    engine = AsyncLLMEngine.from_engine_args(engine_args)
+    @asynccontextmanager
+    async def lifespan(app: fastapi.FastAPI, args: ):
 
-#     def start_server(host: str = "127.0.0.1", port: int = 8000, ssl_keyfile: str = None, ssl_certfile: str = None, root_path: str = ""):
-#         global engine
-#         parser = argparse.ArgumentParser()
-#         parser.add_argument("--host", type=str, default=host)
-#         parser.add_argument("--port", type=int, default=port)
-#         parser.add_argument("--ssl-keyfile", type=str, default=ssl_keyfile)
-#         parser.add_argument("--ssl-certfile", type=str, default=ssl_certfile)
-#         parser.add_argument("--root-path", type=str, default=root_path, help="FastAPI root_path when app is behind a path based routing proxy")
-#         parser = AsyncEngineArgs.add_cli_args(parser)
-#         args = parser.parse_args()
+        async def _force_log():
+            while True:
+                await asyncio.sleep(10)
+                await engine.do_log_stats()
 
-#         engine = create_engine(args)
-#         app.root_path = args.root_path
-#         uvicorn.run(app, host=args.host, port=args.port, log_level="debug", timeout_keep_alive=TIMEOUT_KEEP_ALIVE, ssl_keyfile=args.ssl_keyfile, ssl_certfile=args.ssl_certfile)
+        if not engine_args.disable_log_stats:
+            asyncio.create_task(_force_log())
 
-# if __name__ == "__main__":
-#     start_server()
+        yield
+
+    return lifespan
+
+
+def create_app(args) -> fastapi.FastAPI:
+    app = fastapi.FastAPI(lifespan=get_lifespan_context_manager(args))
+
+    # Setup middleware
+    app.add_middleware(MetricsMiddleware)
+    app.add_route("/metrics", metrics)
+
+    # Setup CORS middleware if needed based on args
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=args.allowed_origins,
+        allow_credentials=args.allow_credentials,
+        allow_methods=args.allowed_methods,
+        allow_headers=args.allowed_headers,
+    )
+
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(_, exc):
+        err = openai_serving_chat.create_error_response(message=str(exc))
+        return JSONResponse(err.model_dump(), status_code=HTTPStatus.BAD_REQUEST)
+
+
+    @app.get("/health")
+    async def health() -> Response:
+        """Health check."""
+        return Response(status_code=200)
+
+
+    @app.get("/v1/models")
+    async def show_available_models():
+        models = await openai_serving_chat.show_available_models()
+        return JSONResponse(content=models.model_dump())
+
+
+    @app.post("/v1/chat/completions")
+    async def create_chat_completion(request: ChatCompletionRequest,
+                                    raw_request: Request):
+        generator = await openai_serving_chat.create_chat_completion(
+            request, raw_request)
+        if isinstance(generator, ErrorResponse):
+            return JSONResponse(content=generator.model_dump(),
+                                status_code=generator.code)
+        if request.stream:
+            return StreamingResponse(content=generator,
+                                    media_type="text/event-stream")
+        else:
+            return JSONResponse(content=generator.model_dump())
+
+
+    @app.post("/v1/completions")
+    async def create_completion(request: CompletionRequest, raw_request: Request):
+        generator = await openai_serving_completion.create_completion(
+            request, raw_request)
+        if isinstance(generator, ErrorResponse):
+            return JSONResponse(content=generator.model_dump(),
+                                status_code=generator.code)
+        if request.stream:
+            return StreamingResponse(content=generator,
+                                    media_type="text/event-stream")
+        else:
+            return JSONResponse(content=generator.model_dump())
+
+if __name__ == "__main__":
+    args = parse_args()
+    start_server(args)
+
+    
