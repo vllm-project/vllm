@@ -51,8 +51,8 @@ Alongside each architecture, we include some popular models that use it.
     - InternLM2
     - :code:`internlm/internlm2-7b`, :code:`internlm/internlm2-chat-7b`, etc.
   * - :code:`LlamaForCausalLM`
-    - LLaMA, LLaMA-2, Vicuna, Alpaca, Koala, Guanaco
-    - :code:`meta-llama/Llama-2-13b-hf`, :code:`meta-llama/Llama-2-70b-hf`, :code:`openlm-research/open_llama_13b`, :code:`lmsys/vicuna-13b-v1.3`, :code:`young-geng/koala`, etc.
+    - LLaMA, LLaMA-2, Vicuna, Alpaca, Yi
+    - :code:`meta-llama/Llama-2-13b-hf`, :code:`meta-llama/Llama-2-70b-hf`, :code:`openlm-research/open_llama_13b`, :code:`lmsys/vicuna-13b-v1.3`, :code:`01-ai/Yi-6B`, :code:`01-ai/Yi-34B`, etc.
   * - :code:`MistralForCausalLM`
     - Mistral, Mistral-Instruct
     - :code:`mistralai/Mistral-7B-v0.1`, :code:`mistralai/Mistral-7B-Instruct-v0.1`, etc.
@@ -77,9 +77,6 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`StableLMEpochForCausalLM`
     - StableLM
     - :code:`stabilityai/stablelm-3b-4e1t/` , :code:`stabilityai/stablelm-base-alpha-7b-v2`, etc.
-  * - :code:`YiForCausalLM`
-    - Yi
-    - :code:`01-ai/Yi-6B`, :code:`01-ai/Yi-34B`, etc.
 
 If your model uses one of the above model architectures, you can seamlessly run your model with vLLM.
 Otherwise, please refer to :ref:`Adding a New Model <adding_a_new_model>` for instructions on how to implement support for your model.
