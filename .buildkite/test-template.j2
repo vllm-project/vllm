@@ -35,8 +35,8 @@ steps:
               - image: "{{ docker_image }}"
                 command: ["bash"]
                 args:
-                - "-c"
-                - "'cd {{ (step.working_dir or default_working_dir) | safe  }} && {{ step.command  or (step.commands | join(' && ')) | safe }}'"
+                - '-c'
+                - 'cd {{ (step.working_dir or default_working_dir) | safe  }} && {{ step.command  or (step.commands | join(' && ')) | safe }}'
                 {% if not step.no_gpu %}
                 resources:
                   requests:
