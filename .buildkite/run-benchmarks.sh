@@ -29,7 +29,7 @@ python3 benchmarks/benchmark_serving.py \
     --num-prompts 20 \
     --endpoint /v1/completions \
     --tokenizer meta-llama/Llama-2-7b-chat-hf \
-    --save-result ./serving-result.json \
+    --save-result \
     2>&1 | tee benchmark_serving.txt
 bench_serving_exit_code=$?
 kill $server_pid
@@ -66,4 +66,4 @@ if [ $bench_serving_exit_code -ne 0 ]; then
     exit $bench_serving_exit_code
 fi
 
-/workspace/buildkite-agent artifact upload serving-result.json
+/workspace/buildkite-agent artifact upload *.json
