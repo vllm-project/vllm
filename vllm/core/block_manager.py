@@ -125,9 +125,8 @@ class BlockAllocator:
             self.free_table[block.block_hash] = block
             del self.table[block.block_hash]
 
-    # TODO: Should this account for the number of blocks with a ref count of 0?
     def get_num_free_blocks(self) -> int:
-        return self.num_blocks - self.current_num_blocks
+        return self.num_blocks - self.current_num_blocks + len(self.free_table)
 
     def contains_block(self, block_hash: int) -> bool:
         return block_hash in self.table
