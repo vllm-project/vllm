@@ -283,7 +283,7 @@ class InternLMForCausalLM(nn.Module):
             if "rotary_emb.inv_freq" in name:
                 continue
             for (param_name, weight_name, shard_id) in weight_shards:
-                param_name = get_packed_param(packed_modules, weight_name)
+                param_name = get_packed_param(self.packed_modules, weight_name)
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
