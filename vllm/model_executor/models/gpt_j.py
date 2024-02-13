@@ -252,7 +252,7 @@ class GPTJForCausalLM(nn.Module):
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
-        weight_shard_mapping = [
+        weight_shards = [
             # (shard_name, shard_id)
             ("q_proj", "q"),
             ("k_proj", "k"),

@@ -333,7 +333,7 @@ class LlamaForCausalLM(nn.Module):
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
-        weight_shard_mapping = [
+        weight_shards = [
             # (shard_name, shard_id)
             ("q_proj", "q"),
             ("k_proj", "k"),
@@ -351,7 +351,7 @@ class LlamaForCausalLM(nn.Module):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            for (weight_name, shard_id) in weight_shard_mapping:
+            for (weight_name, shard_id) in weight_shards:
                 param_name = get_packed_param(packed_modules_mapping, weight_name)
                 if weight_name not in name:
                     continue
