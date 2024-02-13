@@ -4,12 +4,21 @@ project(vllm_extensions LANGUAGES CXX)
 
 # add comment why it comes before append_cmake_prefix_path
 set(CMAKE_FIND_DEBUG_MODE TRUE)
-set(CMAKE_FIND_PACKAGE_SORT_ORDER NATURAL)
-set(CMAKE_FIND_PACKAGE_SORT_DIRECTION ASC)
-find_package(Python 3.8...3.11 REQUIRED COMPONENTS Interpreter Development.Module)
+#set(CMAKE_FIND_PACKAGE_SORT_ORDER NATURAL)
+#set(CMAKE_FIND_PACKAGE_SORT_DIRECTION ASC)
+
+find_package(Python3 3.8...3.11 REQUIRED COMPONENTS Interpreter Development.Module)
+
+#find_package(Python 3.8 EXACT REQUIRED COMPONENTS Interpreter Development.Module)
+#if (NOT Python_FOUND)
+#  find_package(Python 3.8...3.11 REQUIRED COMPONENTS Interpreter Development.Module)
+#endif()
+
+
 set(CMAKE_FIND_DEBUG_MODE FALSE)
 #set(CMAKE_FIND_PACKAGE_SORT_ORDER NONE)
 #set(CMAKE_FIND_PACKAGE_SORT_DIRECTION DESC)
+
 find_package(MPI)
 
 if(NOT DEFINED PYTHON_EXECUTABLE)
@@ -176,14 +185,14 @@ set(CMAKE_CXX_STANDARD 17)
 #this doesn't seem to work
 #set(CUDA_PROPAGATE_HOST_FLAGS OFF)
 
-message("pv: ${PYTHON_VERSION_STRING}")
+#message("pv: ${PYTHON_VERSION_STRING}")
 
 #set(PYTHON_SABI_VERSION "${Python_VERSION_MAJOR}.${Python_VERSION_MINOR}")
 
 # add comment
 function(define_module_target MOD_NAME MOD_SRC MOD_NVCC_FLAGS MOD_CUDA_ARCHES)
   #  Python_add_library(${MOD_NAME} MODULE ${MOD_SRC} USE_SABI ${PYTHON_SABI_VERSION})
-  Python_add_library(${MOD_NAME} MODULE ${MOD_SRC} WITH_SOABI)
+  Python3_add_library(${MOD_NAME} MODULE ${MOD_SRC} WITH_SOABI)
   #add_library(${MOD_NAME} MODULE ${MOD_SRC})
   set_target_properties(${MOD_NAME} PROPERTIES CUDA_ARCHITECTURES "${MOD_CUDA_ARCHES}")
   # Note: optimization level/debug info is set by build type
