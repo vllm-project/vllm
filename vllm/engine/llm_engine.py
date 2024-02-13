@@ -68,16 +68,16 @@ class LLMEngine:
     """
 
     def __init__(
-        self,
-        model_config: ModelConfig,
-        cache_config: CacheConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        lora_config: Optional[LoRAConfig],
-        placement_group: Optional["PlacementGroup"],
-        log_stats: bool,
-        usage_context: UsageContext = UsageContext.UNKNOWN_CONTEXT
+            self,
+            model_config: ModelConfig,
+            cache_config: CacheConfig,
+            parallel_config: ParallelConfig,
+            scheduler_config: SchedulerConfig,
+            device_config: DeviceConfig,
+            lora_config: Optional[LoRAConfig],
+            placement_group: Optional["PlacementGroup"],
+            log_stats: bool,
+            usage_context: UsageContext = UsageContext.UNKNOWN_CONTEXT
     ) -> None:
         logger.info(
             "Initializing an LLM engine with config: "
@@ -115,7 +115,8 @@ class LLMEngine:
         #If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
             usage_message.report_usage(model_config.model, usage_context)
-            Process(usage_message.send_to_server())
+            p = Process(usage_message.send_to_server())
+            p.start()
 
         # Create the parallel GPU workers.
         if self.parallel_config.worker_use_ray:
@@ -368,7 +369,11 @@ class LLMEngine:
         self._run_workers("warm_up_model")
 
     @classmethod
-    def from_engine_args(cls, engine_args: EngineArgs, usage_context: UsageContext=UsageContext.UNKNOWN_CONTEXT) -> "LLMEngine":
+    def from_engine_args(
+        cls,
+        engine_args: EngineArgs,
+        usage_context: UsageContext = UsageContext.UNKNOWN_CONTEXT
+    ) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.
         engine_configs = engine_args.create_engine_configs()
@@ -379,8 +384,7 @@ class LLMEngine:
         engine = cls(*engine_configs,
                      placement_group,
                      log_stats=not engine_args.disable_log_stats,
-                     usage_context = usage_context
-                     )
+                     usage_context=usage_context)
         return engine
 
     def encode_request(

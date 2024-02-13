@@ -87,7 +87,8 @@ if __name__ == "__main__":
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine = AsyncLLMEngine.from_engine_args(engine_args, usage_context=UsageContext.API_SERVER)
+    engine = AsyncLLMEngine.from_engine_args(
+        engine_args, usage_context=UsageContext.API_SERVER)
 
     app.root_path = args.root_path
     uvicorn.run(app,

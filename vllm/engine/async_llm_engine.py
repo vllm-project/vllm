@@ -13,6 +13,7 @@ from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
+
 logger = init_logger(__name__)
 
 
@@ -611,10 +612,12 @@ class AsyncLLMEngine:
             return self.engine.get_model_config()
 
     @classmethod
-    def from_engine_args(cls,
-                         engine_args: AsyncEngineArgs,
-                         start_engine_loop: bool = True,
-                         usage_context: UsageContext = UsageContext.UNKNOWN_CONTEXT) -> "AsyncLLMEngine":
+    def from_engine_args(
+        cls,
+        engine_args: AsyncEngineArgs,
+        start_engine_loop: bool = True,
+        usage_context: UsageContext = UsageContext.UNKNOWN_CONTEXT
+    ) -> "AsyncLLMEngine":
         """Creates an async LLM engine from the engine arguments."""
         # Create the engine configs.
         engine_configs = engine_args.create_engine_configs()
@@ -631,8 +634,7 @@ class AsyncLLMEngine:
                      log_stats=not engine_args.disable_log_stats,
                      max_log_len=engine_args.max_log_len,
                      start_engine_loop=start_engine_loop,
-                     usage_context=usage_context
-                     )
+                     usage_context=usage_context)
         return engine
 
     async def do_log_stats(self) -> None:
