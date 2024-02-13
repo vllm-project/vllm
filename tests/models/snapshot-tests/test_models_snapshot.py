@@ -8,6 +8,7 @@ hanging and nccl process group errors.
 """
 import json
 import pytest
+import torch
 
 SNAPSHOT_PATH = "./snapshot.json"
 
@@ -52,6 +53,17 @@ def test_model_snapshot(
                              max_model_len=1024)
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
+
+    # force pytorch to garbage collect to avoid OOM
+    torch.cuda.empty_cache()
+    # check the GPU memory usage is low
+    for i in range(torch.cuda.device_count()):
+        print(
+            f"GPU {i} memory usage: {torch.cuda.memory_allocated(i) / 1e9:.2f}GB"
+        )
+    assert all(
+        torch.cuda.memory_allocated(i) < 1e9
+        for i in range(torch.cuda.device_count()))
 
     for i in range(len(example_prompts)):
         hf_output_str = snapshot[key][example_prompts[i]]
