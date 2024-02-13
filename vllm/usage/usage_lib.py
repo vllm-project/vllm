@@ -5,6 +5,7 @@ import json
 import platform
 import sys
 import pkg_resources
+import requests
 from cloud_detect import provider
 from typing import Optional
 from enum import Enum
@@ -12,7 +13,7 @@ from pathlib import Path
 _USAGE_STATS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'usage_stats.json')
 _USAGE_STATS_ENABLED = None
 _USAGE_STATS_SEVER = os.environ.get('VLLM_USAGE_STATS_SERVER', 'https://stats.vllm.ai')
-
+_USAGE_STATS_URL = "http://127.0.0.1:1234"
 def is_usage_stats_enabled():
     """Determine whether or not we can send usage stats to the server.
     The logic is as follows:
@@ -59,4 +60,8 @@ class UsageMessage:
     def write_to_file(self):
         with open(_USAGE_STATS_FILE, "w") as outfile: 
             json.dump(vars(self), outfile)
+    def send_to_server(self):
+        headers = {'Content-type': 'application/json'}
+        payload = json.dumps(vars(self))
+        response = requests.post(_USAGE_STATS_URL, data=payload, headers=headers)
 usage_message = UsageMessage()
