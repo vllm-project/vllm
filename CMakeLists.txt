@@ -5,7 +5,7 @@ project(vllm_extensions LANGUAGES CXX)
 # add comment why it comes before append_cmake_prefix_path
 set(CMAKE_FIND_PACKAGE_SORT_ORDER NATURAL)
 set(CMAKE_FIND_PACKAGE_SORT_DIRECTION ASC)
-find_package(Python 3.8 EXACT REQUIRED COMPONENTS Interpreter Development.Module)
+find_package(Python 3.8 REQUIRED COMPONENTS Interpreter Development.Module)
 #set(CMAKE_FIND_PACKAGE_SORT_ORDER NONE)
 #set(CMAKE_FIND_PACKAGE_SORT_DIRECTION DESC)
 find_package(MPI)
