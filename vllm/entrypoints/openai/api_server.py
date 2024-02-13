@@ -213,7 +213,7 @@ if __name__ == "__main__":
     else:
         served_model = args.model
     engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine = AsyncLLMEngine.from_engine_args(engine_args, usage_context=UsageContext.API_SERVER)
+    engine = AsyncLLMEngine.from_engine_args(engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
     openai_serving_chat = OpenAIServingChat(engine, served_model,
                                             args.response_role,
                                             args.chat_template)

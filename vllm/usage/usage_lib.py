@@ -6,14 +6,19 @@ import platform
 import sys
 import pkg_resources
 import requests
+import datetime
 from cloud_detect import provider
 from typing import Optional
 from enum import Enum
 from pathlib import Path
+
+
 _USAGE_STATS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'usage_stats.json')
 _USAGE_STATS_ENABLED = None
 _USAGE_STATS_SEVER = os.environ.get('VLLM_USAGE_STATS_SERVER', 'https://stats.vllm.ai')
 _USAGE_STATS_URL = "http://127.0.0.1:1234"
+
+
 def is_usage_stats_enabled():
     """Determine whether or not we can send usage stats to the server.
     The logic is as follows:
@@ -33,6 +38,9 @@ def is_usage_stats_enabled():
         _USAGE_STATS_ENABLED = not (do_not_track or no_usage_stats or do_not_track_file)
     return _USAGE_STATS_ENABLED
 
+def _get_current_timestamp_ns() -> int:
+    return int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1e9)
+
 class UsageContext(Enum):
     UNKNOWN_CONTEXT = "UNKNOWN_CONTEXT"
     LLM = "LLM"
@@ -49,6 +57,8 @@ class UsageMessage:
         self.model : Optional[str] = None
         self.vllm_version : Optional[str] = None
         self.context : Optional[str] = None
+        self.log_time : Optional[int] = None
+
     def report_usage(self, model: str, context: UsageContext) -> None:
         self.context = context.value
         self.gpu_name = torch.cuda.get_device_name()
@@ -57,9 +67,12 @@ class UsageMessage:
         self.platform = platform.platform()
         self.vllm_version = pkg_resources.get_distribution("vllm").version
         self.model = model
+        self.log_time = _get_current_timestamp_ns()
+
     def write_to_file(self):
         with open(_USAGE_STATS_FILE, "w") as outfile: 
             json.dump(vars(self), outfile)
+
     def send_to_server(self):
         headers = {'Content-type': 'application/json'}
         payload = json.dumps(vars(self))
