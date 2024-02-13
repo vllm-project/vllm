@@ -1,16 +1,13 @@
-import requests
 import os
 import torch
 import json
 import platform
-import sys
 import pkg_resources
 import requests
 import datetime
 from cloud_detect import provider
 from typing import Optional
 from enum import Enum
-from pathlib import Path
 
 
 _USAGE_STATS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'usage_stats.json') #File path to store usage data locally
@@ -78,8 +75,8 @@ class UsageMessage:
         headers = {'Content-type': 'application/json'}
         payload = json.dumps(vars(self))
         try:
-            response = requests.post(_USAGE_STATS_URL, data=payload, headers=headers)
-        except requests.exceptions.RequestException as e:
+            requests.post(_USAGE_STATS_URL, data=payload, headers=headers)
+        except requests.exceptions.RequestException:
             print("Usage Log Request Failed")
 
 usage_message = UsageMessage()
