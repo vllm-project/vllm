@@ -143,9 +143,7 @@ class Sequence:
     def hash(self, logical_idx: int) -> int:
         # Compute the number of tokens in the sequence
         num_tokens = logical_idx * self.block_size + self.block_size
-        return hash(
-            tuple(self.data.get_token_ids()
-                  [0:min(num_tokens, len(self.data.get_token_ids()))]))
+        return hash(tuple(self.data.get_token_ids()[0:num_tokens]))
 
     def _append_logical_block(self) -> None:
         block = LogicalTokenBlock(
