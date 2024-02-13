@@ -107,7 +107,7 @@ def test_replace_submodules(dist_init, dummy_model):
                                LoRAConfig(max_lora_rank=8,
                                           max_cpu_loras=8,
                                           max_loras=8),
-                               lora_target_modules=["dense1", "layer1.dense2"])
+                               support_lora_modules=["dense1", "layer1.dense2"])
     model = manager.model
 
     assert isinstance(model.get_submodule("dense1"),
@@ -130,7 +130,7 @@ def test_lora_model_manager(dist_init, dummy_model):
         2,
         2,
         LoRAConfig(max_lora_rank=8, max_cpu_loras=3, max_loras=2),
-        lora_target_modules=["dense1", "dense2", "lm_head"])
+        support_lora_modules=["dense1", "dense2", "lm_head"])
     assert all(x is None for x in manager.lora_index_to_id)
     assert manager.add_lora(model_lora1)
     assert manager.activate_lora(1)
@@ -178,7 +178,7 @@ def test_lora_lru_cache_model_manager(dist_init, dummy_model):
         2,
         2,
         LoRAConfig(max_lora_rank=8, max_cpu_loras=3, max_loras=2),
-        lora_target_modules=["dense1", "dense2", "lm_head"])
+        support_lora_modules=["dense1", "dense2", "lm_head"])
     assert all(x is None for x in manager.lora_index_to_id)
     assert manager.add_lora(model_lora1)
     assert manager.activate_lora(1)
