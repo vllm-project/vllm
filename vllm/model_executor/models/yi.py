@@ -261,6 +261,8 @@ class YiModel(nn.Module):
 
 class YiForCausalLM(nn.Module):
 
+    packed_modules = PACKED_MODULES
+
     def __init__(
         self,
         config: YiConfig,
