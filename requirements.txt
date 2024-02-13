@@ -7,7 +7,7 @@ numpy
 torch == 2.1.2
 requests
 py-cpuinfo
-tensorizer == 2.7.1
+tensorizer == 2.8.0
 transformers >= 4.39.1  # Required for StarCoder2 & Llava.
 xformers == 0.0.23.post1  # Required for CUDA 12.1.
 fastapi

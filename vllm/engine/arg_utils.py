@@ -24,7 +24,6 @@ class TensorizerArgs:
     ## Commenting out serializer_encryption until I work out how I want to implement it
     # serializer_encryption: Optional[bool] = False
     lazy_load: bool = False
-    plaid_mode: bool = False
     plaid_mode_buffers: Optional[int] = None
     verify_hash: bool = False
     filter_func: Optional[Callable[[str], Union[bool, Any]]] = None
@@ -50,7 +49,7 @@ class TensorizerArgs:
         self.deserializer_params = {
             "filter_func": self.filter_func,
             "lazy_load": self.lazy_load,
-            "plaid_mode": self.plaid_mode,
+            "plaid_mode": True,
             "plaid_mode_buffers": self.plaid_mode_buffers,
             "verify_hash": self.verify_hash,
             "encryption": self.deserializer_encryption_key,
@@ -74,15 +73,8 @@ class TensorizerArgs:
             action='store_true',
             help="If True, tensors will be loaded and cached when keys are"
             "accessed. If False, all tensors will be loaded into memory up"
-            "front.")
-        parser.add_argument(
-            "--plaid-mode",
-            action='store_true',
-            help="If True, tensors will be loaded extremely fast into the"
-            "target device. This is only supported on CUDA devices,"
-            "and the buffers are going to be inconsistent due to the extreme"
-            "naughtiness of reusing a backing buffer. This is only recommended"
-            "for use with inference, and not training.")
+            "front.",
+        )
         parser.add_argument(
             "--plaid-mode-buffers",
             default=None,
