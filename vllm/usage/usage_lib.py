@@ -73,6 +73,8 @@ class UsageMessage:
         self.model = model
         self.log_time = _get_current_timestamp_ns()
 
+        
+
     def _write_to_file(self):
         with open(_USAGE_STATS_FILE, "w") as outfile:
             json.dump(vars(self), outfile)
