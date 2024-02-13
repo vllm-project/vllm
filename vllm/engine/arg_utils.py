@@ -76,6 +76,11 @@ class TensorizerArgs:
             "front.",
         )
         parser.add_argument(
+            "--tensorizer-uri",
+            help="Path to serialized model tensors. Can be a local file path"
+                 "or a S3 URI.",
+        )
+        parser.add_argument(
             "--plaid-mode-buffers",
             default=None,
             help="The number of buffers to use in plaid mode."

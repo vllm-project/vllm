@@ -293,7 +293,7 @@ def hf_model_weights_iterator(
     elif load_format == "tensorizer":
         if cache_dir:
             logger.warning(
-                "It is not recommended to download deserialized tensors locally."
+                "It is not recommended to download deserialized tensors locally. "
                 "Consider keeping `download_dir` as None next time.")
         deserializer_args = tensorizer_args.deserializer_params
         credentials = tensorizer_args.credentials
