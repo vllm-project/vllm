@@ -2,7 +2,7 @@
 import copy
 import enum
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Any
 
 from vllm.block import LogicalTokenBlock
 from vllm.prefix import Prefix
@@ -281,6 +281,9 @@ class SequenceGroup:
         self.prefix: Optional[Prefix] = prefix
         self.prompt_logprobs: Optional[PromptLogprobs] = None
 
+        # Sequence group state, used to store Generator used in seeded sampling
+        self.state: Dict[str, Any] = {}
+
     @property
     def prompt(self) -> str:
         # All sequences in the group should have the same prompt.
@@ -397,6 +400,7 @@ class SequenceGroupMetadata:
         sampling_params: The sampling parameters used to generate the outputs.
         block_tables: The block tables. (Seq id -> list of physical block
             numbers)
+        state: A dict for holding internal state tied to this sequence group.
         lora_request: LoRA request.
         prefix: The prefix of the prompt of the sequence group.
     """
@@ -410,6 +414,7 @@ class SequenceGroupMetadata:
         block_tables: Dict[int, List[int]],
         lora_request: Optional[LoRARequest] = None,
         prefix: Optional[Prefix] = None,
+        state: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
@@ -418,6 +423,7 @@ class SequenceGroupMetadata:
         self.block_tables = block_tables
         self.lora_request = lora_request
         self.prefix = prefix
+        self.state = {} if state is None else state
 
     @property
     def lora_int_id(self) -> int:
