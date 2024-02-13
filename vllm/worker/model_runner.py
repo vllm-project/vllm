@@ -85,9 +85,11 @@ class ModelRunner:
             assert hasattr(
                 self.model, "supported_lora_modules"
             ) and self.model.supported_lora_modules, "Model does not support LoRA"
-            assert hasattr(self.model, "embedding_modules") and hasattr(
-                self.model, "embedding_padding_modules"
-            ), "Model does not have embedding_modules/embedding_padding_modules"
+            assert hasattr(
+                self.model,
+                "embedding_modules"), "Model does not have embedding_modules"
+            assert hasattr(self.model, "embedding_padding_modules"
+                           ), "Model does not have embedding_padding_modules"
             self.lora_manager = LRUCacheWorkerLoRAManager(
                 self.scheduler_config.max_num_seqs,
                 self.scheduler_config.max_num_batched_tokens +

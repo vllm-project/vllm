@@ -198,7 +198,6 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
     def create_lora_manager(
         self,
         model: torch.nn.Module,
-        supported_lora_modules: Optional[Union[str, List[str]]] = None,
     ) -> Any:
         lora_manager = create_lora_manager(
             model,
