@@ -20,7 +20,6 @@ from vllm.model_executor.layers.quantization import (get_quantization_config,
 
 logger = init_logger(__name__)
 
-
 # Which weights get packed together. This is usually specified for each model
 # via the packed_modules class attribute, the following is used for most models.
 PACKED_MODULES = {
@@ -34,6 +33,7 @@ PACKED_MODULES = {
         "up_proj",
     ],
 }
+
 
 def get_packed_param(packed_modules: Dict[str, Any], weight_name):
     for param_name, weight_names in packed_modules.items():

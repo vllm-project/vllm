@@ -282,7 +282,7 @@ class StablelmForCausalLM(nn.Module):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            for (param_name, weight_name, shard_id) in weight_shards:
+            for (weight_name, shard_id) in weight_shards:
                 param_name = get_packed_param(self.packed_modules, weight_name)
                 if weight_name not in name:
                     continue

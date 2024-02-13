@@ -37,9 +37,6 @@ from vllm.model_executor.weight_utils import (PACKED_MODULES,
 
 
 class DeciLMForCausalLM(LlamaForCausalLM):
-
-    packed_modules = PACKED_MODULES
-
     """
     Implementation for https://huggingface.co/Deci/DeciLM-7b-instruct.
     Based on the llama executor.
@@ -56,6 +53,8 @@ class DeciLMForCausalLM(LlamaForCausalLM):
     normalize the weights upon loading, and use uniform GQA with the max value
     instead.
     """
+
+    packed_modules = PACKED_MODULES
 
     def __init__(
         self,
