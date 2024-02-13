@@ -160,7 +160,6 @@ class SamplingParams:
                 self.top_k = -1
                 self.min_p = 0.0
                 self._verify_greedy_sampling()
-        self._generator = None
 
     def _verify_args(self) -> None:
         if self.n < 1:
