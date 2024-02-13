@@ -16,8 +16,10 @@ _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
 def _read_prompts(filename: str) -> str:
     prompts = []
     with open(filename, "r") as f:
-        prompt = f.readline()
-        prompts.append(prompt)
+        for line in f:
+            line = line.strip()
+            if line:
+                prompts.append(line)
     return prompts
 
 
@@ -25,7 +27,7 @@ def _read_prompts(filename: str) -> str:
 def example_prompts() -> List[str]:
     prompts = []
     for filename in _TEST_PROMPTS:
-        prompts += _read_prompts(filename)
+        prompts.extend(_read_prompts(filename))
     return prompts
 
 
