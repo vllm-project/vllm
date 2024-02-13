@@ -49,3 +49,10 @@ steps:
   commands:
   - pip install aiohttp
   - bash run-benchmarks.sh
+
+- label: Documentation Build
+  working_dir: "/vllm-workspace/docs"
+  no_gpu: True
+  commands:
+  - pip install -r requirements-docs.txt
+  - SPHINXOPTS=\"-W\" make html
