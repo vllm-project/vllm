@@ -1,24 +1,18 @@
 import torch
-from torch.sparse import SparseSemiStructuredTensor
 
 from typing import Type
-from magic_wand import (
-    SparseTensor, 
-    CompressedStorageFormat, 
-    SparseBitmaskStorageFormat, 
-    SparseSemiStructuredStorageFormat
-)
+from magic_wand import (SparseTensor, CompressedStorageFormat,
+                        SparseBitmaskStorageFormat)
 
 
 class SparseParameter(SparseTensor):
 
     @staticmethod
-    def __new__(
-        cls,
-        shape: torch.Size,
-        dtype: torch.dtype,
-        storage_format_cls: Type[CompressedStorageFormat] = SparseBitmaskStorageFormat
-    ):
+    def __new__(cls,
+                shape: torch.Size,
+                dtype: torch.dtype,
+                storage_format_cls: Type[
+                    CompressedStorageFormat] = SparseBitmaskStorageFormat):
         assert torch.__version__ > (1,
                                     10), "SparseTensor requires PyTorch 1.11+"
 

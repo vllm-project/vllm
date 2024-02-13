@@ -7,6 +7,7 @@ from typing import Type
 from vllm.model_executor.layers.linear import LinearMethodBase
 from magic_wand import CompressedStorageFormat
 
+
 class SparsityConfig(ABC):
     """Base class for sparsity configs."""
 

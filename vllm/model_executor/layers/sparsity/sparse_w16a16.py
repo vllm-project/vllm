@@ -1,15 +1,12 @@
 from typing import Any, Dict, List, Type
 
 import torch
-import torch.nn.functional as F
 
 from vllm.model_executor.layers.sparsity.base_config import SparsityConfig
 
 from .sparse_w16a16_linear_method import SparseW16A16LinearMethod
-from magic_wand import (
-    CompressedStorageFormat,
-    SparseBitmaskStorageFormat
-)
+from magic_wand import (CompressedStorageFormat, SparseBitmaskStorageFormat)
+
 
 class SparseW16A16Config(SparsityConfig):
     """Config class for SparseW16A16.
@@ -50,4 +47,4 @@ class SparseW16A16Config(SparsityConfig):
         return cls()
 
     def get_linear_method(self) -> "SparseW16A16LinearMethod":
-        return SparseW16A16LinearMethod(self,self.get_storage_format_cls())
+        return SparseW16A16LinearMethod(self, self.get_storage_format_cls())
