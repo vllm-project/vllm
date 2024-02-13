@@ -29,7 +29,6 @@ from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-import common_metrics
 from backend_request_func import (
     ASYNC_REQUEST_FUNCS,
     RequestFuncInput,
@@ -221,21 +220,21 @@ async def benchmark(
     print(f"Median TPOT: {metrics.median_tpot_ms:.2f} ms")
     print(f"P99 TPOT: {metrics.p99_tpot_ms:.2f} ms")
 
-    result = {}
-    result["duration"] = benchmark_duration
-    result[common_metrics.COMPLETED] = metrics.completed
-    result[common_metrics.TOTAL_INPUT_TOKENS] = metrics.total_input
-    result[common_metrics.TOTAL_OUTPUT_TOKENS] = metrics.total_output
-    result[common_metrics.REQUEST_INTHROUGPUT] = metrics.request_throughput
-    result[common_metrics.INPUT_THROUGHPUT] = metrics.input_throughput
-    result[common_metrics.OUTPUT_THROUGHPUT] = metrics.output_throughput
-    result[common_metrics.MEAN_TTFT_MS] = metrics.mean_ttft_ms
-    result[common_metrics.MEDIAN_TTFT_MS] = metrics.median_ttft_ms
-    result[common_metrics.P99_TTFT_MS] = metrics.p99_ttft_ms
-    result[common_metrics.MEAN_TPOT_MS] = metrics.mean_tpot_ms
-    result[common_metrics.MEDIAN_TPOT_MS] = metrics.median_tpot_ms
-    result[common_metrics.P99_TPOT_MS] = metrics.p99_tpot_ms
-
+    result = {
+        "duration": benchmark_duration,
+        "completed": metrics.completed,
+        "total_input_tokens": metrics.total_input,
+        "total_output_tokens": metrics.total_output,
+        "request_inthroughput": metrics.request_throughput,
+        "input_throughput": metrics.input_throughput,
+        "output_throughput": metrics.output_throughput,
+        "mean_ttft_ms": metrics.mean_ttft_ms,
+        "median_ttft_ms": metrics.median_ttft_ms,
+        "p99_ttft_ms": metrics.p99_ttft_ms,
+        "mean_tpot_ms": metrics.mean_tpot_ms,
+        "median_tpot_ms": metrics.median_tpot_ms,
+        "p99_tpot_ms": metrics.p99_tpot_ms
+    }
     return result
 
 
