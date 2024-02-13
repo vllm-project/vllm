@@ -48,6 +48,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (PACKED_MODULES,
                                               default_weight_loader,
+                                              get_packed_param,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 

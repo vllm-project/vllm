@@ -30,7 +30,9 @@ from transformers import PretrainedConfig
 
 from vllm.model_executor.layers.linear import LinearMethodBase
 from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.model_executor.weight_utils import (default_weight_loader,
+from vllm.model_executor.weight_utils import (PACKED_MODULES,
+                                              default_weight_loader,
+                                              get_packed_param,
                                               hf_model_weights_iterator)
 
 

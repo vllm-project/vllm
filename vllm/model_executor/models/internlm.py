@@ -20,7 +20,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_world_size)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.weight_utils import (default_weight_loader,
+from vllm.model_executor.weight_utils import (PACKED_MODULES,
+                                              default_weight_loader,
+                                              get_packed_param,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 
