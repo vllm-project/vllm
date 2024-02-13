@@ -181,9 +181,6 @@ class LLM:
                               prefix_pos=prefix_pos_i)
         return self._run_engine(use_tqdm)
 
-    def cleanup(self) -> None:
-        self.llm_engine.cleanup()
-
     def _add_request(
         self,
         prompt: Optional[str],

@@ -5,11 +5,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.config import DeviceConfig, ModelConfig, LoRAConfig, ParallelConfig, SchedulerConfig
+from vllm.config import (DeviceConfig, ModelConfig, LoRAConfig, ParallelConfig,
+                         SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
 from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
+from vllm.model_executor.parallel_utils.cupy_utils import get_nccl_backend
 from vllm.model_executor.parallel_utils.parallel_state import (
     with_cupy_nccl_for_all_reduce)
 from vllm.model_executor.parallel_utils import custom_all_reduce
@@ -644,12 +646,6 @@ class ModelRunner:
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.list_loras()
 
-    def cleanup(self) -> None:
-        torch.cuda.synchronize()
-        self.graph_runners.clear()
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-
     @torch.inference_mode()
     def capture_model(self, kv_caches: List[KVCache]) -> None:
         assert not self.model_config.enforce_eager
@@ -726,6 +722,18 @@ class ModelRunner:
         elapsed_time = end_time - start_time
         # This usually takes < 10 seconds.
         logger.info(f"Graph capturing finished in {elapsed_time:.0f} secs.")
+
+        # NOTE(woosuk): This is a hack to ensure that the NCCL backend is never
+        # deleted before the CUDA graphs.
+        self.cupy_nccl_backend = get_nccl_backend()
+
+    def __del__(self) -> None:
+        # Delete the CUDA graphs before deleting the CuPy NCCL communicator.
+        # NOTE(woosuk): This is necessary because otherwise deadlocks can
+        # happen.
+        # FIXME(woosuk): This is a bit hacky. Find a more robust solution.
+        self.graph_runners.clear()
+        self.cupy_nccl_backend = None
 
 
 class CUDAGraphRunner:

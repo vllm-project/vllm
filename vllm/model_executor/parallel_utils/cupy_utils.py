@@ -43,6 +43,11 @@ class NCCLBackendWithBFloat16(NCCLBackend):
             nccl_dtype = nccl.NCCL_BFLOAT16
         return nccl_dtype, count
 
+    def barrier(self) -> None:
+        raise RuntimeError(
+            "Currently, CuPy NCCL barrier is not supported since the TCP "
+            "store is immediately stopped after the initialization.")
+
 
 _NCCL_BACKEND = None
 _WORLD_SIZE = 0
@@ -54,7 +59,7 @@ def is_initialized() -> bool:
 
 
 @contextlib.contextmanager
-def set_cupy_stream(stream: torch.cuda.Stream) -> None:
+def set_cupy_stream(stream: torch.cuda.Stream):
     """Set the cuda stream for communication"""
     cupy_stream = cupy.cuda.ExternalStream(stream.cuda_stream,
                                            stream.device_index)
@@ -85,6 +90,11 @@ def init_process_group(world_size: int, rank: int, host: str,
     _NCCL_BACKEND = NCCLBackendWithBFloat16(world_size, rank, host, port)
     _WORLD_SIZE = world_size
 
+    # Stop the TCP store to prevent the deadlock issues at termination time.
+    # FIXME(woosuk): This is hacky. Find a more robust solution.
+    if rank == 0 and hasattr(_NCCL_BACKEND, "_store"):
+        _NCCL_BACKEND._store.stop()
+
 
 def all_reduce(input_: torch.Tensor, op=ReduceOp.SUM) -> None:
     """All-reduces the input tensor across the process group."""
@@ -114,3 +124,7 @@ def destroy_process_group() -> None:
 def get_world_size() -> int:
     """Returns the world size."""
     return _WORLD_SIZE
+
+
+def get_nccl_backend():
+    return _NCCL_BACKEND

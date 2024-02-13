@@ -1,5 +1,4 @@
 """A GPU worker class."""
-import atexit
 import gc
 import os
 from typing import Dict, List, Tuple, Set, Optional
@@ -15,7 +14,7 @@ from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
 from vllm.model_executor.parallel_utils.custom_all_reduce import init_custom_ar
 from vllm.model_executor.parallel_utils.parallel_state import (
-    ensure_model_parallel_initialized, destroy_model_parallel)
+    ensure_model_parallel_initialized)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
@@ -68,12 +67,6 @@ class Worker:
         self.cache_engine = None
         self.cache_events = None
         self.gpu_cache = None
-
-        # Safely clean up the CuPy states before termination.
-        # NOTE(woosuk): This is necessary because destroying CuPy NCCL
-        # communicator before deleting CUDA graphs can result in deadlocks.
-        # FIXME(woosuk): This is a bit hacky. Find a better solution.
-        atexit.register(lambda: self.cleanup())
 
     def init_model(self, cupy_port: Optional[int] = None) -> None:
         if self.device_config.device.type == "cuda":
@@ -236,12 +229,6 @@ class Worker:
 
     def list_loras(self) -> Set[int]:
         return self.model_runner.list_loras()
-
-    def cleanup(self) -> None:
-        # NOTE(woosuk): Make sure that CUDA graphs are deleted before CuPy NCCL
-        # communicator. Otherwise, deadlocks can happen.
-        self.model_runner.cleanup()
-        destroy_model_parallel()
 
 
 def init_distributed_environment(
