@@ -757,7 +757,7 @@ class CUDAGraphRunner:
         # Run the model once without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
-        with _nccl_backend():
+        with _maybe_cupy_nccl():
             self.model(
                 input_ids,
                 positions,
@@ -771,7 +771,7 @@ class CUDAGraphRunner:
         # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
         self.graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self.graph, pool=memory_pool):  # noqa: SIM117
-            with _nccl_backend():
+            with _maybe_cupy_nccl():
                 hidden_states = self.model(
                     input_ids,
                     positions,
@@ -823,7 +823,7 @@ class CUDAGraphRunner:
 
 
 @contextlib.contextmanager
-def _nccl_backend():
+def _maybe_cupy_nccl():
     if cupy_utils.is_initialized() and not custom_all_reduce.is_initialized():
         with with_cupy_nccl_for_all_reduce():
             yield
