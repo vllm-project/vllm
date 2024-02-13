@@ -250,7 +250,7 @@ class LoRAModelManager:
         max_num_batched_tokens: int,
         vocab_size: int,
         lora_config: LoRAConfig,
-        support_lora_modules: Optional[List[str]] = None,
+        supported_lora_modules: Optional[List[str]] = None,
         packed_modules_mapping: Optional[Dict[str, List[str]]] = None,
     ):
         """Create a LoRAModelManager and adapter for a given model.
@@ -263,7 +263,7 @@ class LoRAModelManager:
                 in a single batch.
             vocab_size: the vocab size of the model.
             lora_config: the LoRA configuration.
-            support_lora_modules: the target modules patterns to be adapted.
+            supported_lora_modules: the target modules patterns to be adapted.
                 Support both single module name and a list of module names.
             packed_modules_mapping: the mapping for packed modules. vLLM
                 packs some modules into one module, e.g., qkv_proj
@@ -298,19 +298,17 @@ class LoRAModelManager:
 
         self.model: nn.Module = model
         # allow overriding the target modules and mapping with initialization
-        if support_lora_modules:
-            self.support_lora_modules: List[str] = (
-                [support_lora_modules] if isinstance(
-                    support_lora_modules, str) else support_lora_modules)
+        if supported_lora_modules:
+            self.supported_lora_modules: List[str] = supported_lora_modules
             self.packed_modules_mapping = copy.deepcopy(
                 packed_modules_mapping) if packed_modules_mapping else {}
         elif hasattr(self.model, "supports_lora") and self.model.supports_lora:
-            assert hasattr(self.model, "support_lora_modules") and hasattr(
+            assert hasattr(self.model, "supported_lora_modules") and hasattr(
                 self.model, "packed_modules_mapping"), (
-                    f"{self.model} model must have support_lora_modules and "
+                    f"{self.model} model must have supported_lora_modules and "
                     "packed_modules_mapping to support lora")
-            self.support_lora_modules = copy.deepcopy(
-                self.model.support_lora_modules)
+            self.supported_lora_modules = copy.deepcopy(
+                self.model.supported_lora_modules)
             self.packed_modules_mapping = copy.deepcopy(
                 self.model.packed_modules_mapping)
         self.packed_modules: Dict[str, List[str]] = {}
@@ -523,7 +521,7 @@ class LoRAModelManager:
             re.match(
                 r".*\.{target_module}$".format(target_module=target_module),
                 module_name) or target_module == module_name
-            for target_module in self.support_lora_modules)
+            for target_module in self.supported_lora_modules)
 
     def _register_packed_modules(self, module_full_name: str) -> None:
         parts = module_full_name.split(".")
@@ -578,11 +576,11 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
         max_num_batched_tokens: int,
         vocab_size: int,
         lora_config: LoRAConfig,
-        support_lora_modules: Optional[Union[str, List[str]]] = None,
+        supported_lora_modules: Optional[Union[str, List[str]]] = None,
         packed_modules_mapping: Optional[Dict[str, List[str]]] = None,
     ):
         super().__init__(model, max_num_seqs, max_num_batched_tokens,
-                         vocab_size, lora_config, support_lora_modules,
+                         vocab_size, lora_config, supported_lora_modules,
                          packed_modules_mapping)
         self._registered_loras: LoRALRUCache = LoRALRUCache(
             self.capacity, self.deactivate_lora)
@@ -642,8 +640,8 @@ def create_lora_manager(
         max_num_batched_tokens=max_num_batched_tokens,
         vocab_size=vocab_size,
         lora_config=lora_config,
-        support_lora_modules=target_modules
-        if target_modules else model.support_lora_modules,
+        supported_lora_modules=target_modules
+        if target_modules else model.supported_lora_modules,
         packed_modules_mapping=packed_modules_mapping
         if packed_modules_mapping else model.packed_modules_mapping,
         **kwargs)

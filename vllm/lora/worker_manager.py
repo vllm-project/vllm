@@ -103,7 +103,7 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
             max_num_seqs=self.max_num_seqs,
             max_num_batched_tokens=self.max_num_batched_tokens,
             target_modules=target_modules
-            if target_modules else model.support_lora_modules,
+            if target_modules else model.supported_lora_modules,
             vocab_size=self.vocab_size,
             lora_config=self.lora_config,
             lora_manager_cls=self._lora_manager_cls,

@@ -322,7 +322,7 @@ class MixtralModel(nn.Module):
 class MixtralForCausalLM(nn.Module):
     # LoRA specific attributes
     supports_lora = True
-    support_lora_modules = [
+    supported_lora_modules = [
         "qkv_proj",
         "o_proj",
         "embed_tokens",
