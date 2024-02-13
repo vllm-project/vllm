@@ -100,14 +100,13 @@ def create_packed_lora(
 
 def test_replace_submodules(dist_init, dummy_model):
     model = dummy_model
-    manager = LoRAModelManager(model,
-                               1,
-                               1,
-                               1,
-                               LoRAConfig(max_lora_rank=8,
-                                          max_cpu_loras=8,
-                                          max_loras=8),
-                               support_lora_modules=["dense1", "layer1.dense2"])
+    manager = LoRAModelManager(
+        model,
+        1,
+        1,
+        1,
+        LoRAConfig(max_lora_rank=8, max_cpu_loras=8, max_loras=8),
+        support_lora_modules=["dense1", "layer1.dense2"])
     model = manager.model
 
     assert isinstance(model.get_submodule("dense1"),

@@ -299,9 +299,9 @@ class LoRAModelManager:
         self.model: nn.Module = model
         # allow overriding the target modules and mapping with initialization
         if support_lora_modules:
-            self.support_lora_modules: List[str] = ([
-                support_lora_modules
-            ] if isinstance(support_lora_modules, str) else support_lora_modules)
+            self.support_lora_modules: List[str] = (
+                [support_lora_modules] if isinstance(
+                    support_lora_modules, str) else support_lora_modules)
             self.packed_modules_mapping = copy.deepcopy(
                 packed_modules_mapping) if packed_modules_mapping else {}
         elif hasattr(self.model, "supports_lora") and self.model.supports_lora:
