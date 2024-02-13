@@ -35,6 +35,9 @@ from vllm.model_executor.weight_utils import (default_weight_loader,
 
 
 class DeciLMForCausalLM(LlamaForCausalLM):
+
+    packed_modules = PACKED_MODULES
+
     """
     Implementation for https://huggingface.co/Deci/DeciLM-7b-instruct.
     Based on the llama executor.
@@ -84,7 +87,7 @@ class DeciLMForCausalLM(LlamaForCausalLM):
                 loaded_weight = self._degroup_weight(loaded_weight)
 
             for (weight_name, shard_id) in weight_shards:
-                param_name = get_packed_param(packed_modules_mapping, weight_name)
+                param_name = get_packed_param(packed_modules, weight_name)
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)

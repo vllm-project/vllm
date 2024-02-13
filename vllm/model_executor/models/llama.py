@@ -270,7 +270,7 @@ class LlamaModel(nn.Module):
 
 class LlamaForCausalLM(nn.Module):
 
-    packed_modules_mapping = {
+    packed_modules = {
         "qkv_proj": [
             "q_proj",
             "k_proj",
@@ -352,7 +352,7 @@ class LlamaForCausalLM(nn.Module):
                 # the checkpoint. Skip them.
                 continue
             for (weight_name, shard_id) in weight_shards:
-                param_name = get_packed_param(packed_modules_mapping, weight_name)
+                param_name = get_packed_param(packed_modules, weight_name)
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)

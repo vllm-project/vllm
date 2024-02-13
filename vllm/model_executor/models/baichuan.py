@@ -287,6 +287,10 @@ class BaiChuanModel(nn.Module):
 
 class BaiChuanBaseForCausalLM(nn.Module):
 
+    packed_modules = {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+
     def __init__(self,
                  config,
                  position_embedding: str,
@@ -345,7 +349,7 @@ class BaiChuanBaseForCausalLM(nn.Module):
                         loaded_weight)
 
             for (param_name, weight_name, shard_id) in weight_shards:
-                param_name = get_packed_param(packed_modules_mapping, weight_name)
+                param_name = get_packed_param(packed_modules, weight_name)
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
