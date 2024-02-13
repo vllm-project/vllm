@@ -14,19 +14,6 @@ if(NOT DEFINED PYTHON_EXECUTABLE)
   set(PYTHON_EXECUTABLE python3)
 endif()
 
-# HACKS
-execute_process(
-  COMMAND
-  "${PYTHON_EXECUTABLE}" "--version"
-  OUTPUT_VARIABLE JUNK)
-message("junk: ${JUNK}")
-execute_process(
-  COMMAND
-  "which" "-a" "python3"
-  OUTPUT_VARIABLE JUNK)
-message("junk: ${JUNK}")
-# HACKS
-
 #
 # Find where user site-packages and torch are installed and add it to cmake's search path.
 # Find packages needed to compile
@@ -187,8 +174,13 @@ set(CMAKE_CXX_STANDARD 17)
 #this doesn't seem to work
 #set(CUDA_PROPAGATE_HOST_FLAGS OFF)
 
+message("pv: ${PYTHON_VERSION_STRING}")
+
+#set(PYTHON_SABI_VERSION "${Python_VERSION_MAJOR}.${Python_VERSION_MINOR}")
+
 # add comment
 function(define_module_target MOD_NAME MOD_SRC MOD_NVCC_FLAGS MOD_CUDA_ARCHES)
+  #  Python_add_library(${MOD_NAME} MODULE ${MOD_SRC} USE_SABI ${PYTHON_SABI_VERSION})
   Python_add_library(${MOD_NAME} MODULE ${MOD_SRC} WITH_SOABI)
   #add_library(${MOD_NAME} MODULE ${MOD_SRC})
   set_target_properties(${MOD_NAME} PROPERTIES CUDA_ARCHITECTURES "${MOD_CUDA_ARCHES}")
@@ -211,8 +203,8 @@ define_module_target(_C "${VLLM_EXT_SRC}" "${NVCC_FLAGS}" "${VLLM_CUDA_ARCHES}")
 define_module_target(_moe_C "${VLLM_MOE_EXT_SRC}" "${NVCC_FLAGS}" "${VLLM_CUDA_ARCHES}")
 define_module_target(_punica_C "${VLLM_PUNICA_EXT_SRC}" "${PUNICA_NVCC_FLAGS}" "${VLLM_PUNICA_CUDA_ARCHES}")
 
-#get_cmake_property(_variableNames VARIABLES)
-#list (SORT _variableNames)
-#foreach (_variableName ${_variableNames})
-#    message(STATUS "${_variableName}=${${_variableName}}")
-#endforeach()
+get_cmake_property(_variableNames VARIABLES)
+list (SORT _variableNames)
+foreach (_variableName ${_variableNames})
+    message(STATUS "${_variableName}=${${_variableName}}")
+endforeach()
