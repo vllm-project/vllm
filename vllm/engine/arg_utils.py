@@ -30,7 +30,7 @@ class TensorizerArgs:
     deserializer_encryption_key: Optional[str] = None
 
     def __post_init__(self):
-        self.file_obj = self.download_dir
+        self.file_obj = self.tensorizer_uri
         self.s3_access_key_id = os.environ.get("S3_ACCESS_KEY_ID") or None
         self.s3_secret_access_key = os.environ.get("S3_SECRET_ACCESS_KEY") or None
         self.s3_endpoint = os.environ.get("S3_ENDPOINT_URL") or None

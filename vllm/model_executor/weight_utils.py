@@ -291,9 +291,13 @@ def hf_model_weights_iterator(
                 param = np.load(f)
             yield name, torch.from_numpy(param)
     elif load_format == "tensorizer":
+        if cache_dir:
+            logger.warning(
+                "It is not recommended to download deserialized tensors locally."
+                "Consider keeping `download_dir` as None next time.")
         deserializer_args = tensorizer_args.deserializer_params
         credentials = tensorizer_args.credentials
-        stream = open_stream(cache_dir, **credentials)
+        stream = open_stream(tensorizer_args.tensorizer_uri, **credentials)
         with TensorDeserializer(stream, **deserializer_args) as state:
             for name, param in state.items():
                 yield name, param
