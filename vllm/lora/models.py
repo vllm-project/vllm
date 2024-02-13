@@ -4,8 +4,7 @@ import logging
 import math
 import os
 import re
-from typing import (Any, Callable, Dict, Hashable, List, Optional, Tuple, Type,
-                    Union)
+from typing import (Any, Callable, Dict, Hashable, List, Optional, Tuple, Type)
 
 import safetensors.torch
 import torch
