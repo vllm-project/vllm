@@ -37,11 +37,13 @@ steps:
                 args:
                 - "-c"
                 - "'cd {{ (step.working_dir or default_working_dir) | safe  }} && {{ step.command  or (step.commands | join(' && ')) | safe }}'"
+                {% if not step.no_gpu %}
                 resources:
                   requests:
                     nvidia.com/gpu: "{{ step.num_gpus or default_num_gpu }}"
                   limits:
                     nvidia.com/gpu: "{{ step.num_gpus or default_num_gpu }}"
+                {% endif %}
                 env:
                   - name: HF_TOKEN
                     valueFrom:

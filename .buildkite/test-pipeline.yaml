@@ -52,7 +52,7 @@ steps:
 
 - label: Documentation Build
   working_dir: "/vllm-workspace/docs"
-  num_gpus: 0
+  no_gpu: True
   commands:
   - pip install -r requirements-docs.txt
   - SPHINXOPTS="-W" make html
