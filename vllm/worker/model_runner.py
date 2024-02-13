@@ -648,6 +648,10 @@ class ModelRunner:
 
     @torch.inference_mode()
     def capture_model(self, kv_caches: List[KVCache]) -> None:
+        # NOTE(woosuk): This is a hack to ensure that the NCCL backend is never
+        # deleted before the CUDA graphs.
+        self.cupy_nccl_backend = get_nccl_backend()
+
         assert not self.model_config.enforce_eager
         logger.info("Capturing the model for CUDA graphs. This may lead to "
                     "unexpected consequences if the model is not static. To "
@@ -722,10 +726,6 @@ class ModelRunner:
         elapsed_time = end_time - start_time
         # This usually takes < 10 seconds.
         logger.info(f"Graph capturing finished in {elapsed_time:.0f} secs.")
-
-        # NOTE(woosuk): This is a hack to ensure that the NCCL backend is never
-        # deleted before the CUDA graphs.
-        self.cupy_nccl_backend = get_nccl_backend()
 
     def __del__(self) -> None:
         # Delete the CUDA graphs before deleting the CuPy NCCL communicator.
