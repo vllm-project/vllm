@@ -18,11 +18,10 @@ def update_snapshot(model, dtype, max_tokens, prompt, hf_output_str):
         snapshot = json.load(f)
 
     snapshot.setdefault(key, {})
-    snapshot[key].setdefault(prompt, [])
-    snapshot[key][prompt].append(hf_output_str)
+    snapshot[key][prompt] = hf_output_str
 
     with open(snapshot_path, "w") as f:
-        json.dump(snapshot, f, indent=2)
+        json.dump(snapshot, f, indent=2, sort_keys=True)
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -41,10 +40,10 @@ def test_models(
     del hf_model
 
     for i in range(len(example_prompts)):
-        hf_output_ids, hf_output_str = hf_outputs[i]
+        _, hf_output_str = hf_outputs[i]
 
         update_snapshot(model, dtype, max_tokens, example_prompts[i],
-                        hf_output_ids, hf_output_str)
+                        hf_output_str)
 
 
 if __name__ == "__main__":
