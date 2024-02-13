@@ -29,7 +29,7 @@ steps:
 - label: Model Snapshot Test
   working_dir: "/vllm-workspace/tests/models/snapshot-tests"
   commands:
-    - pytest -v -s test_model_snapshot --forked
+    - pytest -v -s test_model_snapshot.py --forked
 
 - label: Prefix Caching Test
   commands:
