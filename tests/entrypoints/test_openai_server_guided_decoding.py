@@ -64,7 +64,7 @@ TEST_SCHEMA = {
 # NOTE: outlines' underlying regex library (interegular) doesn't support
 # ^ or $ or \b, kinda annoying
 TEST_REGEX = r"((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.){3}" + \
-               "(25[0-5]|(2[0-4]|1\d|[1-9]|)\d)"
+             r"(25[0-5]|(2[0-4]|1\d|[1-9]|)\d)"
 
 pytestmark = pytest.mark.asyncio
 

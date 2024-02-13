@@ -10,7 +10,6 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
-from vllm.model_executor.guided_decoding import GuidedDecodingMode, get_guided_decoding_logits_processor
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
 app = FastAPI()
@@ -31,16 +30,12 @@ async def generate(request: Request) -> Response:
     - prompt: the prompt to use for the generation.
     - stream: whether to stream the results or not.
     - other fields: the sampling parameters (See `SamplingParams` for details).
-    - guided decoding (structured generation) can be specified with:
-        - guided_json: JSON schema (str, dict, Pydantic BaseModel).
-        - guided_regex: a regex string.
     """
     request_dict = await request.json()
     prompt = request_dict.pop("prompt")
     prefix_pos = request_dict.pop("prefix_pos", None)
     stream = request_dict.pop("stream", False)
 
-    _setup_guided_decoding(request_dict)
     sampling_params = SamplingParams(**request_dict)
     request_id = random_uuid()
 
@@ -76,28 +71,6 @@ async def generate(request: Request) -> Response:
     text_outputs = [prompt + output.text for output in final_output.outputs]
     ret = {"text": text_outputs}
     return JSONResponse(ret)
-
-
-def _setup_guided_decoding(request_dict):
-    guided_json = request_dict.pop("guided_json", None)
-    guided_regex = request_dict.pop("guided_regex", None)
-
-    # if both json and regex exist, use the json
-    if guided_json:
-        logits_processors = get_guided_decoding_logits_processor(
-            guided_json, GuidedDecodingMode("json"),
-            engine.engine.tokenizer.tokenizer)
-    elif guided_regex:
-        logits_processors = get_guided_decoding_logits_processor(
-            guided_regex, GuidedDecodingMode("regex"),
-            engine.engine.tokenizer.tokenizer)
-    else:
-        return
-
-    if request_dict.get("logits_processors") is None:
-        request_dict["logits_processors"] = logits_processors
-    else:
-        request_dict["logits_processors"].extend(logits_processors)
 
 
 if __name__ == "__main__":
