@@ -106,6 +106,7 @@ class BlockAllocator:
         if block_hash in self.free_table:
             assert block_hash not in self.table
             block = self.free_table[block_hash]
+            assert block.ref_count == 0
             self.table[block_hash] = block
             block.ref_count += 1
             del self.free_table[block_hash]
@@ -122,6 +123,7 @@ class BlockAllocator:
             raise ValueError(f"Double free! {block} is already freed.")
         block.ref_count -= 1
         if block.ref_count == 0:
+            assert block.block_hash not in self.free_table
             self.free_table[block.block_hash] = block
             del self.table[block.block_hash]
 
