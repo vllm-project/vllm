@@ -1,6 +1,6 @@
 import logging
 from abc import ABC, abstractmethod, abstractproperty
-from typing import Any, Dict, List, Optional, Set, Type, Union
+from typing import Any, Dict, List, Optional, Set, Type
 
 import torch
 
