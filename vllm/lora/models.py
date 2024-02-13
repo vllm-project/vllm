@@ -297,16 +297,7 @@ class LoRAModelManager:
         self.indices_len = [None] * 4
 
         self.model: nn.Module = model
-        # allow overriding the target modules and mapping with initialization
-        if supported_lora_modules:
-            self.supported_lora_modules: List[str] = supported_lora_modules
-            self.packed_modules_mapping = copy.deepcopy(
-                packed_modules_mapping) if packed_modules_mapping else {}
-        elif hasattr(self.model, "supports_lora") and self.model.supports_lora:
-            assert hasattr(self.model, "supported_lora_modules") and hasattr(
-                self.model, "packed_modules_mapping"), (
-                    f"{self.model} model must have supported_lora_modules and "
-                    "packed_modules_mapping to support lora")
+        if hasattr(self.model, "supported_lora_modules"):
             self.supported_lora_modules = copy.deepcopy(
                 self.model.supported_lora_modules)
             self.packed_modules_mapping = copy.deepcopy(
