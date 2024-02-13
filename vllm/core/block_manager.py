@@ -13,7 +13,8 @@ class EvictionPolicy(enum.Enum):
     LRU = enum.auto()
 
 
-def lru_eviction(free_table: Dict[int, PhysicalTokenBlock]) -> PhysicalTokenBlock:
+def lru_eviction(
+        free_table: Dict[int, PhysicalTokenBlock]) -> PhysicalTokenBlock:
     free_blocks: List[PhysicalTokenBlock] = list(free_table.values())
     if len(free_blocks) == 0:
         raise ValueError("No usable cache memory left")
