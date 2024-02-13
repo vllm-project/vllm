@@ -13,10 +13,10 @@ from enum import Enum
 from pathlib import Path
 
 
-_USAGE_STATS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'usage_stats.json')
+_USAGE_STATS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'usage_stats.json') #File path to store usage data locally
 _USAGE_STATS_ENABLED = None
 _USAGE_STATS_SEVER = os.environ.get('VLLM_USAGE_STATS_SERVER', 'https://stats.vllm.ai')
-_USAGE_STATS_URL = "http://127.0.0.1:1234"
+_USAGE_STATS_URL = "http://127.0.0.1:1234" #Placeholder for sending usage data to vector.dev http server
 
 
 def is_usage_stats_enabled():
