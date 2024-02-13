@@ -69,12 +69,16 @@ class UsageMessage:
         self.model = model
         self.log_time = _get_current_timestamp_ns()
 
-    def write_to_file(self):
+    def _write_to_file(self):
         with open(_USAGE_STATS_FILE, "w") as outfile: 
             json.dump(vars(self), outfile)
 
     def send_to_server(self):
         headers = {'Content-type': 'application/json'}
         payload = json.dumps(vars(self))
-        response = requests.post(_USAGE_STATS_URL, data=payload, headers=headers)
+        try:
+            response = requests.post(_USAGE_STATS_URL, data=payload, headers=headers)
+        except requests.exceptions.RequestException as e:
+            print("Usage Log Request Failed")
+
 usage_message = UsageMessage()

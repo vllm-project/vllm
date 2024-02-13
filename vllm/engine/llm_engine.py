@@ -63,6 +63,7 @@ class LLMEngine:
         placement_group: Ray placement group for distributed execution.
             Required for distributed execution.
         log_stats: Whether to log statistics.
+        usage_context: Specified entry point, used for usage info collection
     """
 
     def __init__(
