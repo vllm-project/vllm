@@ -269,6 +269,19 @@ class LlamaModel(nn.Module):
 
 
 class LlamaForCausalLM(nn.Module):
+
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+
     supports_lora = True
 
     def __init__(
@@ -320,13 +333,13 @@ class LlamaForCausalLM(nn.Module):
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
+        weight_shard_mapping = [
+            # (shard_name, shard_id)
+            ("q_proj", "q"),
+            ("k_proj", "k"),
+            ("v_proj", "v"),
+            ("gate_proj", 0),
+            ("up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
@@ -338,7 +351,8 @@ class LlamaForCausalLM(nn.Module):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+            for (weight_name, shard_id) in weight_shard_mapping:
+                param_name = get_packed_param(packed_modules_mapping, weight_name)
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)

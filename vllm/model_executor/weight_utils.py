@@ -5,7 +5,7 @@ import fnmatch
 import json
 import os
 from collections import defaultdict
-from typing import Any, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from huggingface_hub import snapshot_download, HfFileSystem
 import numpy as np
@@ -19,6 +19,26 @@ from vllm.model_executor.layers.quantization import (get_quantization_config,
                                                      QuantizationConfig)
 
 logger = init_logger(__name__)
+
+
+# Which weights get packed together. This is usually specified for each model
+# via the packed_modules class attribute, the following is used for most models.
+PACKED_MODULES = {
+    "qkv_proj": [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+    ],
+    "gate_up_proj": [
+        "gate_proj",
+        "up_proj",
+    ],
+}
+
+def get_packed_param(packed_modules: Dict[str, Any], weight_name):
+    for param_name, weight_names in packed_modules.items():
+        if weight_name in weight_names:
+            return param_name
 
 
 class Disabledtqdm(tqdm):

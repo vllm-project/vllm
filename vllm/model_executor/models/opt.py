@@ -282,6 +282,14 @@ class OPTModel(nn.Module):
 
 class OPTForCausalLM(nn.Module):
 
+    packed_modules = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+    }
+
     def __init__(
         self,
         config,
@@ -319,11 +327,11 @@ class OPTForCausalLM(nn.Module):
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
+        weight_shards = [
+            # (shard_name, shard_id)
+            ("q_proj", "q"),
+            ("k_proj", "k"),
+            ("v_proj", "v"),
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in hf_model_weights_iterator(
@@ -333,7 +341,8 @@ class OPTForCausalLM(nn.Module):
             if name.startswith("decoder."):
                 name = "model." + name
 
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+            for (weight_name, shard_id) in weight_shards:
+                param_name = get_packed_param(packed_modules, weight_name)
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
