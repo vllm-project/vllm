@@ -7,7 +7,7 @@ set(CMAKE_FIND_DEBUG_MODE TRUE)
 #set(CMAKE_FIND_PACKAGE_SORT_ORDER NATURAL)
 #set(CMAKE_FIND_PACKAGE_SORT_DIRECTION ASC)
 
-find_package(Python 3.8 EXACT REQUIRED COMPONENTS Interpreter Development.Module)
+find_package(Python 3.8 EXACT COMPONENTS Interpreter Development.Module)
 if (NOT Python_FOUND)
   find_package(Python 3.8...3.11 REQUIRED COMPONENTS Interpreter Development.Module)
 endif()
