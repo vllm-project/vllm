@@ -68,8 +68,6 @@ class UnquantizedLinearMethod(LinearMethodBase):
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         weight = weights["weight"]
         if self.separate_bias_add:
-            #print(f">>> HELOOOOOOOOOOOOOO apply_weights {x.shape}, {weight.shape}, {bias}")
-
             if bias:
                 return F.linear(x, weight) + bias
             return F.linear(x, weight)

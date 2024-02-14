@@ -46,6 +46,7 @@ from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 from vllm.config import LoRAConfig
+from vllm import custom_ops
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -74,8 +75,16 @@ class LlamaMLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
+        #print(f'>>>Shape of x in mlp {x.shape} {self.gate_up_proj.weight.shape}')
+        if x.shape[0] == 1 and x.shape[1] == 1:
+
+            out = torch.empty(x.shape[0],self.gate_up_proj.weight.shape[0]//2,dtype=x.dtype,device=x.device)
+            custom_ops.LLMM_Silu(self.gate_up_proj.weight,x.view(-1,x.size(-1)),out,8)
+            x = out.view(x.shape[0], x.shape[1], out.shape[1])
+        else:
+            gate_up, _ = self.gate_up_proj(x)
+            x = self.act_fn(gate_up)
+            #print(f'>>> x.shape {x.shape}')
         x, _ = self.down_proj(x)
         return x
 

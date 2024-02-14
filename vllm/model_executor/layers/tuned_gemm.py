@@ -29,7 +29,6 @@ class TunedGemm:
     def apply_custom(self,ds):
         M,N,K = ds['M'],ds['N'],ds['K']
         #apply custom matvec (only for f16 dtype)
-        #return ds
         if N==1:
             ds1 = ds.copy()
             ds1['libtype'] = 'custom'
@@ -93,7 +92,7 @@ class TunedGemm:
             #print(">>> found rocblas")
             out = rocb_mm(inp_view,weights.t(),solidx)
         else:
-            print('>>>Tgemm Default',inp.shape,weights.shape,soltype,solidx)
+            #print('>>>Tgemm Default',inp.shape,weights.shape,soltype,solidx)
             out = F.linear(inp,weights)
         if batched:
             return out.view(inp.shape[0], inp.shape[1], weights.shape[0])
