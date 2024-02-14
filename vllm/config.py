@@ -363,6 +363,10 @@ class ParallelConfig:
             parallel and large models.
         disable_custom_all_reduce: Disable the custom all-reduce kernel and
             fall back to NCCL.
+        num_tokenizer_actors: Number of tokenizer actors to use for
+            asynchronous tokenization with Ray. If 0, will use
+            synchronous tokenization.
+        tokenizer_actor_options: Options for tokenizer Ray Actors.
     """
 
     def __init__(
@@ -372,12 +376,16 @@ class ParallelConfig:
         worker_use_ray: bool,
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
+        num_tokenizer_actors: int = 0,
+        tokenizer_actor_options: Optional[dict] = None,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         self.tensor_parallel_size = tensor_parallel_size
         self.worker_use_ray = worker_use_ray
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
+        self.num_tokenizer_actors = num_tokenizer_actors
+        self.tokenizer_actor_options = tokenizer_actor_options
 
         self.world_size = pipeline_parallel_size * tensor_parallel_size
         if self.world_size > 1:
