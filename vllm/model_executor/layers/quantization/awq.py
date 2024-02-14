@@ -147,6 +147,7 @@ class AWQLinearMethod(LinearMethodBase):
         qweight = weights["qweight"]
         scales = weights["scales"]
         qzeros = weights["qzeros"]
+        group_size = self.quant_config.group_size
         pack_factor = self.quant_config.pack_factor
         out_shape = (x.shape[:-1] + (qweight.shape[-1] * pack_factor, ))
         reshaped_x = x.reshape(-1, x.shape[-1])
@@ -159,7 +160,7 @@ class AWQLinearMethod(LinearMethodBase):
             out = torch.matmul(reshaped_x, out)
         else:
             out = ops.awq_gemm(reshaped_x, qweight, scales, qzeros,
-                               pack_factor)
+                               group_size, pack_factor)
         if bias is not None:
             out = out + bias
         return out.reshape(out_shape)

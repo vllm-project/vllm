@@ -71,6 +71,7 @@ torch::Tensor awq_gemm(
   torch::Tensor _kernel,
   torch::Tensor _scaling_factors,
   torch::Tensor _zeros,
+  int group_size,
   int split_k_iters);
 
 torch::Tensor awq_dequantize(
