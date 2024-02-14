@@ -30,7 +30,10 @@ steps:
   working_dir: "/vllm-workspace/tests/models/snapshot-tests"
   num_gpus: 2
   commands:
-    - pytest -v -s test_models_snapshot.py --forked
+    - nvidia-smi
+    - pytest -v -s test_models_snapshot.py --forked -k llama
+    - nvidia-smi
+    - pytest -v -s test_models_snapshot.py --forked -k mistral
 
 - label: Prefix Caching Test
   commands:
