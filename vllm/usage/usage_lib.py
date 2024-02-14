@@ -15,7 +15,7 @@ _USAGE_STATS_FILE = os.path.join(
 _USAGE_STATS_ENABLED = None
 _USAGE_STATS_SEVER = os.environ.get('VLLM_USAGE_STATS_SERVER',
                                     'https://stats.vllm.ai')
-_USAGE_STATS_URL = "http://127.0.0.1:1234"  #Placeholder for sending usage data to vector.dev http server
+_USAGE_STATS_URL = "https://vector-dev-server-uzyrqjjayq-uc.a.run.app"  #Placeholder for sending usage data to vector.dev http server
 
 
 def is_usage_stats_enabled():
