@@ -268,7 +268,7 @@ class EngineArgs:
                             type=str,
                             default=EngineArgs.device,
                             choices=["auto", "cuda", "neuron"],
-                            help=('Device type for vLLM execution.'))
+                            help='Device type for vLLM execution.')
         return parser
 
     @classmethod

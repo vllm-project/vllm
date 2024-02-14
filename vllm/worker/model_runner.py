@@ -82,7 +82,7 @@ class ModelRunner:
         self.is_neuron = is_neuron()
 
     def load_model(self) -> None:
-        if is_neuron():
+        if self.is_neuron:
             self.model = get_model(self.model_config, self.parallel_config,
                                    self.scheduler_config)
         else:
