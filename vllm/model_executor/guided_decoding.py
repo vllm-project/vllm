@@ -1,4 +1,6 @@
 from enum import Enum
+from functools import lru_cache
+from json import dumps as json_dumps
 from typing import Union
 from types import SimpleNamespace
 from pydantic import BaseModel
@@ -8,7 +10,7 @@ try:
     from outlines.serve.vllm import JSONLogitsProcessor, RegexLogitsProcessor
 except ImportError as e:
     raise ValueError(
-        "Please install 'outlines' (pip install outlines) to use guided generation."
+        "Please install 'outlines' (pip install outlines) to use guided decoding."
     ) from e
 
 
@@ -16,34 +18,67 @@ def get_guided_decoding_logits_processor(
         request: Union[CompletionRequest, ChatCompletionRequest],
         tokenizer
     ) -> Union[JSONLogitsProcessor, RegexLogitsProcessor]:
+    """
+    Given an OpenAI-compatible request, check for guided decoding parameters
+    and get the necessary logits processor for the given guide.
+    We cache logit processors by (json/regex, tokenizer).
+    """
+
+    if request.guided_json:
+        if not isinstance(request.guided_json, (str, dict, BaseModel)):
+            raise TypeError("JSON schema must be str, dict, or BaseModel")
+        
+        json = request.guided_json
+        if isinstance(request.guided_json, dict):
+            # turn dict into hashable string
+            json = json_dumps(request.guided_json, sort_keys=True)
+        elif isinstance(request.guided_json, BaseModel):
+            # use pydantic signature so that different model classes
+            # with the same fields will get hashed the same
+            json = str(request.guided_json.__signature__)
+
+        return get_cached_logit_processor(json, tokenizer, True)
+    
+    elif request.guided_regex:
+        if not isinstance(request.guided_regex, str):
+            raise TypeError("Regex must be string")
+        
+        return get_cached_logit_processor(
+            request.guided_regex, tokenizer, False)
+    
+    elif request.guided_choice:
+        if not isinstance(request.guided_choice, list):
+            raise TypeError("Choices must be a list")
+        
+        # choice just uses regex
+        choices = [str_with_escape(choice) for choice in request.guided_choice]
+        choices_regex = "(" + "|".join(choices) + ")"
+
+        return get_cached_logit_processor(choices_regex, tokenizer, False)
+    
+    else:
+        return None
+    
+
+@lru_cache
+def get_cached_logit_processor(guide: str, tokenizer, is_json: bool):
+    # guide is guaranteed hashable (see above function)
+    # tokenizer should be hashable right??
 
     def dummy_llm():
         # outlines' logit processor takes in a vllm.LLM object
-        # to grab the LLM's tokenizer
+        # to grab the LLM's tokenizer, may break in future
         x = SimpleNamespace()
         y = SimpleNamespace()
         x.tokenizer = tokenizer
         y.tokenizer = x
         return y
-
-    if request.guided_json:
-        if not isinstance(request.guided_json, (str, dict, BaseModel)):
-            raise TypeError("JSON schema must be str, dict, or BaseModel")
-        return [JSONLogitsProcessor(request.guided_json, dummy_llm())]
-    elif request.guided_regex:
-        if not isinstance(request.guided_regex, str):
-            raise TypeError("Regex must be string")
-        return [RegexLogitsProcessor(request.guided_regex, dummy_llm())]
-    elif request.guided_choice:
-        if not isinstance(request.guided_choice, list):
-            raise TypeError("Choices must be a list")
-        # create regex from choices
-        choices = [str_with_escape(choice) for choice in request.guided_choice]
-        choices_regex = "(" + "|".join(choices) + ")"
-        return [RegexLogitsProcessor(choices_regex, dummy_llm())]
-    else:
-        return None
     
+    if is_json:
+        return [JSONLogitsProcessor(guide, dummy_llm())]
+    else:
+        return [RegexLogitsProcessor(guide, dummy_llm())]
+
 
 def str_with_escape(e: Union[str, int, float, bool]):
     s = str(e)
