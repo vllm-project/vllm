@@ -20,8 +20,8 @@ from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
                            SequenceGroupOutput, SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                TokenizerGroup)
-from vllm.utils import (
-Counter, set_cuda_visible_devices, get_ip, get_open_port, get_distributed_init_method, is_neuron)
+from vllm.utils import (Counter, set_cuda_visible_devices, get_ip,
+                        get_open_port, get_distributed_init_method, is_neuron)
 
 if ray:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -109,6 +109,7 @@ class LLMEngine:
 
         self._init_tokenizer()
         self.seq_counter = Counter()
+        self.is_neuron = is_neuron()
 
         # Create the parallel GPU workers.
         if self.parallel_config.worker_use_ray:
@@ -141,7 +142,7 @@ class LLMEngine:
     def _init_workers(self):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
-        if is_neuron():
+        if self.is_neuron:
             from vllm.worker.neuron_worker import Worker
         else:
             from vllm.worker.worker import Worker
@@ -246,7 +247,7 @@ class LLMEngine:
 
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
-        if is_neuron():
+        if self.is_neuron:
             from vllm.worker.neuron_worker import Worker
         else:
             from vllm.worker.worker import Worker
@@ -364,7 +365,7 @@ class LLMEngine:
         self._run_workers("init_cache_engine", cache_config=self.cache_config)
         # Warm up the model. This includes capturing the model into CUDA graph
         # if enforce_eager is False.
-        if not is_neuron():
+        if not self.is_neuron:
             self._run_workers("warm_up_model")
 
     @classmethod
