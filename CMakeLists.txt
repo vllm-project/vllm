@@ -2,69 +2,126 @@ cmake_minimum_required(VERSION 3.21)
 
 project(vllm_extensions LANGUAGES CXX)
 
-# add comment why it comes before append_cmake_prefix_path
-# add comment why we need to do this multiple times (TODO: maybe use a loop?)
-find_package(Python 3.8 EXACT COMPONENTS Interpreter Development.Module)
+#
+# Supported python verions.  These versions will be searched in order, the
+# first match will be selected.
+#
+set(PYTHON_SUPPORTED_VERSIONS "3.8" "3.9" "3.10" "3.11")
+
+# Supported NVIDIA architectures
+set(NVIDIA_SUPPORTED_ARCHS "7.0;7.5;8.0;8.6;8.9;9.0")
+
+# Supported AMD GPU architectures
+set(ROCM_SUPPORTED_ARCHS "gfx90a;gfx942;gfx1100")
+
+#
+# Loop thru all supported python versions until we find the first match.
+# Cmake is unable to pick the lowest supported version when multiple
+# versions are available, even with CMAKE_FIND_PACKAGE_SORT_ORDER.
+#
+foreach(VER ${PYTHON_SUPPORTED_VERSIONS})
+  message(STATUS "Attempting to find python ${VER} package.")
+  find_package(Python ${VER} EXACT COMPONENTS Interpreter Development.Module)
+  if (Python_FOUND)
+    message(STATUS "Found python version ${VER} (${Python_EXECUTABLE}).")
+    break()
+  endif()
+endforeach()
+
 if (NOT Python_FOUND)
-  find_package(Python 3.8...3.11 REQUIRED COMPONENTS Interpreter Development.Module)
+  message(FATAL_ERROR
+    "No supported version of python found. ('${PYTHON_SUPPORTED_VERSIONS}')")
 endif()
 
-if(NOT DEFINED PYTHON_EXECUTABLE)
-  set(PYTHON_EXECUTABLE python3)
-endif()
+#
+# Run EXPR in python.  The standard output of python is stored in OUT and has
+# trailing whitespace stripped.  If an error is encountered when running python,
+# a fatal message ERR_MSG is issued.
+#
+macro (run_python OUT EXPR ERR_MSG)
+  execute_process(
+    COMMAND
+    "${Python_EXECUTABLE}" "-c" "${EXPR}"
+    OUTPUT_VARIABLE ${OUT}
+    RESULT_VARIABLE PYTHON_ERROR_CODE
+    ERROR_VARIABLE PYTHON_STDERR
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
 
+  if(NOT PYTHON_ERROR_CODE EQUAL 0)
+    message(FATAL_ERROR "${ERR_MSG}: ${PYTHON_STDERR}")
+  endif()
+endmacro()
 
+#
+# Try to find MPI package
+#
 find_package(MPI)
 
 #
-# Find where user site-packages and torch are installed and add it to cmake's search path.
+# Find where user site-packages and torch are installed and add it to cmake's
+# search path.
 #
 
-# add comment
+# Run EXPR in python after importing PKG. Use the result of this to extend
+# CMAKE_PREFIX_PATH so we can import the torch cmake configuration.
 macro (append_cmake_prefix_path PKG EXPR)
-  execute_process(
-    COMMAND
-    "${PYTHON_EXECUTABLE}" "-c" "import ${PKG}; print(${EXPR})"
-    OUTPUT_VARIABLE PREFIX_PATH
-    ERROR_VARIABLE PREFIX_PATH_ERR
-    OUTPUT_STRIP_TRAILING_WHITESPACE)
-
-  if(PREFIX_PATH STREQUAL "")
-    message(FATAL_ERROR "Failed to locate ${PKG} path,"
-            " full error message:\n${PREFIX_PATH_ERR}")
-  endif()
-
+  run_python(PREFIX_PATH
+    "import ${PKG}; print(${EXPR})" "Failed to locate ${PKG} path")
   list(APPEND CMAKE_PREFIX_PATH ${PREFIX_PATH})
 endmacro()
 
+# Add user site-packages and torch path to CMAKE_PREFIX_PATH
 append_cmake_prefix_path("site" "site.getusersitepackages()")
 append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
 
-
+#
+# Import torch cmake configuration.
+# Torch also imports CUDA/HIP packages with some customizations, so we do not
+# need to do this explicitly with check_language/enable_language, etc.
+#
 find_package(Torch 2.1.2 EXACT REQUIRED)
+
+# For some reason torch does not add libtorch_python.so to the list of torch
+# libraries to link.  Find it by hand using 'append_torchlib_if_found' from
+# torch's cmake setup.
 append_torchlib_if_found(torch_python)
+
+if ((NOT HIP_FOUND) AND (NOT CUDA_FOUND))
+  message(FATAL_ERROR "Can't find CUDA or HIP installation.")
+endif()
+
+if (NOT HIP_FOUND AND CUDA_FOUND)
+  set(IS_CUDA true)
+endif()
 
 #
 # Setup extra NVCC flags
 #
+# Note: CUDA + HIP are detected by pytorch package so there's no need to repeat
+# detect them explicitly with check_language, etc.
+#
+if (HIP_FOUND)
+  list(APPEND VLLM_NVCC_FLAGS
+    "-DUSE_ROCM"
+    "-U__HIP_NO_HALF_CONVERSIONS__"
+    "-U__HIP_NO_HALF_OPERATORS__")
+
+  # TODO: intersect with this list?
+  if(NOT DEFINED CMAKE_HIP_ARCHITECTURES)
+    set(VLLM_SUPPORTED_HIP_ARCHITECTURES "gfx90a;gfx942;gfx1100")
+  endif()
+
+  foreach(HIP_ARCH ${CMAKE_HIP_ARCHITECTURES})
+    list(APPEND VLLM_NVCC_FLAGS "--offload-arch=${HIP_ARCH}")
+  endforeach()
+endif()
 
 # TODO: IS_CUDA only?
 
-# add comment
-execute_process(
-    COMMAND
-      "${PYTHON_EXECUTABLE}" "-c"
-      "import torch.utils.cpp_extension as torch_cpp_ext; print(';'.join(torch_cpp_ext.COMMON_NVCC_FLAGS))"
-    OUTPUT_VARIABLE TORCH_NVCC_FLAGS
-    ERROR_VARIABLE TORCH_NVCC_FLAGS_ERR
-    OUTPUT_STRIP_TRAILING_WHITESPACE)
-
-if(TORCH_NVCC_FLAGS STREQUAL "")
-  message(FATAL_ERROR "Unable to determine torch nvcc compiler flags,"
-                      " full error message:\n${TORCH_NVCC_FLAGS_ERR}")
-endif()
-
-set(VLLM_NVCC_FLAGS ${TORCH_NVCC_FLAGS})
+# Get common NVCC flags from torch.
+run_python(VLLM_NVCC_FLAGS
+  "from torch.utils.cpp_extension import COMMON_NVCC_FLAGS; print(';'.join(COMMON_NVCC_FLAGS))"
+  "Failed to determine torch nvcc compiler flags")
 
 if (CUDA_VERSION VERSION_GREATER_EQUAL 11.8)
   list(APPEND VLLM_NVCC_FLAGS "-DENABLE_FP8_E5M2")
@@ -80,149 +137,163 @@ set(VLLM_PUNICA_NVCC_FLAGS ${VLLM_NVCC_FLAGS})
 # Copy flags+update for punica
 #
 
-foreach(OPT
-    "-D__CUDA_NO_HALF_OPERATORS__"
-    "-D__CUDA_NO_HALF_CONVERSIONS__"
-    "-D__CUDA_NO_BFLOAT16_CONVERSIONS__"
-    "-D__CUDA_NO_HALF2_OPERATORS__"
-  )
-  list(REMOVE_ITEM VLLM_PUNICA_NVCC_FLAGS ${OPT})
-endforeach()
+list(REMOVE_ITEM VLLM_PUNICA_NVCC_FLAGS
+  "-D__CUDA_NO_HALF_OPERATORS__"
+  "-D__CUDA_NO_HALF_CONVERSIONS__"
+  "-D__CUDA_NO_BFLOAT16_CONVERSIONS__"
+  "-D__CUDA_NO_HALF2_OPERATORS__")
+
+message(DEBUG "nvcc: ${VLLM_NVCC_FLAGS}")
+message(DEBUG "punica nvcc: ${VLLM_PUNICA_NVCC_FLAGS}")
 
 #
-# deal with arch flags here
+# Setup/process CUDA arch flags
 #
-
+# The torch cmake setup detects and hardcodes the detected architecture flags
+# in CMAKE_CUDA_FLAGS but we will need to filter/modify them for the supported
+# architectures and the punica target.  So we have to extract and remove all
+# the '-gencode' flags from CMAKE_CUDA_FLAGS for processing.  We can't use
+# 'target_compiler_options' for adding '-gencode' arguments so we will use the
+# target's CUDA_ARCHITECTURES property instead. This requires repackaging
+# the architecture flags into a format that cmake expects for
+# CUDA_ARCHITECTURES.
 #
-# CUDA_NVCC_FLAGS holds the complete + canonical flags at this point
-# make two versions: regular, punica
-# strip out stuff from punica + update versions
+# This is a bit fragile in that it depends on torch using -gencode as opposed
+# to one of the other nvcc options to specify architectures.
 #
-
-message("CUDA_NVCC_FLAGS: ${CUDA_NVCC_FLAGS}")
-message("CMAKE_CUDA_FLAGS: ${CMAKE_CUDA_FLAGS}")
-
-
-# remove gencode flags added by pytorch
-#list(FILTER CUDA_NVCC_FLAGS EXCLUDE REGEX "-gencode")
-#list(FILTER CUDA_NVCC_FLAGS EXCLUDE REGEX "arch=compute.*")
-#string(REGEX REPLACE "-gencode arch=[^ ]+ *" "" CMAKE_CUDA_FLAGS ${CMAKE_CUDA_FLAGS})
-
-
+# Note: torch uses the TORCH_CUDA_ARCH_LIST environment variable to override
+# detected architectures.
 #
-# Setup arch flags
-#
+message(DEBUG "initial CMAKE_CUDA_FLAGS: ${CMAKE_CUDA_FLAGS}")
 
-string(REGEX MATCHALL "-gencode arch=[^ ]+" VLLM_CUDA_ARCH_FLAGS ${CMAKE_CUDA_FLAGS})
-string(REGEX REPLACE "-gencode arch=[^ ]+ *" "" CMAKE_CUDA_FLAGS ${CMAKE_CUDA_FLAGS})
-message("arch flags: ${VLLM_CUDA_ARCH_FLAGS}")
-# filter ARCH_FLAGS and add them back into CMAKE_CUDA_FLAGS
+# Extract all '-gencode' flags from CMAKE_CUDA_FLAGS
+string(REGEX MATCHALL "-gencode arch=[^ ]+" VLLM_CUDA_ARCH_FLAGS
+  ${CMAKE_CUDA_FLAGS})
 
-#set(VLLM_PUNICA_CUDA_ARCH_FLAGS ${VLLM_CUDA_ARCH_FLAGS})
-#list(FILTER VLLM_PUNICA_CUDA_ARCH_FLAGS EXCLUDE REGEX "compute_[1-7][0-9]")
+# Remove all '-gencode' flags from CMAKE_CUDA_FLAGS since we will be modifying
+# them and passing them back in via the CUDA_ARCHITECTURES property.
+string(REGEX REPLACE "-gencode arch=[^ ]+ *" "" CMAKE_CUDA_FLAGS
+  ${CMAKE_CUDA_FLAGS})
 
-message("post arch flags: ${VLLM_CUDA_ARCH_FLAGS}")
-message("post punica arch flags: ${VLLM_PUNICA_CUDA_ARCH_FLAGS}")
+# If this error is triggered, it might mean that torch has changed how it sets
+# up nvcc architecture code generation flags.
+if (NOT VLLM_CUDA_ARCH_FLAGS)
+  message(FATAL_ERROR
+    "Could not find any architecture related code generation flags in "
+    "CMAKE_CUDA_FLAGS. (${CMAKE_CUDA_FLAGS})")
+endif()
 
-message("nvcc: ${VLLM_NVCC_FLAGS}")
-message("punica nvcc: ${VLLM_PUNICA_NVCC_FLAGS}")
+message(DEBUG "arch flags: ${VLLM_CUDA_ARCH_FLAGS}")
 
-#list(APPEND VLLM_NVCC_FLAGS ${VLLM_CUDA_ARCH_FLAGS})
-#list(APPEND VLLM_PUNICA_NVCC_FLAGS ${VLLM_PUNICA_CUDA_ARCH_FLAGS})
+# Macro for converting a 'gencode' version number to a cmake version number.
+macro(string_to_ver OUT_VER IN_STR)
+  string(REGEX REPLACE "\([0-9]+\)\([0-9]\)" "\\1.\\2" ${OUT_VER} ${IN_STR})
+endmacro()
 
-# the painful way: NOTE needs to only happen w/CUDA
+# Initialize the architecure lists to empty.
 set(VLLM_CUDA_ARCHES)
 set(VLLM_PUNICA_CUDA_ARCHES)
 
-macro(string_to_ver VER STR)
-  string(REGEX REPLACE "\([0-9]+\)\([0-9]\)" "\\1.\\2" ${VER} ${STR})
-endmacro()
-
-set(NVIDIA_SUPPORTED_ARCHS "7.0;7.5;8.0;8.6;8.9;9.0")
-set(ROCM_SUPPORTED_ARCHS "gfx90a;gfx942;gfx1100")
-
+# Process each 'gencode' flag.
 foreach(ARCH ${VLLM_CUDA_ARCH_FLAGS})
-  string(REGEX MATCH "arch=compute_\([0-9]+a*\)" COMPUTE ${ARCH})
+  # For each flag we want to extract the version number and whether
+  # it refers to PTX or native code.
+  # Note: if a regex matches then CMAKE_MATCH_1 will hold the binding
+  # for that match.
+
+  string(REGEX MATCH "arch=compute_\([0-9]+a?\)" COMPUTE ${ARCH})
   if (COMPUTE)
     set(COMPUTE ${CMAKE_MATCH_1})
-#    message("arch: ${COMPUTE}")
   endif()
 
-  string(REGEX MATCH "code=sm_\([0-9]+a*\)" SM ${ARCH})
+  string(REGEX MATCH "code=sm_\([0-9]+a?\)" SM ${ARCH})
   if (SM)
     set(SM ${CMAKE_MATCH_1})
-#    message("sm: ${SM}")
   endif()
 
-  string(REGEX MATCH "code=compute_\([0-9]+a*\)" CODE ${ARCH})
+  string(REGEX MATCH "code=compute_\([0-9]+a?\)" CODE ${ARCH})
   if (CODE)
     set(CODE ${CMAKE_MATCH_1})
-#    message("code: ${CODE}")
   endif()
 
-  if (COMPUTE AND SM)
-    string_to_ver(SM_VER ${SM})
-    if (NOT SM_VER IN_LIST NVIDIA_SUPPORTED_ARCHS)
-      # TODO: issue warning?
-      continue()
-    endif()
-    list(APPEND VLLM_CUDA_ARCHES ${SM})
-    if (SM_VER GREATER_EQUAL 8.0)
-      list(APPEND VLLM_PUNICA_CUDA_ARCHES ${SM})
-    endif()
+  # Make sure the virtual architecture can be matched.
+  if (NOT COMPUTE)
+    message(FATAL_ERROR
+      "Could not determine virtual architecture from: ${ARCH}.")
+  endif()
+
+  # One of sm_ or compute_ must exist.
+  if ((NOT SM) AND (NOT CODE))
+    message(FATAL_ERROR
+      "Could not determine a codegen architecture from: ${ARCH}.")
+  endif()
+
+  if (SM)
+    set(VIRT "")
+    set(CODE_ARCH ${SM})
   else()
-    string_to_ver(CODE_VER ${CODE})
-    if (NOT CODE_VER IN_LIST NVIDIA_SUPPORTED_ARCHS)
-      # TODO: issue warning?
-      continue()
-    endif()
-    list(APPEND VLLM_CUDA_ARCHES "${CODE}-virtual")
-    if (CODE_VER GREATER_EQUAL 8.0)
-      list(APPEND VLLM_PUNICA_CUDA_ARCHES "${CODE}-virtual")
-    endif()
+    set(VIRT "-virtual")
+    set(CODE_ARCH ${CODE})
+  endif()
+
+  # Check if the current version is in the supported arch list
+  string_to_ver(CODE_VER ${CODE_ARCH})
+  if (NOT CODE_VER IN_LIST NVIDIA_SUPPORTED_ARCHS)
+    message(STATUS "discarding unsupported CUDA arch ${VER}.")
+    continue()
+  endif()
+
+  # Add it to the arch list
+  list(APPEND VLLM_CUDA_ARCHES "${CODE_ARCH}${VIRT}")
+
+  # Add it to punica arch list if the version is >= 8.0
+  if (CODE_VER GREATER_EQUAL 8.0)
+    list(APPEND VLLM_PUNICA_CUDA_ARCHES "${CODE_ARCH}${VIRT}")
   endif()
 endforeach()
 
-message("post nvcc: ${VLLM_NVCC_FLAGS}")
-message("post punica nvcc: ${VLLM_PUNICA_NVCC_FLAGS}")
-message("post nvcc arch: ${VLLM_CUDA_ARCHES}")
-message("post punica arch: ${VLLM_PUNICA_CUDA_ARCHES}")
-
+message(DEBUG "nvcc arch: ${VLLM_CUDA_ARCHES}")
+message(DEBUG "punica arch: ${VLLM_PUNICA_CUDA_ARCHES}")
 
 #
-# Check for existence of CUDA/HIP language support
+# Define targets
 #
-# https://cliutils.gitlab.io/modern-cmake/chapters/packages/CUDA.html
-#include(CheckLanguage)
-#check_language(HIP)
-#check_language(CUDA)  # picked up by torch
 
-# Note: CUDA + HIP are detected by pytorch package so there's no need to repeat them.
+# add comment
+# Note: optimization level/debug info is set via cmake build type.
+function(define_module_target MOD_NAME MOD_SRC MOD_EXTRA_NVCC_FLAGS
+    MOD_CUDA_ARCHES)
 
-if(HIP_FOUND)
-  enable_language(HIP)
-  list(APPEND VLLM_NVCC_FLAGS "-DUSE_ROCM" "-U__HIP_NO_HALF_CONVERSIONS__" "-U__HIP_NO_HALF_OPERATORS__")
+  Python_add_library(${MOD_NAME} MODULE ${MOD_SRC} WITH_SOABI)
 
-  # TODO: intersect with this list?
-  if(NOT DEFINED CMAKE_HIP_ARCHITECTURES)
-    set(VLLM_SUPPORTED_HIP_ARCHITECTURES "gfx90a;gfx942;gfx1100")
+  # TODO: needed for rocm?
+  if (IS_CUDA)
+    set(CUDA_LANG "CUDA")
+  else()
+    set(CUDA_LANG "HIP")
   endif()
 
-  foreach(HIP_ARCH ${CMAKE_HIP_ARCHITECTURES})
-    list(APPEND VLLM_NVCC_FLAGS "--offload-arch=${HIP_ARCH}")
-  endforeach()
-elseif(CUDA_FOUND)
-  enable_language(CUDA)
-  set(IS_CUDA true)
+  set_property(TARGET ${MOD_NAME} PROPERTY CXX_STANDARD 17)
 
-  # TODO: check supported?
+  set_target_properties(${MOD_NAME} PROPERTIES CUDA_ARCHITECTURES
+    "${MOD_CUDA_ARCHES}")
 
-else()
-  message(FATAL_ERROR "Can't find CUDA or HIP installation.")
-endif()
+  target_compile_options(${MOD_NAME} PRIVATE
+    $<$<COMPILE_LANGUAGE:${CUDA_LANG}>:${MOD_EXTRA_NVCC_FLAGS}>)
+
+  target_compile_definitions(${MOD_NAME} PRIVATE
+    "-DTORCH_EXTENSION_NAME=${MOD_NAME}")
+
+  target_include_directories(${MOD_NAME} PRIVATE
+    csrc PRIVATE ${TORCH_INCLUDE_DIRS} ${MPI_CXX_INCLUDE_DIRS})
+
+  target_link_libraries(${MOD_NAME} PRIVATE ${TORCH_LIBRARIES})
+
+  install(TARGETS ${MOD_NAME} LIBRARY DESTINATION vllm)
+endfunction()
 
 #
-# Define target source files
+# _C extension
 #
 
 set(VLLM_EXT_SRC
@@ -243,48 +314,50 @@ if(IS_CUDA)
     "csrc/custom_all_reduce.cu")
 endif()
 
-#TODO: list files
-File(GLOB VLLM_MOE_EXT_SRC "csrc/moe/*.cu" "csrc/moe/*.cpp")
-File(GLOB VLLM_PUNICA_EXT_SRC "csrc/punica/bgmv/*.cu" "csrc/punica/*.cpp")
+define_module_target(_C
+  "${VLLM_EXT_SRC}"
+  "${VLLM_NVCC_FLAGS}"
+  "${VLLM_CUDA_ARCHES}")
 
 #
-# Define targets
+# _moe_C extension
 #
-set(CMAKE_CXX_STANDARD 17)
 
-# add comment
-function(define_module_target MOD_NAME MOD_SRC MOD_EXTRA_NVCC_FLAGS MOD_CUDA_ARCHES)
-  Python_add_library(${MOD_NAME} MODULE ${MOD_SRC} WITH_SOABI)
+set(VLLM_MOE_EXT_SRC
+  "csrc/moe/moe_ops.cpp"
+  "csrc/moe/topk_softmax_kernels.cu")
 
-  set_target_properties(${MOD_NAME} PROPERTIES CUDA_ARCHITECTURES "${MOD_CUDA_ARCHES}")
+define_module_target(_moe_C
+  "${VLLM_MOE_EXT_SRC}"
+  "${VLLM_NVCC_FLAGS}"
+  "${VLLM_CUDA_ARCHES}")
 
-  if (IS_CUDA)
-    set(CUDA_LANG "CUDA")
-  else()
-    set(CUDA_LANG "HIP")
-  endif()
+#
+# _punica_C extension
+#
 
-  # Note: optimization level/debug info is set by build type
-  #  target_compile_options(${MOD_NAME} BEFORE PRIVATE $<$<COMPILE_LANGUAGE:${CUDA_LANG}>:${MOD_EXTRA_NVCC_FLAGS}>)
-  target_compile_options(${MOD_NAME} PRIVATE $<$<COMPILE_LANGUAGE:${CUDA_LANG}>:${MOD_EXTRA_NVCC_FLAGS}>)
+set(VLLM_PUNICA_EXT_SRC
+  "csrc/punica/bgmv/bgmv_bf16_bf16_bf16.cu"
+  "csrc/punica/bgmv/bgmv_bf16_bf16_fp16.cu"
+  "csrc/punica/bgmv/bgmv_bf16_fp16_bf16.cu"
+  "csrc/punica/bgmv/bgmv_bf16_fp16_fp16.cu"
+  "csrc/punica/bgmv/bgmv_bf16_fp32_bf16.cu"
+  "csrc/punica/bgmv/bgmv_bf16_fp32_fp16.cu"
+  "csrc/punica/bgmv/bgmv_fp16_bf16_bf16.cu"
+  "csrc/punica/bgmv/bgmv_fp16_bf16_fp16.cu"
+  "csrc/punica/bgmv/bgmv_fp16_fp16_bf16.cu"
+  "csrc/punica/bgmv/bgmv_fp16_fp16_fp16.cu"
+  "csrc/punica/bgmv/bgmv_fp16_fp32_bf16.cu"
+  "csrc/punica/bgmv/bgmv_fp16_fp32_fp16.cu"
+  "csrc/punica/bgmv/bgmv_fp32_bf16_bf16.cu"
+  "csrc/punica/bgmv/bgmv_fp32_bf16_fp16.cu"
+  "csrc/punica/bgmv/bgmv_fp32_fp16_bf16.cu"
+  "csrc/punica/bgmv/bgmv_fp32_fp16_fp16.cu"
+  "csrc/punica/bgmv/bgmv_fp32_fp32_bf16.cu"
+  "csrc/punica/bgmv/bgmv_fp32_fp32_fp16.cu"
+  "csrc/punica/punica_ops.cc")
 
-#  get_target_property(XXX ${MOD_NAME} COMPILE_OPTIONS)
-#  message("XXX: ${XXX}")
-#  get_target_property(XXX ${MOD_NAME} COMPILE_FEATURES)
-#  message("XXX: ${XXX}")
-
-  target_compile_definitions(${MOD_NAME} PRIVATE "-DTORCH_EXTENSION_NAME=${MOD_NAME}")
-  target_include_directories(${MOD_NAME} PRIVATE csrc PRIVATE ${TORCH_INCLUDE_DIRS} ${MPI_CXX_INCLUDE_DIRS})
-  target_link_libraries(${MOD_NAME} PRIVATE ${TORCH_LIBRARIES})
-  install(TARGETS ${MOD_NAME} LIBRARY DESTINATION vllm)
-endfunction()
-
-define_module_target(_C "${VLLM_EXT_SRC}" "${VLLM_NVCC_FLAGS}" "${VLLM_CUDA_ARCHES}")
-define_module_target(_moe_C "${VLLM_MOE_EXT_SRC}" "${VLLM_NVCC_FLAGS}" "${VLLM_CUDA_ARCHES}")
-define_module_target(_punica_C "${VLLM_PUNICA_EXT_SRC}" "${VLLM_PUNICA_NVCC_FLAGS}" "${VLLM_PUNICA_CUDA_ARCHES}")
-
-#get_cmake_property(_variableNames VARIABLES)
-#list (SORT _variableNames)
-#foreach (_variableName ${_variableNames})
-#    message(STATUS "${_variableName}=${${_variableName}}")
-#endforeach()
+define_module_target(_punica_C
+  "${VLLM_PUNICA_EXT_SRC}"
+  "${VLLM_PUNICA_NVCC_FLAGS}"
+  "${VLLM_PUNICA_CUDA_ARCHES}")
