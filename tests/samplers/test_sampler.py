@@ -46,6 +46,34 @@ CUDA_DEVICES = [
 ]
 
 
+def _do_sample(
+    batch_size: int,
+    input_tensor: torch.Tensor,
+    sampler: MockLogitsSampler,
+    model_runner: ModelRunner,
+    sampling_params: SamplingParams,
+):
+    seq_group_metadata_list = []
+    prompt_lens = []
+    for i in range(batch_size):
+        seq_group_metadata_list.append(
+            SequenceGroupMetadata(
+                request_id=f"test_{i}",
+                is_prompt=True,
+                seq_data={0: SequenceData([1, 2, 3])},
+                sampling_params=sampling_params,
+                block_tables={0: [1]},
+            ))
+        prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
+
+    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
+                                                     prompt_lens,
+                                                     subquery_lens=prompt_lens)
+    return sampler(embedding=None,
+                   hidden_states=input_tensor,
+                   sampling_metadata=sampling_metadata)
+
+
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_sampler_all_greedy(seed: int, device: str):
@@ -55,25 +83,9 @@ def test_sampler_all_greedy(seed: int, device: str):
     input_tensor, fake_logits, sampler, model_runner = _prepare_test(
         batch_size)
 
-    seq_group_metadata_list = []
-    prompt_lens = []
-    for i in range(batch_size):
-        seq_group_metadata_list.append(
-            SequenceGroupMetadata(
-                request_id=f"test_{i}",
-                is_prompt=True,
-                seq_data={0: SequenceData([1, 2, 3])},
-                sampling_params=SamplingParams(temperature=0, ),
-                block_tables={0: [1]},
-            ))
-        prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
-
-    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens,
-                                                     subquery_lens=prompt_lens)
-    sampler_output = sampler(embedding=None,
-                             hidden_states=input_tensor,
-                             sampling_metadata=sampling_metadata)
+    sampling_params = SamplingParams(temperature=0)
+    sampler_output = _do_sample(batch_size, input_tensor, sampler,
+                                model_runner, sampling_params)
     expected = torch.argmax(fake_logits, dim=-1)
     for i, sequence_output in enumerate(sampler_output):
         for nth_output in sequence_output.samples:
@@ -94,28 +106,13 @@ def test_sampler_all_random(seed: int, device: str):
     for i in range(batch_size):
         fake_logits[i, i] = 1e2
 
-    seq_group_metadata_list = []
-    prompt_lens = []
-    for i in range(batch_size):
-        seq_group_metadata_list.append(
-            SequenceGroupMetadata(
-                request_id=f"test_{i}",
-                is_prompt=True,
-                seq_data={0: SequenceData([1, 2, 3])},
-                sampling_params=SamplingParams(
-                    temperature=1.0,
-                    n=random.randint(1, 10),
-                ),
-                block_tables={0: [1]},
-            ))
-        prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
+    sampling_params = SamplingParams(
+        temperature=1.0,
+        n=random.randint(1, 10),
+    )
+    sampler_output = _do_sample(batch_size, input_tensor, sampler,
+                                model_runner, sampling_params)
 
-    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens,
-                                                     subquery_lens=prompt_lens)
-    sampler_output = sampler(embedding=None,
-                             hidden_states=input_tensor,
-                             sampling_metadata=sampling_metadata)
     for i, sequence_output in enumerate(sampler_output):
         for nth_output in sequence_output.samples:
             assert nth_output.output_token == i
@@ -135,32 +132,42 @@ def test_sampler_all_random_seed(seed: int, device: str):
     for i in range(batch_size):
         fake_logits[i, i] = 1e2
 
-    seq_group_metadata_list = []
-    prompt_lens = []
-    for i in range(batch_size):
-        seq_group_metadata_list.append(
-            SequenceGroupMetadata(
-                request_id=f"test_{i}",
-                is_prompt=True,
-                seq_data={0: SequenceData([1, 2, 3])},
-                sampling_params=SamplingParams(
-                    temperature=1.0,
-                    n=random.randint(1, 10),
-                    seed=random.randint(0, 10000),
-                ),
-                block_tables={0: [1]},
-            ))
-        prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
+    sampling_params = SamplingParams(
+        temperature=1.0,
+        n=random.randint(1, 10),
+        seed=random.randint(0, 10000),
+    )
+    sampler_output = _do_sample(batch_size, input_tensor, sampler,
+                                model_runner, sampling_params)
 
-    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens,
-                                                     subquery_lens=prompt_lens)
-    sampler_output = sampler(embedding=None,
-                             hidden_states=input_tensor,
-                             sampling_metadata=sampling_metadata)
     for i, sequence_output in enumerate(sampler_output):
         for nth_output in sequence_output.samples:
             assert nth_output.output_token == i
+
+    del model_runner
+
+
+@pytest.mark.parametrize("seed", RANDOM_SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_sampler_all_random_seed_deterministic(seed: int, device: str):
+    set_random_seed(seed)
+    torch.set_default_device(device)
+    batch_size = random.randint(1, 256)
+    input_tensor, fake_logits, sampler, model_runner = _prepare_test(
+        batch_size)
+
+    sampling_params = SamplingParams(
+        temperature=1.0,
+        n=random.randint(1, 10),
+        seed=random.randint(0, 10000),
+    )
+    first_sampler_output = _do_sample(batch_size, input_tensor, sampler,
+                                      model_runner, sampling_params)
+
+    second_sampler_output = _do_sample(batch_size, input_tensor, sampler,
+                                       model_runner, sampling_params)
+
+    assert first_sampler_output == second_sampler_output
 
     del model_runner
 
@@ -173,29 +180,13 @@ def test_sampler_all_beam(seed: int, device: str):
     batch_size = random.randint(1, 256)
     input_tensor, _, sampler, model_runner = _prepare_test(batch_size)
 
-    seq_group_metadata_list = []
-    prompt_lens = []
-    for i in range(batch_size):
-        seq_group_metadata_list.append(
-            SequenceGroupMetadata(
-                request_id=f"test_{i}",
-                is_prompt=True,
-                seq_data={0: SequenceData([1, 2, 3])},
-                sampling_params=SamplingParams(
-                    temperature=0,
-                    best_of=2,
-                    use_beam_search=True,
-                ),
-                block_tables={0: [1]},
-            ))
-        prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
-
-    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens,
-                                                     subquery_lens=prompt_lens)
-    sampler(embedding=None,
-            hidden_states=input_tensor,
-            sampling_metadata=sampling_metadata)
+    sampling_params = SamplingParams(
+        temperature=0,
+        best_of=2,
+        use_beam_search=True,
+    )
+    _do_sample(batch_size, input_tensor, sampler, model_runner,
+               sampling_params)
     # no assertion here as I am not sure how to determine whether
     # the outputs are expected - in other words, this just tests
     # whether there are no exceptions in the sampler
