@@ -1,4 +1,5 @@
-from enum import Enum
+from collections import defaultdict
+from copy import copy
 from functools import lru_cache
 from json import dumps as json_dumps
 from re import escape as regex_escape
@@ -22,9 +23,11 @@ def get_guided_decoding_logits_processor(
     """
     Given an OpenAI-compatible request, check for guided decoding parameters
     and get the necessary logits processor for the given guide.
-    We cache logit processors by (json/regex, tokenizer).
+    We cache logit processors by (json/regex, tokenizer), and on cache hit
+    we make a shallow copy to reuse the same underlying RegexFSM.
     """
 
+    logits_processor = None
     if request.guided_json:
         if not isinstance(request.guided_json, (str, dict, BaseModel)):
             raise TypeError("JSON schema must be str, dict, or BaseModel")
@@ -38,25 +41,32 @@ def get_guided_decoding_logits_processor(
             # with the same fields will get hashed the same
             json = str(request.guided_json.__signature__)
 
-        return [get_cached_logits_processor(json, tokenizer, True)]
+        logits_processor = copy(get_cached_logits_processor(
+            json, tokenizer, True))
     
     elif request.guided_regex:
         if not isinstance(request.guided_regex, str):
             raise TypeError("Regex must be string")
         
-        return [get_cached_logits_processor(
-            request.guided_regex, tokenizer, False)]
+        logits_processor = copy(get_cached_logits_processor(
+            request.guided_regex, tokenizer, False))
     
     elif request.guided_choice:
         if not isinstance(request.guided_choice, list):
             raise TypeError("Choices must be a list")
         
         # choice just uses regex
-        choices = [regex_escape(str(choice)) for choice in request.guided_choice]
+        choices = [regex_escape(str(choice)) 
+                   for choice in request.guided_choice]
         choices_regex = "(" + "|".join(choices) + ")"
 
-        return [get_cached_logits_processor(choices_regex, tokenizer, False)]
+        logits_processor = copy(get_cached_logits_processor(
+            choices_regex, tokenizer, False))
     
+    if logits_processor:
+        # reset logits processor's internal state
+        logits_processor.fsm_state = defaultdict(int)
+        return [logits_processor]
     else:
         return None
     
