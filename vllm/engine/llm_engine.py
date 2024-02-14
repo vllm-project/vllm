@@ -114,9 +114,9 @@ class LLMEngine:
 
         #If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
-            usage_message.report_usage(model_config.model, usage_context)
-            # t = Thread(usage_message.send_to_server())
-            # t.start()
+            t = Thread(target=usage_message.report_usage,
+                       args=(model_config.model, usage_context))
+            t.start()
 
         # Create the parallel GPU workers.
         if self.parallel_config.worker_use_ray:

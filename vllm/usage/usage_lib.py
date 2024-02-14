@@ -5,7 +5,7 @@ import platform
 import pkg_resources
 import requests
 import datetime
-from cloud_detect import provider
+from pathlib import Path
 from typing import Optional
 from enum import Enum
 
@@ -44,6 +44,27 @@ def _get_current_timestamp_ns() -> int:
     return int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1e9)
 
 
+def _detect_cloud_provider() -> str:
+    # Try detecting through vendor file
+    vendor_files = [
+        '/sys/class/dmi/id/product_version', '/sys/class/dmi/id/bios_vendor',
+        '/sys/class/dmi/id/product_name',
+        '/sys/class/dmi/id/chassis_asset_tag', '/sys/class/dmi/id/sys_vendor'
+    ]
+    for vendor_file in vendor_files:
+        path = Path(vendor_file)
+        if path.is_file():
+            if 'amazon' in path.read_text().lower():
+                return "AWS"
+            elif 'Microsoft Corporation' in path.read_text():
+                return "AZURE"
+            elif 'Google' in path.read_text():
+                return "GCP"
+            elif 'OracleCloud' in path.read_text():
+                return "OCI"
+    return "UNKNOWN"
+
+
 class UsageContext(Enum):
     UNKNOWN_CONTEXT = "UNKNOWN_CONTEXT"
     LLM = "LLM"
@@ -66,20 +87,12 @@ class UsageMessage:
     def report_usage(self, model: str, context: UsageContext) -> None:
         self.context = context.value
         self.gpu_name = torch.cuda.get_device_name()
-        self.provider = provider()
+        self.provider = _detect_cloud_provider()
         self.architecture = platform.machine()
         self.platform = platform.platform()
         self.vllm_version = pkg_resources.get_distribution("vllm").version
         self.model = model
         self.log_time = _get_current_timestamp_ns()
-
-        
-
-    def _write_to_file(self):
-        with open(_USAGE_STATS_FILE, "w") as outfile:
-            json.dump(vars(self), outfile)
-
-    def send_to_server(self):
         self._write_to_file()
         headers = {'Content-type': 'application/json'}
         payload = json.dumps(vars(self))
@@ -87,6 +100,10 @@ class UsageMessage:
             requests.post(_USAGE_STATS_URL, data=payload, headers=headers)
         except requests.exceptions.RequestException:
             print("Usage Log Request Failed")
+
+    def _write_to_file(self):
+        with open(_USAGE_STATS_FILE, "w") as outfile:
+            json.dump(vars(self), outfile)
 
 
 usage_message = UsageMessage()
