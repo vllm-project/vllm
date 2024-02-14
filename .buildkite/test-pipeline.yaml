@@ -31,9 +31,9 @@ steps:
   num_gpus: 2
   commands:
     - nvidia-smi
-    - pytest -v -s test_models_snapshot.py --forked -k llama
+    - pytest -v -s test_models_snapshot.py -k llama
     - nvidia-smi
-    - pytest -v -s test_models_snapshot.py --forked -k mistral
+    - pytest -v -s test_models_snapshot.py -k mistral
 
 - label: Prefix Caching Test
   commands:
