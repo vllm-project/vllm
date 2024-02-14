@@ -23,7 +23,9 @@ ROOT_DIR = os.path.dirname(__file__)
 MAIN_CUDA_VERSION = "12.1"
 
 # Supported NVIDIA GPU architectures.
-NVIDIA_SUPPORTED_ARCHS = {"6.0", "6.1", "6.2", "7.0", "7.5", "8.0", "8.6", "8.9", "9.0"}
+NVIDIA_SUPPORTED_ARCHS = {
+    "6.0", "6.1", "6.2", "7.0", "7.5", "8.0", "8.6", "8.9", "9.0"
+}
 ROCM_SUPPORTED_ARCHS = {"gfx90a", "gfx942", "gfx1100"}
 # SUPPORTED_ARCHS = NVIDIA_SUPPORTED_ARCHS.union(ROCM_SUPPORTED_ARCHS)
 
