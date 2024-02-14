@@ -21,6 +21,7 @@ ROOT_DIR = os.path.dirname(__file__)
 # https://github.com/pypa/setuptools/issues/917
 
 MAIN_CUDA_VERSION = "12.1"
+os.environ["TORCH_CUDA_ARCH_LIST"]="8.0"
 
 # Supported NVIDIA GPU architectures.
 NVIDIA_SUPPORTED_ARCHS = {"7.0", "7.5", "8.0", "8.6", "8.9", "9.0"}
@@ -46,9 +47,9 @@ def _is_cuda() -> bool:
 
 
 # Compiler flags.
-CXX_FLAGS = ["-g", "-O2", "-std=c++17"]
+CXX_FLAGS = ["-g", "-O3", "-std=c++17"]
 # TODO(woosuk): Should we use -O3?
-NVCC_FLAGS = ["-O2", "-std=c++17"]
+NVCC_FLAGS = ["-O3", "-std=c++17"]
 
 if _is_hip():
     if ROCM_HOME is None:
