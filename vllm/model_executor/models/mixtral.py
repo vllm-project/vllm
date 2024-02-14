@@ -293,7 +293,7 @@ class MixtralModel(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
-            org_num_embeddings=self.org_vocab_size,
+            org_num_embeddings=self.vocab_size,
         )
         self.layers = nn.ModuleList([
             MixtralDecoderLayer(config, linear_method=linear_method)
