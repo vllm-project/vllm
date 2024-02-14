@@ -51,6 +51,7 @@ def test_model_snapshot(
         dtype=dtype,
         tensor_parallel_size=2,
         enforce_eager=True,
+        max_model_len=1024,
     )
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
