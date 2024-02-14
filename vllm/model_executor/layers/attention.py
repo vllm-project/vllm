@@ -206,6 +206,8 @@ class PagedAttention(nn.Module):
                 output = out.view_as(query)
             else:
                 # prefix-enabled attention
+                assert self.num_kv_heads == self.num_heads, (
+                    "Prefix caching is currently not supported with MQA/GQA")
                 output = torch.empty_like(query)
                 context_attention_fwd(
                     query,
