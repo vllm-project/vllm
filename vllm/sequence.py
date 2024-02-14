@@ -145,6 +145,13 @@ class Sequence:
         num_tokens = logical_idx * self.block_size + self.block_size
         return hash(tuple(self.data.get_token_ids()[0:num_tokens]))
 
+    def prefix_len_of_block(self, logical_idx: int, full_prefix_len: int):
+        num_tokens = logical_idx * self.block_size + self.block_size
+        if num_tokens > full_prefix_len:
+            return full_prefix_len
+        else:
+            return num_tokens
+
     def _append_logical_block(self) -> None:
         block = LogicalTokenBlock(
             block_number=len(self.logical_token_blocks),

@@ -223,8 +223,10 @@ class BlockSpaceManager:
                     and logical_idx >= self.block_sliding_window):
                 block = block_table[logical_idx % self.block_sliding_window]
             else:
-                block = self.gpu_allocator.allocate(seq.hash(logical_idx),
-                                                    seq_group.get_prefix_len())
+                block = self.gpu_allocator.allocate(
+                    seq.hash(logical_idx),
+                    seq.prefix_len_of_block(logical_idx,
+                                            seq_group.get_prefix_len()))
             block_table.append(block)
 
         # Assign the block table for each sequence.
@@ -285,8 +287,10 @@ class BlockSpaceManager:
         block_hash: Optional[int] = None
         if (self._is_last_block_full(seq)):
             block_hash = seq.hash(len(seq.logical_token_blocks) - 1)
+        block_prefix_len = seq.prefix_len_of_block(
+            len(seq.logical_token_blocks) - 1, prefix_len)
         new_block = self.gpu_allocator.allocate(block_hash,
-                                                prefix_len=prefix_len)
+                                                prefix_len=block_prefix_len)
         if block_hash is None:
             assert (new_block.ref_count == 1)
         return new_block
