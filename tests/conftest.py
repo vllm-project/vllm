@@ -169,7 +169,6 @@ class VllmRunner:
         dtype: str = "half",
         tensor_parallel_size: int = 1,
         enforce_eager: bool = False,
-        max_seq_len: Optional[int] = None,
     ) -> None:
         self.model = LLM(
             model=model_name,
@@ -179,7 +178,6 @@ class VllmRunner:
             swap_space=0,
             tensor_parallel_size=tensor_parallel_size,
             enforce_eager=enforce_eager,
-            max_seq_len=max_seq_len,
         )
 
     def generate(
