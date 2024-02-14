@@ -95,7 +95,7 @@ void moe_align_block_size(
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     assert(num_experts <= NUM_MAX_EXPERTS);
     VLLM_DISPATCH_INTEGRAL_TYPES(
-        topk_ids.scalar_type(), "moe_alig_block_size_kernel", [&] {
+        topk_ids.scalar_type(), "moe_align_block_size_kernel", [&] {
         vllm::moe_align_block_size_kernel<scalar_t><<<1, num_experts, 0, stream>>>(
             topk_ids.data_ptr<scalar_t>(), 
             sorted_token_ids.data_ptr<int32_t>(), 

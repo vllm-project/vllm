@@ -24,12 +24,14 @@ _MODELS = {
     "GPTBigCodeForCausalLM": ("gpt_bigcode", "GPTBigCodeForCausalLM"),
     "GPTJForCausalLM": ("gpt_j", "GPTJForCausalLM"),
     "GPTNeoXForCausalLM": ("gpt_neox", "GPTNeoXForCausalLM"),
-    "InternLMForCausalLM": ("internlm", "InternLMForCausalLM"),
+    "InternLMForCausalLM": ("llama", "LlamaForCausalLM"),
+    "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
     # For decapoda-research/llama-*
     "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
     "MistralForCausalLM": ("mistral", "MistralForCausalLM"),
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
+    "QuantMixtralForCausalLM": ("mixtral_quant", "MixtralForCausalLM"),
     # transformers's mpt class has lower case
     "MptForCausalLM": ("mpt", "MPTForCausalLM"),
     "MPTForCausalLM": ("mpt", "MPTForCausalLM"),

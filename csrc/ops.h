@@ -100,6 +100,13 @@ void gptq_shuffle(
   torch::Tensor q_weight,
   torch::Tensor q_perm);
 
+void moe_align_block_size(
+  torch::Tensor topk_ids,
+  int num_experts,
+  int block_size,
+  torch::Tensor sorted_token_ids,
+  torch::Tensor experts_ids,
+  torch::Tensor num_tokens_post_pad);
 
 #ifndef USE_ROCM
 using fptr_t = uint64_t;
@@ -121,12 +128,3 @@ std::pair<std::vector<uint8_t>, std::vector<int64_t>> get_graph_buffer_ipc_meta(
 void register_graph_buffers(fptr_t _fa, const std::vector<std::string> &handles,
                             const std::vector<std::vector<int64_t>> &offsets);
 #endif
-
-void moe_align_block_size(
-  torch::Tensor topk_ids,
-  int num_experts,
-  int block_size,
-  torch::Tensor sorted_token_ids,
-  torch::Tensor experts_ids,
-  torch::Tensor num_tokens_post_pad
-  );
