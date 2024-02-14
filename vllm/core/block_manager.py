@@ -110,11 +110,13 @@ class BlockAllocator:
             self.table[block_hash] = block
             block.ref_count += 1
             del self.free_table[block_hash]
+            assert block.block_hash == block_hash
             return block
         if block_hash not in self.table:
             self.table[block_hash] = self.allocate_block(
                 block_hash, prefix_len)
         block = self.table[block_hash]
+        assert block.block_hash == block_hash
         block.ref_count += 1
         return block
 
@@ -131,7 +133,7 @@ class BlockAllocator:
         return self.num_blocks - self.current_num_blocks + len(self.free_table)
 
     def contains_block(self, block_hash: int) -> bool:
-        return block_hash in self.table
+        return block_hash in self.table or block_hash in self.free_table
 
     def update_hash(self, block_hash: int, block: PhysicalTokenBlock):
         assert (not self.contains_block(block_hash))
