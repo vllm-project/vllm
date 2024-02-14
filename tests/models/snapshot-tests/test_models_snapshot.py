@@ -3,7 +3,7 @@
 The data is from HF implementation is generated ahead of time on A100 or H100 by using
 `python generate-snapshot.py` or manually update the `snapshot.json` file.
 
-Similar to test_models.py, this test should be ran with `--forked` flag to avoid
+Similar to test_models.py, this test should be ran with `--forked` flag locally to avoid
 hanging and nccl process group errors.
 """
 import json
@@ -46,13 +46,21 @@ def test_model_snapshot(
         snapshot = json.load(f)
 
     # Note we are using 2 L4 GPUs for tensor parallelism to run 7b model at float32.
-    vllm_model = vllm_runner(model,
-                             dtype=dtype,
-                             tensor_parallel_size=2,
-                             enforce_eager=True,
-                             max_model_len=1024)
+    vllm_model = vllm_runner(
+        model,
+        dtype=dtype,
+        tensor_parallel_size=2,
+        enforce_eager=True,
+        max_seq_len=512,
+    )
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
+
+    for i in range(len(example_prompts)):
+        hf_output_str = snapshot[key][example_prompts[i]]
+        _, vllm_output_str = vllm_outputs[i]
+        assert hf_output_str == vllm_output_str, (
+            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
 
     # force pytorch to garbage collect to avoid OOM
     torch.cuda.empty_cache()
@@ -62,11 +70,5 @@ def test_model_snapshot(
             f"GPU {i} memory usage: {torch.cuda.memory_allocated(i) / 1e9:.2f}GB"
         )
     assert all(
-        torch.cuda.memory_allocated(i) < 1e9
+        torch.cuda.memory_allocated(i) < 1e7  # 10MB
         for i in range(torch.cuda.device_count()))
-
-    for i in range(len(example_prompts)):
-        hf_output_str = snapshot[key][example_prompts[i]]
-        _, vllm_output_str = vllm_outputs[i]
-        assert hf_output_str == vllm_output_str, (
-            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
