@@ -80,12 +80,6 @@ RUN --mount=type=cache,target=/root/.cache/pip VLLM_USE_PRECOMPILED=1 pip instal
 # In the future it would be nice to get a container with pytorch and cuda without duplicating cuda
 FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04 AS vllm-base
 
-# Somehow the official cuda containers from Nvidia have the wrong LD_LIBRARY_PATH set.
-# It is set to /usr/local/nvidia/libs and /usr/local/nvidia/lib64, but the actual
-# cuda libraries are in /usr/local/cuda/compat.
-# There are also cuda libraries in python site-packages, but they don't have everything.
-ENV LD_LIBRARY_PATH="/usr/local/cuda/compat:${LD_LIBRARY_PATH}"
-
 # libnccl required for ray
 RUN apt-get update -y \
     && apt-get install -y python3-pip
