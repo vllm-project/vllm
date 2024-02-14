@@ -290,8 +290,7 @@ class LoRAModelManager:
         if hasattr(self.model, "supported_lora_modules"):
             self.supported_lora_modules = copy.deepcopy(
                 self.model.supported_lora_modules)
-            self.packed_modules = copy.deepcopy(
-                self.model.packed_modules)
+            self.packed_modules = copy.deepcopy(self.model.packed_modules)
         self.packed_modules: Dict[str, List[str]] = {}
         self.modules: Dict[str, "BaseLayerWithLoRA"] = {}
         self._registered_loras: Dict[int, LoRAModel] = {}
