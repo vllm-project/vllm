@@ -1,13 +1,11 @@
 import torch
 
 from typing import Any, Dict, List, Type
-from magic_wand import CompressedStorageFormat
 from vllm.model_executor.layers.sparsity.base_config import SparsityConfig
 from .sparse_w16a16_linear_method import SparseW16A16LinearMethod
-from magic_wand import (
-    CompressedStorageFormat,
-    SparseSemiStructuredStorageFormat
-)
+from magic_wand import (CompressedStorageFormat,
+                        SparseSemiStructuredStorageFormat)
+
 
 class SemiStructuredSparseW16A16Config(SparsityConfig):
     """Config class for SemiStructuredSparseW16A16.
@@ -29,7 +27,7 @@ class SemiStructuredSparseW16A16Config(SparsityConfig):
 
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
-        return [torch.half,torch.bfloat16]
+        return [torch.half, torch.bfloat16]
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -41,8 +39,9 @@ class SemiStructuredSparseW16A16Config(SparsityConfig):
         return ["sparsity_config.json"]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "SemiStructuredSparseW16A16Config":
+    def from_config(
+            cls, config: Dict[str, Any]) -> "SemiStructuredSparseW16A16Config":
         return cls()
 
     def get_linear_method(self) -> "SparseW16A16LinearMethod":
-        return SparseW16A16LinearMethod(self,self.get_storage_format_cls())
+        return SparseW16A16LinearMethod(self, self.get_storage_format_cls())
