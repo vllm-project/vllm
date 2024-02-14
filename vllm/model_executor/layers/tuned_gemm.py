@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 from rocsolidxgemm import rocb_create_extension,rocb_mm
 from hipbsolidxgemm import hipb_create_extension,hipb_mm
+from pathlib import Path
 import os
 import yaml
 import pandas as pd
@@ -16,16 +17,19 @@ class TunedGemm:
         self.bestsols = {}
         self.load_best_sols()
         self.create_ds()
-    def load_best_sols(self):
-        perfbits = {}
-        perf_file = os.environ.get('VLLM_PERF_YAML')
-        if perf_file is not None:
-            with open(perf_file, 'r') as file:
-                perfbits = yaml.safe_load(file)
+        self.save_gemm = int(os.environ.get('VLLM_TUNE_GEMM',0))
+        self.untune_path = os.environ.get('VLLM_UNTUNE_FILE', "/tmp/vllm_untuned.csv")
+        self.tune_path = os.environ.get('VLLM_TUNE_FILE', "tuned.csv")
 
-        tune_file = perfbits.get('tuned_gemm_csv',None)
-        if tune_file is not None:
-            self.bestsols = pd.read_csv(tune_file,index_col=[0])
+        if (self.save_gemm == 1):
+            self.tuned_df = pd.DataFrame(columns=['M','N','K'])
+        else:
+            self.tuned_df = None
+
+    def load_best_sols(self):
+        if self.tune_path is not None and Path(self.tune_path).is_file():
+            self.bestsols = pd.read_csv(self.tune_path)
+
     def apply_custom(self,ds):
         M,N,K = ds['M'],ds['N'],ds['K']
         #apply custom matvec (only for f16 dtype)
