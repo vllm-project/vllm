@@ -1,6 +1,7 @@
 from enum import Enum
 from functools import lru_cache
 from json import dumps as json_dumps
+from re import escape as regex_escape
 from typing import Union
 from types import SimpleNamespace
 from pydantic import BaseModel
@@ -37,31 +38,31 @@ def get_guided_decoding_logits_processor(
             # with the same fields will get hashed the same
             json = str(request.guided_json.__signature__)
 
-        return get_cached_logit_processor(json, tokenizer, True)
+        return [get_cached_logits_processor(json, tokenizer, True)]
     
     elif request.guided_regex:
         if not isinstance(request.guided_regex, str):
             raise TypeError("Regex must be string")
         
-        return get_cached_logit_processor(
-            request.guided_regex, tokenizer, False)
+        return [get_cached_logits_processor(
+            request.guided_regex, tokenizer, False)]
     
     elif request.guided_choice:
         if not isinstance(request.guided_choice, list):
             raise TypeError("Choices must be a list")
         
         # choice just uses regex
-        choices = [str_with_escape(choice) for choice in request.guided_choice]
+        choices = [regex_escape(choice) for choice in request.guided_choice]
         choices_regex = "(" + "|".join(choices) + ")"
 
-        return get_cached_logit_processor(choices_regex, tokenizer, False)
+        return [get_cached_logits_processor(choices_regex, tokenizer, False)]
     
     else:
         return None
     
 
 @lru_cache
-def get_cached_logit_processor(guide: str, tokenizer, is_json: bool):
+def get_cached_logits_processor(guide: str, tokenizer, is_json: bool):
     # guide is guaranteed hashable (see above function)
     # tokenizer should be hashable right??
 
@@ -75,17 +76,6 @@ def get_cached_logit_processor(guide: str, tokenizer, is_json: bool):
         return y
     
     if is_json:
-        return [JSONLogitsProcessor(guide, dummy_llm())]
+        return JSONLogitsProcessor(guide, dummy_llm())
     else:
-        return [RegexLogitsProcessor(guide, dummy_llm())]
-
-
-def str_with_escape(e: Union[str, int, float, bool]):
-    s = str(e)
-    a = []
-    regex_reserved = set(".()[]{}|*+?^$-\\")
-    for ch in s:
-        if ch in regex_reserved:
-            a.append("\\")
-        a.append(ch)
-    return "".join(a)
+        return RegexLogitsProcessor(guide, dummy_llm())
