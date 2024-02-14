@@ -91,7 +91,7 @@ class LlamaAttention(nn.Module):
         rope_scaling: Optional[Dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
         linear_method: Optional[LinearMethodBase] = None,
-        bias = False,
+        bias=False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
