@@ -1,3 +1,6 @@
+import asyncio
+import os
+from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple, Union
 
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
@@ -6,9 +9,44 @@ from transformers import (AutoTokenizer, PreTrainedTokenizer,
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.utils import make_async, LRUCache
+from vllm.engine.ray_utils import ray
 from vllm.transformers_utils.tokenizers import *
 
 logger = init_logger(__name__)
+
+
+def _get_cached_tokenizer(
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
+) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
+    """Get tokenizer with cached properties.
+
+    By default, transformers will recompute multiple tokenizer properties
+    each time they are called, leading to a significant slowdown. This
+    function caches these properties for faster access."""
+
+    tokenizer_all_special_ids = set(tokenizer.all_special_ids)
+    tokenizer_all_special_tokens_extended = (
+        tokenizer.all_special_tokens_extended)
+    tokenizer_all_special_tokens = set(tokenizer.all_special_tokens)
+
+    class CachedTokenizer(tokenizer.__class__):
+
+        @property
+        def all_special_ids(self):
+            return tokenizer_all_special_ids
+
+        @property
+        def all_special_tokens(self):
+            return tokenizer_all_special_tokens
+
+        @property
+        def all_special_tokens_extended(self):
+            return tokenizer_all_special_tokens_extended
+
+    CachedTokenizer.__name__ = f"Cached{tokenizer.__class__.__name__}"
+
+    tokenizer.__class__ = CachedTokenizer
+    return tokenizer
 
 
 def get_tokenizer(
@@ -64,7 +102,7 @@ def get_tokenizer(
         logger.warning(
             "Using a slow tokenizer. This might cause a significant "
             "slowdown. Consider using a fast tokenizer instead.")
-    return tokenizer
+    return _get_cached_tokenizer(tokenizer)
 
 
 def get_lora_tokenizer(lora_request: LoRARequest, *args,
@@ -88,8 +126,7 @@ def get_lora_tokenizer(lora_request: LoRARequest, *args,
 get_lora_tokenizer_async = make_async(get_lora_tokenizer)
 
 
-class TokenizerGroup:
-    """A group of tokenizers that can be used for LoRA adapters."""
+class BaseTokenizerGroup(ABC):
 
     def __init__(self, tokenizer_id: str, enable_lora: bool, max_num_seqs: int,
                  max_input_length: Optional[int], **tokenizer_config):
@@ -102,6 +139,40 @@ class TokenizerGroup:
             self.lora_tokenizers = LRUCache(capacity=max_num_seqs)
         else:
             self.lora_tokenizers = None
+
+    def get_max_input_len(self,
+                          lora_request: Optional[LoRARequest] = None
+                          ) -> Optional[int]:
+        return self.max_input_length
+
+    def ping(self):
+        return True
+
+    @abstractmethod
+    def encode(self, prompt: str, request_id: Optional[str],
+               lora_request: Optional[LoRARequest]) -> List[int]:
+        pass
+
+    async def encode_async(self, prompt: str, request_id: Optional[str],
+                           lora_request: Optional[LoRARequest]) -> List[int]:
+        return self.encode(prompt=prompt,
+                           request_id=request_id,
+                           lora_request=lora_request)
+
+    @abstractmethod
+    def get_lora_tokenizer(
+            self,
+            lora_request: Optional[LoRARequest]) -> "PreTrainedTokenizer":
+        ...
+
+    async def get_lora_tokenizer_async(
+            self,
+            lora_request: Optional[LoRARequest]) -> "PreTrainedTokenizer":
+        return self.get_lora_tokenizer(lora_request)
+
+
+class TokenizerGroup(BaseTokenizerGroup):
+    """A group of tokenizers that can be used for LoRA adapters."""
 
     def encode(self,
                prompt: str,
@@ -143,6 +214,94 @@ class TokenizerGroup:
             return tokenizer
         else:
             return self.lora_tokenizers.get(lora_request.lora_int_id)
+
+
+if ray:
+    RayTokenizerGroup = ray.remote(TokenizerGroup)
+
+    class RayTokenizerGroupPool(BaseTokenizerGroup):
+        """A pool of TokenizerGroups for async tokenization."""
+
+        def __init__(  # pylint: disable=super-init-not-called
+                self, tokenizer_id: str, enable_lora: bool, max_num_seqs: int,
+                max_input_length: Optional[int], num_actors: int,
+                ray_actor_options: dict, **tokenizer_config):
+            self.tokenizer = TokenizerGroup(tokenizer_id, enable_lora,
+                                            max_num_seqs, max_input_length,
+                                            **tokenizer_config)
+            self.max_input_length = max_input_length
+
+            # Carry over the env vars to the actors.
+            # This is necessary for API keys and such.
+            ray_actor_options.setdefault("runtime_env", {})
+            env_vars = os.environ.copy()
+            ray_actor_options["runtime_env"].setdefault("env_vars", {})
+            env_vars.update(ray_actor_options["runtime_env"]["env_vars"])
+            ray_actor_options["runtime_env"]["env_vars"] = env_vars
+
+            ray_tokenizer_cls = RayTokenizerGroup.options(**ray_actor_options)
+            self.tokenizer_actors = [
+                ray_tokenizer_cls.remote(tokenizer_id, enable_lora,
+                                         max_num_seqs, max_input_length,
+                                         **tokenizer_config)
+                for _ in range(num_actors)
+            ]
+            self._idle_actors = None
+
+        def ping(self):
+            return ray.get(
+                [actor.ping.remote() for actor in self.tokenizer_actors])
+
+        def encode(self,
+                   prompt: str,
+                   request_id: Optional[str] = None,
+                   lora_request: Optional[LoRARequest] = None) -> List[int]:
+            if self._idle_actors is None:
+                self._idle_actors = asyncio.Queue()
+                for actor in self.tokenizer_actors:
+                    self._idle_actors.put_nowait(actor)
+            if self._idle_actors.empty():
+                raise RuntimeError("No idle actors available.")
+            actor = self._idle_actors.get_nowait()
+            try:
+                ret = ray.get(
+                    actor.encode.remote(request_id=request_id,
+                                        prompt=prompt,
+                                        lora_request=lora_request))
+            finally:
+                self._idle_actors.put_nowait(actor)
+            return ret
+
+        async def encode_async(
+                self,
+                prompt: str,
+                request_id: Optional[str] = None,
+                lora_request: Optional[LoRARequest] = None) -> List[int]:
+            if self._idle_actors is None:
+                self._idle_actors = asyncio.Queue()
+                for actor in self.tokenizer_actors:
+                    self._idle_actors.put_nowait(actor)
+            actor = await self._idle_actors.get()
+            try:
+                ret = await actor.encode.remote(request_id=request_id,
+                                                prompt=prompt,
+                                                lora_request=lora_request)
+            finally:
+                self._idle_actors.put_nowait(actor)
+            return ret
+
+        def get_lora_tokenizer(
+                self,
+                lora_request: Optional[LoRARequest]) -> "PreTrainedTokenizer":
+            return self.tokenizer.get_lora_tokenizer(lora_request)
+
+        async def get_lora_tokenizer_async(
+                self,
+                lora_request: Optional[LoRARequest]) -> "PreTrainedTokenizer":
+            return await self.tokenizer.get_lora_tokenizer_async(lora_request)
+
+else:
+    RayTokenizerGroupPool = None
 
 
 def _convert_tokens_to_string_with_added_encoders(

@@ -1,10 +1,24 @@
 import argparse
+import json
 import dataclasses
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, LoRAConfig)
+
+
+class _StoreJsonAction(argparse._StoreAction):
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        json_values = []
+        for value in values:
+            try:
+                json_values.append(json.loads(value))
+            except json.JSONDecodeError as e:
+                raise argparse.ArgumentTypeError(
+                    f'Invalid JSON string: {value}') from e
+        setattr(namespace, self.dest, json_values)
 
 
 @dataclass
@@ -40,6 +54,8 @@ class EngineArgs:
     enforce_eager: bool = False
     max_context_len_to_capture: int = 8192
     disable_custom_all_reduce: bool = False
+    num_tokenizer_actors: int = 0
+    tokenizer_actor_options: Optional[dict] = None
     enable_lora: bool = False
     max_loras: int = 1
     max_lora_rank: int = 16
@@ -249,6 +265,20 @@ class EngineArgs:
                             action='store_true',
                             default=EngineArgs.disable_custom_all_reduce,
                             help='See ParallelConfig')
+        parser.add_argument('--num-tokenizer-actors',
+                            type=int,
+                            default=EngineArgs.num_tokenizer_actors,
+                            help='Number of tokenizer actors to use for '
+                            'asynchronous tokenization with Ray. If 0, will '
+                            'use synchronous tokenization.')
+        parser.add_argument('--tokenizer-actor-options',
+                            type=str,
+                            default=EngineArgs.tokenizer_actor_options,
+                            action=_StoreJsonAction,
+                            help='Options for tokenizer Ray actors. '
+                            'This should be a JSON string that will be '
+                            'parsed into a dictionary. Ignored if '
+                            'num_tokenizer_actors is 0.')
         # LoRA related configs
         parser.add_argument('--enable-lora',
                             action='store_true',
@@ -319,7 +349,9 @@ class EngineArgs:
                                          self.worker_use_ray,
                                          self.max_parallel_loading_workers,
                                          self.disable_custom_all_reduce,
-                                         self.ray_workers_use_nsight)
+                                         self.ray_workers_use_nsight,
+                                         self.num_tokenizer_actors,
+                                         self.tokenizer_actor_options)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
                                            model_config.max_model_len,

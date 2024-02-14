@@ -21,12 +21,14 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import (Logprob, SamplerOutput, Sequence, SequenceGroup,
                            SequenceGroupOutput, SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
-                                               TokenizerGroup)
+                                               BaseTokenizerGroup,
+                                               TokenizerGroup,
+                                               RayTokenizerGroupPool)
 from vllm.utils import (Counter, set_cuda_visible_devices, get_ip,
                         get_open_port, get_distributed_init_method)
 
 if ray:
-    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy, NodeAffinitySchedulingStrategy
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -141,6 +143,9 @@ class LLMEngine:
         else:
             self._init_workers()
 
+        # Make sure the tokenizer actors are alive
+        self.tokenizer.ping()
+
         # Profile the memory usage and initialize the cache.
         self._init_cache()
 
@@ -208,8 +213,31 @@ class LLMEngine:
             trust_remote_code=self.model_config.trust_remote_code,
             revision=self.model_config.tokenizer_revision)
         init_kwargs.update(tokenizer_init_kwargs)
-        self.tokenizer: TokenizerGroup = TokenizerGroup(
-            self.model_config.tokenizer, **init_kwargs)
+
+        if self.parallel_config.num_tokenizer_actors > 0:
+            if not RayTokenizerGroupPool:
+                raise ImportError(
+                    "RayTokenizerGroupPool is not available. Please install "
+                    "the ray package to use the tokenizer actors or "
+                    "set `num_tokenizer_actors` to 0.")
+            ray_actor_options = (self.parallel_config.tokenizer_actor_options
+                                 or {
+                                     "num_cpus": 0
+                                 })
+            ray_actor_options.setdefault(
+                "scheduling_strategy",
+                NodeAffinitySchedulingStrategy(
+                    node_id=ray.get_runtime_context().get_node_id(),
+                    soft=True))
+
+            init_kwargs[
+                "num_actors"] = self.parallel_config.num_tokenizer_actors
+            init_kwargs["ray_actor_options"] = ray_actor_options
+            self.tokenizer: BaseTokenizerGroup = RayTokenizerGroupPool(
+                self.model_config.tokenizer, **init_kwargs)
+        else:
+            self.tokenizer: TokenizerGroup = TokenizerGroup(
+                self.model_config.tokenizer, **init_kwargs)
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
