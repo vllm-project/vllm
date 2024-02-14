@@ -163,6 +163,7 @@ class VllmRunner:
         model_name: str,
         tokenizer_name: Optional[str] = None,
         dtype: str = "half",
+        disable_log_stats: bool = True,
     ) -> None:
         self.model = LLM(
             model=model_name,
@@ -170,6 +171,7 @@ class VllmRunner:
             trust_remote_code=True,
             dtype=dtype,
             swap_space=0,
+            disable_log_stats=disable_log_stats,
         )
 
     def generate(
