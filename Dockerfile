@@ -6,7 +6,8 @@ FROM nvidia/cuda:12.1.0-devel-ubuntu22.04 AS dev
 
 # Set the DEBIAN_FRONTEND variable to noninteractive to avoid interactive prompts
 ENV DEBIAN_FRONTEND=noninteractive
-
+ENV VLLM_INSTALL_PUNICA_KERNELS=1
+ENV MAX_JOBS=24
 # Preconfigure tzdata for US Central Time (build running in us-central-1 but this really doesn't matter.)
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Chicago' | debconf-set-selections
@@ -17,8 +18,8 @@ RUN apt-get update -y \
     && apt-get install -y software-properties-common \
     && add-apt-repository ppa:deadsnakes/ppa -y \
     && apt-get update -y \
-    && apt-get install -y python3.8 python3.8-dev python3.8-venv python3-pip git \
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.8 1
+    && apt-get install -y python3.10 python3.10-dev python3.10-venv python3-pip git \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
@@ -56,10 +57,10 @@ COPY pyproject.toml pyproject.toml
 COPY vllm/__init__.py vllm/__init__.py
 
 # cuda arch list used by torch
-ARG torch_cuda_arch_list='7.0 7.5 8.0 8.6 8.9 9.0+PTX'
+ARG torch_cuda_arch_list='8.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 # max jobs used by Ninja to build extensions
-ARG max_jobs=2
+ARG max_jobs=12
 ENV MAX_JOBS=${max_jobs}
 # number of threads used by nvcc
 ARG nvcc_threads=8
@@ -83,7 +84,7 @@ ADD . /vllm-workspace/
 COPY --from=build /workspace/vllm/*.so /vllm-workspace/vllm/
 # ignore build dependencies installation because we are using pre-complied extensions
 RUN rm pyproject.toml
-RUN --mount=type=cache,target=/root/.cache/pip VLLM_USE_PRECOMPILED=1 pip install . --verbose
+RUN --mount=type=cache,target=/root/.cache/pip VLLM_INSTALL_PUNICA_KERNELS=1 VLLM_USE_PRECOMPILED=1 pip install . --verbose
 #################### TEST IMAGE ####################
 
 
@@ -112,5 +113,5 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY --from=build /workspace/vllm/*.so /workspace/vllm/
 COPY vllm vllm
 
-ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.api_server"]
 #################### OPENAI API SERVER ####################
