@@ -16,7 +16,7 @@ from .protocol import (
 )
 from vllm.outputs import RequestOutput
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
-from vllm.model_executor.guided_decoding import GuidedDecodingMode, get_guided_decoding_logits_processor
+from vllm.model_executor.guided_decoding import get_guided_decoding_logits_processor
 
 logger = init_logger(__name__)
 
@@ -285,7 +285,9 @@ class OpenAIServingCompletion(OpenAIServing):
         generators = []
         try:
             sampling_params = request.to_sampling_params()
-            sampling_params.logits_processors = self._get_guided_decoding_logits_processor(request)
+            sampling_params.logits_processors = \
+                get_guided_decoding_logits_processor(
+                    request, self.engine.get_tokenizer())
             prompt_is_tokens, prompts = parse_prompt_format(request.prompt)
 
             for i, prompt in enumerate(prompts):
@@ -349,16 +351,3 @@ class OpenAIServingCompletion(OpenAIServing):
             return fake_stream_generator()
 
         return response
-
-    def _get_guided_decoding_logits_processor(self, request: CompletionRequest):
-        # should this go inside CompletionRequest.to_sampling_params() instead?
-        if request.guided_json:
-            return get_guided_decoding_logits_processor(
-                    request.guided_json, GuidedDecodingMode("json"),
-                    self.engine.engine.tokenizer.tokenizer)
-        elif request.guided_regex:
-            return get_guided_decoding_logits_processor(
-                    request.guided_regex, GuidedDecodingMode("regex"),
-                    self.engine.engine.tokenizer.tokenizer)
-        else:
-            return None

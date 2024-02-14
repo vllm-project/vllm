@@ -82,6 +82,7 @@ class ChatCompletionRequest(BaseModel):
     length_penalty: Optional[float] = 1.0
     guided_json: Optional[Union[str, dict, BaseModel]] = None
     guided_regex: Optional[str] = None
+    guided_choice: Optional[List[Union[str, int, float, bool]]] = None
 
     def to_sampling_params(self) -> SamplingParams:
         return SamplingParams(
@@ -137,6 +138,7 @@ class CompletionRequest(BaseModel):
     length_penalty: Optional[float] = 1.0
     guided_json: Optional[Union[str, dict, BaseModel]] = None
     guided_regex: Optional[str] = None
+    guided_choice: Optional[List[Union[str, int, float, bool]]] = None
 
     def to_sampling_params(self):
         echo_without_generation = self.echo and self.max_tokens == 0
