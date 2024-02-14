@@ -1,10 +1,5 @@
-import torch
-from vllm.model_executor.layers.parameters.sparsity import SparseParameter
+from vllm.model_executor.layers.parameters.lazy_compressed import LazyCompressedParameter
 
-
-def get_param_data(param: torch.nn.Parameter) -> torch.Tensor:
-    """Gets parameter data in dense format."""
-    if isinstance(param, SparseParameter):
-        return param.get_dense_data()
-    else:
-        return param.data
+__all__ = [
+    "LazyCompressedParameter",
+]
