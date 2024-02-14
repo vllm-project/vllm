@@ -64,7 +64,8 @@ def test_request_tracker():
     stream_5 = tracker.add_request("5")
     assert tracker.new_requests_event.flag
     tracker.process_request_output(
-        RequestOutput("2", "output", [], [], [], finished=True))
+        RequestOutput("2", "output", [], [], [], bool(finished), 0, 0, 0, 0,
+                      0))
     new, finished = tracker.get_new_and_finished_requests()
     assert not tracker.new_requests_event.flag
     assert len(finished) == 1

@@ -252,8 +252,11 @@ class SequenceGroup:
         self.request_id = request_id
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
         self.sampling_params = sampling_params
-        self.arrival_time = arrival_time
-        self.last_token_time = arrival_time
+        self.arrival_time: float = arrival_time
+        self.last_token_time: float = arrival_time
+        self.first_scheduled_time: Optional[float] = None
+        self.first_token_time: Optional[float] = None
+        self.time_in_queue: Optional[float] = None
         self.lora_request = lora_request
         self.prefix: Optional[Prefix] = prefix
         self.prompt_logprobs: Optional[PromptLogprobs] = None
@@ -276,6 +279,9 @@ class SequenceGroup:
 
     def get_last_latency(self, now: float) -> float:
         """Gets last token latency for Request level timings."""
+        if self.first_token_time is None:
+            self.first_token_time = now
+
         latency = now - self.last_token_time
         self.last_token_time = now
         return latency
