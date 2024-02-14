@@ -52,7 +52,7 @@ def get_guided_decoding_logits_processor(
             raise TypeError("Choices must be a list")
         
         # choice just uses regex
-        choices = [regex_escape(choice) for choice in request.guided_choice]
+        choices = [regex_escape(str(choice)) for choice in request.guided_choice]
         choices_regex = "(" + "|".join(choices) + ")"
 
         return [get_cached_logits_processor(choices_regex, tokenizer, False)]
