@@ -13,7 +13,7 @@ from vllm.model_executor.parallel_utils.utils import (
     divide, split_tensor_along_last_dim)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.parameters import SparseParameter, get_param_data
+from vllm.model_executor.layers.parameters import LazyCompressedParameter
 
 logger = init_logger(__name__)
 
@@ -192,7 +192,7 @@ class ColumnParallelLinear(torch.nn.Module):
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         tp_rank = get_tensor_model_parallel_rank()
         output_dim = getattr(param, "output_dim", None)
-        param_data = get_param_data(param)
+        param_data = param.data
 
         if output_dim is not None:
             shard_size = param_data.shape[output_dim]
@@ -202,9 +202,8 @@ class ColumnParallelLinear(torch.nn.Module):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
-        # If SparseParameter, repack dense data as sparse.
-        if isinstance(param, SparseParameter):
-            param.pack()
+        if isinstance(param, LazyCompressedParameter):
+            param.compress()
 
     def forward(self, input_):
         bias = self.bias if not self.skip_bias_add else None
@@ -253,6 +252,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         linear_method: Optional[LinearMethodBase] = None,
     ):
         self.output_sizes = output_sizes
+        self.loaded_shards = set()
         tp_size = get_tensor_model_parallel_world_size()
         assert all(output_size % tp_size == 0 for output_size in output_sizes)
         super().__init__(input_size, sum(output_sizes), bias, gather_output,
@@ -262,14 +262,9 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                       param: Parameter,
                       loaded_weight: torch.Tensor,
                       loaded_shard_id: Optional[int] = None):
-        param_data = get_param_data(param)
+        param_data = param.data
         output_dim = getattr(param, "output_dim", None)
         if loaded_shard_id is None:
-            if isinstance(param, SparseParameter):
-                raise NotImplementedError(
-                    "Passing loaded_shard_id=None not yet supported for SparseParameter"
-                )
-
             # Loaded weight is already packed.
             if output_dim is None:
                 assert param_data.shape == loaded_weight.shape
@@ -316,12 +311,17 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     "Loading a weight without `output_dim` attribute in "
                     "MergedColumnParallelLinear, assume the weight is "
                     "the same for all partitions.")
+
+        self.loaded_shards.add(loaded_shard_id)
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
-        # If Parameter, repack dense data as sparse.
-        if isinstance(param, SparseParameter):
-            param.pack()
+        # This is super hacky for now but we basically want to only compress once all
+        # of the shards are loaded, right now we just check if the number of shards
+        # loaded matches the number of outputs expected, assuming one shard per output
+        all_shards_loaded = (len(self.loaded_shards) == len(self.output_sizes))
+        if all_shards_loaded and isinstance(param, LazyCompressedParameter):
+            param.compress()
 
 
 class QKVParallelLinear(ColumnParallelLinear):
@@ -365,6 +365,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         if total_num_kv_heads is None:
             total_num_kv_heads = total_num_heads
         self.total_num_kv_heads = total_num_kv_heads
+        self.loaded_shards = set()
         # Divide the weight matrix along the last dimension.
         tp_size = get_tensor_model_parallel_world_size()
         self.num_heads = divide(self.total_num_heads, tp_size)
@@ -385,14 +386,9 @@ class QKVParallelLinear(ColumnParallelLinear):
                       param: Parameter,
                       loaded_weight: torch.Tensor,
                       loaded_shard_id: Optional[str] = None):
-        param_data = get_param_data(param)
+        param_data = param.data
         output_dim = getattr(param, "output_dim", None)
         if loaded_shard_id is None:
-            if isinstance(param, SparseParameter):
-                raise NotImplementedError(
-                    "Passing loaded_shard_id=None not yet supported for SparseParameter"
-                )
-
             # Loaded weight is already packed.
             if output_dim is None:
                 assert param_data.shape == loaded_weight.shape
@@ -456,9 +452,14 @@ class QKVParallelLinear(ColumnParallelLinear):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
-        # If SparseParameter, repack dense data as sparse.
-        if isinstance(param, SparseParameter):
-            param.pack()
+        self.loaded_shards.add(loaded_shard_id)
+
+        # This is super hacky for now but we basically want to only compress once
+        # all of the shards are loaded, for the QKV matrix this means
+        # loading shards "q", "k" and "v"
+        all_shards_loaded = (self.loaded_shards == set(["q", "k", "v"]))
+        if all_shards_loaded and isinstance(param, LazyCompressedParameter):
+            param.compress()
 
 
 class RowParallelLinear(torch.nn.Module):
@@ -540,7 +541,7 @@ class RowParallelLinear(torch.nn.Module):
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         tp_rank = get_tensor_model_parallel_rank()
         input_dim = getattr(param, "input_dim", None)
-        param_data = get_param_data(param)
+        param_data = param.data
         if input_dim is not None:
             shard_size = param_data.shape[input_dim]
             start_idx = tp_rank * shard_size
@@ -549,9 +550,8 @@ class RowParallelLinear(torch.nn.Module):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
-        # If SparseParameter, repack dense data as sparse.
-        if isinstance(param, SparseParameter):
-            param.pack()
+        if isinstance(param, LazyCompressedParameter):
+            param.compress()
 
     def forward(self, input_):
         # Set up backprop all-reduce.

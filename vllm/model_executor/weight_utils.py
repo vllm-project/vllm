@@ -19,8 +19,7 @@ from vllm.model_executor.layers.quantization import (get_quantization_config,
                                                      QuantizationConfig)
 from vllm.model_executor.layers.sparsity import (get_sparsity_config,
                                                  SparsityConfig)
-from vllm.model_executor.layers.parameters import (get_param_data,
-                                                   SparseParameter)
+from vllm.model_executor.layers.parameters import LazyCompressedParameter
 
 logger = init_logger(__name__)
 
@@ -299,9 +298,9 @@ def default_weight_loader(param: torch.nn.Parameter,
                           loaded_weight: torch.Tensor) -> None:
     """Default weight loader."""
     assert param.size() == loaded_weight.size()
-    get_param_data(param).copy_(loaded_weight)
-    if isinstance(param, SparseParameter):
-        param.pack()
+    param.data.copy_(loaded_weight)
+    if isinstance(param, LazyCompressedParameter):
+        param.compress()
 
 
 def initialize_dummy_weights(
