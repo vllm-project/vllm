@@ -508,5 +508,25 @@ async def test_guided_decoding_type_error(server, client: openai.AsyncOpenAI):
         )
 
 
+async def test_guided_decoding_cache_performance(server, client: openai.AsyncOpenAI):
+    N = 10
+    times = []
+    for i in range(N):
+        start_t = time.time()
+        _ = await client.completions.create(
+            model=MODEL_NAME,
+            prompt="Give an example JSON for an employee profile "
+                    f"that fits this schema: {TEST_SCHEMA}",
+            max_tokens=500,
+            extra_body=dict(
+                guided_json=TEST_SCHEMA
+            )
+        )
+        times.append(time.time() - start_t)
+        
+    for i in range(N):
+        print(f"Request #{i}, time: {times[i]}")
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
