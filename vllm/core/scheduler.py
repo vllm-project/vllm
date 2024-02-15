@@ -381,7 +381,7 @@ class Scheduler:
                 sampling_params=seq_group.sampling_params,
                 block_tables=block_tables,
                 lora_request=seq_group.lora_request,
-                prefix_pos=seq_group.prefix_pos,
+                prefix_pos=(seq_group.prefix_pos // 16) * 16,
                 computed_block_nums=self.block_manager.
                 get_common_computed_block_ids(seq_group),
             )
