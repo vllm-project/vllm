@@ -475,6 +475,7 @@ class BlockSpaceManager:
         block_table = self.block_tables[seq.seq_id]
         for block in block_table:
             block.computed = True
+        block_table[-1].computed = False
 
     def get_all_computed_block_ids_seq(self, seq: Sequence) -> List[int]:
         if seq.seq_id not in self.block_tables:
@@ -486,7 +487,7 @@ class BlockSpaceManager:
             for block in takewhile(lambda block: block.computed, block_table)
         ]
 
-    def get_all_computed_block_ids(self,
+    def get_common_computed_block_ids(self,
                                    seq_group: SequenceGroup) -> List[int]:
         ids_list = [
             self.get_all_computed_block_ids_seq(seq)

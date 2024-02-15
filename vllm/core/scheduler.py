@@ -383,7 +383,7 @@ class Scheduler:
                 lora_request=seq_group.lora_request,
                 prefix_pos=seq_group.prefix_pos,
                 computed_block_nums=self.block_manager.
-                get_all_computed_block_ids(seq_group),
+                get_common_computed_block_ids(seq_group),
             )
             seq_group_metadata_list.append(seq_group_metadata)
         return seq_group_metadata_list, scheduler_outputs

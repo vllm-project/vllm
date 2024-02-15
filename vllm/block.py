@@ -74,7 +74,10 @@ class PhysicalTokenBlock:
     def __repr__(self) -> str:
         return (f'PhysicalTokenBlock(device={self.device}, '
                 f'block_number={self.block_number}, '
-                f'ref_count={self.ref_count})')
+                f'prefix_len={self.prefix_len}, '
+                f'ref_count={self.ref_count}, '
+                f'last_accessed={self.last_accessed}, '
+                f'computed={self.computed})')
 
 
 # Mapping: logical block number -> physical block.
