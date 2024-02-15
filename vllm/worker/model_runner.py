@@ -130,7 +130,7 @@ class ModelRunner:
             computed_block_nums = seq_group_metadata.computed_block_nums
             if computed_block_nums is not None and len(
                     computed_block_nums) > 0:
-                prefix_len = seq_group_metadata.prefix_pos
+                prefix_len = seq_group_metadata.get_prefix_len()
                 prompt_tokens = prompt_tokens[prefix_len:]
                 prefix_block_tables.append(computed_block_nums)
             else:

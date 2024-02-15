@@ -397,6 +397,9 @@ class SequenceGroupMetadata:
         self.prefix_pos = prefix_pos
         self.computed_block_nums = computed_block_nums
 
+    def get_prefix_len(self) -> int:
+        return self.prefix_pos if self.prefix_pos is not None else 0
+
     @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
