@@ -18,14 +18,6 @@ RUN git clone -b develop https://github.com/ROCmSoftwarePlatform/hipBLASLt \
 RUN sed -i 's/, hipblaslt-dev \(.*\), hipcub-dev/, hipcub-dev/g' /var/lib/dpkg/status
 RUN sed -i 's/, hipblaslt \(.*\), hipfft/, hipfft/g' /var/lib/dpkg/status
 
-RUN git clone  https://streamhsa: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@github.com/rocm/rocBLAS-internal.git \
-    && export GTest_DIR="/usr/local/lib/cmake/GTest/" \
-    && cd rocBLAS-internal \
-    && git fetch origin 4f353a8035da38c8b8873823c09a499db777b231 \
-    && git checkout 4f353a8035da38c8b8873823c09a499db777b231 \
-    && ./install.sh -idc -a 'gfx90a;gfx942' \
-    && cd ../ && rm -rf rocBLAS-internal
-
 RUN pip uninstall -y triton
 RUN git clone https://github.com/ROCmSoftwarePlatform/triton.git \
     && cd triton/python && pip3 install -e .
@@ -52,5 +44,4 @@ RUN git clone https://github.com/ROCmSoftwarePlatform/rocmProfileData.git \
 
 COPY docker/libamdhip64.so.6 /opt/rocm/lib/libamdhip64.so.6.0.60000
 COPY docker/libfile_plugin.so /opt/rocm/lib/roctracer
-COPY docker/run_13b.sh $WORKSPACE_DIR/
-COPY docker/run_70b.sh $WORKSPACE_DIR/
+ENV WORKSPACE_DIR=/workspace/vllm
