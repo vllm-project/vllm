@@ -61,7 +61,9 @@ class DeciLMForCausalLM(LlamaForCausalLM):
     ) -> None:
         config.num_key_value_heads = max(config.num_key_value_heads_per_layer)
         delattr(config, "num_key_value_heads_per_layer")
-        super().__init__(config=config, linear_method=linear_method, lora_config=lora_config)
+        super().__init__(config=config,
+                         linear_method=linear_method,
+                         lora_config=lora_config)
 
     def load_weights(self,
                      model_name_or_path: str,
