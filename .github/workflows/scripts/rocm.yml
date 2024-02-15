@@ -11,7 +11,7 @@ on:
       - main
 
 jobs:
-  ruff:
+  rocm:
     runs-on: self-hosted
     steps:
     - uses: actions/checkout@v2
