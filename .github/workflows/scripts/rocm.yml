@@ -1,0 +1,23 @@
+name: AMD ROCm Build
+
+on:
+  # Trigger the workflow on push or pull request,
+  # but only for the main branch
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  ruff:
+    runs-on: self-hosted
+    steps:
+    - uses: actions/checkout@v2
+    - name: Check environment
+      run: |
+        docker --version
+    - name: Build Docker
+      run: |
+        docker build -t rocm -f Dockerfile.rocm .
