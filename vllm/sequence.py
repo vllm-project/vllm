@@ -259,7 +259,6 @@ class SequenceGroup:
         arrival_time: float,
         lora_request: Optional[LoRARequest] = None,
         prefix_pos: Optional[int] = None,
-        prefix_block_nums: Optional[List[int]] = None,
     ) -> None:
         self.request_id = request_id
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
@@ -269,7 +268,6 @@ class SequenceGroup:
         self.lora_request = lora_request
         self.prefix_pos: Optional[int] = prefix_pos
         self.prompt_logprobs: Optional[PromptLogprobs] = None
-        self.prefix_block_nums = prefix_block_nums
 
     @property
     def prompt(self) -> str:
@@ -388,7 +386,7 @@ class SequenceGroupMetadata:
         block_tables: Dict[int, List[int]],
         lora_request: Optional[LoRARequest] = None,
         prefix_pos: Optional[int] = None,
-        prefix_block_nums: Optional[List[int]] = None,
+        computed_block_nums: Optional[List[int]] = None,
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
@@ -397,7 +395,7 @@ class SequenceGroupMetadata:
         self.block_tables = block_tables
         self.lora_request = lora_request
         self.prefix_pos = prefix_pos
-        self.prefix_block_nums = prefix_block_nums
+        self.computed_block_nums = computed_block_nums
 
     @property
     def lora_int_id(self) -> int:

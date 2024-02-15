@@ -68,6 +68,9 @@ class PhysicalTokenBlock:
         self.ref_count = 0
         self.last_accessed = monotonic()
 
+        self.computed = False
+
+    # TODO: update this
     def __repr__(self) -> str:
         return (f'PhysicalTokenBlock(device={self.device}, '
                 f'block_number={self.block_number}, '

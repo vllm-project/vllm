@@ -382,7 +382,8 @@ class Scheduler:
                 block_tables=block_tables,
                 lora_request=seq_group.lora_request,
                 prefix_pos=seq_group.prefix_pos,
-                prefix_block_nums=seq_group.prefix_block_nums,
+                computed_block_nums=self.block_manager.
+                get_all_computed_block_ids(seq_group),
             )
             seq_group_metadata_list.append(seq_group_metadata)
         return seq_group_metadata_list, scheduler_outputs
@@ -492,3 +493,6 @@ class Scheduler:
         blocks_to_swap_out.update(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             seq.status = SequenceStatus.SWAPPED
+
+    def mark_blocks_as_computed(self, seq_group: SequenceGroup):
+        self.block_manager.mark_blocks_as_computed(seq_group)

@@ -50,6 +50,7 @@ def lru_eviction(
     evicted_block = eviction_candidates[0]
     del free_table[evicted_block.block_hash]
 
+    evicted_block.computed = False
     return evicted_block
 
 
@@ -228,13 +229,6 @@ class BlockSpaceManager:
                     seq.prefix_len_of_block(logical_idx,
                                             seq_group.get_prefix_len()))
             block_table.append(block)
-
-        if seq_group.prefix_pos is not None and seq_group.prefix_pos > 0 and seq_group.prefix_block_nums is None:
-            num_prefix_blocks = seq_group.prefix_pos // self.block_size
-            prefix_block_table = block_table[:num_prefix_blocks]
-            seq_group.prefix_block_nums = [
-                block.block_number for block in prefix_block_table
-            ]
 
         # Assign the block table for each sequence.
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
@@ -472,3 +466,33 @@ class BlockSpaceManager:
         block_table = self.block_tables[seq.seq_id]
         for block in block_table:
             block.last_accessed = access_time
+
+    def compute_all_blocks_in_seq(self, seq: Sequence):
+        if seq.seq_id not in self.block_tables:
+            return
+        block_table = self.block_tables[seq.seq_id]
+        for block in block_table:
+            block.computed = True
+
+    def get_all_computed_block_ids_2(self, seq: Sequence):
+        block_ids: List[int] = []
+        if seq.seq_id not in self.block_tables:
+            return block_ids
+        block_table = self.block_tables[seq.seq_id]
+        # We want to get the first n contiguous completed blocks
+        for block in block_table:
+            if block.computed:
+                block_ids.append(block.block_number)
+            else:
+                return block_ids
+        return block_ids
+
+    def get_all_computed_block_ids(self,
+                                   seq_group: SequenceGroup) -> List[int]:
+
+        return self.get_all_computed_block_ids_2(
+            next(iter(seq_group.seqs_dict.values())))
+
+    def mark_blocks_as_computed(self, seq_group: SequenceGroup):
+        for seq in seq_group.seqs_dict.values():
+            self.compute_all_blocks_in_seq(seq)

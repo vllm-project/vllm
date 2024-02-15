@@ -125,11 +125,14 @@ class ModelRunner:
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
             prefix_len = 0
-            prefix_block_nums = seq_group_metadata.prefix_block_nums
-            if prefix_block_nums is not None:
+
+            # NOTE: This only works for oooooooxxx style attention.
+            computed_block_nums = seq_group_metadata.computed_block_nums
+            if computed_block_nums is not None and len(
+                    computed_block_nums) > 0:
                 prefix_len = seq_group_metadata.prefix_pos
                 prompt_tokens = prompt_tokens[prefix_len:]
-                prefix_block_tables.append(prefix_block_nums)
+                prefix_block_tables.append(computed_block_nums)
             else:
                 prefix_block_tables.append([])
             # actual prompt lens
