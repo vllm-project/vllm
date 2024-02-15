@@ -493,7 +493,8 @@ class BlockSpaceManager:
             self.get_all_computed_block_ids_seq(seq)
             for seq in iter(seq_group.seqs_dict.values())
         ]
-        return commonprefix([ids for ids in ids_list if ids != []])
+        cp = commonprefix([ids for ids in ids_list if ids != []])
+        return cp[:seq_group.get_prefix_len() // 16]
 
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
         for seq in seq_group.seqs_dict.values():
