@@ -62,9 +62,6 @@ def test_model_snapshot(
         assert hf_output_str == vllm_output_str, (
             f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
 
-    # Clean up memory, normally we don't need to do this.
-    ray.shutdown()
-
 
 if __name__ == "__main__":
     pytest.main(["-v", "-s", __file__])
