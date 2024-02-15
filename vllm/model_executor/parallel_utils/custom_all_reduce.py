@@ -142,7 +142,7 @@ def _is_full_nvlink(rank, world_size):
 
 def _can_p2p(rank: int, world_size: int) -> bool:
     num_dev = torch.cuda.device_count()
-    # note: num dev can be larger than world_size if we're only using 
+    # note: num dev can be larger than world_size if we're only using
     # first few GPUs
     if num_dev < world_size:
         logger.warn(
