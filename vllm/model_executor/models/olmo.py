@@ -45,19 +45,23 @@ from torch import nn
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import PagedAttention
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               LinearMethodBase,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    LinearMethodBase,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.vocab_parallel_embedding import \
-    VocabParallelEmbedding
-from vllm.model_executor.parallel_utils.parallel_state import \
-    get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_world_size,
+)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
+from vllm.model_executor.weight_utils import (
+    default_weight_loader,
+    hf_model_weights_iterator,
+)
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs.olmo import OLMoConfig
 
@@ -367,7 +371,7 @@ class OLMoForCausalLM(nn.Module):
             if ".att" in name:
                 name = name.replace(".att", ".attn.att")
             # mlp
-            if ".ff" in name:
+            if ".ff" in name and "transformer.ff_out" not in name:
                 name = name.replace(".ff", ".mlp.ff")
             # there is no bias in olmo
             param = params_dict[name]
