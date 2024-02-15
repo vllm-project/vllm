@@ -139,8 +139,8 @@ class BlockAllocator:
         assert (not self.contains_block(block_hash))
         old_hash = block.block_hash
         del self.table[old_hash]
-        self.table[block_hash] = block
         block.block_hash = block_hash
+        self.table[block_hash] = block
 
 
 class AllocStatus(enum.Enum):
