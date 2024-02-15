@@ -469,13 +469,17 @@ class BlockSpaceManager:
         for block in block_table:
             block.last_accessed = access_time
 
-    def compute_all_blocks_in_seq(self, seq: Sequence):
+    def compute_all_blocks_in_seq(self, seq: Sequence,
+                                  max_computed_blocks: int):
         if seq.seq_id not in self.block_tables:
             return
         block_table = self.block_tables[seq.seq_id]
+        counter = 0
         for block in block_table:
+            if counter >= max_computed_blocks:
+                return
             block.computed = True
-        block_table[-1].computed = False
+            counter += 1
 
     def get_all_computed_block_ids_seq(self, seq: Sequence) -> List[int]:
         if seq.seq_id not in self.block_tables:
@@ -493,9 +497,10 @@ class BlockSpaceManager:
             self.get_all_computed_block_ids_seq(seq)
             for seq in iter(seq_group.seqs_dict.values())
         ]
-        cp = commonprefix([ids for ids in ids_list if ids != []])
-        return cp
+        return commonprefix([ids for ids in ids_list if ids != []])
 
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
         for seq in seq_group.seqs_dict.values():
-            self.compute_all_blocks_in_seq(seq)
+            self.compute_all_blocks_in_seq(
+                seq,
+                seq_group.get_prefix_len() // seq.block_size)
