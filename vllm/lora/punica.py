@@ -7,8 +7,8 @@ import torch
 
 def _raise_import_error(e):
     if torch.cuda.get_device_capability() < (8, 0):
-        raise ImportError("punica LoRA kernels require compute "
-                          "capability>=8.0") from e
+        raise ImportError(
+            "punica LoRA kernels require compute capability >= 8.0") from e
     else:
         raise ImportError(
             "punica LoRA kernels could not be imported. If you built vLLM "
@@ -50,14 +50,14 @@ def bgmv(
 
 
 def add_lora(y: torch.Tensor,
-              x: torch.Tensor,
-              wa_t_all: torch.Tensor,
-              wb_t_all: torch.Tensor,
-              indicies: torch.LongTensor,
-              layer_idx: int,
-              scale: float,
-              *,
-              buffer: Optional[torch.Tensor] = None):
+             x: torch.Tensor,
+             wa_t_all: torch.Tensor,
+             wb_t_all: torch.Tensor,
+             indicies: torch.LongTensor,
+             layer_idx: int,
+             scale: float,
+             *,
+             buffer: Optional[torch.Tensor] = None):
     """
     Semantics:
       y[i] += (
@@ -83,32 +83,31 @@ def add_lora(y: torch.Tensor,
         import vllm._punica_C as punica_kernels
     except ImportError as e:
         _raise_import_error(e)
-  
+
     r = wb_t_all.size(-1)
     if buffer is None:
         # We set the buffer to be float32 by default to avoid
         # numerical innacuracies that would otherwise happen
         # due to downcasting.
         buffer = torch.zeros((x.size(0), r),
-                              dtype=torch.float32,
-                              device=x.device)
-    punica_kernels.dispatch_bgmv(buffer, x, wa_t_all, indicies, layer_idx,
-                                  1.0)
+                             dtype=torch.float32,
+                             device=x.device)
+    punica_kernels.dispatch_bgmv(buffer, x, wa_t_all, indicies, layer_idx, 1.0)
     punica_kernels.dispatch_bgmv(y, buffer, wb_t_all, indicies, layer_idx,
-                                  scale)
+                                 scale)
 
 
 def add_lora_slice(y: torch.Tensor,
-                    x: torch.Tensor,
-                    wa_t_all: torch.Tensor,
-                    wb_t_all: torch.Tensor,
-                    indicies: torch.LongTensor,
-                    layer_idx: int,
-                    scale: float,
-                    y_offset: int,
-                    y_slice_size: int,
-                    *,
-                    buffer: Optional[torch.Tensor] = None):
+                   x: torch.Tensor,
+                   wa_t_all: torch.Tensor,
+                   wb_t_all: torch.Tensor,
+                   indicies: torch.LongTensor,
+                   layer_idx: int,
+                   scale: float,
+                   y_offset: int,
+                   y_slice_size: int,
+                   *,
+                   buffer: Optional[torch.Tensor] = None):
     """
     Same as `add_lora` but you can operate on slices of y.
     Pass whole y, define y_offset and y_slice_size.
@@ -145,8 +144,8 @@ def add_lora_slice(y: torch.Tensor,
         # numerical inaccuracies that would otherwise happen
         # due to downcasting.
         buffer = torch.zeros((x.size(0), r),
-                              dtype=torch.float32,
-                              device=x.device)
+                             dtype=torch.float32,
+                             device=x.device)
     punica_kernels.dispatch_bgmv_low_level(
         buffer,
         x,
