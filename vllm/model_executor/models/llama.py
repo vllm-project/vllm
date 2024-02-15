@@ -92,7 +92,7 @@ class LlamaAttention(nn.Module):
         max_position_embeddings: int = 8192,
         linear_method: Optional[LinearMethodBase] = None,
         bias: bool = False,
-        sliding_window: int = None,
+        sliding_window: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
