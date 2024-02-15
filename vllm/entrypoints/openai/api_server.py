@@ -176,6 +176,13 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump())
 
 
+@app.post("/v1/controllers")
+async def upload_aici_module(request: Request):
+    if not pyaici_runner_completion:
+        return JSONResponse({ "error": "AICI runtime is not enabled" }, status_code=501)
+    contents = await request.body()
+    return JSONResponse(await pyaici_runner_completion.aici_runner.upload_module_async(contents))
+
 @app.post("/v1/run")
 async def aici_run(request: RunRequest, raw_request: Request):
     if not pyaici_runner_completion:
