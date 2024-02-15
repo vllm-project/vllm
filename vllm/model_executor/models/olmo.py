@@ -43,7 +43,6 @@ import torch.nn.functional as F
 from torch import nn
 
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import PagedAttention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -55,8 +54,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_world_size,
-)
+    get_tensor_model_parallel_world_size, )
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (
     default_weight_loader,
@@ -69,6 +67,7 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class SwiGLU(nn.Module):
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x, gate = x.chunk(2, dim=-1)
         return F.silu(gate) * x
@@ -93,16 +92,17 @@ class OlmoAttention(nn.Module):
         self.config = config
         self.hidden_size = config.d_model
         assert config.d_model % config.n_heads == 0
-        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size()
+        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size(
+        )
         self.total_num_heads = self.config.n_heads
         assert self.total_num_heads % tensor_model_parallel_world_size == 0
         self.num_heads = self.total_num_heads // tensor_model_parallel_world_size
         self.head_dim = self.hidden_size // self.total_num_heads
 
         # Layer norms.
-        self.attn_norm = nn.LayerNorm(
-            config.d_model, elementwise_affine=False, bias=False
-        )
+        self.attn_norm = nn.LayerNorm(config.d_model,
+                                      elementwise_affine=False,
+                                      bias=False)
         # Attention input projection. Projects x -> (q, k, v)
         self.att_proj = QKVParallelLinear(
             config.d_model,
@@ -115,7 +115,8 @@ class OlmoAttention(nn.Module):
         # Rotary embeddings.
         if self.config.rope:
             rope_theta = getattr(config, "rope_theta", 10000)
-            max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
+            max_position_embeddings = getattr(config,
+                                              "max_position_embeddings", 8192)
             self.rotary_emb = get_rope(
                 self.head_dim,
                 rotary_dim=self.head_dim,
@@ -123,7 +124,9 @@ class OlmoAttention(nn.Module):
                 base=rope_theta,
             )
         self.scaling = self.head_dim**-0.5
-        self.attn = PagedAttention(self.num_heads, self.head_dim, scale=self.scaling)
+        self.attn = PagedAttention(self.num_heads,
+                                   self.head_dim,
+                                   scale=self.scaling)
 
         # Attention output projection.
         self.attn_out = RowParallelLinear(
@@ -164,16 +167,13 @@ class OlmoMLP(nn.Module):
     ):
         super().__init__()
         self.config = config
-        self.hidden_size = (
-            config.mlp_hidden_size
-            if config.mlp_hidden_size is not None
-            else config.mlp_ratio * config.d_model
-        )
+        self.hidden_size = (config.mlp_hidden_size if config.mlp_hidden_size
+                            is not None else config.mlp_ratio * config.d_model)
 
         # Layer norms.
-        self.ff_norm = nn.LayerNorm(
-            config.d_model, elementwise_affine=False, bias=False
-        )
+        self.ff_norm = nn.LayerNorm(config.d_model,
+                                    elementwise_affine=False,
+                                    bias=False)
 
         # Feed-forward input projection.
         self.ff_proj = ColumnParallelLinear(
@@ -219,9 +219,9 @@ class OlmoBlock(nn.Module):
     (plus another skip connection).
     """
 
-    def __init__(
-        self, config: OLMoConfig, linear_method: Optional[LinearMethodBase] = None
-    ):
+    def __init__(self,
+                 config: OLMoConfig,
+                 linear_method: Optional[LinearMethodBase] = None):
         super().__init__()
         # Attention block.
         self.attn = OlmoAttention(config, linear_method)
@@ -248,9 +248,9 @@ class OlmoBlock(nn.Module):
 
 class OlmoModel(nn.Module):
 
-    def __init__(
-        self, config: OLMoConfig, linear_method: Optional[LinearMethodBase] = None
-    ):
+    def __init__(self,
+                 config: OLMoConfig,
+                 linear_method: Optional[LinearMethodBase] = None):
         super().__init__()
         self.config = config
 
@@ -260,27 +260,29 @@ class OlmoModel(nn.Module):
                     config.embedding_size or config.vocab_size,
                     config.d_model,
                 ),
-                ln_f=nn.LayerNorm(config.d_model, elementwise_affine=False, bias=False),
-            )
-        )
+                ln_f=nn.LayerNorm(config.d_model,
+                                  elementwise_affine=False,
+                                  bias=False),
+            ))
 
-        blocks = [OlmoBlock(config, linear_method) for i in range(config.n_layers)]
+        blocks = [
+            OlmoBlock(config, linear_method) for i in range(config.n_layers)
+        ]
         if self.config.block_group_size > 1:
             raise NotImplementedError("Block group size > 1 not supported yet")
         else:
             self.transformer.update({"blocks": nn.ModuleList(blocks)})
 
         if not config.weight_tying:
-            self.transformer.update(
-                {
-                    "ff_out": ColumnParallelLinear(
-                        config.d_model,
-                        config.embedding_size or config.vocab_size,
-                        bias=config.include_bias,
-                        linear_method=linear_method,
-                    )
-                }
-            )
+            self.transformer.update({
+                "ff_out":
+                ColumnParallelLinear(
+                    config.d_model,
+                    config.embedding_size or config.vocab_size,
+                    bias=config.include_bias,
+                    linear_method=linear_method,
+                )
+            })
 
     def forward(
         self,
@@ -317,18 +319,16 @@ class OLMoForCausalLM(nn.Module):
     Extremely barebones HF model wrapper.
     """
 
-    def __init__(
-        self, config: OLMoConfig, linear_method: Optional[LinearMethodBase] = None
-    ):
+    def __init__(self,
+                 config: OLMoConfig,
+                 linear_method: Optional[LinearMethodBase] = None):
         super().__init__()
         self.config = config
         self.linear_method = linear_method
         self.model = OlmoModel(config, linear_method)
-        self.lm_head_weight = (
-            self.model.transformer.wte.weight
-            if config.weight_tying
-            else self.model.transformer.ff_out.weight
-        )
+        self.lm_head_weight = (self.model.transformer.wte.weight
+                               if config.weight_tying else
+                               self.model.transformer.ff_out.weight)
         self.sampler = Sampler(config.vocab_size)
 
     def forward(
@@ -351,9 +351,8 @@ class OLMoForCausalLM(nn.Module):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(
-            self.lm_head_weight, hidden_states, sampling_metadata
-        )
+        next_tokens = self.sampler(self.lm_head_weight, hidden_states,
+                                   sampling_metadata)
         return next_tokens
 
     def load_weights(
@@ -365,8 +364,7 @@ class OLMoForCausalLM(nn.Module):
     ):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in hf_model_weights_iterator(
-            model_name_or_path, cache_dir, load_format, revision
-        ):
+                model_name_or_path, cache_dir, load_format, revision):
             # attention
             if ".att" in name:
                 name = name.replace(".att", ".attn.att")
@@ -375,5 +373,6 @@ class OLMoForCausalLM(nn.Module):
                 name = name.replace(".ff", ".mlp.ff")
             # there is no bias in olmo
             param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
             weight_loader(param, loaded_weight)
