@@ -5,7 +5,6 @@ from transformers import AutoConfig, PretrainedConfig
 from vllm.transformers_utils.configs import *
 
 _CONFIG_REGISTRY = {
-    "aquila": AquilaConfig,
     "baichuan": BaiChuanConfig,
     "chatglm": ChatGLMConfig,
     "mpt": MPTConfig,
