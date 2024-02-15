@@ -229,7 +229,6 @@ class BlockSpaceManager:
                                             seq_group.get_prefix_len()))
             block_table.append(block)
 
-        #TODO add block ref_counts for each block in prefix?
         if seq_group.prefix_pos is not None and seq_group.prefix_pos > 0 and seq_group.prefix_block_nums is None:
             num_prefix_blocks = seq_group.prefix_pos // self.block_size
             prefix_block_table = block_table[:num_prefix_blocks]
