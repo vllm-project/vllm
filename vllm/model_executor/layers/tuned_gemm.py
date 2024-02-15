@@ -14,12 +14,13 @@ class TunedGemm:
         #rocb_create_extension()
         #hipb_create_extension()
         self.extensions_created = False
-        self.bestsols = {}
-        self.load_best_sols()
-        self.create_ds()
         self.save_gemm = int(os.environ.get('VLLM_TUNE_GEMM',0))
         self.untune_path = os.environ.get('VLLM_UNTUNE_FILE', "/tmp/vllm_untuned.csv")
         self.tune_path = os.environ.get('VLLM_TUNE_FILE', "tuned.csv")
+        self.bestsols = {}
+        self.load_best_sols()
+        self.create_ds()
+
 
         if (self.save_gemm == 1):
             self.tuned_df = pd.DataFrame(columns=['M','N','K'])

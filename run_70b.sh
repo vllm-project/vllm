@@ -1,6 +1,6 @@
 #!/bin/bash
-BASE_DIR=/workspace
-VLLM_DIR=$BASE_DIR/vllm-private
+BASE_DIR=/trees
+VLLM_DIR=$BASE_DIR/vllm
 GRAD_DIR=$BASE_DIR/gradlib
 RPD_DIR=/workspace/rocmProfileData
 MODEL=/data/llama2-70b-chat
@@ -10,7 +10,7 @@ GEMM_TUNER=1
 #TP="1 2 4 8"
 TP=8
 #Flag to use Triton Flash Attention vs CK
-export VLLM_USE_TRITON=1
+#export VLLM_USE_TRITON=1
 
 #Gemm tuner flags
 export VLLM_TUNE_GEMM=0
@@ -21,22 +21,21 @@ export VLLM_TUNE_FILE=$VLLM_DIR"/tuned.csv"
 #export VLLM_USE_TORCH_MULTINOMIAL=1
 
 #Delete tuned gemms before running.
-DELETE_TUNED_CSV=1
+#DELETE_TUNED_CSV=1
 #Flag to disable MSCCL
 #export RCCL_MSCCL_ENABLE=0
 #HIPGraph performance flags
 export HIP_FORCE_DEV_KERNARG=1
 export DEBUG_CLR_GRAPH_PACKET_CAPTURE=1
 #Enable full decoder graph mode
-HIP_GRAPH=--use-cuda-graph
 #Use top of tree build of RCCL
 export LD_LIBRARY_PATH=/workspace/rccl/build/
 #Enable either flag to create a profile trace (rocprof, or rocpd)
 #RPD_PROFILE="--profile"
 #ROCPROF_PROFILE="rocprof --hip-trace"
-GEN_LEN="1 32"
-#INPUT_LEN="512 1024 2048 3072"
-INPUT_LEN="512 1024 2048 3072 4096 6144 8192 16384"
+GEN_LEN="1,32,128"
+INPUT_LEN="512,1024,2048,3072"
+
 ITER=10
 # pring usage of the parameters
 usage() {
@@ -57,26 +56,16 @@ for tp in $TP;
 do
     if (( $GEMM_TUNER ));
     then
-      echo "tuned_gemm_csv: ./tuned_tp$tp.csv" > $VLLM_DIR/tuned_perf_tp$tp.yaml
-      tuned_file=$VLLM_DIR/tuned_tp$tp.csv
-      if [[ $DELETE_TUNED_CSV == 1 || ! -f $VLLM_DIR/tuned_tp$tp.csv ]];
-      echo "tuned_gemm_csv: "$VLLM_TUNE_FILE > $VLLM_DIR/tuned_perf.yaml
+      echo "tuned_gemm_csv: "$VLLM_TUNE_FILE > $VLLM_DIR/tuned_perf_tp$tp.yaml
+
       if [[ $DELETE_TUNED_CSV == 1 ]];
       then
-              rm -rf $tuned_file
-              echo "INFO: Generating Tuned Gemm configs"
-              cd $GRAD_DIR
-              python gemm_tuner.py --model_dir $MODEL --output $tuned_file --tp $tp
+              rm -rf $VLLM_TUNE_FILE
       fi
-      export VLLM_PERF_YAML=./tuned_perf_tp$tp.yaml
+      #export VLLM_PERF_YAML=./tuned_perf_tp$tp.yaml
       echo "INFO: Generating Tuned Gemm configs"
       cd $GRAD_DIR
-      python gemm_tuner.py --model_dir $MODEL --output $VLLM_TUNE_FILE --tp $tp
-
-
-      echo "================================= TUNED GEMMS  $tuned_file ==============================================="
-      cat $tuned_file
-
+      python gemm_tuner.py --model_dir $MODEL --tuned_file $VLLM_TUNE_FILE --tp $tp
     fi
 
     cd $VLLM_DIR
@@ -91,7 +80,7 @@ do
             fi
             echo "================================= RUNNING $MODEL $input_len $gen_len ==============================================="
             $ROCPROF_PROFILE torchrun --standalone --nnodes=1 --nproc-per-node=$tp benchmarks/benchmark_latency.py --model $MODEL  --batch-size 1 --input-len $input_len --output-len $gen_len \
-            --tensor-parallel-size $tp --num-iters $ITER $HIP_GRAPH $RPD_PROFILE
+            --tensor-parallel-size $tp --num-iters $ITER $RPD_PROFILE --report
             if [[ -v ROCPROF_PROFILE ]] ;
             then
                 TRACE_FILE=$BASE_DIR/trace_${MODEL_SIZE}_${input_len}_${gen_len}.json
