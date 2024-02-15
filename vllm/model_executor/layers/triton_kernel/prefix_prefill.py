@@ -5,8 +5,6 @@ import torch
 import triton
 import triton.language as tl
 
-TESLA = 'Tesla' in torch.cuda.get_device_name(0)
-
 if triton.__version__ >= "2.1.0":
 
     @triton.jit
