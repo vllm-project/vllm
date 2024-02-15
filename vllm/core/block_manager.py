@@ -488,7 +488,7 @@ class BlockSpaceManager:
         ]
 
     def get_common_computed_block_ids(self,
-                                   seq_group: SequenceGroup) -> List[int]:
+                                      seq_group: SequenceGroup) -> List[int]:
         ids_list = [
             self.get_all_computed_block_ids_seq(seq)
             for seq in iter(seq_group.seqs_dict.values())
