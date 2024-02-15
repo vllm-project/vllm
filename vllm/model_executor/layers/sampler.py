@@ -10,7 +10,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata, SamplingTens
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (PromptLogprobs, SampleLogprobs, SamplerOutput,
                            SequenceData, SequenceGroupOutput, SequenceOutput)
-
+from pyaici.comms import AiciRunner
 
 class Sampler(nn.Module):
     """Samples the next tokens from the model's outputs.
@@ -143,6 +143,19 @@ def _apply_logits_processors(
     logits: torch.Tensor,
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
+    runner = AiciRunner.instance
+    if runner:
+        mapping, arr = runner.recv_logit_bias()
+        bias = torch.from_numpy(arr).to(logits.device).to(logits.dtype)
+        if bias.shape[0] > 0:
+            logits_row_idx = 0
+            for seq_ids, sampling_params in sampling_metadata.seq_groups:
+                n = len(seq_ids)
+                if sampling_params.has_aici:
+                    bias_idx = mapping[seq_ids[0]]
+                    logits[logits_row_idx:logits_row_idx + n] += bias[bias_idx:bias_idx + n]
+                logits_row_idx += n
+
     logits_row_idx = 0
     found_logits_processors = False
     for seq_ids, sampling_params in sampling_metadata.seq_groups:

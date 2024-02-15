@@ -6,6 +6,7 @@ import os
 import importlib
 import inspect
 
+import pyaici
 from aioprometheus import MetricsMiddleware
 from aioprometheus.asgi.starlette import metrics
 import fastapi
@@ -19,17 +20,19 @@ from fastapi.responses import JSONResponse, StreamingResponse, Response
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.metrics import add_global_metrics_labels
-from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest, ErrorResponse
+from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest, ErrorResponse, RunRequest
 from vllm.logger import init_logger
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
+from vllm.entrypoints.openai.serving_aici import AiciRunnerCompletion
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
 openai_serving_chat: OpenAIServingChat = None
 openai_serving_completion: OpenAIServingCompletion = None
-logger = init_logger(__name__)
+pyaici_runner_completion: AiciRunnerCompletion = None
 
+logger = init_logger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: fastapi.FastAPI):
@@ -118,6 +121,7 @@ def parse_args():
     )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
+    parser = pyaici.add_cli_args(parser)
     return parser.parse_args()
 
 
@@ -172,6 +176,16 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump())
 
 
+@app.post("/v1/run")
+async def aici_run(request: RunRequest, raw_request: Request):
+    if not pyaici_runner_completion:
+        return JSONResponse({ "error": "AICI runtime is not enabled" }, status_code=501)
+    # TODO: await not needed?
+    generator = pyaici_runner_completion.create_completion(request, raw_request)
+    return StreamingResponse(content=generator,
+                             media_type="text/event-stream")
+
+
 if __name__ == "__main__":
     args = parse_args()
 
@@ -215,6 +229,9 @@ if __name__ == "__main__":
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)
+    if args.aici_rt:
+        pyaici_runner = pyaici.runner_from_cli(args)
+        pyaici_runner_completion = AiciRunnerCompletion(pyaici_runner, engine, served_model)
     openai_serving_chat = OpenAIServingChat(engine, served_model,
                                             args.response_role,
                                             args.chat_template)

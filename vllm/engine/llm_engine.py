@@ -594,6 +594,8 @@ class LLMEngine:
             # We reuse the parent sequence here to reduce redundant memory
             # copies, especially when using non-beam search sampling methods.
             last_child_sample = child_samples[-1]
+            if seq_group.sampling_params.has_aici:
+                self.scheduler.aici_runner.tokens_generated(parent.seq_id, [last_child_sample.output_token])
             parent.append_token_id(last_child_sample.output_token,
                                    last_child_sample.logprobs)
             child_seqs.append((parent, parent))

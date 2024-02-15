@@ -2,6 +2,7 @@ from collections import deque
 import enum
 import time
 from typing import Deque, Dict, Iterable, List, Optional, Tuple, Union, Set
+from pyaici.comms import AiciRunner
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.block_manager import AllocStatus, BlockSpaceManager
@@ -88,6 +89,8 @@ class Scheduler:
         self.prompt_limit = min(self.scheduler_config.max_model_len,
                                 self.scheduler_config.max_num_batched_tokens)
 
+        self.aici_runner: AiciRunner = None
+
         # Instantiate the scheduling policy.
         self.policy = PolicyFactory.get_policy(policy_name="fcfs")
         # Create the block space manager.
@@ -112,6 +115,11 @@ class Scheduler:
         return bool(self.lora_config)
 
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
+        if seq_group.sampling_params.has_aici:
+            seq = seq_group.get_seqs()[0]
+            seq.has_aici = True
+            self.aici_runner.assign_seq_id(seq_group.request_id, seq.seq_id)
+
         # Add sequence groups to the waiting queue.
         self.waiting.append(seq_group)
 
@@ -361,6 +369,10 @@ class Scheduler:
         return scheduler_outputs
 
     def schedule(self) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs]:
+        runner = self.aici_runner
+        if runner:
+            runner.exec_post_pre()
+
         # Schedule sequence groups.
         # This function call changes the internal states of the scheduler
         # such as self.running, self.swapped, and self.waiting.
@@ -375,6 +387,8 @@ class Scheduler:
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
+                if seq_group.sampling_params.has_aici:
+                    runner.add_mid(seq_id)
 
             seq_group_metadata = SequenceGroupMetadata(
                 request_id=seq_group.request_id,
@@ -392,6 +406,8 @@ class Scheduler:
         self.block_manager.fork(parent_seq, child_seq)
 
     def free_seq(self, seq: Sequence) -> None:
+        if seq.has_aici:
+            self.aici_runner.seq_freed(seq.seq_id)
         self.block_manager.free(seq)
 
     def free_finished_seq_groups(self) -> None:
