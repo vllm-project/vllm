@@ -20,7 +20,7 @@ from vllm.utils import in_wsl
 
 logger = init_logger(__name__)
 
-KVCache = Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]
+KVCache = Tuple[torch.Tensor, torch.Tensor]
 _PAD_SLOT_ID = -1
 LORA_WARMUP_RANK = 8
 # Capture graphs for batch size 1, 2, 4, 8, 16, 24, 32, 40, ..., 256.
@@ -83,6 +83,24 @@ class ModelRunner:
                 self.scheduler_config.max_paddings, vocab_size,
                 self.lora_config, self.device)
             self.model = self.lora_manager.create_lora_manager(self.model)
+        
+        if self.model_config.kv_cache_scales is not None:
+            if self.kv_cache_dtype == "fp8":
+                if callable(getattr(self.model, "load_kv_cache_scales", None)):
+                    self.model.load_kv_cache_scales(self.model_config.kv_cache_scales)
+                else:
+                    logger.warn("Using FP8 KV cache and scaling factors provided but "
+                                f"model {self.model.__class__} does not support "
+                                "loading scaling factors. Defaulting to 1.0 scales, "
+                                "be warned that this might lead to inaccurate "
+                                "results!")
+            else:
+                logger.warn("User provided KV cache scaling factors but these will "
+                            "not be used as the KV cache dtype is not FP8!")
+        elif self.kv_cache_dtype == "fp8":
+            logger.warn(f"Using FP8 KV cache but no scaling factors provided. "
+                        "Defaulting to 1.0 scales, be warned that this might "
+                        "lead to inaccurate results!")
 
     def set_block_size(self, block_size: int) -> None:
         self.block_size = block_size
@@ -595,7 +613,7 @@ class ModelRunner:
 
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
-        kv_caches = [(None, None, None)] * num_layers
+        kv_caches = [(None, None)] * num_layers
         self.execute_model(seqs, kv_caches)
         torch.cuda.synchronize()
         return
