@@ -36,7 +36,7 @@ class EngineArgs:
     quantization: Optional[str] = None
     enforce_eager: bool = False
     max_context_len_to_capture: int = 8192
-    disable_custom_all_reduce: bool = False
+    disable_custom_all_reduce: bool = True
     enable_lora: bool = False
     max_loras: int = 1
     max_lora_rank: int = 16

@@ -43,7 +43,7 @@ def init_custom_ar() -> None:
     if not _can_p2p(rank, world_size):
         logger.warn(
             "Custom allreduce is disabled because your platform lacks GPU P2P"
-            " capability. To slience this warning, specify"
+            " capability or P2P test failed. To slience this warning, specify"
             "disable_custom_all_reduce=True explicitly.")
         return
     full_nvlink = _is_full_nvlink(rank, world_size)
@@ -141,12 +141,38 @@ def _is_full_nvlink(rank, world_size):
 
 
 def _can_p2p(rank: int, world_size: int) -> bool:
+    num_dev = torch.cuda.device_count()
+    # note: num dev can be larger than world_size if we're only using 
+    # first few GPUs
+    if num_dev < world_size:
+        logger.warn(
+            "Cannot test GPU P2P because not all GPUs are visible to the "
+            "current process. This might be the case if 'CUDA_VISIBLE_DEVICES'"
+            " is set.")
+        return False
     for i in range(world_size):
         if i == rank:
             continue
         if not torch.cuda.can_device_access_peer(rank, i):
             return False
+        # on some platforms, P2P support might be buggy and we need
+        # additional checks. See also:
+        # https://github.com/vllm-project/vllm/issues/2728
+        if not _can_actually_p2p(rank, i):
+            return False
     return True
+
+
+# code partly borrowed from
+# https://github.com/turboderp/exllamav2/blob/1c67f97f3d2a968605a9c31ab791a05c85bb7879/exllamav2/compat.py#L10
+# License: MIT
+def _can_actually_p2p(idx_a, idx_b):
+    dev_i = f"cuda:{idx_a}"
+    dev_j = f"cuda:{idx_b}"
+    a = torch.randn(5, device=dev_i) + 123.0
+    b = a.to(dev_j)
+    c = b.to(dev_i)
+    return torch.all(a == c)
 
 
 class CustomAllreduce:
