@@ -400,6 +400,11 @@ class Scheduler:
                 prefix=seq_group.prefix,
             )
             seq_group_metadata_list.append(seq_group_metadata)
+        if runner:
+            if scheduler_outputs.is_empty():
+                assert not runner.needs_exec_mid()
+            else:
+                runner.exec_mid()
         return seq_group_metadata_list, scheduler_outputs
 
     def fork_seq(self, parent_seq: Sequence, child_seq: Sequence) -> None:
