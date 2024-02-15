@@ -381,6 +381,8 @@ class Scheduler:
                 sampling_params=seq_group.sampling_params,
                 block_tables=block_tables,
                 lora_request=seq_group.lora_request,
+                prefix_pos=seq_group.prefix_pos,
+                prefix_block_nums=seq_group.prefix_block_nums,
             )
             seq_group_metadata_list.append(seq_group_metadata)
         return seq_group_metadata_list, scheduler_outputs
