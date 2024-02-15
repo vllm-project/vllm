@@ -1,5 +1,5 @@
 """CacheEngine class for managing the KV cache."""
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 
@@ -12,7 +12,7 @@ from vllm.utils import in_wsl, STR_DTYPE_TO_TORCH_DTYPE
 
 logger = init_logger(__name__)
 
-KVCache = Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]
+KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class CacheEngine:
@@ -49,19 +49,10 @@ class CacheEngine:
             self.dtype = model_config.dtype
         else:
             self.dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
-        
-        # We enable cache scaling factors if and only if cache is FP8-typed
-        self.use_scaling_factor = torch.tensor([], dtype=self.dtype).element_size() == 1
 
         # Initialize the cache.
         self.gpu_cache = self.allocate_gpu_cache()
         self.cpu_cache = self.allocate_cpu_cache()
-
-        # Load scaling factors into the GPU cache if values are specified
-        # We do not need to load them into the CPU cache because they are
-        # never swapped out.
-        if self.cache_config.kv_cache_scales is not None:
-            self.load_kv_cache_scales(self.cache_config.kv_cache_scales)
 
         # Initialize the stream for caching operations.
         self.cache_stream = torch.cuda.Stream()
@@ -101,15 +92,7 @@ class CacheEngine:
                 dtype=self.dtype,
                 device="cuda",
             )
-            if self.use_scaling_factor:
-                scaling_factor = torch.ones(
-                    1,
-                    dtype=torch.float32,
-                    device='cuda',
-                )
-            else:
-                scaling_factor = None
-            gpu_cache.append((key_blocks, value_blocks, scaling_factor))
+            gpu_cache.append((key_blocks, value_blocks))
         return gpu_cache
 
     def allocate_cpu_cache(self) -> List[KVCache]:
@@ -135,9 +118,7 @@ class CacheEngine:
                 pin_memory=pin_memory,
                 device="cpu",
             )
-            # Scale factors are not involved in the swap process and never need to reside on CPU
-            scaling_factor = None
-            cpu_cache.append((key_blocks, value_blocks, scaling_factor))
+            cpu_cache.append((key_blocks, value_blocks))
         return cpu_cache
 
     def _swap(
@@ -150,13 +131,8 @@ class CacheEngine:
 
         with torch.cuda.stream(self.cache_stream):
             for i in range(self.num_layers):
-                src_key_cache, src_value_cache, src_scaling = src[i]
-                dst_key_cache, dst_value_cache, dst_scaling = dst[i]
-                # We should not need to copy scaling factors, as they are equal
-                # given a fixed layer
-                # TODO(mattwong) Remove this once confirmed
-                if self.use_scaling_factor:
-                    assert torch.equal(src_scaling, dst_scaling)
+                src_key_cache, src_value_cache = src[i]
+                dst_key_cache, dst_value_cache = dst[i]
                 # Copy the key blocks.
                 cache_ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
                 # Copy the value blocks.
@@ -176,14 +152,6 @@ class CacheEngine:
         value_caches = [value_cache for _, value_cache, _ in self.gpu_cache]
         # NOTE(woosuk): This operation implicitly synchronizes the CPU and GPU.
         cache_ops.copy_blocks(key_caches, value_caches, src_to_dsts)
-    
-    # Helper function to load in static KV cache scaling factors (one per layer)
-    # stored in a given file. These scaling factors are assumed to not take up
-    # too much space and are hence permanently resident on GPU.
-    def load_kv_cache_scales(self, filename: str):
-        for layer_idx, scaling_factor in kv_cache_scales_iterator(filename):
-            self.gpu_cache[layer_idx][2].copy_(scaling_factor)
-
 
     @staticmethod
     def get_cache_block_size(
@@ -204,11 +172,6 @@ class CacheEngine:
         else:
             dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
         dtype_size = _get_dtype_size(dtype)
-        
-        use_scaling_factor = dtype_size == 1
-        if use_scaling_factor:
-            return dtype_size * total + num_layers * 4
-        
         return dtype_size * total
 
 

@@ -41,7 +41,7 @@ from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 
-KVCache = Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]
+KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class GPTBigCodeAttention(nn.Module):
@@ -104,9 +104,8 @@ class GPTBigCodeAttention(nn.Module):
             ],
             dim=-1,
         )
-        key_cache, value_cache, kv_cache_scaling_factor = kv_cache
+        key_cache, value_cache = kv_cache
         attn_output = self.attn(q, k, v, key_cache, value_cache,
-                                kv_cache_scaling_factor,
                                 input_metadata)
         attn_output, _ = self.c_proj(attn_output)
         return attn_output

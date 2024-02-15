@@ -27,6 +27,10 @@ class ModelConfig:
             downloading the model and tokenizer.
         download_dir: Directory to download and load the weights, default to the
             default cache directory of huggingface.
+        kv_cache_scales: Path to file containing a JSON serialization of a map
+            of layer indices to their respective KV cache scaling factors. Used to
+            load aforementioned scaling factors into the model when KV cache type
+            is FP8.
         load_format: The format of the model weights to load:
             "auto" will try to load the weights in the safetensors format and
                 fall back to the pytorch bin format if safetensors format is
@@ -69,6 +73,7 @@ class ModelConfig:
         tokenizer_mode: str,
         trust_remote_code: bool,
         download_dir: Optional[str],
+        kv_cache_scales: Optional[str],
         load_format: str,
         dtype: Union[str, torch.dtype],
         seed: int,
@@ -85,6 +90,7 @@ class ModelConfig:
         self.tokenizer_mode = tokenizer_mode
         self.trust_remote_code = trust_remote_code
         self.download_dir = download_dir
+        self.kv_cache_scales = kv_cache_scales
         self.load_format = load_format
         self.seed = seed
         self.revision = revision
@@ -302,7 +308,6 @@ class CacheConfig:
         gpu_memory_utilization: float,
         swap_space: int,
         cache_dtype: str,
-        kv_cache_scales: Optional[str] = None,
         sliding_window: Optional[int] = None,
     ) -> None:
         self.block_size = block_size
@@ -310,7 +315,6 @@ class CacheConfig:
         self.swap_space_bytes = swap_space * _GB
         self.cache_dtype = cache_dtype
         self.sliding_window = sliding_window
-        self.kv_cache_scales = kv_cache_scales
         self._verify_args()
         self._verify_cache_dtype()
 
@@ -332,11 +336,6 @@ class CacheConfig:
         if self.cache_dtype == "auto":
             pass
         elif self.cache_dtype == "fp8":
-            if self.kv_cache_scales is None:
-                logger.warn(f"Using cache dtype {self.cache_dtype} but no "
-                            "scaling factors provided. Defaulting to 1.0 "
-                            "scales, be warned that this might lead to "
-                            "inaccurate results!")
             if not is_hip():
                 nvcc_cuda_version = get_nvcc_cuda_version()
                 if nvcc_cuda_version < Version("11.8"):

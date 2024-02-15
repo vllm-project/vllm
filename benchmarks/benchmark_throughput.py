@@ -73,6 +73,7 @@ def run_vllm(
     enforce_eager: bool,
     kv_cache_dtype: str,
     device: str,
+    kv_cache_scales: Optional[str],
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(
@@ -87,6 +88,7 @@ def run_vllm(
         enforce_eager=enforce_eager,
         kv_cache_dtype=kv_cache_dtype,
         device=device,
+        kv_cache_scales=kv_cache_scales,
     )
 
     # Add the requests to the engine.
@@ -108,8 +110,9 @@ def run_vllm(
 
     start = time.perf_counter()
     # FIXME(woosuk): Do not use internal method.
-    llm._run_engine(use_tqdm=True)
+    outputs = llm._run_engine(use_tqdm=True)
     end = time.perf_counter()
+    print(outputs[-1])
     return end - start
 
 
@@ -211,7 +214,7 @@ def main(args: argparse.Namespace):
                                 args.seed, args.n, args.use_beam_search,
                                 args.trust_remote_code, args.dtype,
                                 args.max_model_len, args.enforce_eager,
-                                args.kv_cache_dtype, args.device)
+                                args.kv_cache_dtype, args.device ,args.kv_cache_scales)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -303,6 +306,15 @@ if __name__ == "__main__":
         default="cuda",
         choices=["cuda"],
         help='device type for vLLM execution, supporting CUDA only currently.')
+    parser.add_argument(
+            '--kv-cache-scales',
+            type=str,
+            default=None,
+            help='Path to the JSON file containing the KV cache scaling factors. '
+            'This should generally be supplied when KV cache dtype is FP8. Otherwise '
+            'the KV cache scaling factors default to 1.0, which will likely cause '
+            'accuracy issues. Note FP8 is not supported when cuda version is '
+            'lower than 11.8.')
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model

@@ -13,6 +13,7 @@ from vllm._C import cache_ops
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.triton_kernel.prefix_prefill import (
     context_attention_fwd)
+from vllm.model_executor.layers.linear import set_weight_attrs
 from vllm.utils import is_hip
 
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
@@ -51,6 +52,11 @@ class PagedAttention(nn.Module):
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.register_buffer("alibi_slopes", alibi_slopes, persistent=False)
+        
+        # This will be set to a float by the model initialization
+        # if and only if we are using it. Note that this implies we are
+        # supporting only scalar per-tensor scaling factors for now.
+        self.kv_cache_scaling_factor = None
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -100,7 +106,6 @@ class PagedAttention(nn.Module):
         value: torch.Tensor,
         key_cache: Optional[torch.Tensor],
         value_cache: Optional[torch.Tensor],
-        kv_cache_scaling_factor: Optional[torch.Tensor],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
         """PagedAttention forward pass.
@@ -122,17 +127,21 @@ class PagedAttention(nn.Module):
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
-        
+
+        # Store this here as it will be modified if we perform KV cache scaling
+        softmax_scale = self.scale
         # Reshape the keys and values and store them in the cache.
         # If key_cache and value_cache are not provided, the new key and value
         # vectors will not be cached. This happens during the initial memory
         # profiling run.
         if key_cache is not None and value_cache is not None:
-            if kv_cache_scaling_factor is not None:
-                # Scale the key and value scaling factors for quantization
-                # by cache ops
-                key = key.div_(kv_cache_scaling_factor)
-                value = value.div_(kv_cache_scaling_factor)
+            # Pre-scale K, V tensors; quantization done by cache_ops
+            # We will correct for the effects of scaling later
+            if self.kv_cache_scaling_factor is not None:
+                key.div_(self.kv_cache_scaling_factor)
+                value.div_(self.kv_cache_scaling_factor)
+                # This corrects for the K-tensor scaling.
+                softmax_scale *= self.kv_cache_scaling_factor
             cache_ops.reshape_and_cache(
                 key,
                 value,
@@ -207,7 +216,7 @@ class PagedAttention(nn.Module):
                     value,
                     attn_bias=input_metadata.attn_bias,
                     p=0.0,
-                    scale=self.scale,
+                    scale=softmax_scale,
                     op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if
                     (is_hip()) else None,
                 )
@@ -228,6 +237,7 @@ class PagedAttention(nn.Module):
                     input_metadata.context_lens,
                     input_metadata.max_seq_len,
                     getattr(self, "alibi_slopes", None),
+                    softmax_scale,
                 )
 
         else:
@@ -238,10 +248,13 @@ class PagedAttention(nn.Module):
                 value_cache,
                 input_metadata,
                 self.num_kv_heads,
-                self.scale,
+                softmax_scale,
                 self.alibi_slopes,
             )
-
+        # Correct for the V tensor scaling if it took place
+        if key_cache is not None and value_cache is not None and \
+            self.kv_cache_scaling_factor is not None:
+            output.mul_(self.kv_cache_scaling_factor)
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
 
