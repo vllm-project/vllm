@@ -1,5 +1,7 @@
 """A block manager that manages token blocks."""
 import enum
+from itertools import takewhile
+from os.path import commonprefix
 from time import monotonic
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -474,24 +476,23 @@ class BlockSpaceManager:
         for block in block_table:
             block.computed = True
 
-    def get_all_computed_block_ids_2(self, seq: Sequence):
-        block_ids: List[int] = []
+    def get_all_computed_block_ids_seq(self, seq: Sequence) -> List[int]:
         if seq.seq_id not in self.block_tables:
-            return block_ids
+            return []
         block_table = self.block_tables[seq.seq_id]
         # We want to get the first n contiguous completed blocks
-        for block in block_table:
-            if block.computed:
-                block_ids.append(block.block_number)
-            else:
-                return block_ids
-        return block_ids
+        return [
+            block.block_number
+            for block in takewhile(lambda block: block.computed, block_table)
+        ]
 
     def get_all_computed_block_ids(self,
                                    seq_group: SequenceGroup) -> List[int]:
-
-        return self.get_all_computed_block_ids_2(
-            next(iter(seq_group.seqs_dict.values())))
+        ids_list = [
+            self.get_all_computed_block_ids_seq(seq)
+            for seq in iter(seq_group.seqs_dict.values())
+        ]
+        return commonprefix([ids for ids in ids_list if ids != []])
 
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
         for seq in seq_group.seqs_dict.values():
