@@ -1,85 +1,56 @@
-# default base image
-ARG BASE_IMAGE="rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1"
-
-FROM $BASE_IMAGE
-
-ARG BASE_IMAGE="rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1"
-
-RUN echo "Base image is $BASE_IMAGE"
-
-# BASE_IMAGE for ROCm_5.7: "rocm/pytorch:rocm5.7_ubuntu22.04_py3.10_pytorch_2.0.1"
-# BASE_IMAGE for ROCm_6.0: "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1"
-
-
+FROM rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1
+ENV WORKSPACE_DIR=/workspace
+RUN mkdir -p $WORKSPACE_DIR
+WORKDIR $WORKSPACE_DIR
+# Limit arch's so composable kernel doesn't take days to finish
+ENV PYTORCH_ROCM_ARCH=gfx90a;gfx942
 ARG FA_GFX_ARCHS="gfx90a;gfx942"
-RUN echo "FA_GFX_ARCHS is $FA_GFX_ARCHS"
-
-ARG FA_BRANCH="3d2b6f5"
-RUN echo "FA_BRANCH is $FA_BRANCH"
-
-# Install some basic utilities
-RUN apt-get update && apt-get install python3 python3-pip -y
-
-# Install some basic utilities
-RUN apt-get update && apt-get install -y \
-    curl \
-    ca-certificates \
-    sudo \
-    git \
-    bzip2 \
-    libx11-6 \
-    build-essential \
-    wget \
-    unzip \
-    nvidia-cuda-toolkit \
-    tmux \
- && rm -rf /var/lib/apt/lists/*
-
-### Mount Point ###
-# When launching the container, mount the code directory to /app
-ARG APP_MOUNT=/app
-VOLUME [ ${APP_MOUNT} ]
-WORKDIR ${APP_MOUNT}
-
-RUN python3 -m pip install --upgrade pip
-RUN python3 -m pip install --no-cache-dir fastapi ninja tokenizers pandas
-
-ENV LLVM_SYMBOLIZER_PATH=/opt/rocm/llvm/bin/llvm-symbolizer
-ENV PATH=$PATH:/opt/rocm/bin:/libtorch/bin:
-ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/rocm/lib/:/libtorch/lib:
-ENV CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/libtorch/include:/libtorch/include/torch/csrc/api/include/:/opt/rocm/include/:
-
-# Install ROCm flash-attention
-RUN mkdir libs \
-    && cd libs \
-    && git clone https://github.com/ROCmSoftwarePlatform/flash-attention.git \
+RUN apt update && apt install -y sqlite3 libsqlite3-dev libfmt-dev
+RUN git clone --recursive https://github.com/ROCmSoftwarePlatform/flash-attention \
     && cd flash-attention \
-    && git checkout ${FA_BRANCH} \
-    && git submodule update --init \
     && export GPU_ARCHS=${FA_GFX_ARCHS} \
-    && if [ "$BASE_IMAGE" = "rocm/pytorch:rocm5.7_ubuntu22.04_py3.10_pytorch_2.0.1" ]; then \
-        patch /opt/conda/envs/py_3.10/lib/python3.10/site-packages/torch/utils/hipify/hipify_python.py hipify_patch.patch; fi \
-    && python3 setup.py install \
-    && cd ..
+    && python setup.py install
+RUN git clone -b develop https://github.com/ROCmSoftwarePlatform/hipBLASLt \
+    && export GTest_DIR="/usr/local/lib/cmake/GTest/" \
+    && cd hipBLASLt \
+    && ./install.sh -idc --architecture 'gfx90a;gfx942' \
+    && cd ../ && rm -rf hipBLASLt
+RUN sed -i 's/, hipblaslt-dev \(.*\), hipcub-dev/, hipcub-dev/g' /var/lib/dpkg/status
+RUN sed -i 's/, hipblaslt \(.*\), hipfft/, hipfft/g' /var/lib/dpkg/status
 
-COPY ./ /app/vllm
+RUN git clone  https://streamhsa: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@github.com/rocm/rocBLAS-internal.git \
+    && export GTest_DIR="/usr/local/lib/cmake/GTest/" \
+    && cd rocBLAS-internal \
+    && git fetch origin 4f353a8035da38c8b8873823c09a499db777b231 \
+    && git checkout 4f353a8035da38c8b8873823c09a499db777b231 \
+    && ./install.sh -idc -a 'gfx90a;gfx942' \
+    && cd ../ && rm -rf rocBLAS-internal
 
-RUN python3 -m pip install --upgrade pip
-RUN python3 -m pip install xformers==0.0.23 --no-deps
+RUN pip uninstall -y triton
+RUN git clone https://github.com/ROCmSoftwarePlatform/triton.git \
+    && cd triton/python && pip3 install -e .
+ENV MAX_JOBS=32
+RUN cd ${WORKSPACE_DIR} \
+    && git clone -b exp_bandaid https://github.com/ROCmSoftwarePlatform/rccl \
+    && cd rccl && mkdir build && cd build \
+    && CXX=/opt/rocm/bin/hipcc cmake -DCMAKE_PREFIX_PATH=/opt/rocm/ .. && make -j
 
-# Error related to odd state for numpy 1.20.3 where there is no METADATA etc, but an extra LICENSES_bundled.txt.
-# Manually removed it so that later steps of numpy upgrade can continue
-RUN if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1" ]; then \
-    rm -rf /opt/conda/envs/py_3.9/lib/python3.9/site-packages/numpy-1.20.3.dist-info/; fi
+RUN pip install xformers==0.0.23 --no-deps
+ADD ./ $WORKSPACE_DIR/vllm
 
-RUN cd /app \
-    && cd vllm \
-    && pip install -U -r requirements-rocm.txt \
+RUN cd vllm \
+    && pip install -r requirements-rocm.txt \
+    && pip install typing-extensions==4.8.0 \
     && bash patch_xformers.rocm.sh \
-    && python3 setup.py install \
-    && cd ..
+    && cd gradlib && python setup.py develop && cd ../ \
+    && python setup.py build && python setup.py develop; exit 0
 
-RUN python3 -m pip install --upgrade pip
-RUN python3 -m pip install --no-cache-dir ray[all]
+RUN pip install pyarrow Ray pandas==2.0 numpy==1.20.3
 
-CMD ["/bin/bash"]
+RUN git clone https://github.com/ROCmSoftwarePlatform/rocmProfileData.git \
+    && cd rocmProfileData && make; make install
+
+COPY docker/libamdhip64.so.6 /opt/rocm/lib/libamdhip64.so.6.0.60000
+COPY docker/libfile_plugin.so /opt/rocm/lib/roctracer
+COPY docker/run_13b.sh $WORKSPACE_DIR/
+COPY docker/run_70b.sh $WORKSPACE_DIR/

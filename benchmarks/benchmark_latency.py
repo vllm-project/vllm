@@ -71,6 +71,11 @@ def main(args: argparse.Namespace):
 
                 print("Warming up...")
                 run_to_completion(profile_dir=None)
+                
+                if (args.warmup_only):
+
+                    print(">>> Warmup only specified, exiting")
+                    continue
 
                 if args.profile:
                     profile_dir = args.profile_result_dir
@@ -81,12 +86,31 @@ def main(args: argparse.Namespace):
                     print(f"Profiling (results will be saved to '{profile_dir}')...")
                     run_to_completion(profile_dir=args.profile_result_dir)
                     return
+                if args.rpd:
+                    from rpdTracerControl import rpdTracerControl
+                    rpdTracerControl.setFilename(name = "/workspace/trace.rpd", append=True)
+                    profile_rpd = rpdTracerControl()
+                    profile_rpd.start()
+                    print(f"RPD Profiling'...")
+                    run_to_completion(profile_dir=None)
+                    profile_rpd.stop()
+                    return
 
                 # Benchmark.
                 latencies = []
                 for _ in tqdm(range(args.num_iters), desc="Profiling iterations"):
                     latencies.append(run_to_completion(profile_dir=None))
-                print(f'Avg latency: {np.mean(latencies)} seconds')
+
+                if torch.distributed.get_rank() == 0:
+                #results_df = pd.DataFrame(columns=['model', 'batch', 'tp', 'input', 'output', 'latency'])
+                    latency=np.mean(latencies)
+                    print(f'Avg latency: {latency} seconds') 
+                    if args.report:
+                        entry = {'model':[args.model], 'tp':[args.tensor_parallel_size],'batch':[batch_size], 'input':[input_len], 'output':[output_len], 'latency':[latency]}
+                        results_df = pd.concat([results_df, pd.DataFrame(entry)], ignore_index=True)
+    if torch.distributed.get_rank() == 0 and args.report:
+        print(results_df)
+        results_df.to_csv(args.report_file, index=False)
 
 
 
