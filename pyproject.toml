@@ -31,6 +31,10 @@ ignore = [
     "E731",
     # line too long, handled by black formatting
     "E501",
+    # .strip() with multi-character strings
+    "B005",
+    # Loop control variable not used within loop body
+    "B007",
 ]
 
 [tool.mypy]
