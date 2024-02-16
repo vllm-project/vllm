@@ -22,7 +22,6 @@ from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                TokenizerGroup)
 from vllm.utils import Counter, set_cuda_visible_devices, get_ip, get_open_port, get_distributed_init_method
 from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
-from threading import Thread
 if ray:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
@@ -114,9 +113,7 @@ class LLMEngine:
 
         #If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
-            t = Thread(target=usage_message.report_usage,
-                       args=(model_config.model, usage_context))
-            t.start()
+            usage_message.report_usage(model_config.model, usage_context)
 
         # Create the parallel GPU workers.
         if self.parallel_config.worker_use_ray:

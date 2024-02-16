@@ -5,6 +5,8 @@ import platform
 import pkg_resources
 import requests
 import datetime
+import psutil
+from threading import Thread
 from pathlib import Path
 from typing import Optional
 from enum import Enum
@@ -75,7 +77,7 @@ class UsageContext(Enum):
 class UsageMessage:
 
     def __init__(self) -> None:
-        self.gpu_name: Optional[str] = None
+        self.gpu: Optional[dict] = None
         self.provider: Optional[str] = None
         self.architecture: Optional[str] = None
         self.platform: Optional[str] = None
@@ -83,16 +85,31 @@ class UsageMessage:
         self.vllm_version: Optional[str] = None
         self.context: Optional[str] = None
         self.log_time: Optional[int] = None
+        #Logical CPU count
+        self.num_cpu: Optional[int] = None
+        self.total_memory: Optional[int] = None
 
     def report_usage(self, model: str, context: UsageContext) -> None:
+        t = Thread(target=usage_message._report_usage, args=(model, context))
+        t.start()
+
+    def _report_usage(self, model: str, context: UsageContext) -> None:
         self.context = context.value
-        self.gpu_name = torch.cuda.get_device_name()
+        self.gpu = dict()
+        for i in range(torch.cuda.device_count()):
+            k = torch.cuda.get_device_properties(i).name
+            if k in self.gpu:
+                self.gpu[k] += 1
+            else:
+                self.gpu[k] = 1
         self.provider = _detect_cloud_provider()
         self.architecture = platform.machine()
         self.platform = platform.platform()
         self.vllm_version = pkg_resources.get_distribution("vllm").version
         self.model = model
         self.log_time = _get_current_timestamp_ns()
+        self.num_cpu = os.cpu_count()
+        self.total_memory = psutil.virtual_memory().total
         self._write_to_file()
         headers = {'Content-type': 'application/json'}
         payload = json.dumps(vars(self))
