@@ -1,6 +1,6 @@
 from pyaici.comms import AiciRunner
 from fastapi import Request
-from typing import AsyncGenerator, AsyncIterator, Callable, List, Optional, Dict, Tuple
+from typing import List
 from vllm.utils import random_uuid
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from .protocol import RunRequest
