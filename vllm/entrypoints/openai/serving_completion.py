@@ -286,7 +286,7 @@ class OpenAIServingCompletion(OpenAIServing):
         try:
             sampling_params = request.to_sampling_params()
             sampling_params.logits_processors = \
-                get_guided_decoding_logits_processor(
+                await get_guided_decoding_logits_processor(
                     request, self.engine.get_tokenizer())
             prompt_is_tokens, prompts = parse_prompt_format(request.prompt)
 

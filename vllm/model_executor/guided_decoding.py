@@ -1,3 +1,4 @@
+import asyncio
 from collections import defaultdict
 import concurrent.futures
 from copy import copy
@@ -25,7 +26,7 @@ class GuidedDecodingMode(Enum):
     GRAMMAR = "grammar"
 
 
-def get_guided_decoding_logits_processor(
+async def get_guided_decoding_logits_processor(
         request: Union[CompletionRequest, ChatCompletionRequest],
         tokenizer
     ) -> Union[JSONLogitsProcessor, RegexLogitsProcessor]:
@@ -33,7 +34,7 @@ def get_guided_decoding_logits_processor(
     Given an OpenAI-compatible request, check for guided decoding parameters
     and get the necessary logits processor for the given guide.
     We cache logit processors by (json/regex, tokenizer), and on cache hit
-    we make a shallow copy to reuse the same underlying RegexFSM.
+    we make a shallow copy to reuse the same underlying FSM.
     """
     guide_count = sum([
         request.guided_json is not None,
@@ -48,8 +49,55 @@ def get_guided_decoding_logits_processor(
             "('guided_json', 'guided_regex' or 'guided_choice')."
         )
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [None] # weird workaround, there should be better semantics
+    loop = asyncio.get_running_loop()
+
+    # if request.guided_json:
+    #     if not isinstance(request.guided_json, (str, dict, BaseModel)):
+    #         raise TypeError("JSON schema must be str, dict, or BaseModel")
+        
+    #     json = request.guided_json
+    #     if isinstance(json, dict):
+    #         # turn dict into hashable string
+    #         json = json_dumps(json, sort_keys=True)
+    #     elif isinstance(json, BaseModel):
+    #         # use pydantic signature so that different model classes
+    #         # with the same fields will get hashed the same
+    #         json = str(json.__signature__)
+
+    #     result = await loop.run_in_executor(
+    #         None, get_cached_logits_processor,
+    #         json, tokenizer, GuidedDecodingMode.JSON
+    #     )
+    
+    # elif request.guided_regex:
+    #     if not isinstance(request.guided_regex, str):
+    #         raise TypeError("Regex must be string")
+        
+    #     result = await loop.run_in_executor(
+    #         get_cached_logits_processor,
+    #         request.guided_regex, tokenizer, GuidedDecodingMode.REGEX
+    #     )
+    
+    # elif request.guided_choice:
+    #     if not isinstance(request.guided_choice, list):
+    #         raise TypeError("Choices must be a list")
+        
+    #     # choice just uses regex
+    #     choices = [regex_escape(str(choice)) 
+    #             for choice in request.guided_choice]
+    #     choices_regex = "(" + "|".join(choices) + ")"
+
+    #     result = await loop.run_in_executor(
+    #         get_cached_logits_processor,
+    #         choices_regex, tokenizer, GuidedDecodingMode.CHOICE
+    #     )
+
+    # logits_processor = copy(result)
+    # # reset logits processor's internal state
+    # logits_processor.fsm_state = defaultdict(int)
+    # return [logits_processor]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         if request.guided_json:
             if not isinstance(request.guided_json, (str, dict, BaseModel)):
                 raise TypeError("JSON schema must be str, dict, or BaseModel")
@@ -63,8 +111,8 @@ def get_guided_decoding_logits_processor(
                 # with the same fields will get hashed the same
                 json = str(json.__signature__)
 
-            futures[0] = executor.submit(
-                get_cached_logits_processor,
+            result = await loop.run_in_executor(
+                pool, get_cached_logits_processor,
                 json, tokenizer, GuidedDecodingMode.JSON
             )
         
@@ -72,8 +120,8 @@ def get_guided_decoding_logits_processor(
             if not isinstance(request.guided_regex, str):
                 raise TypeError("Regex must be string")
             
-            futures[0] = executor.submit(
-                get_cached_logits_processor,
+            result = await loop.run_in_executor(
+                pool, get_cached_logits_processor,
                 request.guided_regex, tokenizer, GuidedDecodingMode.REGEX
             )
         
@@ -86,19 +134,15 @@ def get_guided_decoding_logits_processor(
                     for choice in request.guided_choice]
             choices_regex = "(" + "|".join(choices) + ")"
 
-            futures[0] = executor.submit(
-                get_cached_logits_processor,
+            result = await loop.run_in_executor(
+                pool, get_cached_logits_processor,
                 choices_regex, tokenizer, GuidedDecodingMode.CHOICE
             )
         
-        future = next(concurrent.futures.as_completed(futures))
-        try:
-            logits_processor = copy(future.result())
-            # reset logits processor's internal state
-            logits_processor.fsm_state = defaultdict(int)
-            return [logits_processor]
-        except Exception as e:
-            print("Thread failed to get guided logits processor:", e)
+        logits_processor = copy(result)
+        # reset logits processor's internal state
+        logits_processor.fsm_state = defaultdict(int)
+        return [logits_processor]
     
 
 @lru_cache(maxsize=32)

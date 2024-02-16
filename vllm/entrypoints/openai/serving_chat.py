@@ -66,7 +66,7 @@ class OpenAIServingChat(OpenAIServing):
                                                            prompt=prompt)
             sampling_params = request.to_sampling_params()
             sampling_params.logits_processors = \
-                get_guided_decoding_logits_processor(
+                await get_guided_decoding_logits_processor(
                     request, self.engine.get_tokenizer())
         except ValueError as e:
             return self.create_error_response(str(e))
