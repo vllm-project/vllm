@@ -282,6 +282,10 @@ class SequenceGroup:
         return next(iter(self.seqs_dict.values())).data.prompt_token_ids
 
     @property
+    def block_size(self) -> int:
+        return next(iter(self.seqs_dict.values())).block_size
+
+    @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
 

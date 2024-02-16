@@ -368,6 +368,11 @@ class Scheduler:
         for seq_group in scheduler_outputs.scheduled_seq_groups:
             seq_data: Dict[int, SequenceData] = {}
             block_tables: Dict[int, List[int]] = {}
+
+            # Round the prefix position down to the last full block
+            rounded_prefix_pos = (seq_group.get_prefix_len() //
+                                  seq_group.block_size) * seq_group.block_size
+
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
@@ -381,7 +386,7 @@ class Scheduler:
                 sampling_params=seq_group.sampling_params,
                 block_tables=block_tables,
                 lora_request=seq_group.lora_request,
-                prefix_pos=(seq_group.get_prefix_len() // 16) * 16,
+                prefix_pos=rounded_prefix_pos,
                 computed_block_nums=self.block_manager.
                 get_common_computed_block_ids(seq_group),
             )
