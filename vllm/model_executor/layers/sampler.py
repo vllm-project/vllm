@@ -12,6 +12,7 @@ from vllm.sequence import (PromptLogprobs, SampleLogprobs, SamplerOutput,
                            SequenceData, SequenceGroupOutput, SequenceOutput)
 from pyaici.comms import AiciRunner
 
+
 class Sampler(nn.Module):
     """Samples the next tokens from the model's outputs.
 
@@ -153,7 +154,8 @@ def _apply_logits_processors(
                 n = len(seq_ids)
                 if sampling_params.has_aici:
                     bias_idx = mapping[seq_ids[0]]
-                    logits[logits_row_idx:logits_row_idx + n] += bias[bias_idx:bias_idx + n]
+                    logits[logits_row_idx:logits_row_idx +
+                           n] += bias[bias_idx:bias_idx + n]
                 logits_row_idx += n
 
     logits_row_idx = 0

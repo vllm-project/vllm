@@ -11,16 +11,16 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing
 
 class AiciRunnerCompletion(OpenAIServing):
 
-    def __init__(
-        self, aici_runner: AiciRunner, engine: AsyncLLMEngine, served_model: str
-    ):
+    def __init__(self, aici_runner: AiciRunner, engine: AsyncLLMEngine,
+                 served_model: str):
         super().__init__(engine=engine, served_model=served_model)
         self.aici_runner = aici_runner
         self.empty_prompt: List[int] = self.tokenizer("").input_ids
         # TODO: this is a hack:
         engine.engine.scheduler.aici_runner = aici_runner
 
-    async def create_completion(self, request: RunRequest, raw_request: Request):
+    async def create_completion(self, request: RunRequest,
+                                raw_request: Request):
         """Completion API for AICI controllers.
 
         See https://github.com/microsoft/aici/blob/main/docs/REST.md
@@ -28,11 +28,12 @@ class AiciRunnerCompletion(OpenAIServing):
         request_id = f"run-{random_uuid()}"
 
         runner = self.aici_runner
-        yield runner.data_line(runner.initial_json(request_id, self.served_model))
+        yield runner.data_line(
+            runner.initial_json(request_id, self.served_model))
 
         inst_res = await self.aici_runner.instantiate_async(
-            request_id, self.empty_prompt, request.controller, request.controller_arg
-        )
+            request_id, self.empty_prompt, request.controller,
+            request.controller_arg)
 
         prompt = self.empty_prompt
 
@@ -45,9 +46,10 @@ class AiciRunnerCompletion(OpenAIServing):
             return
 
         sampling_params = request.to_sampling_params()
-        generator = self.engine.generate(
-            None, sampling_params, request_id, prompt_token_ids=prompt
-        )
+        generator = self.engine.generate(None,
+                                         sampling_params,
+                                         request_id,
+                                         prompt_token_ids=prompt)
 
         previous_texts = []
         ff_tokens = len(prompt)
@@ -67,7 +69,7 @@ class AiciRunnerCompletion(OpenAIServing):
                 i = output.index
                 while len(previous_texts) <= i:
                     previous_texts.append("")
-                delta_text = output.text[len(previous_texts[i]) :]
+                delta_text = output.text[len(previous_texts[i]):]
                 previous_texts[i] = output.text
 
                 fork_res = runner.seq_logs(
@@ -78,7 +80,7 @@ class AiciRunnerCompletion(OpenAIServing):
                 )
                 forks.append(fork_res)
             yield runner.data_line(
-                runner.run_json(forks, runner.usage_json(ff_tokens, sampled_tokens))
-            )
+                runner.run_json(forks,
+                                runner.usage_json(ff_tokens, sampled_tokens)))
 
         yield runner.final_data()

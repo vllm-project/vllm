@@ -106,7 +106,8 @@ class RequestOutput:
                 # logprobs are not requested.
                 logprobs = None
             finshed_reason = SequenceStatus.get_finished_reason(seq.status)
-            output = CompletionOutput(seq.seq_id, seqs.index(seq), seq.output_text,
+            output = CompletionOutput(seq.seq_id, seqs.index(seq),
+                                      seq.output_text,
                                       seq.get_output_token_ids(),
                                       seq.get_cumulative_logprob(), logprobs,
                                       finshed_reason)
