@@ -5,7 +5,7 @@ import re
 import subprocess
 import sys
 from shutil import which
-from typing import List
+from typing import Dict, List, Optional
 
 import torch
 from packaging.version import Version, parse
@@ -329,6 +329,12 @@ def get_requirements() -> List[str]:
     return requirements
 
 
+def get_ray_requirement() -> Optional[Dict[str, List[str]]]:
+    if _is_neuron():
+        return None
+    return {"ray": ["ray >= 2.9"]}
+
+
 ext_modules = []
 
 if _is_cuda():
@@ -372,6 +378,7 @@ setup(
                                     "tests")),
     python_requires=">=3.8",
     install_requires=get_requirements(),
+    extras_requires=get_ray_requirement(),
     ext_modules=ext_modules,
     cmdclass={"build_ext": cmake_build_ext} if not _is_neuron() else {},
     package_data=package_data,
