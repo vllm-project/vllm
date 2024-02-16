@@ -1,6 +1,7 @@
 """Multi-head attention."""
 from typing import List, Optional
 
+import importlib
 import torch
 import torch.nn as nn
 from xformers import ops as xops
@@ -57,6 +58,40 @@ class PagedAttention(nn.Module):
         if self.head_size not in _SUPPORTED_HEAD_SIZES:
             raise ValueError(f"head_size ({self.head_size}) is not supported. "
                              f"Supported head sizes: {_SUPPORTED_HEAD_SIZES}.")
+
+        self.use_ref_attention = self.check_use_ref_attention()
+
+    def check_use_ref_attention(self) -> bool:
+        if not is_hip():
+            return False
+        # For ROCm, check whether flash attention is installed or not.
+        # if not, use_ref_attention needs to be True
+        return importlib.util.find_spec("flash_attn") is None
+
+    def ref_masked_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> torch.Tensor:
+        query = query.view(-1, self.num_heads, self.head_size)
+        key = key.view(-1, self.num_kv_heads, self.head_size)
+        value = value.view(-1, self.num_kv_heads, self.head_size)
+
+        seq_len, _, _ = query.shape
+        attn_mask = torch.triu(torch.ones(seq_len,
+                                          seq_len,
+                                          dtype=query.dtype,
+                                          device=query.device),
+                               diagonal=1)
+        attn_mask = attn_mask * torch.finfo(query.dtype).min
+
+        attn_weights = self.scale * torch.einsum("qhd,khd->hqk", query,
+                                                 key).float()
+        attn_weights = attn_weights + attn_mask.float()
+        attn_weights = torch.softmax(attn_weights, dim=-1).to(value.dtype)
+        out = torch.einsum("hqk,khd->qhd", attn_weights, value)
+        return out
 
     def forward(
         self,
@@ -136,6 +171,16 @@ class PagedAttention(nn.Module):
                         input_metadata.attn_bias = _make_alibi_bias(
                             self.alibi_slopes, self.num_kv_heads, batch_size,
                             seq_len, query.dtype)
+
+                if self.use_ref_attention:
+                    output = self.ref_masked_attention(
+                        query,
+                        key,
+                        value,
+                    )
+                    # Using view got RuntimeError: view size is not compatible with input tensor's size and stride
+                    # (at least one dimension spans across two contiguous subspaces). Use reshape instead
+                    return output.reshape(batch_size, seq_len, hidden_size)
 
                 # TODO(woosuk): Too many view operations. Let's try to reduce
                 # them in the future for code readability.

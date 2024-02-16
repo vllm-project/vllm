@@ -67,3 +67,13 @@ You can also build and install vLLM from source:
 
         $ # Use `--ipc=host` to make sure the shared memory is large enough.
         $ docker run --gpus all -it --rm --ipc=host nvcr.io/nvidia/pytorch:23.10-py3
+
+.. note::
+    If you are developing the C++ backend of vLLM, consider building vLLM with
+
+    .. code-block:: console
+
+        $ python setup.py develop
+
+    since it will give you incremental builds. The downside is that this method
+    is `deprecated by setuptools <https://github.com/pypa/setuptools/issues/917>`_.

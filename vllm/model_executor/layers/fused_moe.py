@@ -286,8 +286,6 @@ def fused_moe(
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
     assert gating_output.shape[1] == w1.shape[0], "Number of experts mismatch"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
-    # assert w1.is_contiguous(), "Expert weights1 must be contiguous"
-    # assert w2.is_contiguous(), "Expert weights2 must be contiguous"
     assert hidden_states.dtype in [
         torch.float32, torch.float16, torch.bfloat16
     ]

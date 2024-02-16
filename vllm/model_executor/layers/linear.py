@@ -47,6 +47,8 @@ class LinearMethodBase(ABC):
                                              output_size_per_partition,
                                              input_size, output_size,
                                              params_dtype)
+        if num_experts == 1:
+            return linear_weights
         for name, param in tuple(linear_weights.items()):
             if isinstance(param, Parameter):
                 repeat_size = (num_experts, ) + (1, ) * param.dim()
@@ -210,14 +212,9 @@ class ColumnParallelLinear(torch.nn.Module):
             linear_method = UnquantizedLinearMethod()
         self.linear_method = linear_method
         self.num_experts = num_experts
-        if num_experts > 1:
-            self.linear_weights = self.linear_method.create_moe_weights(
-                num_experts, self.input_size, self.output_size_per_partition,
-                self.input_size, self.output_size, self.params_dtype)
-        else:
-            self.linear_weights = self.linear_method.create_weights(
-                self.input_size, self.output_size_per_partition,
-                self.input_size, self.output_size, self.params_dtype)
+        self.linear_weights = self.linear_method.create_moe_weights(
+            num_experts, self.input_size, self.output_size_per_partition,
+            self.input_size, self.output_size, self.params_dtype)
         for name, weight in self.linear_weights.items():
             if isinstance(weight, torch.Tensor):
                 self.register_parameter(name, weight)
@@ -548,14 +545,9 @@ class RowParallelLinear(torch.nn.Module):
             linear_method = UnquantizedLinearMethod()
         self.linear_method = linear_method
         self.num_experts = num_experts
-        if num_experts > 1:
-            self.linear_weights = self.linear_method.create_moe_weights(
-                num_experts, self.input_size_per_partition, self.output_size,
-                self.input_size, self.output_size, self.params_dtype)
-        else:
-            self.linear_weights = self.linear_method.create_weights(
-                self.input_size_per_partition, self.output_size,
-                self.input_size, self.output_size, self.params_dtype)
+        self.linear_weights = self.linear_method.create_moe_weights(
+            num_experts, self.input_size_per_partition, self.output_size,
+            self.input_size, self.output_size, self.params_dtype)
         for name, weight in self.linear_weights.items():
             if isinstance(weight, torch.Tensor):
                 self.register_parameter(name, weight)
