@@ -1,0 +1,62 @@
+name: build-test
+on:
+  # makes workflow reusable
+  workflow_call:
+    inputs:
+      label:
+        description: "requested runner label (specifies instance)"
+        type: string
+        required: true
+      timeout:
+        description: "time limit for run in minutes "
+        type: string
+        required: true
+      gitref:
+        description: "git commit hash or branch name"
+        type: string
+        required: true
+      python:
+        description: "python version, e.g. 3.10.12"
+        type: string
+        required: true
+
+  # makes workflow manually callable
+  workflow_dispatch:
+    inputs:
+      label:
+        description: "requested runner label (specifies instance)"
+        type: string
+        required: true
+      timeout:
+        description: "time limit for run in minutes "
+        type: string
+        required: true
+      gitref:
+        description: "git commit hash or branch name"
+        type: string
+        required: true
+      python:
+        description: "python version, e.g. 3.10.12"
+        type: string
+        required: true
+
+jobs:
+
+    BUILD-TEST:
+
+        runs-on: ${{ inputs.label }}
+        timeout-minutes: ${{ fromJson(inputs.timeout) }}
+
+        steps:
+
+            - name: checkout
+              id: checkout
+              uses: actions/checkout@v4
+              with:
+                fetch-depth: 0
+                ref: ${{ inputs.gitref }}
+                submodules: recursive
+
+            - name: hello world
+              run: |
+                echo "HELLO WORLD" >> $GITHUB_STEP_SUMMARY
