@@ -7,6 +7,7 @@ import subprocess
 import uuid
 import warnings
 from collections import OrderedDict, defaultdict
+from collections.abc import Iterable
 from functools import lru_cache, partial
 from platform import uname
 from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
@@ -270,7 +271,7 @@ def get_open_port() -> int:
             return s.getsockname()[1]
 
 
-def set_cuda_visible_devices(device_ids: List[int]) -> None:
+def set_cuda_visible_devices(device_ids: Iterable[int]) -> None:
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, device_ids))
 
 
@@ -492,7 +493,7 @@ def maybe_expand_dim(tensor: torch.Tensor,
 def merge_dicts(dict1: Dict[Any, List[Any]],
                 dict2: Dict[Any, List[Any]]) -> Dict[Any, List[Any]]:
     """Merge 2 dicts that have key -> List of items.
-    
+
     When a key conflicts, the values in dict1 is prioritized.
     """
     merged_dict = defaultdict(list)

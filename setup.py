@@ -5,7 +5,7 @@ import re
 import subprocess
 import sys
 from shutil import which
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import torch
 from packaging.version import Version, parse
@@ -361,6 +361,20 @@ def get_requirements() -> List[str]:
     return requirements
 
 
+def get_extra_requirements() -> Optional[Dict[str, List[str]]]:
+    extras = {"tensorizer": ["tensorizer==2.9.0a1"]}
+    if _is_cuda():
+        extras["ray"] = ["ray>=2.9"]
+    elif _is_hip():
+        extras["ray"] = ["ray==2.9.3"]
+    elif _is_neuron() or _is_cpu():
+        pass
+    else:
+        raise ValueError(
+            "Unsupported platform, please use CUDA, ROCM or Neuron.")
+    return extras
+
+
 ext_modules = []
 
 if _is_cuda():
@@ -405,9 +419,7 @@ setup(
     python_requires=">=3.8",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
-    extras_require={
-        "tensorizer": ["tensorizer==2.9.0a1"],
-    },
+    extras_require=get_extra_requirements(),
     cmdclass={"build_ext": cmake_build_ext} if not _is_neuron() else {},
     package_data=package_data,
 )

@@ -2,6 +2,7 @@
 # https://github.com/skypilot-org/skypilot/blob/86dc0f6283a335e4aa37b3c10716f90999f48ab6/sky/sky_logging.py
 """Logging configuration for vLLM."""
 import logging
+import multiprocessing as mp
 import os
 import sys
 from typing import Optional
@@ -10,6 +11,13 @@ VLLM_CONFIGURE_LOGGING = int(os.getenv("VLLM_CONFIGURE_LOGGING", "1"))
 
 _FORMAT = "%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s"
 _DATE_FORMAT = "%m-%d %H:%M:%S"
+
+
+class ProcessLogger(logging.LoggerAdapter):
+
+    def process(self, msg, kwargs):
+        msg = f"[{self.extra['process_name']} pid {self.extra['pid']}] {msg}"
+        return msg, kwargs
 
 
 class NewLineFormatter(logging.Formatter):
@@ -64,4 +72,9 @@ def init_logger(name: str):
                 " Please open an issue on Github.")
         logger.addHandler(_default_handler)
         logger.propagate = False
+    if mp.parent_process() is not None:
+        logger = ProcessLogger(logger, {
+            'process_name': mp.current_process().name,
+            'pid': os.getpid()
+        })
     return logger

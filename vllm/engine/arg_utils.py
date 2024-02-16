@@ -27,7 +27,7 @@ class EngineArgs:
     quantization_param_path: Optional[str] = None
     seed: int = 0
     max_model_len: Optional[int] = None
-    worker_use_ray: bool = False
+    worker_use_ray: Optional[bool] = None
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     max_parallel_loading_workers: Optional[int] = None
@@ -201,10 +201,12 @@ class EngineArgs:
                             help='model context length. If unspecified, '
                             'will be automatically derived from the model.')
         # Parallel arguments
-        parser.add_argument('--worker-use-ray',
-                            action='store_true',
-                            help='use Ray for distributed serving, will be '
-                            'automatically set when using more than 1 GPU')
+        parser.add_argument(
+            '--worker-use-ray',
+            action=argparse.BooleanOptionalAction,
+            default=None,
+            help='use Ray for distributed serving, will default '
+            'to true when ray is installed and more than 1 GPU is used')
         parser.add_argument('--pipeline-parallel-size',
                             '-pp',
                             type=int,

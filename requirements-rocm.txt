@@ -1,5 +1,5 @@
 # Common dependencies
 -r requirements-common.txt
 
-# Dependencies for AMD GPUs
-ray == 2.9.3
+# No specific dependencies currently for AMD GPUs
+

@@ -73,9 +73,10 @@ try:
             return output
 
 except ImportError as e:
-    logger.warning(f"Failed to import Ray with {e!r}. "
-                   "For distributed inference, please install Ray with "
-                   "`pip install ray`.")
+    logger.warning(
+        f"Unable to import Ray with {e!r}. "
+        "For multi-node distributed inference, please install Ray with "
+        "`pip install ray`.")
     ray = None  # type: ignore
     RayWorkerVllm = None  # type: ignore
 

@@ -3,12 +3,12 @@ import copy
 import os
 import pickle
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from vllm.engine.ray_utils import RayWorkerVllm, ray
-from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
+from vllm.executor.multi_gpu_executor import (MultiGPUExecutor,
+                                              MultiGPUExecutorAsync)
 from vllm.logger import init_logger
-from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async, set_cuda_visible_devices)
@@ -27,7 +27,7 @@ logger = init_logger(__name__)
 USE_RAY_COMPILED_DAG = bool(os.getenv("VLLM_USE_RAY_COMPILED_DAG", 0))
 
 
-class RayGPUExecutor(ExecutorBase):
+class RayGPUExecutor(MultiGPUExecutor):
 
     def _init_executor(self) -> None:
         assert (not self.speculative_config
@@ -154,69 +154,10 @@ class RayGPUExecutor(ExecutorBase):
                     tensorizer_config=self.tensorizer_config,
                 ))
 
-        # Initialize the driver worker with the Worker class.
         driver_rank = 0
         driver_local_rank = node_workers[driver_node_id].index(driver_rank)
-        self.driver_worker = Worker(
-            model_config=self.model_config,
-            parallel_config=self.parallel_config,
-            scheduler_config=self.scheduler_config,
-            device_config=self.device_config,
-            cache_config=self.cache_config,
-            local_rank=driver_local_rank,
-            rank=driver_rank,
-            distributed_init_method=distributed_init_method,
-            lora_config=self.lora_config,
-            vision_language_config=self.vision_language_config,
-            tensorizer_config=self.tensorizer_config,
-            is_driver_worker=True,
-        )
-
-        self._run_workers("init_device")
-        self._run_workers(
-            "load_model",
-            max_concurrent_workers=self.parallel_config.
-            max_parallel_loading_workers,
-        )
-
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
-        """Determine the number of available KV blocks.
-
-        This invokes `determine_num_available_blocks` on each worker and takes
-        the min of the results, guaranteeing that the selected cache sizes are
-        compatible with all workers.
-
-        Returns:
-            - Tuple[num_gpu_blocks, num_cpu_blocks]
-        """
-        # Get the maximum number of blocks that can be allocated on GPU and CPU.
-        num_blocks = self._run_workers("determine_num_available_blocks", )
-
-        # Since we use a shared centralized controller, we take the minimum
-        # number of blocks across all workers to make sure all the memory
-        # operators can be applied to all workers.
-        num_gpu_blocks = min(b[0] for b in num_blocks)
-        num_cpu_blocks = min(b[1] for b in num_blocks)
-
-        return num_gpu_blocks, num_cpu_blocks
-
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
-        """Initialize the KV cache in all workers.
-        """
-
-        # NOTE: We log here to avoid multiple logs when number of workers is
-        # greater than one. We could log in the engine, but not all executors
-        # have GPUs.
-        logger.info(f"# GPU blocks: {num_gpu_blocks}, "
-                    f"# CPU blocks: {num_cpu_blocks}")
-
-        self.cache_config.num_gpu_blocks = num_gpu_blocks
-        self.cache_config.num_cpu_blocks = num_cpu_blocks
-
-        self._run_workers("initialize_cache",
-                          num_gpu_blocks=num_gpu_blocks,
-                          num_cpu_blocks=num_cpu_blocks)
+        self._init_driver_worker_and_model(driver_rank, driver_local_rank,
+                                           distributed_init_method)
 
     def execute_model(self,
                       seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -236,23 +177,6 @@ class RayGPUExecutor(ExecutorBase):
         # Only the driver worker returns the sampling results.
         output = all_outputs[0]
         return output
-
-    def add_lora(self, lora_request: LoRARequest) -> bool:
-        assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
-        return self._run_workers(
-            "add_lora",
-            lora_request=lora_request,
-        )
-
-    def remove_lora(self, lora_id: int) -> bool:
-        assert lora_id > 0, "lora_id must be greater than 0."
-        return self._run_workers(
-            "remove_lora",
-            lora_id=lora_id,
-        )
-
-    def list_loras(self) -> Set[int]:
-        return self._run_workers("list_loras")
 
     def _run_workers(
         self,
@@ -292,19 +216,17 @@ class RayGPUExecutor(ExecutorBase):
                                        method)(*driver_args, **driver_kwargs)
 
         # Get the results of the ray workers.
-        if self.workers:
-            if use_ray_compiled_dag:
-                try:
-                    ray_worker_outputs = [
-                        pickle.loads(chan.begin_read())
-                        for chan in output_channels
-                    ]
-                finally:
-                    # Has to call end_read in order to reuse the DAG.
-                    for chan in output_channels:
-                        chan.end_read()
-            else:
-                ray_worker_outputs = ray.get(ray_worker_outputs)
+        if use_ray_compiled_dag:
+            try:
+                ray_worker_outputs = [
+                    pickle.loads(chan.begin_read()) for chan in output_channels
+                ]
+            finally:
+                # Has to call end_read in order to reuse the DAG.
+                for chan in output_channels:
+                    chan.end_read()
+        else:
+            ray_worker_outputs = ray.get(ray_worker_outputs)
 
         return [driver_worker_output] + ray_worker_outputs
 
@@ -346,7 +268,7 @@ class RayGPUExecutor(ExecutorBase):
                                f"Dead Workers: {dead_actors}. ")
 
 
-class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
+class RayGPUExecutorAsync(RayGPUExecutor, MultiGPUExecutorAsync):
 
     async def _run_workers_async(
         self,
@@ -374,23 +296,3 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
 
         all_outputs = await asyncio.gather(*coros)
         return all_outputs
-
-    async def execute_model_async(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        blocks_to_swap_in: Dict[int, int],
-        blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, List[int]],
-    ) -> SamplerOutput:
-        all_outputs = await self._run_workers_async(
-            "execute_model",
-            driver_kwargs={
-                "seq_group_metadata_list": seq_group_metadata_list,
-                "blocks_to_swap_in": blocks_to_swap_in,
-                "blocks_to_swap_out": blocks_to_swap_out,
-                "blocks_to_copy": blocks_to_copy,
-            })
-
-        # Only the driver worker returns the sampling results.
-        output = all_outputs[0]
-        return output

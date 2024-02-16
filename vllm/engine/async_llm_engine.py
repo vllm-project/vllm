@@ -338,9 +338,11 @@ class AsyncLLMEngine:
             initialize_ray_cluster(engine_config.parallel_config)
             from vllm.executor.ray_gpu_executor import RayGPUExecutorAsync
             executor_class = RayGPUExecutorAsync
+        elif engine_config.parallel_config.world_size > 1:
+            from vllm.executor.multiproc_gpu_executor import (
+                MultiProcGPUExecutorAsync)
+            executor_class = MultiProcGPUExecutorAsync
         else:
-            assert engine_config.parallel_config.world_size == 1, (
-                "Ray is required if parallel_config.world_size > 1.")
             from vllm.executor.gpu_executor import GPUExecutorAsync
             executor_class = GPUExecutorAsync
         # Create the async LLM engine.
