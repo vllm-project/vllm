@@ -1,3 +1,4 @@
+import importlib.util
 from typing import Optional, Union, ClassVar
 from dataclasses import dataclass
 import os
@@ -376,9 +377,9 @@ class ParallelConfig:
     Args:
         pipeline_parallel_size: Number of pipeline parallel groups.
         tensor_parallel_size: Number of tensor parallel groups.
-        worker_use_ray: Whether to use Ray for model workers. Will be set to
+        worker_use_ray: Whether to use Ray for model workers. Will default to
             True if either pipeline_parallel_size or tensor_parallel_size is
-            greater than 1.
+            greater than 1 and Ray is installed.
         max_parallel_loading_workers: Maximum number of multiple batches
             when load model sequentially. To avoid RAM OOM when using tensor
             parallel and large models.
@@ -392,7 +393,7 @@ class ParallelConfig:
         self,
         pipeline_parallel_size: int,
         tensor_parallel_size: int,
-        worker_use_ray: bool,
+        worker_use_ray: Optional[bool] = None,
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
         ray_workers_use_nsight: bool = False,
@@ -412,9 +413,10 @@ class ParallelConfig:
         self.ray_workers_use_nsight = ray_workers_use_nsight
 
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
-        # Ray worker is not supported for Neuron backend.
-        if self.world_size > 1 and not is_neuron():
-            self.worker_use_ray = True
+        if self.worker_use_ray is None:
+            ray_found = importlib.util.find_spec("ray") is not None
+            self.worker_use_ray = ray_found and self.world_size > 1
+
         self._verify_args()
 
     def _verify_args(self) -> None:

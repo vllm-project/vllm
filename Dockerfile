@@ -70,7 +70,7 @@ ADD . /vllm-workspace/
 COPY --from=build /workspace/vllm/*.so /vllm-workspace/vllm/
 # ignore build dependencies installation because we are using pre-complied extensions
 RUN rm pyproject.toml
-RUN --mount=type=cache,target=/root/.cache/pip VLLM_USE_PRECOMPILED=1 pip install . --verbose
+RUN --mount=type=cache,target=/root/.cache/pip VLLM_USE_PRECOMPILED=1 pip install .[ray] --verbose
 #################### TEST IMAGE ####################
 
 
@@ -80,7 +80,6 @@ RUN --mount=type=cache,target=/root/.cache/pip VLLM_USE_PRECOMPILED=1 pip instal
 # In the future it would be nice to get a container with pytorch and cuda without duplicating cuda
 FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04 AS vllm-base
 
-# libnccl required for ray
 RUN apt-get update -y \
     && apt-get install -y python3-pip
 

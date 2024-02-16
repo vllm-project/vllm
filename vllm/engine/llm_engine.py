@@ -15,6 +15,7 @@ from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics import StatLogger, Stats
 from vllm.engine.ray_utils import RayWorkerVllm, initialize_cluster, ray
+from vllm.engine.local_worker_utils import LocalWorkerVllm, WorkerMonitor, ResultHandler
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
@@ -119,6 +120,7 @@ class LLMEngine:
         self.seq_counter = Counter()
 
         # Create the parallel GPU workers.
+        self.worker_monitor = None
         if self.parallel_config.worker_use_ray:
             # Disable Ray usage stats collection.
             ray_usage = os.environ.get("RAY_USAGE_STATS_ENABLED", "0")
@@ -169,30 +171,79 @@ class LLMEngine:
         return Worker
 
     def _init_workers(self):
+        world_size = self.parallel_config.tensor_parallel_size
+
+        # Set CUDA_VISIBLE_DEVICES for the driver, inherited by workers
+        if "CUDA_VISIBLE_DEVICES" not in os.environ:
+            set_cuda_visible_devices(range(world_size))
+
+        from torch.cuda import device_count
+        assert world_size <= device_count(), (
+            "please set tensor_parallel_size to less than max local gpu count")
+
+        distributed_init_method = get_distributed_init_method(
+            get_ip(), get_open_port())
+
+        if world_size == 1:
+            self.workers = []
+        else:
+            result_handler = ResultHandler()
+            self.workers = [
+                LocalWorkerVllm(
+                    result_handler,
+                    self.model_config,
+                    self.parallel_config,
+                    self.scheduler_config,
+                    self.device_config,
+                    local_rank=rank,
+                    rank=rank,
+                    distributed_init_method=distributed_init_method,
+                    lora_config=self.lora_config,
+                    kv_cache_dtype=self.cache_config.cache_dtype,
+                ) for rank in range(1, world_size)
+            ]
+
+            for worker in self.workers:
+                worker.start()
+
+            self.worker_monitor = WorkerMonitor(self.workers, result_handler)
+            result_handler.start()
+            self.worker_monitor.start()
+
+        self._init_driver_worker_and_model(0, 0, distributed_init_method)
+
+    def __del__(self):
+        # Terminate local worker processes when engine is garbage collected
+        if self.worker_monitor is not None:
+            self.worker_monitor.close()
+
+    def _init_driver_worker_and_model(self, rank: int, local_rank: int,
+                                      distributed_init_method: str):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
         Worker = self._dispatch_worker()
 
-        assert self.parallel_config.world_size == 1, (
-            "Ray is required if parallel_config.world_size > 1.")
-
-        self.workers: List[Worker] = []
-        distributed_init_method = get_distributed_init_method(
-            get_ip(), get_open_port())
         self.driver_worker = Worker(
             self.model_config,
             self.parallel_config,
             self.scheduler_config,
             self.device_config,
-            local_rank=0,
-            rank=0,
+            local_rank=local_rank,
+            rank=rank,
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )
-        self._run_workers("init_model")
-        self._run_workers("load_model")
+        # don't use cupy for eager mode
+        self._run_workers("init_model",
+                          cupy_port=get_open_port()
+                          if not self.model_config.enforce_eager else None)
+        self._run_workers(
+            "load_model",
+            max_concurrent_workers=self.parallel_config.
+            max_parallel_loading_workers,
+        )
 
     def _init_tokenizer(self, **tokenizer_init_kwargs):
         init_kwargs = dict(
@@ -301,28 +352,8 @@ class LLMEngine:
 
         driver_rank = 0
         driver_local_rank = node_workers[driver_node_id].index(driver_rank)
-        self.driver_worker = Worker(
-            model_config,
-            parallel_config,
-            scheduler_config,
-            device_config,
-            driver_local_rank,
-            driver_rank,
-            distributed_init_method,
-            lora_config=self.lora_config,
-            kv_cache_dtype=self.cache_config.cache_dtype,
-            is_driver_worker=True,
-        )
-
-        # don't use cupy for eager mode
-        self._run_workers("init_model",
-                          cupy_port=get_open_port()
-                          if not model_config.enforce_eager else None)
-        self._run_workers(
-            "load_model",
-            max_concurrent_workers=self.parallel_config.
-            max_parallel_loading_workers,
-        )
+        self._init_driver_worker_and_model(driver_rank, driver_local_rank,
+                                           distributed_init_method)
 
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
@@ -1063,13 +1094,19 @@ class LLMEngine:
             raise NotImplementedError(
                 "max_concurrent_workers is not supported yet.")
 
-        if use_ray_compiled_dag:
+        # Start the workers first.
+        if not self.parallel_config.worker_use_ray:
+            worker_outputs = [
+                worker.execute_method(method, *args, **kwargs)
+                for worker in self.workers
+            ]
+        elif use_ray_compiled_dag:
             # Right now, compiled DAG can only accept a single
             # input. TODO(sang): Fix it.
             output_channels = self.forward_dag.execute(1)
         else:
             # Start the ray workers first.
-            ray_worker_outputs = [
+            worker_outputs = [
                 worker.execute_method.remote(method, *args, **kwargs)
                 for worker in self.workers
             ]
@@ -1079,15 +1116,17 @@ class LLMEngine:
         if driver_kwargs is None:
             driver_kwargs = kwargs
 
-        # Start the driver worker after all the ray workers.
+        # Start the driver worker after all the other workers.
         driver_worker_output = getattr(self.driver_worker,
                                        method)(*driver_args, **driver_kwargs)
 
-        # Get the results of the ray workers.
+        # Get the results of the workers.
         if self.workers:
-            if use_ray_compiled_dag:
+            if not self.parallel_config.worker_use_ray:
+                worker_outputs = [output.get() for output in worker_outputs]
+            elif use_ray_compiled_dag:
                 try:
-                    ray_worker_outputs = [
+                    worker_outputs = [
                         pickle.loads(chan.begin_read())
                         for chan in output_channels
                     ]
@@ -1096,9 +1135,9 @@ class LLMEngine:
                     for chan in output_channels:
                         chan.end_read()
             else:
-                ray_worker_outputs = ray.get(ray_worker_outputs)
+                worker_outputs = ray.get(worker_outputs)
 
-        return [driver_worker_output] + ray_worker_outputs
+        return [driver_worker_output] + worker_outputs
 
     def _compiled_ray_dag(self):
         import pkg_resources

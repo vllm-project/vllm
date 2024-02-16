@@ -4,11 +4,19 @@
 import logging
 import sys
 import os
+import multiprocessing as mp
 
 VLLM_CONFIGURE_LOGGING = int(os.getenv("VLLM_CONFIGURE_LOGGING", "1"))
 
 _FORMAT = "%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s"
 _DATE_FORMAT = "%m-%d %H:%M:%S"
+
+
+class ProcessLogger(logging.LoggerAdapter):
+
+    def process(self, msg, kwargs):
+        msg = f"[{self.extra['process_name']} pid {self.extra['pid']}] {msg}"
+        return msg, kwargs
 
 
 class NewLineFormatter(logging.Formatter):
@@ -58,4 +66,9 @@ def init_logger(name: str):
     if VLLM_CONFIGURE_LOGGING:
         logger.addHandler(_default_handler)
         logger.propagate = False
+    if mp.parent_process() is not None:
+        logger = ProcessLogger(logger, {
+            'process_name': mp.current_process().name,
+            'pid': os.getpid()
+        })
     return logger
