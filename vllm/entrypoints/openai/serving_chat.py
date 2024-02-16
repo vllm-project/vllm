@@ -1,7 +1,7 @@
 import time
 import codecs
 from fastapi import Request
-from typing import AsyncGenerator, AsyncIterator, Union
+from typing import AsyncGenerator, AsyncIterator, List, Union
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -20,10 +20,10 @@ class OpenAIServingChat(OpenAIServing):
 
     def __init__(self,
                  engine: AsyncLLMEngine,
-                 served_model: str,
+                 served_model_names: List[str],
                  response_role: str,
                  chat_template=None):
-        super().__init__(engine=engine, served_model=served_model)
+        super().__init__(engine=engine, served_model_names=served_model_names)
         self.response_role = response_role
         self._load_chat_template(chat_template)
 
@@ -88,7 +88,6 @@ class OpenAIServingChat(OpenAIServing):
             result_generator: AsyncIterator[RequestOutput], request_id: str
     ) -> Union[ErrorResponse, AsyncGenerator[str, None]]:
 
-        model_name = request.model
         created_time = int(time.monotonic())
         chunk_object_type = "chat.completion.chunk"
 
@@ -97,11 +96,12 @@ class OpenAIServingChat(OpenAIServing):
         for i in range(request.n):
             choice_data = ChatCompletionResponseStreamChoice(
                 index=i, delta=DeltaMessage(role=role), finish_reason=None)
-            chunk = ChatCompletionStreamResponse(id=request_id,
-                                                 object=chunk_object_type,
-                                                 created=created_time,
-                                                 choices=[choice_data],
-                                                 model=model_name)
+            chunk = ChatCompletionStreamResponse(
+                id=request_id,
+                object=chunk_object_type,
+                created=created_time,
+                choices=[choice_data],
+                model=self.served_model_names[0])
             data = chunk.model_dump_json(exclude_unset=True)
             yield f"data: {data}\n\n"
 
@@ -124,7 +124,7 @@ class OpenAIServingChat(OpenAIServing):
                         object=chunk_object_type,
                         created=created_time,
                         choices=[choice_data],
-                        model=model_name)
+                        model=self.served_model_names[0])
                     data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
 
@@ -155,7 +155,7 @@ class OpenAIServingChat(OpenAIServing):
                         object=chunk_object_type,
                         created=created_time,
                         choices=[choice_data],
-                        model=model_name)
+                        model=self.served_model_names[0])
                     data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
                 else:
@@ -175,7 +175,7 @@ class OpenAIServingChat(OpenAIServing):
                         object=chunk_object_type,
                         created=created_time,
                         choices=[choice_data],
-                        model=model_name)
+                        model=self.served_model_names[0])
                     if final_usage is not None:
                         chunk.usage = final_usage
                     data = chunk.model_dump_json(exclude_unset=True,
@@ -190,7 +190,6 @@ class OpenAIServingChat(OpenAIServing):
             result_generator: AsyncIterator[RequestOutput],
             request_id: str) -> Union[ErrorResponse, ChatCompletionResponse]:
 
-        model_name = request.model
         created_time = int(time.monotonic())
         final_res: RequestOutput = None
 
@@ -235,7 +234,7 @@ class OpenAIServingChat(OpenAIServing):
         response = ChatCompletionResponse(
             id=request_id,
             created=created_time,
-            model=model_name,
+            model=self.served_model_names[0],
             choices=choices,
             usage=usage,
         )

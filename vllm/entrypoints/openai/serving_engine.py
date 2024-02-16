@@ -15,9 +15,9 @@ logger = init_logger(__name__)
 
 class OpenAIServing:
 
-    def __init__(self, engine: AsyncLLMEngine, served_model: str):
+    def __init__(self, engine: AsyncLLMEngine, served_model_names: List[str]):
         self.engine = engine
-        self.served_model = served_model
+        self.served_model_names = served_model_names
 
         self.max_model_len = 0
         self.tokenizer = None
@@ -46,9 +46,10 @@ class OpenAIServing:
     async def show_available_models(self) -> ModelList:
         """Show available models. Right now we only have one model."""
         model_cards = [
-            ModelCard(id=self.served_model,
-                      root=self.served_model,
+            ModelCard(id=served_model_name,
+                      root=served_model_name,
                       permission=[ModelPermission()])
+            for served_model_name in self.served_model_names
         ]
         return ModelList(data=model_cards)
 
@@ -97,7 +98,7 @@ class OpenAIServing:
                              code=status_code.value)
 
     async def _check_model(self, request) -> Optional[ErrorResponse]:
-        if request.model == self.served_model:
+        if request.model in self.served_model_names:
             return
         return self.create_error_response(
             message=f"The model `{request.model}` does not exist.",

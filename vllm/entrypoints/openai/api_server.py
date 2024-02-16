@@ -75,12 +75,17 @@ def parse_args():
         help=
         "If provided, the server will require this key to be presented in the header."
     )
-    parser.add_argument("--served-model-name",
-                        type=str,
-                        default=None,
-                        help="The model name used in the API. If not "
-                        "specified, the model name will be the same as "
-                        "the huggingface name.")
+    parser.add_argument(
+        "--served-model-name",
+        nargs="+",
+        type=str,
+        default=None,
+        help="The model name(s) used in the API. If multiple "
+        "names are provided, the server will respond to any of "
+        "the provided names. The model name in the model field "
+        "of a response will be the first name in this list. If "
+        "not specified, the model name will be the same as the "
+        "huggingface name.")
     parser.add_argument("--chat-template",
                         type=str,
                         default=None,
@@ -209,16 +214,17 @@ if __name__ == "__main__":
     logger.info(f"args: {args}")
 
     if args.served_model_name is not None:
-        served_model = args.served_model_name
+        served_model_names = args.served_model_name
     else:
-        served_model = args.model
+        served_model_names = [args.model]
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)
-    openai_serving_chat = OpenAIServingChat(engine, served_model,
+    openai_serving_chat = OpenAIServingChat(engine, served_model_names,
                                             args.response_role,
                                             args.chat_template)
-    openai_serving_completion = OpenAIServingCompletion(engine, served_model)
+    openai_serving_completion = OpenAIServingCompletion(
+        engine, served_model_names)
 
     # Register labels for metrics
     add_global_metrics_labels(model_name=engine_args.model)
