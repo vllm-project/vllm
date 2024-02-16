@@ -179,6 +179,9 @@ class RunRequest(BaseModel):
         r.has_aici = True
         return r
 
+class SetTagsRequest(BaseModel):
+    module_id: str
+    tags: List[str]
 
 class LogProbs(BaseModel):
     text_offset: List[int] = Field(default_factory=list)

@@ -20,7 +20,9 @@ from fastapi.responses import JSONResponse, StreamingResponse, Response
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.metrics import add_global_metrics_labels
-from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest, ErrorResponse, RunRequest
+from vllm.entrypoints.openai.protocol import (
+    CompletionRequest, ChatCompletionRequest, ErrorResponse, RunRequest,
+    SetTagsRequest)
 from vllm.logger import init_logger
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
@@ -175,23 +177,43 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     else:
         return JSONResponse(content=generator.model_dump())
 
+def _no_aici():
+    return JSONResponse({ "error": "AICI runtime is not enabled" }, status_code=501)
 
 @app.post("/v1/controllers")
 async def upload_aici_module(request: Request):
     if not pyaici_runner_completion:
-        return JSONResponse({ "error": "AICI runtime is not enabled" }, status_code=501)
+        return _no_aici()
     contents = await request.body()
     return JSONResponse(await pyaici_runner_completion.aici_runner.upload_module_async(contents))
 
 @app.post("/v1/run")
 async def aici_run(request: RunRequest, raw_request: Request):
     if not pyaici_runner_completion:
-        return JSONResponse({ "error": "AICI runtime is not enabled" }, status_code=501)
+        return _no_aici()
     # TODO: await not needed?
     generator = pyaici_runner_completion.create_completion(request, raw_request)
     return StreamingResponse(content=generator,
                              media_type="text/event-stream")
 
+@app.post("/v1/controllers/tags")
+async def aici_set_tags(request: SetTagsRequest):
+    if not pyaici_runner_completion:
+        return _no_aici()
+    # non-admin users can only set tags that start with their username
+    auto_info = {
+        "user": "vllm",
+        "is_admin": True
+    }
+    r = await pyaici_runner_completion.aici_runner.set_tags(request.module_id, request.tags, auth_info=auto_info)
+    return JSONResponse(r)
+
+@app.get("/v1/controllers/tags")
+async def aici_get_tags():
+    if not pyaici_runner_completion:
+        return _no_aici()
+    r = await pyaici_runner_completion.aici_runner.get_tags()
+    return JSONResponse(r)
 
 if __name__ == "__main__":
     args = parse_args()
