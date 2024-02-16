@@ -58,24 +58,32 @@ class SparseW16A16LinearMethod(LinearMethodBase):
             assert not w.has_compressed_data
             output = F.linear(x, w.uncompressed_data, bias)
         elif self.storage_format_cls == SparseSemiStructuredStorageFormat:
-            assert bias is None
             w_encap = w.compressed_data.encapsulated_torch_sparse_tensor
             out_shape = (x.shape[:-1] + (w_encap.shape[0], ))
             reshaped_x, valid_rows_range = pad_tensor_to_multiple(
                 x.reshape(-1, x.shape[-1]), 8)
+            if bias is None:
+                bias = torch.nn.Parameter(
+                    torch.zeros(
+                        (w_encap.shape[0], ),
+                        dtype=reshaped_x.dtype,
+                        device=reshaped_x.device,
+                    ))
             output = F.linear(
-                reshaped_x, w_encap,
-                torch.nn.Parameter(torch.zeros((w_encap.shape[0], ))).to(
-                    reshaped_x.dtype).to(reshaped_x.device)).contiguous()
-            output = extract_valid_rows(output, valid_rows_range)
-            return output.reshape(out_shape)
+                reshaped_x,
+                w_encap,
+                bias,
+            ).contiguous()
+            output = extract_valid_rows(output,
+                                        valid_rows_range).reshape(out_shape)
         elif self.storage_format_cls == SparseBEGemmStorageFormat:
-            assert bias is None
             assert w.compress_transposed
             out_shape = (x.shape[:-1] + (w.shape[0], ))
             reshaped_x = x.reshape(-1, x.shape[-1])
-            y = be_ds_gemm(reshaped_x, w.compressed_data)
-            return y.reshape(out_shape)
+            output = be_ds_gemm(reshaped_x,
+                                w.compressed_data).reshape(out_shape)
+            if bias is not None:
+                output = output + bias
         else:
             # Standard matrix multiply
             # Uncompress to dense
