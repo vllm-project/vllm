@@ -171,8 +171,8 @@ class VllmRunner:
     ) -> None:
         
         free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
-        print(f"free: {free_gpu_memory // 1024 // 1024}")
-        print(f"total: {total_gpu_memory // 1024 // 1024}")
+        print(f"free: {free_gpu_memory / 1024 / 1024 // 1024}GB")
+        print(f"total: {total_gpu_memory / 1024 / 1024 // 1024}GB")
         print("\n")
         
         self.model = LLM(
@@ -181,6 +181,7 @@ class VllmRunner:
             trust_remote_code=True,
             dtype=dtype,
             swap_space=0,
+            gpu_memory_utilization=0.8,
         )
 
     def generate(
