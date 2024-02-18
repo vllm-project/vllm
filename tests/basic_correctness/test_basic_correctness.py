@@ -5,7 +5,8 @@ Run `pytest tests/basic_correctness/test_basic_correctness.py --forked`.
 import pytest
 
 MODELS = [
-    "facebook/opt-125m", "meta-llama/Llama-2-7b-hf",
+    "facebook/opt-125m",
+    "meta-llama/Llama-2-7b-hf",
 ]
 
 
