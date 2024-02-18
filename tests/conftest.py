@@ -232,7 +232,9 @@ class VllmRunner:
         max_tokens: int,
         num_logprobs: int,
     ) -> List[Tuple[List[int], str]]:
-        greedy_logprobs_params = SamplingParams(temperature=0.0, max_tokens=max_tokens, logprobs=num_logprobs)
+        greedy_logprobs_params = SamplingParams(temperature=0.0,
+                                                max_tokens=max_tokens,
+                                                logprobs=num_logprobs)
         outputs = self.generate_w_logprobs(prompts, greedy_logprobs_params)
 
         return [(output_ids, output_str, output_logprobs)
