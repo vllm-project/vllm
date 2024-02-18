@@ -106,6 +106,12 @@ class LLM:
             disable_custom_all_reduce=disable_custom_all_reduce,
             **kwargs,
         )
+
+        print("In LLM:")
+        free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
+        print(f"free: {free_gpu_memory / 1024 / 1024 // 1024}GB")
+        print(f"total: {total_gpu_memory / 1024 / 1024 // 1024}GB")
+        print("\n")
         self.llm_engine = LLMEngine.from_engine_args(engine_args)
         self.request_counter = Counter()
 
