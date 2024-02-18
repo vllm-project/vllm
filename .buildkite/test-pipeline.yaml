@@ -11,6 +11,9 @@ steps:
 - label: AsyncEngine Test
   command: pytest -v -s async_engine
 
+- label: Basic Correctness Test
+  command: pytest -v -s --forked basic_correctness
+
 - label: Distributed Test
   command: pytest -v -s --forked .
   working_dir: "/vllm-workspace/tests/distributed"

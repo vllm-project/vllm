@@ -1,16 +1,14 @@
 """Compare the outputs of HF and vLLM when using greedy sampling.
 
-Run `pytest tests/distributed/test_basic_distributed_correctness.py --forked`.
+Run `pytest tests/basic_correctness/test_basic_correctness.py --forked`.
 """
 import pytest
-import torch
 
 MODELS = [
     "facebook/opt-125m", "meta-llama/Llama-2-7b-hf",
 ]
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2,
-                    reason="Need at least 2 GPUs to run the test.")
+
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
@@ -26,7 +24,7 @@ def test_models(
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
     del hf_model
 
-    vllm_model = vllm_runner(model, dtype=dtype, tensor_parallel_size=2)
+    vllm_model = vllm_runner(model, dtype=dtype)
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
 
