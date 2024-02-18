@@ -115,18 +115,7 @@ class Worker:
         """
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
-        print("In profile_num_available_blocks before empty_cache():")
-        free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
-        print(f"free: {free_gpu_memory / 1024 / 1024 // 1024}GB")
-        print(f"total: {total_gpu_memory / 1024 / 1024 // 1024}GB")
-        print("\n")
-        
         torch.cuda.empty_cache()
-        print("In profile_num_available_blocks after empty_cache():")
-        free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
-        print(f"free: {free_gpu_memory / 1024 / 1024 // 1024}GB")
-        print(f"total: {total_gpu_memory / 1024 / 1024 // 1024}GB")
-        print("\n")
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.

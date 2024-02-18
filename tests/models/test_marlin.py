@@ -29,10 +29,10 @@ class ModelPair:
     model_gptq: str
 
 model_pairs = [
-    # ModelPair(
-    #     model_marlin="nm-testing/zephyr-beta-7b-marlin-g128",
-    #     model_gptq="nm-testing/zephyr-beta-7b-gptq-g128"
-    # ),
+    ModelPair(
+        model_marlin="nm-testing/zephyr-beta-7b-marlin-g128",
+        model_gptq="nm-testing/zephyr-beta-7b-gptq-g128"
+    ),
     ModelPair(
         model_marlin="robertgshaw2/TinyLlama-1.1B-Chat-v1.0-g128-marlin",
         model_gptq="robertgshaw2/TinyLlama-1.1B-Chat-v1.0-g128-gptq"
@@ -61,11 +61,21 @@ def test_models(
         marlin_model = vllm_runner(model_pair.model_marlin, dtype=dtype)
         marlin_outputs = marlin_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
+        
+        # Note: not sure why, but deleting just the model on Ada Lovelace
+        #   does not free the GPU memory. On Ampere, deleting the just model
+        #   frees the memory.
+        del marlin_model.model.llm_engine.driver_worker
         del marlin_model
 
         gptq_model = vllm_runner(model_pair.model_gptq, dtype=dtype)
         gptq_outputs = gptq_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
+        
+        # Note: not sure why, but deleting just the model on Ada Lovelace
+        #   does not free the GPU memory. On Ampere, deleting the just model
+        #   frees the memory.
+        del gptq_model.model.llm_engine.driver_worker
         del gptq_model
 
         # index of the failed_prompt

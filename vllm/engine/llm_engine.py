@@ -78,12 +78,6 @@ class LLMEngine:
         placement_group: Optional["PlacementGroup"],
         log_stats: bool,
     ) -> None:
-        print("In LLMEngine:")
-        free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
-        print(f"free: {free_gpu_memory / 1024 / 1024 // 1024}GB")
-        print(f"total: {total_gpu_memory / 1024 / 1024 // 1024}GB")
-        print("\n")
-
         logger.info(
             "Initializing an LLM engine with config: "
             f"model={model_config.model!r}, "
@@ -168,12 +162,6 @@ class LLMEngine:
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )
-        print("In Init Workers:")
-        free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
-        print(f"free: {free_gpu_memory / 1024 / 1024 // 1024}GB")
-        print(f"total: {total_gpu_memory / 1024 / 1024 // 1024}GB")
-        print("\n")
-
 
         self._run_workers("init_model")
         self._run_workers("load_model")
@@ -334,11 +322,6 @@ class LLMEngine:
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameters.
         """
-        print("In Init Cache:")
-        free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
-        print(f"free: {free_gpu_memory / 1024 / 1024 // 1024}GB")
-        print(f"total: {total_gpu_memory / 1024 / 1024 // 1024}GB")
-        print("\n")
 
         # Get the maximum number of blocks that can be allocated on GPU and CPU.
         num_blocks = self._run_workers(
