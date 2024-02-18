@@ -71,6 +71,13 @@ TEST_REGEX = r"((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.){3}" + \
 TEST_CHOICE = ["Python", "Java", "JavaScript", "C++", "C#", 
                "PHP", "TypeScript", "Ruby", "Swift", "Kotlin"]
 
+TEST_GRAMMAR = """
+start: DECIMAL
+DIGIT: "0".."9"
+INT: DIGIT+
+DECIMAL: INT "." INT? | "." INT
+"""
+
 pytestmark = pytest.mark.asyncio
 
 
@@ -484,6 +491,59 @@ async def test_guided_choice_chat(server, client: openai.AsyncOpenAI):
     choice2 = chat_completion.choices[0].message.content
     assert choice2 in TEST_CHOICE
     assert choice1 != choice2
+
+
+async def test_guided_grammar_completion(server, client: openai.AsyncOpenAI):
+    completion = await client.completions.create(
+        model=MODEL_NAME,
+        prompt=f"Give me a value that matches this context-free grammar: {TEST_GRAMMAR}",
+        n=2,
+        temperature=1.0,
+        max_tokens=10,
+        extra_body=dict(
+            guided_grammar=TEST_GRAMMAR
+        )
+    )
+
+    assert completion.id is not None
+    assert completion.choices is not None and len(completion.choices) == 2
+    for i in range(2):
+        _ = float(completion.choices[i].text)
+
+
+async def test_guided_grammar_chat(server, client: openai.AsyncOpenAI):
+    messages = [{
+        "role": "system",
+        "content": "you are a helpful assistant"
+    }, {
+        "role": "user",
+        "content": f"Give me a value that matches this context-free grammar: {TEST_GRAMMAR}"
+    }]
+    chat_completion = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        max_tokens=10,
+        extra_body=dict(
+            guided_grammar=TEST_GRAMMAR
+        )
+    )
+    val1 = float(chat_completion.choices[0].message.content)
+
+    messages.append({"role": "assistant", "content": val1})
+    messages.append({
+        "role": "user",
+        "content": "Give me a different value"
+    })
+    chat_completion = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        max_tokens=10,
+        extra_body=dict(
+            guided_grammar=TEST_GRAMMAR
+        )
+    )
+    val2 = float(chat_completion.choices[0].message.content)
+    assert val1 != val2
 
 
 async def test_guided_decoding_type_error(server, client: openai.AsyncOpenAI):
