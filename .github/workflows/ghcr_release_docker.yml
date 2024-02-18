@@ -13,7 +13,7 @@ jobs:
     name: Build and Push Container Image to GitHub Container Registry
     runs-on: ubuntu-latest
 
-    # Sets the permissions granted to the `GHCR_CI_TOKEN` for the actions in this job.
+    # Sets the permissions granted to the `GITHUB_TOKEN` for the actions in this job.
     permissions:
       contents: read
       packages: write
@@ -29,7 +29,7 @@ jobs:
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_CI_TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       # This step uses [docker/metadata-action](https://github.com/docker/metadata-action#about) to extract tags and labels that will be applied to the specified image. The `id` "meta" allows the output of this step to be referenced in a subsequent step. The `images` value provides the base name for the tags and labels.
       - name: "Set Container Image Metadata"
