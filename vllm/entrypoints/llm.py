@@ -1,7 +1,5 @@
 from typing import List, Optional, Union
 
-import torch
-
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
@@ -108,7 +106,6 @@ class LLM:
             disable_custom_all_reduce=disable_custom_all_reduce,
             **kwargs,
         )
-
         self.llm_engine = LLMEngine.from_engine_args(engine_args)
         self.request_counter = Counter()
 

@@ -1,5 +1,3 @@
-import torch
-
 import copy
 from collections import defaultdict
 import os
@@ -162,7 +160,6 @@ class LLMEngine:
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )
-
         self._run_workers("init_model")
         self._run_workers("load_model")
 
@@ -322,7 +319,6 @@ class LLMEngine:
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameters.
         """
-
         # Get the maximum number of blocks that can be allocated on GPU and CPU.
         num_blocks = self._run_workers(
             "profile_num_available_blocks",

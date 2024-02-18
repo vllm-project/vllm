@@ -169,7 +169,6 @@ class VllmRunner:
         tokenizer_name: Optional[str] = None,
         dtype: str = "half",
     ) -> None:
-        
         self.model = LLM(
             model=model_name,
             tokenizer=tokenizer_name,
