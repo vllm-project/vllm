@@ -1,3 +1,5 @@
+import torch
+
 import copy
 from collections import defaultdict
 import os
@@ -76,6 +78,12 @@ class LLMEngine:
         placement_group: Optional["PlacementGroup"],
         log_stats: bool,
     ) -> None:
+        print("In LLMEngine:")
+        free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
+        print(f"free: {free_gpu_memory / 1024 / 1024 // 1024}GB")
+        print(f"total: {total_gpu_memory / 1024 / 1024 // 1024}GB")
+        print("\n")
+
         logger.info(
             "Initializing an LLM engine with config: "
             f"model={model_config.model!r}, "
