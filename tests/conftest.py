@@ -181,7 +181,6 @@ class VllmRunner:
             trust_remote_code=True,
             dtype=dtype,
             swap_space=0,
-            gpu_memory_utilization=0.8,
         )
 
     def generate(
