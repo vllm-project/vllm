@@ -19,7 +19,7 @@ from vllm.model_executor.layers.quantization import _QUANTIZATION_CONFIG_REGISTR
 
 capability = torch.cuda.get_device_capability()
 capability = capability[0] * 10 + capability[1]
-is_marlin_supported = (
+marlin_not_supported = (
     capability < _QUANTIZATION_CONFIG_REGISTRY["marlin"].get_min_capability()
 )
 
@@ -39,7 +39,7 @@ model_pairs = [
     )
 ]
 
-@pytest.mark.skipif(not is_marlin_supported,
+@pytest.mark.skipif(marlin_not_supported,
                     reason="Marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("model_pair", model_pairs)
 @pytest.mark.parametrize("dtype", ["half"])
