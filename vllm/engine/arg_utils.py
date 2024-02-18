@@ -32,6 +32,7 @@ class EngineArgs:
     max_paddings: int = 256
     disable_log_stats: bool = False
     revision: Optional[str] = None
+    code_revision: Optional[str] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
     enforce_eager: bool = False
@@ -75,6 +76,13 @@ class EngineArgs:
             help='the specific model version to use. It can be a branch '
             'name, a tag name, or a commit id. If unspecified, will use '
             'the default version.')
+        parser.add_argument(
+            '--code-revision',
+            type=str,
+            default=None,
+            help='the specific revision to use for the model code on '
+            'Hugging Face Hub. It can be a branch name, a tag name, or a '
+            'commit id. If unspecified, will use the default version.')
         parser.add_argument(
             '--tokenizer-revision',
             type=str,
@@ -279,13 +287,12 @@ class EngineArgs:
     ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig,
                DeviceConfig, Optional[LoRAConfig]]:
         device_config = DeviceConfig(self.device)
-        model_config = ModelConfig(self.model, self.tokenizer,
-                                   self.tokenizer_mode, self.trust_remote_code,
-                                   self.download_dir, self.load_format,
-                                   self.dtype, self.seed, self.revision,
-                                   self.tokenizer_revision, self.max_model_len,
-                                   self.quantization, self.enforce_eager,
-                                   self.max_context_len_to_capture)
+        model_config = ModelConfig(
+            self.model, self.tokenizer, self.tokenizer_mode,
+            self.trust_remote_code, self.download_dir, self.load_format,
+            self.dtype, self.seed, self.revision, self.code_revision,
+            self.tokenizer_revision, self.max_model_len, self.quantization,
+            self.enforce_eager, self.max_context_len_to_capture)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
