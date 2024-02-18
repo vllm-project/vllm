@@ -1,4 +1,4 @@
-"""Compare the outputs of HF and vLLM when using greedy sampling.
+"""Compare the outputs of HF and distributed vLLM when using greedy sampling.
 
 Run `pytest tests/distributed/test_basic_distributed_correctness.py --forked`.
 """
