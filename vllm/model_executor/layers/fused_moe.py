@@ -250,7 +250,8 @@ def fused_moe(
     E, N, _ = w1.shape
 
     if M <= 64:
-        return fused_moe_(hidden_states, w1, w2, gating_output, topk, renormalize, inplace)
+        assert inplace
+        return fused_moe_(hidden_states, w1, w2, gating_output, topk, renormalize)
 
     if is_hip():
         # The MoE kernels are not yet supported on ROCm.
