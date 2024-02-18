@@ -29,10 +29,10 @@ class ModelPair:
     model_gptq: str
 
 model_pairs = [
-    ModelPair(
-        model_marlin="nm-testing/zephyr-beta-7b-marlin-g128",
-        model_gptq="nm-testing/zephyr-beta-7b-gptq-g128"
-    ),
+    # ModelPair(
+    #     model_marlin="nm-testing/zephyr-beta-7b-marlin-g128",
+    #     model_gptq="nm-testing/zephyr-beta-7b-gptq-g128"
+    # ),
     ModelPair(
         model_marlin="robertgshaw2/TinyLlama-1.1B-Chat-v1.0-g128-marlin",
         model_gptq="robertgshaw2/TinyLlama-1.1B-Chat-v1.0-g128-gptq"
@@ -58,15 +58,15 @@ def test_models(
 
     # Run the experiment failure_tolerance times
     for retry_idx in range(failure_tolerance):
-        gptq_model = vllm_runner(model_pair.model_gptq, dtype=dtype)
-        gptq_outputs = gptq_model.generate_greedy_logprobs(
-            example_prompts, max_tokens, num_logprobs)
-        del gptq_model
-
         marlin_model = vllm_runner(model_pair.model_marlin, dtype=dtype)
         marlin_outputs = marlin_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
         del marlin_model
+
+        gptq_model = vllm_runner(model_pair.model_gptq, dtype=dtype)
+        gptq_outputs = gptq_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs)
+        del gptq_model
 
         # index of the failed_prompt
         failed_prompt_idx = -1
