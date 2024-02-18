@@ -44,6 +44,9 @@ class ModelConfig:
         revision: The specific model version to use. It can be a branch name,
             a tag name, or a commit id. If unspecified, will use the default
             version.
+        code_revision: The specific revision to use for the model code on
+            Hugging Face Hub. It can be a branch name, a tag name, or a 
+            commit id. If unspecified, will use the default version.
         tokenizer_revision: The specific tokenizer version to use. It can be a
             branch name, a tag name, or a commit id. If unspecified, will use
             the default version.
@@ -70,6 +73,7 @@ class ModelConfig:
         dtype: Union[str, torch.dtype],
         seed: int,
         revision: Optional[str] = None,
+        code_revision: Optional[str] = None,
         tokenizer_revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
@@ -84,6 +88,7 @@ class ModelConfig:
         self.load_format = load_format
         self.seed = seed
         self.revision = revision
+        self.code_revision = code_revision
         self.tokenizer_revision = tokenizer_revision
         self.quantization = quantization
         self.enforce_eager = enforce_eager
@@ -103,7 +108,8 @@ class ModelConfig:
             self.download_dir = model_path
             self.tokenizer = model_path
 
-        self.hf_config = get_config(self.model, trust_remote_code, revision)
+        self.hf_config = get_config(self.model, trust_remote_code, revision,
+                                    code_revision)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
         self.max_model_len = _get_and_verify_max_len(self.hf_config,
                                                      max_model_len)

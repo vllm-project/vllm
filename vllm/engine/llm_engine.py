@@ -283,7 +283,7 @@ class LLMEngine:
             is_driver_worker=True,
         )
 
-        self._run_workers("init_model")
+        self._run_workers("init_model", cupy_port=get_open_port())
         self._run_workers(
             "load_model",
             max_concurrent_workers=self.parallel_config.
@@ -463,6 +463,9 @@ class LLMEngine:
         prefix = self.scheduler.prefix_pool.add_or_get_prefix(
             prompt_token_ids[:prefix_pos], lora_request.lora_int_id
             if lora_request else 0) if prefix_pos is not None else None
+
+        # Defensive copy of SamplingParams, which are used by the sampler
+        sampling_params = copy.deepcopy(sampling_params)
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,
