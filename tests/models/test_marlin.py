@@ -17,15 +17,18 @@ import torch
 from dataclasses import dataclass
 from vllm.model_executor.layers.quantization import _QUANTIZATION_CONFIG_REGISTRY
 
-gptq_config_cls = _QUANTIZATION_CONFIG_REGISTRY["gptq"]
-marlin_config_cls = _QUANTIZATION_CONFIG_REGISTRY["marlin"]
+capability = torch.cuda.get_device_capability()
+capability = capability[0] * 10 + capability[1]
+is_marlin_supported = (
+    capability < _QUANTIZATION_CONFIG_REGISTRY["marlin"].get_min_capability()
+)
 
 @dataclass
 class ModelPair:
     model_marlin: str
     model_gptq: str
 
-MODEL_PAIRS = [
+model_pairs = [
     ModelPair(
         model_marlin="nm-testing/zephyr-beta-7b-marlin-g128",
         model_gptq="nm-testing/zephyr-beta-7b-gptq-g128"
@@ -36,7 +39,9 @@ MODEL_PAIRS = [
     )
 ]
 
-@pytest.mark.parametrize("model_pair", MODEL_PAIRS)
+@pytest.mark.skipif(not is_marlin_supported,
+                    reason="Marlin is not supported on this GPU type.")
+@pytest.mark.parametrize("model_pair", model_pairs)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [3])
@@ -50,13 +55,6 @@ def test_models(
     num_logprobs: int,
     failure_tolerance: int,
 ) -> None:
-    
-    capability = torch.cuda.get_device_capability()
-    capability = capability[0] * 10 + capability[1]
-    if (capability < gptq_config_cls.get_min_capability() or
-        capability < marlin_config_cls.get_min_capability()):
-        print(f"Skipping test_marlin due to device capability: {capability} (requires >8.0)")
-        return        
 
     # Run the experiment failure_tolerance times
     for retry_idx in range(failure_tolerance):
