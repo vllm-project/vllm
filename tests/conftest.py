@@ -169,6 +169,12 @@ class VllmRunner:
         tokenizer_name: Optional[str] = None,
         dtype: str = "half",
     ) -> None:
+        
+        free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
+        print(f"free: {free_gpu_memory // 1024 // 1024}")
+        print(f"total: {total_gpu_memory // 1024 // 1024}")
+        print("\n")
+        
         self.model = LLM(
             model=model_name,
             tokenizer=tokenizer_name,
