@@ -46,6 +46,7 @@ class InputMetadata:
     def __repr__(self) -> str:
         return ("InputMetadata("
                 f"is_prompt={self.is_prompt}, "
+                f"prompt_lens={self.prompt_lens}, "
                 f"max_context_len={self.max_context_len}, "
                 f"slot_mapping={self.slot_mapping}, "
                 f"context_lens={self.context_lens}, "

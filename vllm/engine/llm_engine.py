@@ -153,6 +153,9 @@ class LLMEngine:
         Worker = imported_worker.Worker
         return Worker
 
+        self.is_encoder_decoder = getattr(self.model_config.hf_config,
+                                          "is_encoder_decoder", False)
+
     def _init_workers(self):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
@@ -476,7 +479,7 @@ class LLMEngine:
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
         seq = Sequence(seq_id, prompt, prompt_token_ids, block_size,
-                       lora_request)
+                       self.is_encoder_decoder, lora_request)
 
         # Check whether the input specifies prefix
         prefix = self.scheduler.prefix_pool.add_or_get_prefix(

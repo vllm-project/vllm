@@ -6,7 +6,7 @@ import time
 from typing import List, Optional, Tuple
 
 import torch
-from transformers import (AutoModelForCausalLM, AutoTokenizer,
+from transformers import (AutoModelForCausalLM, T5ForConditionalGeneration, AutoTokenizer,
                           PreTrainedTokenizerBase)
 from tqdm import tqdm
 
@@ -123,8 +123,12 @@ def run_hf(
     trust_remote_code: bool,
 ) -> float:
     assert not use_beam_search
-    llm = AutoModelForCausalLM.from_pretrained(
-        model, torch_dtype=torch.float16, trust_remote_code=trust_remote_code)
+    if "t5" in model:
+        llm = T5ForConditionalGeneration.from_pretrained(
+            model, torch_dtype=torch.float16, trust_remote_code=trust_remote_code)
+    else:
+        llm = AutoModelForCausalLM.from_pretrained(
+            model, torch_dtype=torch.float16, trust_remote_code=trust_remote_code)
     if llm.config.model_type == "llama":
         # To enable padding in the HF backend.
         tokenizer.pad_token = tokenizer.eos_token

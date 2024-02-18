@@ -12,7 +12,7 @@ from vllm._C import ops
 from vllm._C import cache_ops
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.triton_kernel.prefix_prefill import (
-    context_attention_fwd)
+    context_attention_fwd, )
 from vllm.utils import is_hip
 
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
@@ -195,6 +195,9 @@ class PagedAttention(nn.Module):
                     key = key.unflatten(0, (batch_size, seq_len))
                     value = value.unflatten(0, (batch_size, seq_len))
 
+                print("query.shape: ", query.shape)
+                print("key.shape: ", key.shape)
+                print("value.shape: ", value.shape)
                 out = xops.memory_efficient_attention_forward(
                     query,
                     key,
@@ -226,14 +229,18 @@ class PagedAttention(nn.Module):
 
         else:
             # Decoding run.
-            output = _paged_attention(
+            output = paged_attention(
                 query,
                 key_cache,
                 value_cache,
-                input_metadata,
+                input_metadata.block_tables,
+                input_metadata.context_lens,
+                input_metadata.max_context_len,
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
+                None,
+                input_metadata.kv_cache_dtype
             )
 
         # Reshape the output tensor.
@@ -274,22 +281,26 @@ def _make_alibi_bias(
     return attn_bias
 
 
-def _paged_attention(
+def paged_attention(
     query: torch.Tensor,
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
-    input_metadata: InputMetadata,
+    block_tables: torch.Tensor,
+    context_lens: torch.Tensor,
+    max_context_len: int,
     num_kv_heads: int,
     scale: float,
     alibi_slopes: Optional[torch.Tensor],
+    custom_bias: Optional[torch.Tensor],
+    kv_cache_dtype: torch.dtype,
 ) -> torch.Tensor:
     output = torch.empty_like(query)
 
     block_size = value_cache.shape[3]
     num_seqs, num_heads, head_size = query.shape
-    max_num_partitions = (
-        (input_metadata.max_context_len + _PARTITION_SIZE - 1) //
-        _PARTITION_SIZE)
+    max_num_partitions = ((max_context_len + _PARTITION_SIZE - 1) //
+                          _PARTITION_SIZE)
+    # print("max_num_partitions: ", max_num_partitions)
     # NOTE(woosuk): We use a simple heuristic to decide whether to use
     # PagedAttention V1 or V2. If the number of partitions is 1, we use
     # V1 to avoid the overhead of reduction. Also, if the number of
@@ -297,9 +308,28 @@ def _paged_attention(
     # to parallelize.
     # TODO(woosuk): Tune this heuristic.
     # For context len > 8192, use V2 kernel to avoid shared memory shortage.
-    use_v1 = input_metadata.max_context_len <= 8192 and (
-        max_num_partitions == 1 or num_seqs * num_heads > 512)
+    use_v1 = max_context_len <= 8192 and (max_num_partitions == 1
+                                          or num_seqs * num_heads > 512)
     if use_v1:
+        # print("v1")
+        # print("output: ", output)
+        # print("query: ", query)
+        # print("num_kv_heads: ", num_kv_heads)
+        # print("scale: ", scale)
+        # print("block_tables: ", block_tables)
+        # print("context_lens: ", context_lens)
+        # print("block_size: ", block_size)
+        # print("max_context_len: ", max_context_len)
+        # print("alibi_slopes: ", alibi_slopes)
+        # print("custom_bias: ", custom_bias)
+        # print("key_cache shape: ", key_cache.shape)
+        # print("value_cache shape: ", value_cache.shape)
+        # for block_table in block_tables:
+        #     for block in block_table:
+        #         print(f"key_cache at {block} shape: ", key_cache[block].shape)
+        #         print(f"key_cache at {block}: ", key_cache[block])
+        #         print(f"value_cache at {block} shape: ", value_cache[block].shape)
+        #         print(f"value_cache at {block}: ", value_cache[block])
         # Run PagedAttention V1.
         ops.paged_attention_v1(
             output,
@@ -308,14 +338,16 @@ def _paged_attention(
             value_cache,
             num_kv_heads,
             scale,
-            input_metadata.block_tables,
-            input_metadata.context_lens,
+            block_tables,
+            context_lens,
             block_size,
-            input_metadata.max_context_len,
+            max_context_len,
             alibi_slopes,
-            input_metadata.kv_cache_dtype,
+            custom_bias,
+            kv_cache_dtype,
         )
     else:
+        # print("v2")
         # Run PagedAttention V2.
         assert _PARTITION_SIZE % block_size == 0
         tmp_output = torch.empty(
@@ -329,6 +361,16 @@ def _paged_attention(
             device=output.device,
         )
         max_logits = torch.empty_like(exp_sums)
+        # print("output: ", output)
+        # print("query: ", query)
+        # print("num_kv_heads: ", num_kv_heads)
+        # print("scale: ", scale)
+        # print("block_tables: ", block_tables)
+        # print("context_lens: ", context_lens)
+        # print("block_size: ", block_size)
+        # print("max_context_len: ", max_context_len)
+        # print("alibi_slopes: ", alibi_slopes)
+        # print("custom_bias: ", custom_bias)
         ops.paged_attention_v2(
             output,
             exp_sums,
@@ -339,11 +381,12 @@ def _paged_attention(
             value_cache,
             num_kv_heads,
             scale,
-            input_metadata.block_tables,
-            input_metadata.context_lens,
+            block_tables,
+            context_lens,
             block_size,
-            input_metadata.max_context_len,
+            max_context_len,
             alibi_slopes,
-            input_metadata.kv_cache_dtype,
+            custom_bias,
+            kv_cache_dtype,
         )
     return output

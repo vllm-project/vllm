@@ -83,6 +83,8 @@ class ModelRunner:
         # Set enforce_eager to True for Neuron backend, to avoid capturing graph
         if self.device_config.is_neuron:
             self.model_config.enforce_eager = True
+        self.is_encoder_decoder = getattr(self.model_config.hf_config,
+                                          "is_encoder_decoder", False)
 
     def load_model(self) -> None:
         self.model = get_model(self.model_config,
@@ -135,6 +137,8 @@ class ModelRunner:
         context_lens: List[int] = []
         subquery_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
+        block_tables: List[List[int]] = []
+        max_block_table_len = 0
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -145,16 +149,20 @@ class ModelRunner:
             prompt_tokens = seq_data.get_token_ids()
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
+
             prefix_len = 0
-            prefix = seq_group_metadata.prefix
-            if prefix is not None and prefix.computed:
-                prefix_len = prefix.get_length()
-                prompt_tokens = prompt_tokens[prefix_len:]
-                prefix_block_tables.append(prefix.get_block_numbers())
+            if self.is_encoder_decoder:
+                context_lens.append(1)
             else:
-                prefix_block_tables.append([])
-            # actual prompt lens
-            context_lens.append(prefix_len)
+                prefix = seq_group_metadata.prefix
+                if prefix is not None and prefix.computed:
+                    prefix_len = prefix.get_length()
+                    prompt_tokens = prompt_tokens[prefix_len:]
+                    prefix_block_tables.append(prefix.get_block_numbers())
+                else:
+                    prefix_block_tables.append([])
+                # actual prompt lens
+                context_lens.append(prefix_len)
             subquery_lens.append(prompt_len - prefix_len)
 
             input_tokens.append(prompt_tokens)
@@ -204,6 +212,12 @@ class ModelRunner:
                 slot = block_number * self.block_size + block_offset
                 slot_mapping[-1].append(slot)
 
+            if self.is_encoder_decoder:
+                block_tables.append(block_table)
+                max_block_table_len = max(max_block_table_len,
+                                          len(block_table))
+        # print("slot_mapping: ", slot_mapping)
+        # print("block_tables: ", block_tables)
         max_prompt_len = max(subquery_lens)
         input_tokens = _make_tensor_with_pad(input_tokens,
                                              max_prompt_len,
@@ -215,8 +229,16 @@ class ModelRunner:
                                                 pad=0,
                                                 dtype=torch.long,
                                                 device=self.device)
+        if self.is_encoder_decoder and len(block_tables) > 0:
+            # Pad the slot mapping to the same length and add decoder_start_id
+            for i in range(len(slot_mapping)):
+                slot_mapping[i] += [_PAD_SLOT_ID
+                                    ] * (max_prompt_len - len(slot_mapping[i]))
+                slot_mapping[i].append(block_tables[i][-1] * self.block_size)
+
+        max_slot_mapping_len = max_prompt_len + self.is_encoder_decoder
         slot_mapping = _make_tensor_with_pad(slot_mapping,
-                                             max_prompt_len,
+                                             max_slot_mapping_len,
                                              pad=_PAD_SLOT_ID,
                                              dtype=torch.long,
                                              device=self.device)
@@ -224,6 +246,7 @@ class ModelRunner:
             _pad_to_max(mapping, max_prompt_len, pad=0)
             for mapping in lora_index_mapping
         ]
+
         context_lens_tensor = torch.tensor(context_lens,
                                            dtype=torch.int,
                                            device=self.device)
@@ -236,6 +259,28 @@ class ModelRunner:
             dtype=torch.int,
             device=self.device,
         )
+        if self.is_encoder_decoder:
+            padded_block_tables = []
+            # Pad the encoder block tables to the same length and then add a decoder block table in the end
+            for block_table in block_tables:
+                block_table = block_table[:-1] + [0] * (
+                    max_block_table_len - len(block_table)) + block_table[-1:]
+                padded_block_tables.append(block_table)
+
+            block_tables_tensor = _make_tensor_with_pad(
+                padded_block_tables,
+                max_len=max_block_table_len,
+                pad=0,
+                dtype=torch.int)
+        else:
+            max_prompt_block_table_len = max(
+                len(t) for t in prefix_block_tables)
+            block_tables_tensor = _make_tensor_with_pad(
+                prefix_block_tables,
+                max_len=max_prompt_block_table_len,
+                pad=0,
+                dtype=torch.int,
+            )
         start_loc_tensor = torch.arange(0,
                                         len(prompt_lens) * max_prompt_len,
                                         max_prompt_len,
@@ -251,9 +296,9 @@ class ModelRunner:
             prompt_lens=prompt_lens_tensor,
             max_seq_len=max_prompt_len,
             start_loc=start_loc_tensor,
-            max_context_len=None,
+            max_context_len=max(context_lens),
             context_lens=context_lens_tensor,
-            block_tables=block_tables,
+            block_tables=block_tables_tensor,
             use_cuda_graph=False,
             kv_cache_dtype=self.kv_cache_dtype,
         )
@@ -270,12 +315,14 @@ class ModelRunner:
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
         slot_mapping: List[List[int]] = []
+        prompt_lens: List[int] = []
         context_lens: List[int] = []
         block_tables: List[List[int]] = []
         lora_index_mapping: List[int] = []
         lora_prompt_mapping: List[int] = []
         lora_requests: Set[LoRARequest] = set()
 
+        max_block_table_len = 0
         for seq_group_metadata in seq_group_metadata_list:
             assert not seq_group_metadata.is_prompt
 
@@ -294,11 +341,27 @@ class ModelRunner:
                 position = seq_len - 1
                 input_positions.append([position])
 
-                context_len = seq_len if self.sliding_window is None else min(
-                    seq_len, self.sliding_window)
+                prompt_len = len(seq_data.prompt_token_ids)
+                prompt_lens.append(prompt_len)
+
+                if self.is_encoder_decoder:
+                    # Encoder-decoder model stores prompt and generation tokens separately,
+                    # so we need to adjust to the pad.
+                    prompt_blocks_num = (prompt_len + self.block_size -
+                                         1) // self.block_size
+                    prompt_pad = prompt_blocks_num * self.block_size - prompt_len
+                    position += prompt_pad + 1  # One extra for decoder_start_id
+
+                if self.is_encoder_decoder:
+                    context_len = seq_len - prompt_len + 1
+                elif self.sliding_window is not None:
+                    context_len = min(seq_len, self.sliding_window)
+                else:
+                    context_len = seq_len
                 context_lens.append(context_len)
 
                 block_table = seq_group_metadata.block_tables[seq_id]
+                max_block_table_len = max(max_block_table_len, len(block_table))
                 block_number = block_table[position // self.block_size]
                 block_offset = position % self.block_size
                 slot = block_number * self.block_size + block_offset
@@ -311,6 +374,15 @@ class ModelRunner:
                                              self.block_size)
                     block_table = block_table[-sliding_window_blocks:]
                 block_tables.append(block_table)
+        if self.is_encoder_decoder:
+            padded_block_tables = []
+            # Pad the encoder block tables to the same length and then add a decoder block table in the end
+            for block_table in block_tables:
+                block_table = block_table[:-1] + [0] * (
+                    max_block_table_len - len(block_table)) + block_table[-1:]
+                padded_block_tables.append(block_table)
+
+            block_tables = padded_block_tables
 
         batch_size = len(input_tokens)
         max_context_len = max(context_lens)
@@ -350,6 +422,7 @@ class ModelRunner:
                                     dtype=torch.int,
                                     device=self.device)
 
+        prompt_lens = torch.tensor(prompt_lens, dtype=torch.int, device=self.device)
         if use_captured_graph:
             # The shape of graph_block_tables is
             # [max batch size, max context len // block size].
@@ -376,7 +449,7 @@ class ModelRunner:
         input_metadata = InputMetadata(
             is_prompt=False,
             slot_mapping=slot_mapping,
-            prompt_lens=None,
+            prompt_lens=prompt_lens,
             max_seq_len=None,
             start_loc=None,
             max_context_len=max_context_len,
@@ -408,7 +481,7 @@ class ModelRunner:
             sampling_params = seq_group_metadata.sampling_params
             seq_groups.append((seq_ids, sampling_params))
 
-            if seq_group_metadata.is_prompt:
+            if seq_group_metadata.is_prompt and not self.is_encoder_decoder:
                 assert len(seq_ids) == 1
                 assert subquery_lens is not None
                 subquery_len = subquery_lens[i]
@@ -452,6 +525,7 @@ class ModelRunner:
                                             dtype=torch.long,
                                             target_device=self.device,
                                             pin_memory=pin_memory)
+        # print("selected_token_indices: ", selected_token_indices)
         categorized_sample_indices = {
             t: _async_h2d(seq_ids,
                           dtype=torch.int,
@@ -459,11 +533,12 @@ class ModelRunner:
                           pin_memory=pin_memory)
             for t, seq_ids in categorized_sample_indices.items()
         }
+        # print("categorized_sample_indices: ", categorized_sample_indices)
 
         seq_data: Dict[int, SequenceData] = {}
         for seq_group_metadata in seq_group_metadata_list:
             seq_data.update(seq_group_metadata.seq_data)
-
+        # print("selected_token_indices: ", selected_token_indices)
         sampling_metadata = SamplingMetadata(
             seq_groups=seq_groups,
             seq_data=seq_data,
@@ -585,6 +660,8 @@ class ModelRunner:
             kv_caches=kv_caches,
             input_metadata=input_metadata,
         )
+        # print("hidden_states shape: ", hidden_states.shape)
+        # print("hidden_states: ", hidden_states)
 
         # Sample the next token.
         output = self.model.sample(
@@ -700,6 +777,7 @@ class ModelRunner:
         slot_mapping = torch.empty(max_batch_size, 1, dtype=torch.long).cuda()
         slot_mapping.fill_(_PAD_SLOT_ID)
         context_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
+        prompt_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
         block_tables = torch.from_numpy(self.graph_block_tables).cuda()
 
         graph_batch_size = _get_graph_batch_size(

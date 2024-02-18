@@ -166,6 +166,10 @@ class LLM:
             # Use default sampling params.
             sampling_params = SamplingParams()
 
+        if self.llm_engine.is_encoder_decoder:
+            assert (prefix_pos is None
+                    ), "Encoder decoder models do not support Prefix Cache yet"
+
         # Add requests to the engine.
         num_requests = len(prompts) if prompts is not None else len(
             prompt_token_ids)

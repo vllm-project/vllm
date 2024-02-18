@@ -26,18 +26,21 @@ from transformers import GPT2Config
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import PagedAttention
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               LinearMethodBase,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    LinearMethodBase,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_world_size)
+    get_tensor_model_parallel_world_size, )
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
+from vllm.model_executor.weight_utils import (
+    default_weight_loader,
+    hf_model_weights_iterator,
+)
 from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -53,8 +56,8 @@ class GPT2Attention(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         total_num_heads = config.num_attention_heads
-        tensor_model_parallel_world_size = (
-            get_tensor_model_parallel_world_size())
+        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size(
+        )
         assert total_num_heads % tensor_model_parallel_world_size == 0
         self.num_heads = total_num_heads // tensor_model_parallel_world_size
         self.head_dim = self.hidden_size // total_num_heads
@@ -134,8 +137,7 @@ class GPT2Block(nn.Module):
     ):
         super().__init__()
         hidden_size = config.hidden_size
-        inner_dim = (config.n_inner if config.n_inner is not None else 4 *
-                     hidden_size)
+        inner_dim = config.n_inner if config.n_inner is not None else 4 * hidden_size
 
         self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.attn = GPT2Attention(config, linear_method)
@@ -149,6 +151,7 @@ class GPT2Block(nn.Module):
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
         residual = hidden_states
+        print("Block input: ", hidden_states)
         hidden_states = self.ln_1(hidden_states)
         attn_output = self.attn(
             hidden_states=hidden_states,
@@ -163,6 +166,7 @@ class GPT2Block(nn.Module):
         feed_forward_hidden_states = self.mlp(hidden_states)
         # residual connection
         hidden_states = residual + feed_forward_hidden_states
+        print("Block output: ", hidden_states)
         return hidden_states
 
 
@@ -195,12 +199,17 @@ class GPT2Model(nn.Module):
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
         inputs_embeds = self.wte(input_ids)
+        print("input_embeds: ", inputs_embeds)
         position_embeds = self.wpe(position_ids)
         hidden_states = inputs_embeds + position_embeds
-
+        print("hidden_states: ", hidden_states)
         for i in range(len(self.h)):
             layer = self.h[i]
             hidden_states = layer(hidden_states, kv_caches[i], input_metadata)
+            if i == 0 and kv_caches[0][0] is not None:
+                print("hidden_states shape: ", hidden_states.shape)
+                print("kv cache shape", kv_caches[i][0].shape)
+                print("Input metadata", input_metadata)
 
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
@@ -227,6 +236,9 @@ class GPT2LMHeadModel(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
+        if kv_caches[0][0] is not None:
+            print("input_ids: ", input_ids)
+            print("slot mapping shape: ", input_metadata.slot_mapping.shape)
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          input_metadata)
         return hidden_states
@@ -240,11 +252,13 @@ class GPT2LMHeadModel(nn.Module):
                                    sampling_metadata)
         return next_tokens
 
-    def load_weights(self,
-                     model_name_or_path: str,
-                     cache_dir: Optional[str] = None,
-                     load_format: str = "auto",
-                     revision: Optional[str] = None):
+    def load_weights(
+        self,
+        model_name_or_path: str,
+        cache_dir: Optional[str] = None,
+        load_format: str = "auto",
+        revision: Optional[str] = None,
+    ):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):

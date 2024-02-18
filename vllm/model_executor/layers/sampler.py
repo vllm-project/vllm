@@ -57,6 +57,9 @@ class Sampler(nn.Module):
         sampling_metadata: SamplingMetadata,
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[SamplerOutput]:
+        # print("hidden_states shape: ", hidden_states.shape)
+        # print("hidden_states: ", hidden_states)
+
         # Get the hidden states that we use for sampling.
         if self.logits_as_hidden_states:
             logits = hidden_states
@@ -66,6 +69,9 @@ class Sampler(nn.Module):
 
             # Get the logits for the next tokens.
             logits = self._get_logits(hidden_states, embedding, embedding_bias)
+
+        # print("Logits shape: ", logits.shape)
+        # print("Logits: ", logits)
 
         # Only perform sampling in the driver worker.
         # Note: `_get_logits` is still distributed across TP workers because
@@ -77,9 +83,12 @@ class Sampler(nn.Module):
         assert logits is not None
         _, vocab_size = logits.shape
 
+        # print("Logits shape: ", logits.shape)
+        # print("Logits: ", logits)
         # Apply logits processors (if any).
         logits = _apply_logits_processors(logits, sampling_metadata)
-
+        # print("Logits shape: ", logits.shape)
+        # print("Logits: ", logits)
         # Prepare sampling tensors with pinned memory to avoid blocking.
         (sampling_tensors, do_penalties, do_top_p_top_k,
          do_min_p) = SamplingTensors.from_sampling_metadata(
@@ -92,18 +101,23 @@ class Sampler(nn.Module):
                                       sampling_tensors.presence_penalties,
                                       sampling_tensors.frequency_penalties,
                                       sampling_tensors.repetition_penalties)
-
+        # print("Logits shape: ", logits.shape)
+        # print("Logits: ", logits)
         # Apply temperature scaling.
         # Use in-place division to avoid creating a new tensor.
         logits.div_(sampling_tensors.temperatures.unsqueeze_(dim=1))
-
+        # print("Logits shape: ", logits.shape)
+        # print("Logits: ", logits)
         if do_top_p_top_k:
             logits = _apply_top_k_top_p(logits, sampling_tensors.top_ps,
                                         sampling_tensors.top_ks)
-
+        # print("Logits shape: ", logits.shape)
+        # print("Logits: ", logits)
         if do_min_p:
             logits = _apply_min_p(logits, sampling_tensors.min_ps)
 
+        # print("Logits shape: ", logits.shape)
+        # print("Logits: ", logits)
         # We use float32 for probabilities and log probabilities.
         # Compute the probabilities.
         probs = torch.softmax(logits, dim=-1, dtype=torch.float)
@@ -112,10 +126,18 @@ class Sampler(nn.Module):
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
 
         # Sample the next tokens.
+        # print("Probs shape: ", probs.shape)
+        # print("Probs: ", probs)
+        # print("Logprobs shape: ", logprobs.shape)
+        # print("Logprobs: ", logprobs)
+
         sample_results = _sample(probs, logprobs, sampling_metadata)
         # Get the logprobs query results.
+        # print("Sample results: ", sample_results)
         prompt_logprobs, sample_logprobs = _get_logprobs(
             logprobs, sampling_metadata, sample_results)
+        # print("Prompt logprobs: ", prompt_logprobs)
+        # print("Sample logprobs: ", sample_logprobs)
         return _build_sampler_output(sample_results, sampling_metadata,
                                      prompt_logprobs, sample_logprobs)
 
@@ -378,6 +400,8 @@ def _sample(
     logprobs: torch.Tensor,
     sampling_metadata: SamplingMetadata,
 ) -> List[Tuple[List[int], List[int]]]:
+    # print("probs: ", probs)
+    # print("logprobs: ", logprobs)
     categorized_seq_group_ids = {t: [] for t in SamplingType}
     categorized_sample_indices = sampling_metadata.categorized_sample_indices
     for i, seq_group in enumerate(sampling_metadata.seq_groups):
@@ -393,11 +417,15 @@ def _sample(
     # The first loop can run without waiting on GPU<->CPU sync.
     for sampling_type in SamplingType:
         sample_indices = categorized_sample_indices[sampling_type]
+        # print("sampling_type: ", sampling_type)
+        # print("sample_indices: ", sample_indices)
         num_tokens = len(sample_indices)
         if num_tokens == 0:
             continue
         seq_group_ids = categorized_seq_group_ids[sampling_type]
+        # print("seq_group_ids: ", seq_group_ids)
         seq_groups = [sampling_metadata.seq_groups[i] for i in seq_group_ids]
+        # print("seq_groups: ", seq_groups)
         is_prompts = [i < sampling_metadata.num_prompts for i in seq_group_ids]
         sample_metadata[sampling_type] = (seq_group_ids, seq_groups,
                                           is_prompts, sample_indices)
