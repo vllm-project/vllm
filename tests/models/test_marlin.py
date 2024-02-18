@@ -63,6 +63,10 @@ def test_models(
             example_prompts, max_tokens, num_logprobs)
         del marlin_model
 
+        free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
+        print(free_gpu_memory)
+        print(total_gpu_memory)
+        
         gptq_model = vllm_runner(model_pair.model_gptq, dtype=dtype)
         gptq_outputs = gptq_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
