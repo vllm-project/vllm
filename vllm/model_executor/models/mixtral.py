@@ -21,6 +21,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Mixtral model."""
+import os
 from typing import List, Optional, Tuple
 
 import torch
@@ -78,6 +79,11 @@ class MixtralMoE(nn.Module):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size // self.tp_size
 
+        self.fused_moe_config = None
+        if "VLLM_MIXTRAL_FUSE_MOE_CONFIG" in os.environ:
+            data = json.load(os.environ["VLLM_MIXTRAL_FUSE_MOE_CONFIG"])
+            self.fused_moe_config = {int(key): val for key, val in data.items()}
+
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
@@ -133,7 +139,8 @@ class MixtralMoE(nn.Module):
                                         router_logits,
                                         self.top_k,
                                         renormalize=True,
-                                        inplace=True)
+                                        inplace=True,
+                                        self.fused_moe_config)
 
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
