@@ -9,6 +9,7 @@ The FP8 data format retains 2~3 mantissa bits and can convert float/fp16/bflaot1
 Here is an example of how to enable this feature:
 
 .. code-block:: python
+
     from vllm import LLM, SamplingParams
     # Sample prompts.
     prompts = [

@@ -104,11 +104,13 @@ class CacheEngine:
                 size=(self.num_cpu_blocks, *key_block_shape),
                 dtype=self.dtype,
                 pin_memory=pin_memory,
+                device="cpu",
             )
             value_blocks = torch.empty(
                 size=(self.num_cpu_blocks, *value_block_shape),
                 dtype=self.dtype,
                 pin_memory=pin_memory,
+                device="cpu",
             )
             cpu_cache.append((key_blocks, value_blocks))
         return cpu_cache

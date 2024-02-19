@@ -121,13 +121,18 @@ def sql_lora_files():
     return snapshot_download(repo_id="yard1/llama-2-7b-sql-lora-test")
 
 
+@pytest.fixture(scope="session")
+def mixtral_lora_files():
+    return snapshot_download(repo_id="terrysun/mixtral-lora-adapter")
+
+
 @pytest.fixture
 def llama_2_7b_engine_extra_embeddings() -> nn.Module:
     cleanup()
     get_model_old = get_model
 
-    def get_model_patched(model_config, lora_config=None):
-        return get_model_old(model_config,
+    def get_model_patched(model_config, device_config, lora_config=None):
+        return get_model_old(model_config, device_config,
                              LoRAConfig(max_loras=4, max_lora_rank=8))
 
     with patch("vllm.worker.model_runner.get_model", get_model_patched):

@@ -228,7 +228,8 @@ def create_kv_caches_with_random(
     device: Optional[str] = "cuda",
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
     torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
 
     if isinstance(cache_dtype, str):
         if cache_dtype == "auto":
@@ -257,10 +258,13 @@ def create_kv_caches_with_random(
         key_cache = torch.empty(size=key_cache_shape,
                                 dtype=torch_dtype,
                                 device=device)
-        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
-            key_cache.uniform_(-scale, scale)
-        elif cache_dtype == 'fp8_e5m2':
+        if cache_dtype == 'fp8_e5m2':
             _generate_random_fp8_e5m2(key_cache, -scale, scale)
+        elif torch_dtype in [torch.half, torch.bfloat16, torch.float]:
+            key_cache.uniform_(-scale, scale)
+        else:
+            raise ValueError(
+                f"Does not support key cache of type {cache_dtype}")
         key_caches.append(key_cache)
 
     value_cache_shape = (num_blocks, num_heads, head_size, block_size)
@@ -269,9 +273,12 @@ def create_kv_caches_with_random(
         value_cache = torch.empty(size=value_cache_shape,
                                   dtype=torch_dtype,
                                   device=device)
-        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
-            value_cache.uniform_(-scale, scale)
-        elif cache_dtype == 'fp8_e5m2':
+        if cache_dtype == 'fp8_e5m2':
             _generate_random_fp8_e5m2(value_cache, -scale, scale)
+        elif torch_dtype in [torch.half, torch.bfloat16, torch.float]:
+            value_cache.uniform_(-scale, scale)
+        else:
+            raise ValueError(
+                f"Does not support value cache of type {cache_dtype}")
         value_caches.append(value_cache)
     return key_caches, value_caches

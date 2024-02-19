@@ -196,7 +196,7 @@ class Sequence:
         return self.data.cumulative_logprob
 
     def get_beam_search_score(self,
-                              length_penalty: float = 0.0,
+                              length_penalty: float = 1.0,
                               seq_len: Optional[int] = None,
                               eos_token_id: Optional[int] = None) -> float:
         """Calculate the beam search score with length penalty.
