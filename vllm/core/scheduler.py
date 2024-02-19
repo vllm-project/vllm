@@ -9,6 +9,11 @@ from vllm.logger import init_logger
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceStatus)
 
+#JE : for using nvtx
+import nvtx
+from vllm.block import PhysicalTokenBlock
+BlockTable = List[PhysicalTokenBlock]
+
 logger = init_logger(__name__)
 
 
@@ -35,6 +40,10 @@ class SchedulerOutputs:
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
+        #JE
+        blocks_to_pre_copy: Dict[int, int],
+        blocks_to_gpu_free: BlockTable,
+        blocks_to_cpu_free: BlockTable,
         ignored_seq_groups: List[SequenceGroup],
     ) -> None:
         self.scheduled_seq_groups = scheduled_seq_groups
@@ -43,6 +52,10 @@ class SchedulerOutputs:
         self.blocks_to_swap_in = blocks_to_swap_in
         self.blocks_to_swap_out = blocks_to_swap_out
         self.blocks_to_copy = blocks_to_copy
+        #JE
+        self.blocks_to_pre_copy = blocks_to_pre_copy
+        self.blocks_to_gpu_free = blocks_to_gpu_free
+        self.blocks_to_cpu_free = blocks_to_cpu_free
         # Swap in and swap out should never happen at the same time.
         assert not (blocks_to_swap_in and blocks_to_swap_out)
         self.ignored_seq_groups = ignored_seq_groups
@@ -50,7 +63,7 @@ class SchedulerOutputs:
     def is_empty(self) -> bool:
         # NOTE: We do not consider the ignored sequence groups.
         return (not self.scheduled_seq_groups and not self.blocks_to_swap_in
-                and not self.blocks_to_swap_out and not self.blocks_to_copy)
+                and not self.blocks_to_swap_out and not self.blocks_to_copy and not self.blocks_to_pre_copy and not self.blocks_to_gpu_free and not self.blocks_to_cpu_free) #JE
 
 
 class Scheduler:
@@ -82,6 +95,7 @@ class Scheduler:
         self.running: List[SequenceGroup] = []
         # Sequence groups in the SWAPPED state.
         self.swapped: List[SequenceGroup] = []
+        self.pre_copied: List[SequenceGroup] = []
 
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the waiting queue.
@@ -119,6 +133,10 @@ class Scheduler:
         blocks_to_swap_in: Dict[int, int] = {}
         blocks_to_swap_out: Dict[int, int] = {}
         blocks_to_copy: Dict[int, List[int]] = {}
+        #JE
+        blocks_to_pre_copy: Dict[int, int] = {}
+        blocks_to_gpu_free: BlockTable = []
+        blocks_to_cpu_free: BlockTable = []
 
         # Fix the current time.
         now = time.monotonic()
@@ -131,7 +149,8 @@ class Scheduler:
             # requests in the generation phase.
             num_curr_seqs = sum(seq_group.get_max_num_running_seqs()
                                 for seq_group in self.running)
-            num_batched_tokens = 0
+            seq_lens: List[int] = []
+
             # Optimization: We do not sort the waiting queue since the preempted
             # sequence groups are added to the front and the new sequence groups
             # are added to the back.
@@ -157,7 +176,9 @@ class Scheduler:
                     break
 
                 # If the number of batched tokens exceeds the limit, stop.
-                if (num_batched_tokens + num_prompt_tokens >
+                new_seq_lens = seq_lens + [num_prompt_tokens]
+                num_batched_tokens = len(new_seq_lens) * max(new_seq_lens)
+                if (num_batched_tokens >
                         self.scheduler_config.max_num_batched_tokens):
                     break
 
@@ -168,10 +189,14 @@ class Scheduler:
                         self.scheduler_config.max_num_seqs):
                     break
 
+                num_paddings = num_batched_tokens - sum(new_seq_lens)
+                if num_paddings > self.scheduler_config.max_paddings:
+                    break
+                seq_lens = new_seq_lens
+
                 seq_group = self.waiting.pop(0)
                 self._allocate(seq_group)
                 self.running.append(seq_group)
-                num_batched_tokens += num_prompt_tokens
                 num_curr_seqs += num_new_seqs
                 scheduled.append(seq_group)
 
@@ -179,10 +204,13 @@ class Scheduler:
                 scheduler_outputs = SchedulerOutputs(
                     scheduled_seq_groups=scheduled,
                     prompt_run=True,
-                    num_batched_tokens=num_batched_tokens,
+                    num_batched_tokens=len(seq_lens) * max(seq_lens),
                     blocks_to_swap_in=blocks_to_swap_in,
                     blocks_to_swap_out=blocks_to_swap_out,
                     blocks_to_copy=blocks_to_copy,
+                    blocks_to_pre_copy=blocks_to_pre_copy,
+                    blocks_to_gpu_free=blocks_to_gpu_free,
+                    blocks_to_cpu_free=blocks_to_cpu_free,
                     ignored_seq_groups=ignored_seq_groups,
                 )
                 return scheduler_outputs
@@ -192,18 +220,35 @@ class Scheduler:
         # In this case, the policy is responsible for deciding which sequence
         # groups to preempt.
         self.running = self.policy.sort_by_priority(now, self.running)
-
+        
         # Reserve new token slots for the running sequence groups.
         running: List[SequenceGroup] = []
         preempted: List[SequenceGroup] = []
         while self.running:
             seq_group = self.running.pop(0)
+            running_cp = self.running
             while not self.block_manager.can_append_slot(seq_group):
                 if self.running:
                     # Preempt the lowest-priority sequence groups.
                     victim_seq_group = self.running.pop(-1)
+                    
+                    #JE : START
+                    if victim_seq_group in self.pre_copied :
+                      self.block_manager._free_block_table(self.blocks_to_gpu_free)
+                      
+                    '''else:
+                      print(f"CPU blocks : {self.block_manager.cpu_allocator.get_num_free_blocks()}")
+                      self.block_manager._free_block_table(self.blocks_to_cpu_free)
+                      print("************ JE : FREE CPU blocks ***********")'''
+                    
+                    # JE : END 
+                    print(f"blocks_to_pre_copy : {blocks_to_pre_copy}")
+                    
                     self._preempt(victim_seq_group, blocks_to_swap_out)
                     preempted.append(victim_seq_group)
+                    print(f"blocks_to_swap_out: {blocks_to_swap_out}")
+                    print("############## SWAP OUT ###############")
+                    self.pre_copied.clear()
                 else:
                     # No other sequence groups can be preempted.
                     # Preempt the current sequence group.
@@ -211,9 +256,22 @@ class Scheduler:
                     preempted.append(seq_group)
                     break
             else:
-                # Append new slots to the sequence group.
-                self._append_slot(seq_group, blocks_to_copy)
-                running.append(seq_group)
+            
+                 # Append new slots to the sequence group.
+                 self._append_slot(seq_group, blocks_to_copy)
+                 running.append(seq_group)
+                 
+                 #JE
+                 if not self.block_manager.is_slot_enough(seq_group) :
+                   running_cp = self.running.copy()
+                   if running_cp :
+                     to_be_victim_seq_group = running_cp.pop(-1)
+                     self.pre_copied.append(to_be_victim_seq_group)
+                     print(f"pre_copied : {self.pre_copied}")
+                #        #print(self.block_manager.get_num_free_cpu_blocks())
+                     self._pre_copy(to_be_victim_seq_group, blocks_to_pre_copy)
+                     print("*************** JE : PRE-COPY**********************")
+                
         self.running = running
 
         # Swap in the sequence groups in the SWAPPED state if possible.
@@ -255,6 +313,10 @@ class Scheduler:
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
+            #JE
+            blocks_to_pre_copy=blocks_to_pre_copy,
+            blocks_to_gpu_free=blocks_to_gpu_free,
+            blocks_to_cpu_free=blocks_to_cpu_free,
             ignored_seq_groups=[],
         )
         return scheduler_outputs
@@ -268,7 +330,7 @@ class Scheduler:
         # Create input data structures.
         seq_group_metadata_list: List[SequenceGroupMetadata] = []
         for seq_group in scheduler_outputs.scheduled_seq_groups:
-            seq_data: Dict[int, List[SequenceData]] = {}
+            seq_data: Dict[int, SequenceData] = {}
             block_tables: Dict[int, List[int]] = {}
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
@@ -335,7 +397,7 @@ class Scheduler:
         # sequences. This may require a more sophisticated CUDA kernel.
         if preemption_mode is None:
             if seq_group.get_max_num_running_seqs() == 1:
-                preemption_mode = PreemptionMode.RECOMPUTE
+                preemption_mode = PreemptionMode.SWAP
             else:
                 preemption_mode = PreemptionMode.SWAP
         if preemption_mode == PreemptionMode.RECOMPUTE:
@@ -366,6 +428,7 @@ class Scheduler:
         self._swap_out(seq_group, blocks_to_swap_out)
         self.swapped.append(seq_group)
 
+    @nvtx.annotate("_swap_in", color="blue")
     def _swap_in(
         self,
         seq_group: SequenceGroup,
@@ -376,6 +439,7 @@ class Scheduler:
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
             seq.status = SequenceStatus.RUNNING
 
+    @nvtx.annotate("_swap_out", color="red")
     def _swap_out(
         self,
         seq_group: SequenceGroup,
@@ -384,10 +448,28 @@ class Scheduler:
         if not self.block_manager.can_swap_out(seq_group):
             # FIXME(woosuk): Abort the sequence group instead of aborting the
             # entire engine.
-            raise RuntimeError(
-                "Aborted due to the lack of CPU swap space. Please increase "
-                "the swap space to avoid this error.")
+            for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING) :
+                seq.status = SequenceStatus.WAITING
+            #raise RuntimeError(
+            #    "Aborted due to the lack of CPU swap space. Please increase "
+            #    "the swap space to avoid this error.")
         mapping = self.block_manager.swap_out(seq_group)
         blocks_to_swap_out.update(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             seq.status = SequenceStatus.SWAPPED
+
+    # JE : START
+    def _pre_copy(
+        self,
+        seq_group: SequenceGroup,
+        blocks_to_pre_copy: Dict[int, int],
+    ) -> None:
+        mapping, self.blocks_to_gpu_free, self.blocks_to_cpu_free = self.block_manager.pre_copy(seq_group)
+        blocks_to_pre_copy.update(mapping)
+
+    ''' def _free_copied_blocks(
+      	self,
+        block_table,
+	  ) -> None:
+	      self.block_manager._free_block_table(block_table)'''
+    # JE : END

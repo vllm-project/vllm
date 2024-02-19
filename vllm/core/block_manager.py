@@ -4,8 +4,13 @@ from typing import Dict, List, Optional, Set, Tuple
 from vllm.block import PhysicalTokenBlock
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
-
-
+import time
+from matplotlib import pyplot as plt
+     
+     
+#JE : for using nvtx
+import nvtx
+   
 class BlockAllocator:
     """Manages free physical token blocks for a device.
 
@@ -39,13 +44,16 @@ class BlockAllocator:
         block.ref_count = 1
         return block
 
+    #@nvtx.annotate("free", color="blue")
     def free(self, block: PhysicalTokenBlock) -> None:
         if block.ref_count == 0:
             raise ValueError(f"Double free! {block} is already freed.")
         block.ref_count -= 1
         if block.ref_count == 0:
+            #print("JE : free blocks here")
             self.free_blocks.append(block)
-
+            
+    #@nvtx.annotate("get_num_free", color="blue")
     def get_num_free_blocks(self) -> int:
         return len(self.free_blocks)
 
@@ -125,7 +133,7 @@ class BlockSpaceManager:
         # for each sequence, we can append.
         num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
         num_seqs = seq_group.num_seqs(status=SequenceStatus.RUNNING)
-        return num_seqs <= num_free_gpu_blocks
+        return num_seqs < num_free_gpu_blocks
 
     def append_slot(self, seq: Sequence) -> Optional[Tuple[int, int]]:
         """Allocate a physical slot for a new token."""
@@ -187,9 +195,26 @@ class BlockSpaceManager:
         # NOTE: This should match the logic in can_append_slot().
         num_required_blocks = len(blocks) + num_swapped_seqs
         return num_free_blocks - num_required_blocks >= self.watermark_blocks
+    
+    #global num_swap_in 
+    #num_swap_in = 0
+    #global num_swap_out
+    #num_swap_out = 0
+    #global total_swap_in 
+    #total_swap_in = 0
+    #global total_swap_out
+    #total_swap_out = 0
 
+    @nvtx.annotate("swap_in", color="blue")
     def swap_in(self, seq_group: SequenceGroup) -> Dict[int, int]:
         # CPU block -> GPU block.
+        #start = time.time()
+        #with open("swap_in_times.txt", "a") as file:
+        #    file.write(f"{start:.5f}\n")
+        #with open("swap_in_order.txt", "a") as file:
+        #    file.write(f"{len(open('swap_in_order.txt').readlines()) + 1}\n")
+       # global num_swap_in 
+       # num_swap_in += 1
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
             new_block_table: BlockTable = []
@@ -211,15 +236,29 @@ class BlockSpaceManager:
             cpu_block.block_number: gpu_block.block_number
             for cpu_block, gpu_block in mapping.items()
         }
+        #end = time.time()
+        #global total_swap_in
+        #total_swap_in += end - start
+        #print(f"SWAP_IN : {num_swap_in}\ntime : {end - start:.5f} sec\ntotal_time : {total_swap_in:.5f}")
         return block_number_mapping
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
         blocks = self._get_physical_blocks(seq_group)
         return len(blocks) <= self.cpu_allocator.get_num_free_blocks()
 
+    @nvtx.annotate("swap_out", color="red")
     def swap_out(self, seq_group: SequenceGroup) -> Dict[int, int]:
         # GPU block -> CPU block.
+       # start = time.time()
+       # with open("swap_out_times.txt", "a") as file:
+       #     file.write(f"{start:.5f}\n")
+       # with open("swap_out_order.txt", "a") as file:
+        #    file.write(f"{len(open('swap_out_order.txt').readlines()) + 1}\n")
+       # global num_swap_out
+       # num_swap_out += 1
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
+        gpu_blocks: BlockTable =[]
+        cpu_blocks: BlockTable =[]
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             new_block_table: BlockTable = []
             block_table = self.block_tables[seq.seq_id]
@@ -234,12 +273,22 @@ class BlockSpaceManager:
                 new_block_table.append(cpu_block)
                 # Free the GPU block swapped out to CPU.
                 self.gpu_allocator.free(gpu_block)
+                gpu_blocks.append(gpu_block)
+                cpu_blocks.append(cpu_block)
+                
             self.block_tables[seq.seq_id] = new_block_table
+            print(f"new_block_table : {new_block_table}")
+            print(f"gpu blocks : {gpu_blocks}")
+            print(f"cpu blocks : {cpu_blocks}")
 
         block_number_mapping = {
             gpu_block.block_number: cpu_block.block_number
             for gpu_block, cpu_block in mapping.items()
         }
+       # end = time.time()
+       # global total_swap_out
+       # total_swap_out += end - start
+        # print(f"SWAP_OUT : {num_swap_out}\ntime : {end - start:.5f} sec\ntotal_time : {total_swap_out:.5f}")
         return block_number_mapping
 
     def _free_block_table(self, block_table: BlockTable) -> None:
@@ -271,3 +320,45 @@ class BlockSpaceManager:
 
     def get_num_free_cpu_blocks(self) -> int:
         return self.cpu_allocator.get_num_free_blocks()
+
+    #JE : START
+    def is_slot_enough(self, seq_group: SequenceGroup) -> bool :
+        num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
+        num_seqs = seq_group.num_seqs(status=SequenceStatus.RUNNING)
+        return num_seqs + 1 <= num_free_gpu_blocks
+
+    def pre_copy(self, seq_group: SequenceGroup) -> Dict[int, int]:
+        # GPU block -> CPU block
+        mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
+        gpu_blocks: BlockTable =[]
+        cpu_blocks: BlockTable =[]
+        
+        for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+            new_block_table: BlockTable = []
+            block_table = self.block_tables[seq.seq_id]
+
+            for gpu_block in block_table:
+                if gpu_block in mapping:
+                    cpu_block = mapping[gpu_block]
+                    cpu_block.ref_count += 1
+                else:
+                    cpu_block = self.cpu_allocator.allocate()
+                    mapping[gpu_block] = cpu_block
+                new_block_table.append(cpu_block)
+                gpu_blocks.append(gpu_block)
+                cpu_blocks.append(cpu_block)
+                
+                # Free the GPU block swapped out to CPU.
+                # self.gpu_allocator.free(gpu_block)
+            self.block_tables[seq.seq_id] = new_block_table
+            print(f"new_block_table : {new_block_table}")
+            print(f"gpu blocks : {gpu_blocks}")
+            print(f"cpu blocks : {cpu_blocks}")
+
+        block_number_mapping = {
+            gpu_block.block_number: cpu_block.block_number
+            for gpu_block, cpu_block in mapping.items()
+        }
+        return block_number_mapping, gpu_blocks, cpu_blocks
+    #JE : END
+
