@@ -75,7 +75,7 @@ class LLMEngine:
         lora_config: Optional[LoRAConfig],
         placement_group: Optional["PlacementGroup"],
         log_stats: bool,
-        tokenizer_init_kwargs: Optional[Dict[str, Any]],
+        tokenizer_init_kwargs: Optional[Dict[str, Any]] = None,
     ) -> None:
         logger.info(
             "Initializing an LLM engine with config: "
@@ -173,7 +173,8 @@ class LLMEngine:
             tokenizer_mode=self.model_config.tokenizer_mode,
             trust_remote_code=self.model_config.trust_remote_code,
             revision=self.model_config.tokenizer_revision)
-        init_kwargs.update(tokenizer_init_kwargs)
+        if tokenizer_init_kwargs is not None:
+            init_kwargs.update(tokenizer_init_kwargs)
         self.tokenizer: TokenizerGroup = TokenizerGroup(
             self.model_config.tokenizer, **init_kwargs)
 
