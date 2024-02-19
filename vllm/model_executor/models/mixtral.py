@@ -140,7 +140,7 @@ class MixtralMoE(nn.Module):
                                         self.top_k,
                                         renormalize=True,
                                         inplace=True,
-                                        self.fused_moe_config)
+                                        fused_moe_config=self.fused_moe_config)
 
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
