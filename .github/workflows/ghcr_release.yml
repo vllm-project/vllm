@@ -19,9 +19,7 @@ jobs:
       packages: write
 
     steps:
-      - name: "Free up space"
-        run: "sudo apt autoremove -y && sudo apt clean -y && sudo rm -rf /var/lib/apt/lists/* && sudo rm -rf /var/cache/apt/* && sudo rm -rf /tmp/* && sudo rm -rf /var/tmp"
-
+      
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it.
       - name: "Checkout Repository"
         uses: actions/checkout@v4
