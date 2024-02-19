@@ -85,11 +85,6 @@ def test_models(
                 zip(gptq_output_ids, marlin_output_ids)):
             # If sequence is not an exact match,
             if marlin_output_id != gptq_output_id:
-                if gptq_output_id not in marlin_logprobs[idx]:
-                    print("\n\n\nOMG IM HERE\n\n\n")
-                if marlin_output_id not in gptq_logprobs[idx]:
-                    print("\n\n\nOMG IM HERE\n\n\n")
-
                 # Each predicted token must be in top 5 of the other's
                 assert gptq_output_id in marlin_logprobs[idx], (
                     f"Test{prompt_idx}:\nGPTQ:\t{gptq_output_str!r}\nMarlin:\t{marlin_output_str!r}"
