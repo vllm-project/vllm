@@ -75,6 +75,7 @@ class LLMEngine:
         lora_config: Optional[LoRAConfig],
         placement_group: Optional["PlacementGroup"],
         log_stats: bool,
+        tokenizer_init_kwargs: Dict[str, Any]
     ) -> None:
         logger.info(
             "Initializing an LLM engine with config: "
@@ -94,7 +95,8 @@ class LLMEngine:
             f"enforce_eager={model_config.enforce_eager}, "
             f"kv_cache_dtype={cache_config.cache_dtype}, "
             f"device_config={device_config.device}, "
-            f"seed={model_config.seed})")
+            f"seed={model_config.seed})",
+            f"tokenizer_init_kwargs={tokenizer_init_kwargs}")
         # TODO(woosuk): Print more configs in debug mode.
 
         self.model_config = model_config
@@ -106,7 +108,7 @@ class LLMEngine:
         self.log_stats = log_stats
         self._verify_args()
 
-        self._init_tokenizer()
+        self._init_tokenizer(tokenizer_init_kwargs)
         self.seq_counter = Counter()
 
         # Create the parallel GPU workers.
