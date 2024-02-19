@@ -233,7 +233,7 @@ def get_c4_new(tokenizer, nsamples, seed, seqlen):
     return trainloader, valenc
 
 
-def get_pileval(tokenizer, nsamples, seed, seqlen=512):
+def get_pileval(tokenizer, nsamples, seed, path, seqlen=512):
     """Load pileval train dataset and tokenize.
 
     Args:
@@ -251,7 +251,7 @@ def get_pileval(tokenizer, nsamples, seed, seqlen=512):
     try:
         dataset = load_dataset(
             'json',
-            data_files='https://the-eye.eu/public/AI/pile/val.jsonl.zst',
+            data_files=path,
             split='train')
     except DatasetGenerationError as err:
         raise InterruptedError('There have been some issues when generating '
@@ -315,4 +315,6 @@ def get_calib_loaders(name,
         return get_c4(tokenizer, nsamples, seed, seqlen, path)
 
     if 'pileval' in name:
-        return get_pileval(tokenizer, nsamples, seed, seqlen)
+        if path is None:
+            path = 'https://the-eye.eu/public/AI/pile/val.jsonl.zst'
+        return get_pileval(tokenizer, nsamples, seed, path, seqlen)
