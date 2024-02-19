@@ -3,14 +3,22 @@ from typing import List, Optional
 
 import torch
 import torch.nn as nn
-from xformers import ops as xops
-from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
-                                         LowerTriangularMaskWithTensorBias)
 
-from vllm._C import ops
-from vllm._C import cache_ops
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.utils import is_hip
+from vllm.utils import is_hip, is_hpu
+
+if is_hpu():
+    from vllm.hpu import ops
+    from vllm.hpu import cache_ops
+    from vllm.hpu import xops
+    from vllm.hpu.attn_bias import (BlockDiagonalCausalMask,
+                                    LowerTriangularMaskWithTensorBias)
+else:
+    from vllm._C import ops
+    from vllm._C import cache_ops
+    from xformers import ops as xops
+    from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
+                                             LowerTriangularMaskWithTensorBias)
 
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
@@ -143,17 +151,35 @@ class PagedAttention(nn.Module):
                 key = key.unflatten(0, (batch_size, seq_len))
                 value = value.unflatten(0, (batch_size, seq_len))
 
-            out = xops.memory_efficient_attention_forward(
-                query,
-                key,
-                value,
-                attn_bias=input_metadata.attn_bias,
-                p=0.0,
-                scale=self.scale,
-                op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if
-                (is_hip()) else None,
-            )
-            output = out.view_as(query)
+            if is_hpu():
+                cu_seq_lens = [0]
+                for i in range(len(input_metadata.prompt_lens)):
+                    cu_seq_lens.append(cu_seq_lens[-1] + input_metadata.prompt_lens[i])
+                input_metadata.cu_seq_lens = cu_seq_lens
+                out = xops.memory_efficient_attention_forward(
+                    query,
+                    key,
+                    value,
+                    cu_seq_lens,
+                    attn_bias=input_metadata.attn_bias,
+                    p=0.0,
+                    scale=self.scale,
+                )
+                output = torch.zeros_like(query)
+                output[:, :out.shape[1], :, :] = out
+                output = output.view_as(query)
+            else:
+                out = xops.memory_efficient_attention_forward(
+                    query,
+                    key,
+                    value,
+                    attn_bias=input_metadata.attn_bias,
+                    p=0.0,
+                    scale=self.scale,
+                    op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if
+                    (is_hip()) else None,
+                )
+                output = out.view_as(query)
         else:
             # Decoding run.
             if key_cache is not None and value_cache is not None:
@@ -234,10 +260,9 @@ def _paged_attention(
     # For context len > 8192, use V2 kernel to avoid shared memory shortage.
     use_v1 = input_metadata.max_context_len <= 8192 and (
         max_num_partitions == 1 or num_seqs * num_heads > 512)
-    if use_v1:
-        # Run PagedAttention V1.
-        ops.paged_attention_v1(
-            output,
+
+    if is_hpu():
+        output = ops.paged_attention_v1(
             query,
             key_cache,
             value_cache,
@@ -250,33 +275,49 @@ def _paged_attention(
             alibi_slopes,
         )
     else:
-        # Run PagedAttention V2.
-        assert _PARTITION_SIZE % block_size == 0
-        tmp_output = torch.empty(
-            size=(num_seqs, num_heads, max_num_partitions, head_size),
-            dtype=output.dtype,
-            device=output.device,
-        )
-        exp_sums = torch.empty(
-            size=(num_seqs, num_heads, max_num_partitions),
-            dtype=torch.float32,
-            device=output.device,
-        )
-        max_logits = torch.empty_like(exp_sums)
-        ops.paged_attention_v2(
-            output,
-            exp_sums,
-            max_logits,
-            tmp_output,
-            query,
-            key_cache,
-            value_cache,
-            num_kv_heads,
-            scale,
-            input_metadata.block_tables,
-            input_metadata.context_lens,
-            block_size,
-            input_metadata.max_context_len,
-            alibi_slopes,
-        )
+        if use_v1:
+            # Run PagedAttention V1.
+            ops.paged_attention_v1(
+                output,
+                query,
+                key_cache,
+                value_cache,
+                num_kv_heads,
+                scale,
+                input_metadata.block_tables,
+                input_metadata.context_lens,
+                block_size,
+                input_metadata.max_context_len,
+                alibi_slopes,
+            )
+        else:
+            # Run PagedAttention V2.
+            assert _PARTITION_SIZE % block_size == 0
+            tmp_output = torch.empty(
+                size=(num_seqs, num_heads, max_num_partitions, head_size),
+                dtype=output.dtype,
+                device=output.device,
+            )
+            exp_sums = torch.empty(
+                size=(num_seqs, num_heads, max_num_partitions),
+                dtype=torch.float32,
+                device=output.device,
+            )
+            max_logits = torch.empty_like(exp_sums)
+            ops.paged_attention_v2(
+                output,
+                exp_sums,
+                max_logits,
+                tmp_output,
+                query,
+                key_cache,
+                value_cache,
+                num_kv_heads,
+                scale,
+                input_metadata.block_tables,
+                input_metadata.context_lens,
+                block_size,
+                input_metadata.max_context_len,
+                alibi_slopes,
+            )
     return output

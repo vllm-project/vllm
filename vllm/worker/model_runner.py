@@ -10,7 +10,7 @@ from vllm.logger import init_logger
 from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
-from vllm.utils import in_wsl
+from vllm.utils import in_wsl, is_hpu
 
 logger = init_logger(__name__)
 
@@ -307,9 +307,9 @@ class ModelRunner:
 
         selected_token_indices = _async_h2d(selected_token_indices,
                                             dtype=torch.long,
-                                            pin_memory=not self.in_wsl)
+                                            pin_memory=not is_hpu() and not self.in_wsl)
         categorized_sample_indices = {
-            t: _async_h2d(seq_ids, dtype=torch.int, pin_memory=not self.in_wsl)
+            t: _async_h2d(seq_ids, dtype=torch.int, pin_memory=not is_hpu() and not self.in_wsl)
             for t, seq_ids in categorized_sample_indices.items()
         }
 
@@ -414,7 +414,7 @@ class ModelRunner:
         input_tokens = torch.zeros(max_batch_size, 1, dtype=torch.long).cuda()
         input_positions = torch.zeros(max_batch_size, 1,
                                       dtype=torch.long).cuda()
-        slot_mapping = torch.empty(max_batch_size, 1, dtype=torch.long).cuda()
+        slot_mapping = torch.zeros(max_batch_size, 1, dtype=torch.long).cuda() # FIXME (kzawora): revert this to torch.empty after bridge bug is fixed
         slot_mapping.fill_(_PAD_SLOT_ID)
         context_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
         block_tables = torch.from_numpy(self.graph_block_tables).cuda()

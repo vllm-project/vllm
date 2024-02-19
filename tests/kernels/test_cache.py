@@ -3,7 +3,11 @@ import random
 import pytest
 import torch
 
-from vllm._C import cache_ops
+from vllm.utils import is_hpu
+if is_hpu():
+    from vllm.hpu import cache_ops
+else:
+    from vllm._C import cache_ops
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [83]  # Arbitrary values for testing

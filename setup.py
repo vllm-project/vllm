@@ -19,19 +19,26 @@ NVIDIA_SUPPORTED_ARCHS = {"7.0", "7.5", "8.0", "8.6", "8.9", "9.0"}
 ROCM_SUPPORTED_ARCHS = {"gfx90a", "gfx908", "gfx906", "gfx1030", "gfx1100"}
 # SUPPORTED_ARCHS = NVIDIA_SUPPORTED_ARCHS.union(ROCM_SUPPORTED_ARCHS)
 
-
 def _is_hip() -> bool:
     return torch.version.hip is not None
 
 
 def _is_cuda() -> bool:
-    return torch.version.cuda is not None
+    return torch.version.cuda is not None and torch.cuda.is_available()
 
 
 # Compiler flags.
-CXX_FLAGS = ["-g", "-O2", "-std=c++17"]
+CXX_FLAGS = []
 # TODO(woosuk): Should we use -O3?
-NVCC_FLAGS = ["-O2", "-std=c++17"]
+NVCC_FLAGS = []
+
+if _is_cuda() or _is_hip():    
+    CXX_FLAGS = ["-g", "-O2", "-std=c++17"]
+    NVCC_FLAGS = ["-O2", "-std=c++17"]
+
+    ABI = 1 if torch._C._GLIBCXX_USE_CXX11_ABI else 0
+    CXX_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
+    NVCC_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
 
 if _is_hip():
     if ROCM_HOME is None:
@@ -43,11 +50,6 @@ if _is_hip():
 if _is_cuda() and CUDA_HOME is None:
     raise RuntimeError(
         "Cannot find CUDA_HOME. CUDA must be available to build the package.")
-
-ABI = 1 if torch._C._GLIBCXX_USE_CXX11_ABI else 0
-CXX_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
-NVCC_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
-
 
 def get_amdgpu_offload_arch():
     command = "/opt/rocm/llvm/bin/amdgpu-offload-arch"
@@ -101,43 +103,45 @@ def get_nvcc_cuda_version(cuda_dir: str) -> Version:
 
 
 def get_torch_arch_list() -> Set[str]:
-    # TORCH_CUDA_ARCH_LIST can have one or more architectures,
-    # e.g. "8.0" or "7.5,8.0,8.6+PTX". Here, the "8.6+PTX" option asks the
-    # compiler to additionally include PTX code that can be runtime-compiled
-    # and executed on the 8.6 or newer architectures. While the PTX code will
-    # not give the best performance on the newer architectures, it provides
-    # forward compatibility.
-    env_arch_list = os.environ.get("TORCH_CUDA_ARCH_LIST", None)
-    if env_arch_list is None:
+    if _is_cuda() or _is_hip():
+        # TORCH_CUDA_ARCH_LIST can have one or more architectures,
+        # e.g. "8.0" or "7.5,8.0,8.6+PTX". Here, the "8.6+PTX" option asks the
+        # compiler to additionally include PTX code that can be runtime-compiled
+        # and executed on the 8.6 or newer architectures. While the PTX code will
+        # not give the best performance on the newer architectures, it provides
+        # forward compatibility.
+        env_arch_list = os.environ.get("TORCH_CUDA_ARCH_LIST", None)
+        if env_arch_list is None:
+            return set()
+
+        # List are separated by ; or space.
+        torch_arch_list = set(env_arch_list.replace(" ", ";").split(";"))
+        if not torch_arch_list:
+            return set()
+
+        # Filter out the invalid architectures and print a warning.
+        valid_archs = NVIDIA_SUPPORTED_ARCHS.union(
+            {s + "+PTX"
+            for s in NVIDIA_SUPPORTED_ARCHS})
+        arch_list = torch_arch_list.intersection(valid_archs)
+        # If none of the specified architectures are valid, raise an error.
+        if not arch_list:
+            raise RuntimeError(
+                "None of the CUDA/ROCM architectures in `TORCH_CUDA_ARCH_LIST` env "
+                f"variable ({env_arch_list}) is supported. "
+                f"Supported CUDA/ROCM architectures are: {valid_archs}.")
+        invalid_arch_list = torch_arch_list - valid_archs
+        if invalid_arch_list:
+            warnings.warn(
+                f"Unsupported CUDA/ROCM architectures ({invalid_arch_list}) are "
+                "excluded from the `TORCH_CUDA_ARCH_LIST` env variable "
+                f"({env_arch_list}). Supported CUDA/ROCM architectures are: "
+                f"{valid_archs}.",
+                stacklevel=2)
+        return arch_list
+    else:
         return set()
-
-    # List are separated by ; or space.
-    torch_arch_list = set(env_arch_list.replace(" ", ";").split(";"))
-    if not torch_arch_list:
-        return set()
-
-    # Filter out the invalid architectures and print a warning.
-    valid_archs = NVIDIA_SUPPORTED_ARCHS.union(
-        {s + "+PTX"
-         for s in NVIDIA_SUPPORTED_ARCHS})
-    arch_list = torch_arch_list.intersection(valid_archs)
-    # If none of the specified architectures are valid, raise an error.
-    if not arch_list:
-        raise RuntimeError(
-            "None of the CUDA/ROCM architectures in `TORCH_CUDA_ARCH_LIST` env "
-            f"variable ({env_arch_list}) is supported. "
-            f"Supported CUDA/ROCM architectures are: {valid_archs}.")
-    invalid_arch_list = torch_arch_list - valid_archs
-    if invalid_arch_list:
-        warnings.warn(
-            f"Unsupported CUDA/ROCM architectures ({invalid_arch_list}) are "
-            "excluded from the `TORCH_CUDA_ARCH_LIST` env variable "
-            f"({env_arch_list}). Supported CUDA/ROCM architectures are: "
-            f"{valid_archs}.",
-            stacklevel=2)
-    return arch_list
-
-
+        
 # First, check the TORCH_CUDA_ARCH_LIST environment variable.
 compute_capabilities = get_torch_arch_list()
 if _is_cuda() and not compute_capabilities:
@@ -227,15 +231,15 @@ vllm_extension_sources = [
 if _is_cuda():
     vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
 
-vllm_extension = CUDAExtension(
-    name="vllm._C",
-    sources=vllm_extension_sources,
-    extra_compile_args={
-        "cxx": CXX_FLAGS,
-        "nvcc": NVCC_FLAGS,
-    },
-)
-ext_modules.append(vllm_extension)
+    vllm_extension = CUDAExtension(
+        name="vllm._C",
+        sources=vllm_extension_sources,
+        extra_compile_args={
+            "cxx": CXX_FLAGS,
+            "nvcc": NVCC_FLAGS,
+        },
+    )
+    ext_modules.append(vllm_extension)
 
 
 def get_path(*filepath) -> str:
@@ -264,7 +268,7 @@ def get_vllm_version() -> str:
         if hipcc_version != MAIN_CUDA_VERSION:
             rocm_version_str = hipcc_version.replace(".", "")[:3]
             version += f"+rocm{rocm_version_str}"
-    else:
+    elif _is_cuda():
         cuda_version = str(nvcc_cuda_version)
         if cuda_version != MAIN_CUDA_VERSION:
             cuda_version_str = cuda_version.replace(".", "")[:3]
@@ -274,18 +278,17 @@ def get_vllm_version() -> str:
 
 
 def read_readme() -> str:
-    """Read the README file if present."""
-    p = get_path("README.md")
-    if os.path.isfile(p):
-        return io.open(get_path("README.md"), "r", encoding="utf-8").read()
-    else:
-        return ""
+    """Read the README file."""
+    return io.open(get_path("README.md"), "r", encoding="utf-8").read()
 
 
 def get_requirements() -> List[str]:
     """Get Python package dependencies from requirements.txt."""
     if _is_hip():
         with open(get_path("requirements-rocm.txt")) as f:
+            requirements = f.read().strip().split("\n")
+    elif not _is_cuda() and not _is_hip():
+        with open(get_path("requirements-hpu.txt")) as f:
             requirements = f.read().strip().split("\n")
     else:
         with open(get_path("requirements.txt")) as f:
@@ -320,6 +323,5 @@ setuptools.setup(
     python_requires=">=3.8",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
-    cmdclass={"build_ext": BuildExtension},
-    package_data={"vllm": ["py.typed"]},
+    cmdclass={"build_ext": BuildExtension} if _is_cuda() or _is_hip() else {},
 )

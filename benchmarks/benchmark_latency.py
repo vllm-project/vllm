@@ -6,6 +6,9 @@ from typing import Optional
 
 import numpy as np
 import torch
+from vllm.utils import is_hpu
+if is_hpu():
+    import habana_frameworks.torch as htorch
 from tqdm import tqdm
 
 from vllm import LLM, SamplingParams

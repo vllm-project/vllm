@@ -3,10 +3,14 @@ from typing import Dict, List, Tuple
 
 import torch
 
-from vllm._C import cache_ops
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import in_wsl
+from vllm.utils import in_wsl, is_hpu
+
+if is_hpu():
+    from vllm.hpu import cache_ops
+else:
+    from vllm._C import cache_ops
 
 logger = init_logger(__name__)
 
@@ -41,7 +45,10 @@ class CacheEngine:
         self.num_cpu_blocks = cache_config.num_cpu_blocks
 
         # Initialize the cache.
-        self.gpu_cache = self.allocate_gpu_cache()
+        if is_hpu():
+            self.gpu_cache = self.allocate_hpu_cache()
+        else:
+            self.gpu_cache = self.allocate_gpu_cache()
         self.cpu_cache = self.allocate_cpu_cache()
 
         # Initialize the stream for caching operations.
@@ -67,6 +74,28 @@ class CacheEngine:
             self.block_size,
         )
 
+    def allocate_hpu_cache(self) -> List[KVCache]:
+        hpu_cache: List[KVCache] = []
+        kv_block_shape = (
+            self.num_heads,
+            self.head_size,
+            self.block_size)
+        for _ in range(self.num_layers):
+            key_blocks = []
+            value_blocks = []
+            key_blocks = torch.empty(
+                size=(self.num_gpu_blocks, *kv_block_shape),
+                dtype=self.dtype,
+                device="hpu",
+            )
+            value_blocks = torch.empty(
+                size=(self.num_gpu_blocks, *kv_block_shape),
+                dtype=self.dtype,
+                device="hpu",
+            )
+            hpu_cache.append((key_blocks, value_blocks))
+        return hpu_cache
+
     def allocate_gpu_cache(self) -> List[KVCache]:
         gpu_cache: List[KVCache] = []
         key_block_shape = self.get_key_block_shape()
@@ -89,7 +118,8 @@ class CacheEngine:
         cpu_cache: List[KVCache] = []
         key_block_shape = self.get_key_block_shape()
         value_block_shape = self.get_value_block_shape()
-        pin_memory = not in_wsl()
+        # pin_memory = not in_wsl()
+        pin_memory = not in_wsl() and not is_hpu()
         if not pin_memory:
             # Pinning memory in WSL is not supported.
             # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications

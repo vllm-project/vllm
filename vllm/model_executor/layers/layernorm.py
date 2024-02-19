@@ -4,8 +4,17 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from vllm._C import ops
+from vllm.utils import is_hpu
+if is_hpu():
+    from vllm.hpu import ops
+else:
+    from vllm._C import ops
 
+try:
+    from habana_frameworks.torch.hpex.normalization import FusedRMSNorm as FusedRMSNorm
+except ImportError:
+    print("Not using HPU fused kernel for RMSNorm")
+    FusedRMSNorm = None
 
 class RMSNorm(nn.Module):
     """Root mean square normalization.
@@ -49,6 +58,12 @@ class RMSNorm(nn.Module):
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         if residual is not None:
+            if x.device.type == "hpu" and FusedRMSNorm:
+                orig_dtype = x.dtype
+                residual += x
+                x = FusedRMSNorm.apply(residual.float(), self.weight.float(), self.variance_epsilon)
+                return x.to(orig_dtype), residual
+
             ops.fused_add_rms_norm(
                 x,
                 residual,
@@ -56,6 +71,12 @@ class RMSNorm(nn.Module):
                 self.variance_epsilon,
             )
             return x, residual
+
+        if x.device.type == "hpu" and FusedRMSNorm:
+            orig_dtype = x.dtype
+            x = FusedRMSNorm.apply(x.float(), self.weight.float(), self.variance_epsilon)
+            return x.to(orig_dtype)
+
         out = torch.empty_like(x)
         ops.rms_norm(
             out,

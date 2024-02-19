@@ -3,6 +3,10 @@ from typing import List, Optional, Tuple
 
 import pytest
 import torch
+from vllm.utils import is_hpu
+if is_hpu():
+    import habana_frameworks.torch.core as htcore
+    import habana_frameworks.torch.gpu_migration
 from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
@@ -53,11 +57,18 @@ class HfRunner:
     ) -> None:
         assert dtype in _STR_DTYPE_TO_TORCH_DTYPE
         torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype]
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch_dtype,
-            trust_remote_code=True,
-        ).cuda()
+        if is_hpu():
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                torch_dtype=torch_dtype,
+                trust_remote_code=True,
+            )
+        else:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                torch_dtype=torch_dtype,
+                trust_remote_code=True,
+            ).cuda()
         if tokenizer_name is None:
             tokenizer_name = model_name
         self.tokenizer = get_tokenizer(tokenizer_name, trust_remote_code=True)
@@ -69,9 +80,12 @@ class HfRunner:
     ) -> List[Tuple[List[int], str]]:
         outputs: List[Tuple[List[int], str]] = []
         for prompt in prompts:
-            input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids
+            if is_hpu():
+                input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids 
+            else:
+                input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.cuda
             output_ids = self.model.generate(
-                input_ids.cuda(),
+                input_ids,
                 use_cache=True,
                 **kwargs,
             )
@@ -125,9 +139,12 @@ class HfRunner:
     ) -> List[List[torch.Tensor]]:
         all_logprobs = []
         for prompt in prompts:
-            input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids
+            if is_hpu():
+                input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids
+            else:
+                input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.cuda()
             output = self.model.generate(
-                input_ids.cuda(),
+                input_ids,
                 use_cache=True,
                 do_sample=False,
                 max_new_tokens=max_tokens,

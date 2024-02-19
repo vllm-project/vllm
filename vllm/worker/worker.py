@@ -8,6 +8,7 @@ import torch.distributed
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.model_executor import set_random_seed
+from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.parallel_utils.parallel_state import (
     initialize_model_parallel)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
@@ -124,6 +125,206 @@ class Worker:
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
+
+    def _prepare_inputs(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+    ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata]:
+        seq_groups: List[Tuple[List[int], SamplingParams]] = []
+        input_tokens: List[List[int]] = []
+        input_positions: List[List[int]] = []
+        slot_mapping: List[List[int]] = []
+        selected_token_indices: List[int] = []
+        selected_token_start_idx = 0
+        categorized_sample_indices = {t: [] for t in SamplingType}
+        categorized_sample_indices_start_idx = 0
+
+        # Add prompt tokens.
+        prompt_lens: List[int] = []
+        for seq_group_metadata in seq_group_metadata_list:
+            if not seq_group_metadata.is_prompt:
+                continue
+
+            seq_ids = list(seq_group_metadata.seq_data.keys())
+            sampling_params = seq_group_metadata.sampling_params
+            seq_groups.append((seq_ids, sampling_params))
+
+            # Use any sequence in the group.
+            seq_id = seq_ids[0]
+
+            seq_data = seq_group_metadata.seq_data[seq_id]
+            prompt_tokens = seq_data.get_token_ids()
+            prompt_len = len(prompt_tokens)
+            prompt_lens.append(prompt_len)
+
+            if sampling_params.prompt_logprobs is not None:
+                # NOTE: prompt token positions do not need sample, skip
+                categorized_sample_indices_start_idx += prompt_len - 1
+
+            categorized_sample_indices[sampling_params.sampling_type].append(
+                categorized_sample_indices_start_idx)
+            categorized_sample_indices_start_idx += 1
+
+            input_tokens.append(prompt_tokens)
+            # NOTE(woosuk): Here we assume that the first token in the prompt
+            # is always the first token in the sequence.
+            input_positions.append(list(range(prompt_len)))
+
+            if seq_group_metadata.block_tables is None:
+                # During memory profiling, the block tables are not initialized
+                # yet. In this case, we just use a dummy slot mapping.
+                slot_mapping.append([0] * prompt_len)
+                continue
+
+            # Compute the slot mapping.
+            slot_mapping.append([])
+            block_table = seq_group_metadata.block_tables[seq_id]
+            for i in range(prompt_len):
+                block_number = block_table[i // self.block_size]
+                block_offset = i % self.block_size
+                slot = block_number * self.block_size + block_offset
+                slot_mapping[-1].append(slot)
+
+        # Add generation tokens.
+        max_context_len = 0
+        max_num_blocks_per_seq = 0
+        context_lens: List[int] = []
+        generation_block_tables: List[List[int]] = []
+        max_seq_len = max(prompt_lens) if prompt_lens else 1
+        for seq_group_metadata in seq_group_metadata_list:
+            if seq_group_metadata.is_prompt:
+                # We need to do this in this loop as we need to know max_seq_len
+                assert len(
+                    seq_ids) == 1, "Prompt input should have only one seq."
+                sampling_params = seq_group_metadata.sampling_params
+                if sampling_params.prompt_logprobs is not None:
+                    selected_token_indices.extend(
+                        range(selected_token_start_idx,
+                              selected_token_start_idx + prompt_len - 1))
+                selected_token_indices.append(selected_token_start_idx +
+                                              prompt_len - 1)
+                selected_token_start_idx += max_seq_len
+                continue
+
+            seq_ids = list(seq_group_metadata.seq_data.keys())
+            sampling_params = seq_group_metadata.sampling_params
+            seq_groups.append((seq_ids, sampling_params))
+
+            num_seqs = len(seq_ids)
+            selected_token_indices.extend(
+                range(selected_token_start_idx,
+                      selected_token_start_idx + num_seqs))
+            selected_token_start_idx += num_seqs
+
+            categorized_sample_indices[sampling_params.sampling_type].extend(
+                range(categorized_sample_indices_start_idx,
+                      categorized_sample_indices_start_idx + num_seqs))
+            categorized_sample_indices_start_idx += num_seqs
+
+            for seq_id in seq_ids:
+                seq_data = seq_group_metadata.seq_data[seq_id]
+                generation_token = seq_data.get_last_token_id()
+                input_tokens.append([generation_token])
+
+                context_len = seq_data.get_len()
+                position = context_len - 1
+                if self.sliding_window is not None:
+                    context_len = min(context_len, self.sliding_window)
+                input_positions.append([position])
+
+                block_table = seq_group_metadata.block_tables[seq_id]
+
+                max_context_len = max(max_context_len, context_len)
+                max_num_blocks_per_seq = max(max_num_blocks_per_seq,
+                                             len(block_table))
+                context_lens.append(context_len)
+
+                block_number = block_table[position // self.block_size]
+                block_offset = position % self.block_size
+                slot = block_number * self.block_size + block_offset
+                slot_mapping.append([slot])
+
+                if self.sliding_window is not None:
+                    sliding_window_blocks = (self.sliding_window //
+                                             self.block_size)
+                    block_table = block_table[-sliding_window_blocks:]
+                generation_block_tables.append(block_table)
+
+        def round_up(n, multiple):
+            return (n + multiple - 1) // multiple * multiple
+
+        if self.block_size is not None:
+            if max_seq_len != 1:
+                max_seq_len = round_up(max_seq_len, self.block_size)
+
+        padded_input_tokens = [
+            _pad_to_max(tokens, max_seq_len, pad=0) for tokens in input_tokens
+        ]
+        padded_input_positions = [
+            _pad_to_max(positions, max_seq_len, pad=0)
+            for positions in input_positions
+        ]
+        padded_slot_mapping = [
+            _pad_to_max(mapping, max_seq_len, pad=-1)
+            for mapping in slot_mapping
+        ]
+        padded_block_tables = [
+            _pad_to_max(block_table, max_num_blocks_per_seq, pad=0)
+            for block_table in generation_block_tables
+        ]
+
+        # Convert to tensors.
+        tokens_tensor = torch.tensor(padded_input_tokens,
+                                     dtype=torch.long,
+                                     device="cuda")
+        positions_tensor = torch.tensor(padded_input_positions,
+                                        dtype=torch.long,
+                                        device="cuda")
+        slot_mapping_tensor = torch.tensor(padded_slot_mapping,
+                                           dtype=torch.long,
+                                           device="cpu")
+        context_lens_tensor = torch.tensor(context_lens,
+                                           dtype=torch.int,
+                                           device="cpu")
+        selected_token_indices = torch.tensor(selected_token_indices,
+                                              dtype=torch.long,
+                                              device="cuda")
+        categorized_sample_indices = {
+            t: torch.tensor(seq_ids, dtype=torch.int, device="cuda")
+            for t, seq_ids in categorized_sample_indices.items()
+        }
+        block_tables_tensor = torch.tensor(padded_block_tables,
+                                           dtype=torch.int,
+                                           device="cpu")
+
+        seq_data: Dict[int, SequenceData] = {}
+        for seq_group_metadata in seq_group_metadata_list:
+            seq_data.update(seq_group_metadata.seq_data)
+
+        input_metadata = InputMetadata(
+            seq_groups=seq_groups,
+            seq_data=seq_data,
+            prompt_lens=prompt_lens,
+            slot_mapping=slot_mapping_tensor,
+            context_lens=context_lens_tensor,
+            max_context_len=max_context_len,
+            block_tables=block_tables_tensor,
+            selected_token_indices=selected_token_indices,
+            categorized_sample_indices=categorized_sample_indices,
+            sliding_window=self.sliding_window,
+        )
+
+        # Create attention mask
+        if max_num_blocks_per_seq != 0:
+            attn_masks = torch.zeros((max_num_blocks_per_seq, len(input_tokens), self.block_size), dtype=torch.int64)
+            for i in range(0, max_num_blocks_per_seq):
+                for seq_id in range(len(input_tokens)):
+                    if (i * self.block_size) < context_lens[seq_id] and (i + 1) * self.block_size > context_lens[seq_id]:
+                        attn_masks[i][seq_id, :context_lens[seq_id] % self.block_size] = 1
+                    elif (i + 1) * self.block_size <= context_lens[seq_id]:
+                        attn_masks[i][seq_id, :] = 1
+            input_metadata.attention_masks = attn_masks.to(device="cuda")
+        return tokens_tensor, positions_tensor, input_metadata
 
     @torch.inference_mode()
     def execute_model(

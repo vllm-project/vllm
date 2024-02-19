@@ -25,6 +25,10 @@ from typing import AsyncGenerator, List, Tuple
 import aiohttp
 import numpy as np
 from transformers import PreTrainedTokenizerBase
+import torch
+from vllm.utils import is_hpu
+if is_hpu():
+    import habana_frameworks.torch as htorch
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 # (prompt len, output len, latency)

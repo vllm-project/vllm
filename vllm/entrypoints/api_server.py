@@ -1,7 +1,11 @@
 import argparse
 import json
 from typing import AsyncGenerator
-
+import torch
+from vllm.utils import is_hpu
+if is_hpu():
+    import habana_frameworks.torch.core as htcore
+    import habana_frameworks.torch.gpu_migration
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 import uvicorn

@@ -4,7 +4,11 @@ import time
 
 import torch
 
-from vllm._C import ops
+from vllm.utils import is_hpu
+if is_hpu():
+    from vllm.hpu import ops
+else:
+    from vllm._C import ops
 
 NUM_BLOCKS = 1024
 PARTITION_SIZE = 512

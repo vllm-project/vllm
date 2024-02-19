@@ -1,12 +1,11 @@
 import enum
 import socket
 import uuid
+import importlib
 from platform import uname
 
 import psutil
 import torch
-
-from vllm._C import cuda_utils
 
 
 class Device(enum.Enum):
@@ -30,6 +29,16 @@ class Counter:
 
 def is_hip() -> bool:
     return torch.version.hip is not None
+
+
+def is_hpu() -> bool:
+    return importlib.util.find_spec('habana_frameworks') is not None
+
+
+if is_hpu():
+    from vllm.hpu import cuda_utils
+else:
+    from vllm._C import cuda_utils
 
 
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
