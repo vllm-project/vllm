@@ -464,6 +464,9 @@ class LLMEngine:
             prompt_token_ids[:prefix_pos], lora_request.lora_int_id
             if lora_request else 0) if prefix_pos is not None else None
 
+        # Defensive copy of SamplingParams, which are used by the sampler
+        sampling_params = copy.deepcopy(sampling_params)
+
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,
                                   arrival_time, lora_request, prefix)

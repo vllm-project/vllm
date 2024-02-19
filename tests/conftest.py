@@ -164,6 +164,7 @@ class VllmRunner:
         tokenizer_name: Optional[str] = None,
         dtype: str = "half",
         disable_log_stats: bool = True,
+        tensor_parallel_size: int = 1,
     ) -> None:
         self.model = LLM(
             model=model_name,
@@ -172,6 +173,7 @@ class VllmRunner:
             dtype=dtype,
             swap_space=0,
             disable_log_stats=disable_log_stats,
+            tensor_parallel_size=tensor_parallel_size,
         )
 
     def generate(
