@@ -62,6 +62,9 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`MPTForCausalLM`
     - MPT, MPT-Instruct, MPT-Chat, MPT-StoryWriter
     - :code:`mosaicml/mpt-7b`, :code:`mosaicml/mpt-7b-storywriter`, :code:`mosaicml/mpt-30b`, etc.
+  * - :code:`OLMoForCausalLM`
+    - OLMo
+    - :code:`allenai/OLMo-1B`, :code:`allenai/OLMo-7B`, etc.
   * - :code:`OPTForCausalLM`
     - OPT, OPT-IML
     - :code:`facebook/opt-66b`, :code:`facebook/opt-iml-max-30b`, etc.
