@@ -75,7 +75,7 @@ class LLMEngine:
         lora_config: Optional[LoRAConfig],
         placement_group: Optional["PlacementGroup"],
         log_stats: bool,
-        tokenizer_init_kwargs: Dict[str, Any]
+        tokenizer_init_kwargs: Optional[Dict[str, Any]],
     ) -> None:
         logger.info(
             "Initializing an LLM engine with config: "
