@@ -420,7 +420,7 @@ torch::Tensor awq_gemm(
         throw std::invalid_argument("OC is not multiple of Group size");
 
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-    if (num_in_channels > 256) {
+    if (num_in_feats > 256) {
       at::Tensor _de_kernel = torch::empty({num_in_channels, num_out_channels}, options);
       auto de_kernel = reinterpret_cast<half*>(_de_kernel.data_ptr<at::Half>());
 
