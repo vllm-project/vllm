@@ -11,7 +11,7 @@ env:
 jobs:
   build-and-push-image:
     name: Build and Push Container Image to GitHub Container Registry
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
 
     # Sets the permissions granted to the `GITHUB_TOKEN` for the actions in this job.
     permissions:
