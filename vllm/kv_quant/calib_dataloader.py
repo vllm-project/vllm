@@ -249,10 +249,7 @@ def get_pileval(tokenizer, nsamples, seed, path, seqlen=512):
     from datasets import load_dataset
     from datasets.builder import DatasetGenerationError
     try:
-        dataset = load_dataset(
-            'json',
-            data_files=path,
-            split='train')
+        dataset = load_dataset('json', data_files=path, split='train')
     except DatasetGenerationError as err:
         raise InterruptedError('There have been some issues when generating '
                                'the dataset, you could try to download it '
