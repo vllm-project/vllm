@@ -108,7 +108,10 @@ class LLMEngine:
         self.log_stats = log_stats
         self._verify_args()
 
-        self._init_tokenizer(**(tokenizer_init_kwargs or {}))
+        if tokenizer_init_kwargs is None:
+          tokenizer_init_kwargs = {}
+
+        self._init_tokenizer(**tokenizer_init_kwargs)
         self.seq_counter = Counter()
 
         # Create the parallel GPU workers.
@@ -173,8 +176,7 @@ class LLMEngine:
             tokenizer_mode=self.model_config.tokenizer_mode,
             trust_remote_code=self.model_config.trust_remote_code,
             revision=self.model_config.tokenizer_revision)
-        if tokenizer_init_kwargs is not None:
-            init_kwargs.update(tokenizer_init_kwargs)
+        init_kwargs.update(tokenizer_init_kwargs)
         self.tokenizer: TokenizerGroup = TokenizerGroup(
             self.model_config.tokenizer, **init_kwargs)
 
