@@ -153,9 +153,6 @@ class OpenAIServingChat(OpenAIServing):
                 if finish_reason_sent[i]:
                     continue
 
-                delta_text = output.text[len(previous_texts[i]):]
-                previous_texts[i] = output.text
-
                 if request.echo and request.max_tokens == 0:
                     delta_token_ids = res.prompt_token_ids
                     top_logprobs = res.prompt_logprobs
@@ -179,6 +176,8 @@ class OpenAIServingChat(OpenAIServing):
                 else:
                     logprobs = None
 
+                delta_text = output.text[len(previous_texts[i]):]
+                previous_texts[i] = output.text
                 previous_num_tokens[i] = len(output.token_ids)
                 if output.finish_reason is None:
                     # Send token-by-token response for each request.n
