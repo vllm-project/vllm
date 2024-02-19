@@ -13,12 +13,10 @@ _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
 
 
-def _read_prompts(filename: str) -> str:
-    prompts = []
+def _read_prompts(filename: str) -> List[str]:
     with open(filename, "r") as f:
-        prompt = f.readline()
-        prompts.append(prompt)
-    return prompts
+        prompts = f.readlines()
+        return prompts
 
 
 @pytest.fixture
@@ -166,6 +164,7 @@ class VllmRunner:
         tokenizer_name: Optional[str] = None,
         dtype: str = "half",
         disable_log_stats: bool = True,
+        tensor_parallel_size: int = 1,
     ) -> None:
         self.model = LLM(
             model=model_name,
@@ -174,6 +173,7 @@ class VllmRunner:
             dtype=dtype,
             swap_space=0,
             disable_log_stats=disable_log_stats,
+            tensor_parallel_size=tensor_parallel_size,
         )
 
     def generate(
