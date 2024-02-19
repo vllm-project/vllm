@@ -6,6 +6,7 @@ INT8 KV Cache
 The kv cache is quantized to INT8 dtype from float/fp16/bflaot16 to save GPU memory.
 To use it, you first need to export scales and zero points with a calibration dataset like pileval and save these quantization parameters at a certain path.
 Then you can enable the int8 kv cache in the vllm settings.
+Note that INT8 KV Cache only supports Llama model for now.
 
 
 Here is an example of how to export quantization scales and zero points:
