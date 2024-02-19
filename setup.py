@@ -5,7 +5,7 @@ import re
 import subprocess
 import warnings
 from pathlib import Path
-from typing import List, Set
+from typing import List, Set, Dict
 
 from packaging.version import parse, Version
 import setuptools
@@ -435,10 +435,10 @@ def get_requirements() -> List[str]:
     return requirements
 
 
-def get_ray_requirement() -> Optional[List[str]]:
+def get_ray_requirement() -> Optional[Dict[str, List[str]]]:
     if _is_neuron():
         return None
-    return ["ray >= 2.9"]
+    return {"ray": ["ray >= 2.9"]}
 
 
 package_data = {

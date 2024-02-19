@@ -68,7 +68,7 @@ class ResultHandler(threading.Thread):
         for result in iter(self.result_queue.get, _TERMINATE):
             future = self.tasks.pop(result.task_id)
             _set_future_result(future, result)
-            # Ensure that all waiters will receive an exception
+        # Ensure that all waiters will receive an exception
         for future in self.tasks.values():
             _set_future_result(
                 future, Result(exception=ChildProcessError("worker died")))
@@ -88,6 +88,7 @@ class WorkerMonitor(threading.Thread):
         self._close = False
 
     def run(self) -> None:
+        # Blocks until any worker exits
         dead_sentinels = wait([p.sentinel for p in self.workers])
         if self._close:
             return
@@ -163,7 +164,7 @@ class LocalWorkerVllm(mp.Process):
         self.kill()
 
     def run(self) -> None:
-        del self.tasks
+        del self.tasks  # Not used in forked process
         from vllm.worker.worker import Worker
         self.worker = Worker(*self.worker_args, **self.worker_kwargs)
         del self.worker_args
