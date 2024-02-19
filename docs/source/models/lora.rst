@@ -50,3 +50,42 @@ the third parameter is the path to the LoRA adapter.
 
 Check out `examples/multilora_inference.py <https://github.com/vllm-project/vllm/blob/main/examples/multilora_inference.py>`_
 for an example of how to use LoRA adapters with the async engine and how to use more advanced configuration options.
+
+Serving LoRA Adapters
+---------------------
+LoRA adapted models can also be served with the Open-AI compatible vLLM server. To do so, we use
+``--lora-modules {name}={path} {name}={path}`` to specify each LoRA module when we kickoff the server:
+
+.. code-block:: bash
+
+    python -m vllm.entrypoints.api_server \
+        --model meta-llama/Llama-2-7b-hf \
+        --enable-lora \
+        --lora-modules sql-lora=~/.cache/huggingface/hub/models--yard1--llama-2-7b-sql-lora-test/
+
+The server entrypoint accepts all other LoRA configuration parameters (``max_loras``, ``max_lora_rank``, ``max_cpu_loras``,
+etc.), which will apply to all forthcoming requests. Upon querying the ``/models`` endpoint, we should see our LoRA along
+with its base model:
+
+.. code-block:: bash
+
+    curl localhost:8000/v1/models | jq .
+    {
+        "object": "list",
+        "data": [
+            {
+                "id": "meta-llama/Llama-2-7b-hf",
+                "object": "model",
+                ...
+            },
+            {
+                "id": "sql-lora",
+                "object": "model",
+                ...
+            }
+        ]
+    }
+
+Requests can specify the LoRA adapter as if it were any other model via the ``model`` request parameter. The requests will be
+processed according to the server-wide LoRA configuration (i.e. in parallel with base model requests, and potentially other
+LoRA adapter requests if they were provided and ``max_loras`` is set high enough).

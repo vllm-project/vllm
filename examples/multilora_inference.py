@@ -12,7 +12,9 @@ from vllm import EngineArgs, LLMEngine, SamplingParams, RequestOutput
 from vllm.lora.request import LoRARequest
 
 
-def create_test_prompts(lora_path: str) -> List[Tuple[str, SamplingParams]]:
+def create_test_prompts(
+        lora_path: str
+) -> List[Tuple[str, SamplingParams, Optional[LoRARequest]]]:
     """Create a list of test prompts with their sampling parameters.
     
     2 requests for base model, 4 requests for the LoRA. We define 2

@@ -11,8 +11,16 @@ steps:
 - label: AsyncEngine Test
   command: pytest -v -s async_engine
 
-- label: Distributed Test
-  command: pytest -v -s test_comm_ops.py
+- label: Basic Correctness Test
+  command: pytest -v -s --forked basic_correctness
+
+- label: Distributed Comm Ops Test
+  command: pytest -v -s --forked test_comm_ops.py
+  working_dir: "/vllm-workspace/tests/distributed"
+  num_gpus: 2 # only support 1 or 2 for now.
+
+- label: Distributed Correctness Test
+  command: pytest -v -s --forked test_basic_distributed_correctness.py
   working_dir: "/vllm-workspace/tests/distributed"
   num_gpus: 2 # only support 1 or 2 for now.
 
