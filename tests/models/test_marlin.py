@@ -64,8 +64,9 @@ def test_models(
     del marlin_model
 
     gptq_model = vllm_runner(model_pair.model_gptq, dtype=dtype)
-    gptq_outputs = gptq_model.generate_greedy_logprobs(
-        example_prompts, max_tokens, num_logprobs)
+    gptq_outputs = gptq_model.generate_greedy_logprobs(example_prompts,
+                                                       max_tokens,
+                                                       num_logprobs)
 
     # Note: not sure why, but deleting just the model on Ada Lovelace
     #   does not free the GPU memory. On Ampere, deleting the just model
