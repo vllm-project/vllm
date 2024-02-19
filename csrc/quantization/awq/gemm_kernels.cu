@@ -11,10 +11,11 @@ Adapted from https://github.com/mit-han-lab/llm-awq
 
 #include <torch/extension.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <cuda_runtime.h>
+#include <cuda_fp16.h>
 
 #include "dequantize.cuh"
-
-#include <cuda_fp16.h>
 
 namespace vllm {
 namespace awq {
@@ -419,7 +420,36 @@ torch::Tensor awq_gemm(
         throw std::invalid_argument("OC is not multiple of Group size");
 
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-    if (num_out_channels % 128 == 0)
+    if (num_in_channels > 256) {
+      at::Tensor _de_kernel = torch::empty({num_in_channels, num_out_channels}, options);
+      auto de_kernel = reinterpret_cast<half*>(_de_kernel.data_ptr<at::Half>());
+
+
+      int j_factors1 = num_out_channels / 64 / 1;
+      dim3 num_blocks(1 * (num_out_feats + 16 - 1) / 16 * j_factors1 * split_k_iters);
+
+      // threadIdx.x: 32
+      // threadIdx.y: i_factors[2] * j_factors[2]
+      dim3 threads_per_block(32, 2);
+
+      vllm::awq::dequantize_weights<<<num_blocks, threads_per_block, 0, stream>>>(
+        kernel, scaling_factors, zeros, de_kernel, group_size);
+
+      const half alpha = __float2half(1.0f);
+      const half beta = __float2half(0.0f);
+      cublasHandle_t cublas_handle = at::cuda::getCurrentCUDABlasHandle();
+      cublasHgemm(
+        cublas_handle,
+        CUBLAS_OP_N,
+        CUBLAS_OP_N,
+        num_in_feats, num_out_channels, num_in_channels,
+        &alpha,
+        in_feats, num_in_feats,
+        de_kernel, num_in_channels,
+        &beta,
+        out_feats, num_in_feats);
+    }
+    else if (num_out_channels % 128 == 0)
     {
         int j_factors1 = num_out_channels / 128 / 1;
         dim3 num_blocks((num_out_feats + 16 - 1) / 16 * j_factors1 * split_k_iters);
