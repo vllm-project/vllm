@@ -81,6 +81,7 @@ class MixtralMoE(nn.Module):
 
         self.fused_moe_config = None
         if "VLLM_MIXTRAL_FUSE_MOE_CONFIG" in os.environ:
+            import json
             data = json.load(os.environ["VLLM_MIXTRAL_FUSE_MOE_CONFIG"])
             self.fused_moe_config = {int(key): val for key, val in data.items()}
 
