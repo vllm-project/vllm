@@ -108,7 +108,7 @@ class LLMEngine:
         self.log_stats = log_stats
         self._verify_args()
 
-        self._init_tokenizer(tokenizer_init_kwargs)
+        self._init_tokenizer(**(tokenizer_init_kwargs or {}))
         self.seq_counter = Counter()
 
         # Create the parallel GPU workers.
