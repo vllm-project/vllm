@@ -1,3 +1,4 @@
+
 /*
 Adapted from https://github.com/mit-han-lab/llm-awq
 @article{lin2023awq,
@@ -373,8 +374,7 @@ torch::Tensor awq_dequantize(
     dim3 num_blocks(x_blocks, y_blocks);
     dim3 threads_per_block(x_thread, y_thread);
 
-    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-    vllm::awq::dequantize_weights<<<num_blocks, threads_per_block, 0, stream>>>(
+    vllm::awq::dequantize_weights<<<num_blocks, threads_per_block>>>(
         kernel, scaling_factors, zeros, de_kernel, G);
 
     return _de_kernel;
@@ -418,7 +418,6 @@ torch::Tensor awq_gemm(
     if (num_out_channels % group_size != 0)
         throw std::invalid_argument("OC is not multiple of Group size");
 
-    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     if (num_out_channels % 128 == 0)
     {
         int j_factors1 = num_out_channels / 128 / 1;
@@ -426,7 +425,7 @@ torch::Tensor awq_gemm(
         // threadIdx.x: 32
         // threadIdx.y: i_factors[2] * j_factors[2]
         dim3 threads_per_block(32, 2);
-        vllm::awq::gemm_forward_4bit_cuda_m16nXk32<128><<<num_blocks, threads_per_block, 0, stream>>>(
+        vllm::awq::gemm_forward_4bit_cuda_m16nXk32<128><<<num_blocks, threads_per_block>>>(
             group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels,
             num_out_channels, out_feats);
     }
@@ -438,7 +437,7 @@ torch::Tensor awq_gemm(
         // threadIdx.x: 32
         // threadIdx.y: i_factors[2] * j_factors[2]
         dim3 threads_per_block(32, 2);
-        vllm::awq::gemm_forward_4bit_cuda_m16nXk32<64><<<num_blocks, threads_per_block, 0, stream>>>(
+        vllm::awq::gemm_forward_4bit_cuda_m16nXk32<64><<<num_blocks, threads_per_block>>>(
             group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels,
             num_out_channels, out_feats);
     }
