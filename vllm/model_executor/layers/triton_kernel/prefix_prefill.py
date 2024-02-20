@@ -639,8 +639,7 @@ if triton.__version__ >= "2.1.0":
         assert Lq == Lk and Lk == Lv
         assert Lk in {16, 32, 64, 128}
 
-        if sm_scale is None:
-            sm_scale = 1.0 / (Lq**0.5)
+        sm_scale = 1.0 / (Lq**0.5)
         batch, head = b_seq_len.shape[0], q.shape[1]
         num_queries_per_kv = q.shape[1] // k.shape[1]
 

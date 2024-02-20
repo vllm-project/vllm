@@ -391,7 +391,7 @@ class LlamaForCausalLM(nn.Module):
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
     
-    # Should not be called unless the KV cache dtype is FP8
+    # Should not be called unless the KV cache dtype is FP8 on ROCm (AMD GPU)
     def load_kv_cache_scales(self, filename: str) -> None:
         for layer_idx, scaling_factor in kv_cache_scales_iterator(filename):
             layer_paged_attn = self.model.layers[layer_idx].self_attn.attn

@@ -148,8 +148,8 @@ class CacheEngine:
         self._swap(self.gpu_cache, self.cpu_cache, src_to_dst)
 
     def copy(self, src_to_dsts: Dict[int, List[int]]) -> None:
-        key_caches = [key_cache for key_cache, _, _ in self.gpu_cache]
-        value_caches = [value_cache for _, value_cache, _ in self.gpu_cache]
+        key_caches = [key_cache for key_cache, _ in self.gpu_cache]
+        value_caches = [value_cache for _, value_cache in self.gpu_cache]
         # NOTE(woosuk): This operation implicitly synchronizes the CPU and GPU.
         cache_ops.copy_blocks(key_caches, value_caches, src_to_dsts)
 
