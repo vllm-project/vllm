@@ -385,6 +385,7 @@ torch::Tensor awq_gemm(
       const __half alpha = at::Half(1.0f);
       const __half beta = at::Half(0.0f);
       const cublasHandle_t cublas_handle = at::cuda::getCurrentCUDABlasHandle();
+      cublasSetStream(cublas_handle, stream);
       cublasHgemm(
         cublas_handle,
         CUBLAS_OP_N,
