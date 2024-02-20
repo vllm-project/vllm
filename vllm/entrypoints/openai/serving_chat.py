@@ -20,6 +20,7 @@ TypeTopLogProbs = List[Optional[Dict[int, float]]]
 TypeCreateLogProbsFn = Callable[
     [TypeTokenIDs, TypeTopLogProbs, Optional[int], int], LogProbs]
 
+
 class OpenAIServingChat(OpenAIServing):
 
     def __init__(self,
