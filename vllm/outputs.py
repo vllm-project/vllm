@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import List, Optional
 import time
 
@@ -51,6 +52,24 @@ class CompletionOutput:
                 f"finish_reason={self.finish_reason})")
 
 
+@dataclass
+class RequestOutputMetrics:
+    """Metrics associated with a request.
+
+    Args:
+        arrival_time: The time when the request arrived.
+        first_scheduled_time: The time when the request was first scheduled.
+        first_token_time: The time when the first token was generated.
+        time_in_queue: The time the request spent in the queue.
+        finished_time: The time when the request was finished.
+    """
+    arrival_time: float
+    first_scheduled_time: float
+    first_token_time: float
+    time_in_queue: float
+    finished_time: Optional[float] = None
+
+
 class RequestOutput:
     """The output data of a request to the LLM.
 
@@ -61,11 +80,7 @@ class RequestOutput:
         prompt_logprobs: The log probabilities to return per prompt token.
         outputs: The output sequences of the request.
         finished: Whether the whole request is finished.
-        arrival_time: The time when the request arrived.
-        first_scheduled_time: The time when the request was first scheduled.
-        first_token_time: The time when the first token was generated.
-        time_in_queue: The time the request spent in the queue.
-        finished_time: The time when the request was finished.
+        metrics: Metrics associated with the request.
         lora_request: The LoRA request that was used to generate the output.
     """
 
@@ -77,11 +92,7 @@ class RequestOutput:
         prompt_logprobs: Optional[PromptLogprobs],
         outputs: List[CompletionOutput],
         finished: bool,
-        arrival_time: float,
-        first_scheduled_time: float,
-        first_token_time: float,
-        time_in_queue: float,
-        finished_time: Optional[float] = None,
+        metrics: Optional[RequestOutputMetrics] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> None:
         self.request_id = request_id
@@ -90,11 +101,7 @@ class RequestOutput:
         self.prompt_logprobs = prompt_logprobs
         self.outputs = outputs
         self.finished = finished
-        self.arrival_time = arrival_time
-        self.first_scheduled_time = first_scheduled_time
-        self.first_token_time = first_token_time
-        self.time_in_queue = time_in_queue
-        self.finished_time = finished_time
+        self.metrics = metrics
         self.lora_request = lora_request
 
     @classmethod
@@ -138,11 +145,12 @@ class RequestOutput:
                    prompt_logprobs,
                    outputs,
                    finished,
-                   arrival_time=seq_group.arrival_time,
-                   first_scheduled_time=seq_group.first_scheduled_time,
-                   first_token_time=seq_group.first_token_time,
-                   time_in_queue=seq_group.time_in_queue,
-                   finished_time=finished_time,
+                   metrics=RequestOutputMetrics(
+                       arrival_time=seq_group.arrival_time,
+                       first_scheduled_time=seq_group.first_scheduled_time,
+                       first_token_time=seq_group.first_token_time,
+                       time_in_queue=seq_group.time_in_queue,
+                       finished_time=finished_time),
                    lora_request=seq_group.lora_request)
 
     def __repr__(self) -> str:
@@ -152,9 +160,5 @@ class RequestOutput:
                 f"prompt_logprobs={self.prompt_logprobs}, "
                 f"outputs={self.outputs}, "
                 f"finished={self.finished}, "
-                f"arrival_time={self.arrival_time}, "
-                f"first_scheduled_time={self.first_scheduled_time}, "
-                f"first_token_time={self.first_token_time}, "
-                f"time_in_queue={self.time_in_queue}, "
-                f"finished_time={self.finished_time}, "
+                f"metrics={self.metrics}, "
                 f"lora_request={self.lora_request})")

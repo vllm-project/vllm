@@ -279,12 +279,14 @@ class SequenceGroup:
 
     def get_last_latency(self, now: float) -> float:
         """Gets last token latency for Request level timings."""
-        if self.first_token_time is None:
-            self.first_token_time = now
-
         latency = now - self.last_token_time
         self.last_token_time = now
         return latency
+
+    def set_first_token_time(self, now: float) -> None:
+        """Sets the first token time for Request level timings."""
+        if self.first_token_time is None:
+            self.first_token_time = now
 
     def get_max_num_running_seqs(self) -> int:
         """The maximum number of sequences running in parallel in the remaining
