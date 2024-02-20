@@ -55,8 +55,8 @@ if __name__ == "__main__":
                                      "and saves them to a JSON file compatible with later "
                                      "use by vLLM (pass this file to the appropriate "
                                      "runtime typically using the argument "
-                                     "--kv-cache-scales <filename>). This is only used "
-                                     "if the KV cache dtype is FP8.")
+                                     "--kv-cache-scales-path <filename>). This is only used "
+                                     "if the KV cache dtype is FP8 and on ROCm (AMD GPU).")
     parser.add_argument("--model",
                         help="Specify either a directory or name of a HF model. If the model "
                         "does not exist, this utility will attempt to download said model "
