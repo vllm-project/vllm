@@ -72,14 +72,6 @@ torch::Tensor awq_gemm(
   torch::Tensor _scaling_factors,
   torch::Tensor _zeros,
   int split_k_iters);
-
-torch::Tensor awq_dequantize(
-    torch::Tensor _kernel,
-    torch::Tensor _scaling_factors,
-    torch::Tensor _zeros,
-    int split_k_iters,
-    int thx,
-    int thy);
 #endif
 
 void squeezellm_gemm(
