@@ -15,7 +15,8 @@ def main(args):
         hf_folder, _, _ = prepare_hf_model_weights(args.model,
                                                    args.cache_dir,
                                                    args.load_format,
-                                                   revision=args.revision)
+                                                   revision=args.revision,
+                                                   fall_back_to_pt=False)
         output_file = os.path.join(hf_folder, default_output_name)
     else:
         output_file = os.path.join(args.output, default_output_name)
