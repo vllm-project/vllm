@@ -77,9 +77,6 @@ endmacro()
 #
 find_package(MPI)
 
-#find_package(HIP)
-enable_language(HIP)  # use FindHIP?
-
 #
 # Find where user site-packages and torch are installed and add it to cmake's
 # search path.
@@ -128,7 +125,7 @@ endif()
 #
 if (HIP_FOUND)
   message("HIP FOUND")
-#  enable_language(HIP)  # use FindHIP?
+  enable_language(HIP)  # use FindHIP?
 
   # TODO: intersect with this list?
   if(NOT DEFINED CMAKE_HIP_ARCHITECTURES)
