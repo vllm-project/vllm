@@ -1,10 +1,11 @@
 import random
-from typing import Tuple
+from typing import Tuple, List
 from unittest.mock import patch
 
 import pytest
 import torch
 from transformers import GenerationConfig, GenerationMixin
+from typing import Optional
 
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.utils import set_random_seed
@@ -204,13 +205,14 @@ def test_sampler_mixed(seed: int, device: str):
         batch_size)
 
     seq_group_metadata_list = []
-    expected_tokens = []
+    expected_tokens: List[Optional[List[int]]] = []
     prompt_lens = []
     for i in range(batch_size):
-        n = 1
+        expected: Optional[List[int]] = None
         sampling_type = random.randint(0, 3)
         if sampling_type == 0:
             sampling_params = SamplingParams(temperature=0)
+            expected = [torch.argmax(fake_logits[i], dim=-1).item()]
         elif sampling_type in (1, 2):
             n = random.randint(1, 10)
             sampling_params = SamplingParams(
@@ -219,16 +221,18 @@ def test_sampler_mixed(seed: int, device: str):
                 top_k=random.randint(0, 10) or -1,
                 n=n,
                 presence_penalty=random.randint(0, 1),
-                seed=(random.randint(0, 10000)
-                      if sampling_type == 2 else None),
             )
+            if sampling_type == 2:
+                sampling_params.seed = random.randint(0, 10000)
+            else:
+                for idx in range(n):
+                    fake_logits[i, i + idx] = 1e2
+                expected = list(range(i, i + n))
         else:
             sampling_params = SamplingParams(temperature=0,
                                              use_beam_search=True,
                                              best_of=2)
-        for idx in range(n):
-            fake_logits[i, i + idx] = 1e2
-            expected_tokens.append(i + idx)
+        expected_tokens.append(expected)
         seq_group_metadata_list.append(
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
@@ -239,17 +243,50 @@ def test_sampler_mixed(seed: int, device: str):
             ))
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
-    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens,
-                                                     subquery_lens=prompt_lens)
-    sampler_output = sampler(embedding=None,
-                             hidden_states=input_tensor,
-                             sampling_metadata=sampling_metadata)
-    for i, sequence_output in enumerate(sampler_output):
-        if seq_group_metadata_list[i].sampling_params.use_beam_search:
-            continue
-        for nth_output in sequence_output.samples:
-            assert nth_output.output_token in expected_tokens
+    def test_sampling(model_runner: ModelRunner):
+        sampling_metadata = model_runner._prepare_sample(
+            seq_group_metadata_list, prompt_lens, subquery_lens=prompt_lens)
+        sampler_output = sampler(embedding=None,
+                                 hidden_states=input_tensor,
+                                 sampling_metadata=sampling_metadata)
+
+        for i, (sequence_output, metadata) in enumerate(
+                zip(sampler_output, seq_group_metadata_list)):
+            if metadata.sampling_params.use_beam_search:
+                continue
+
+            if metadata.sampling_params.seed is not None \
+                    and expected_tokens[i] is None:
+                # Record seeded random result to compare with results of second invocation
+                expected_tokens[i] = [
+                    nth_output.output_token
+                    for nth_output in sequence_output.samples
+                ]
+                continue
+
+            for n, nth_output in enumerate(sequence_output.samples):
+                if metadata.sampling_params.temperature == 0 or metadata.sampling_params.seed is not None:
+                    # Ensure exact matches for greedy or random with seed
+                    assert nth_output.output_token == expected_tokens[i][n]
+                else:
+                    # For non-seeded random check that one of the high-logit tokens were chosen
+                    assert nth_output.output_token in expected_tokens[i]
+
+    # Test batch
+    test_sampling(model_runner)
+
+    # Shuffle the batch and resample
+    target_index = list(range(batch_size))
+    for list_to_shuffle in (target_index, seq_group_metadata_list,
+                            expected_tokens, prompt_lens):
+        random.Random(seed).shuffle(list_to_shuffle)
+    target_index = torch.tensor(target_index)
+    input_tensor.data = input_tensor.index_select(0, target_index)
+    fake_logits.data = fake_logits.index_select(0, target_index)
+
+    # This time, results of seeded random samples will be compared with the corresponding
+    # sample in the pre-shuffled batch
+    test_sampling(model_runner)
 
     del model_runner
 
