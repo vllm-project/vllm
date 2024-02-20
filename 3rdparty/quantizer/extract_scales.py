@@ -25,7 +25,8 @@ def main(args):
     for name, param in hf_model_weights_iterator(args.model,
                                                  args.cache_dir,
                                                  args.load_format,
-                                                 args.revision):
+                                                 args.revision,
+                                                 fall_back_to_pt=False):
         if "kv_cache_scaling_factor" in name:
             nums = [int(s) for s in name.split('.') if s.isdigit()]
             assert len(nums) == 1, f"Could not determine layer idx for {name}!"
@@ -67,7 +68,7 @@ if __name__ == "__main__":
     parser.add_argument("--load_format",
                         help="Optionally specify the format of the model's tensor files "
                         "containing the KV cache scaling factors.",
-                        choices=["auto", "safetensors", "pt", "npcache"],
+                        choices=["auto", "safetensors", "npcache"],
                         default="auto")
     parser.add_argument("--revision",
                         help="Optionally specify the model's revision number.",
