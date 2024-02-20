@@ -25,7 +25,9 @@
 
 #include "attention_dtypes.h"
 #include "attention_utils.cuh"
+#ifdef ENABLE_FP8_E5M2
 #include "../quantization/fp8_e5m2_kvcache/quant_utils.cuh"
+#endif
 
 #include <algorithm>
 
