@@ -38,6 +38,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # copy input files
 COPY csrc csrc
 COPY setup.py setup.py
+COPY hipify.py hipify.py
 COPY CMakeLists.txt CMakeLists.txt
 COPY requirements.txt requirements.txt
 COPY pyproject.toml pyproject.toml

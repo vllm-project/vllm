@@ -69,10 +69,7 @@ class cmake_build_ext(build_ext):
                 # temporary build directory instead
                 '-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY_{}={}'.format(
                     cfg.upper(), self.build_temp),
-                # Hint CMake to use the same Python executable that
-                # is launching the build, prevents possible mismatching if
-                # multiple versions of Python are installed
-                '-DPYTHON_EXECUTABLE={}'.format(sys.executable),
+                '--log-level=TRACE',
             ]
 
             # TODO: change default to 0
@@ -113,6 +110,7 @@ class cmake_build_ext(build_ext):
                 build_jobs = ['-j', str(num_jobs)]
 
             # Config
+            # TODO: this only needs to happen once
             subprocess.check_call(['cmake', ext.cmake_lists_dir] + build_tool +
                                   cmake_args,
                                   cwd=self.build_temp)
