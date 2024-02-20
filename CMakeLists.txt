@@ -21,7 +21,7 @@ set(PYTHON_SUPPORTED_VERSIONS "3.8" "3.9" "3.10" "3.11")
 set(NVIDIA_SUPPORTED_ARCHS "7.0;7.5;8.0;8.6;8.9;9.0")
 
 # Supported AMD GPU architectures
-set(ROCM_SUPPORTED_ARCHS "gfx90a;gfx942;gfx1100")
+set(ROCM_SUPPORTED_ARCHS "gfx908;gfx90a;gfx942;gfx1100")
 
 #
 # Loop thru all supported python versions until we find the first suitable
