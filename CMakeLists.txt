@@ -2,6 +2,15 @@ cmake_minimum_required(VERSION 3.21)
 
 project(vllm_extensions LANGUAGES CXX)
 
+function (dumpvars MSG)
+  message(${MSG})
+  get_cmake_property(_variableNames VARIABLES)
+  list (SORT _variableNames)
+  foreach (_variableName ${_variableNames})
+    message(STATUS "${_variableName}=${${_variableName}}")
+  endforeach()
+endfunction()
+
 #
 # Supported python verions.  These versions will be searched in order, the
 # first match will be selected.
@@ -148,10 +157,11 @@ if (HIP_FOUND)
   list(APPEND VLLM_NVCC_FLAGS "${X}")
 
   list(APPEND VLLM_NVCC_FLAGS
-    "-DWITH_HIP"
+#    "-DWITH_HIP"
     "-DUSE_ROCM"
     "-U__HIP_NO_HALF_CONVERSIONS__"
-    "-U__HIP_NO_HALF_OPERATORS__")
+    "-U__HIP_NO_HALF_OPERATORS__"
+    "-fno-gpu-rdc")
 
   # hack
 #  set(CMAKE_CUDA_COMPILER ${hip_HIPCC_EXECUTABLE}) # ${ROCM_PATH}/bin/hipcc)
@@ -317,6 +327,8 @@ function(define_module_target MOD_NAME MOD_SRC MOD_EXTRA_NVCC_FLAGS
     Python_add_library(${MOD_NAME} MODULE ${MOD_SRC} WITH_SOABI)
 #    hip_add_library(${MOD_NAME} MODULE ${MOD_SRC})
 
+    add_dependencies(${MOD_NAME} hipify)
+
     set(CUDA_LANG "HIP")
     foreach(SRC ${MOD_SRC})
       if (${SRC} MATCHES "\.hip$")
@@ -390,20 +402,37 @@ if(IS_CUDA)
     "csrc/quantization/awq/gemm_kernels.cu"
     "csrc/custom_all_reduce.cu")
 elseif(HIP_FOUND)
+  dumpvars("VARS")
+
   # maybe use add_custom_target instead + add_dependencies?
   message("build dir  ${CMAKE_CURRENT_BINARY_DIR}")
 
   set(X)
-  foreach (SRC ${VLLM_EXT_SRC})
-    list(APPEND X ${SRC})
+  foreach (SRC ${VLLM_EXT_ROCM_SRC})
+    list(APPEND X "${CMAKE_CURRENT_BINARY_DIR}/${SRC}")
   endforeach()
+  set(VLLM_EXT_ROCM_SRC ${X})
 
   message("cmake cwd: ${CMAKE_CURRENT_BINARY_DIR}")
-  add_custom_command(
-    COMMAND cp -r ${CMAKE_SOURCE_DIR}/csrc .
-    COMMAND ${CMAKE_SOURCE_DIR}/hipify.py -b csrc -o csrc -i csrc ${VLLM_EXT_SRC}
+#  add_custom_command(
+#    COMMAND echo "HELLLLLLLLLLLLLLLLLLLLLLLLLLO"
+#    COMMAND cp -r ${CMAKE_SOURCE_DIR}/csrc .
+#    COMMAND ${CMAKE_SOURCE_DIR}/hipify.py -b csrc -o csrc -i csrc ${VLLM_EXT_SRC}
+#    DEPENDS hipify.py ${VLLM_EXT_SRC}
+#    OUTPUT ${VLLM_EXT_ROCM_SRC}
+#    COMMENT "run hipify")
+
+  message("rocm src: ${VLLM_EXT_ROCM_SRC}")
+
+  add_custom_target(
+    hipify
+    COMMAND echo "HELLLLLLLLLLLLLLLLLLLLLLLLLLO2"
+    COMMAND pwd
+    COMMAND cp -r ${CMAKE_SOURCE_DIR}/csrc ${CMAKE_CURRENT_BINARY_DIR}
+    COMMAND ${CMAKE_SOURCE_DIR}/hipify.py -b ${CMAKE_CURRENT_BINARY_DIR}/csrc -o ${CMAKE_CURRENT_BINARY_DIR}/csrc -i ${CMAKE_CURRENT_BINARY_DIR}/csrc ${VLLM_EXT_SRC}
     DEPENDS hipify.py ${VLLM_EXT_SRC}
-    OUTPUT ${VLLM_EXT_ROCM_SRC})
+    BYPRODUCTS ${VLLM_EXT_ROCM_SRC}
+    COMMENT "run hipify2")
 
 #  add_custom_command(
 #    COMMAND ./hipify.py -b ${CMAKE_CURRENT_BINARY_DIR}/csrc -i csrc -o ${CMAKE_CURRENT_BINARY_DIR}/csrc ${VLLM_EXT_SRC}
@@ -412,15 +441,17 @@ elseif(HIP_FOUND)
 #    OUTPUT ${VLLM_EXT_ROCM_SRC}
 #    VERBATIM)
 
-#  set(VLLM_EXT_SRC ${VLLM_EXT_ROCM_SRC})
-  set(VLLM_EXT_SRC)
-  foreach (ROCM_SRC ${VLLM_EXT_ROCM_SRC})
-    list(APPEND VLLM_EXT_SRC ${CMAKE_SOURCE_DIR}/${ROCM_SRC})
-  endforeach()
+   set(VLLM_EXT_SRC ${VLLM_EXT_ROCM_SRC})
+
+#  set(VLLM_EXT_SRC)
+#  foreach (ROCM_SRC ${VLLM_EXT_ROCM_SRC})
+#    list(APPEND VLLM_EXT_SRC ${CMAKE_SOURCE_DIR}/${ROCM_SRC})
+#  endforeach()
   message("final src: ${VLLM_EXT_SRC}")
 endif()
 
-list(APPEND VLM_EXT_SRC "csrc/pybind.cpp") #?
+list(APPEND VLLM_EXT_SRC "csrc/pybind.cpp") # or leave in original list?
+#set(VLLM_EXT_SRC "csrc/pybind.cpp")
 
 define_module_target(_C
   "${VLLM_EXT_SRC}"
@@ -469,9 +500,3 @@ define_module_target(_punica_C
   "${VLLM_PUNICA_EXT_SRC}"
   "${VLLM_PUNICA_NVCC_FLAGS}"
   "${VLLM_PUNICA_CUDA_ARCHES}")
-
-get_cmake_property(_variableNames VARIABLES)
-list (SORT _variableNames)
-foreach (_variableName ${_variableNames})
-    message(STATUS "${_variableName}=${${_variableName}}")
-endforeach()
