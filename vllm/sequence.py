@@ -283,10 +283,16 @@ class SequenceGroup:
         self.last_token_time = now
         return latency
 
-    def set_first_token_time(self, now: float) -> None:
+    def maybe_set_first_token_time(self, now: float) -> None:
         """Sets the first token time for Request level timings."""
         if self.first_token_time is None:
             self.first_token_time = now
+
+    def maybe_set_first_scheduled_time(self, now: float) -> None:
+        """Sets the first scheduled time and time in queue for Request level timings."""
+        if self.first_scheduled_time is None:
+            self.first_scheduled_time = now
+            self.time_in_queue = now - self.arrival_time
 
     def get_max_num_running_seqs(self) -> int:
         """The maximum number of sequences running in parallel in the remaining

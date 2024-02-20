@@ -370,9 +370,7 @@ class Scheduler:
         # Create input data structures.
         seq_group_metadata_list: List[SequenceGroupMetadata] = []
         for seq_group in scheduler_outputs.scheduled_seq_groups:
-            if seq_group.first_scheduled_time is None:
-                seq_group.first_scheduled_time = now
-                seq_group.time_in_queue = now - seq_group.arrival_time
+            seq_group.maybe_set_first_scheduled_time(now)
 
             seq_data: Dict[int, SequenceData] = {}
             block_tables: Dict[int, List[int]] = {}

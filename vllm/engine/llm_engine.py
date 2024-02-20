@@ -737,7 +737,7 @@ class LLMEngine:
         # Create the outputs.
         request_outputs: List[RequestOutput] = []
         for seq_group in scheduled_seq_groups:
-            seq_group.set_first_token_time(now)
+            seq_group.maybe_set_first_token_time(now)
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
         for seq_group in scheduler_outputs.ignored_seq_groups:
