@@ -18,7 +18,7 @@ class EngineArgs:
     load_format: str = 'auto'
     dtype: str = 'auto'
     kv_cache_dtype: str = 'auto'
-    kv_cache_scales: str = None
+    kv_cache_scales_path: str = None
     seed: int = 0
     max_model_len: Optional[int] = None
     worker_use_ray: bool = False
@@ -133,14 +133,14 @@ class EngineArgs:
             'FP8_E5M2 (without scaling) is only supported on cuda version greater than 11.8. '
             'On ROCm (AMD GPU), FP8_E4M3 is instead supported for common inference criteria.')
         parser.add_argument(
-            '--kv-cache-scales',
+            '--kv-cache-scales-path',
             type=str,
             default=None,
-            help='Path to the JSON file containing the KV cache scaling factors. '
-            'This should generally be supplied when KV cache dtype is FP8. Otherwise '
-            'the KV cache scaling factors default to 1.0, which will likely cause '
-            'accuracy issues. Note FP8 is not supported when cuda version is '
-            'lower than 11.8.')
+            help='Path to the JSON files containing the KV cache scaling factors. '
+            'This should generally be supplied, when KV cache dtype is FP8. Otherwise, '
+            'KV cache scaling factors default to 1.0, which may cause accuracy issues. '
+            'FP8_E5M2 (withour scaling) is only supported on cuda version greater than 11.8. '
+            'On ROCm (AMD GPU), FP8_E4M3 is instead supported for common inference criteria.')
         parser.add_argument('--max-model-len',
                             type=int,
                             default=None,
@@ -281,7 +281,7 @@ class EngineArgs:
                Optional[LoRAConfig]]:
         model_config = ModelConfig(self.model, self.tokenizer,
                                    self.tokenizer_mode, self.trust_remote_code,
-                                   self.download_dir, self.kv_cache_scales, self.load_format,
+                                   self.download_dir, self.kv_cache_scales_path, self.load_format,
                                    self.dtype, self.seed, self.revision,
                                    self.tokenizer_revision, self.max_model_len,
                                    self.quantization, self.enforce_eager,

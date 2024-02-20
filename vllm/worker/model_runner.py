@@ -84,23 +84,21 @@ class ModelRunner:
                 self.lora_config, self.device)
             self.model = self.lora_manager.create_lora_manager(self.model)
         
-        if self.model_config.kv_cache_scales is not None:
+        if self.model_config.kv_cache_scales_path is not None:
             if self.kv_cache_dtype == "fp8":
                 if callable(getattr(self.model, "load_kv_cache_scales", None)):
-                    self.model.load_kv_cache_scales(self.model_config.kv_cache_scales)
+                    self.model.load_kv_cache_scales(self.model_config.kv_cache_scales_path)
                 else:
                     logger.warn("Using FP8 KV cache and scaling factors provided but "
-                                f"model {self.model.__class__} does not support "
-                                "loading scaling factors. Defaulting to 1.0 scales, "
-                                "be warned that this might lead to inaccurate "
-                                "results!")
+                                f"model {self.model.__class__} does not support loading "
+                                "scaling factors. Defaulting to scaling factors of 1.0, "
+                                "This may lead to less accurate results!")
             else:
-                logger.warn("User provided KV cache scaling factors but these will "
-                            "not be used as the KV cache dtype is not FP8!")
+                logger.warn("KV cache scaling factors provided, but the KV cache data type is not FP8. "
+                            "KV cache scaling factors will not be used.")
         elif self.kv_cache_dtype == "fp8":
-            logger.warn(f"Using FP8 KV cache but no scaling factors provided. "
-                        "Defaulting to 1.0 scales, be warned that this might "
-                        "lead to inaccurate results!")
+            logger.warn(f"Using FP8 KV cache but no scaling factors provided. Defaulting to "
+                         "scaling factors of 1.0, This may lead to less accurate results!")
 
     def set_block_size(self, block_size: int) -> None:
         self.block_size = block_size
