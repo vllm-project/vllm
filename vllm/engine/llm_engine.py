@@ -927,12 +927,27 @@ class LLMEngine:
                 self._finalize_sequence(seq, sampling_params, stop_str)
                 seq.status = SequenceStatus.FINISHED_STOPPED
                 return
-        if seq.get_last_token_id() in sampling_params.stop_token_ids:
-            stop_str = self.get_tokenizer_for_seq(seq).convert_ids_to_tokens(
-                seq.get_last_token_id())
-            self._finalize_sequence(seq, sampling_params, stop_str)
-            seq.status = SequenceStatus.FINISHED_STOPPED
-            return
+
+        # Check if last_n_token_id is stop_token_ids or stop_token_ids_group
+        if len(sampling_params.stop_token_ids) > 0:
+            find_stop_token_ids = None
+            if isinstance(sampling_params.stop_token_ids[0], list):
+                for stop_token_ids_group in sampling_params.stop_token_ids:
+                    find_stop_token_ids = seq.get_last_n_token_id(len(stop_token_ids_group))
+                    if find_stop_token_ids == stop_token_ids_group:
+                        break
+                    else:
+                        find_stop_token_ids = None
+            else:
+                find_stop_token_ids = seq.get_last_token_id()
+                if find_stop_token_ids not in sampling_params.stop_token_ids:
+                    find_stop_token_ids = None
+
+            if find_stop_token_ids is not None:
+                stop_str = self.get_tokenizer_for_seq(seq).convert_ids_to_tokens(find_stop_token_ids)
+                self._finalize_sequence(seq, sampling_params, stop_str)
+                seq.status = SequenceStatus.FINISHED_STOPPED
+                return
 
         # Check if the sequence has reached max_model_len.
         if seq.get_len() > self.scheduler_config.max_model_len:

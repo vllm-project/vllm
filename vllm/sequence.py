@@ -90,6 +90,11 @@ class SequenceData:
             return self.prompt_token_ids[-1]
         return self.output_token_ids[-1]
 
+    def get_last_n_token_id(self, n: int) -> List[int]:
+        if not self.output_token_ids:
+            return self.prompt_token_ids[-n:]
+        return self.output_token_ids[-n:]
+
     def __repr__(self) -> str:
         return (f"SequenceData("
                 f"prompt_token_ids={self.prompt_token_ids}, "
@@ -188,6 +193,9 @@ class Sequence:
 
     def get_last_token_id(self) -> int:
         return self.data.get_last_token_id()
+
+    def get_last_n_token_id(self, n: int) -> List[int]:
+        return self.data.get_last_n_token_id(n)
 
     def get_output_token_ids(self) -> List[int]:
         return self.data.output_token_ids
