@@ -9,8 +9,7 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse,
-    LogProbs,
-    UsageInfo)
+    LogProbs, UsageInfo)
 from vllm.outputs import RequestOutput
 from vllm.entrypoints.openai.serving_engine import OpenAIServing, LoRA
 
@@ -85,7 +84,8 @@ class OpenAIServingChat(OpenAIServing):
                 request, result_generator, request_id, self._create_logprobs)
         else:
             return await self.chat_completion_full_generator(
-                request, raw_request, result_generator, request_id, self._create_logprobs)
+                request, raw_request, result_generator, request_id,
+                self._create_logprobs)
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
         if request.add_generation_prompt:
@@ -94,9 +94,9 @@ class OpenAIServingChat(OpenAIServing):
             return request.messages[-1].role
 
     async def chat_completion_stream_generator(
-            self, request: ChatCompletionRequest,
-            result_generator: AsyncIterator[RequestOutput], request_id: str,
-            create_logprobs_fn: TypeCreateLogProbsFn
+        self, request: ChatCompletionRequest,
+        result_generator: AsyncIterator[RequestOutput], request_id: str,
+        create_logprobs_fn: TypeCreateLogProbsFn
     ) -> Union[ErrorResponse, AsyncGenerator[str, None]]:
 
         model_name = request.model
@@ -107,7 +107,10 @@ class OpenAIServingChat(OpenAIServing):
         role = self.get_chat_request_role(request)
         for i in range(request.n):
             choice_data = ChatCompletionResponseStreamChoice(
-                index=i, delta=DeltaMessage(role=role), logprobs=None, finish_reason=None)
+                index=i,
+                delta=DeltaMessage(role=role),
+                logprobs=None,
+                finish_reason=None)
             chunk = ChatCompletionStreamResponse(id=request_id,
                                                  object=chunk_object_type,
                                                  created=created_time,
@@ -158,7 +161,8 @@ class OpenAIServingChat(OpenAIServing):
                     top_logprobs = res.prompt_logprobs
                 elif request.echo and request.max_tokens > 0:
                     delta_token_ids = res.prompt_token_ids + output.token_ids
-                    top_logprobs = res.prompt_logprobs + (output.logprobs or [])
+                    top_logprobs = res.prompt_logprobs + (output.logprobs
+                                                          or [])
                 else:
                     delta_token_ids = output.token_ids[previous_num_tokens[i]:]
                     top_logprobs = output.logprobs[
@@ -223,10 +227,10 @@ class OpenAIServingChat(OpenAIServing):
         yield "data: [DONE]\n\n"
 
     async def chat_completion_full_generator(
-            self, request: ChatCompletionRequest, raw_request: Request,
-            result_generator: AsyncIterator[RequestOutput],
-            request_id: str,
-            create_logprobs_fn: TypeCreateLogProbsFn) -> Union[ErrorResponse, ChatCompletionResponse]:
+        self, request: ChatCompletionRequest, raw_request: Request,
+        result_generator: AsyncIterator[RequestOutput], request_id: str,
+        create_logprobs_fn: TypeCreateLogProbsFn
+    ) -> Union[ErrorResponse, ChatCompletionResponse]:
 
         model_name = request.model
         created_time = int(time.monotonic())
