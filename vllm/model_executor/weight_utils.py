@@ -271,14 +271,36 @@ def kv_cache_scales_iterator(filename: str) -> Iterator[Tuple[int, torch.Tensor]
     itself. Keep this function in sync with the output of
     3rdparty/quantization/extract_scales.py
     """
-    with open(filename) as f:
-        layer_scale_factor_map = json.load(f, parse_int=int, parse_constant=float)
-        if not isinstance(layer_scale_factor_map, dict) or \
-            len(layer_scale_factor_map) == 0:
-            raise RuntimeError(f"File '{filename}' does not specify a valid "
-                                "layer:scale_factor map.")
-        for layer_idx, scale_factor in layer_scale_factor_map.items():
-            yield int(layer_idx), float(scale_factor)
+    try:
+        with open(filename) as f:
+            # For now we do not obtain any of the benefits of iterators
+            # but since the number of layers = number of scales is typically
+            # small, this is not a concern. Loading and processing the entire
+            # dictionary at once allows us to do sanity checks all at once and
+            # avoid a situation where we have to abort after having partially
+            # loaded scaling factors 
+            raw_map = json.load(f, parse_int=int, parse_constant=float)
+            if not isinstance(raw_map, dict) or len(raw_map) == 0:
+                raise RuntimeError(f"File '{filename}' does not specify a valid "
+                                   "layer:scale_factor map.")
+            # If any of the inputs are malformed, it will raise an error here and
+            # be caught in except
+            layer_scales_map = {int(layer_idx): float(scale) 
+                                for layer_idx, scale in raw_map.items()}
+            return layer_scales_map.items()
+        
+    except FileNotFoundError:
+        logger.error(f"File '{filename}' not found.")
+    except json.JSONDecodeError:
+        logger.error(f"Error decoding JSON in file '{filename}'.")
+    except Exception as e:
+        logger.error(f"An error occurred while reading file '{filename}': {e}")
+    # This section is only reached if any of the excepts are hit
+    # Return an empty iterator (tuple) => no KV cache scales are loaded
+    # which effectively defaults to 1.0 scales
+    logger.warn("Defaulting to KV cache scaling factors = 1.0 as an error "
+                "occurred while trying to load them from file.")
+    return ()
 
 
 def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
