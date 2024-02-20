@@ -21,3 +21,9 @@ jobs:
     - name: Build Docker
       run: |
         docker build -t rocm -f Dockerfile.rocm .
+    - name: Run Sanity Test
+      run: |
+        docker run --detached --p 8000:8000 rocm
+        while [ "$(curl -s -o /dev/null -w ''%{http_code}'' localhost:8000)" != "200" ]; do sleep 1; done
+        python examples/openai_completion_client.py
+
