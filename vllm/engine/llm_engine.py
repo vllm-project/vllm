@@ -933,7 +933,8 @@ class LLMEngine:
             find_stop_token_ids = None
             if isinstance(sampling_params.stop_token_ids[0], list):
                 for stop_token_ids_group in sampling_params.stop_token_ids:
-                    find_stop_token_ids = seq.get_last_n_token_id(len(stop_token_ids_group))
+                    find_stop_token_ids = seq.get_last_n_token_id(
+                        len(stop_token_ids_group))
                     if find_stop_token_ids == stop_token_ids_group:
                         break
                     else:
@@ -944,7 +945,8 @@ class LLMEngine:
                     find_stop_token_ids = None
 
             if find_stop_token_ids is not None:
-                stop_str = self.get_tokenizer_for_seq(seq).convert_ids_to_tokens(find_stop_token_ids)
+                stop_str = self.get_tokenizer_for_seq(
+                    seq).convert_ids_to_tokens(find_stop_token_ids)
                 self._finalize_sequence(seq, sampling_params, stop_str)
                 seq.status = SequenceStatus.FINISHED_STOPPED
                 return
