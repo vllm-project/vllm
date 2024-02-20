@@ -12,6 +12,7 @@ from vllm._C import cache_ops
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.triton_kernel.prefix_prefill import (
     context_attention_fwd)
+from vllm.model_executor.layers.linear import set_weight_attrs
 from vllm.utils import is_hip
 
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
@@ -50,6 +51,11 @@ class PagedAttention(nn.Module):
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.register_buffer("alibi_slopes", alibi_slopes, persistent=False)
+        
+        # This will be set to a float by model initialization per attention,
+        # if and only if we are using it. N.B. currently we only support per
+        # tensor scalar scaling factors & only applicable to ROCm (AMD GPU).
+        self.kv_cache_scaling_factor = None
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -188,7 +194,6 @@ class PagedAttention(nn.Module):
                 self.scale,
                 self.alibi_slopes,
             )
-
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
 

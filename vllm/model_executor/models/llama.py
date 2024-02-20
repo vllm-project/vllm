@@ -43,7 +43,8 @@ from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_world_size)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
+                                              hf_model_weights_iterator,
+                                              kv_cache_scales_iterator)
 from vllm.sequence import SamplerOutput
 from vllm.config import LoRAConfig
 
@@ -357,3 +358,9 @@ class LlamaForCausalLM(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+    
+    # Should not be called unless the KV cache dtype is FP8 on ROCm (AMD GPU)
+    def load_kv_cache_scales(self, filename: str) -> None:
+        for layer_idx, scaling_factor in kv_cache_scales_iterator(filename):
+            layer_paged_attn = self.model.layers[layer_idx].self_attn.attn
+            layer_paged_attn.kv_cache_scaling_factor = scaling_factor

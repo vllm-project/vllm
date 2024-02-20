@@ -83,6 +83,22 @@ class ModelRunner:
                 self.scheduler_config.max_paddings, vocab_size,
                 self.lora_config, self.device)
             self.model = self.lora_manager.create_lora_manager(self.model)
+        
+        if self.model_config.kv_cache_scales_path is not None:
+            if self.kv_cache_dtype == "fp8":
+                if callable(getattr(self.model, "load_kv_cache_scales", None)):
+                    self.model.load_kv_cache_scales(self.model_config.kv_cache_scales_path)
+                else:
+                    logger.warn("Using FP8 KV cache and scaling factors provided but "
+                                f"model {self.model.__class__} does not support loading "
+                                "scaling factors. Defaulting to scaling factors of 1.0, "
+                                "This may lead to less accurate results!")
+            else:
+                logger.warn("KV cache scaling factors provided, but the KV cache data type is not FP8. "
+                            "KV cache scaling factors will not be used.")
+        elif self.kv_cache_dtype == "fp8":
+            logger.warn(f"Using FP8 KV cache but no scaling factors provided. Defaulting to "
+                         "scaling factors of 1.0, This may lead to less accurate results!")
 
     def set_block_size(self, block_size: int) -> None:
         self.block_size = block_size
@@ -517,7 +533,7 @@ class ModelRunner:
     def execute_model(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+        kv_caches: List[KVCache],
     ) -> Optional[SamplerOutput]:
         input_tokens, input_positions, input_metadata, sampling_metadata, lora_requests, lora_mapping = (
             self.prepare_input_tensors(seq_group_metadata_list))
@@ -753,7 +769,7 @@ class CUDAGraphRunner:
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+        kv_caches: List[KVCache],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
         # KV caches are fixed tensors, so we don't need to copy them.
