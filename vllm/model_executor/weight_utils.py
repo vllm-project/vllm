@@ -272,6 +272,10 @@ def kv_cache_scales_iterator(filename: str) -> Iterator[Tuple[int, torch.Tensor]
     """
     with open(filename) as f:
         layer_scale_factor_map = json.load(f, parse_int=int, parse_constant=float)
+        if not isinstance(layer_scale_factor_map, dict) or \
+            len(layer_scale_factor_map) == 0:
+            raise RuntimeError(f"File '{filename}' does not specify a valid "
+                                "layer:scale_factor map.")
         for layer_idx, scale_factor in layer_scale_factor_map.items():
             yield int(layer_idx), float(scale_factor)
 

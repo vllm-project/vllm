@@ -110,9 +110,8 @@ def run_vllm(
 
     start = time.perf_counter()
     # FIXME(woosuk): Do not use internal method.
-    outputs = llm._run_engine(use_tqdm=True)
+    llm._run_engine(use_tqdm=True)
     end = time.perf_counter()
-    print(outputs[-1])
     return end - start
 
 
@@ -313,7 +312,7 @@ if __name__ == "__main__":
         help='Path to the JSON files containing the KV cache scaling factors. '
         'This should generally be supplied, when KV cache dtype is FP8. Otherwise, '
         'KV cache scaling factors default to 1.0, which may cause accuracy issues. '
-        'FP8_E5M2 (withour scaling) is only supported on cuda version greater than 11.8. '
+        'FP8_E5M2 (without scaling) is only supported on cuda version greater than 11.8. '
         'On ROCm (AMD GPU), FP8_E4M3 is instead supported for common inference criteria.')
     args = parser.parse_args()
     if args.tokenizer is None:
