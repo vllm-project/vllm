@@ -18,6 +18,7 @@ def _read_prompts(filename: str) -> List[str]:
         prompts = f.readlines()
         return prompts
 
+
 @pytest.fixture
 def example_prompts() -> List[str]:
     prompts = []
