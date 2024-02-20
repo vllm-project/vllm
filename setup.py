@@ -2,7 +2,6 @@ import io
 import os
 import re
 import subprocess
-import sys
 from typing import List
 
 from packaging.version import parse, Version

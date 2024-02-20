@@ -30,12 +30,10 @@ if __name__ == '__main__':
         default=[],
     )
 
-    parser.add_argument(
-        "sources",
-        help="Source files to hipify.",
-        nargs="*",
-        default=[]
-    )
+    parser.add_argument("sources",
+                        help="Source files to hipify.",
+                        nargs="*",
+                        default=[])
 
     args = parser.parse_args()
 
@@ -48,31 +46,33 @@ if __name__ == '__main__':
     extra_files = [os.path.abspath(s) for s in args.sources]
     print(f"extra_files {extra_files}")
 
-    hipify_result = hipify(
-        project_directory=args.build_dir,
-        output_directory=args.output_dir,
-        header_include_dirs=[],
-        includes=includes,
-        extra_files=extra_files,
-        show_detailed=True,
-        is_pytorch_extension=True,
-        hipify_extra_files_only=True)
+    hipify_result = hipify(project_directory=args.build_dir,
+                           output_directory=args.output_dir,
+                           header_include_dirs=[],
+                           includes=includes,
+                           extra_files=extra_files,
+                           show_detailed=True,
+                           is_pytorch_extension=True,
+                           hipify_extra_files_only=True)
 
     #print(hipify_result)
 
     hipified_sources = []
     for source in args.sources:
         s_abs = os.path.abspath(source)
-        hipified_s_abs = (hipify_result[s_abs].hipified_path if (s_abs in hipify_result and
-                          hipify_result[s_abs].hipified_path is not None) else s_abs)
+        hipified_s_abs = (hipify_result[s_abs].hipified_path if
+                          (s_abs in hipify_result
+                           and hipify_result[s_abs].hipified_path is not None)
+                          else s_abs)
         if True:
             hipified_sources.append(hipified_s_abs)
         else:
             hipified_sources.append(
-                os.path.relpath(hipified_s_abs,
-                                os.path.abspath(os.path.join(args.build_dir, os.pardir))))
+                os.path.relpath(
+                    hipified_s_abs,
+                    os.path.abspath(os.path.join(args.build_dir, os.pardir))))
 
-    assert(len(hipified_sources) == len(args.sources))
+    assert (len(hipified_sources) == len(args.sources))
 
     #    print("\n".join(hipified_sources))
 
