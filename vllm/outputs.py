@@ -1,9 +1,8 @@
-from dataclasses import dataclass
 from typing import List, Optional
 import time
 
 from vllm.sequence import (PromptLogprobs, SampleLogprobs, SequenceGroup,
-                           SequenceStatus)
+                           SequenceStatus, RequestMetrics)
 from vllm.lora.request import LoRARequest
 
 
@@ -52,24 +51,6 @@ class CompletionOutput:
                 f"finish_reason={self.finish_reason})")
 
 
-@dataclass
-class RequestOutputMetrics:
-    """Metrics associated with a request.
-
-    Args:
-        arrival_time: The time when the request arrived.
-        first_scheduled_time: The time when the request was first scheduled.
-        first_token_time: The time when the first token was generated.
-        time_in_queue: The time the request spent in the queue.
-        finished_time: The time when the request was finished.
-    """
-    arrival_time: float
-    first_scheduled_time: float
-    first_token_time: float
-    time_in_queue: float
-    finished_time: Optional[float] = None
-
-
 class RequestOutput:
     """The output data of a request to the LLM.
 
@@ -92,7 +73,7 @@ class RequestOutput:
         prompt_logprobs: Optional[PromptLogprobs],
         outputs: List[CompletionOutput],
         finished: bool,
-        metrics: Optional[RequestOutputMetrics] = None,
+        metrics: Optional[RequestMetrics] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> None:
         self.request_id = request_id
@@ -139,18 +120,14 @@ class RequestOutput:
         prompt_logprobs = seq_group.prompt_logprobs
         finished = seq_group.is_finished()
         finished_time = time.time() if finished else None
+        seq_group.set_finished_time(finished_time)
         return cls(seq_group.request_id,
                    prompt,
                    prompt_token_ids,
                    prompt_logprobs,
                    outputs,
                    finished,
-                   metrics=RequestOutputMetrics(
-                       arrival_time=seq_group.arrival_time,
-                       first_scheduled_time=seq_group.first_scheduled_time,
-                       first_token_time=seq_group.first_token_time,
-                       time_in_queue=seq_group.time_in_queue,
-                       finished_time=finished_time),
+                   seq_group.metrics,
                    lora_request=seq_group.lora_request)
 
     def __repr__(self) -> str:

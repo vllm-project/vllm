@@ -873,11 +873,12 @@ class LLMEngine:
             # Latency Timings.
             time_last_iters = []
             for seq_group in scheduler_outputs.scheduled_seq_groups:
-                # Time since last token. (n.b. updates seq_group.last_token_time)
+                # Time since last token. (n.b. updates seq_group.metrics.last_token_time)
                 time_last_iters.append(seq_group.get_last_latency(now))
                 # Time since arrival for all finished requests.
                 if seq_group.is_finished():
-                    time_e2e_requests.append(now - seq_group.arrival_time)
+                    time_e2e_requests.append(now -
+                                             seq_group.metrics.arrival_time)
 
             time_to_first_tokens = time_last_iters if prompt_run else []
             time_per_output_tokens = [] if prompt_run else time_last_iters
