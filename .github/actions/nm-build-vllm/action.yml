@@ -1,0 +1,33 @@
+name: build neuralmagic-vllm
+description: 'build neuralmagic-vllm'
+inputs:
+  Gi_per_thread:
+    description: 'requested GiB to reserve per thread'
+    required: true
+  python:
+    description: 'python version, e.g. 3.10.12'
+    required: true
+  venv:
+    description: 'name for python virtual environment'
+    required: true
+outputs:
+  status:
+    description: "final build status from 'pip install -e'"
+    value: ${{ steps.build.outputs.status }}
+runs:
+  using: composite
+  steps:
+  - id: build
+    run: |
+      # TODO: this is a hack ... fix it later
+      # pyenv hardcoded ... python version hardcoded ...
+      COMMIT=${{ github.sha }}
+      VENV="${{ inputs.venv }}-${COMMIT:0:7}"
+      source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
+      pip3 install --index-url http://192.168.201.226:8080/ --trusted-host 192.168.201.226 magic-wand
+      pip3 install -r requirements.txt
+      SUCCESS=0
+      pip3 install -e . || SUCCESS=$?
+      echo "status=${SUCCESS}" >> "$GITHUB_OUTPUT"
+      exit ${SUCCESS}
+    shell: bash

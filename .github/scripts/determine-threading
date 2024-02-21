@@ -1,0 +1,49 @@
+#!/bin/bash -e
+
+usage() {
+    echo "Usage: ${0} <options>"
+    echo
+    echo "  -G    - number of GiB per processor (includes hyperthreads, default is 1 GiB)."
+    echo "  -h    - this list of options"
+    echo
+    exit 1
+}
+
+Gi_PER_PROC=1
+
+while getopts "hG:" OPT; do
+    case "${OPT}" in
+	h)
+	    usage
+	    ;;
+	G)
+	    Gi_PER_PROC="${OPTARG}"
+	    ;;
+    esac
+done
+
+
+# this includes hyperthreads, since we're only compiling code
+# ... not doing floating point calculations
+UNAME=$(uname)
+ALL_PROC=1
+TOTAL_MEM=0
+
+ALL_PROC=$(nproc --all)
+TOTAL_MEM=$(grep MemTotal /proc/meminfo)
+TOTAL_MEM=${TOTAL_MEM##MemTotal:}
+TOTAL_MEM=${TOTAL_MEM%%kB}
+TOTAL_MEM=$(echo $TOTAL_MEM | xargs)
+TOTAL_MEM=$((TOTAL_MEM / 1048576))
+
+USE_PROC=$((TOTAL_MEM / Gi_PER_PROC))
+
+# constrain to have at least 1 Gi per processor
+USE_PROC=$((USE_PROC > ALL_PROC ? ALL_PROC : USE_PROC))
+
+# if unable to determine total memory, then just set USE_PROC to 1
+if [ ${TOTAL_MEM} -eq 0 ]; then
+    USE_PROC=1
+fi
+
+echo ${USE_PROC}

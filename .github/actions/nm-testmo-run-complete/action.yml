@@ -1,0 +1,35 @@
+name: complete testmo run
+description: 'complete neuralmagic testmo run'
+inputs:
+  testmo_url:
+    description: 'testmo URL'
+    required: true
+  testmo_token:
+    description: 'testmo token'
+    required: true
+  testmo_run_id:
+    description: 'testmo run id'
+    required: true
+runs:
+  using: "composite"
+  steps:
+    - run: |
+        echo "completing TESTMO run ..."
+        ## CHECK testmo_url and token
+        if [[ -z "${TESTMO_URL}" ]]; then
+          echo "The TESTMO_URL secret is not defined for this repository"
+          exit 1
+        fi
+        if [[ -z "${TESTMO_TOKEN}" ]]; then
+          echo "The TESTMO_TOKEN secret is not defined for this repository"
+          exit 1
+        fi
+        ## complete testmo run
+        npx testmo automation:run:complete \
+          --instance "${TESTMO_URL}" \
+          --run-id "${TESTMO_RUN_ID}"
+      env:
+        TESTMO_URL: ${{ inputs.testmo_url }}
+        TESTMO_TOKEN: ${{ inputs.testmo_token }}
+        TESTMO_RUN_ID: ${{ inputs.testmo_run_id }}
+      shell: bash

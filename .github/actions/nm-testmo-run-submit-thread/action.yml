@@ -1,0 +1,59 @@
+name: submit results to testmo run
+description: 'asynchronously submit step results to neuralmagic testmo run'
+inputs:
+  testmo_url:
+    description: 'testmo URL'
+    required: true
+  testmo_token:
+    description: 'testmo token'
+    required: true
+  testmo_run_id:
+    description: 'testmo run id'
+    required: true
+  results:
+    description: "directory of JUnit '*.xml' formatted result files"
+    required: true
+  step_status:
+    description: 'status of reported step'
+    required: true
+outputs:
+  status:
+    description: "status of updating testmo. if there was no update, then 'success' is returned."
+    value: ${{ steps.submit_thread.outputs.status }}
+runs:
+  using: "composite"
+  steps:
+    - id: submit_thread
+      run: |
+        ls -al
+        ## if results is non-existent or there aren't results, then nothing to submit ...
+        REPORT=1
+        RESULTS=
+        if [[ ! -d ${{ inputs.results }} ]]; then
+          REPORT=0
+        else
+          RESULTS=$(find ${{ inputs.results }} -type f -name "*.xml")
+        fi
+        if [[ -z "${RESULTS}" ]]; then
+          REPORT=0
+        fi
+        ## submit results?
+        SUCCESS=0
+        if [ ${REPORT} -eq 1 ]; then
+          echo "submitting results to TESTMO run ..."
+          ## not checking testmo_url and token as this should be
+          ## called between "create" and "complete"
+          npx testmo automation:run:submit-thread \
+            --instance ${TESTMO_URL} \
+            --run-id ${TESTMO_RUN_ID} \
+            --results ${RESULTS} \
+            -- ./.github/scripts/step-status ${{ inputs.step_status }}
+            SUCCESS=$?
+        fi
+        echo "status=${SUCCESS}" >> "$GITHUB_OUTPUT"
+        exit ${SUCCESS}
+      env:
+        TESTMO_URL: ${{ inputs.testmo_url }}
+        TESTMO_TOKEN: ${{ inputs.testmo_token }}
+        TESTMO_RUN_ID: ${{ inputs.testmo_run_id }}
+      shell: bash

@@ -1,0 +1,30 @@
+name: remote push
+run-name: ${{ github.actor }} verifying branch '${{ github.ref }}'
+on:
+  push:
+    branches-ignore:
+      - main
+
+concurrency:
+  group: ${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+
+    # TODO: expand python matrix later, once CI system has
+    #       matured.
+    # TODO: adjust timeout after we get a bit more experience.
+    #       making it 60 is a bit permissive.
+
+    # TODO: enable this later
+    AWS-AVX2-32G-A10G-24G:
+        strategy:
+            matrix:
+                python: [3.10.12]
+        uses: ./.github/workflows/build-test.yml
+        with:
+            label: aws-avx2-32G-a10g-24G
+            timeout: 60
+            gitref: '${{ github.ref }}'
+            python: ${{ matrix.python }}
+        secrets: inherit

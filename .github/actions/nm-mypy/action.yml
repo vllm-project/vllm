@@ -1,0 +1,16 @@
+name: mypy
+description: "run 'mypy' and report final status"
+outputs:
+  status:
+    description: "final status from 'mypy'"
+    value: ${{ steps.mypy.outputs.status }}
+runs:
+  using: composite
+  steps:
+  - id: mypy
+    run: |
+      SUCCESS=0
+      mypy || SUCCESS=$?
+      echo "status=${SUCCESS}" >> "$GITHUB_OUTPUT"
+      exit ${SUCCESS}
+    shell: bash

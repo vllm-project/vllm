@@ -57,6 +57,94 @@ jobs:
                 ref: ${{ inputs.gitref }}
                 submodules: recursive
 
-            - name: hello world
+            - name: setenv
+              id: setenv
+              uses: ./.github/actions/nm-set-env/
+              with:
+                hf_home: ${{ secrets.NM_HF_HOME }}
+
+            - name: set python
+              id: set_python
+              uses: ./.github/actions/nm-set-python/
+              with:
+                python: ${{ inputs.python }}
+                venv: TEST
+
+            # TODO: testmo source is currently hardcoded.
+            - name: create testmo run
+              id: create_testmo_run
+              uses: ./.github/actions/nm-testmo-run-create/
+              if: success() || failure()
+              with:
+                testmo_url: https://neuralmagic.testmo.net
+                testmo_token: ${{ secrets.TESTMO_TEST_TOKEN }}
+                source: 'build-test'
+
+            - name: python lint
+              id: lint
+              uses: ./.github/actions/nm-lint-python/
+
+            - name: build
+              id: build
+              uses: ./.github/actions/nm-build-vllm/
+              with:
+                Gi_per_thread: 1
+                python: ${{ inputs.python }}
+                venv: TEST
+
+            - name: test
+              id: test
+              uses: ./.github/actions/nm-test-vllm/
+              with:
+                test_directory: tests
+                test_xml: test-results/all_tests.xml
+                python: ${{ inputs.python }}
+                venv: TEST
+
+            - name: report test results
+              id: report_test
+              uses: ./.github/actions/nm-testmo-run-submit-thread/
+              if: success() || failure()
+              with:
+                testmo_url: https://neuralmagic.testmo.net
+                testmo_token: ${{ secrets.TESTMO_TEST_TOKEN }}
+                testmo_run_id: ${{ steps.create_testmo_run.outputs.id }}
+                results: test-results
+                step_status: ${{ steps.test.outputs.status }}
+
+            - name: summary
+              uses: ./.github/actions/nm-run-summary/
+              if: success() || failure()
+              with:
+                label: ${{ inputs.label }}
+                gitref: ${{ inputs.gitref }}
+                testmo_run_url: https://neuralmagic.testmo.net/automation/runs/view/${{ steps.create_testmo_run.outputs.id }}
+                python: ${{ steps.set_python.outputs.version }}
+                lint_status: ${{ steps.lint.outputs.status }}
+                build_status: ${{ steps.build.outputs.status }}
+                test_status: ${{ steps.test.outputs.status }}
+
+            - name: run status
+              id: run_status
+              if: success() || failure()
+              env:
+                CHECKOUT: ${{ steps.checkout.outcome }}
+                LINT_STATUS: ${{ steps.lint.outputs.status }}
+                BUILD_STATUS: ${{ steps.build.outputs.status }}
+                TEST_STATUS: ${{ steps.test.outputs.status }}
               run: |
-                echo "HELLO WORLD" >> $GITHUB_STEP_SUMMARY
+                  echo "checkout status: ${CHECKOUT}"
+                  if [[ "${CHECKOUT}" != *"success"* ]]; then exit 1; fi
+                  if [ ${LINT_STATUS} -ne 0 ]; then exit 1; fi
+                  if [ ${BUILD_STATUS} -ne 0 ]; then exit 1; fi
+                  echo "build status: ${BUILD_STATUS}"
+                  if [ ${TEST_STATUS} -ne 0 ]; then exit 1; fi
+                  echo "test status: ${TEST_STATUS}"
+
+            - name: complete testmo run
+              uses: ./.github/actions/nm-testmo-run-complete/
+              if: success() || failure()
+              with:
+                testmo_url: https://neuralmagic.testmo.net
+                testmo_token: ${{ secrets.TESTMO_TEST_TOKEN }}
+                testmo_run_id: ${{ steps.create_testmo_run.outputs.id }}
