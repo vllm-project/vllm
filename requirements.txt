@@ -1,3 +1,4 @@
+fastapi
 ninja  # For faster builds.
 psutil
 ray >= 2.9

@@ -184,3 +184,7 @@ _build/
 
 # Benchmark dataset
 *.json
+
+# pyenv
+.python-version
+

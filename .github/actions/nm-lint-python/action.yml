@@ -1,0 +1,23 @@
+name: lint python
+description: "runs 'ruff' and reports errors"
+outputs:
+  status:
+    description: "return code from 'ruff'"
+    value: ${{ steps.ruff.outputs.status }}
+runs:
+  using: composite
+  steps:
+    - id: ruff
+      run: |
+        SUCCESS=0
+        PYTHON_FILES=$(ruff .) || SUCCESS=$?
+        if [ ${SUCCESS} -ne 0 ]; then
+          echo "__Python Lint Failures:__" >> $GITHUB_STEP_SUMMARY
+          echo "${PYTHON_FILES}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo -e "lint: \xE2\x9D\x8C __FAILED__" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+        fi
+        echo "status=${SUCCESS}" >> "$GITHUB_OUTPUT"
+        exit ${SUCCESS}
+      shell: bash
