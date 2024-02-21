@@ -289,6 +289,9 @@ def kv_cache_scales_iterator(filename: str,
             # in the following lines and is caught in except
             assert isinstance(raw_rank_map, dict), "Did not load a dictionary from file."
             assert len(raw_rank_map) != 0, "Loaded dictionary is empty."
+            loaded_tp_size = max(int(rank) for rank in raw_rank_map) + 1
+            assert loaded_tp_size == tp_size, f"Loaded dictionary has TP size {loaded_tp_size} " \
+              f"but LLM engine is currently running with TP size {tp_size}."
             for rank, scales_map in raw_rank_map.items():
                 assert len(scales_map) == num_hidden_layers, "KV cache scales map for TP rank " \
                   f"{rank} is malformed. Expected {num_hidden_layers} layers, got {len(scales_map)}."
