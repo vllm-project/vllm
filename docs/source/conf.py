@@ -94,3 +94,5 @@ class MockedClassDocumenter(autodoc.ClassDocumenter):
 
 
 autodoc.ClassDocumenter = MockedClassDocumenter
+
+navigation_with_keys = False
