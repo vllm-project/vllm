@@ -1,13 +1,13 @@
+aioprometheus[starlette]
+fastapi
 ninja  # For faster builds.
-typing-extensions>=4.8.0
-starlette
+numpy
 psutil
+pydantic >= 2.0  # Required for OpenAI server.
 ray >= 2.5.1
 sentencepiece  # Required for LLaMA tokenizer.
-numpy
+starlette
 tokenizers>=0.15.0
 transformers >= 4.37.0  # Required for Mixtral.
-fastapi
+typing-extensions>=4.8.0
 uvicorn[standard]
-pydantic >= 2.0  # Required for OpenAI server.
-aioprometheus[starlette]

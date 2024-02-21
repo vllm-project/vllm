@@ -1,0 +1,59 @@
+name: create testmo run
+description: 'create neuralmagic testmo run and return its ID'
+inputs:
+  testmo_url:
+    description: 'testmo URL'
+    required: true
+  testmo_token:
+    description: 'testmo token'
+    required: true
+  source:
+    description: "source for testmo, e.g. 'build-test'"
+    required: true
+outputs:
+  id:
+    description: 'testmo run id'
+    value: ${{ steps.testmo_id.outputs.id }}
+runs:
+  using: "composite"
+  steps:
+    - name: create run
+      id: testmo_id
+      run: |
+        echo "creating TESTMO run ..."
+        sudo mkdir -p ${HOME}/.npm
+        sudo chown -R $(whoami):$(whoami) ${HOME}/.npm
+        ## adjust resources and GHA link
+        npx testmo automation:resources:add-field --name git --type string --value ${GITHUB_SHA:0:7} --resources resources.json
+        RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+        ACTOR=${GITHUB_ACTOR}
+        BUILD=${ACTOR}-$(whoami)-gpu
+        echo "name: ${BUILD}"
+        echo "url: ${RUN_URL}"
+        npx testmo automation:resources:add-link --name ${BUILD} --url ${RUN_URL} --resources resources.json
+        ## CHECK testmo_url and token
+        if [[ -z "${TESTMO_URL}" ]]; then
+          echo "The TESTMO_URL secret is not defined for this repository"
+          exit 1
+        fi
+        if [[ -z "${TESTMO_TOKEN}" ]]; then
+          echo "The TESTMO_TOKEN secret is not defined for this repository"
+          exit 1
+        fi
+        ## construct name
+        BRANCH_NAME=${GITHUB_REF_NAME}
+        TMP=${ACTOR}-${BRANCH_NAME}
+        TESTMO_RUN_NAME=$(echo ${TMP} | awk '{print tolower($0)}')
+        echo "test run name: ${TESTMO_RUN_NAME}"
+        ## create testmo run
+        TESTMO_ID=$(npx testmo automation:run:create \
+          --instance "${TESTMO_URL}" \
+          --project-id "${PROJECT_ID}" \
+          --name "${TESTMO_RUN_NAME}" \
+          --source "${{ inputs.source }}" \
+          --resources resources.json)
+        echo "id=${TESTMO_ID}" >> "${GITHUB_OUTPUT}"
+      env:
+        TESTMO_URL: ${{ inputs.testmo_url }}
+        TESTMO_TOKEN: ${{ inputs.testmo_token }}
+      shell: bash

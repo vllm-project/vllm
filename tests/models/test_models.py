@@ -13,6 +13,7 @@ MODELS = [
 ]
 
 
+@pytest.mark.skip("running these on a10g results in process getting killed")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [128])
