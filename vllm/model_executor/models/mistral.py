@@ -89,7 +89,8 @@ class MistralAttention(nn.Module):
                  max_position: int = 4096 * 32,
                  rope_theta: float = 10000,
                  linear_method: Optional[LinearMethodBase] = None,
-                 sliding_window: Optional[int] = None) -> None:
+                 sliding_window: Optional[int] = None,
+                 rope_scaling = None) -> None:
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -133,6 +134,7 @@ class MistralAttention(nn.Module):
             rotary_dim=self.head_dim,
             max_position=max_position,
             base=self.rope_theta,
+            rope_scaling=rope_scaling,
         )
         self.attn = PagedAttention(self.num_heads,
                                    self.head_dim,
@@ -167,6 +169,7 @@ class MistralDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 10000)
+        rope_scaling = getattr(config, "rope_scaling", None)
         self.self_attn = MistralAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -174,7 +177,8 @@ class MistralDecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
             linear_method=linear_method,
-            sliding_window=config.sliding_window)
+            sliding_window=config.sliding_window,
+            rope_scaling = rope_scaling)
         self.mlp = MistralMLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
