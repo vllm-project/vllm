@@ -1,0 +1,25 @@
+name: workflow info
+description: 'give a brief summary of workflow parameters'
+inputs:
+  label:
+    description: "requested runner label (specifies instance)"
+    required: true
+  timeout:
+    description: "time limit for run in minutes "
+    required: true
+  gitref:
+    description: "git commit hash or branch name"
+    required: true
+runs:
+  using: composite
+  steps:
+    - run: |
+        echo "workflow started ..."
+        echo "label: '${{ inputs.label }}'"
+        echo "github actor: '${{ github.actor }}'"
+        echo "repository: '${{ github.repository }}'"
+        echo "gitref: '${{ inputs.gitref }}'"
+        echo "branch name: '${{ github.ref_name }}'"
+        echo "user on instance: $(whoami)"
+        echo "workflow timeout: ${{ inputs.timeout }} (min)"
+      shell: bash

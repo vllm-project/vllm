@@ -1,0 +1,17 @@
+name: run vllm benchmarks
+description: 'run vllm benchmarks'
+inputs:
+  output_directory:
+    description: 'output directory to store the benchmark results'
+    required: true
+runs:
+  using: composite
+  steps:
+  - id: benchmark
+    run: |
+      mkdir -p ${{ inputs.output_directory }}
+      SUCCESS=0
+      .github/workflows/scripts/nm-run-benchmarks.sh ${{ inputs.output_directory }} || SUCCESS=$?
+      echo "test=${SUCCESS}" >> "$GITHUB_OUTPUT"
+      exit ${SUCCESS}
+    shell: bash

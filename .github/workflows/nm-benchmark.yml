@@ -1,0 +1,72 @@
+name: benchmark 
+on:
+  workflow_dispatch:
+    inputs:
+      label:
+        description: "requested runner label (specifies instance)"
+        type: string
+        required: true
+      timeout:
+        description: "approximate number of minutes to keep instance up (should be at least 20)."
+        type: string
+        required: true
+      gitref:
+        description: "git commit hash or branch name"
+        type: string
+        required: true
+
+jobs:
+  BENCHMARK:
+
+    runs-on: ${{ inputs.label }}
+    timeout-minutes: ${{ fromJSON(inputs.timeout) }}
+
+    steps:
+      - name: checkout repository code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.gitref }}
+          submodules: recursive
+
+      - name: workflow info
+        uses: ./.github/actions/nm-workflow-info/
+        with:
+          gitref: ${{ inputs.gitref }}
+          label: ${{ inputs.label }}
+          timeout: ${{ inputs.timeout }}
+  
+      # Call the `build` action when available
+      #- name: build
+      #  id: build
+      #  uses: ./.github/actions/build/
+
+      - name: run benchmarks
+        uses: ./.github/actions/nm-benchmark/
+        with:
+          output_directory: benchmark-results
+
+      - name: store benchmark result artifacts
+        uses: actions/upload-artifact@v4
+        if: success() || failure()
+        with:
+          name: ${{ github.run_id }}-${{ inputs.label }}
+          path: benchmark-results
+          retention-days: 90
+
+      #######################################################
+      # TODO (Varun) : Remove pause once things are automated
+      - name: announce pause
+        if: success() || failure()
+        run: |
+          M=${{ inputs.timeout }}
+          R=$((M - 15))
+          S=$((R * 60))
+          echo "pausing for, ${R} minutes"
+
+      - name: pause workflow
+        run: |
+          M=${{ inputs.timeout }}
+          R=$((M - 15))
+          S=$((R * 60))
+          sleep $S
