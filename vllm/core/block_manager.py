@@ -377,10 +377,6 @@ class BlockSpaceManager:
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
             new_block_table: BlockTable = []
             block_table = self.block_tables[seq.seq_id]
-            if seq_group.prefix is not None:
-                for block in seq_group.prefix.block_table:
-                    new_block_table.append(block)
-                    block.ref_count += 1
 
             for cpu_block in block_table:
                 if cpu_block in mapping:

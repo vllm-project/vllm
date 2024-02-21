@@ -81,6 +81,10 @@ Below, you can find an explanation of every engine argument for vLLM:
 
     Token block size for contiguous chunks of tokens.
 
+.. option:: --disable-prefix-caching
+
+    Disables automatic prefix caching
+
 .. option:: --seed <seed>
 
     Random seed for operations.
