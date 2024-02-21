@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Dict, List, Optional, Union
 from vllm.logger import init_logger
@@ -9,15 +10,35 @@ from vllm.entrypoints.openai.protocol import (CompletionRequest,
                                               ErrorResponse, LogProbs,
                                               ModelCard, ModelList,
                                               ModelPermission)
+from vllm.lora.request import LoRARequest
 
 logger = init_logger(__name__)
 
 
+@dataclass
+class LoRA:
+    name: str
+    local_path: str
+
+
 class OpenAIServing:
 
-    def __init__(self, engine: AsyncLLMEngine, served_model_names: List[str]):
+    def __init__(self,
+                 engine: AsyncLLMEngine,
+                 served_model_names: List[str],
+                 lora_modules=Optional[List[LoRA]]):
         self.engine = engine
         self.served_model_names = served_model_names
+        if lora_modules is None:
+            self.lora_requests = []
+        else:
+            self.lora_requests = [
+                LoRARequest(
+                    lora_name=lora.name,
+                    lora_int_id=i,
+                    lora_local_path=lora.local_path,
+                ) for i, lora in enumerate(lora_modules, start=1)
+            ]
 
         self.max_model_len = 0
         self.tokenizer = None
@@ -51,6 +72,13 @@ class OpenAIServing:
                       permission=[ModelPermission()])
             for served_model_name in self.served_model_names
         ]
+        lora_cards = [
+            ModelCard(id=lora.lora_name,
+                      root=self.served_model_names[0],
+                      permission=[ModelPermission()])
+            for lora in self.lora_requests
+        ]
+        model_cards.extend(lora_cards)
         return ModelList(data=model_cards)
 
     def _create_logprobs(
@@ -100,10 +128,21 @@ class OpenAIServing:
     async def _check_model(self, request) -> Optional[ErrorResponse]:
         if request.model in self.served_model_names:
             return
+        if request.model in [lora.lora_name for lora in self.lora_requests]:
+            return
         return self.create_error_response(
             message=f"The model `{request.model}` does not exist.",
             err_type="NotFoundError",
             status_code=HTTPStatus.NOT_FOUND)
+
+    def _maybe_get_lora(self, request) -> Optional[LoRARequest]:
+        if request.model in self.served_model_names:
+            return
+        for lora in self.lora_requests:
+            if request.model == lora.lora_name:
+                return lora
+        # if _check_model has been called earlier, this will be unreachable
+        raise ValueError("The model `{request.model}` does not exist.")
 
     def _validate_prompt_and_tokenize(
             self,
