@@ -166,7 +166,9 @@ def get_ip() -> str:
     try:
         s.connect(("8.8.8.8", 80))  # Doesn't need to be reachable
     except OSError:
-        pass
+        logger.info(
+            "Failed to ping Google servers, local IP may be the default interface."
+        )
     return s.getsockname()[0]
 
 
