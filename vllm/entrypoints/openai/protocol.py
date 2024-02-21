@@ -60,6 +60,7 @@ class ChatCompletionRequest(BaseModel):
     top_p: Optional[float] = 1.0
     n: Optional[int] = 1
     max_tokens: Optional[int] = None
+    seed: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
     presence_penalty: Optional[float] = 0.0
@@ -90,6 +91,7 @@ class ChatCompletionRequest(BaseModel):
             temperature=self.temperature,
             top_p=self.top_p,
             min_p=self.min_p,
+            seed=self.seed,
             stop=self.stop,
             stop_token_ids=self.stop_token_ids,
             max_tokens=self.max_tokens,
@@ -117,6 +119,7 @@ class CompletionRequest(BaseModel):
     logprobs: Optional[int] = None
     echo: Optional[bool] = False
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
+    seed: Optional[int] = None
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
     best_of: Optional[int] = None
@@ -147,6 +150,7 @@ class CompletionRequest(BaseModel):
             top_p=self.top_p,
             top_k=self.top_k,
             min_p=self.min_p,
+            seed=self.seed,
             stop=self.stop,
             stop_token_ids=self.stop_token_ids,
             ignore_eos=self.ignore_eos,

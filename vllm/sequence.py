@@ -248,6 +248,14 @@ class Sequence:
                 f"num_blocks={len(self.logical_token_blocks)})")
 
 
+@dataclass
+class SequenceGroupState:
+    """Mutable state tied to a specific sequence group"""
+
+    # torch.Generator used in seeded sampling
+    generator: Optional = None
+
+
 class SequenceGroup:
     """A group of sequences that are generated from the same prompt.
 
@@ -280,6 +288,7 @@ class SequenceGroup:
         self.lora_request = lora_request
         self.prefix: Optional[Prefix] = prefix
         self.prompt_logprobs: Optional[PromptLogprobs] = None
+        self.state = SequenceGroupState()
 
     @property
     def prompt(self) -> str:
@@ -397,6 +406,7 @@ class SequenceGroupMetadata:
         sampling_params: The sampling parameters used to generate the outputs.
         block_tables: The block tables. (Seq id -> list of physical block
             numbers)
+        state: Internal state tied to this sequence group.
         lora_request: LoRA request.
         prefix: The prefix of the prompt of the sequence group.
     """
@@ -410,6 +420,7 @@ class SequenceGroupMetadata:
         block_tables: Dict[int, List[int]],
         lora_request: Optional[LoRARequest] = None,
         prefix: Optional[Prefix] = None,
+        state: Optional[SequenceGroupState] = None,
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
@@ -418,6 +429,7 @@ class SequenceGroupMetadata:
         self.block_tables = block_tables
         self.lora_request = lora_request
         self.prefix = prefix
+        self.state = SequenceGroupState() if state is None else state
 
     @property
     def lora_int_id(self) -> int:

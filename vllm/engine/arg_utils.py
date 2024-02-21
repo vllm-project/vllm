@@ -173,7 +173,6 @@ class EngineArgs:
                             default=EngineArgs.block_size,
                             choices=[8, 16, 32],
                             help='token block size')
-        # TODO(woosuk): Support fine-grained seeds (e.g., seed per request).
         parser.add_argument('--seed',
                             type=int,
                             default=EngineArgs.seed,
