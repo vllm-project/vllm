@@ -372,8 +372,11 @@ class AsyncLLMEngine:
         self.set_errored(exc)
         self._request_tracker.propagate_exception(exc)
 
+    def get_tokenizer_group(self):
+        return self.engine.tokenizer
+
     def get_tokenizer(self):
-        return self.engine.tokenizer.tokenizer
+        return self.get_tokenizer_group().tokenizer
 
     def start_background_loop(self) -> None:
         """Start the background loop."""

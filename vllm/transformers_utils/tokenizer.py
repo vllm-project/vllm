@@ -1,6 +1,8 @@
 import asyncio
 import os
+import threading
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Tuple, Union
 
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
@@ -199,8 +201,7 @@ class TokenizerGroup(BaseTokenizerGroup):
                 lora_request, **self.tokenizer_config) or self.tokenizer)
             self.lora_tokenizers.put(lora_request.lora_int_id, tokenizer)
             return tokenizer
-        else:
-            return self.lora_tokenizers.get(lora_request.lora_int_id)
+        return self.lora_tokenizers.get(lora_request.lora_int_id)
 
     async def get_lora_tokenizer_async(
             self,
@@ -212,23 +213,44 @@ class TokenizerGroup(BaseTokenizerGroup):
                 lora_request, **self.tokenizer_config) or self.tokenizer)
             self.lora_tokenizers.put(lora_request.lora_int_id, tokenizer)
             return tokenizer
-        else:
-            return self.lora_tokenizers.get(lora_request.lora_int_id)
+        return self.lora_tokenizers.get(lora_request.lora_int_id)
+
+
+class ThreadPoolTokenizerGroup(TokenizerGroup):
+    """A threadpool of TokenizerGroups for async tokenization."""
+
+    def __init__(self, *args, max_workers: int, **tokenizer_config):
+        super().__init__(*args, **tokenizer_config)
+        local = threading.local()
+
+        def init_tokenizer():
+            local.tokenizer = TokenizerGroup(*args, **tokenizer_config)
+
+        executor = ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix='tokenizer-thread-',
+            initializer=init_tokenizer,
+        )
+
+        def encode_local(*args, **kwargs):
+            return local.tokenizer.encode(*args, **kwargs)
+
+        self.encode_async = make_async(encode_local, executor)
+        self.encode = encode_local
 
 
 if ray:
     RayTokenizerGroup = ray.remote(TokenizerGroup)
 
-    class RayTokenizerGroupPool(BaseTokenizerGroup):
+    class RayTokenizerGroupPool(TokenizerGroup):
         """A pool of TokenizerGroups for async tokenization."""
 
-        def __init__(  # pylint: disable=super-init-not-called
-                self, tokenizer_id: str, enable_lora: bool, max_num_seqs: int,
-                max_input_length: Optional[int], num_actors: int,
-                ray_actor_options: dict, **tokenizer_config):
-            self.tokenizer = TokenizerGroup(tokenizer_id, enable_lora,
-                                            max_num_seqs, max_input_length,
-                                            **tokenizer_config)
+        def __init__(self, tokenizer_id: str, enable_lora: bool,
+                     max_num_seqs: int, max_input_length: Optional[int],
+                     num_actors: int, ray_actor_options: dict,
+                     **tokenizer_config):
+            super().__init__(tokenizer_id, enable_lora, max_num_seqs,
+                             max_input_length, **tokenizer_config)
             self.max_input_length = max_input_length
 
             # Carry over the env vars to the actors.
@@ -289,16 +311,6 @@ if ray:
             finally:
                 self._idle_actors.put_nowait(actor)
             return ret
-
-        def get_lora_tokenizer(
-                self,
-                lora_request: Optional[LoRARequest]) -> "PreTrainedTokenizer":
-            return self.tokenizer.get_lora_tokenizer(lora_request)
-
-        async def get_lora_tokenizer_async(
-                self,
-                lora_request: Optional[LoRARequest]) -> "PreTrainedTokenizer":
-            return await self.tokenizer.get_lora_tokenizer_async(lora_request)
 
 else:
     RayTokenizerGroupPool = None
