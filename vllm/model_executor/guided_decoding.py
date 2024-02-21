@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest
 try:
-    from outlines.serve.vllm import JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor
+    from outlines.serve.vllm import JSONLogitsProcessor, RegexLogitsProcessor
 except ImportError as e:
     raise ValueError(
         "Please install 'outlines' (pip install outlines) to use guided decoding."
@@ -23,7 +23,6 @@ class GuidedDecodingMode(Enum):
     JSON = "json"
     REGEX = "regex"
     CHOICE = "choice"
-    GRAMMAR = "grammar"
 
 
 async def get_guided_decoding_logits_processor(
@@ -97,11 +96,6 @@ def _get_guide_and_mode(
                 for choice in request.guided_choice]
         choices_regex = "(" + "|".join(choices) + ")"
         return choices_regex, GuidedDecodingMode.CHOICE
-    
-    elif request.guided_grammar:
-        if not isinstance(request.guided_grammar, str):
-            raise TypeError("Grammar must be string")
-        return request.guided_grammar, GuidedDecodingMode.GRAMMAR
 
 
 @lru_cache(maxsize=32)
@@ -120,7 +114,5 @@ def get_cached_logits_processor(guide: str, tokenizer, mode: GuidedDecodingMode)
         return JSONLogitsProcessor(guide, dummy_llm())
     elif mode == GuidedDecodingMode.REGEX or mode == GuidedDecodingMode.CHOICE:
         return RegexLogitsProcessor(guide, dummy_llm())
-    elif mode == GuidedDecodingMode.GRAMMAR:
-        return CFGLogitsProcessor(guide, dummy_llm())
     else:
         raise RuntimeError(f"Unknown guided decoding mode {mode}")
