@@ -190,6 +190,7 @@ def get_open_port() -> int:
             s.bind(("", 0))
             return s.getsockname()[1]
 
+
 def set_cuda_visible_devices(device_ids: List[int]) -> None:
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, device_ids))
 
