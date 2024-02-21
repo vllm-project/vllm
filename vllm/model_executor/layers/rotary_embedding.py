@@ -246,11 +246,11 @@ def _yarn_find_correction_range(low_rot: int,
 
 def _yarn_linear_ramp_mask(low: float, high: float, dim: int,
                            dtype: torch.dtype,
-                           device: torch.device) -> torch.Tensor:
+                           ) -> torch.Tensor:
     if low == high:
         high += 0.001  # Prevent singularity
 
-    linear_func = (torch.arange(dim, dtype=dtype, device=device) -
+    linear_func = (torch.arange(dim, dtype=dtype) -
                    low) / (high - low)
     ramp_func = torch.clamp(linear_func, 0, 1)
     return ramp_func
