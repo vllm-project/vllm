@@ -37,8 +37,8 @@ def _get_model_architecture(model_config: ModelConfig) -> Type[nn.Module]:
         f"Supported architectures: {ModelRegistry.get_supported_archs()}")
 
 
-def get_model_gpu(model_config: ModelConfig, device_config: DeviceConfig,
-                  **kwargs) -> nn.Module:
+def get_model(model_config: ModelConfig, device_config: DeviceConfig,
+              **kwargs) -> nn.Module:
     lora_config = kwargs.get("lora_config", None)
     model_class = _get_model_architecture(model_config)
 
