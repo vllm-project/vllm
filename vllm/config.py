@@ -381,6 +381,9 @@ class ParallelConfig:
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         if is_neuron():
+            # For Neuron device support, here we assign TP=1 to avoid sharding within vLLM directly.
+            # Transformer-neuronx would take neuron_tp_degree attribute, and distribute the workload
+            # to multiple NeuronCores.
             self.tensor_parallel_size = 1
             self.neuron_tp_degree = tensor_parallel_size
         else:
@@ -390,6 +393,7 @@ class ParallelConfig:
         self.disable_custom_all_reduce = disable_custom_all_reduce
 
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
+        # Ray worker is not supported for Neuron backend.
         if self.world_size > 1 and not is_neuron():
             self.worker_use_ray = True
         self._verify_args()
@@ -488,6 +492,10 @@ class DeviceConfig:
         else:
             # Set device with device type
             self.device = torch.device(self.device_type)
+
+    @property
+    def is_neuron(self):
+        return self.device_type == "neuron"
 
 
 @dataclass

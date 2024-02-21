@@ -794,7 +794,10 @@ class SamplerWithLoRA(BaseLayerWithLoRA):
         self.hidden_size = hidden_size
         self.dtype = dtype
         self.device = device
-        self.is_neuron = self.base_layer.is_neuron
+
+    @property
+    def device_config(self):
+        return self.base_layer.device_config
 
     @property
     def vocab_size(self):

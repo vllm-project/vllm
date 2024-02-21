@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, DeviceConfig
 from vllm.model_executor.models import ModelRegistry
 
 TORCH_DTYPE_TO_NEURON_AMP = {
@@ -32,9 +32,12 @@ def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
         f"Supported architectures: {ModelRegistry.get_supported_archs()}")
 
 
-def get_model(model_config: ModelConfig, parallel_config,
-              scheduler_config) -> nn.Module:
+def get_model(model_config: ModelConfig, device_config: DeviceConfig,
+              **kwargs) -> nn.Module:
     from transformers_neuronx.config import NeuronConfig, ContinuousBatchingConfig
+
+    parallel_config = kwargs.get("parallel_config")
+    scheduler_config = kwargs.get("scheduler_config")
 
     model_class = _get_model_architecture(model_config.hf_config)
     linear_method = None

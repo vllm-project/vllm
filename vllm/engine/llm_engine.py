@@ -3,6 +3,7 @@ from collections import defaultdict
 import os
 import time
 import pickle
+import importlib
 from typing import (TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple,
                     Union)
 
@@ -21,7 +22,7 @@ from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                TokenizerGroup)
 from vllm.utils import (Counter, set_cuda_visible_devices, get_ip,
-                        get_open_port, get_distributed_init_method, is_neuron)
+                        get_open_port, get_distributed_init_method)
 
 if ray:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -31,6 +32,12 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
+
+# A map between the device type (in device config) to its worker module.
+DEVICE_TO_WORKER_MODULE_MAP = {
+    "cuda": "vllm.worker.worker",
+    "neuron": "vllm.worker.neuron_worker",
+}
 
 # If the env var is set, it uses the Ray's compiled DAG API
 # which optimizes the control plane overhead.
@@ -109,7 +116,6 @@ class LLMEngine:
 
         self._init_tokenizer()
         self.seq_counter = Counter()
-        self.is_neuron = is_neuron()
 
         # Create the parallel GPU workers.
         if self.parallel_config.worker_use_ray:
@@ -139,13 +145,17 @@ class LLMEngine:
     def get_tokenizer_for_seq(self, sequence: Sequence):
         return self.tokenizer.get_lora_tokenizer(sequence.lora_request)
 
+    def _dispatch_worker(self):
+        worker_module = DEVICE_TO_WORKER_MODULE_MAP[
+            self.device_config.device_type]
+        imported_worker = importlib.import_module(worker_module)
+        Worker = imported_worker.Worker
+        return Worker
+
     def _init_workers(self):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
-        if self.is_neuron:
-            from vllm.worker.neuron_worker import Worker
-        else:
-            from vllm.worker.worker import Worker
+        Worker = self._dispatch_worker()
 
         assert self.parallel_config.world_size == 1, (
             "Ray is required if parallel_config.world_size > 1.")
@@ -247,10 +257,7 @@ class LLMEngine:
 
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
-        if self.is_neuron:
-            from vllm.worker.neuron_worker import Worker
-        else:
-            from vllm.worker.worker import Worker
+        Worker = self._dispatch_worker()
 
         # Initialize torch distributed process group for the workers.
         model_config = copy.deepcopy(self.model_config)
@@ -365,8 +372,7 @@ class LLMEngine:
         self._run_workers("init_cache_engine", cache_config=self.cache_config)
         # Warm up the model. This includes capturing the model into CUDA graph
         # if enforce_eager is False.
-        if not self.is_neuron:
-            self._run_workers("warm_up_model")
+        self._run_workers("warm_up_model")
 
     @classmethod
     def from_engine_args(cls, engine_args: EngineArgs) -> "LLMEngine":

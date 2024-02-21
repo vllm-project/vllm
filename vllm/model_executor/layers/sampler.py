@@ -33,7 +33,8 @@ class Sampler(nn.Module):
                  org_vocab_size: Optional[int] = None) -> None:
         super().__init__()
         self.vocab_size = vocab_size
-        self.is_neuron = is_neuron()
+        # Transformers-neuronx generate outputs as logits directly.
+        self.logits_as_hidden_states = is_neuron()
         # original vocabulary size (without LoRA).
         self.org_vocab_size = org_vocab_size or vocab_size
 
@@ -57,7 +58,7 @@ class Sampler(nn.Module):
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[SamplerOutput]:
         # Get the hidden states that we use for sampling.
-        if self.is_neuron:
+        if self.logits_as_hidden_states:
             logits = hidden_states
         else:
             hidden_states = _prune_hidden_states(hidden_states,
