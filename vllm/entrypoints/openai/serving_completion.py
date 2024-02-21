@@ -281,6 +281,7 @@ class OpenAIServingCompletion(OpenAIServing):
             return self.create_error_response(
                 "logit_bias is not currently supported")
 
+        model_name = self.served_model_names[0]
         request_id = f"cmpl-{random_uuid()}"
         created_time = int(time.monotonic())
 
@@ -326,7 +327,7 @@ class OpenAIServingCompletion(OpenAIServing):
                                                self._create_logprobs,
                                                request_id,
                                                created_time,
-                                               self.served_model_names[0],
+                                               model_name,
                                                num_prompts=len(prompts))
 
         # Non-streaming response
@@ -339,7 +340,7 @@ class OpenAIServingCompletion(OpenAIServing):
             final_res_batch[i] = res
         response = request_output_to_completion_response(
             final_res_batch, request, self._create_logprobs, request_id,
-            created_time, self.served_model_names[0])
+            created_time, model_name)
 
         # When user requests streaming but we don't stream, we still need to
         # return a streaming response with a single event.
