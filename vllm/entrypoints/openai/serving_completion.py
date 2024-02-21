@@ -170,18 +170,20 @@ def request_output_to_completion_response(
         for output in final_res.outputs:
             if request.echo and request.max_tokens == 0:
                 token_ids = prompt_token_ids
-                top_logprobs = prompt_logprobs
                 output_text = prompt_text
             elif request.echo and request.max_tokens > 0:
                 token_ids = prompt_token_ids + output.token_ids
-                top_logprobs = prompt_logprobs + output.logprobs
                 output_text = prompt_text + output.text
             else:
                 token_ids = output.token_ids
-                top_logprobs = output.logprobs
                 output_text = output.text
 
             if request.logprobs is not None:
+                top_logprobs = []
+                if request.echo:
+                    top_logprobs.append(prompt_logprobs)
+                if request.max_tokens > 0:
+                    top_logprobs.append(output.logprobs)
                 logprobs = create_logprobs_fn(
                     token_ids=token_ids,
                     top_logprobs=top_logprobs,
