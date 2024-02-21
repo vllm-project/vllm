@@ -2,6 +2,7 @@ import copy
 from collections import defaultdict
 import os
 import time
+import pickle
 from typing import (TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple,
                     Union)
 
@@ -29,6 +30,11 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
+
+# If the env var is set, it uses the Ray's compiled DAG API
+# which optimizes the control plane overhead.
+# Run VLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
+USE_RAY_COMPILED_DAG = bool(os.getenv("VLLM_USE_RAY_COMPILED_DAG", 0))
 
 
 class LLMEngine:
@@ -123,6 +129,10 @@ class LLMEngine:
         if self.log_stats:
             self.stat_logger = StatLogger(
                 local_interval=_LOCAL_LOGGING_INTERVAL_SEC)
+
+        self.forward_dag = None
+        if USE_RAY_COMPILED_DAG:
+            self.forward_dag = self._compiled_ray_dag()
 
     def get_tokenizer_for_seq(self, sequence: Sequence):
         return self.tokenizer.get_lora_tokenizer(sequence.lora_request)
@@ -273,7 +283,7 @@ class LLMEngine:
             is_driver_worker=True,
         )
 
-        self._run_workers("init_model")
+        self._run_workers("init_model", cupy_port=get_open_port())
         self._run_workers(
             "load_model",
             max_concurrent_workers=self.parallel_config.
@@ -448,6 +458,9 @@ class LLMEngine:
         seq_id = next(self.seq_counter)
         seq = Sequence(seq_id, prompt, prompt_token_ids, block_size,
                        lora_request)
+
+        # Defensive copy of SamplingParams, which are used by the sampler
+        sampling_params = copy.deepcopy(sampling_params)
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,
@@ -799,7 +812,8 @@ class LLMEngine:
                     "blocks_to_swap_in": scheduler_outputs.blocks_to_swap_in,
                     "blocks_to_swap_out": scheduler_outputs.blocks_to_swap_out,
                     "blocks_to_copy": scheduler_outputs.blocks_to_copy,
-                })
+                },
+                use_ray_compiled_dag=USE_RAY_COMPILED_DAG)
 
             # Only the driver worker returns the sampling results.
             output = all_outputs[0]
@@ -846,7 +860,9 @@ class LLMEngine:
 
             # Number of Tokens.
             if prompt_run:
-                num_prompt_tokens = scheduler_outputs.num_batched_tokens
+                num_prompt_tokens = sum(
+                    len(seq_group.prompt_token_ids)
+                    for seq_group in scheduler_outputs.scheduled_seq_groups)
             else:
                 num_generation_tokens = scheduler_outputs.num_batched_tokens
 
@@ -901,13 +917,13 @@ class LLMEngine:
         """Stop the finished sequences."""
         for stop_str in sampling_params.stop:
             if seq.output_text.endswith(stop_str):
-                if not sampling_params.include_stop_str_in_output:
-                    # Truncate the output text so that the stop string is
-                    # not included in the output.
-                    seq.output_text = seq.output_text[:-len(stop_str)]
+                self._finalize_sequence(seq, sampling_params, stop_str)
                 seq.status = SequenceStatus.FINISHED_STOPPED
                 return
         if seq.get_last_token_id() in sampling_params.stop_token_ids:
+            stop_str = self.get_tokenizer_for_seq(seq).convert_ids_to_tokens(
+                seq.get_last_token_id())
+            self._finalize_sequence(seq, sampling_params, stop_str)
             seq.status = SequenceStatus.FINISHED_STOPPED
             return
 
@@ -926,6 +942,14 @@ class LLMEngine:
                 == self.get_tokenizer_for_seq(seq).eos_token_id):
             seq.status = SequenceStatus.FINISHED_STOPPED
             return
+
+    def _finalize_sequence(self, seq: Sequence,
+                           sampling_params: SamplingParams,
+                           stop_string: str) -> None:
+        if not sampling_params.include_stop_str_in_output and stop_string:
+            # Truncate the output text so that the stop string is
+            # not included in the output.
+            seq.output_text = seq.output_text[:-len(stop_string)]
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
@@ -951,6 +975,7 @@ class LLMEngine:
         driver_args: Optional[List[Any]] = None,
         driver_kwargs: Optional[Dict[str, Any]] = None,
         max_concurrent_workers: Optional[int] = None,
+        use_ray_compiled_dag: bool = False,
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers."""
@@ -959,11 +984,16 @@ class LLMEngine:
             raise NotImplementedError(
                 "max_concurrent_workers is not supported yet.")
 
-        # Start the ray workers first.
-        ray_worker_outputs = [
-            worker.execute_method.remote(method, *args, **kwargs)
-            for worker in self.workers
-        ]
+        if use_ray_compiled_dag:
+            # Right now, compiled DAG can only accept a single
+            # input. TODO(sang): Fix it.
+            output_channels = self.forward_dag.execute(1)
+        else:
+            # Start the ray workers first.
+            ray_worker_outputs = [
+                worker.execute_method.remote(method, *args, **kwargs)
+                for worker in self.workers
+            ]
 
         if driver_args is None:
             driver_args = args
@@ -976,6 +1006,37 @@ class LLMEngine:
 
         # Get the results of the ray workers.
         if self.workers:
-            ray_worker_outputs = ray.get(ray_worker_outputs)
+            if use_ray_compiled_dag:
+                try:
+                    ray_worker_outputs = [
+                        pickle.loads(chan.begin_read())
+                        for chan in output_channels
+                    ]
+                finally:
+                    # Has to call end_read in order to reuse the DAG.
+                    for chan in output_channels:
+                        chan.end_read()
+            else:
+                ray_worker_outputs = ray.get(ray_worker_outputs)
 
         return [driver_worker_output] + ray_worker_outputs
+
+    def _compiled_ray_dag(self):
+        import pkg_resources
+        required_version = "2.9"
+        current_version = pkg_resources.get_distribution("ray").version
+        if current_version < required_version:
+            raise ValueError(f"Ray version {required_version} or greater is "
+                             f"required, but found {current_version}")
+
+        from ray.dag import MultiOutputNode, InputNode
+        assert self.parallel_config.worker_use_ray
+
+        # Right now, compiled DAG requires at least 1 arg. We send
+        # a dummy value for now. It will be fixed soon.
+        with InputNode() as input_data:
+            forward_dag = MultiOutputNode([
+                worker.execute_model_compiled_dag_remote.bind(input_data)
+                for worker in self.workers
+            ])
+        return forward_dag.experimental_compile()
