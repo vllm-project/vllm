@@ -796,8 +796,8 @@ class SamplerWithLoRA(BaseLayerWithLoRA):
         self.device = device
 
     @property
-    def device_config(self):
-        return self.base_layer.device_config
+    def logits_as_hidden_states(self):
+        return self.base_layer.logits_as_hidden_states
 
     @property
     def vocab_size(self):
