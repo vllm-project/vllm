@@ -72,7 +72,7 @@ def get_model(model_config: ModelConfig,
         with torch.device(device_config.device) if not \
             (isinstance(linear_method, AutoQuantLinearMethod) and
              linear_method.quant_config.from_float) else nullcontext():
-            if getattr(model_class, "supports_lora", False):
+            if hasattr(model_class, "supported_lora_modules"):
                 model = model_class(model_config.hf_config, linear_method,
                                     lora_config)
             elif lora_config:

@@ -82,6 +82,7 @@ Documentation
    models/supported_models
    models/adding_model
    models/engine_args
+   models/lora
 
 .. toctree::
    :maxdepth: 1
@@ -89,6 +90,7 @@ Documentation
 
    quantization/auto_awq
    quantization/auto_quant
+   quantization/fp8_e5m2_kv_cache
 
 .. toctree::
    :maxdepth: 2
