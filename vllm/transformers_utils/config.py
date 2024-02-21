@@ -16,10 +16,14 @@ _CONFIG_REGISTRY = {
 
 def get_config(model: str,
                trust_remote_code: bool,
-               revision: Optional[str] = None) -> PretrainedConfig:
+               revision: Optional[str] = None,
+               code_revision: Optional[str] = None) -> PretrainedConfig:
     try:
         config = AutoConfig.from_pretrained(
-            model, trust_remote_code=trust_remote_code, revision=revision)
+            model,
+            trust_remote_code=trust_remote_code,
+            revision=revision,
+            code_revision=code_revision)
     except ValueError as e:
         if (not trust_remote_code and
                 "requires you to execute the configuration file" in str(e)):
@@ -33,5 +37,7 @@ def get_config(model: str,
             raise e
     if config.model_type in _CONFIG_REGISTRY:
         config_class = _CONFIG_REGISTRY[config.model_type]
-        config = config_class.from_pretrained(model, revision=revision)
+        config = config_class.from_pretrained(model,
+                                              revision=revision,
+                                              code_revision=code_revision)
     return config
