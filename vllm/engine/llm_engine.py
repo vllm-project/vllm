@@ -220,7 +220,8 @@ class LLMEngine:
         driver_worker_node_and_gpu_ids = []
         other_worker_node_and_gpu_ids = []
 
-        for worker, (node_id, gpu_ids) in zip(self.workers, worker_node_and_gpu_ids):
+        for worker, (node_id, gpu_ids) in zip(self.workers,
+                                              worker_node_and_gpu_ids):
             if node_id == driver_node_id:
                 driver_node_workers.append(worker)
                 driver_worker_node_and_gpu_ids.append((node_id, gpu_ids))
@@ -241,7 +242,6 @@ class LLMEngine:
             node_gpus[node_id].extend(gpu_ids)
         for node_id, gpu_ids in node_gpus.items():
             node_gpus[node_id] = sorted(gpu_ids)
-
 
         # Set CUDA_VISIBLE_DEVICES for the driver.
         set_cuda_visible_devices(node_gpus[driver_node_id])
@@ -377,9 +377,9 @@ class LLMEngine:
         """Setup MSCCL++ communication connections for KV cache transfer."""
         self._run_workers("setup_kvcache_comm")
 
-    def dismantle_kvcache_comm(self) -> None:
+    def destroy_kvcache_comm(self) -> None:
         """Stop MSCCL++ communication connections for KV cache transfer."""
-        self._run_workers("dismantle_kvcache_comm")
+        self._run_workers("destroy_kvcache_comm")
 
     @classmethod
     def from_engine_args(cls, engine_args: EngineArgs) -> "LLMEngine":
@@ -832,6 +832,8 @@ class LLMEngine:
         if scheduler_outputs.is_empty():
             output = []
         elif self.parallel_config.sep_prompt_token:
+            # TODO: This will only schedule one set of workers at a time and will not be
+            # able to take advantage of parallely running prompt and token workers.
             all_outputs = self._run_stage_workers(
                 "execute_model",
                 prompt_stage=seq_group_metadata_list[0].is_prompt,
@@ -1064,29 +1066,33 @@ class LLMEngine:
         if driver_kwargs is None:
             driver_kwargs = kwargs
 
-
         if prompt_stage:
             # Prompt workers include 1 driver worker and num_prompt_workers-1 ray workers.
             ray_worker_outputs = [
                 worker.execute_method.remote(method, *args, **kwargs)
-                for worker in self.workers[:self.parallel_config.num_prompt_workers-1]
+                for worker in
+                self.workers[:self.parallel_config.num_prompt_workers - 1]
             ]
 
             # Start the driver worker after all the ray workers.
             driver_worker_output = getattr(self.driver_worker,
-                                        method)(*driver_args, **driver_kwargs)
+                                           method)(*driver_args,
+                                                   **driver_kwargs)
 
         else:
             # Token workers use worker[num_prompt_workers-1] as driver worker.
             # Start the ray workers first.
             ray_worker_outputs = [
                 worker.execute_method.remote(method, *args, **kwargs)
-                for worker in self.workers[self.parallel_config.num_prompt_workers:]
+                for worker in
+                self.workers[self.parallel_config.num_prompt_workers:]
             ]
 
             # Start the token driver worker after all the ray workers.
-            driver_worker = self.workers[self.parallel_config.num_prompt_workers-1]
-            driver_worker_output = driver_worker.execute_method.remote(method, *driver_args, **driver_kwargs)
+            driver_worker = self.workers[
+                self.parallel_config.num_prompt_workers - 1]
+            driver_worker_output = driver_worker.execute_method.remote(
+                method, *driver_args, **driver_kwargs)
             driver_worker_output = ray.get(driver_worker_output)
 
             # Get the results of the ray workers.

@@ -268,7 +268,8 @@ class Scheduler:
                         # and first step of generation phase
                         if seq.get_output_len() <= 1:
                             block_ids = self.block_manager.get_block_table(seq)
-                            slot_id = self.seq_to_slot_mapper.get_slot_id(seq.seq_id)
+                            slot_id = self.seq_to_slot_mapper.get_slot_id(
+                                seq.seq_id)
                             blocks_to_nw[slot_id].extend(block_ids)
 
             self.waiting.extendleft(leftover_waiting_sequences)
@@ -375,7 +376,8 @@ class Scheduler:
                     # and first step of generation phase
                     if seq.get_output_len() <= 1:
                         block_ids = self.block_manager.get_block_table(seq)
-                        slot_id = self.seq_to_slot_mapper.get_slot_id(seq.seq_id)
+                        slot_id = self.seq_to_slot_mapper.get_slot_id(
+                            seq.seq_id)
                         blocks_to_nw[slot_id].extend(block_ids)
 
         scheduler_outputs = SchedulerOutputs(

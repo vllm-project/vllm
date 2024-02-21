@@ -49,10 +49,10 @@ def initialize_model_parallel(
     assert torch.distributed.is_initialized()
     world_size: int = torch.distributed.get_world_size()
     # World size is scaled by two in case of separate prompt token machines.
-    scale_factor : int = 2 if sep_prompt_token else 1
+    scale_factor: int = 2 if sep_prompt_token else 1
 
-    if (world_size !=
-            tensor_model_parallel_size * pipeline_model_parallel_size * scale_factor):
+    if (world_size != tensor_model_parallel_size *
+            pipeline_model_parallel_size * scale_factor):
         raise RuntimeError(
             f"world_size ({world_size}) is not equal to "
             f"tensor_model_parallel_size ({tensor_model_parallel_size}) x "
@@ -94,7 +94,8 @@ def initialize_model_parallel(
             _STAGE_PARALLEL_GROUP = _TENSOR_MODEL_PARALLEL_GROUP
         else:
             prompt_group = torch.distributed.new_group(range(world_size // 2))
-            token_group = torch.distributed.new_group(range(world_size // 2, world_size))
+            token_group = torch.distributed.new_group(
+                range(world_size // 2, world_size))
             if rank < world_size // 2:
                 _STAGE_PARALLEL_GROUP = prompt_group
             else:
@@ -168,8 +169,7 @@ def get_pipeline_model_parallel_world_size():
 
 def get_stage_parallel_world_size():
     """Return world size for the stage parallel group."""
-    return torch.distributed.get_world_size(
-        group=get_stage_parallel_group())
+    return torch.distributed.get_world_size(group=get_stage_parallel_group())
 
 
 def get_tensor_model_parallel_rank():
@@ -185,8 +185,7 @@ def get_pipeline_model_parallel_rank():
 
 def get_stage_parallel_rank():
     """Return my rank for the pipeline model parallel group."""
-    return torch.distributed.get_rank(
-        group=get_stage_parallel_group())
+    return torch.distributed.get_rank(group=get_stage_parallel_group())
 
 
 def get_tensor_model_parallel_src_rank():

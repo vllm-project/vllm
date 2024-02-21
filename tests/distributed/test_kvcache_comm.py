@@ -7,10 +7,12 @@ import ray
 
 from vllm import EngineArgs, LLMEngine
 
+
 def initialize_engine(args: argparse.Namespace) -> LLMEngine:
     """Initialize the LLMEngine from the command line arguments."""
     engine_args = EngineArgs.from_cli_args(args)
     return LLMEngine.from_engine_args(engine_args)
+
 
 def run_all_workers(engine: LLMEngine, method: str, *args):
     """Run all the workers."""
@@ -18,8 +20,7 @@ def run_all_workers(engine: LLMEngine, method: str, *args):
         worker.execute_method.remote(method, *args)
         for worker in engine.workers
     ]
-    _ = getattr(engine.driver_worker,
-            method)(*args)
+    _ = getattr(engine.driver_worker, method)(*args)
     ray.get(ray_worker_outputs)
 
 
@@ -38,4 +39,4 @@ if __name__ == '__main__':
     run_all_workers(engine, "send_recv_kvcache_all")
     run_all_workers(engine, "check_gpucache")
 
-    engine.dismantle_kvcache_comm()
+    engine.destroy_kvcache_comm()

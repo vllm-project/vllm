@@ -120,20 +120,25 @@ class LRUCache:
             self.remove_oldest()
         self.cache.clear()
 
+
 # Maximum number of sequences that can be in the system at a time
 # Only used when sep_prompt_token is set in Parallel Config
 # It determines the number of semaphores that will be used for KV cache transfer using MSCCL++
 # This can be changed based on need
-MAX_SLOT_IDS = 10
+MAX_SLOT_IDS = 256
 
 
 class SeqToSlotMapper:
-    """ SeqToSlotMapper maps sequence ids to a limited set of slot ids.
-    A slot is freed every time a sequence finishes. It is used to manage
-    the semaphores for MSCCL++ proxy channels - there are as many semaphores
-    as the number of slots. Each sequence is mapped to a different semaphore/slot,
-    in order to allow fine-grained synchronization
+    """ SeqToSlotMapper maps sequence ids to slot ids that range from 0 to MAX_SLOT_IDS-1.
+    Occupied slots indicate that their associated sequence is currently being processed in
+    the system. A slot is used to index into the list of semaphores used to synchronize the
+    KV cache transfer using MSCCL++. Each sequence is mapped to a different slot/semaphore
+    in order to allow fine-grained synchronization.
+    
+    Slots are freed once their sequence finishes, allowing the same semaphores to be
+    used for new sequences as they arrive.
     """
+
     def __init__(self):
         self.available_slotids = list(range(MAX_SLOT_IDS))
         self.seq_to_slot = {}
@@ -142,7 +147,8 @@ class SeqToSlotMapper:
         try:
             slot_id = self.available_slotids.pop(0)
         except IndexError:
-            raise RuntimeError("No more slots available. Increase MAX_SLOT_IDS.")
+            raise RuntimeError(
+                "No more slots available. Increase MAX_SLOT_IDS.")
         self.seq_to_slot[seq_id] = slot_id
 
     def free_seq(self, seq_id):

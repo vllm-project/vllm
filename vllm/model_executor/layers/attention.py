@@ -58,10 +58,10 @@ class PagedAttention(nn.Module):
             raise ValueError(f"head_size ({self.head_size}) is not supported. "
                              f"Supported head sizes: {_SUPPORTED_HEAD_SIZES}.")
 
-        self.kvcache_comm = None
+        self.kvcache_comm_manager = None
 
-    def set_kvcache_comm(self, kvcache_comm):
-        self.kvcache_comm = kvcache_comm
+    def set_kvcache_comm_manager(self, kvcache_comm_manager):
+        self.kvcache_comm_manager = kvcache_comm_manager
 
     def forward(
         self,
@@ -107,10 +107,10 @@ class PagedAttention(nn.Module):
             )
 
             if input_metadata.is_prompt and len(input_metadata.blocks_to_nw):
-                assert self.kvcache_comm is not None
+                assert self.kvcache_comm_manager is not None
                 for semid in input_metadata.blocks_to_nw:
                     for block_start, num_blocks in input_metadata.blocks_to_nw[semid]:
-                        self.kvcache_comm.put(semid, self.layer_id, block_start, num_blocks)
+                        self.kvcache_comm_manager.put(semid, self.layer_id, block_start, num_blocks)
 
         if input_metadata.is_prompt:
             # Prompt run.

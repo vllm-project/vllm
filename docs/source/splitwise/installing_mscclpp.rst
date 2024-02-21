@@ -7,6 +7,7 @@ Installing MSCCL++
 It is used to implement KV cache communication in Splitwise.
 
 To install MSCCL++, please follow the instructions at  `MSCCL++ Quickstart <https://github.com/microsoft/mscclpp/blob/main/docs/quickstart.md>`_ or follow the steps below to install it from source:
+MSCCL++ required libnuma, which can be installed using `apt install libnuma-dev` on Debian-based systems.
 
 .. code-block:: console
 

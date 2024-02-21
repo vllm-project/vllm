@@ -15,7 +15,7 @@ from vllm.model_executor.parallel_utils.custom_all_reduce import init_custom_ar
 from vllm.model_executor.parallel_utils.parallel_state import (
     ensure_model_parallel_initialized, get_stage_parallel_group)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
-from vllm.utils import get_total_num_gpus, WorkerType
+from vllm.utils import WorkerType
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
 from vllm.lora.request import LoRARequest
@@ -72,8 +72,7 @@ class Worker:
         self.cache_events = None
         self.gpu_cache = None
 
-        self.kvcache_comm = None
-        self.mscclpp_group = None
+        self.kvcache_comm_manager = None
 
     def is_prompt_worker(self) -> bool:
         return self.worker_type == WorkerType.PROMPT
@@ -106,10 +105,9 @@ class Worker:
         # Initialize the distributed environment.
         init_distributed_environment(self.parallel_config, self.rank,
                                      self.distributed_init_method)
-        self.init_mscclpp_comm(self.mscclpp_init_method)
+        self.init_kvcache_comm(self.mscclpp_init_method)
         if not self.parallel_config.disable_custom_all_reduce:
             init_custom_ar()
-
 
         # Initialize the model.
         set_random_seed(self.model_config.seed)
@@ -118,29 +116,20 @@ class Worker:
         self.model_runner.load_model()
         if self.parallel_config.sep_prompt_token:
             # Populate Sampler with dst_rank as driver worker's rank.
-            self.model_runner.model.sampler.set_dst_rank(self.model_runner.driver_rank)
+            self.model_runner.model.sampler.set_dst_rank(
+                self.model_runner.driver_rank)
 
-    def init_mscclpp_comm(self, mscclpp_init_method: Optional[str] = None) -> None:
+    def init_kvcache_comm(self,
+                          mscclpp_init_method: Optional[str] = None) -> None:
         if mscclpp_init_method is not None:
-            try:
-                import mscclpp.comm as mscclpp_comm
-            except ImportError:
-                raise ImportError(
-                    "Failed to import MSCCL++ library. Please make sure that "
-                    "the MSCCL++ library is installed."
-                )
+            from vllm.worker.comm_utils import KVCacheCommManager
+            self.kvcache_comm_manager = KVCacheCommManager(
+                self.rank, self.parallel_config.world_size,
+                self.parallel_config.num_prompt_workers, mscclpp_init_method)
 
-            self.mscclpp_group = mscclpp_comm.CommGroup(
-                rank=self.rank,
-                size=self.parallel_config.world_size,
-                interfaceIpPortTrio=mscclpp_init_method,
-            )
-            self.mscclpp_conns = None
-            self.worker_type = (
-                WorkerType.PROMPT
-                if self.rank < self.parallel_config.num_prompt_workers
-                else WorkerType.TOKEN
-            )
+            self.worker_type = (WorkerType.PROMPT if self.rank <
+                                self.parallel_config.num_prompt_workers else
+                                WorkerType.TOKEN)
 
             # Set the driver worker rank for prompt and token workers.
             self.model_runner.driver_rank = (
@@ -150,89 +139,37 @@ class Worker:
                 self.is_driver_worker = True
                 self.model_runner.is_driver_worker = True
 
-            # Setup up connections.
-            corr_worker_rank = (
-                self.mscclpp_group.my_rank + self.parallel_config.num_prompt_workers
-            ) % self.mscclpp_group.nranks
-            transport = self.mscclpp_group.my_ib_device(
-                self.mscclpp_group.my_rank % get_total_num_gpus()
-            )
-            self.mscclpp_conns = self.mscclpp_group.make_connection(
-                [corr_worker_rank], transport
-            )
-
     def setup_kvcache_comm(self) -> None:
         # Setup the communication for the KV cache.
-        from vllm.utils import MAX_SLOT_IDS
-        from vllm.worker.comm_utils import (
-            HEAD_TYPES,
-            KVCacheCommunicator,
-        )
-        import mscclpp.comm as mscclpp_comm
+        if self.kvcache_comm_manager is not None:
+            num_layers = self.model_config.get_num_layers(self.parallel_config)
+            self.kvcache_comm_manager.setup_comm(num_layers, self.gpu_cache)
 
-        corr_worker_rank = (
-            self.mscclpp_group.my_rank + self.parallel_config.num_prompt_workers
-        ) % self.mscclpp_group.nranks
+            # Populate the attention modules with the KV cache communicator.
+            self.set_comm_for_attention_modules()
 
-        num_layers = self.model_config.get_num_layers(self.parallel_config)
-
-        # Set up proxy service and proxy channels for KV cache communication.
-        self.proxy_service = mscclpp_comm.ProxyService()
-        self.proxy_service.start_proxy()
-
-        # register KV cache memory with MSCCL++ proxy channel
-        memory_ids = [[None, None] for _ in range(num_layers)]
-        for layer_id in range(num_layers):
-            for head_type in HEAD_TYPES:
-                memory_ids[layer_id][head_type] = self.mscclpp_group.register_memory_with_proxy(
-                    self.proxy_service,
-                    self.gpu_cache[layer_id][head_type],
-                    self.mscclpp_conns,
-                )
-        # register semaphores with MSCCL++ proxy channel
-        # one for each sequence
-        proxy_channels = [None for _ in range(MAX_SLOT_IDS)]
-        device_handles = [None for _ in range(MAX_SLOT_IDS)]
-        for sem_id in range(MAX_SLOT_IDS):
-            proxy_channels[sem_id] = self.mscclpp_group.register_semaphore_with_proxy(
-                self.proxy_service,
-                self.mscclpp_conns,
-            )[corr_worker_rank]
-            device_handles[sem_id] = proxy_channels[sem_id].device_handle().raw
-
-        all_blocks_size = (
-            self.gpu_cache[0][0].numel() * self.gpu_cache[0][0].element_size()
-        )
-        block_size = all_blocks_size // self.gpu_cache[0][0].size(0)
-
-        self.kvcache_comm = KVCacheCommunicator(block_size, device_handles, memory_ids, self.rank, corr_worker_rank)
-
-        # Populate the attention modules with the KV cache communicator.
-        self.set_comm_for_attention_modules()
+    def destroy_kvcache_comm(self) -> None:
+        if self.kvcache_comm_manager is not None:
+            self.kvcache_comm_manager.destroy_comm()
+            self.unset_comm_for_attention_modules()
 
     def set_comm_for_attention_modules(self) -> None:
-        attention_modules = list(filter(lambda module: "PagedAttention" in module.__class__.__name__, self.model_runner.model.modules()))
+        attention_modules = list(
+            filter(
+                lambda module: "PagedAttention" in module.__class__.__name__,
+                self.model_runner.model.modules()))
         for i, attention_module in enumerate(attention_modules):
-            attention_module.set_kvcache_comm(self.kvcache_comm)
-            attention_module.layer_id = i
-
-    def dismantle_kvcache_comm(self) -> None:
-        self.proxy_service.stop_proxy()
-        del self.proxy_service
-        del self.kvcache_comm
-        del self.mscclpp_group
-        self.unset_comm_for_attention_modules()
-
-    def set_comm_for_attention_modules(self) -> None:
-        attention_modules = list(filter(lambda module: "PagedAttention" in module.__class__.__name__, self.model_runner.model.modules()))
-        for i, attention_module in enumerate(attention_modules):
-            attention_module.set_kvcache_comm(self.kvcache_comm)
+            attention_module.set_kvcache_comm_manager(
+                self.kvcache_comm_manager)
             attention_module.layer_id = i
 
     def unset_comm_for_attention_modules(self) -> None:
-        attention_modules = list(filter(lambda module: "PagedAttention" in module.__class__.__name__, self.model_runner.model.modules()))
+        attention_modules = list(
+            filter(
+                lambda module: "PagedAttention" in module.__class__.__name__,
+                self.model_runner.model.modules()))
         for attention_module in attention_modules:
-            del attention_module.kvcache_comm
+            del attention_module.kvcache_comm_manager
 
     @torch.inference_mode()
     def profile_num_available_blocks(
@@ -367,14 +304,14 @@ class Worker:
 
         if len(blocks_to_nw) and self.is_token_worker() and not is_prompt:
             for sem_id in blocks_to_nw:
-                self.kvcache_comm.wait(sem_id)
+                self.kvcache_comm_manager.wait(sem_id)
 
         output = self.model_runner.execute_model(seq_group_metadata_list,
                                                  self.gpu_cache, blocks_to_nw)
 
         if len(blocks_to_nw) and self.is_prompt_worker() and is_prompt:
             for sem_id in blocks_to_nw:
-                self.kvcache_comm.signal_and_flush(sem_id)
+                self.kvcache_comm_manager.signal_and_flush(sem_id)
         return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
@@ -388,40 +325,47 @@ class Worker:
 
     def should_execute(self, is_prompt: bool) -> bool:
         return self.is_mixed_worker() or (
-            self.is_prompt_worker() and is_prompt) or (
-                self.is_token_worker() and not is_prompt)
+            self.is_prompt_worker() and is_prompt) or (self.is_token_worker()
+                                                       and not is_prompt)
 
     def set_gpucache(self):
         from vllm.worker.comm_utils import HEAD_TYPES
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         for layer_id in range(num_layers):
             for head_type in HEAD_TYPES:
-                self.gpu_cache[layer_id][head_type][:] = self.rank * (num_layers * len(HEAD_TYPES)) + layer_id * len(HEAD_TYPES) + head_type
+                self.gpu_cache[layer_id][head_type][:] = self.rank * (
+                    num_layers *
+                    len(HEAD_TYPES)) + layer_id * len(HEAD_TYPES) + head_type
         torch.cuda.synchronize()
 
     def send_recv_kvcache_all(self):
-        if self.kvcache_comm is not None:
+        if self.kvcache_comm_manager is not None:
             num_gpu_blocks = self.cache_config.num_gpu_blocks
             num_layers = self.model_config.get_num_layers(self.parallel_config)
             if self.rank < self.parallel_config.num_prompt_workers:
                 for layer_id in range(num_layers):
-                    self.kvcache_comm.put(0, layer_id, 0, num_gpu_blocks)
-                self.kvcache_comm.signal_and_flush(0)
+                    self.kvcache_comm_manager.put(0, layer_id, 0,
+                                                  num_gpu_blocks)
+                self.kvcache_comm_manager.signal_and_flush(0)
             else:
-                self.kvcache_comm.wait(0)
+                self.kvcache_comm_manager.wait(0)
             torch.cuda.synchronize()
 
     def check_gpucache(self):
-        if self.kvcache_comm is not None:
+        if self.kvcache_comm_manager is not None:
             from vllm.worker.comm_utils import HEAD_TYPES
             num_prompt_workers = self.parallel_config.num_prompt_workers
             num_layers = self.model_config.get_num_layers(self.parallel_config)
             expected_worker_id = self.rank if self.rank < num_prompt_workers else self.rank - num_prompt_workers
             for layer_id in range(num_layers):
                 for head_type in HEAD_TYPES:
-                    expected_scalar = expected_worker_id * (num_layers * len(HEAD_TYPES)) + layer_id * len(HEAD_TYPES) + head_type
-                    expected_tensor = torch.ones_like(self.gpu_cache[layer_id][head_type]) * expected_scalar
-                    assert torch.allclose(self.gpu_cache[layer_id][head_type], expected_tensor)
+                    expected_scalar = expected_worker_id * (num_layers * len(
+                        HEAD_TYPES)) + layer_id * len(HEAD_TYPES) + head_type
+                    expected_tensor = torch.ones_like(
+                        self.gpu_cache[layer_id][head_type]) * expected_scalar
+                    assert torch.allclose(self.gpu_cache[layer_id][head_type],
+                                          expected_tensor)
+
 
 def init_distributed_environment(
     parallel_config: ParallelConfig,

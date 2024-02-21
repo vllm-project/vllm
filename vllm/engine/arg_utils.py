@@ -160,9 +160,10 @@ class EngineArgs:
             help='load model sequentially in multiple batches, '
             'to avoid RAM OOM when using tensor '
             'parallel and large models')
-        parser.add_argument('--sep-prompt-token',
-                            action='store_true',
-                            help='separate the prompt processing and token sampling')
+        parser.add_argument(
+            '--sep-prompt-token',
+            action='store_true',
+            help='separate the prompt processing and token sampling')
         # KV cache arguments
         parser.add_argument('--block-size',
                             type=int,

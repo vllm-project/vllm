@@ -501,9 +501,12 @@ class ModelRunner:
                 "lora_requests": lora_requests,
                 "lora_mapping": lora_mapping,
             }
-            broadcast_tensor_dict(metadata_dict, src=self.driver_rank, group=stage_group)
+            broadcast_tensor_dict(metadata_dict,
+                                  src=self.driver_rank,
+                                  group=stage_group)
         else:
-            metadata_dict = broadcast_tensor_dict(src=self.driver_rank, group=stage_group)
+            metadata_dict = broadcast_tensor_dict(src=self.driver_rank,
+                                                  group=stage_group)
             input_tokens = metadata_dict["input_tokens"]
             input_positions = metadata_dict["input_positions"]
             lora_mapping = metadata_dict["lora_mapping"]
@@ -542,7 +545,8 @@ class ModelRunner:
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, input_metadata, sampling_metadata,
          lora_requests,
-         lora_mapping) = self.prepare_input_tensors(seq_group_metadata_list, blocks_to_nw)
+         lora_mapping) = self.prepare_input_tensors(seq_group_metadata_list,
+                                                    blocks_to_nw)
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
