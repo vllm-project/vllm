@@ -2,6 +2,8 @@ from typing import Optional
 from vllm.config import TokenizerPoolConfig
 from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
     BaseTokenizerGroup)
+from vllm.transformers_utils.tokenizer_group.thread_tokenizer_group import (
+    ThreadPoolTokenizerGroup)
 from vllm.transformers_utils.tokenizer_group.tokenizer_group import (
     TokenizerGroup)
 from vllm.engine.ray_utils import ray
@@ -24,9 +26,10 @@ def get_tokenizer_group(tokenizer_pool_config: Optional[TokenizerPoolConfig],
                 "the ray package to use the Ray tokenizer group pool.")
         return RayTokenizerGroupPool.from_config(tokenizer_pool_config,
                                                  **init_kwargs)
-    else:
-        raise ValueError(
-            f"Unknown pool type: {tokenizer_pool_config.pool_type}")
+    if tokenizer_pool_config.pool_type == "thread":
+        return ThreadPoolTokenizerGroup(
+            max_workers=tokenizer_pool_config.pool_size, **init_kwargs)
+    raise ValueError(f"Unknown pool type: {tokenizer_pool_config.pool_type}")
 
 
 __all__ = ["get_tokenizer_group", "BaseTokenizerGroup"]

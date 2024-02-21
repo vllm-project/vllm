@@ -21,10 +21,8 @@ class TokenizerGroup(BaseTokenizerGroup):
         self.enable_lora = enable_lora
         self.max_input_length = max_input_length
         self.tokenizer = get_tokenizer(self.tokenizer_id, **tokenizer_config)
-        if enable_lora:
-            self.lora_tokenizers = LRUCache(capacity=max_num_seqs)
-        else:
-            self.lora_tokenizers = None
+        self.lora_tokenizers = LRUCache[PreTrainedTokenizer](
+            capacity=max_num_seqs) if enable_lora else None
 
     def ping(self) -> bool:
         """Check if the tokenizer group is alive."""
@@ -62,8 +60,7 @@ class TokenizerGroup(BaseTokenizerGroup):
                 lora_request, **self.tokenizer_config) or self.tokenizer)
             self.lora_tokenizers.put(lora_request.lora_int_id, tokenizer)
             return tokenizer
-        else:
-            return self.lora_tokenizers.get(lora_request.lora_int_id)
+        return self.lora_tokenizers.get(lora_request.lora_int_id)
 
     async def get_lora_tokenizer_async(
             self,
@@ -76,5 +73,4 @@ class TokenizerGroup(BaseTokenizerGroup):
                 lora_request, **self.tokenizer_config) or self.tokenizer)
             self.lora_tokenizers.put(lora_request.lora_int_id, tokenizer)
             return tokenizer
-        else:
-            return self.lora_tokenizers.get(lora_request.lora_int_id)
+        return self.lora_tokenizers.get(lora_request.lora_int_id)

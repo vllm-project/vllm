@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Optional, Union, ClassVar
+from typing import TYPE_CHECKING, Optional, Union, ClassVar, Literal
 from dataclasses import dataclass
 import os
 from packaging.version import Version
@@ -393,7 +393,7 @@ class CacheConfig:
 @dataclass
 class TokenizerPoolConfig:
     """Configuration for the tokenizer pool.
-    
+
     Args:
         pool_size: Number of tokenizer workers in the pool.
         pool_type: Type of the pool.
@@ -402,44 +402,54 @@ class TokenizerPoolConfig:
             pool type.
     """
     pool_size: int
-    pool_type: str
+    pool_type: Literal["ray", "thread"]
     extra_config: dict
 
     def __post_init__(self):
-        if self.pool_type not in ("ray", ):
+        if self.pool_type not in ("ray", "thread"):
             raise ValueError(f"Unknown pool type: {self.pool_type}")
         if not isinstance(self.extra_config, dict):
             raise ValueError("extra_config must be a dictionary.")
 
     @classmethod
     def create_config(
-        cls, tokenizer_pool_size: int, tokenizer_pool_type: str,
-        tokenizer_pool_extra_config: Optional[Union[str, dict]]
+        cls,
+        tokenizer_pool_size: Optional[int],
+        tokenizer_pool_type: Literal["ray", "thread"],
+        tokenizer_pool_extra_config: Optional[Union[str, dict]],
+        tensor_parallel_size: int,
     ) -> Optional["TokenizerPoolConfig"]:
         """Create a TokenizerPoolConfig from the given parameters.
-        
+
         If tokenizer_pool_size is 0, return None.
-        
+
         Args:
             tokenizer_pool_size: Number of tokenizer workers in the pool.
             tokenizer_pool_type: Type of the pool.
             tokenizer_pool_extra_config: Additional config for the pool.
                 The way the config will be used depends on the
                 pool type. This can be a JSON string (will be parsed).
+            tensor_parallel_size: Used in default pool size calculation.
         """
-        if tokenizer_pool_size:
-            if isinstance(tokenizer_pool_extra_config, str):
-                tokenizer_pool_extra_config_parsed = json.loads(
-                    tokenizer_pool_extra_config)
-            else:
-                tokenizer_pool_extra_config_parsed = (
-                    tokenizer_pool_extra_config or {})
-            tokenizer_pool_config = cls(tokenizer_pool_size,
-                                        tokenizer_pool_type,
-                                        tokenizer_pool_extra_config_parsed)
+        if tokenizer_pool_size == 0:
+            return None
+
+        if tokenizer_pool_size is None:
+            # Default based on CPU count
+            tokenizer_pool_size = min(
+                16,
+                os.cpu_count() - tensor_parallel_size - 1)
+            tokenizer_pool_size = max(1, tokenizer_pool_size)
+
+        if isinstance(tokenizer_pool_extra_config, str):
+            tokenizer_pool_extra_config_parsed = json.loads(
+                tokenizer_pool_extra_config)
         else:
-            tokenizer_pool_config = None
-        return tokenizer_pool_config
+            tokenizer_pool_extra_config_parsed = (tokenizer_pool_extra_config
+                                                  or {})
+
+        return cls(tokenizer_pool_size, tokenizer_pool_type,
+                   tokenizer_pool_extra_config_parsed)
 
 
 class ParallelConfig:

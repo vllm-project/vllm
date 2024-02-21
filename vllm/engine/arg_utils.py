@@ -1,7 +1,7 @@
 import argparse
 import dataclasses
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Literal
 
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, LoRAConfig,
@@ -41,8 +41,8 @@ class EngineArgs:
     enforce_eager: bool = False
     max_context_len_to_capture: int = 8192
     disable_custom_all_reduce: bool = False
-    tokenizer_pool_size: int = 0
-    tokenizer_pool_type: str = "ray"
+    tokenizer_pool_size: Optional[int] = None
+    tokenizer_pool_type: Literal["ray", "thread"] = "thread"
     tokenizer_pool_extra_config: Optional[dict] = None
     enable_lora: bool = False
     max_loras: int = 1
@@ -257,11 +257,13 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.tokenizer_pool_size,
                             help='Size of tokenizer pool to use for '
-                            'asynchronous tokenization. If 0, will '
+                            'asynchronous tokenization. Default chosen '
+                            'based on available CPU cores. If 0, will '
                             'use synchronous tokenization.')
         parser.add_argument('--tokenizer-pool-type',
                             type=str,
                             default=EngineArgs.tokenizer_pool_type,
+                            choices=['thread', 'ray'],
                             help='Type of tokenizer pool to use for '
                             'asynchronous tokenization. Ignored '
                             'if tokenizer_pool_size is 0.')
@@ -344,6 +346,7 @@ class EngineArgs:
                 self.tokenizer_pool_size,
                 self.tokenizer_pool_type,
                 self.tokenizer_pool_extra_config,
+                self.tensor_parallel_size,
             ), self.ray_workers_use_nsight)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
