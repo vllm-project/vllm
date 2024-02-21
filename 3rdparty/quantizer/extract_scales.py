@@ -1,52 +1,195 @@
 import argparse
+import fnmatch
+import glob
+from huggingface_hub import snapshot_download, HfFileSystem
 import json
+import numpy as np
 import os
-from vllm.model_executor.weight_utils import (
-    hf_model_weights_iterator,
-    prepare_hf_model_weights
-)
+from safetensors.torch import safe_open
+import torch
+from typing import List, Optional, Tuple
 
-default_output_name = "kv_cache_scales.json"
 
+# Adapted from vllm/model_executor/weight_utils.py
+# The main differences are that we add the NPZ format and that there's no
+# need for a file lock when downloading model weights because this tool is
+# not intended to be run on multiple processes simultaneously.
+# Since our use case is sufficiently different, we define our own function
+# here.
+def _prepare_hf_weights(
+    model_name_or_path: str,
+    cache_dir: Optional[str] = None,
+    load_format: str = "auto",
+    fall_back_to_pt: bool = True,
+    revision: Optional[str] = None,
+) -> Tuple[str, List[str], bool]:
+    # Download model weights from huggingface.
+    is_local = os.path.isdir(model_name_or_path)
+    use_safetensors = False
+    # Some quantized models use .pt files for storing the weights.
+    if load_format == "auto":
+        allow_patterns = ["*.safetensors", "*.bin"]
+    elif load_format == "safetensors":
+        use_safetensors = True
+        allow_patterns = ["*.safetensors"]
+    elif load_format == "pt":
+        allow_patterns = ["*.pt"]
+    elif load_format == "npz":
+        allow_patterns = ["*.npz"]
+    else:
+        raise ValueError(f"Unknown load_format: {load_format}")
+
+    if fall_back_to_pt:
+        allow_patterns += ["*.pt"]
+
+    if not is_local:
+        # Before we download we look at that is available:
+        fs = HfFileSystem()
+        file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
+        # depending on what is available we download different things
+        for pattern in allow_patterns:
+            matching = fnmatch.filter(file_list, pattern)
+            if len(matching) > 0:
+                allow_patterns = [pattern]
+                break
+        print(f"Downloading model... Using model weights format {allow_patterns}")
+        hf_folder = snapshot_download(model_name_or_path,
+                                      allow_patterns=allow_patterns,
+                                      cache_dir=cache_dir,
+                                      revision=revision)
+    else:
+        hf_folder = model_name_or_path
+    hf_weights_files: List[str] = []
+    for pattern in allow_patterns:
+        hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
+        if len(hf_weights_files) > 0:
+            if pattern == "*.safetensors":
+                use_safetensors = True
+            break
+    if not use_safetensors:
+        # Exclude files that are not needed for inference.
+        # https://github.com/huggingface/transformers/blob/v4.34.0/src/transformers/trainer.py#L227-L233
+        blacklist = [
+            "training_args.bin",
+            "optimizer.bin",
+            "optimizer.pt",
+            "scheduler.pt",
+            "scaler.pt",
+        ]
+        hf_weights_files = [
+            f for f in hf_weights_files
+            if not any(f.endswith(x) for x in blacklist)
+        ]
+
+    if len(hf_weights_files) == 0:
+        raise RuntimeError(
+            f"Cannot find any model weights with `{model_name_or_path}`")
+
+    return hf_folder, hf_weights_files, use_safetensors
+
+
+# Adapted from vllm/model_executor/weight_utils.py
+def _hf_tensorfile_iterator(filename: str, load_format: str, 
+                            use_safetensors: bool):
+    if load_format == "npz":
+        assert not use_safetensors
+        with np.load(filename) as data:
+            for name in data.files:
+                param = torch.from_numpy(data[name])
+                yield name, param
+    elif use_safetensors:
+        with safe_open(filename, framework="pt") as f:
+            for name in f.keys():
+                param = f.get_tensor(name)
+                yield name, param
+    else:
+        state = torch.load(filename, map_location="cpu")
+        for name, param in state.items():
+            yield name, param
+        del state
+        torch.cuda.empty_cache()
+
+
+# Used by both main and if __name__ == "__main__"
+_default_kvcache_scales_filename = "kv_cache_scales.json"
 
 def main(args):
-    layer_scale_factors_map = {}
-    if args.output is None:
-        hf_folder, _, _ = prepare_hf_model_weights(args.model,
-                                                   args.cache_dir,
-                                                   args.load_format,
-                                                   revision=args.revision,
-                                                   fall_back_to_pt=False)
-        output_file = os.path.join(hf_folder, default_output_name)
-    else:
-        output_file = os.path.join(args.output, default_output_name)
-        if not os.path.isdir(args.output):
-            os.makedirs(args.output, exist_ok=True)
+    rank_tensors_map = {}
+    hf_folder, hf_tensor_files, use_safetensors = _prepare_hf_weights(
+                                                    args.model,
+                                                    args.cache_dir,
+                                                    args.load_format,
+                                                    revision=args.revision,
+                                                    fall_back_to_pt=True)
+    # Matches the number immediately after this keyword in the tensor filename to
+    # determine the TP rank corresponding to said tensor file
+    rank_keyword = "rank"
+    for tensor_file in hf_tensor_files:
+        try:
+            rank_idx = tensor_file.find(rank_keyword)
+            if rank_idx != -1:
+                start_idx = rank_idx + len(rank_keyword)
+                stop_idx = start_idx
+                while stop_idx < len(tensor_file) and tensor_file[stop_idx].isdecimal():
+                    stop_idx += 1
+                if stop_idx == start_idx:
+                    raise RuntimeError("Did not find rank # in filename.")
+                rank = int(tensor_file[start_idx:stop_idx])
+            elif len(hf_tensor_files) == 1:
+                # Since there is only one tensor file, we can assume
+                # that it's intended for TP rank 0
+                rank = 0
+            else:
+                raise RuntimeError(f"Filename does not contain '{rank_keyword}'.")
+        except RuntimeError:
+            print("Unable to determine TP rank "
+                  f"corresponding to file '{tensor_file}'")
+            raise
+        
+        if rank not in rank_tensors_map:
+            layer_scales_map = {}
+            rank_tensors_map[rank] = layer_scales_map
+        else:
+            raise RuntimeError(f"Tensor file '{tensor_file}' shares TP rank {rank} "
+                               "with another tensor file.")
+        
+        module_delimiter = ":" if args.load_format == "npz" else "."
+        for name, param in _hf_tensorfile_iterator(tensor_file, args.load_format,
+                                                  use_safetensors):
+            if "kv_cache_scaling_factor" in name:
+                nums = [int(s) for s in name.split(module_delimiter) if s.isdigit()]
+                assert len(nums) == 1, f"Could not determine layer idx for {name}"
+                layer_idx = nums[0]
+                assert layer_idx not in layer_scales_map, f"Duplicate scaling " \
+                    f"factor corresponding to layer {layer_idx}"
+                try:
+                    layer_scales_map[layer_idx] = param.item()
+                except RuntimeError:
+                    print("This utility supports only per-tensor scalar scale factors "
+                            f"for now. The tensor\n {name} = {param} is an invalid "
+                            "scale factor.")
+                    raise
 
-    for name, param in hf_model_weights_iterator(args.model,
-                                                 args.cache_dir,
-                                                 args.load_format,
-                                                 args.revision,
-                                                 fall_back_to_pt=False):
-        if "kv_cache_scaling_factor" in name:
-            nums = [int(s) for s in name.split('.') if s.isdigit()]
-            assert len(nums) == 1, f"Could not determine layer idx for {name}!"
-            layer_idx = nums[0]
-            assert layer_idx not in layer_scale_factors_map, f"Duplicate scaling " \
-                f"factor corresponding to layer {layer_idx}!"
-            try:
-                layer_scale_factors_map[layer_idx] = param.item()
-            except RuntimeError:
-                print("This utility supports only per-tensor scalar scale factors "
-                        f"for now. The tensor\n {name} = {param} is an invalid "
-                        "scale factor!")
-                raise
-    if len(layer_scale_factors_map) == 0:
-        print("WARNING: No KV cache scale factors found! No output saved.")
+    if args.output_path is None:
+        output_file = os.path.join(hf_folder, _default_kvcache_scales_filename)
     else:
+        output_file = os.path.join(args.output_path, _default_kvcache_scales_filename)
+        if not os.path.isdir(args.output_path):
+            os.makedirs(args.output_path, exist_ok=True)
+
+    if (len(rank_tensors_map) == 0 or
+        all(len(layer_scales_map) == 0 for layer_scales_map in rank_tensors_map.values())):
+        print("WARNING: No KV cache scale factors found. No output saved.")
+    else:
+        tp_world_size = max(rank_tensors_map.keys()) + 1
+        for i in range(tp_world_size):
+            assert i in rank_tensors_map, f"Expected TP world size = {tp_world_size} " \
+                                          "but did not find KV cache scaling factors " \
+                                          f"for TP rank {i}"
         with open(output_file, 'w') as f:
-            json.dump(layer_scale_factors_map, f, sort_keys=True)
-            print(f"Completed! KV cache scaling factors saved to {output_file}")
+            json.dump(rank_tensors_map, f, sort_keys=True, indent=4)
+            print(f"Completed! Found TP world size = {tp_world_size}.",
+                  f"KV cache scaling factors saved to {output_file}")
 
 
 if __name__ == "__main__":
@@ -69,15 +212,16 @@ if __name__ == "__main__":
     parser.add_argument("--load_format",
                         help="Optionally specify the format of the model's tensor files "
                         "containing the KV cache scaling factors.",
-                        choices=["auto", "safetensors", "npcache"],
+                        choices=["auto", "safetensors", "npz", "pt"],
                         default="auto")
     parser.add_argument("--revision",
                         help="Optionally specify the model's revision number.",
                         default=None)
-    parser.add_argument("--output",
-                        help="Specify the output directory. By default it will be saved in "
-                        f"the model directory with the filename {default_output_name}, "
-                        "however you can override this behavior here.",
+    parser.add_argument("--output_path",
+                        help="Optionally specify the output directory. By default the "
+                        "scaling factors will be saved in the model directory with the "
+                        f"filename {_default_kvcache_scales_filename}, however you can "
+                        "override this behavior here.",
                         default=None)
     args = parser.parse_args()
 
