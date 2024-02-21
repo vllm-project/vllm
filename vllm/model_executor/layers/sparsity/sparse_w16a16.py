@@ -2,20 +2,20 @@ from typing import Any, Dict, List, Type
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.sparsity.base_config import SparsityConfig
 
 from .sparse_w16a16_linear_method import SparseW16A16LinearMethod
-from magic_wand import (CompressedStorageFormat, SparseBEGemmStorageFormat)
+from magic_wand import (CompressedStorageFormat, SparseBitmaskStorageFormat,
+                        SparseBEGemmStorageFormat)
+
+logger = init_logger(__name__)
 
 
 class SparseW16A16Config(SparsityConfig):
-    """Config class for SparseW16A16.
-
-    TODO: Add based on need
-    """
+    """Config class for SparseW16A16."""
 
     def __init__(self) -> None:
-        # TODO: Add new configs here
         pass
 
     def __repr__(self) -> str:
@@ -23,7 +23,15 @@ class SparseW16A16Config(SparsityConfig):
 
     @classmethod
     def get_storage_format_cls(cls) -> Type[CompressedStorageFormat]:
-        return SparseBEGemmStorageFormat
+        cuda_compute_capability = torch.cuda.get_device_capability()
+        if cuda_compute_capability >= (8, 0):
+            return SparseBEGemmStorageFormat
+        else:
+            # For NVIDIA SM < 8.0
+            logger.warning("Unstructured sparse kernels are not optimized for "
+                           "NVIDIA SM < 8.0. Naive decompress kernels will be "
+                           "used and can be slower than dense models")
+            return SparseBitmaskStorageFormat
 
     @classmethod
     def get_name(cls) -> str:
@@ -35,8 +43,7 @@ class SparseW16A16Config(SparsityConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # TODO: Update after checks on more GPUs
-        return 80
+        return 70
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
