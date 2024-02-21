@@ -11,12 +11,7 @@ from types import SimpleNamespace
 from pydantic import BaseModel
 
 from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest
-try:
-    from outlines.serve.vllm import JSONLogitsProcessor, RegexLogitsProcessor
-except ImportError as e:
-    raise ValueError(
-        "Please install 'outlines' (pip install outlines) to use guided decoding."
-    ) from e
+from vllm.model_executor.guided_logits_processors import JSONLogitsProcessor, RegexLogitsProcessor
 
 
 class GuidedDecodingMode(Enum):
@@ -105,10 +100,10 @@ def get_cached_logits_processor(guide: str, tokenizer, mode: GuidedDecodingMode)
         # to grab the LLM's tokenizer, may break in future
         # NOTE: as of 2/17, outlines PR 541 gets this wrong"
         x = SimpleNamespace()
-        # y = SimpleNamespace()
+        y = SimpleNamespace()
         x.tokenizer = tokenizer
-        # y.tokenizer = x
-        return x
+        y.tokenizer = x
+        return y
     
     if mode == GuidedDecodingMode.JSON:
         return JSONLogitsProcessor(guide, dummy_llm())
