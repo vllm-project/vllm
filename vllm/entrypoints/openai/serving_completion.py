@@ -1,7 +1,7 @@
 import asyncio
 import time
 from fastapi import Request
-from typing import AsyncGenerator, AsyncIterator, Callable, List, Optional, Dict, Tuple
+from typing import AsyncGenerator, AsyncIterator, Callable, Dict, List, Optional, Tuple
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -251,10 +251,10 @@ class OpenAIServingCompletion(OpenAIServing):
 
     def __init__(self,
                  engine: AsyncLLMEngine,
-                 served_model: str,
+                 served_model_names: List[str],
                  lora_modules: Optional[List[LoRA]] = None):
         super().__init__(engine=engine,
-                         served_model=served_model,
+                         served_model_names=served_model_names,
                          lora_modules=lora_modules)
 
     async def create_completion(self, request: CompletionRequest,
@@ -281,7 +281,6 @@ class OpenAIServingCompletion(OpenAIServing):
             return self.create_error_response(
                 "logit_bias is not currently supported")
 
-        model_name = request.model
         request_id = f"cmpl-{random_uuid()}"
         created_time = int(time.monotonic())
 
@@ -327,7 +326,7 @@ class OpenAIServingCompletion(OpenAIServing):
                                                self._create_logprobs,
                                                request_id,
                                                created_time,
-                                               model_name,
+                                               self.served_model_names[0],
                                                num_prompts=len(prompts))
 
         # Non-streaming response
@@ -340,7 +339,7 @@ class OpenAIServingCompletion(OpenAIServing):
             final_res_batch[i] = res
         response = request_output_to_completion_response(
             final_res_batch, request, self._create_logprobs, request_id,
-            created_time, model_name)
+            created_time, self.served_model_names[0])
 
         # When user requests streaming but we don't stream, we still need to
         # return a streaming response with a single event.
