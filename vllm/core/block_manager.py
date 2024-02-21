@@ -1,6 +1,6 @@
 """A block manager that manages token blocks."""
 import enum
-from itertools import takewhile
+from itertools import takewhile, count
 from os.path import commonprefix
 from time import monotonic
 from typing import Dict, List, Optional, Set, Tuple
@@ -39,17 +39,16 @@ def lru_eviction(
         if block.prefix_len > highest_prefix_count:
             highest_prefix_count = block.prefix_len
 
-    # Find all blocks with the lowest timestamp
-    eviction_candidates: List[PhysicalTokenBlock] = []
+    evicted_block: Optional[PhysicalTokenBlock] = None
+
+    # Find the first block with the lowest timestamp
     for block in least_recent:
         if block.prefix_len == highest_prefix_count:
-            eviction_candidates.append(block)
+            evicted_block = block
+            break
 
-    # Arbitrarily evict the first candidate
-    if len(eviction_candidates) == 0:
-        raise ValueError("No usable cache memory left")
+    assert evicted_block is not None
 
-    evicted_block = eviction_candidates[0]
     del free_table[evicted_block.block_hash]
 
     evicted_block.computed = False
@@ -72,12 +71,13 @@ class BlockAllocator:
         self.device = device
         self.block_size = block_size
         self.num_blocks = num_blocks
-
         self.eviction_policy = eviction_policy
 
         self.current_num_blocks = 0
         self.table: Dict[int, PhysicalTokenBlock] = {}
         self.free_table: Dict[int, PhysicalTokenBlock] = {}
+
+        self.default_hash_ctr = count()
 
     def evict(self) -> PhysicalTokenBlock:
         if self.eviction_policy == EvictionPolicy.LRU:
@@ -105,7 +105,7 @@ class BlockAllocator:
                  block_hash: Optional[int] = None,
                  prefix_len: int = 0) -> PhysicalTokenBlock:
         if block_hash is None:
-            block_hash = monotonic()
+            block_hash = next(self.default_hash_ctr)
         if block_hash in self.free_table:
             assert block_hash not in self.table
             block = self.free_table[block_hash]
@@ -263,7 +263,8 @@ class BlockSpaceManager:
         self,
         seq: Sequence,
     ) -> bool:
-        return (len(seq.data.get_token_ids())) % seq.block_size == 0
+        token_ids_len = len(seq.data.get_token_ids())
+        return token_ids_len > 0 and token_ids_len % seq.block_size == 0
 
     def _is_last_block(
         self,
