@@ -163,7 +163,10 @@ def make_async(func: Callable[..., T]) -> Callable[..., Awaitable[T]]:
 
 def get_ip() -> str:
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.connect(("8.8.8.8", 80))  # Doesn't need to be reachable
+    try:
+        s.connect(("8.8.8.8", 80))  # Doesn't need to be reachable
+    except OSError:
+        pass
     return s.getsockname()[0]
 
 
