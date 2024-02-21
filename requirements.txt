@@ -4,7 +4,7 @@ ray >= 2.9
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
 torch == 2.1.2
-transformers >= 4.37.0 # Required for Qwen2
+transformers >= 4.38.0  # Required for Gemma.
 xformers == 0.0.23.post1  # Required for CUDA 12.1.
 fastapi
 uvicorn[standard]
