@@ -1,9 +1,15 @@
 import numpy
 import torch
 from torch.utils._pytree import tree_map
+import importlib.util
 
 from typing import Type
-from magic_wand import (CompressedStorageFormat, SparseBitmaskStorageFormat)
+
+is_magic_wand_available = importlib.util.find_spec("magic_wand") is not None
+
+# These are types from magic_wand, but we only want to import if required
+CompressedStorageFormat = "CompressedStorageFormat"
+SparseBitmaskStorageFormat = "SparseBitmaskStorageFormat"
 
 
 class LazyCompressedParameter(torch.Tensor):
@@ -14,6 +20,12 @@ class LazyCompressedParameter(torch.Tensor):
                 storage_format_cls: Type[
                     CompressedStorageFormat] = SparseBitmaskStorageFormat,
                 compress_transposed: bool = False):
+
+        if not is_magic_wand_available:
+            raise ValueError(
+                "magic_wand is not available and required for sparsity "
+                "support. Please install it with `pip install magic_wand`")
+
         self = torch.Tensor._make_wrapper_subclass(
             cls,
             size=uncompressed_data.shape,

@@ -17,8 +17,6 @@ from tqdm.auto import tqdm
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (get_quantization_config,
                                                      QuantizationConfig)
-from vllm.model_executor.layers.sparsity import (get_sparsity_config,
-                                                 SparsityConfig)
 from vllm.model_executor.layers.parameters import LazyCompressedParameter
 
 logger = init_logger(__name__)
@@ -91,7 +89,8 @@ def get_sparse_config(
     model_name_or_path: str,
     hf_config: PretrainedConfig,
     cache_dir: Optional[str] = None,
-) -> SparsityConfig:
+):
+    from vllm.model_executor.layers.sparsity import get_sparsity_config
     sparsity_cls = get_sparsity_config(sparsity)
     hf_sparsity_config = getattr(hf_config, "sparsity_config", None)
     if hf_sparsity_config is not None:
