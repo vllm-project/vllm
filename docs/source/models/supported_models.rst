@@ -32,6 +32,9 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`FalconForCausalLM`
     - Falcon
     - :code:`tiiuae/falcon-7b`, :code:`tiiuae/falcon-40b`, :code:`tiiuae/falcon-rw-7b`, etc.
+  * - :code:`GemmaForCausalLM`
+    - Gemma
+    - :code:`google/gemma-2b`, :code:`google/gemma-7b`, etc.
   * - :code:`GPT2LMHeadModel`
     - GPT-2
     - :code:`gpt2`, :code:`gpt2-xl`, etc.
@@ -62,6 +65,9 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`MPTForCausalLM`
     - MPT, MPT-Instruct, MPT-Chat, MPT-StoryWriter
     - :code:`mosaicml/mpt-7b`, :code:`mosaicml/mpt-7b-storywriter`, :code:`mosaicml/mpt-30b`, etc.
+  * - :code:`OLMoForCausalLM`
+    - OLMo
+    - :code:`allenai/OLMo-1B`, :code:`allenai/OLMo-7B`, etc.
   * - :code:`OPTForCausalLM`
     - OPT, OPT-IML
     - :code:`facebook/opt-66b`, :code:`facebook/opt-iml-max-30b`, etc.

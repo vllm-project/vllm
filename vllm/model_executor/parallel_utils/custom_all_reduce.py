@@ -36,14 +36,14 @@ def init_custom_ar() -> None:
     if world_size not in _SUPPORTED_WORLD_SIZES:
         logger.warn(
             "Custom allreduce is disabled due to an unsupported world size: "
-            "%d. Supported world sizes: %s. To slience this warning, specify"
+            "%d. Supported world sizes: %s. To silence this warning, specify"
             "disable_custom_all_reduce=True explicitly.", world_size,
             str(_SUPPORTED_WORLD_SIZES))
         return
     if not _can_p2p(rank, world_size):
         logger.warn(
             "Custom allreduce is disabled because your platform lacks GPU P2P"
-            " capability. To slience this warning, specify"
+            " capability. To silence this warning, specify"
             "disable_custom_all_reduce=True explicitly.")
         return
     _CA_HANDLE = CustomAllreduce(rank, world_size)
