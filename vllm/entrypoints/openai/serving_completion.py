@@ -36,9 +36,11 @@ async def completion_stream_generator(
     model_name: str,
     num_prompts: int,
 ) -> AsyncGenerator[str, None]:
-    previous_texts = [""] * request.n * num_prompts
-    previous_num_tokens = [0] * request.n * num_prompts
+    previous_output_texts = [""] * request.n * num_prompts
+    previous_output_num_tokens = [0] * request.n * num_prompts
     has_echoed = [False] * request.n * num_prompts
+    num_prompt_tokens = 0
+    num_generated_tokens = 0
 
     async for prompt_idx, res in result_generator:
 
@@ -48,41 +50,46 @@ async def completion_stream_generator(
             raise StopAsyncIteration()
 
         for output in res.outputs:
+            print(f"Tokenized echo: {res.prompt_token_ids}. Length: {len(res.prompt_token_ids)}")
             i = output.index + prompt_idx * request.n
             # TODO(simon): optimize the performance by avoiding full text O(n^2) sending.
+            delta_text = ""
+            delta_token_ids = []
+            offset_text = ""
+            offset_tk_ids = []
+            if not has_echoed[i]:
+                num_prompt_tokens += len(res.prompt_token_ids)
+                if request.echo:
+                    delta_text += res.prompt
+                    delta_token_ids = res.prompt_token_ids
+                has_echoed[i] = True
 
-            if request.echo and request.max_tokens == 0:
-                # only return the prompt
-                delta_text = res.prompt
-                delta_token_ids = res.prompt_token_ids
-                top_logprobs = res.prompt_logprobs
-                has_echoed[i] = True
-            elif request.echo and request.max_tokens > 0 and not has_echoed[i]:
-                # echo the prompt and first token
-                delta_text = res.prompt + output.text
-                delta_token_ids = res.prompt_token_ids + output.token_ids
-                top_logprobs = res.prompt_logprobs + (output.logprobs or [])
-                has_echoed[i] = True
-            else:
-                # return just the delta
-                delta_text = output.text[len(previous_texts[i]):]
-                delta_token_ids = output.token_ids[previous_num_tokens[i]:]
-                top_logprobs = output.logprobs[
-                    previous_num_tokens[i]:] if output.logprobs else None
+            elif request.max_tokens > 0:
+                offset_text = output.text[len(previous_output_texts[i]):]
+                offset_tk_ids = output.token_ids[previous_output_num_tokens[i]:]
+                delta_text += offset_text
+                delta_token_ids += offset_tk_ids
+                num_generated_tokens += len(offset_tk_ids)
 
             if request.logprobs is not None:
                 assert top_logprobs is not None, "top_logprobs must be provided when logprobs is requested"
+                top_logprobs = []
+                if request.echo:
+                    top_logprobs += res.prompt_logprobs
+                if request.max_tokens > 0:
+                    top_logprobs += output.logprobs[
+                        previous_output_num_tokens[i]:] if output.logprobs else None
                 logprobs = create_logprobs_fn(
                     token_ids=delta_token_ids,
                     top_logprobs=top_logprobs,
                     num_output_top_logprobs=request.logprobs,
-                    initial_text_offset=len(previous_texts[i]),
+                    initial_text_offset=len(previous_output_texts[i]),
                 )
             else:
                 logprobs = None
 
-            previous_texts[i] = output.text
-            previous_num_tokens[i] = len(output.token_ids)
+            previous_output_texts[i] += offset_text
+            previous_output_num_tokens[i] += len(offset_tk_ids)
             finish_reason = output.finish_reason
             response_json = CompletionStreamResponse(
                 id=request_id,
@@ -100,8 +107,8 @@ async def completion_stream_generator(
 
             if output.finish_reason is not None:  # return final usage
                 logprobs = LogProbs() if request.logprobs is not None else None
-                prompt_tokens = len(res.prompt_token_ids)
-                completion_tokens = len(output.token_ids)
+                prompt_tokens = num_prompt_tokens
+                completion_tokens = num_generated_tokens
                 final_usage = UsageInfo(
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
@@ -162,28 +169,30 @@ def request_output_to_completion_response(
     num_prompt_tokens = 0
     num_generated_tokens = 0
     for final_res in final_res_batch:
+        print(f"Tokenized echo: {final_res.prompt_token_ids}. Length: {len(final_res.prompt_token_ids)}")
         assert final_res is not None
         prompt_token_ids = final_res.prompt_token_ids
         prompt_logprobs = final_res.prompt_logprobs
         prompt_text = final_res.prompt
 
+        num_prompt_tokens += len(prompt_token_ids)
         for output in final_res.outputs:
-            if request.echo and request.max_tokens == 0:
-                token_ids = prompt_token_ids
-                output_text = prompt_text
-            elif request.echo and request.max_tokens > 0:
-                token_ids = prompt_token_ids + output.token_ids
-                output_text = prompt_text + output.text
-            else:
-                token_ids = output.token_ids
-                output_text = output.text
+            token_ids = []
+            output_text = ""
+            if request.echo:
+                token_ids += prompt_token_ids
+                output_text += prompt_text
+            if request.max_tokens > 0:
+                token_ids += output.token_ids
+                output_text += output.text
+                num_generated_tokens += len(output.token_ids)
 
             if request.logprobs is not None:
                 top_logprobs = []
                 if request.echo:
-                    top_logprobs.append(prompt_logprobs)
+                    top_logprobs += prompt_logprobs
                 if request.max_tokens > 0:
-                    top_logprobs.append(output.logprobs)
+                    top_logprobs += output.logprobs
                 logprobs = create_logprobs_fn(
                     token_ids=token_ids,
                     top_logprobs=top_logprobs,
@@ -199,10 +208,6 @@ def request_output_to_completion_response(
                 finish_reason=output.finish_reason,
             )
             choices.append(choice_data)
-
-        num_prompt_tokens += len(prompt_token_ids)
-        num_generated_tokens += sum(
-            len(output.token_ids) for output in final_res.outputs)
 
     usage = UsageInfo(
         prompt_tokens=num_prompt_tokens,
