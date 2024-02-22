@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
 
+#
+# A command line tool for running pytorch's hipify preprocessor on CUDA
+# source files.
+#
+# See https://github.com/ROCm/hipify_torch
+# and <torch install dir>/utils/hipify/hipify_python.py
+#
+
 import argparse
 import shutil
 import os
@@ -9,26 +17,21 @@ from torch.utils.hipify.hipify_python import hipify
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
+    # Project directory where all the source + include files live.
     parser.add_argument(
-        "-b",
-        "--build_dir",
-        help="The build directory.",
+        "-p",
+        "--project_dir",
+        help="The project directory.",
     )
 
+    # Directory where hipified files are written.
     parser.add_argument(
         "-o",
         "--output_dir",
         help="The output directory.",
     )
 
-    parser.add_argument(
-        "-i",
-        "--include_dir",
-        help="Include directory",
-        action="append",
-        default=[],
-    )
-
+    # Source files to convert.
     parser.add_argument("sources",
                         help="Source files to hipify.",
                         nargs="*",
@@ -36,16 +39,17 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    # limit scope to build_dir only
-    includes = [os.path.join(args.build_dir, '*')]
+    # Limit include scope to project_dir only
+    includes = [os.path.join(args.project_dir, '*')]
 
+    # Get absolute path for all source files.
     extra_files = [os.path.abspath(s) for s in args.sources]
 
     # Copy sources from project directory to output directory.
     # The directory might already exist to hold object files so we ignore that.
-    shutil.copytree(args.build_dir, args.output_dir, dirs_exist_ok=True)
+    shutil.copytree(args.project_dir, args.output_dir, dirs_exist_ok=True)
 
-    hipify_result = hipify(project_directory=args.build_dir,
+    hipify_result = hipify(project_directory=args.project_dir,
                            output_directory=args.output_dir,
                            header_include_dirs=[],
                            includes=includes,
@@ -61,13 +65,7 @@ if __name__ == '__main__':
                           (s_abs in hipify_result
                            and hipify_result[s_abs].hipified_path is not None)
                           else s_abs)
-        if True:
-            hipified_sources.append(hipified_s_abs)
-        else:
-            hipified_sources.append(
-                os.path.relpath(
-                    hipified_s_abs,
-                    os.path.abspath(os.path.join(args.build_dir, os.pardir))))
+        hipified_sources.append(hipified_s_abs)
 
     assert (len(hipified_sources) == len(args.sources))
 

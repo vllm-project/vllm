@@ -4,7 +4,7 @@ project(vllm_extensions LANGUAGES CXX)
 
 #
 # Supported python versions.  These versions will be searched in order, the
-# first match will be selected.
+# first match is be selected.
 #
 set(PYTHON_SUPPORTED_VERSIONS "3.8" "3.9" "3.10" "3.11")
 
@@ -25,6 +25,8 @@ foreach(VER ${PYTHON_SUPPORTED_VERSIONS})
   message(STATUS "Attempting to find python ${VER} package.")
   find_package(Python ${VER} COMPONENTS Interpreter Development.Module)
   if (Python_FOUND)
+    # Attempt to import torch from python we just found. If so, stop
+    # searching for other versions of python.
     # Note: find_package(Torch) won't work here because cmake might not
     # have the proper search path set yet.
     execute_process(
@@ -66,7 +68,7 @@ macro (run_python OUT EXPR ERR_MSG)
 endmacro()
 
 #
-# Try to find MPI package
+# Try to find the MPI package
 #
 find_package(MPI)
 
@@ -103,6 +105,9 @@ if ((NOT HIP_FOUND) AND (NOT CUDA_FOUND))
   message(FATAL_ERROR "Can't find CUDA or HIP installation.")
 endif()
 
+#
+# Check the torch version and warn if it isn't what is expected.
+#
 if (NOT HIP_FOUND AND CUDA_FOUND)
   set(IS_CUDA true)
 
@@ -134,15 +139,18 @@ endif()
 # detect them explicitly with check_language, etc.
 #
 if (HIP_FOUND)
-  # Importing torch recognizes and sets up some HIP/ROCm stuff but not all.
-  # If we want cmake to be able to understand the .hip extension automatically,
-  # we need to enable HIP explicitly.
+  # Importing torch recognizes and sets up some HIP/ROCm configuration but
+  # does not let cmake recognize .hip files. If we want cmake to be able to
+  # understand the .hip extension automatically, we need to enable HIP
+  # explicitly.
   enable_language(HIP)
 
   #
-  # VLLM_HIP_ARCHITECUTRES will control the offload-arch flags.
-  # CMAKE_HIP_ARCHITECTURES is setup by pytorch and can be controlled
+  # VLLM_HIP_ARCHITECUTRES controls the --offload-arch flags.
+  # CMAKE_HIP_ARCHITECTURES is set up by pytorch and can be controlled
   # via the PYTORCH_ROCM_ARCH env variable.
+  #
+
   #
   # Find the intersection of the supported + detected architectures to
   # set the module architecture flags.
@@ -172,16 +180,17 @@ if (HIP_FOUND)
     "from torch.utils.cpp_extension import COMMON_HIPCC_FLAGS; print(';'.join(COMMON_HIPCC_FLAGS))"
     "Failed to determine torch nvcc compiler flags")
 
-  list(APPEND VLLM_GPU_FLAGS ${VLLM_HIPCC_FLAGS})
-
   list(APPEND VLLM_GPU_FLAGS
+    ${VLLM_HIPCC_FLAGS}
     "-DUSE_ROCM"
     "-U__HIP_NO_HALF_CONVERSIONS__"
     "-U__HIP_NO_HALF_OPERATORS__"
     "-fno-gpu-rdc")
 
 else()
+  #
   # Get common NVCC flags from torch.
+  #
   run_python(VLLM_GPU_FLAGS
     "from torch.utils.cpp_extension import COMMON_NVCC_FLAGS; print(';'.join(COMMON_NVCC_FLAGS))"
     "Failed to determine torch nvcc compiler flags")
@@ -199,7 +208,6 @@ else()
   #
   # Copy flags+update for punica
   #
-
   list(REMOVE_ITEM VLLM_PUNICA_GPU_FLAGS
     "-D__CUDA_NO_HALF_OPERATORS__"
     "-D__CUDA_NO_HALF_CONVERSIONS__"
@@ -213,13 +221,13 @@ else()
   # Setup/process CUDA arch flags
   #
   # The torch cmake setup detects and hardcodes the detected architecture flags
-  # in CMAKE_CUDA_FLAGS but we will need to filter/modify them for the supported
-  # architectures and the punica target.  So we have to extract and remove all
-  # the '-gencode' flags from CMAKE_CUDA_FLAGS for processing.  We can't use
-  # 'target_compiler_options' for adding '-gencode' arguments so we will use the
-  # target's CUDA_ARCHITECTURES property instead. This requires repackaging
-  # the architecture flags into a format that cmake expects for
-  # CUDA_ARCHITECTURES.
+  # in CMAKE_CUDA_FLAGS. Since CMAKE_CUDA_FLAGS is a "global" variable, we can't
+  # modify it on a per-target basis, i.e. for the punica extension.
+  # So we have to extract and remove all the '-gencode' flags from
+  # CMAKE_CUDA_FLAGS for processing. We can't use 'target_compiler_options'
+  # for adding '-gencode' arguments so we use the target's CUDA_ARCHITECTURES
+  # property instead. This requires repackaging the architecture flags into a
+  # format that cmake expects for CUDA_ARCHITECTURES.
   #
   # This is a bit fragile in that it depends on torch using -gencode as opposed
   # to one of the other nvcc options to specify architectures.
@@ -261,7 +269,7 @@ else()
   foreach(ARCH ${VLLM_CUDA_ARCH_FLAGS})
     # For each flag we want to extract the version number and whether
     # it refers to PTX or native code.
-    # Note: if a regex matches then CMAKE_MATCH_1 will hold the binding
+    # Note: if a regex matches then CMAKE_MATCH_1 holds the binding
     # for that match.
 
     string(REGEX MATCH "arch=compute_\([0-9]+a?\)" COMPUTE ${ARCH})
@@ -323,7 +331,11 @@ endif()
 # Define targets
 #
 
-# add comment
+#
+# Add a target named `NAME` that runs the hipify preprocessor on a set of
+# CUDA source files. The names of the corresponding "hipified" sources
+# are stored in `OUT_SRCS`.
+#
 macro(hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
   #
   # Split into C++ and non-C++ (i.e. CUDA) sources
@@ -350,7 +362,7 @@ macro(hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
   set(CSRC_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/csrc)
   add_custom_target(
     hipify${NAME}
-    COMMAND ${CMAKE_SOURCE_DIR}/hipify.py -b ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} -i ${CMAKE_SOURCE_DIR}/csrc ${SRCS}
+    COMMAND ${CMAKE_SOURCE_DIR}/hipify.py -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} ${SRCS}
     DEPENDS hipify.py ${SRCS}
     BYPRODUCTS ${HIP_SRCS}
     COMMENT "Running hipify on extension source files.")
@@ -362,18 +374,27 @@ macro(hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
   message(DEBUG "final ext src: ${OUT_SRCS}")
 endmacro()
 
-# add comment
+#
+# Define a target named `MOD_NAME` for a single extension. The
+# arguments are:
+#
+# MOD_SRC             - the list of source files relative to CMakeLists.txt
+#                       directory.
+# MOD_EXTRA_GPU_FLAGS - extra compiler flags passed to NVCC/hip.
+# MOD_GPU_ARCHES      - a list of target GPU architectures in cmake format.
+#                       Refer to cmake documentation on CMAKE_CUDA_ARCHITECTURES
+#                       and CMAKE_HIP_ARCHITECTURES for more info.
+#
 # Note: optimization level/debug info is set via cmake build type.
+#
 function(define_module_target MOD_NAME MOD_SRC MOD_EXTRA_GPU_FLAGS
     MOD_GPU_ARCHES)
 
+  # Add hipify preprocessing step if we are building with HIP/ROCm.
   if (NOT IS_CUDA AND HIP_FOUND)
-    # Add hipify preprocessing step if we are running on AMD.
     hipify_sources_target(MOD_SRC ${MOD_NAME} "${MOD_SRC}")
   endif()
 
-  # Note: for ROCm builds we let the proper flags and libraries get
-  # pulled in by torch.
   Python_add_library(${MOD_NAME} MODULE ${MOD_SRC} WITH_SOABI)
 
   if (IS_CUDA)
