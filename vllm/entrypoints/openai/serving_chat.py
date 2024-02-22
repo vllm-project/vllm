@@ -157,17 +157,9 @@ class OpenAIServingChat(OpenAIServing):
                 if finish_reason_sent[i]:
                     continue
 
-                if request.echo and request.max_tokens == 0:
-                    delta_token_ids = res.prompt_token_ids
-                    top_logprobs = res.prompt_logprobs
-                elif request.echo and request.max_tokens > 0:
-                    delta_token_ids = res.prompt_token_ids + output.token_ids
-                    top_logprobs = res.prompt_logprobs + (output.logprobs
-                                                          or [])
-                else:
-                    delta_token_ids = output.token_ids[previous_num_tokens[i]:]
-                    top_logprobs = output.logprobs[
-                        previous_num_tokens[i]:] if output.logprobs else None
+                delta_token_ids = output.token_ids[previous_num_tokens[i]:]
+                top_logprobs = output.logprobs[
+                    previous_num_tokens[i]:] if output.logprobs else None
 
                 if request.logprobs is not None:
                     assert(top_logprobs is not None),\
@@ -252,15 +244,8 @@ class OpenAIServingChat(OpenAIServing):
 
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
-            if request.echo and request.max_tokens == 0:
-                token_ids = prompt_token_ids
-                top_logprobs = prompt_logprobs
-            elif request.echo and request.max_tokens > 0:
-                token_ids = prompt_token_ids + output.token_ids
-                top_logprobs = prompt_logprobs + output.logprobs
-            else:
-                token_ids = output.token_ids
-                top_logprobs = output.logprobs
+            token_ids = output.token_ids
+            top_logprobs = output.logprobs
 
             if request.logprobs is not None:
                 logprobs = create_logprobs_fn(
