@@ -52,7 +52,7 @@ __device__ __forceinline__ T gelu_kernel(const T& x) {
     input.scalar_type(),                                                                  \
     "act_and_mul_kernel",                                                                 \
     [&] {                                                                                 \
-      vllm::act_and_mul_kernel<scalar_t, KERNEL<scalar_t>><<<grid, block, 0, stream>>>(  \
+      vllm::act_and_mul_kernel<scalar_t, KERNEL<scalar_t>><<<grid, block, 0, stream>>>(   \
         out.data_ptr<scalar_t>(),                                                         \
         input.data_ptr<scalar_t>(),                                                       \
         d);                                                                               \
