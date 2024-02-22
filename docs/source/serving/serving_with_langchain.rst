@@ -9,13 +9,13 @@ To install langchain, run
 
 .. code-block:: console
 
-    $ pip install langchain -q
+    $ pip install langchain langchain_community -q
 
 To run inference on a single or multiple GPUs, use ``VLLM`` class from ``langchain``.
 
 .. code-block:: python
 
-    from langchain.llms import VLLM
+    from langchain_community.llms import VLLM
 
     llm = VLLM(model="mosaicml/mpt-7b",
                trust_remote_code=True,  # mandatory for hf models
@@ -28,4 +28,4 @@ To run inference on a single or multiple GPUs, use ``VLLM`` class from ``langcha
 
     print(llm("What is the capital of France ?"))
 
-Please refer to this `Tutorial <https://github.com/langchain-ai/langchain/blob/master/docs/docs/integrations/llms/vllm.ipynb>`_ for more details.
+Please refer to this `Tutorial <https://python.langchain.com/docs/integrations/llms/vllm>`_ for more details.
