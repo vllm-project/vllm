@@ -72,6 +72,7 @@ class ChatCompletionRequest(BaseModel):
     top_k: Optional[int] = -1
     ignore_eos: Optional[bool] = False
     use_beam_search: Optional[bool] = False
+    early_stopping: Optional[bool] = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     skip_special_tokens: Optional[bool] = True
     spaces_between_special_tokens: Optional[bool] = True
@@ -99,6 +100,7 @@ class ChatCompletionRequest(BaseModel):
             top_k=self.top_k,
             ignore_eos=self.ignore_eos,
             use_beam_search=self.use_beam_search,
+            early_stopping=self.early_stopping,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
@@ -129,6 +131,7 @@ class CompletionRequest(BaseModel):
     top_k: Optional[int] = -1
     ignore_eos: Optional[bool] = False
     use_beam_search: Optional[bool] = False
+    early_stopping: Optional[bool] = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     skip_special_tokens: Optional[bool] = True
     spaces_between_special_tokens: Optional[bool] = True
@@ -157,6 +160,7 @@ class CompletionRequest(BaseModel):
             max_tokens=self.max_tokens if not echo_without_generation else 1,
             logprobs=self.logprobs,
             use_beam_search=self.use_beam_search,
+            early_stopping=self.early_stopping,
             prompt_logprobs=self.logprobs if self.echo else None,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=(self.spaces_between_special_tokens),
