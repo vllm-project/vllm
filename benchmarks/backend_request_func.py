@@ -58,13 +58,13 @@ async def async_request_tgi(
         try:
             async with session.post(url=api_url, json=payload) as response:
                 if response.status == 200:
-                    async for data in response.content.iter_any():
+                    async for data in response.content.iter_any():  # noqa
                         if ttft == 0:
                             ttft = time.perf_counter() - st
                             output.ttft = ttft
                     output.latency = time.perf_counter() - st
 
-                    body = data.decode("utf-8").lstrip("data:")
+                    body = data.decode("utf-8").lstrip("data:")     # noqa
                     output.generated_text = json.loads(body)["generated_text"]
                     output.success = True
                 else:
@@ -104,7 +104,7 @@ async def async_request_vllm(
         try:
             async with session.post(url=api_url, json=payload) as response:
                 if response.status == 200:
-                    async for data in response.content.iter_any():
+                    async for data in response.content.iter_any():  # noqa
                         if ttft == 0:
                             ttft = time.perf_counter() - st
                             output.ttft = ttft
@@ -152,13 +152,13 @@ async def async_request_trt_llm(
         try:
             async with session.post(url=api_url, json=payload) as resp:
                 if resp.status == 200:
-                    async for data in resp.content.iter_any():
+                    async for data in resp.content.iter_any():  # noqa
                         if ttft == 0:
                             ttft = time.perf_counter() - st
                             output.ttft = ttft
                     output.latency = time.perf_counter() - st
 
-                    body = data.decode("utf-8").lstrip("data:")
+                    body = data.decode("utf-8").lstrip("data:") # noqa
                     output.generated_text = json.loads(body)["text_output"]
                     output.success = True
 
@@ -255,7 +255,7 @@ async def async_request_openai_completions(
                         if not chunk:
                             continue
 
-                        chunk = chunk.decode("utf-8").lstrip("data: ")
+                        chunk = chunk.decode("utf-8").lstrip("data: ") # noqa
                         if chunk == "[DONE]":
                             latency = time.perf_counter() - st
                         else:
