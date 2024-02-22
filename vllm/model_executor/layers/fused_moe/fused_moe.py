@@ -1,5 +1,7 @@
 """Fused MoE kernel."""
 import os
+from typing import Dict, Any
+
 import torch
 import triton
 import triton.language as tl
