@@ -83,6 +83,15 @@ def parse_args():
                         help="The model name used in the API. If not "
                         "specified, the model name will be the same as "
                         "the huggingface name.")
+    parser.add_argument(
+        "--lora-modules",
+        type=str,
+        default=None,
+        nargs='+',
+        action=LoRAParserAction,
+        help=
+        "LoRA module configurations in the format name=path. Multiple modules can be specified."
+    )
     parser.add_argument("--chat-template",
                         type=str,
                         default=None,
@@ -222,8 +231,10 @@ if __name__ == "__main__":
     engine = AsyncLLMEngine.from_engine_args(engine_args)
     openai_serving_chat = OpenAIServingChat(engine, served_model,
                                             args.response_role,
+                                            args.lora_modules,
                                             args.chat_template)
-    openai_serving_completion = OpenAIServingCompletion(engine, served_model)
+    openai_serving_completion = OpenAIServingCompletion(
+        engine, served_model, args.lora_modules)
 
     # Register labels for metrics
     add_global_metrics_labels(model_name=engine_args.model)
