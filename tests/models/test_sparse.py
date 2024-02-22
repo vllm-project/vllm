@@ -6,7 +6,7 @@ selections of eachother.
 Note: When running sparse we internally use locks to synchronize the threads. This 
 can result in very slight nondeterminism for Marlin. As a result, we re-run the test
 up to 3 times to see if we pass.
-Run `pytest tests/models/test_sparse.py --forked`.
+Run `pytest tests/models/test_sparse.py`.
 """
 
 import pytest
