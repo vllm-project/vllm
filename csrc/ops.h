@@ -57,6 +57,10 @@ void silu_and_mul(
   torch::Tensor& out,
   torch::Tensor& input);
 
+void gelu_and_mul(
+  torch::Tensor& out,
+  torch::Tensor& input);
+
 void gelu_new(
   torch::Tensor& out,
   torch::Tensor& input);

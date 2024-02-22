@@ -21,10 +21,11 @@ from torch import nn
 from transformers import GemmaConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
+from vllm.model_executor.layers.activation import GeluAndMul
 from vllm.model_executor.layers.attention import PagedAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               LinearMethodBase,
+from vllm.model_executor.layers.linear import (LinearMethodBase,
+                                               MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -50,27 +51,21 @@ class GemmaMLP(nn.Module):
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
-        self.gate_proj = ColumnParallelLinear(hidden_size,
-                                              intermediate_size,
-                                              bias=False,
-                                              linear_method=linear_method)
-        self.up_proj = ColumnParallelLinear(hidden_size,
-                                            intermediate_size,
-                                            bias=False,
-                                            linear_method=linear_method)
+        self.gate_up_proj = MergedColumnParallelLinear(
+            hidden_size, [intermediate_size] * 2,
+            bias=False,
+            linear_method=linear_method)
         self.down_proj = RowParallelLinear(intermediate_size,
                                            hidden_size,
                                            bias=False,
                                            linear_method=linear_method)
-        self.act_fn = nn.GELU()
+        self.act_fn = GeluAndMul()
 
     def forward(self, x):
-        gate, _ = self.gate_proj(x)
-        gate = self.act_fn(gate)
-        up, _ = self.up_proj(x)
-        fuse = gate * up
-        outputs, _ = self.down_proj(fuse)
-        return outputs
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x, _ = self.down_proj(x)
+        return x
 
 
 class GemmaAttention(nn.Module):
@@ -294,6 +289,8 @@ class GemmaForCausalLM(nn.Module):
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
         loaded_params = set()

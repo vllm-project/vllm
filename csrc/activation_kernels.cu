@@ -2,19 +2,16 @@
 #include <torch/extension.h>
 #include <c10/cuda/CUDAGuard.h>
 
+#include <cmath>
+
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
 
 namespace vllm {
 
-template<typename T>
-__device__ __forceinline__ T silu(const T& x) {
-  // x * sigmoid(x)
-  return (T) (((float) x) / (1.0f + expf((float) -x)));
-}
-
-template<typename scalar_t>
-__global__ void silu_and_mul_kernel(
+// Activation and gating kernel template.
+template<typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&)>
+__global__ void act_and_mul_kernel(
   scalar_t* __restrict__ out,               // [..., d]
   const scalar_t* __restrict__ input,       // [..., 2, d]
   const int d) {
@@ -22,32 +19,58 @@ __global__ void silu_and_mul_kernel(
   for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
     const scalar_t x = VLLM_LDG(&input[token_idx * 2 * d + idx]);
     const scalar_t y = VLLM_LDG(&input[token_idx * 2 * d + d + idx]);
-    out[token_idx * d + idx] = silu(x) * y;
+    out[token_idx * d + idx] = ACT_FN(x) * y;
   }
 }
 
+template<typename T>
+__device__ __forceinline__ T silu_kernel(const T& x) {
+  // x * sigmoid(x)
+  return (T) (((float) x) / (1.0f + expf((float) -x)));
+}
+
+template<typename T>
+__device__ __forceinline__ T gelu_kernel(const T& x) {
+  // Equivalent to PyTorch GELU with 'none' approximation.
+  // Refer to:
+  // https://github.com/pytorch/pytorch/blob/8ac9b20d4b090c213799e81acf48a55ea8d437d6/aten/src/ATen/native/cuda/ActivationGeluKernel.cu#L38
+  const float f = (float) x;
+  constexpr float ALPHA = M_SQRT1_2;
+  return (T) (f * 0.5f * (1.0f + ::erf(f * ALPHA)));
+}
+
 } // namespace vllm
+
+// Launch activation and gating kernel.
+#define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL)                                             \
+  int d = input.size(-1) / 2;                                                             \
+  int64_t num_tokens = input.numel() / input.size(-1);                                    \
+  dim3 grid(num_tokens);                                                                  \
+  dim3 block(std::min(d, 1024));                                                          \
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));                       \
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                           \
+  VLLM_DISPATCH_FLOATING_TYPES(                                                           \
+    input.scalar_type(),                                                                  \
+    "act_and_mul_kernel",                                                                 \
+    [&] {                                                                                 \
+      vllm::act_and_mul_kernel<scalar_t, KERNEL<scalar_t>><<<grid, block, 0, stream>>>(   \
+        out.data_ptr<scalar_t>(),                                                         \
+        input.data_ptr<scalar_t>(),                                                       \
+        d);                                                                               \
+    });
 
 void silu_and_mul(
   torch::Tensor& out,      // [..., d]
   torch::Tensor& input)    // [..., 2 * d]
 {
-  int64_t num_tokens = input.numel() / input.size(-1);
-  int d = input.size(-1) / 2;
+  LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel);
+}
 
-  dim3 grid(num_tokens);
-  dim3 block(std::min(d, 1024));
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  VLLM_DISPATCH_FLOATING_TYPES(
-    input.scalar_type(),
-    "silu_and_mul_kernel",
-    [&] {
-      vllm::silu_and_mul_kernel<scalar_t><<<grid, block, 0, stream>>>(
-        out.data_ptr<scalar_t>(),
-        input.data_ptr<scalar_t>(),
-        d);
-    });
+void gelu_and_mul(
+  torch::Tensor& out,      // [..., d]
+  torch::Tensor& input)    // [..., 2 * d]
+{
+  LAUNCH_ACTIVATION_GATE_KERNEL(vllm::gelu_kernel);
 }
 
 namespace vllm {
