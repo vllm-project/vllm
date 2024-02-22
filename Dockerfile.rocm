@@ -42,6 +42,4 @@ RUN pip install pyarrow Ray pandas==2.0 numpy==1.20.3
 RUN git clone https://github.com/ROCmSoftwarePlatform/rocmProfileData.git \
     && cd rocmProfileData && make; make install
 
-COPY docker/libamdhip64.so.6 /opt/rocm/lib/libamdhip64.so.6.0.60000
-COPY docker/libfile_plugin.so /opt/rocm/lib/roctracer
-ENV WORKSPACE_DIR=/workspace/vllm
+WORKDIR /workspace/vllm
