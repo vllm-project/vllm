@@ -181,13 +181,18 @@ def set_cuda_visible_devices(device_ids: List[int]) -> None:
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, device_ids))
 
 
-def get_nvcc_cuda_version() -> Version:
+def get_nvcc_cuda_version() -> Optional[Version]:
     cuda_home = os.environ.get('CUDA_HOME')
     if not cuda_home:
         cuda_home = '/usr/local/cuda'
-        logger.info(
-            f'CUDA_HOME is not found in the environment. Using {cuda_home} as CUDA_HOME.'
-        )
+        if os.path.isfile(cuda_home + '/bin/nvcc'):
+            logger.info(
+                f'CUDA_HOME is not found in the environment. Using {cuda_home} as CUDA_HOME.'
+            )
+        else:
+            logger.warning(
+                f'Not found nvcc in {cuda_home}. Skip cuda version check!')
+            return None
     nvcc_output = subprocess.check_output([cuda_home + "/bin/nvcc", "-V"],
                                           universal_newlines=True)
     output = nvcc_output.split()

@@ -52,6 +52,9 @@ steps:
 - label: LoRA Test
   command: pytest -v -s lora
 
+- label: Metrics Test
+  command: pytest -v -s metrics
+
 - label: Benchmarks
   working_dir: "/vllm-workspace/.buildkite"
   commands:
