@@ -50,7 +50,6 @@ async def completion_stream_generator(
             raise StopAsyncIteration()
 
         for output in res.outputs:
-            print(f"Tokenized echo: {res.prompt_token_ids}. Length: {len(res.prompt_token_ids)}")
             i = output.index + prompt_idx * request.n
             # TODO(simon): optimize the performance by avoiding full text O(n^2) sending.
             delta_text = ""
@@ -63,10 +62,10 @@ async def completion_stream_generator(
                     delta_text += res.prompt
                     delta_token_ids = res.prompt_token_ids
                 has_echoed[i] = True
-
             elif request.max_tokens > 0:
                 offset_text = output.text[len(previous_output_texts[i]):]
-                offset_tk_ids = output.token_ids[previous_output_num_tokens[i]:]
+                offset_tk_ids = output.token_ids[
+                    previous_output_num_tokens[i]:]
                 delta_text += offset_text
                 delta_token_ids += offset_tk_ids
                 num_generated_tokens += len(offset_tk_ids)
@@ -77,8 +76,8 @@ async def completion_stream_generator(
                 if request.echo:
                     top_logprobs += res.prompt_logprobs
                 if request.max_tokens > 0:
-                    top_logprobs += output.logprobs[
-                        previous_output_num_tokens[i]:] if output.logprobs else None
+                    top_logprobs += output.logprobs[previous_output_num_tokens[
+                        i]:] if output.logprobs else None
                 logprobs = create_logprobs_fn(
                     token_ids=delta_token_ids,
                     top_logprobs=top_logprobs,
@@ -169,7 +168,6 @@ def request_output_to_completion_response(
     num_prompt_tokens = 0
     num_generated_tokens = 0
     for final_res in final_res_batch:
-        print(f"Tokenized echo: {final_res.prompt_token_ids}. Length: {len(final_res.prompt_token_ids)}")
         assert final_res is not None
         prompt_token_ids = final_res.prompt_token_ids
         prompt_logprobs = final_res.prompt_logprobs
