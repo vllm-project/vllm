@@ -232,7 +232,7 @@ def get_moe_configs(num_experts: int, intermediate_size: int):
     config_file_path = os.path.join(
         os.path.dirname(os.path.realpath(__file__)),
         "configs",
-        f"E={num_experts},N={intermediate_size},device_name={device_name}"
+        f"E={num_experts},N={intermediate_size},device_name={device_name}.json"
     )
     if os.path.exists(config_file_path):
         with open(config_file_path) as f:
