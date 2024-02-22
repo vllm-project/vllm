@@ -64,7 +64,7 @@ async def async_request_tgi(
                             output.ttft = ttft
                     output.latency = time.perf_counter() - st
 
-                    body = data.decode("utf-8").lstrip("data:")     # noqa
+                    body = data.decode("utf-8").lstrip("data:")  # noqa
                     output.generated_text = json.loads(body)["generated_text"]
                     output.success = True
                 else:
@@ -158,7 +158,7 @@ async def async_request_trt_llm(
                             output.ttft = ttft
                     output.latency = time.perf_counter() - st
 
-                    body = data.decode("utf-8").lstrip("data:") # noqa
+                    body = data.decode("utf-8").lstrip("data:")  # noqa
                     output.generated_text = json.loads(body)["text_output"]
                     output.success = True
 
@@ -255,7 +255,7 @@ async def async_request_openai_completions(
                         if not chunk:
                             continue
 
-                        chunk = chunk.decode("utf-8").lstrip("data: ") # noqa
+                        chunk = chunk.decode("utf-8").lstrip("data: ")  # noqa
                         if chunk == "[DONE]":
                             latency = time.perf_counter() - st
                         else:
