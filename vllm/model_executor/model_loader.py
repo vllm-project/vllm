@@ -63,10 +63,7 @@ def get_model(model_config: ModelConfig,
                 f"{supported_dtypes}")
         linear_method = quant_config.get_linear_method()
     if model_config.sparsity is not None:
-        sparse_config = get_sparse_config(model_config.sparsity,
-                                          model_config.model,
-                                          model_config.hf_config,
-                                          model_config.download_dir)
+        sparse_config = get_sparse_config(model_config)
         capability = torch.cuda.get_device_capability()
         capability = capability[0] * 10 + capability[1]
         if capability < sparse_config.get_min_capability():
