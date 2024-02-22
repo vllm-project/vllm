@@ -369,6 +369,7 @@ function(define_module_target MOD_NAME MOD_SRC MOD_EXTRA_GPU_FLAGS
     MOD_GPU_ARCHES)
 
   if (NOT IS_CUDA AND HIP_FOUND)
+    # Add hipify preprocessing step if we are running on AMD.
     hipify_sources_target(MOD_SRC ${MOD_NAME} "${MOD_SRC}")
   endif()
 
