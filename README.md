@@ -60,6 +60,7 @@ vLLM seamlessly supports many Hugging Face models, including the following archi
 - ChatGLM (`THUDM/chatglm2-6b`, `THUDM/chatglm3-6b`, etc.)
 - DeciLM (`Deci/DeciLM-7B`, `Deci/DeciLM-7B-instruct`, etc.)
 - Falcon (`tiiuae/falcon-7b`, `tiiuae/falcon-40b`, `tiiuae/falcon-rw-7b`, etc.)
+- Gemma (`google/gemma-2b`, `google/gemma-7b`, etc.)
 - GPT-2 (`gpt2`, `gpt2-xl`, etc.)
 - GPT BigCode (`bigcode/starcoder`, `bigcode/gpt_bigcode-santacoder`, etc.)
 - GPT-J (`EleutherAI/gpt-j-6b`, `nomic-ai/gpt4all-j`, etc.)
