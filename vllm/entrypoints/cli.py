@@ -1,5 +1,5 @@
+from requests import request
 import typer
-import uvicorn
 import json
 import os
 from fastapi import FastAPI, Request, Response, HTTPStatus
@@ -19,6 +19,8 @@ import importlib
 import inspect
 
 app = typer.Typer()
+HOST = "127.0.0.1"
+PORT = 8000
 logger = init_logger(__name__)
 
 @app.command()
@@ -54,21 +56,36 @@ def serve(
         "ssl_certfile": ssl_certfile,
         "root_path": root_path,
     }
+    global HOST, PORT
+    HOST, PORT = host, port
     api_server.start_server(args)
 
 @app.command()
-def query(operation: str, args: Optional[List[str]] = None):
+def query(operation: str, data: str):
     """
     Query the server with 'chat' or 'complete' operations.
+    :param operation: 'chat' or 'complete'
+    :param data: JSON string with request data
     """
-    if operation.lower() == 'chat':
-        # Logic to handle chat operation, args can be passed as needed
-        pass
-    elif operation.lower() == 'complete':
-        # Logic to handle complete operation, args can be passed as needed
-        pass
+    # Construct the API URL using the global HOST and PORT
+    api_url = f"http://{HOST}:{PORT}"
+
+    try:
+        request_data = json.loads(data)
+    except json.JSONDecodeError:
+        typer.echo("Invalid JSON data.")
+        raise typer.Exit(code=1)
+
+    # Determine the endpoint based on the operation
+    endpoint = "/v1/chat/completions" if operation.lower() == 'chat' else "/v1/completions"
+    response = request.post(f"{api_url}{endpoint}", json=request_data)
+
+    # Handle the response
+    if response.status_code == 200:
+        typer.echo(json.dumps(response.json(), indent=2))
     else:
-        typer.echo("Invalid operation. Use 'chat' or 'complete'.")
+        typer.echo(f"Error: {response.status_code} - {response.text}")
+
 
 if __name__ == "__main__":
     app()

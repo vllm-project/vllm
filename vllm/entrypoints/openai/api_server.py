@@ -166,8 +166,7 @@ def get_lifespan_context_manager(args):
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)
     @asynccontextmanager
-    async def lifespan(app: fastapi.FastAPI, args: ):
-
+    async def lifespan(app: fastapi.FastAPI):
         async def _force_log():
             while True:
                 await asyncio.sleep(10)
