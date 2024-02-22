@@ -279,7 +279,7 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device) -> None:
             256,
             org_num_embeddings=512)
         expanded_embedding.weight.data[:512, :] = embedding_data
-        # We need to deepcopy the embedding as it will be modifed
+        # We need to deepcopy the embedding as it will be modified
         # in place
         lora_embedding = VocabParallelEmbeddingWithLoRA(
             deepcopy(expanded_embedding))

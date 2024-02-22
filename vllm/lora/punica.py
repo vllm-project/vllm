@@ -87,7 +87,7 @@ def add_lora(y: torch.Tensor,
     r = wb_t_all.size(-1)
     if buffer is None:
         # We set the buffer to be float32 by default to avoid
-        # numerical innacuracies that would otherwise happen
+        # numerical inaccuracies that would otherwise happen
         # due to downcasting.
         buffer = torch.zeros((x.size(0), r),
                              dtype=torch.float32,
