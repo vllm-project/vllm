@@ -21,7 +21,7 @@ MAIN_CUDA_VERSION = "12.1"
 
 
 def is_ccache_available() -> bool:
-    return which("ccacheX") is not None
+    return which("ccache") is not None
 
 
 def is_ninja_available() -> bool:
@@ -71,8 +71,7 @@ class cmake_build_ext(build_ext):
                 '--log-level=TRACE',
             ]
 
-            # TODO: change default to 0
-            verbose = bool(int(os.getenv('VERBOSE', '1')))
+            verbose = bool(int(os.getenv('VERBOSE', '0')))
             if verbose:
                 cmake_args += ['-DCMAKE_VERBOSE_MAKEFILE=ON']
 
