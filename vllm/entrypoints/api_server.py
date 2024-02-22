@@ -35,7 +35,6 @@ async def generate(request: Request) -> Response:
     prompt = request_dict.pop("prompt")
     prefix_pos = request_dict.pop("prefix_pos", None)
     stream = request_dict.pop("stream", False)
-
     sampling_params = SamplingParams(**request_dict)
     request_id = random_uuid()
 
@@ -84,7 +83,6 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="FastAPI root_path when app is behind a path based routing proxy")
-    
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
 

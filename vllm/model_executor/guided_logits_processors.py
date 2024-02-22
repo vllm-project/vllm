@@ -1,15 +1,3 @@
-# Make vLLM compatible with Outlines' structured generation.
-#
-#  _______________________________
-# / Don't want to self-host?      \
-# \ Try .json at http://dottxt.co /
-#  -------------------------------
-#        \   ^__^
-#         \  (oo)\_______
-#            (__)\       )\/\
-#                ||----w |
-#                ||     ||
-#
 # Copyright 2024- the Outlines developers
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -26,34 +14,27 @@
 import json
 import math
 from collections import defaultdict
-from typing import DefaultDict, Dict, List, Optional
+from typing import Union, DefaultDict, Dict, List, Optional
 
 import torch
 from pydantic import BaseModel
-
-try:
-    from outlines.fsm.fsm import RegexFSM
-    from outlines.fsm.json_schema import build_regex_from_schema
-except ImportError as e:
-    raise ValueError(
-        "Please install 'outlines' (pip install outlines) to use guided decoding."
-    ) from e
+from outlines.fsm.fsm import RegexFSM
+from outlines.fsm.json_schema import build_regex_from_schema
 
 
 class RegexLogitsProcessor:
-    def __init__(self, regex_string, llm):
+    def __init__(self, regex_string: str, tokenizer):
         """Compile the FSM that drives the regex-structured generation.
 
         Parameters
         ----------
         regex_string
             A string that represents a regular expression
-        llm
-            An instance of `vllm.LLM`
+        tokenizer
+            The model's tokenizer
 
         """
-        tokenizer = self.adapt_tokenizer(llm.tokenizer.tokenizer)
-
+        tokenizer = self.adapt_tokenizer(tokenizer)
         fsm = RegexFSM(regex_string, tokenizer)
         self.fsm = fsm
 
@@ -111,15 +92,20 @@ class RegexLogitsProcessor:
 
 
 class JSONLogitsProcessor(RegexLogitsProcessor):
-    def __init__(self, schema: Dict, llm, whitespace_pattern: Optional[str] = None):
+    def __init__(
+            self,
+            schema: Union[str, Dict, BaseModel],
+            tokenizer,
+            whitespace_pattern: Optional[str] = None
+        ):
         """Compile the FSM that drives the JSON-guided generation.
 
         Parameters
         ----------
         schema
             A JSON schema that encodes the structure we want the model to generate
-        llm
-            An instance of `vllm.LLM`
+        tokenizer
+            The model's tokenizer
         whitespace_pattern
             Pattern to use for JSON syntactic whitespace (doesn't impact string literals)
             Example: allow only a single space or newline with `whitespace_pattern=r"[\n ]?"`
@@ -137,4 +123,4 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
                 + "Schema specification"
             )
         regex_string = build_regex_from_schema(schema_str, whitespace_pattern)
-        super().__init__(regex_string, llm)
+        super().__init__(regex_string, tokenizer)

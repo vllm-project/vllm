@@ -3,7 +3,7 @@
 import time
 from typing import Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from vllm.utils import random_uuid
 from vllm.sampling_params import SamplingParams
@@ -105,6 +105,21 @@ class ChatCompletionRequest(BaseModel):
             include_stop_str_in_output=self.include_stop_str_in_output,
             length_penalty=self.length_penalty,
         )
+    
+    @model_validator(mode="before")
+    @classmethod
+    def check_guided_decoding_count(cls, data):
+        guide_count = sum([
+            "guided_json" in data and data["guided_json"] is not None,
+            "guided_regex" in data and data["guided_regex"] is not None,
+            "guided_choice" in data and data["guided_choice"] is not None
+        ])
+        if guide_count > 1:
+            raise ValueError(
+                "You can only use one kind of guided decoding "
+                "('guided_json', 'guided_regex' or 'guided_choice')."
+            )
+        return data
 
 
 class CompletionRequest(BaseModel):
@@ -165,6 +180,21 @@ class CompletionRequest(BaseModel):
             include_stop_str_in_output=self.include_stop_str_in_output,
             length_penalty=self.length_penalty,
         )
+    
+    @model_validator(mode="before")
+    @classmethod
+    def check_guided_decoding_count(cls, data):
+        guide_count = sum([
+            "guided_json" in data and data["guided_json"] is not None,
+            "guided_regex" in data and data["guided_regex"] is not None,
+            "guided_choice" in data and data["guided_choice"] is not None
+        ])
+        if guide_count > 1:
+            raise ValueError(
+                "You can only use one kind of guided decoding "
+                "('guided_json', 'guided_regex' or 'guided_choice')."
+            )
+        return data
 
 
 class LogProbs(BaseModel):

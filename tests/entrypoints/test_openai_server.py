@@ -487,45 +487,40 @@ async def test_guided_choice_chat(server, client: openai.AsyncOpenAI):
 
 
 async def test_guided_decoding_type_error(server, client: openai.AsyncOpenAI):
-    with pytest.raises(Exception):
+    with pytest.raises(openai.BadRequestError):
         _ = await client.completions.create(
             model=MODEL_NAME,
             prompt="Give an example JSON that fits this schema: 42",
-            temperature=0.0,
             extra_body=dict(
                 guided_json=42
             )
         )
 
-    with pytest.raises(Exception):
-        _ = await client.completions.create(
+    messages = [{
+        "role": "system",
+        "content": "you are a helpful assistant"
+    }, {
+        "role": "user",
+        "content": "The best language for type-safe systems programming is "
+    }]
+    with pytest.raises(openai.BadRequestError):
+        _ = await client.chat.completions.create(
             model=MODEL_NAME,
-            prompt="Give an example string that fits this regex: True",
-            temperature=0.0,
+            messages=messages,
             extra_body=dict(
-                guided_regex=True
+                guided_regex={1: "Python", 2: "C++"}
             )
         )
 
-
-async def test_guided_decoding_cache_performance(server, client: openai.AsyncOpenAI):
-    N = 10
-    times = []
-    for i in range(N):
-        start_t = time.time()
+    with pytest.raises(openai.BadRequestError):
         _ = await client.completions.create(
             model=MODEL_NAME,
-            prompt="Give an example JSON for an employee profile "
-                    f"that fits this schema: {TEST_SCHEMA}",
-            max_tokens=500,
+            prompt="Give an example string that fits this regex",
             extra_body=dict(
+                guided_regex=TEST_REGEX,
                 guided_json=TEST_SCHEMA
             )
         )
-        times.append(time.time() - start_t)
-        
-    for i in range(N):
-        print(f"Request #{i}, time: {times[i]}")
 
 
 if __name__ == "__main__":

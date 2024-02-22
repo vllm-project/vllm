@@ -39,29 +39,17 @@ async def get_guided_decoding_logits_processor(
             pool, _get_cached_logits_processor,
             guide, tokenizer, mode
         )
-        logits_processor = copy(result)
-        # reset logits processor's internal state
-        logits_processor.init_state()
-        return [logits_processor]
+    
+    logits_processor = copy(result)
+    # reset logits processor's internal state
+    logits_processor.init_state()
+    return [logits_processor]
     
 
 def _get_guide_and_mode(
         request: Union[CompletionRequest, ChatCompletionRequest]
     ) -> Tuple[str, GuidedDecodingMode]:
-    # validate guided decoding parameters
-    guide_count = sum([
-        request.guided_json is not None,
-        request.guided_regex is not None,
-        request.guided_choice is not None
-    ])
-    if guide_count == 0:
-        return None, None
-    elif guide_count > 1:
-        raise ValueError(
-            "You can only use one kind of guided decoding "
-            "('guided_json', 'guided_regex' or 'guided_choice')."
-        )
-    
+
     if request.guided_json:
         if not isinstance(request.guided_json, (str, dict, BaseModel)):
             raise TypeError("JSON schema must be str, dict, or BaseModel")
@@ -90,23 +78,16 @@ def _get_guide_and_mode(
                 for choice in request.guided_choice]
         choices_regex = "(" + "|".join(choices) + ")"
         return choices_regex, GuidedDecodingMode.CHOICE
+    
+    else:
+        return None, None
 
 
 @lru_cache(maxsize=32)
 def _get_cached_logits_processor(guide: str, tokenizer, mode: GuidedDecodingMode):
-    def dummy_llm():
-        # outlines' logit processor takes i"n a LLMEngine object
-        # to grab the LLM's tokenizer, may break in future
-        # NOTE: as of 2/17, outlines PR 541 gets this wrong"
-        x = SimpleNamespace()
-        y = SimpleNamespace()
-        x.tokenizer = tokenizer
-        y.tokenizer = x
-        return y
-    
     if mode == GuidedDecodingMode.JSON:
-        return JSONLogitsProcessor(guide, dummy_llm())
+        return JSONLogitsProcessor(guide, tokenizer)
     elif mode == GuidedDecodingMode.REGEX or mode == GuidedDecodingMode.CHOICE:
-        return RegexLogitsProcessor(guide, dummy_llm())
+        return RegexLogitsProcessor(guide, tokenizer)
     else:
-        raise RuntimeError(f"Unknown guided decoding mode {mode}")
+        raise ValueError(f"Unknown guided decoding mode {mode}")
