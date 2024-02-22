@@ -77,7 +77,7 @@ class GemmaMLP(nn.Module):
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn._forward(gate_up)  # FIXME
+        x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
 
