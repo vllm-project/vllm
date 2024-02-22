@@ -211,12 +211,12 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
     )
 
 
-def get_moe_configs(E: int, M: int, N: int):
+def get_moe_configs(num_experts: int, intermediate_size: int):
     """
-    Return optimized configurations for the fused MoE kernel (E experts, M tokens, inner dimension N).
+    Return optimized configurations for the fused MoE kernel.
 
     The return value will be a dictionary that maps an irregular grid of batch sizes
-    to a configuration of the fused_moe kernel. To evaluate the kernel on a given batch
+    to configurations of the fused_moe kernel. To evaluate the kernel on a given batch
     size bs, the closest batch size in the grid should be picked and the associated
     configuration chosen to invoke the kernel.
     """
@@ -227,7 +227,7 @@ def get_moe_configs(E: int, M: int, N: int):
     config_file_path = os.path.join(
         os.path.dirname(os.path.realpath(__file__)),
         "configs",
-        f"E={E},N={N},device_name={device_name}"
+        f"E={num_experts},N={intermediate_size},device_name={device_name}"
     )
     if os.path.exists(config_file_path):
         with open(config_file_path) as f:
