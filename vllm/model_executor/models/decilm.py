@@ -41,7 +41,7 @@ class DeciLMForCausalLM(LlamaForCausalLM):
     Based on the llama executor.
 
     The main difference is that DeciLM uses Variable Grouped Query Attention.
-    The constant number of GQA heads in the decoder is overriden with a value
+    The constant number of GQA heads in the decoder is overridden with a value
     per layer.
 
     Usually, in the HuggingFace implementation, instead of
