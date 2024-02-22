@@ -239,9 +239,6 @@ class OpenAIServingChat(OpenAIServing):
 
         choices = []
 
-        prompt_token_ids = final_res.prompt_token_ids
-        prompt_logprobs = final_res.prompt_logprobs
-
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
             token_ids = output.token_ids
