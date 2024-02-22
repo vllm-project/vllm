@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 
 from vllm._C import ops
+from vllm.lowering_utils import vllm_lib, register_vllm_lowering
 
 
 class RMSNorm(nn.Module):
@@ -57,10 +58,31 @@ class RMSNorm(nn.Module):
             )
             return x, residual
         out = torch.empty_like(x)
-        ops.rms_norm(
+        torch.ops.vllm.rms_norm(
             out,
             x,
             self.weight.data,
             self.variance_epsilon,
         )
         return out
+
+# needed for compile
+vllm_lib.define(
+    "rms_norm(Tensor(a!) out, Tensor input, Tensor weight, float epsilon) -> Tensor(a!)"
+)
+
+@torch.library.impl(vllm_lib, "rms_norm", "Meta")
+def _rms_norm_meta(out, input, weight, epsilon):
+    return out
+
+
+@torch.library.impl(vllm_lib, "rms_norm", "CUDA")
+def _rms_norm(out, input, weight, epsilon):
+    ops.rms_norm(
+        out,
+        input,
+        weight,
+        epsilon,
+    )
+
+register_vllm_lowering(torch.ops.vllm.rms_norm, [0])

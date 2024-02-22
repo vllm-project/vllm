@@ -60,6 +60,7 @@ class ModelRunner:
         self.device = self.device_config.device
 
         self.model = None
+        self.compiled_model = None
         self.block_size = None  # Set after initial profiling.
         self.lora_manager = None
 
@@ -665,6 +666,61 @@ class ModelRunner:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.list_loras()
+    
+    @torch.inference_mode()
+    def compile_model(self, kv_caches: List[KVCache]) -> None:
+        assert not self.model_config.enforce_eager
+        logger.info("Compiling the model using torch.compile, which may take "
+                    "several minutes. If you prefer to skip the compilation, "
+                    "albeit with performance degradation, set "
+                    "'enforce_eager=True' or use '--enforce-eager' in CLI.")
+
+        start_time = time.perf_counter()
+        self.compiled_model = torch.compile(self.model,
+                                            fullgraph=True)
+        
+        # Prepare dummy inputs. These will be reused for all batch sizes.
+        max_batch_size = max(_BATCH_SIZES_TO_CAPTURE)
+        input_tokens = torch.zeros(max_batch_size, 1, dtype=torch.long).cuda()
+        input_positions = torch.zeros(max_batch_size, 1,
+                                      dtype=torch.long).cuda()
+        slot_mapping = torch.empty(max_batch_size, 1, dtype=torch.long).cuda()
+        slot_mapping.fill_(_PAD_SLOT_ID)
+        context_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
+        block_tables = torch.from_numpy(self.graph_block_tables).cuda()
+
+        graph_batch_size = _get_graph_batch_size(
+            self.scheduler_config.max_num_seqs)
+        batch_size_capture_list = [
+            bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
+        ]
+
+        for batch_size in reversed(batch_size_capture_list):
+            # Create dummy input_metadata.
+            input_metadata = InputMetadata(
+                is_prompt=False,
+                slot_mapping=slot_mapping[:batch_size],
+                prompt_lens=None,
+                max_seq_len=None,
+                start_loc=None,
+                max_context_len=self.max_context_len_to_capture,
+                context_lens=context_lens[:batch_size],
+                block_tables=block_tables[:batch_size],
+                use_cuda_graph=True,
+                kv_cache_dtype=self.kv_cache_dtype,
+            )
+
+            # Run the model with the dummy inputs.
+            self.compiled_model(
+                input_tokens,
+                input_positions,
+                kv_caches,
+                input_metadata,
+            )
+
+        end_time = time.perf_counter()
+        compile_time = end_time - start_time
+        logger.info(f"Model compilation finished in {compile_time:.0f} s.")
 
     @torch.inference_mode()
     def capture_model(self, kv_caches: List[KVCache]) -> None:
@@ -731,7 +787,7 @@ class ModelRunner:
                     )
                     self.set_active_loras(set(), lora_mapping)
 
-                graph_runner = CUDAGraphRunner(self.model)
+                graph_runner = CUDAGraphRunner(self.model if self.compiled_model is None else self.compiled_model)
                 graph_runner.capture(
                     input_tokens[:batch_size],
                     input_positions[:batch_size],

@@ -28,6 +28,7 @@ import torch
 import torch.nn as nn
 
 from vllm._C import ops
+from vllm.lowering_utils import vllm_lib, register_vllm_lowering
 
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
@@ -140,9 +141,26 @@ class RotaryEmbedding(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # ops.rotary_embedding() is an in-place operation that
         # updates the query and key tensors.
-        ops.rotary_embedding(positions, query, key, self.head_size,
+        torch.ops.vllm.rotary_embedding(positions, query, key, self.head_size,
                              self.cos_sin_cache, self.is_neox_style)
         return query, key
+
+# needed for compile
+vllm_lib.define(
+    "rotary_embedding(Tensor positions, Tensor(a!) query, Tensor(b!) key, int head_size, Tensor cos_sin_cache, bool is_neox) -> (Tensor(a!), Tensor(b!))"
+)
+
+@torch.library.impl(vllm_lib, "rotary_embedding", "Meta")
+def _rotary_embedding_meta(positions, query, key, head_size, cos_sin_cache, is_neox):
+    return query, key
+
+
+@torch.library.impl(vllm_lib, "rotary_embedding", "CUDA")
+def _rotary_embedding(positions, query, key, head_size, cos_sin_cache, is_neox):
+    ops.rotary_embedding(positions, query, key, head_size, cos_sin_cache, is_neox)
+    return query, key
+
+register_vllm_lowering(torch.ops.vllm.rotary_embedding, [1, 2])
 
 
 class LinearScalingRotaryEmbedding(RotaryEmbedding):

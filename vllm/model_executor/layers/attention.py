@@ -14,6 +14,7 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.triton_kernel.prefix_prefill import (
     context_attention_fwd)
 from vllm.utils import is_hip
+from vllm.lowering_utils import vllm_lib, register_vllm_lowering
 
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
@@ -127,7 +128,7 @@ class PagedAttention(nn.Module):
         # vectors will not be cached. This happens during the initial memory
         # profiling run.
         if key_cache is not None and value_cache is not None:
-            cache_ops.reshape_and_cache(
+            torch.ops.vllm.reshape_and_cache(
                 key,
                 value,
                 key_cache,
@@ -345,3 +346,20 @@ def _paged_attention(
             input_metadata.kv_cache_dtype,
         )
     return output
+
+# needed for compile
+vllm_lib.define(
+    "reshape_and_cache(Tensor key, Tensor value, Tensor(a!) key_cache, Tensor(b!) value_cache, Tensor slot_mapping, str dtype) -> (Tensor(a!), Tensor(b!))"
+)
+
+@torch.library.impl(vllm_lib, "reshape_and_cache", "Meta")
+def _reshape_and_cache_meta(key, value, key_cache, value_cache, slot_mapping, dtype):
+    return key_cache, value_cache
+
+
+@torch.library.impl(vllm_lib, "reshape_and_cache", "CUDA")
+def _reshape_and_cache(key, value, key_cache, value_cache, slot_mapping, dtype):
+    cache_ops.reshape_and_cache(key, value, key_cache, value_cache, slot_mapping, dtype)
+    return key_cache, value_cache
+
+register_vllm_lowering(torch.ops.vllm.reshape_and_cache, [2, 3])
