@@ -243,7 +243,7 @@ if __name__ == "__main__":
         engine, served_model, args.lora_modules)
 
     # Register labels for metrics
-    add_global_metrics_labels(model_name=engine_args.model)
+    add_global_metrics_labels(model_name=served_model)
 
     app.root_path = args.root_path
     uvicorn.run(app,
