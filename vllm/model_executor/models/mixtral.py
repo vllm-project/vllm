@@ -30,7 +30,7 @@ from transformers import MixtralConfig
 from vllm.config import LoRAConfig
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention import PagedAttention
-from vllm.model_executor.layers.fused_moe import fused_moe
+from vllm.model_executor.layers.fused_moe import fused_moe, get_moe_configs
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                QKVParallelLinear,
@@ -77,6 +77,7 @@ class MixtralMoE(nn.Module):
         self.top_k = top_k
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size // self.tp_size
+        self.fused_moe_configs = get_optimized_moe_configs()
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -133,6 +134,7 @@ class MixtralMoE(nn.Module):
                                         router_logits,
                                         self.top_k,
                                         renormalize=True,
+                                        configs=self.fused_moe_configs,
                                         inplace=True)
 
         if self.tp_size > 1:

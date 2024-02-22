@@ -1,4 +1,5 @@
 """Fused MoE kernel."""
+import os
 import torch
 import triton
 import triton.language as tl
@@ -210,6 +211,36 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
     )
 
 
+def get_moe_configs(E: int, M: int, N: int):
+    """
+    Return optimized configurations for the fused MoE kernel (E experts, M tokens, inner dimension N).
+
+    The return value will be a dictionary that maps an irregular grid of batch sizes
+    to a configuration of the fused_moe kernel. To evaluate the kernel on a given batch
+    size bs, the closest batch size in the grid should be picked and the associated
+    configuration chosen to invoke the kernel.
+    """
+
+    # First look up if an optimized configuration is available in the configs directory
+    device_name = torch.cuda.get_device_name().replace(" ", "_")
+
+    config_file_path = os.path.join(
+        os.path.dirname(os.path.realpath(__file__)),
+        "configs",
+        f"E={E},N={N},device_name={device_name}"
+    )
+    if os.path.exists(config_file_path):
+        with open(config_file_path) as f:
+            # If a configuration has been found, return it
+            return {int(key): val for key, val in json.load(f).items()}
+    
+    # If no optimized configuration is available, return the default configuration
+    return {
+        E: {'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1},
+        E+1: {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}
+    }
+
+
 def fused_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -217,7 +248,8 @@ def fused_moe(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
-    inplace: bool = False,
+    configs: Dict[int, Any],
+    inplace: bool,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of weights, w1 and w2, and top-k gating mechanism.
@@ -229,7 +261,8 @@ def fused_moe(
     - gating_output (torch.Tensor): The output of the gating operation (before softmax).
     - topk (int): The number of top-k experts to select.
     - renormalize (bool): If True, renormalize the top-k weights to sum to 1.
-    - inplace (bool): If True, perform the operation in-place. Defaults to False.
+    - configs (Dict[int, Any]): Mapping from batch size to kernel configuration.
+    - inplace (bool): If True, perform the operation in-place.
     
     Returns:
     - torch.Tensor: The output tensor after applying the MoE layer.
@@ -279,20 +312,7 @@ def fused_moe(
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
-    config = {
-        'BLOCK_SIZE_M': 64,
-        'BLOCK_SIZE_N': 64,
-        'BLOCK_SIZE_K': 32,
-        'GROUP_SIZE_M': 8
-    }
-
-    if topk_ids.numel() <= w1.shape[0]:
-        config = {
-            'BLOCK_SIZE_M': 16,
-            'BLOCK_SIZE_N': 32,
-            'BLOCK_SIZE_K': 64,
-            'GROUP_SIZE_M': 1
-        }
+    config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
 
     intermediate_cache1 = torch.empty((M, topk_ids.shape[1], N),
                                       device=hidden_states.device,
