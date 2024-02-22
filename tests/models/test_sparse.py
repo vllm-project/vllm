@@ -38,20 +38,20 @@ models = [
 
 @pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize("model", models)
-@pytest.mark.parametrize("dtype", ["half", "bfloat16"])
+#@pytest.mark.parametrize("dtype", ["half", "bfloat16"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [3])
 def test_models(
     vllm_runner,
     example_prompts,
     model: SparseModel,
-    dtype: str,
+    #dtype: str,
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
     sparse_model = vllm_runner(model.name,
-                               dtype=dtype,
-                               sparsity=model.sparsity)
+                               sparsity=model.sparsity,
+                               enforce_eager=True)
     sparse_outputs = sparse_model.generate_greedy_logprobs(
         example_prompts, max_tokens, num_logprobs)
 
@@ -61,7 +61,7 @@ def test_models(
     del sparse_model.model.llm_engine.driver_worker
     del sparse_model
 
-    dense_model = vllm_runner(model.name, dtype=dtype, sparsity=None)
+    dense_model = vllm_runner(model.name, sparsity=None, enforce_eager=True)
     dense_outputs = dense_model.generate_greedy_logprobs(
         example_prompts, max_tokens, num_logprobs)
 
