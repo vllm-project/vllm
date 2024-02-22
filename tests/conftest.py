@@ -165,6 +165,7 @@ class VllmRunner:
         dtype: str = "half",
         disable_log_stats: bool = True,
         tensor_parallel_size: int = 1,
+        sparsity: Optional[str] = None,
     ) -> None:
         self.model = LLM(
             model=model_name,
@@ -174,6 +175,7 @@ class VllmRunner:
             swap_space=0,
             disable_log_stats=disable_log_stats,
             tensor_parallel_size=tensor_parallel_size,
+            sparsity=sparsity,
         )
 
     def generate(
