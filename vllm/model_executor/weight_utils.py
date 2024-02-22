@@ -98,21 +98,6 @@ def get_sparse_config(
             "Loading hf sparsity config not yet supported")
     return sparsity_cls()
 
-# TODO(woosuk): Move this to other place.
-def get_quant_config(
-    quantization: str,
-    model_name_or_path: str,
-    hf_config: PretrainedConfig,
-    cache_dir: Optional[str] = None,
-):
-    from vllm.model_executor.layers.sparsity import get_sparsity_config
-    sparsity_cls = get_sparsity_config(sparsity)
-    hf_sparsity_config = getattr(hf_config, "sparsity_config", None)
-    if hf_sparsity_config is not None:
-        raise NotImplementedError(
-            "Loading hf sparsity config not yet supported")
-    return sparsity_cls()
-
 
 # TODO(woosuk): Move this to other place.
 def get_quant_config(model_config: ModelConfig) -> QuantizationConfig:
