@@ -1,5 +1,4 @@
 import asyncio
-from collections import defaultdict
 import concurrent.futures
 from copy import copy
 from enum import Enum
@@ -37,12 +36,12 @@ async def get_guided_decoding_logits_processor(
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         result = await loop.run_in_executor(
-            pool, get_cached_logits_processor,
+            pool, _get_cached_logits_processor,
             guide, tokenizer, mode
         )
         logits_processor = copy(result)
         # reset logits processor's internal state
-        logits_processor.fsm_state = defaultdict(int)
+        logits_processor.init_state()
         return [logits_processor]
     
 
@@ -94,7 +93,7 @@ def _get_guide_and_mode(
 
 
 @lru_cache(maxsize=32)
-def get_cached_logits_processor(guide: str, tokenizer, mode: GuidedDecodingMode):
+def _get_cached_logits_processor(guide: str, tokenizer, mode: GuidedDecodingMode):
     def dummy_llm():
         # outlines' logit processor takes i"n a LLMEngine object
         # to grab the LLM's tokenizer, may break in future

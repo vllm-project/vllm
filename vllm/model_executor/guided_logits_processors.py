@@ -57,13 +57,17 @@ class RegexLogitsProcessor:
         fsm = RegexFSM(regex_string, tokenizer)
         self.fsm = fsm
 
+    def init_state(self):
+        """Initialize the FSM states."""
+        self.fsm_state: DefaultDict[int, int] = defaultdict(int)
+    
     def __call__(self, input_ids: List[int], scores: torch.Tensor) -> torch.Tensor:
         """Use the FSM to bias the logits before sampling the next token."""
 
         seq_id = hash(tuple(input_ids))
 
-        if len(input_ids) == 0:  # Initialize the fsm states
-            self.fsm_state: DefaultDict[int, int] = defaultdict(int)
+        if len(input_ids) == 0:
+            self.init_state()
         else:
             last_token = input_ids[-1]
             last_seq_id = hash(tuple(input_ids[:-1]))
