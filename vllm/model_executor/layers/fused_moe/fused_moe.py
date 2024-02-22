@@ -1,4 +1,5 @@
 """Fused MoE kernel."""
+import functools
 import json
 import os
 from typing import Dict, Any
@@ -217,6 +218,11 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
     )
 
 
+@functools.lru_cache(10)
+def log_once(msg: str):
+    logger.info(msg)
+
+
 def get_moe_configs(num_experts: int, intermediate_size: int):
     """
     Return optimized configurations for the fused MoE kernel.
@@ -237,7 +243,7 @@ def get_moe_configs(num_experts: int, intermediate_size: int):
     )
     if os.path.exists(config_file_path):
         with open(config_file_path) as f:
-            logger.info(f"Using configuration from {config_file_path} for MoE layer.")
+            log_once(f"Using configuration from {config_file_path} for MoE layer.")
             # If a configuration has been found, return it
             return {int(key): val for key, val in json.load(f).items()}
     
