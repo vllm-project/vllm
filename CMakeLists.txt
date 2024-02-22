@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.21)
 project(vllm_extensions LANGUAGES CXX)
 
 #
-# Supported python verions.  These versions will be searched in order, the
+# Supported python versions.  These versions will be searched in order, the
 # first match will be selected.
 #
 set(PYTHON_SUPPORTED_VERSIONS "3.8" "3.9" "3.10" "3.11")
@@ -251,7 +251,7 @@ else()
     string(REGEX REPLACE "\([0-9]+\)\([0-9]\)" "\\1.\\2" ${OUT_VER} ${IN_STR})
   endmacro()
 
-  # Initialize the architecure lists to empty.
+  # Initialize the architecture lists to empty.
   set(VLLM_GPU_ARCHES)
   set(VLLM_PUNICA_GPU_ARCHES)
 
