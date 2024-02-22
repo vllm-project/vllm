@@ -2,12 +2,13 @@ vLLM Paged Attention
 ====================
 
 -  Currently, vLLM utilizes its own implementation of a multi-head query
-   attention kernel. This kernel is designed to be compatible with
+   attention kernel (``csrc/attention/attention_kernels.cu``). 
+   This kernel is designed to be compatible with
    vLLM's paged KV caches, where the key and value cache are stored in
    separate blocks (note that this block concept differs from the GPU
    thread block. So in a later document, I will refer to vLLM paged
-   attention block as “block”, while refer to GPU thread block as
-   “thread block”).
+   attention block as "block", while refer to GPU thread block as
+   "thread block").
 -  To achieve high performance, this kernel relies on a specially
    designed memory layout and access method, specifically when threads
    read data from global memory to shared memory. The purpose of this
@@ -138,9 +139,10 @@ Query
 
    .. figure:: ../../assets/kernel/query.png
       :alt: query
-      :scale: 70%
+      :width: 70%
+      :align: center
 
-      query
+      Query data of one token at one head
 
 -  Each thread defines its own ``q_ptr`` which points to the assigned
    query token data on global memory. For example, if ``VEC_SIZE`` is 4
@@ -149,9 +151,10 @@ Query
 
    .. figure:: ../../assets/kernel/q_vecs.png
       :alt: q_vecs
-      :scale: 70%
+      :width: 70%
+      :align: center
 
-      q_vecs
+      ``q_vecs`` for one thread group
 
    .. code:: cpp
 
@@ -169,13 +172,13 @@ Query
 Key
 ---
 
--  Similar to the “Query” section, this section introduces memory layout
+-  Similar to the "Query" section, this section introduces memory layout
    and assignment for keys. While each thread group only handle one
    query token one kernel run, it may handle multiple key tokens across
-   multiple iterations.Meanwhile, each warp will process multiple blocks
+   multiple iterations. Meanwhile, each warp will process multiple blocks
    of key tokens in multiple iterations, ensuring that all context
    tokens are processed by the entire thread group after the kernel run.
-   In this context, “handle” refers to performing the dot multiplication
+   In this context, "handle" refers to performing the dot multiplication
    between query data and key data.
 
    .. code:: cpp
@@ -191,9 +194,10 @@ Key
 
    .. figure:: ../../assets/kernel/key.png
       :alt: key
-      :scale: 70%
+      :width: 70%
+      :align: center
 
-      key
+      Key data of all context tokens at one head
 
 -  The diagram above illustrates the memory layout for key data. It
    assumes that the ``BLOCK_SIZE`` is 16, ``HEAD_SIZE`` is 128, ``x`` is
@@ -208,9 +212,10 @@ Key
 
    .. figure:: ../../assets/kernel/k_vecs.png
       :alt: k_vecs
-      :scale: 70%
+      :width: 70%
+      :align: center
 
-      k_vecs
+      ``k_vecs`` for one thread
 
    .. code:: cpp
 
@@ -228,7 +233,7 @@ Key
    will read vec 1. In the next inner loop, thread 0 will read vec 2,
    while thread 1 will read vec 3, and so on.
 -  You may still be a little confused about the overall flow. Don't
-   worry, please keep reading the next “QK” section. It will illustrate
+   worry, please keep reading the next "QK" section. It will illustrate
    the query and key calculation flow in a clearer and higher-level
    manner.
 
@@ -280,9 +285,12 @@ Softmax
    results between the query token and all context key tokens.
 
    .. math::
+      :nowrap:
 
+      \begin{gather*}
       m(x):=\max _i \quad x_i \\ \quad f(x):=\left[\begin{array}{lll}e^{x_1-m(x)} & \ldots & e^{x_B-m(x)}\end{array}\right]\\ \quad \ell(x):=\sum_i f(x)_i \\
       \quad \operatorname{softmax}(x):=\frac{f(x)}{\ell(x)}
+      \end{gather*}
 
 ``qk_max`` and ``logits``
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -370,21 +378,24 @@ Value
 
 .. figure:: ../../assets/kernel/value.png
    :alt: value
-   :scale: 70%
+   :width: 70%
+   :align: center
 
-   value
+   Value data of all context tokens at one head
 
 .. figure:: ../../assets/kernel/logits_vec.png
    :alt: logits_vec
-   :scale: 70%
+   :width: 50%
+   :align: center
 
-   logits_vec
+   ``logits_vec`` for one thread
 
 .. figure:: ../../assets/kernel/v_vec.png
    :alt: v_vec
-   :scale: 70%
+   :width: 70%
+   :align: center
 
-   v_vec
+   List of ``v_vec`` for one thread
 
 -  Now we need to retrieve the value data and perform dot multiplication
    with ``logits``. Unlike query and key, there is no thread group
