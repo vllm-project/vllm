@@ -46,6 +46,8 @@ def main(args: argparse.Namespace):
                 )
                 print(sampling_params)
                 dummy_prompt_token_ids = [[0] * input_len] * batch_size
+                dummy_prompts = []
+                dummy_prompts.append('DeepSpeed is a machine learning library that deep learning practitioners should use for what purpose')
 
                 def run_to_completion(profile_dir: Optional[str] = None):
                     if profile_dir:
@@ -60,13 +62,25 @@ def main(args: argparse.Namespace):
                                         sampling_params=sampling_params,
                                         use_tqdm=False)
                         print(p.key_averages())
-                    else:
+                    elif args.accuracy:
                         start_time = time.perf_counter()
-                        llm.generate(prompt_token_ids=dummy_prompt_token_ids,
+                        rsp = llm.generate(
+                                    #prompt_token_ids=dummy_prompt_token_ids,
+                                    prompts=dummy_prompts,
                                     sampling_params=sampling_params,
                                     use_tqdm=False)
                         end_time = time.perf_counter()
                         latency = end_time - start_time
+                        print('>>Rsp', rsp[0].outputs)
+                        return latency
+                    else:
+                        start_time = time.perf_counter()
+                        rsp = llm.generate(prompt_token_ids=dummy_prompt_token_ids,
+                                    sampling_params=sampling_params,
+                                    use_tqdm=False)
+                        end_time = time.perf_counter()
+                        latency = end_time - start_time
+                        print('>>Rsp', rsp[0].outputs)
                         return latency
 
                 print("Warming up...")
@@ -92,7 +106,8 @@ def main(args: argparse.Namespace):
                     profile_rpd = rpdTracerControl()
                     profile_rpd.start()
                     print(f"RPD Profiling'...")
-                    run_to_completion(profile_dir=None)
+                    with torch.autograd.profiler.emit_nvtx():
+                        run_to_completion(profile_dir=None)
                     profile_rpd.stop()
                     return
 
@@ -140,6 +155,7 @@ if __name__ == '__main__':
     parser.add_argument('--trust-remote-code',
                         action='store_true',
                         help='trust remote code from huggingface')
+    
     parser.add_argument(
         '--dtype',
         type=str,
@@ -152,6 +168,9 @@ if __name__ == '__main__':
     parser.add_argument('--enforce-eager',
                         action='store_true',
                         help='enforce eager mode and disable CUDA graph')
+    parser.add_argument('--accuracy',
+                        action='store_true',
+                        help='Run an Actual query through vllm')
     parser.add_argument(
         '--profile',
         action='store_true',
@@ -162,6 +181,10 @@ if __name__ == '__main__':
         default=None,
         help=('path to save the pytorch profiler output. Can be visualized '
               'with ui.perfetto.dev or Tensorboard.'))
+    parser.add_argument(
+        '--rpd',
+        action='store_true',
+        help='profile the generation process of a single batch using the rpd tracer')
     parser.add_argument('--warmup-only', action='store_true',
                         help='only run warmup, useful for tuning')
     parser.add_argument('--report', action='store_true',
