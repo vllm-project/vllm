@@ -234,7 +234,7 @@ class GemmaModel(nn.Module):
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         # Normalize the embedding by sqrt(hidden_size)
-        hidden_states = hidden_states * (self.config.hidden_size**0.5)
+        hidden_states *= self.config.hidden_size**0.5
 
         residual = None
         for i in range(len(self.layers)):
