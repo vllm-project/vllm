@@ -111,7 +111,7 @@ Concepts
    blocks in multiple iterations). For example, if there are 4 warps and
    6 blocks for one context, the assignment would be like warp 0 handles
    the 0th, 4th blocks, warp 1 handles the 1st, 5th blocks, warp 2
-   handles the 2rd block and warp 3 handles the 3rd block.
+   handles the 2nd block and warp 3 handles the 3rd block.
 -  **Thread block**: A thread block is a group of
    threads(\ ``NUM_THREADS``) that can access the same shared memory.
    Each thread block contains multiple warps(\ ``NUM_WARPS``), and in
