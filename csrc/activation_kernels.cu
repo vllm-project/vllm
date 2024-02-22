@@ -35,7 +35,8 @@ __device__ __forceinline__ T gelu_kernel(const T& x) {
   // Refer to:
   // https://github.com/pytorch/pytorch/blob/8ac9b20d4b090c213799e81acf48a55ea8d437d6/aten/src/ATen/native/cuda/ActivationGeluKernel.cu#L38
   const float f = (float) x;
-  return (T) (f * 0.5f * (1.0f + erf(f * M_SQRT1_2)));
+  constexpr float ALPHA = M_SQRT1_2;
+  return (T) (f * 0.5f * (1.0f + ::erf(f * ALPHA)));
 }
 
 } // namespace vllm
