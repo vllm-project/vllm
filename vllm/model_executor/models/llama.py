@@ -92,6 +92,7 @@ class LlamaAttention(nn.Module):
         max_position_embeddings: int = 8192,
         linear_method: Optional[LinearMethodBase] = None,
         bias: bool = False,
+        sliding_window: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -141,7 +142,8 @@ class LlamaAttention(nn.Module):
         self.attn = PagedAttention(self.num_heads,
                                    self.head_dim,
                                    self.scaling,
-                                   num_kv_heads=self.num_kv_heads)
+                                   num_kv_heads=self.num_kv_heads,
+                                   sliding_window=sliding_window)
 
     def forward(
         self,
@@ -172,6 +174,7 @@ class LlamaDecoderLayer(nn.Module):
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
+        sliding_window = getattr(config, "sliding_window", None)
         self.self_attn = LlamaAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -182,6 +185,7 @@ class LlamaDecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             linear_method=linear_method,
             bias=getattr(config, "bias", False),
+            sliding_window=sliding_window,
         )
         self.mlp = LlamaMLP(
             hidden_size=self.hidden_size,
