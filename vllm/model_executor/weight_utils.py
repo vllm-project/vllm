@@ -84,15 +84,11 @@ def convert_bin_to_safetensor_file(
 
 
 # TODO(rib-2): Once we define hf_sparsity_config
-def get_sparse_config(
-    sparsity: str,
-    model_name_or_path: str,
-    hf_config: PretrainedConfig,
-    cache_dir: Optional[str] = None,
-):
+def get_sparse_config(model_config: ModelConfig):
     from vllm.model_executor.layers.sparsity import get_sparsity_config
-    sparsity_cls = get_sparsity_config(sparsity)
-    hf_sparsity_config = getattr(hf_config, "sparsity_config", None)
+    sparsity_cls = get_sparsity_config(model_config.sparsity)
+    hf_sparsity_config = getattr(model_config.hf_config, "sparsity_config",
+                                 None)
     if hf_sparsity_config is not None:
         raise NotImplementedError(
             "Loading hf sparsity config not yet supported")
