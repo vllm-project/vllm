@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 
 import argparse
+import shutil
 import os
 
 from torch.utils.hipify.hipify_python import hipify
 
 if __name__ == '__main__':
-    print(f"CWD {os.getcwd()}")
-
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
@@ -37,14 +36,14 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    print(args.output_dir)
-
     # limit scope to build_dir only
     includes = [os.path.join(args.build_dir, '*')]
-    print(f"includes {includes}")
 
     extra_files = [os.path.abspath(s) for s in args.sources]
-    print(f"extra_files {extra_files}")
+
+    # Copy sources from project directory to output directory.
+    # The directory might already exist to hold object files so we ignore that.
+    shutil.copytree(args.build_dir, args.output_dir, dirs_exist_ok=True)
 
     hipify_result = hipify(project_directory=args.build_dir,
                            output_directory=args.output_dir,
@@ -54,8 +53,6 @@ if __name__ == '__main__':
                            show_detailed=True,
                            is_pytorch_extension=True,
                            hipify_extra_files_only=True)
-
-    #print(hipify_result)
 
     hipified_sources = []
     for source in args.sources:
@@ -74,38 +71,5 @@ if __name__ == '__main__':
 
     assert (len(hipified_sources) == len(args.sources))
 
-    #    print("\n".join(hipified_sources))
-
-#    print(f"got here {args.output_dir}")
-#    os.system(f"find {args.output_dir} -name '*.hip'")
-#    print("end got here")
-
-#    print(f"got here root")
-#    os.system(f"find /app/vllm -name '*.hip'")
-#    print("end got here root")
-
-# project_directory /app/vllm
-# show_detailed True
-# extensions ('.cu', '.cuh', '.c', '.cc', '.cpp', '.h', '.in', '.hpp')
-# header_extensions ('.cuh', '.h', '.hpp')
-# output_directory /app/vllm
-# header_include_dirs []
-# includes ['/app/vllm/*']
-# extra_files [
-#     '/app/vllm/csrc/cache_kernels.cu',
-#     '/app/vllm/csrc/attention/attention_kernels.cu',
-#     '/app/vllm/csrc/pos_encoding_kernels.cu',
-#     '/app/vllm/csrc/activation_kernels.cu',
-#     '/app/vllm/csrc/layernorm_kernels.cu',
-#     '/app/vllm/csrc/quantization/squeezellm/quant_cuda_kernel.cu',
-#     '/app/vllm/csrc/quantization/gptq/q_gemm.cu',
-#     '/app/vllm/csrc/cuda_utils_kernels.cu',
-#     '/app/vllm/csrc/moe_align_block_size_kernels.cu',
-#     '/app/vllm/csrc/pybind.cpp'
-# ]
-# out_of_place_only False
-# ignores ()
-# show_progress True
-# hip_clang_launch False
-# is_pytorch_extension True
-# hipify_extra_files_only True
+    # Print hipified source files.
+    print("\n".join(hipified_sources))

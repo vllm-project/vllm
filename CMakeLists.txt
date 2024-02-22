@@ -25,6 +25,8 @@ foreach(VER ${PYTHON_SUPPORTED_VERSIONS})
   message(STATUS "Attempting to find python ${VER} package.")
   find_package(Python ${VER} COMPONENTS Interpreter Development.Module)
   if (Python_FOUND)
+    # Note: find_package(Torch) won't work here because cmake might not
+    # have the proper search path set yet.
     execute_process(
       COMMAND
       "${Python_EXECUTABLE}" "-c" "import torch"
@@ -343,15 +345,12 @@ macro(hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
     string(REGEX REPLACE "cuda" "hip" SRC ${SRC})
     list(APPEND HIP_SRCS "${CMAKE_CURRENT_BINARY_DIR}/${SRC}")
   endforeach()
-  message("rocm src: ${HIP_SRCS}")
+  message(DEBUG "hip src: ${HIP_SRCS}")
 
-  # TODO: hipify script needs a bunch more work
-  # TODO: move copy into python (or figure out how to make hipify work properly)
   set(CSRC_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/csrc)
   add_custom_target(
     hipify${NAME}
-    COMMAND cp -r ${CMAKE_SOURCE_DIR}/csrc ${CMAKE_CURRENT_BINARY_DIR}
-    COMMAND ${CMAKE_SOURCE_DIR}/hipify.py -b ${CSRC_BUILD_DIR} -o ${CSRC_BUILD_DIR} -i ${CSRC_BUILD_DIR} ${SRCS}
+    COMMAND ${CMAKE_SOURCE_DIR}/hipify.py -b ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} -i ${CMAKE_SOURCE_DIR}/csrc ${SRCS}
     DEPENDS hipify.py ${SRCS}
     BYPRODUCTS ${HIP_SRCS}
     COMMENT "Running hipify on extension source files.")
@@ -425,11 +424,6 @@ if(IS_CUDA)
   list(APPEND VLLM_EXT_SRC
     "csrc/quantization/awq/gemm_kernels.cu"
     "csrc/custom_all_reduce.cu")
-
-elseif(HIP_FOUND)
-
-
-
 endif()
 
 define_module_target(_C
