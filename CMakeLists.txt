@@ -322,9 +322,55 @@ endif()
 #
 
 # add comment
+macro(hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
+  #
+  # Split into C++ and non-C++ (i.e. CUDA) sources
+  #
+  set(SRCS ${ORIG_SRCS})
+  set(CXX_SRCS ${ORIG_SRCS})
+  list(FILTER SRCS EXCLUDE REGEX "\.(cc)|(cpp)$")
+  list(FILTER CXX_SRCS INCLUDE REGEX "\.(cc)|(cpp)$")
+
+  message(DEBUG "sources: ${SRCS}")
+  message(DEBUG "cxx sources: ${CXX_SRCS}")
+
+  #
+  # Generate ROCM/HIP source file names from CUDA file names.
+  #
+  set(HIP_SRCS)
+  foreach (SRC ${SRCS})
+    string(REGEX REPLACE "\.cu$" "\.hip" SRC ${SRC})
+    string(REGEX REPLACE "cuda" "hip" SRC ${SRC})
+    list(APPEND HIP_SRCS "${CMAKE_CURRENT_BINARY_DIR}/${SRC}")
+  endforeach()
+  message("rocm src: ${HIP_SRCS}")
+
+  # TODO: hipify script needs a bunch more work
+  # TODO: move copy into python (or figure out how to make hipify work properly)
+  set(CSRC_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/csrc)
+  add_custom_target(
+    hipify${NAME}
+    COMMAND cp -r ${CMAKE_SOURCE_DIR}/csrc ${CMAKE_CURRENT_BINARY_DIR}
+    COMMAND ${CMAKE_SOURCE_DIR}/hipify.py -b ${CSRC_BUILD_DIR} -o ${CSRC_BUILD_DIR} -i ${CSRC_BUILD_DIR} ${SRCS}
+    DEPENDS hipify.py ${SRCS}
+    BYPRODUCTS ${HIP_SRCS}
+    COMMENT "Running hipify on extension source files.")
+
+  # Swap out original extension sources with hipified sources.
+  set(${OUT_SRCS} ${HIP_SRCS})
+  list(APPEND ${OUT_SRCS} ${CXX_SRCS})
+
+  message(DEBUG "final ext src: ${OUT_SRCS}")
+endmacro()
+
+# add comment
 # Note: optimization level/debug info is set via cmake build type.
 function(define_module_target MOD_NAME MOD_SRC MOD_EXTRA_GPU_FLAGS
     MOD_GPU_ARCHES)
+
+  if (NOT IS_CUDA AND HIP_FOUND)
+    hipify_sources_target(MOD_SRC ${MOD_NAME} "${MOD_SRC}")
+  endif()
 
   # Note: for ROCm builds we let the proper flags and libraries get
   # pulled in by torch.
@@ -334,10 +380,9 @@ function(define_module_target MOD_NAME MOD_SRC MOD_EXTRA_GPU_FLAGS
     set(GPU_LANG "CUDA")
   else()
     set(GPU_LANG "HIP")
+
     # Make this target dependent on the hipify preprocessor step.
-    # TODO: consider moving hipify step into here so it could apply to
-    # any target
-    add_dependencies(${MOD_NAME} hipify)
+    add_dependencies(${MOD_NAME} hipify${MOD_NAME})
   endif()
 
   set_target_properties(${MOD_NAME} PROPERTIES ${GPU_LANG}_ARCHITECTURES
@@ -372,54 +417,17 @@ set(VLLM_EXT_SRC
   "csrc/quantization/squeezellm/quant_cuda_kernel.cu"
   "csrc/quantization/gptq/q_gemm.cu"
   "csrc/cuda_utils_kernels.cu"
-  "csrc/moe_align_block_size_kernels.cu")
-
-set(VLLM_EXT_CXX_SRC "csrc/pybind.cpp")
+  "csrc/moe_align_block_size_kernels.cu"
+  "csrc/pybind.cpp")
 
 if(IS_CUDA)
   list(APPEND VLLM_EXT_SRC
-    ${VLLM_EXT_CXX_SRC}
     "csrc/quantization/awq/gemm_kernels.cu"
     "csrc/custom_all_reduce.cu")
 
 elseif(HIP_FOUND)
 
-  #
-  # Generate ROCM/HIP source file names from CUDA file names.
-  #
-  set(VLLM_ROCM_EXT_SRC)
-  foreach (SRC ${VLLM_EXT_SRC})
-    string(REGEX REPLACE "\.cu$" "\.hip" SRC ${SRC})
-    string(REGEX REPLACE "cuda" "hip" SRC ${SRC})
-    list(APPEND VLLM_EXT_ROCM_SRC "${CMAKE_CURRENT_BINARY_DIR}/${SRC}")
-  endforeach()
-  message("rocm src: ${VLLM_EXT_ROCM_SRC}")
 
-  # TODO: this needs a bunch more work
-
-  #  add_custom_command(
-  #    COMMAND echo "HELLLLLLLLLLLLLLLLLLLLLLLLLLO"
-  #    COMMAND cp -r ${CMAKE_SOURCE_DIR}/csrc .
-  #    COMMAND ${CMAKE_SOURCE_DIR}/hipify.py -b csrc -o csrc -i csrc ${VLLM_EXT_SRC}
-  #    DEPENDS hipify.py ${VLLM_EXT_SRC}
-  #    OUTPUT ${VLLM_EXT_ROCM_SRC}
-  #    COMMENT "run hipify")
-
-  # TODO: move copy into python (or figure out how to make hipify work properly)
-  set(CSRC_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/csrc)
-  add_custom_target(
-    hipify
-    COMMAND cp -r ${CMAKE_SOURCE_DIR}/csrc ${CMAKE_CURRENT_BINARY_DIR}
-    COMMAND ${CMAKE_SOURCE_DIR}/hipify.py -b ${CSRC_BUILD_DIR} -o ${CSRC_BUILD_DIR} -i ${CSRC_BUILD_DIR} ${VLLM_EXT_SRC}
-    DEPENDS hipify.py ${VLLM_EXT_SRC}
-    BYPRODUCTS ${VLLM_EXT_ROCM_SRC}
-    COMMENT "Running hipify on extension source files.")
-
-  # Swap out original extension sources with hipified sources.
-  set(VLLM_EXT_SRC ${VLLM_EXT_ROCM_SRC})
-  list(APPEND VLLM_EXT_SRC ${VLLM_EXT_CXX_SRC})
-
-  message(DEBUG "final ext src: ${VLLM_EXT_SRC}")
 
 endif()
 
