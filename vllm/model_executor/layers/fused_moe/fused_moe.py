@@ -223,7 +223,8 @@ def log_once(msg: str):
     logger.info(msg)
 
 
-def get_moe_configs(num_experts: int, intermediate_size: int) -> Optional[Dict[int, Any]]:
+def get_moe_configs(num_experts: int,
+                    intermediate_size: int) -> Optional[Dict[int, Any]]:
     """
     Return optimized configurations for the fused MoE kernel.
 
@@ -237,16 +238,16 @@ def get_moe_configs(num_experts: int, intermediate_size: int) -> Optional[Dict[i
     device_name = torch.cuda.get_device_name().replace(" ", "_")
 
     config_file_path = os.path.join(
-        os.path.dirname(os.path.realpath(__file__)),
-        "configs",
+        os.path.dirname(os.path.realpath(__file__)), "configs",
         f"E={num_experts},N={intermediate_size},device_name={device_name}.json"
     )
     if os.path.exists(config_file_path):
         with open(config_file_path) as f:
-            log_once(f"Using configuration from {config_file_path} for MoE layer.")
+            log_once(
+                f"Using configuration from {config_file_path} for MoE layer.")
             # If a configuration has been found, return it
             return {int(key): val for key, val in json.load(f).items()}
-    
+
     # If no optimized configuration is available, we will use the default configuration
     return None
 

@@ -77,10 +77,8 @@ class MixtralMoE(nn.Module):
         self.top_k = top_k
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size // self.tp_size
-        self.fused_moe_configs = get_moe_configs(
-            self.num_total_experts,
-            self.intermediate_size
-        )
+        self.fused_moe_configs = get_moe_configs(self.num_total_experts,
+                                                 self.intermediate_size)
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
