@@ -71,7 +71,6 @@ async def completion_stream_generator(
                 num_generated_tokens += len(offset_tk_ids)
 
             if request.logprobs is not None:
-                assert top_logprobs is not None, "top_logprobs must be provided when logprobs is requested"
                 top_logprobs = []
                 if request.echo:
                     top_logprobs += res.prompt_logprobs
