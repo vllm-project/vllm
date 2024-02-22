@@ -5,7 +5,10 @@ import triton
 import triton.language as tl
 
 from vllm._C import ops
+from vllm.logger import init_logger
 from vllm.utils import is_hip
+
+logger = init_logger(__name__)
 
 
 @triton.jit
@@ -231,6 +234,7 @@ def get_moe_configs(num_experts: int, intermediate_size: int):
     )
     if os.path.exists(config_file_path):
         with open(config_file_path) as f:
+            logger.info(f"Using configuration from {config_file_path} for MoE layer.")
             # If a configuration has been found, return it
             return {int(key): val for key, val in json.load(f).items()}
     
