@@ -248,6 +248,8 @@ class OpenAIServingChat(OpenAIServing):
             top_logprobs = output.logprobs
 
             if request.logprobs is not None:
+                assert(top_logprobs is not None),\
+                       "top_logprobs must be provided when logprobs is requested"
                 logprobs = create_logprobs_fn(
                     token_ids=token_ids,
                     top_logprobs=top_logprobs,
