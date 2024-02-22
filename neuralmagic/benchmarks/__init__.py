@@ -1,0 +1,4 @@
+from neuralmagic.benchmarks.run_benchmark_serving import run_benchmark_serving_script
+from neuralmagic.benchmarks.run_benchmark_throughput import run_benchmark_throughput_script
+
+__all__ = [run_benchmark_serving_script, run_benchmark_throughput_script]

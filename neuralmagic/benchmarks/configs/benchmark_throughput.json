@@ -1,0 +1,124 @@
+{
+	"configs": [
+		{
+			"description": "Benchmark vllm engine throughput - with dataset",
+			"models": [
+				"facebook/opt-125m",
+				"TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+				"mistralai/Mistral-7B-Instruct-v0.2",
+				"NousResearch/Llama-2-7b-chat-hf"
+			],
+			"script_name": "benchmark_throughput",
+			"script_args": {
+				"backend": [
+					"vllm"
+				],
+				"dataset": [
+					"sharegpt"
+				],
+				"output-len": [
+					128
+				],
+				"tensor-parallel-size": [
+					1
+				],
+				"n": [
+					1
+				],
+				"num-prompts": [
+					1000
+				],
+				"seed": [
+					0
+				],
+				"dtype": [
+					"auto"
+				]
+			}
+		},
+		{
+			"description": "Benchmark vllm engine prefill throughput - synthetic",
+			"models": [
+				"facebook/opt-125m",
+				"TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+				"mistralai/Mistral-7B-Instruct-v0.2",
+				"NousResearch/Llama-2-7b-chat-hf"
+			],
+			"script_name": "benchmark_throughput",
+			"script_args": {
+				"backend": [
+					"vllm"
+				],
+				"input-len": [
+					1,
+					16,
+					32,
+					64,
+					128,
+					256,
+					512,
+					1024
+				],
+				"output-len": [
+					1
+				],
+				"tensor-parallel-size": [
+					1
+				],
+				"n": [
+					1
+				],
+				"num-prompts": [
+					1
+				],
+				"seed": [
+					0
+				],
+				"dtype": [
+					"auto"
+				]
+			}
+		},
+		{
+			"description": "Benchmark vllm engine decode throughput - synthetic",
+			"models": [
+				"facebook/opt-125m",
+				"TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+				"mistralai/Mistral-7B-Instruct-v0.2",
+				"NousResearch/Llama-2-7b-chat-hf"
+			],
+			"script_name": "benchmark_throughput",
+			"script_args": {
+				"backend": [
+					"vllm"
+				],
+				"input-len": [
+					2
+				],
+				"output-len": [
+					128
+				],
+				"tensor-parallel-size": [
+					1
+				],
+				"n": [
+					1
+				],
+				"num-prompts": [
+					1,
+					4,
+					8,
+					16,
+					32,
+					64
+				],
+				"seed": [
+					0
+				],
+				"dtype": [
+					"auto"
+				]
+			}
+		}
+	]
+}
