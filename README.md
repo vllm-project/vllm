@@ -50,7 +50,11 @@ Here is a more realistic example of running a 50% sparse OpenHermes 2.5 Mistral 
 ```python
 from vllm import LLM, SamplingParams
 
-model = LLM("nm-testing/OpenHermes-2.5-Mistral-7B-pruned50", sparsity="sparse_w16a16")
+model = LLM(
+    "nm-testing/OpenHermes-2.5-Mistral-7B-pruned50",
+    sparsity="sparse_w16a16",
+    max_model_len=1024
+)
 
 sampling_params = SamplingParams(max_tokens=100, temperature=0)
 outputs = model.generate("Hello my name is", sampling_params=sampling_params)
