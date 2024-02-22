@@ -2,15 +2,6 @@ cmake_minimum_required(VERSION 3.21)
 
 project(vllm_extensions LANGUAGES CXX)
 
-function (dumpvars MSG)
-  message(${MSG})
-  get_cmake_property(_variableNames VARIABLES)
-  list (SORT _variableNames)
-  foreach (_variableName ${_variableNames})
-    message(STATUS "${_variableName}=${${_variableName}}")
-  endforeach()
-endfunction()
-
 #
 # Supported python verions.  These versions will be searched in order, the
 # first match will be selected.
@@ -99,10 +90,7 @@ append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
 # Torch also imports CUDA/HIP packages with some customizations, so we do not
 # need to do this explicitly with check_language/enable_language, etc.
 #
-#find_package(Torch 2.1.2 EXACT REQUIRED)
 find_package(Torch REQUIRED)
-
-# TODO: warn about wrong version
 
 # For some reason torch does not add libtorch_python.so to the list of torch
 # libraries to link.  Find it by hand using 'append_torchlib_if_found' from
@@ -115,83 +103,109 @@ endif()
 
 if (NOT HIP_FOUND AND CUDA_FOUND)
   set(IS_CUDA true)
+
+  # Verify torch version and warn if it is not expected.
+  if (NOT Torch_VERSION VERSION_EQUAL 2.1.2)
+    message(WARNING "Pytorch version 2.1.2 expected for CUDA build, "
+      "saw ${Torch_VERSION} instead.")
+  endif()
+else()
+  # Verify torch version and warn if it is not expected (derived from Dockerfile.rocm)
+  # ROCm 5.7 -> torch 2.0.1
+  if (ROCM_VERSION_DEV_MAJOR EQUAL 5 AND NOT Torch_VERSION VERSION_EQUAL 2.0.1)
+    message(WARNING "Pytorch version 2.0.1 expected for ROCMm 5.x build, "
+      "saw ${Torch_VERSION} instead.")
+  endif()
+
+  # ROCm 6.0 -> torch 2.1.1
+  if (ROCM_VERSION_DEV_MAJOR EQUAL 6 AND NOT Torch_VERSION VERSION_EQUAL 2.1.1)
+    message(WARNING "Pytorch version 2.1.1 expected for ROCMm 6.x build, "
+      "saw ${Torch_VERSION} instead.")
+  endif()
 endif()
 
 #
-# Setup extra NVCC flags
+# Setup extra platform specific GPU compilation flags, e.g. NVCC flags for CUDA
+# and hip flags for ROCm.
 #
 # Note: CUDA + HIP are detected by pytorch package so there's no need to repeat
 # detect them explicitly with check_language, etc.
 #
 if (HIP_FOUND)
-  message("HIP FOUND")
-  enable_language(HIP)  # use FindHIP?
+  # Importing torch recognizes and sets up some HIP/ROCm stuff but not all.
+  # If we want cmake to be able to understand the .hip extension automatically,
+  # we need to enable HIP explicitly.
+  enable_language(HIP)
 
-  # TODO: intersect with this list?
-  if(NOT DEFINED CMAKE_HIP_ARCHITECTURES)
-    set(VLLM_SUPPORTED_HIP_ARCHITECTURES "${ROCM_SUPPORTED_ARCHS}")
-  else()
-    set(VLLM_SUPPORTED_HIP_ARCHITECTURES "${CMAKE_HIP_ARCHITECTURES}")
+  #
+  # VLLM_HIP_ARCHITECUTRES will control the offload-arch flags.
+  # CMAKE_HIP_ARCHITECTURES is setup by pytorch and can be controlled
+  # via the PYTORCH_ROCM_ARCH env variable.
+  #
+  # Find the intersection of the supported + detected architectures to
+  # set the module architecture flags.
+  #
+  set(VLLM_HIP_ARCHITECTURES)
+  foreach (ARCH ${CMAKE_HIP_ARCHITECTURES})
+    if (ARCH IN_LIST ROCM_SUPPORTED_ARCHS)
+      list(APPEND VLLM_HIP_ARCHITECTURES ${ARCH})
+    endif()
+  endforeach()
+
+  if(NOT VLLM_HIP_ARCHITECTURES)
+    message(FATAL_ERROR
+      "None of the detected ROCM architectures: ${CMAKE_HIP_ARCHITECTURES} is"
+      " supported. Supported ROCM architectures are: ${ROCM_SUPPORTED_ARCHS}.")
   endif()
-  set(VLLM_SUPPORTED_HIP_ARCHITECTURES "${ROCM_SUPPORTED_ARCHS}")
 
-  #  foreach(HIP_ARCH ${CMAKE_HIP_ARCHITECTURES})
-  #    list(APPEND VLLM_NVCC_FLAGS "--offload-arch=${HIP_ARCH}")
-  #  endforeach()
+  set(VLLM_GPU_ARCHES ${VLLM_HIP_ARCHITECTURES})
+  set(VLLM_PUNICA_GPU_ARCHES ${VLLM_HIP_ARCHITECTURES})
 
-  set(VLLM_CUDA_ARCHES ${VLLM_SUPPORTED_HIP_ARCHITECTURES})
-  set(VLLM_PUNICA_CUDA_ARCHES ${VLLM_SUPPORTED_HIP_ARCHITECTURES})
-
-  # Get common NVCC flags from torch.
-  run_python(VLLM_NVCC_FLAGS
+  # Get common HIP/HIPCC flags from torch.
+  run_python(VLLM_GPU_FLAGS
     "from torch.utils.cpp_extension import COMMON_HIP_FLAGS; print(';'.join(COMMON_HIP_FLAGS))"
     "Failed to determine torch nvcc compiler flags")
 
-  run_python(X
+  run_python(VLLM_HIPCC_FLAGS
     "from torch.utils.cpp_extension import COMMON_HIPCC_FLAGS; print(';'.join(COMMON_HIPCC_FLAGS))"
     "Failed to determine torch nvcc compiler flags")
 
-  list(APPEND VLLM_NVCC_FLAGS "${X}")
+  list(APPEND VLLM_GPU_FLAGS ${VLLM_HIPCC_FLAGS})
 
-  list(APPEND VLLM_NVCC_FLAGS
-#    "-DWITH_HIP"
+  list(APPEND VLLM_GPU_FLAGS
     "-DUSE_ROCM"
     "-U__HIP_NO_HALF_CONVERSIONS__"
     "-U__HIP_NO_HALF_OPERATORS__"
     "-fno-gpu-rdc")
 
-  # hack
-#  set(CMAKE_CUDA_COMPILER ${hip_HIPCC_EXECUTABLE}) # ${ROCM_PATH}/bin/hipcc)
-# enable_language(CUDA)  # use FindHIP?
-
 else()
   # Get common NVCC flags from torch.
-  run_python(VLLM_NVCC_FLAGS
+  run_python(VLLM_GPU_FLAGS
     "from torch.utils.cpp_extension import COMMON_NVCC_FLAGS; print(';'.join(COMMON_NVCC_FLAGS))"
     "Failed to determine torch nvcc compiler flags")
 
   if (CUDA_VERSION VERSION_GREATER_EQUAL 11.8)
-    list(APPEND VLLM_NVCC_FLAGS "-DENABLE_FP8_E5M2")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_FP8_E5M2")
   endif()
 
   if(NVCC_THREADS)
-    list(APPEND VLLM_NVCC_FLAGS "--threads=${NVCC_THREADS}")
+    list(APPEND VLLM_GPU_FLAGS "--threads=${NVCC_THREADS}")
   endif()
 
-  set(VLLM_PUNICA_NVCC_FLAGS ${VLLM_NVCC_FLAGS})
+  set(VLLM_PUNICA_GPU_FLAGS ${VLLM_GPU_FLAGS})
 
   #
   # Copy flags+update for punica
   #
 
-  list(REMOVE_ITEM VLLM_PUNICA_NVCC_FLAGS
+  list(REMOVE_ITEM VLLM_PUNICA_GPU_FLAGS
     "-D__CUDA_NO_HALF_OPERATORS__"
     "-D__CUDA_NO_HALF_CONVERSIONS__"
     "-D__CUDA_NO_BFLOAT16_CONVERSIONS__"
     "-D__CUDA_NO_HALF2_OPERATORS__")
 
-  message(DEBUG "nvcc: ${VLLM_NVCC_FLAGS}")
-  message(DEBUG "punica nvcc: ${VLLM_PUNICA_NVCC_FLAGS}")
+  message(DEBUG "nvcc: ${VLLM_GPU_FLAGS}")
+  message(DEBUG "punica nvcc: ${VLLM_PUNICA_GPU_FLAGS}")
 
   #
   # Setup/process CUDA arch flags
@@ -238,8 +252,8 @@ else()
   endmacro()
 
   # Initialize the architecure lists to empty.
-  set(VLLM_CUDA_ARCHES)
-  set(VLLM_PUNICA_CUDA_ARCHES)
+  set(VLLM_GPU_ARCHES)
+  set(VLLM_PUNICA_GPU_ARCHES)
 
   # Process each 'gencode' flag.
   foreach(ARCH ${VLLM_CUDA_ARCH_FLAGS})
@@ -291,16 +305,16 @@ else()
     endif()
 
     # Add it to the arch list
-    list(APPEND VLLM_CUDA_ARCHES "${CODE_ARCH}${VIRT}")
+    list(APPEND VLLM_GPU_ARCHES "${CODE_ARCH}${VIRT}")
 
     # Add it to punica arch list if the version is >= 8.0
     if (CODE_VER GREATER_EQUAL 8.0)
-      list(APPEND VLLM_PUNICA_CUDA_ARCHES "${CODE_ARCH}${VIRT}")
+      list(APPEND VLLM_PUNICA_GPU_ARCHES "${CODE_ARCH}${VIRT}")
     endif()
   endforeach()
 
-  message(DEBUG "nvcc arch: ${VLLM_CUDA_ARCHES}")
-  message(DEBUG "punica arch: ${VLLM_PUNICA_CUDA_ARCHES}")
+  message(DEBUG "nvcc arch: ${VLLM_GPU_ARCHES}")
+  message(DEBUG "punica arch: ${VLLM_PUNICA_GPU_ARCHES}")
 endif()
 
 #
@@ -309,45 +323,30 @@ endif()
 
 # add comment
 # Note: optimization level/debug info is set via cmake build type.
-function(define_module_target MOD_NAME MOD_SRC MOD_EXTRA_NVCC_FLAGS
-    MOD_CUDA_ARCHES)
+function(define_module_target MOD_NAME MOD_SRC MOD_EXTRA_GPU_FLAGS
+    MOD_GPU_ARCHES)
 
-  # TODO: needed for rocm?
+  # Note: for ROCm builds we let the proper flags and libraries get
+  # pulled in by torch.
+  Python_add_library(${MOD_NAME} MODULE ${MOD_SRC} WITH_SOABI)
+
   if (IS_CUDA)
-    Python_add_library(${MOD_NAME} MODULE ${MOD_SRC} WITH_SOABI)
-
-    set(CUDA_LANG "CUDA")
-    set_target_properties(${MOD_NAME} PROPERTIES CUDA_ARCHITECTURES
-      "${MOD_CUDA_ARCHES}")
-
+    set(GPU_LANG "CUDA")
   else()
-    Python_add_library(${MOD_NAME} MODULE ${MOD_SRC} WITH_SOABI)
-#    hip_add_library(${MOD_NAME} MODULE ${MOD_SRC})
-
+    set(GPU_LANG "HIP")
+    # Make this target dependent on the hipify preprocessor step.
+    # TODO: consider moving hipify step into here so it could apply to
+    # any target
     add_dependencies(${MOD_NAME} hipify)
-
-    set(CUDA_LANG "HIP")
-    foreach(SRC ${MOD_SRC})
-      if (${SRC} MATCHES "\.hip$")
-        message("setting HIP on ${SRC}")
-        set_source_files_properties(${SRC} PROPERTIES LANGUAGE HIP)
-        #set_source_files_properties(${SRC} PROPERTIES LANGUAGE CUDA)
-        #set_source_files_properties(${SRC} PROPERTIES LANGUAGE ${CUDA_LANG})
-      endif()
-    endforeach()
-
-    message("got here! ${MOD_CUDA_ARCHES}")
-    set_target_properties(${MOD_NAME} PROPERTIES HIP_ARCHITECTURES
-      "${MOD_CUDA_ARCHES}")
-
   endif()
+
+  set_target_properties(${MOD_NAME} PROPERTIES ${GPU_LANG}_ARCHITECTURES
+      "${MOD_GPU_ARCHES}")
 
   set_property(TARGET ${MOD_NAME} PROPERTY CXX_STANDARD 17)
 
-#  set_target_properties(${MOD_NAME} PROPERTIES LINKER_LANGUAGE CXX)
-
   target_compile_options(${MOD_NAME} PRIVATE
-    $<$<COMPILE_LANGUAGE:${CUDA_LANG}>:${MOD_EXTRA_NVCC_FLAGS}>)
+    $<$<COMPILE_LANGUAGE:${GPU_LANG}>:${MOD_EXTRA_GPU_FLAGS}>)
 
   target_compile_definitions(${MOD_NAME} PRIVATE
     "-DTORCH_EXTENSION_NAME=${MOD_NAME}")
@@ -355,15 +354,7 @@ function(define_module_target MOD_NAME MOD_SRC MOD_EXTRA_NVCC_FLAGS
   target_include_directories(${MOD_NAME} PRIVATE
     csrc PRIVATE ${MPI_CXX_INCLUDE_DIRS})
 
-
-  if (TRUE OR IS_CUDA)
-    target_link_libraries(${MOD_NAME} PRIVATE ${TORCH_LIBRARIES})
-  else()
-    # -- Python_SOABI=cpython-39-x86_64-linux-gnu
-    message("got here ${_PYTHON_INCLUDE_DIR}, ${_PYTHON_LIBRARY}")
-    target_link_libraries(${MOD_NAME} PRIVATE ${TORCH_LIBRARIES} ${_Python_LIBRARY})
-    target_include_directories(${MOD_NAME} PRIVATE ${Python_INCLUDE_DIRS})
-  endif()
+  target_link_libraries(${MOD_NAME} PRIVATE ${TORCH_LIBRARIES})
 
   install(TARGETS ${MOD_NAME} LIBRARY DESTINATION vllm)
 endfunction()
@@ -383,77 +374,59 @@ set(VLLM_EXT_SRC
   "csrc/cuda_utils_kernels.cu"
   "csrc/moe_align_block_size_kernels.cu")
 
-set(VLLM_EXT_ROCM_SRC
-  "csrc/cache_kernels.hip"
-  "csrc/attention/attention_kernels.hip"
-  "csrc/pos_encoding_kernels.hip"
-  "csrc/activation_kernels.hip"
-  "csrc/layernorm_kernels.hip"
-  "csrc/quantization/squeezellm/quant_hip_kernel.hip"
-  "csrc/quantization/gptq/q_gemm.hip"
-  "csrc/hip_utils_kernels.hip"
-  "csrc/moe_align_block_size_kernels.hip")
+set(VLLM_EXT_CXX_SRC "csrc/pybind.cpp")
 
 if(IS_CUDA)
   list(APPEND VLLM_EXT_SRC
+    ${VLLM_EXT_CXX_SRC}
     "csrc/quantization/awq/gemm_kernels.cu"
     "csrc/custom_all_reduce.cu")
+
 elseif(HIP_FOUND)
-  dumpvars("VARS")
 
-  # maybe use add_custom_target instead + add_dependencies?
-  message("build dir  ${CMAKE_CURRENT_BINARY_DIR}")
-
-  set(X)
-  foreach (SRC ${VLLM_EXT_ROCM_SRC})
-    list(APPEND X "${CMAKE_CURRENT_BINARY_DIR}/${SRC}")
+  #
+  # Generate ROCM/HIP source file names from CUDA file names.
+  #
+  set(VLLM_ROCM_EXT_SRC)
+  foreach (SRC ${VLLM_EXT_SRC})
+    string(REGEX REPLACE "\.cu$" "\.hip" SRC ${SRC})
+    string(REGEX REPLACE "cuda" "hip" SRC ${SRC})
+    list(APPEND VLLM_EXT_ROCM_SRC "${CMAKE_CURRENT_BINARY_DIR}/${SRC}")
   endforeach()
-  set(VLLM_EXT_ROCM_SRC ${X})
-
-  message("cmake cwd: ${CMAKE_CURRENT_BINARY_DIR}")
-#  add_custom_command(
-#    COMMAND echo "HELLLLLLLLLLLLLLLLLLLLLLLLLLO"
-#    COMMAND cp -r ${CMAKE_SOURCE_DIR}/csrc .
-#    COMMAND ${CMAKE_SOURCE_DIR}/hipify.py -b csrc -o csrc -i csrc ${VLLM_EXT_SRC}
-#    DEPENDS hipify.py ${VLLM_EXT_SRC}
-#    OUTPUT ${VLLM_EXT_ROCM_SRC}
-#    COMMENT "run hipify")
-
   message("rocm src: ${VLLM_EXT_ROCM_SRC}")
 
+  # TODO: this needs a bunch more work
+
+  #  add_custom_command(
+  #    COMMAND echo "HELLLLLLLLLLLLLLLLLLLLLLLLLLO"
+  #    COMMAND cp -r ${CMAKE_SOURCE_DIR}/csrc .
+  #    COMMAND ${CMAKE_SOURCE_DIR}/hipify.py -b csrc -o csrc -i csrc ${VLLM_EXT_SRC}
+  #    DEPENDS hipify.py ${VLLM_EXT_SRC}
+  #    OUTPUT ${VLLM_EXT_ROCM_SRC}
+  #    COMMENT "run hipify")
+
+  # TODO: move copy into python (or figure out how to make hipify work properly)
+  set(CSRC_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/csrc)
   add_custom_target(
     hipify
-    COMMAND echo "HELLLLLLLLLLLLLLLLLLLLLLLLLLO2"
-    COMMAND pwd
     COMMAND cp -r ${CMAKE_SOURCE_DIR}/csrc ${CMAKE_CURRENT_BINARY_DIR}
-    COMMAND ${CMAKE_SOURCE_DIR}/hipify.py -b ${CMAKE_CURRENT_BINARY_DIR}/csrc -o ${CMAKE_CURRENT_BINARY_DIR}/csrc -i ${CMAKE_CURRENT_BINARY_DIR}/csrc ${VLLM_EXT_SRC}
+    COMMAND ${CMAKE_SOURCE_DIR}/hipify.py -b ${CSRC_BUILD_DIR} -o ${CSRC_BUILD_DIR} -i ${CSRC_BUILD_DIR} ${VLLM_EXT_SRC}
     DEPENDS hipify.py ${VLLM_EXT_SRC}
     BYPRODUCTS ${VLLM_EXT_ROCM_SRC}
-    COMMENT "run hipify2")
+    COMMENT "Running hipify on extension source files.")
 
-#  add_custom_command(
-#    COMMAND ./hipify.py -b ${CMAKE_CURRENT_BINARY_DIR}/csrc -i csrc -o ${CMAKE_CURRENT_BINARY_DIR}/csrc ${VLLM_EXT_SRC}
-#    DEPENDS hipify.py ${VLLM_EXT_SRC}
-#    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-#    OUTPUT ${VLLM_EXT_ROCM_SRC}
-#    VERBATIM)
+  # Swap out original extension sources with hipified sources.
+  set(VLLM_EXT_SRC ${VLLM_EXT_ROCM_SRC})
+  list(APPEND VLLM_EXT_SRC ${VLLM_EXT_CXX_SRC})
 
-   set(VLLM_EXT_SRC ${VLLM_EXT_ROCM_SRC})
+  message(DEBUG "final ext src: ${VLLM_EXT_SRC}")
 
-#  set(VLLM_EXT_SRC)
-#  foreach (ROCM_SRC ${VLLM_EXT_ROCM_SRC})
-#    list(APPEND VLLM_EXT_SRC ${CMAKE_SOURCE_DIR}/${ROCM_SRC})
-#  endforeach()
-  message("final src: ${VLLM_EXT_SRC}")
 endif()
-
-list(APPEND VLLM_EXT_SRC "csrc/pybind.cpp") # or leave in original list?
-#set(VLLM_EXT_SRC "csrc/pybind.cpp")
 
 define_module_target(_C
   "${VLLM_EXT_SRC}"
-  "${VLLM_NVCC_FLAGS}"
-  "${VLLM_CUDA_ARCHES}")
+  "${VLLM_GPU_FLAGS}"
+  "${VLLM_GPU_ARCHES}")
 
 #
 # _moe_C extension
@@ -465,8 +438,8 @@ set(VLLM_MOE_EXT_SRC
 
 define_module_target(_moe_C
   "${VLLM_MOE_EXT_SRC}"
-  "${VLLM_NVCC_FLAGS}"
-  "${VLLM_CUDA_ARCHES}")
+  "${VLLM_GPU_FLAGS}"
+  "${VLLM_GPU_ARCHES}")
 
 #
 # _punica_C extension
@@ -495,5 +468,5 @@ set(VLLM_PUNICA_EXT_SRC
 
 define_module_target(_punica_C
   "${VLLM_PUNICA_EXT_SRC}"
-  "${VLLM_PUNICA_NVCC_FLAGS}"
-  "${VLLM_PUNICA_CUDA_ARCHES}")
+  "${VLLM_PUNICA_GPU_FLAGS}"
+  "${VLLM_PUNICA_GPU_ARCHES}")
