@@ -2,7 +2,7 @@
 import functools
 import json
 import os
-from typing import Dict, Any
+from typing import Any, Dict, Optional
 
 import torch
 import triton
@@ -223,7 +223,7 @@ def log_once(msg: str):
     logger.info(msg)
 
 
-def get_moe_configs(num_experts: int, intermediate_size: int):
+def get_moe_configs(num_experts: int, intermediate_size: int) -> Optional[Dict[int, Any]]:
     """
     Return optimized configurations for the fused MoE kernel.
 
@@ -247,11 +247,8 @@ def get_moe_configs(num_experts: int, intermediate_size: int):
             # If a configuration has been found, return it
             return {int(key): val for key, val in json.load(f).items()}
     
-    # If no optimized configuration is available, return the default configuration
-    return {
-        num_experts: {'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1},
-        num_experts+1: {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}
-    }
+    # If no optimized configuration is available, we will use the default configuration
+    return None
 
 
 def fused_moe(
@@ -261,8 +258,8 @@ def fused_moe(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
-    configs: Dict[int, Any],
     inplace: bool = False,
+    configs: Dict[int, Any] = None,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of weights, w1 and w2, and top-k gating mechanism.
@@ -274,8 +271,8 @@ def fused_moe(
     - gating_output (torch.Tensor): The output of the gating operation (before softmax).
     - topk (int): The number of top-k experts to select.
     - renormalize (bool): If True, renormalize the top-k weights to sum to 1.
-    - configs (Dict[int, Any]): Mapping from batch size to kernel configuration.
     - inplace (bool): If True, perform the operation in-place. Defaults to False.
+    - configs (Dict[int, Any]): Optional mapping from batch size to kernel configuration.
     
     Returns:
     - torch.Tensor: The output tensor after applying the MoE layer.
@@ -325,7 +322,23 @@ def fused_moe(
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
-    config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
+    if configs:
+        config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
+    else:
+        config = {
+            'BLOCK_SIZE_M': 64,
+            'BLOCK_SIZE_N': 64,
+            'BLOCK_SIZE_K': 32,
+            'GROUP_SIZE_M': 8
+        }
+
+        if topk_ids.numel() <= w1.shape[0]:
+            config = {
+                'BLOCK_SIZE_M': 16,
+                'BLOCK_SIZE_N': 32,
+                'BLOCK_SIZE_K': 64,
+                'GROUP_SIZE_M': 1
+            }
 
     intermediate_cache1 = torch.empty((M, topk_ids.shape[1], N),
                                       device=hidden_states.device,
