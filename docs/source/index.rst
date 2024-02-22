@@ -96,6 +96,7 @@ Documentation
    :caption: Developer Documentation
 
    dev/engine/engine_index
+   dev/kernel/paged_attention
 
 Indices and tables
 ==================
