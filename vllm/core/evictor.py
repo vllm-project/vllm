@@ -14,11 +14,12 @@ class EvictionPolicy(enum.Enum):
 
 
 class Evictor(ABC):
-    """
+    """The Evictor subclasses should be used by the BlockAllocator class to
+    handle eviction of freed PhysicalTokenBlocks.
     """
 
     @abstractmethod
-    def evict(self) -> PhysicalTokenBlock:
+    def __init__(self):
         pass
 
     @abstractmethod
@@ -26,11 +27,22 @@ class Evictor(ABC):
         pass
 
     @abstractmethod
+    def evict(self) -> PhysicalTokenBlock:
+        """Runs the eviction algorithm and returns the evicted block"""
+        pass
+
+    @abstractmethod
     def append(self, block: PhysicalTokenBlock):
+        """Adds block to the evictor, making it a candidate for eviction"""
         pass
 
     @abstractmethod
     def remove(self, block_hash: int) -> PhysicalTokenBlock:
+        """Simply removes the block with the hash value block_hash from the
+        evictor. Caller is responsible for making sure that block_hash is contained
+        in the evictor before calling remove. Should be used to "bring back" blocks
+        that have been freed but not evicted yet.
+        """
         pass
 
     @abstractproperty
@@ -39,6 +51,12 @@ class Evictor(ABC):
 
 
 class LRUEvictor(Evictor):
+    """Evicts in a least-recently-used order using the last_accessed timestamp
+    that's recorded in the PhysicalTokenBlock. If there are multiple blocks with
+    the same last_accessed time, then the one with the largest num_hashed_tokens
+    will be evicted. If two blocks each have the lowest last_accessed time and
+    highest num_hashed_tokens value, then one will be chose arbitrarily
+    """
 
     def __init__(self):
         self.free_table: Dict[int, PhysicalTokenBlock] = {}
@@ -89,7 +107,7 @@ class LRUEvictor(Evictor):
 
     def remove(self, block_hash: int) -> PhysicalTokenBlock:
         if block_hash not in self.free_table:
-            raise AssertionError(
+            raise ValueError(
                 "Attempting to remove block that's not in the evictor")
         block: PhysicalTokenBlock = self.free_table[block_hash]
         del self.free_table[block_hash]
@@ -123,7 +141,7 @@ class FIFOEvictor(Evictor):
             if block_hash == free_block.block_hash:
                 self.free_list.remove(free_block)
                 return free_block
-        raise AssertionError(
+        raise ValueError(
             "Attempting to remove block that's not in the evictor")
 
     @property
