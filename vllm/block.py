@@ -2,10 +2,10 @@
 from typing import List
 
 from vllm.utils import Device
-from time import monotonic
 
 _BLANK_TOKEN_ID = -1
 
+DEFAULT_LAST_ACCESSED_TIME = -1
 
 class LogicalTokenBlock:
     """A block that stores a contiguous chunk of tokens from left to right.
@@ -66,7 +66,7 @@ class PhysicalTokenBlock:
         self.num_hashed_tokens = num_hashed_tokens
 
         self.ref_count = 0
-        self.last_accessed = monotonic()
+        self.last_accessed = DEFAULT_LAST_ACCESSED_TIME
 
         self.computed = False
 
