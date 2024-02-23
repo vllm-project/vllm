@@ -184,8 +184,8 @@ def main(args):
         empirical_tp_world_size = max(rank_tensors_map.keys()) + 1
         if args.tp_size is not None:
             assert args.tp_size == empirical_tp_world_size, "User expected TP world size = " \
-                f"{args.tp_size} but expecting TP world size = {empirical_tp_world_size} from " \
-                "model instead."
+                f"{args.tp_size} from model but tool is expecting TP world size = " \
+                f"{empirical_tp_world_size} from model instead."
         for i in range(empirical_tp_world_size):
             assert i in rank_tensors_map, f"Expected TP world size = {empirical_tp_world_size} " \
                                           "but did not find KV cache scaling factors " \
