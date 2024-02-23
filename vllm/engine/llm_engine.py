@@ -1053,3 +1053,22 @@ class LLMEngine:
                 for worker in self.workers
             ])
         return forward_dag.experimental_compile()
+
+    def check_health(self) -> None:
+        """Raises an error if engine is unhealthy."""
+        self._check_if_any_actor_is_dead()
+
+    def _check_if_any_actor_is_dead(self):
+        if not self.parallel_config.worker_use_ray:
+            return
+
+        workers = (self.workers or [])
+        if workers:
+            dead_actors = []
+            for actor in workers:
+                actor_state = ray.state.actors(actor._ray_actor_id.hex())  # pylint: disable=protected-access
+                if actor_state["State"] == "DEAD":
+                    dead_actors.append(actor)
+            if dead_actors:
+                raise RuntimeError("At least one Worker is dead. "
+                                   f"Dead Workers: {dead_actors}. ")
