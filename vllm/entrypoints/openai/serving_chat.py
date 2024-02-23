@@ -94,8 +94,8 @@ class OpenAIServingChat(OpenAIServing):
             return request.messages[-1].role
 
     async def chat_completion_stream_generator(
-        self, request: ChatCompletionRequest,
-        result_generator: AsyncIterator[RequestOutput], request_id: str
+            self, request: ChatCompletionRequest,
+            result_generator: AsyncIterator[RequestOutput], request_id: str
     ) -> Union[ErrorResponse, AsyncGenerator[str, None]]:
 
         model_name = request.model
@@ -216,9 +216,9 @@ class OpenAIServingChat(OpenAIServing):
         yield "data: [DONE]\n\n"
 
     async def chat_completion_full_generator(
-        self, request: ChatCompletionRequest, raw_request: Request,
-        result_generator: AsyncIterator[RequestOutput], request_id: str
-    ) -> Union[ErrorResponse, ChatCompletionResponse]:
+            self, request: ChatCompletionRequest, raw_request: Request,
+            result_generator: AsyncIterator[RequestOutput],
+            request_id: str) -> Union[ErrorResponse, ChatCompletionResponse]:
 
         model_name = request.model
         created_time = int(time.monotonic())
