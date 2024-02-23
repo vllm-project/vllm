@@ -392,6 +392,7 @@ class ModelRunner:
     ) -> SamplingMetadata:
         seq_groups: List[Tuple[List[int], SamplingParams]] = []
         selected_token_indices: List[int] = []
+        generators: List[torch.Generator] = []
         selected_token_start_idx = 0
         categorized_sample_indices = {t: [] for t in SamplingType}
         categorized_sample_indices_start_idx = 0
@@ -422,6 +423,10 @@ class ModelRunner:
                 selected_token_indices.append(selected_token_start_idx +
                                               subquery_len - 1)
                 selected_token_start_idx += max_subquery_len
+
+                if sampling_params.seed is not None:
+                    seq_group_metadata.state.generator = torch.Generator(
+                        device="cuda").manual_seed(sampling_params.seed)
             else:
                 num_seqs = len(seq_ids)
                 selected_token_indices.extend(
@@ -434,6 +439,9 @@ class ModelRunner:
                         range(categorized_sample_indices_start_idx,
                               categorized_sample_indices_start_idx + num_seqs))
                 categorized_sample_indices_start_idx += num_seqs
+
+            if sampling_params.seed is not None:
+                generators.append(seq_group_metadata.state.generator)
 
         selected_token_indices = _async_h2d(selected_token_indices,
                                             dtype=torch.long,
@@ -457,6 +465,7 @@ class ModelRunner:
             prompt_lens=prompt_lens,
             selected_token_indices=selected_token_indices,
             categorized_sample_indices=categorized_sample_indices,
+            generators=generators,
         )
         return sampling_metadata
 
@@ -539,6 +548,7 @@ class ModelRunner:
                 prompt_lens=None,
                 selected_token_indices=metadata_dict["selected_token_indices"],
                 categorized_sample_indices=None,
+                generators=None,
                 perform_sampling=False,
             )
 

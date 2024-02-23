@@ -361,11 +361,14 @@ class Scheduler:
         # This function call changes the internal states of the scheduler
         # such as self.running, self.swapped, and self.waiting.
         scheduler_outputs = self._schedule()
+        now = time.time()
 
         now = time.monotonic()
         # Create input data structures.
         seq_group_metadata_list: List[SequenceGroupMetadata] = []
         for seq_group in scheduler_outputs.scheduled_seq_groups:
+            seq_group.maybe_set_first_scheduled_time(now)
+
             seq_data: Dict[int, SequenceData] = {}
             block_tables: Dict[int, List[int]] = {}
 
@@ -389,6 +392,7 @@ class Scheduler:
                 prefix_pos=rounded_prefix_pos,
                 computed_block_nums=self.block_manager.
                 get_common_computed_block_ids(seq_group),
+                state=seq_group.state,
             )
             seq_group_metadata_list.append(seq_group_metadata)
         return seq_group_metadata_list, scheduler_outputs
