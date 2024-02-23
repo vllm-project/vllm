@@ -10,6 +10,7 @@ from torch._inductor.virtualized import V
 
 vllm_lib = torch.library.Library("vllm", "DEF")
 
+
 # Fixed in PT 2.2
 def pt22_compute_dependencies(self):
     """
@@ -45,9 +46,8 @@ def pt22_compute_dependencies(self):
             ]
             return DedupList(new_items, new_membership)
 
-    name_to_users: DefaultDict[str, DedupList[sched.NodeUser]] = collections.defaultdict(
-        DedupList
-    )
+    name_to_users: DefaultDict[
+        str, DedupList[sched.NodeUser]] = collections.defaultdict(DedupList)
 
     # handle aliasing by using python aliasing in name_to_users
     # if foo aliases bar then we will make name_to_users["foo"] point
@@ -60,8 +60,9 @@ def pt22_compute_dependencies(self):
                 list1 = name_to_users[node1_name]
                 list2 = name_to_users[node2_name]
                 combined = list1 + list2
-                for key in name_to_users.keys():
-                    if name_to_users[key] is list1 or name_to_users[key] is list2:
+                for key in name_to_users:
+                    if name_to_users[key] is list1 or name_to_users[
+                            key] is list2:
                         name_to_users[key] = combined
             elif node1_name in name_to_users:
                 name_to_users[node2_name] = name_to_users[node1_name]
@@ -78,20 +79,17 @@ def pt22_compute_dependencies(self):
         node = self.name_to_node[node_name]
         write_dep = list(node.read_writes.writes)[0]
         for read_dep in node.read_writes.reads:
-            if (
-                read_dep.name in self.name_to_node
-                and isinstance(read_dep, dependencies.MemoryDep)
-                and isinstance(write_dep, dependencies.MemoryDep)
-                and read_dep.index == write_dep.index
-                and read_dep.size == write_dep.size
-            ):
+            if (read_dep.name in self.name_to_node
+                    and isinstance(read_dep, dependencies.MemoryDep)
+                    and isinstance(write_dep, dependencies.MemoryDep)
+                    and read_dep.index == write_dep.index
+                    and read_dep.size == write_dep.size):
                 reachable_names.update(dep_closure(read_dep.name))
         return reachable_names
 
     def add_user(used_by_name, user_node, can_inplace=False, is_weak=False):
         name_to_users[rename(used_by_name)].append(
-            sched.NodeUser(user_node, can_inplace, is_weak)
-        )
+            sched.NodeUser(user_node, can_inplace, is_weak))
 
     for node in self.nodes:
         # a node will mutate either 0 or 1 buffers
@@ -121,9 +119,9 @@ def pt22_compute_dependencies(self):
         for alt_name in node.get_mutations():
             self.mutation_renames[rename(alt_name)] = node.get_name()
             self.mutation_renames[alt_name] = node.get_name()
-            self.mutation_real_name[node.get_name()] = self.mutation_real_name.get(
-                alt_name, alt_name
-            )
+            self.mutation_real_name[
+                node.get_name()] = self.mutation_real_name.get(
+                    alt_name, alt_name)
 
     # make sure outputs aren't dead-code-eliminated
     for node_name in V.graph.get_output_names():
@@ -136,7 +134,8 @@ def pt22_compute_dependencies(self):
             V.graph.mutated_inputs.add(name)
 
     inp_names = {
-        name: index for index, name in enumerate(V.graph.graph_inputs.keys())
+        name: index
+        for index, name in enumerate(V.graph.graph_inputs.keys())
     }
     V.graph.mutated_input_idxs = [
         inp_names[name] for name in V.graph.mutated_inputs
@@ -151,10 +150,13 @@ def pt22_compute_dependencies(self):
         for user in node.users:
             user.node.inverse_users.append(node)
 
+
 sched.Scheduler.compute_dependencies = pt22_compute_dependencies
+
 
 # Available starting PT 2.2
 class NoneLayout(ir.IRNode):
+
     def __init__(self, device):
         self.device = device
         self.size = [0]
@@ -169,6 +171,7 @@ class NoneLayout(ir.IRNode):
 
 # Available starting PT 2.2
 class MutationOutput(ir.ExternKernel):
+
     def get_mutation_names(self):
         return [self.inputs[0].get_name()]
 
@@ -190,6 +193,7 @@ class MutationOutput(ir.ExternKernel):
 
 
 class VllmCudaKernel(ir.FallbackKernel):
+
     def should_allocate(self):
         return False
 
@@ -197,7 +201,7 @@ class VllmCudaKernel(ir.FallbackKernel):
         return True
 
     @classmethod
-    def create(cls, kernel, *args, mutated_inputs=[], **kwargs) -> None:
+    def create(cls, kernel, *args, mutated_inputs=None, **kwargs) -> None:
         with V.graph.fake_mode:
             (
                 example_output,
@@ -217,18 +221,19 @@ class VllmCudaKernel(ir.FallbackKernel):
             unflatten_args,
             schema=schema,
         )
+
         # Mark inplace inputs as mutated
         def mark_mutation(x):
             if isinstance(x.data, ir.BaseView):
                 x = x.data.unwrap_view()
             MutationOutput(x.layout, x, packed)
-        
 
         for kernel_input_idx in mutated_inputs:
             kernel_input = args[kernel_input_idx]
             # V.graph.mark_buffer_mutated(kernel_input.get_name())
             mark_mutation(kernel_input)
             # MutationOutput(kernel_input.layout, kernel_input, packed)
+
 
 def register_vllm_lowering(op, mutating_inputs):
     lowering.fallbacks.add(op)

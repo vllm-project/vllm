@@ -64,10 +64,12 @@ class RMSNorm(nn.Module):
             self.variance_epsilon,
         )
 
+
 # needed for compile
 vllm_lib.define(
     "rms_norm(Tensor out, Tensor input, Tensor weight, float epsilon) -> Tensor"
 )
+
 
 @torch.library.impl(vllm_lib, "rms_norm", "Meta")
 def _rms_norm_meta(out, input, weight, epsilon):
@@ -84,12 +86,13 @@ def _rms_norm(out, input, weight, epsilon):
     )
     return out
 
-register_vllm_lowering(torch.ops.vllm.rms_norm, [0])
 
+register_vllm_lowering(torch.ops.vllm.rms_norm, [0])
 
 vllm_lib.define(
     "fused_add_rms_norm(Tensor input, Tensor residual, Tensor weight, float epsilon) -> (Tensor, Tensor)"
 )
+
 
 @torch.library.impl(vllm_lib, "fused_add_rms_norm", "Meta")
 def _fused_add_rms_norm_meta(input, residual, weight, epsilon):
@@ -105,5 +108,6 @@ def _fused_add_rms_norm(input, residual, weight, epsilon):
         epsilon,
     )
     return input, residual
+
 
 register_vllm_lowering(torch.ops.vllm.fused_add_rms_norm, [0, 1])

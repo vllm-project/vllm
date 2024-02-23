@@ -666,7 +666,7 @@ class ModelRunner:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.list_loras()
-    
+
     @torch.inference_mode()
     def compile_model(self, kv_caches: List[KVCache]) -> None:
         assert not self.model_config.enforce_eager
@@ -676,9 +676,8 @@ class ModelRunner:
                     "'enforce_eager=True' or use '--enforce-eager' in CLI.")
 
         start_time = time.perf_counter()
-        self.compiled_model = torch.compile(self.model,
-                                            fullgraph=True)
-        
+        self.compiled_model = torch.compile(self.model, fullgraph=True)
+
         # Prepare dummy inputs. These will be reused for all batch sizes.
         max_batch_size = max(_BATCH_SIZES_TO_CAPTURE)
         input_tokens = torch.zeros(max_batch_size, 1, dtype=torch.long).cuda()
@@ -787,7 +786,9 @@ class ModelRunner:
                     )
                     self.set_active_loras(set(), lora_mapping)
 
-                graph_runner = CUDAGraphRunner(self.model if self.compiled_model is None else self.compiled_model)
+                graph_runner = CUDAGraphRunner(
+                    self.model if self.compiled_model is None else self.
+                    compiled_model)
                 graph_runner.capture(
                     input_tokens[:batch_size],
                     input_positions[:batch_size],

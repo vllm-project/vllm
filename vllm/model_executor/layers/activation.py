@@ -36,10 +36,10 @@ class SiluAndMul(nn.Module):
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
         return torch.ops.vllm.silu_and_mul(out, x)
 
+
 # needed for compile
-vllm_lib.define(
-    "silu_and_mul(Tensor out, Tensor input) -> Tensor"
-)
+vllm_lib.define("silu_and_mul(Tensor out, Tensor input) -> Tensor")
+
 
 @torch.library.impl(vllm_lib, "silu_and_mul", "Meta")
 def _silu_and_mul_meta(out, input):
@@ -48,13 +48,12 @@ def _silu_and_mul_meta(out, input):
 
 @torch.library.impl(vllm_lib, "silu_and_mul", "CUDA")
 def _silu_and_mul(out, input):
-    ops.silu_and_mul(
-        out,
-        input
-    )
+    ops.silu_and_mul(out, input)
     return out
 
+
 register_vllm_lowering(torch.ops.vllm.silu_and_mul, [0])
+
 
 class GeluAndMul(nn.Module):
     """An activation function for GeGLU.

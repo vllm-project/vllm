@@ -347,23 +347,28 @@ def _paged_attention(
         )
     return output
 
+
 # needed for compile
 vllm_lib.define(
     "reshape_and_cache(Tensor key, Tensor value, Tensor key_cache, Tensor value_cache, Tensor slot_mapping, str dtype) -> (Tensor, Tensor)"
 )
 
+
 @torch.library.impl(vllm_lib, "reshape_and_cache", "Meta")
-def _reshape_and_cache_meta(key, value, key_cache, value_cache, slot_mapping, dtype):
+def _reshape_and_cache_meta(key, value, key_cache, value_cache, slot_mapping,
+                            dtype):
     return key_cache, value_cache
 
 
 @torch.library.impl(vllm_lib, "reshape_and_cache", "CUDA")
-def _reshape_and_cache(key, value, key_cache, value_cache, slot_mapping, dtype):
-    cache_ops.reshape_and_cache(key, value, key_cache, value_cache, slot_mapping, dtype)
+def _reshape_and_cache(key, value, key_cache, value_cache, slot_mapping,
+                       dtype):
+    cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
+                                slot_mapping, dtype)
     return key_cache, value_cache
 
-register_vllm_lowering(torch.ops.vllm.reshape_and_cache, [2, 3])
 
+register_vllm_lowering(torch.ops.vllm.reshape_and_cache, [2, 3])
 
 vllm_lib.define(
     "paged_attention_v1(Tensor out, Tensor query, Tensor key_cache, Tensor value_cache, int num_kv_heads, float scale, Tensor block_tables, Tensor context_lens, int block_size, SymInt max_context_len, Tensor? alibi_slopes, str kv_cache_dtype) -> Tensor"
@@ -419,13 +424,13 @@ def _paged_attention_v1(
     )
     return out
 
+
 register_vllm_lowering(torch.ops.vllm.paged_attention_v1, [0])
-
-
 
 vllm_lib.define(
     "paged_attention_v2(Tensor out, Tensor exp_sums, Tensor max_logits, Tensor tmp_out, Tensor query, Tensor key_cache, Tensor value_cache, int num_kv_heads, float scale, Tensor block_tables, Tensor context_lens, int block_size, SymInt max_context_len, Tensor? alibi_slopes, str kv_cache_dtype) -> Tensor"
 )
+
 
 @torch.library.impl(vllm_lib, "paged_attention_v2", "Meta")
 def _paged_attention_v2_meta(
@@ -484,5 +489,6 @@ def _paged_attention_v2(
         kv_cache_dtype,
     )
     return out
+
 
 register_vllm_lowering(torch.ops.vllm.paged_attention_v2, [0])
