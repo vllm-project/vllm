@@ -116,7 +116,7 @@ _default_kvcache_scales_filename = "kv_cache_scales.json"
 def main(args):
     rank_tensors_map = {}
     hf_folder, hf_tensor_files, use_safetensors = _prepare_hf_weights(
-                                                    args.model,
+                                                    args.quantized_model,
                                                     args.cache_dir,
                                                     args.load_format,
                                                     revision=args.revision,
@@ -181,14 +181,18 @@ def main(args):
         all(len(layer_scales_map) == 0 for layer_scales_map in rank_tensors_map.values())):
         print("WARNING: No KV cache scale factors found. No output saved.")
     else:
-        tp_world_size = max(rank_tensors_map.keys()) + 1
-        for i in range(tp_world_size):
-            assert i in rank_tensors_map, f"Expected TP world size = {tp_world_size} " \
+        empirical_tp_world_size = max(rank_tensors_map.keys()) + 1
+        if args.tp_size is not None:
+            assert args.tp_size == empirical_tp_world_size, "User expected TP world size = " \
+                f"{args.tp_size} but expecting TP world size = {empirical_tp_world_size} from " \
+                "model instead."
+        for i in range(empirical_tp_world_size):
+            assert i in rank_tensors_map, f"Expected TP world size = {empirical_tp_world_size} " \
                                           "but did not find KV cache scaling factors " \
                                           f"for TP rank {i}"
         with open(output_file, 'w') as f:
             json.dump(rank_tensors_map, f, sort_keys=True, indent=4)
-            print(f"Completed! Found TP world size = {tp_world_size}.",
+            print(f"Completed! Found TP world size = {empirical_tp_world_size}.",
                   f"KV cache scaling factors saved to {output_file}")
 
 
@@ -198,16 +202,14 @@ if __name__ == "__main__":
                                      "and saves them to a JSON file compatible with later "
                                      "use by vLLM (pass this file to the appropriate "
                                      "runtime typically using the argument "
-                                     "--kv-cache-scales-path <filename>). This is only used "
+                                     "--kv_cache_scales_path <filename>). This is only used "
                                      "if the KV cache dtype is FP8 and on ROCm (AMD GPU).")
-    parser.add_argument("--model",
-                        help="Specify either a directory or name of a HF model. If the model "
-                        "does not exist, this utility will attempt to download said model "
-                        "from the HF repo.",
+    parser.add_argument("--quantized_model",
+                        help="Specify either the local path to, or name of, a quantized HF model.",
                         required=True)
     parser.add_argument("--cache_dir",
-                        help="Optionally specify a cache directory to use for a HF model "
-                        "download.",
+                        help="Optionally specify a cache directory to use in the event of a HF "
+                        "model download.",
                         default=None)
     parser.add_argument("--load_format",
                         help="Optionally specify the format of the model's tensor files "
@@ -219,10 +221,21 @@ if __name__ == "__main__":
                         default=None)
     parser.add_argument("--output_path",
                         help="Optionally specify the output directory. By default the "
-                        "scaling factors will be saved in the model directory with the "
-                        f"filename {_default_kvcache_scales_filename}, however you can "
-                        "override this behavior here.",
+                        "KV cache scaling factors will be saved in the model directory "
+                        f"with the filename {_default_kvcache_scales_filename}, however "
+                        "you can override this behavior here.",
                         default=None)
+    parser.add_argument("--tp_size",
+                        help="Optionally specify the tensor-parallel (TP) size that the "
+                        "quantized model should correspond to. If specified, during KV "
+                        "cache scaling factor extraction the observed TP size will be "
+                        "checked against this and an error will be raised if there is "
+                        "a mismatch. If not specified, the quantized model's expected "
+                        "TP size is instead inferred from the largest TP rank observed. "
+                        "The expected TP size is cross-checked against the TP ranks "
+                        "observed in the quantized model and an error is raised if any "
+                        "discrepancies are found.",
+                        default=None, type=int)
     args = parser.parse_args()
 
     main(args)
