@@ -144,7 +144,9 @@ class ModelRunner:
             computed_block_nums = seq_group_metadata.computed_block_nums
             if computed_block_nums is not None and len(
                     computed_block_nums) > 0:
-                computed_len = len(computed_block_nums) * self.block_size
+                # Prefix is not supported with sliding_window
+                if self.sliding_window is None:
+                    computed_len = len(computed_block_nums) * self.block_size
                 prompt_tokens = prompt_tokens[computed_len:]
                 prefix_block_tables.append(computed_block_nums)
             else:
@@ -186,6 +188,9 @@ class ModelRunner:
             # mapping will be [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
             start_idx = 0
             if self.sliding_window is not None:
+                assert computed_len == 0, (
+                    "Prefix caching is currently not supported with "
+                    "sliding window attention")
                 start_idx = max(0, prompt_len - self.sliding_window)
             for i in range(computed_len, prompt_len):
                 if i < start_idx:
