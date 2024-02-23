@@ -462,12 +462,12 @@ class BlockSpaceManager:
         for block in block_table:
             block.last_accessed = access_time
 
-    def compute_all_blocks_in_seq(self, seq: Sequence,
-                                  max_computed_blocks: int):
+    def compute_all_blocks_in_seq(self, seq: Sequence):
         if seq.seq_id not in self.block_tables:
             return
         block_table = self.block_tables[seq.seq_id]
         counter = 0
+        max_computed_blocks = seq.get_len() // seq.block_size
         for block in block_table:
             if counter >= max_computed_blocks:
                 return
@@ -478,10 +478,12 @@ class BlockSpaceManager:
         if seq.seq_id not in self.block_tables:
             return []
         block_table = self.block_tables[seq.seq_id]
+        last_block = block_table[-1]
         # We want to get the first n contiguous completed blocks
+        # We exclude the last block because it's most likely not cached yet
         return [
             block.block_number
-            for block in takewhile(lambda block: block.computed, block_table)
+            for block in takewhile(lambda block: block.computed and block != last_block, block_table)
         ]
 
     def get_common_computed_block_ids(self,
@@ -494,5 +496,4 @@ class BlockSpaceManager:
 
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
         for seq in seq_group.seqs_dict.values():
-            self.compute_all_blocks_in_seq(seq,
-                                           seq.get_len() // seq.block_size)
+            self.compute_all_blocks_in_seq(seq)
