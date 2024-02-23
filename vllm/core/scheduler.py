@@ -364,7 +364,6 @@ class Scheduler:
         scheduler_outputs = self._schedule()
         now = time.time()
 
-        now = time.monotonic()
         # Create input data structures.
         seq_group_metadata_list: List[SequenceGroupMetadata] = []
         for seq_group in scheduler_outputs.scheduled_seq_groups:

@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod, abstractproperty
 
 from vllm.block import PhysicalTokenBlock, DEFAULT_LAST_ACCESSED_TIME
 
+
 class EvictionPolicy(enum.Enum):
     """Enum for eviction policy used by make_evictor to instantiate the correct
        Evictor subclass.
@@ -38,6 +39,7 @@ class Evictor(ABC):
 
 
 class LRUEvictor(Evictor):
+
     def __init__(self):
         self.free_table: Dict[int, PhysicalTokenBlock] = {}
 
@@ -86,9 +88,9 @@ class LRUEvictor(Evictor):
         self.free_table[block.block_hash] = block
 
     def remove(self, block_hash: int) -> PhysicalTokenBlock:
-        if not block_hash in self.free_table:
+        if block_hash not in self.free_table:
             raise AssertionError(
-            "Attempting to remove block that's not in the evictor") 
+                "Attempting to remove block that's not in the evictor")
         block: PhysicalTokenBlock = self.free_table[block_hash]
         del self.free_table[block_hash]
         return block
@@ -100,7 +102,7 @@ class LRUEvictor(Evictor):
 
 class FIFOEvictor(Evictor):
     """Evicts in a first-in-first-out order"""
-    
+
     def __init__(self):
         self.free_list: List[PhysicalTokenBlock] = []
 
@@ -123,7 +125,7 @@ class FIFOEvictor(Evictor):
                 return free_block
         raise AssertionError(
             "Attempting to remove block that's not in the evictor")
-    
+
     @property
     def num_blocks(self) -> int:
         return len(self.free_list)

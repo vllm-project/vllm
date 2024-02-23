@@ -7,6 +7,7 @@ _BLANK_TOKEN_ID = -1
 
 DEFAULT_LAST_ACCESSED_TIME = -1
 
+
 class LogicalTokenBlock:
     """A block that stores a contiguous chunk of tokens from left to right.
 
@@ -70,7 +71,6 @@ class PhysicalTokenBlock:
 
         self.computed = False
 
-    # TODO: update this
     def __repr__(self) -> str:
         return (f'PhysicalTokenBlock(device={self.device}, '
                 f'block_number={self.block_number}, '
