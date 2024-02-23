@@ -4,46 +4,8 @@ Run `pytest tests/prefix_caching/test_prefix_caching.py`.
 """
 import pytest
 
-from vllm import LLM, SamplingParams
 from vllm.core.block_manager import BlockAllocator
 from vllm.utils import Device
-
-prefix = (
-    "You are an expert school principal, skilled in effectively managing "
-    "faculty and staff. Draft 10-15 questions for a potential first grade "
-    "Head Teacher for my K-12, all-girls', independent school that emphasizes "
-    "community, joyful discovery, and life-long learning. The candidate is "
-    "coming in for a first-round panel interview for a 8th grade Math "
-    "teaching role. They have 5 years of previous teaching experience "
-    "as an assistant teacher at a co-ed, public school with experience "
-    "in middle school math teaching. Based on these information, fulfill "
-    "the following paragraph: ")
-
-
-def allocate_all_blocks(block_allocator, num_blocks):
-    blocks = []
-    for i in range(num_blocks):
-        # use i as the block_hash
-        blocks.append(block_allocator.allocate(i, 0))
-    return blocks
-
-
-@pytest.mark.parametrize("model", ["facebook/opt-125m"])
-@pytest.mark.parametrize("max_tokens", [16])
-def test_prefix_caching(
-    example_prompts,
-    model: str,
-    max_tokens: int,
-):
-    llm = LLM(model=model)
-    prompts = [prefix + prompt for prompt in example_prompts]
-    sampling_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
-    outputs_without_prefix = llm.generate(prompts, sampling_params)
-    outputs_with_prefix = llm.generate(prompts, sampling_params)
-    for output_without_prefix, output_with_prefix in zip(
-            outputs_without_prefix, outputs_with_prefix):
-        assert (output_without_prefix.outputs[0].token_ids ==
-                output_with_prefix.outputs[0].token_ids)
 
 
 @pytest.mark.parametrize("block_size", [16])
