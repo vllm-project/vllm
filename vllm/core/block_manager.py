@@ -2,57 +2,12 @@
 import enum
 from itertools import takewhile, count
 from os.path import commonprefix
-from time import monotonic
 from typing import Dict, List, Optional, Set, Tuple
 
 from vllm.block import BlockTable, PhysicalTokenBlock
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
-
-
-class EvictionPolicy(enum.Enum):
-    """Enum for eviction policy used by BlockAllocator."""
-    LRU = enum.auto()
-
-
-def lru_eviction(
-        free_table: Dict[int, PhysicalTokenBlock]) -> PhysicalTokenBlock:
-    free_blocks: List[PhysicalTokenBlock] = list(free_table.values())
-    if len(free_blocks) == 0:
-        raise ValueError("No usable cache memory left")
-
-    # Find lowest timestamp
-    lowest_timestamp = monotonic()
-    for block in free_blocks:
-        if block.last_accessed < lowest_timestamp:
-            lowest_timestamp = block.last_accessed
-
-    # Find all blocks with the lowest timestamp
-    least_recent: List[PhysicalTokenBlock] = []
-    for block in free_blocks:
-        if block.last_accessed == lowest_timestamp:
-            least_recent.append(block)
-
-    # Find highest prefix count per block
-    highest_num_hashed_tokens = 0
-    for block in least_recent:
-        if block.num_hashed_tokens > highest_num_hashed_tokens:
-            highest_num_hashed_tokens = block.num_hashed_tokens
-
-    evicted_block: Optional[PhysicalTokenBlock] = None
-
-    # Find the first block with the lowest timestamp
-    for block in least_recent:
-        if block.num_hashed_tokens == highest_num_hashed_tokens:
-            evicted_block = block
-            break
-
-    assert evicted_block is not None
-
-    del free_table[evicted_block.block_hash]
-
-    evicted_block.computed = False
-    return evicted_block
+from vllm.core.evictor import Evictor, EvictionPolicy, make_evictor
 
 
 class BlockAllocator:
@@ -67,29 +22,27 @@ class BlockAllocator:
                  device: Device,
                  block_size: int,
                  num_blocks: int,
-                 eviction_policy: EvictionPolicy = EvictionPolicy.LRU) -> None:
+                 eviction_policy: EvictionPolicy = EvictionPolicy.LRU,
+                 disable_caching: bool = False) -> None:
         self.device = device
         self.block_size = block_size
         self.num_blocks = num_blocks
-        self.eviction_policy = eviction_policy
+        self.disable_caching = disable_caching
 
         self.current_num_blocks = 0
         self.table: Dict[int, PhysicalTokenBlock] = {}
-        self.free_table: Dict[int, PhysicalTokenBlock] = {}
+
+        # Switch over to FIFO eviction when caching is disabled
+        if self.disable_caching:
+            eviction_policy = EvictionPolicy.FIFO
+        self.evictor: Evictor = make_evictor(eviction_policy)
 
         self.default_hash_ctr = count()
-
-    def evict(self) -> PhysicalTokenBlock:
-        if self.eviction_policy == EvictionPolicy.LRU:
-            return lru_eviction(self.free_table)
-        else:
-            raise ValueError(
-                f"Unknown cache eviction policy: {self.eviction_policy}")
 
     def allocate_block(self, block_hash: int,
                        num_hashed_tokens: int) -> PhysicalTokenBlock:
         if self.current_num_blocks == self.num_blocks:
-            block = self.evict()
+            block = self.evictor.evict()
             block.block_hash = block_hash
             block.num_hashed_tokens = num_hashed_tokens
             return block
@@ -104,15 +57,21 @@ class BlockAllocator:
     def allocate(self,
                  block_hash: Optional[int] = None,
                  num_hashed_tokens: int = 0) -> PhysicalTokenBlock:
+        # If caching is disabled, just allocate a new block and return it
+        if self.disable_caching:
+            block = self.allocate_block(next(self.default_hash_ctr),
+                                        num_hashed_tokens)
+            block.ref_count += 1
+            return block
+
         if block_hash is None:
             block_hash = next(self.default_hash_ctr)
-        if block_hash in self.free_table:
+        if block_hash in self.evictor:
             assert block_hash not in self.table
-            block = self.free_table[block_hash]
+            block = self.evictor.remove(block_hash)
             assert block.ref_count == 0
             self.table[block_hash] = block
             block.ref_count += 1
-            del self.free_table[block_hash]
             assert block.block_hash == block_hash
             return block
         if block_hash not in self.table:
@@ -128,22 +87,28 @@ class BlockAllocator:
             raise ValueError(f"Double free! {block} is already freed.")
         block.ref_count -= 1
         if block.ref_count == 0:
-            assert block.block_hash not in self.free_table
-            self.free_table[block.block_hash] = block
-            del self.table[block.block_hash]
+            assert block.block_hash not in self.evictor
+            self.evictor.append(block)
+
+            # If caching is enabled, remove the block from the table
+            if not self.disable_caching:
+                del self.table[block.block_hash]
 
     def get_num_free_blocks(self) -> int:
-        return self.num_blocks - self.current_num_blocks + len(self.free_table)
+        return self.num_blocks - self.current_num_blocks + self.evictor.num_blocks
 
     def contains_block(self, block_hash: int) -> bool:
-        return block_hash in self.table or block_hash in self.free_table
+        return block_hash in self.table or block_hash in self.evictor
 
     def update_hash(self, block_hash: int, block: PhysicalTokenBlock):
         assert (not self.contains_block(block_hash))
         old_hash = block.block_hash
-        del self.table[old_hash]
         block.block_hash = block_hash
-        self.table[block_hash] = block
+
+        # If caching is enabled, update the table
+        if not self.disable_caching:
+            del self.table[old_hash]
+            self.table[block_hash] = block
 
 
 class AllocStatus(enum.Enum):
@@ -170,6 +135,7 @@ class BlockSpaceManager:
         num_cpu_blocks: int,
         watermark: float = 0.01,
         sliding_window: Optional[int] = None,
+        disable_caching: bool = False,
     ) -> None:
         self.block_size = block_size
         self.num_total_gpu_blocks = num_gpu_blocks
@@ -185,10 +151,14 @@ class BlockSpaceManager:
         assert watermark >= 0.0
 
         self.watermark_blocks = int(watermark * num_gpu_blocks)
-        self.gpu_allocator = BlockAllocator(Device.GPU, block_size,
-                                            num_gpu_blocks)
-        self.cpu_allocator = BlockAllocator(Device.CPU, block_size,
-                                            num_cpu_blocks)
+        self.gpu_allocator = BlockAllocator(Device.GPU,
+                                            block_size,
+                                            num_gpu_blocks,
+                                            disable_caching=disable_caching)
+        self.cpu_allocator = BlockAllocator(Device.CPU,
+                                            block_size,
+                                            num_cpu_blocks,
+                                            disable_caching=disable_caching)
         # Mapping: seq_id -> BlockTable.
         self.block_tables: Dict[int, BlockTable] = {}
 

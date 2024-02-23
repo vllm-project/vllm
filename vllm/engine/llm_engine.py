@@ -721,11 +721,8 @@ class LLMEngine:
         # Update the scheduled sequence groups with the model outputs.
         scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
 
-        # If automatic prefix caching is disabled, all previously computed blocks
-        # will be recomputed
-        if not self.cache_config.disable_prefix_caching:
-            for seq_group in scheduled_seq_groups:
-                self.scheduler.mark_blocks_as_computed(seq_group)
+        for seq_group in scheduled_seq_groups:
+            self.scheduler.mark_blocks_as_computed(seq_group)
 
         for seq_group, outputs in zip(scheduled_seq_groups, output):
             self._process_sequence_group_outputs(seq_group, outputs)
