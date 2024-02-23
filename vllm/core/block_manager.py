@@ -482,8 +482,9 @@ class BlockSpaceManager:
         # We want to get the first n contiguous completed blocks
         # We exclude the last block because it's most likely not cached yet
         return [
-            block.block_number
-            for block in takewhile(lambda block: block.computed and block != last_block, block_table)
+            block.block_number for block in takewhile(
+                lambda block: block.computed and block != last_block,
+                block_table)
         ]
 
     def get_common_computed_block_ids(self,
