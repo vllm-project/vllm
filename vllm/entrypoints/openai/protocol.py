@@ -86,6 +86,8 @@ class ChatCompletionRequest(BaseModel):
     length_penalty: Optional[float] = 1.0
 
     def to_sampling_params(self) -> SamplingParams:
+        if self.logprobs and not self.top_logprobs:
+            raise ValueError("Top logprobs must be set when logprobs is.")
         return SamplingParams(
             n=self.n,
             presence_penalty=self.presence_penalty,

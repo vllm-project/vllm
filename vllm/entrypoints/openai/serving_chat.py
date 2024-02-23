@@ -160,8 +160,6 @@ class OpenAIServingChat(OpenAIServing):
                     previous_num_tokens[i]:] if output.logprobs else None
 
                 if request.logprobs:
-                    assert(top_logprobs is not None),\
-                           "top_logprobs must be provided when logprobs is requested"
                     logprobs = self._create_logprobs(
                         token_ids=delta_token_ids,
                         top_logprobs=top_logprobs,
@@ -242,8 +240,6 @@ class OpenAIServingChat(OpenAIServing):
             top_logprobs = output.logprobs
 
             if request.logprobs:
-                assert(top_logprobs is not None),\
-                       "top_logprobs must be provided when logprobs is requested"
                 logprobs = self._create_logprobs(
                     token_ids=token_ids,
                     top_logprobs=top_logprobs,
