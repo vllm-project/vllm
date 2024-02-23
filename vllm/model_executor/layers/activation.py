@@ -133,7 +133,7 @@ _ACTIVATION_REGISTRY = {
     "gelu": nn.GELU(),
     "gelu_fast": FastGELU(),
     "gelu_new": NewGELU(),
-    "gelu_pytorch_tanh": nn.GELU(approximate="tanh"),
+    "gelu_pytorch_tanh": NewGELU(),
     "relu": nn.ReLU(),
 }
 
