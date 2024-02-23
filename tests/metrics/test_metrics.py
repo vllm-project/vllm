@@ -15,7 +15,10 @@ def test_metric_counter_prompt_tokens(
     dtype: str,
     max_tokens: int,
 ) -> None:
-    vllm_model = vllm_runner(model, dtype=dtype, disable_log_stats=False)
+    vllm_model = vllm_runner(model,
+                             dtype=dtype,
+                             disable_log_stats=False,
+                             gpu_memory_utilization=0.4)
     tokenizer = vllm_model.model.get_tokenizer()
     prompt_token_counts = [len(tokenizer.encode(p)) for p in example_prompts]
     # This test needs at least 2 prompts in a batch of different lengths to verify their token count is correct despite padding.
@@ -44,7 +47,10 @@ def test_metric_counter_generation_tokens(
     dtype: str,
     max_tokens: int,
 ) -> None:
-    vllm_model = vllm_runner(model, dtype=dtype, disable_log_stats=False)
+    vllm_model = vllm_runner(model,
+                             dtype=dtype,
+                             disable_log_stats=False,
+                             gpu_memory_utilization=0.4)
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     tokenizer = vllm_model.model.get_tokenizer()
     stat_logger = vllm_model.model.llm_engine.stat_logger
