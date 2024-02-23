@@ -110,9 +110,6 @@ def _hf_tensorfile_iterator(filename: str, load_format: str,
         torch.cuda.empty_cache()
 
 
-# Used by both main and if __name__ == "__main__"
-_default_kvcache_scales_filename = "kv_cache_scales.json"
-
 def main(args):
     rank_tensors_map = {}
     hf_folder, hf_tensor_files, use_safetensors = _prepare_hf_weights(
@@ -157,7 +154,7 @@ def main(args):
         for name, param in _hf_tensorfile_iterator(tensor_file, args.load_format,
                                                   use_safetensors):
             if "kv_cache_scaling_factor" in name:
-                nums = [int(s) for s in name.split(module_delimiter) if s.isdigit()]
+                nums = [int(s) for s in name.split(module_delimiter) if s.isdecimal()]
                 assert len(nums) == 1, f"Could not determine layer idx for {name}"
                 layer_idx = nums[0]
                 assert layer_idx not in layer_scales_map, f"Duplicate scaling " \
@@ -171,14 +168,14 @@ def main(args):
                     raise
 
     if args.output_path is None:
-        output_file = os.path.join(hf_folder, _default_kvcache_scales_filename)
+        output_file = os.path.join(hf_folder, args.output_name)
     else:
-        output_file = os.path.join(args.output_path, _default_kvcache_scales_filename)
+        output_file = os.path.join(args.output_path, args.output_name)
         if not os.path.isdir(args.output_path):
             os.makedirs(args.output_path, exist_ok=True)
 
-    if (len(rank_tensors_map) == 0 or
-        all(len(layer_scales_map) == 0 for layer_scales_map in rank_tensors_map.values())):
+    if all(len(layer_scales_map) == 0 for layer_scales_map in rank_tensors_map.values()):
+        # Note: this is true even if the rank_tensors_map is empty
         print("WARNING: No KV cache scale factors found. No output saved.")
     else:
         empirical_tp_world_size = max(rank_tensors_map.keys()) + 1
@@ -221,12 +218,14 @@ if __name__ == "__main__":
     parser.add_argument("--revision",
                         help="Optionally specify the model's revision number.",
                         default=None)
-    parser.add_argument("--output_path",
+    parser.add_argument("--output_dir",
                         help="Optionally specify the output directory. By default the "
-                        "KV cache scaling factors will be saved in the model directory "
-                        f"with the filename {_default_kvcache_scales_filename}, however "
-                        "you can override this behavior here.",
+                        "KV cache scaling factors will be saved in the model directory, "
+                        "however you can override this behavior here.",
                         default=None)
+    parser.add_argument("--output_name",
+                        help="Optionally specify the output filename.",
+                        default="kv_cache_scales.json")
     parser.add_argument("--tp_size",
                         help="Optionally specify the tensor-parallel (TP) size that the "
                         "quantized model should correspond to. If specified, during KV "
