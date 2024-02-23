@@ -68,7 +68,6 @@ class cmake_build_ext(build_ext):
                 # temporary build directory instead
                 '-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY_{}={}'.format(
                     cfg.upper(), self.build_temp),
-                '--log-level=TRACE',
             ]
 
             verbose = bool(int(os.getenv('VERBOSE', '0')))
