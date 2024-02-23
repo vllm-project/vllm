@@ -47,6 +47,8 @@ from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator,
                                               kv_cache_scales_iterator)
 from vllm.sequence import SamplerOutput
+from vllm.config import LoRAConfig
+from vllm.utils import is_hip
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -395,4 +397,10 @@ class LlamaForCausalLM(nn.Module):
     def load_kv_cache_scales(self, filename: str) -> None:
         for layer_idx, scaling_factor in kv_cache_scales_iterator(filename):
             layer_paged_attn = self.model.layers[layer_idx].self_attn.attn
+            if is_hip():
+                # The scaling factor convention we are assuming is
+                # quantized_value * scaling_factor ~= true_value
+                # which is consistent with the practice of setting
+                # scaling_factor = tensor_amax / FPtype_max
+                scaling_factor *= 2
             layer_paged_attn.kv_cache_scaling_factor = scaling_factor
