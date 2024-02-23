@@ -28,7 +28,7 @@ def multi_process_tensor_parallel(
 ) -> None:
     # Using ray helps debugging the error when it failed
     # as compared to multiprocessing.
-    ray.init()
+    ray.init(ignore_reinit_error=True)
 
     distributed_init_port = get_open_port()
     refs = []

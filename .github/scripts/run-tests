@@ -48,7 +48,7 @@ if [ ! -d "${TEST_DIR}" ]; then
 fi
 
 # run tests serially
-TESTS_DOT_PY=$(find ${TEST_DIR}  -not -name "__init__.py" -name "*.py")
+TESTS_DOT_PY=$(find ${TEST_DIR} -name "test*.py")
 TESTS_TO_RUN=($TESTS_DOT_PY)
 SUCCESS=0
 for TEST in "${TESTS_TO_RUN[@]}"

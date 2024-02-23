@@ -15,6 +15,7 @@ runs:
       NUM_THREADS=$(./.github/scripts/determine-threading -G ${{ inputs.Gi_per_thread }})
       echo "MAX_JOBS=${NUM_THREADS}" >> $GITHUB_ENV
       echo "VLLM_INSTALL_PUNICA_KERNELS=1" >> $GITHUB_ENV
+      echo "NCCL_IGNORE_DISABLED_P2P=1" >> $GITHUB_ENV
       echo "PYENV_ROOT=/usr/local/apps/pyenv" >> $GITHUB_ENV
       echo "XDG_CONFIG_HOME=/usr/local/apps" >> $GITHUB_ENV
       WHOAMI=$(whoami)
