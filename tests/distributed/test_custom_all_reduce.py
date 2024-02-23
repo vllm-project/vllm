@@ -84,8 +84,10 @@ def P2P_disabled():
     return True
 
 
-@pytest.mark.skipif(P2P_disabled(),
-                    reason="Cuda failure 'peer access is not supported between these two devices'")
+@pytest.mark.skipif(
+    P2P_disabled(),
+    reason=
+    "Cuda failure 'peer access is not supported between these two devices'")
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
                     reason="Need at least 2 GPUs to run the test.")
 @pytest.mark.parametrize("tensor_parallel_size", [2])
