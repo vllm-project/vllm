@@ -128,7 +128,7 @@ class PagedAttention(nn.Module):
         # vectors will not be cached. This happens during the initial memory
         # profiling run.
         if key_cache is not None and value_cache is not None:
-            torch.ops.vllm.reshape_and_cache(
+            key_cache, value_cache = torch.ops.vllm.reshape_and_cache(
                 key,
                 value,
                 key_cache,
@@ -300,7 +300,7 @@ def _paged_attention(
         max_num_partitions == 1 or num_seqs * num_heads > 512)
     if use_v1:
         # Run PagedAttention V1.
-        ops.paged_attention_v1(
+        output = torch.ops.vllm.paged_attention_v1(
             output,
             query,
             key_cache,
@@ -328,7 +328,7 @@ def _paged_attention(
             device=output.device,
         )
         max_logits = torch.empty_like(exp_sums)
-        ops.paged_attention_v2(
+        output = torch.ops.vllm.paged_attention_v2(
             output,
             exp_sums,
             max_logits,
@@ -349,7 +349,7 @@ def _paged_attention(
 
 # needed for compile
 vllm_lib.define(
-    "reshape_and_cache(Tensor key, Tensor value, Tensor(a!) key_cache, Tensor(b!) value_cache, Tensor slot_mapping, str dtype) -> (Tensor(a!), Tensor(b!))"
+    "reshape_and_cache(Tensor key, Tensor value, Tensor key_cache, Tensor value_cache, Tensor slot_mapping, str dtype) -> (Tensor, Tensor)"
 )
 
 @torch.library.impl(vllm_lib, "reshape_and_cache", "Meta")
@@ -363,3 +363,126 @@ def _reshape_and_cache(key, value, key_cache, value_cache, slot_mapping, dtype):
     return key_cache, value_cache
 
 register_vllm_lowering(torch.ops.vllm.reshape_and_cache, [2, 3])
+
+
+vllm_lib.define(
+    "paged_attention_v1(Tensor out, Tensor query, Tensor key_cache, Tensor value_cache, int num_kv_heads, float scale, Tensor block_tables, Tensor context_lens, int block_size, SymInt max_context_len, Tensor? alibi_slopes, str kv_cache_dtype) -> Tensor"
+)
+
+
+@torch.library.impl(vllm_lib, "paged_attention_v1", "Meta")
+def _paged_attention_v1_meta(
+    out,
+    query,
+    key_cache,
+    value_cache,
+    num_kv_heads,
+    scale,
+    block_tables,
+    context_lens,
+    block_size,
+    max_context_len,
+    alibi_slopes,
+    kv_cache_dtype,
+):
+    return out
+
+
+@torch.library.impl(vllm_lib, "paged_attention_v1", "CUDA")
+def _paged_attention_v1(
+    out,
+    query,
+    key_cache,
+    value_cache,
+    num_kv_heads,
+    scale,
+    block_tables,
+    context_lens,
+    block_size,
+    max_context_len,
+    alibi_slopes,
+    kv_cache_dtype,
+):
+    ops.paged_attention_v1(
+        out,
+        query,
+        key_cache,
+        value_cache,
+        num_kv_heads,
+        scale,
+        block_tables,
+        context_lens,
+        block_size,
+        max_context_len,
+        alibi_slopes,
+        kv_cache_dtype,
+    )
+    return out
+
+register_vllm_lowering(torch.ops.vllm.paged_attention_v1, [0])
+
+
+
+vllm_lib.define(
+    "paged_attention_v2(Tensor out, Tensor exp_sums, Tensor max_logits, Tensor tmp_out, Tensor query, Tensor key_cache, Tensor value_cache, int num_kv_heads, float scale, Tensor block_tables, Tensor context_lens, int block_size, SymInt max_context_len, Tensor? alibi_slopes, str kv_cache_dtype) -> Tensor"
+)
+
+@torch.library.impl(vllm_lib, "paged_attention_v2", "Meta")
+def _paged_attention_v2_meta(
+    out,
+    exp_sums,
+    max_logits,
+    tmp_out,
+    query,
+    key_cache,
+    value_cache,
+    num_kv_heads,
+    scale,
+    block_tables,
+    context_lens,
+    block_size,
+    max_context_len,
+    alibi_slopes,
+    kv_cache_dtype,
+):
+    return out
+
+
+@torch.library.impl(vllm_lib, "paged_attention_v2", "CUDA")
+def _paged_attention_v2(
+    out,
+    exp_sums,
+    max_logits,
+    tmp_out,
+    query,
+    key_cache,
+    value_cache,
+    num_kv_heads,
+    scale,
+    block_tables,
+    context_lens,
+    block_size,
+    max_context_len,
+    alibi_slopes,
+    kv_cache_dtype,
+):
+    ops.paged_attention_v2(
+        out,
+        exp_sums,
+        max_logits,
+        tmp_out,
+        query,
+        key_cache,
+        value_cache,
+        num_kv_heads,
+        scale,
+        block_tables,
+        context_lens,
+        block_size,
+        max_context_len,
+        alibi_slopes,
+        kv_cache_dtype,
+    )
+    return out
+
+register_vllm_lowering(torch.ops.vllm.paged_attention_v2, [0])

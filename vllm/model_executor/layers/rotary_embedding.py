@@ -141,13 +141,12 @@ class RotaryEmbedding(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # ops.rotary_embedding() is an in-place operation that
         # updates the query and key tensors.
-        torch.ops.vllm.rotary_embedding(positions, query, key, self.head_size,
+        return torch.ops.vllm.rotary_embedding(positions, query, key, self.head_size,
                              self.cos_sin_cache, self.is_neox_style)
-        return query, key
 
 # needed for compile
 vllm_lib.define(
-    "rotary_embedding(Tensor positions, Tensor(a!) query, Tensor(b!) key, int head_size, Tensor cos_sin_cache, bool is_neox) -> (Tensor(a!), Tensor(b!))"
+    "rotary_embedding(Tensor positions, Tensor query, Tensor key, int head_size, Tensor cos_sin_cache, bool is_neox) -> (Tensor, Tensor)"
 )
 
 @torch.library.impl(vllm_lib, "rotary_embedding", "Meta")

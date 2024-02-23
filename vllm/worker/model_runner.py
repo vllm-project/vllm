@@ -712,8 +712,8 @@ class ModelRunner:
 
             # Run the model with the dummy inputs.
             self.compiled_model(
-                input_tokens,
-                input_positions,
+                input_tokens[:batch_size],
+                input_positions[:batch_size],
                 kv_caches,
                 input_metadata,
             )

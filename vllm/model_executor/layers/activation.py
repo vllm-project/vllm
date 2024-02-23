@@ -12,6 +12,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.utils import divide
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.lowering_utils import vllm_lib, register_vllm_lowering
 
 
 class SiluAndMul(nn.Module):
@@ -33,9 +34,27 @@ class SiluAndMul(nn.Module):
         d = x.shape[-1] // 2
         output_shape = (x.shape[:-1] + (d, ))
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        ops.silu_and_mul(out, x)
-        return out
+        return torch.ops.vllm.silu_and_mul(out, x)
 
+# needed for compile
+vllm_lib.define(
+    "silu_and_mul(Tensor out, Tensor input) -> Tensor"
+)
+
+@torch.library.impl(vllm_lib, "silu_and_mul", "Meta")
+def _silu_and_mul_meta(out, input):
+    return out
+
+
+@torch.library.impl(vllm_lib, "silu_and_mul", "CUDA")
+def _silu_and_mul(out, input):
+    ops.silu_and_mul(
+        out,
+        input
+    )
+    return out
+
+register_vllm_lowering(torch.ops.vllm.silu_and_mul, [0])
 
 class GeluAndMul(nn.Module):
     """An activation function for GeGLU.

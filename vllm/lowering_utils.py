@@ -1,9 +1,157 @@
+import collections
+from typing import DefaultDict, TypeVar, Generic
+
 import torch
 import torch._inductor.ir as ir
 import torch._inductor.lowering as lowering
+import torch._inductor.scheduler as sched
+import torch._inductor.dependencies as dependencies
 from torch._inductor.virtualized import V
 
 vllm_lib = torch.library.Library("vllm", "DEF")
+
+# Fixed in PT 2.2
+def pt22_compute_dependencies(self):
+    """
+    Create dependency edges between nodes, handling aliasing and
+    mutation properly.
+    """
+    T = TypeVar("T")
+
+    class DedupList(Generic[T]):
+        """
+        This data structure behaves like a list except it makes sure the
+        elements remain unique.
+        Normally one could use a set/dict for this purpose however
+        the list in question gets elements appended as it is being
+        iterated over which means that we need to keep the list
+        semantics.
+        """
+
+        def __init__(self, items=None, membership=None):
+            self.items = items or list()
+            self.membership = membership or set()
+
+        def append(self, node_user: T) -> None:
+            if node_user in self.membership:
+                return
+            self.items.append(node_user)
+            self.membership.add(node_user)
+
+        def __add__(self, other: "DedupList[T]") -> "DedupList[T]":
+            new_membership = set.union(self.membership, other.membership)
+            new_items = self.items + [
+                x for x in other.items if x not in self.membership
+            ]
+            return DedupList(new_items, new_membership)
+
+    name_to_users: DefaultDict[str, DedupList[sched.NodeUser]] = collections.defaultdict(
+        DedupList
+    )
+
+    # handle aliasing by using python aliasing in name_to_users
+    # if foo aliases bar then we will make name_to_users["foo"] point
+    # to the same python list as name_to_users["bar"]
+    for node1 in self.nodes:
+        node1_name = node1.get_name()
+        for node2_name in node1.get_aliases():
+            if node1_name in name_to_users and node2_name in name_to_users:
+                # merge the two
+                list1 = name_to_users[node1_name]
+                list2 = name_to_users[node2_name]
+                combined = list1 + list2
+                for key in name_to_users.keys():
+                    if name_to_users[key] is list1 or name_to_users[key] is list2:
+                        name_to_users[key] = combined
+            elif node1_name in name_to_users:
+                name_to_users[node2_name] = name_to_users[node1_name]
+            else:
+                name_to_users[node1_name] = name_to_users[node2_name]
+
+    def rename(n):
+        if n in self.mutation_renames:
+            return rename(self.mutation_renames[n])
+        return n
+
+    def dep_closure(node_name):
+        reachable_names = {node_name}
+        node = self.name_to_node[node_name]
+        write_dep = list(node.read_writes.writes)[0]
+        for read_dep in node.read_writes.reads:
+            if (
+                read_dep.name in self.name_to_node
+                and isinstance(read_dep, dependencies.MemoryDep)
+                and isinstance(write_dep, dependencies.MemoryDep)
+                and read_dep.index == write_dep.index
+                and read_dep.size == write_dep.size
+            ):
+                reachable_names.update(dep_closure(read_dep.name))
+        return reachable_names
+
+    def add_user(used_by_name, user_node, can_inplace=False, is_weak=False):
+        name_to_users[rename(used_by_name)].append(
+            sched.NodeUser(user_node, can_inplace, is_weak)
+        )
+
+    for node in self.nodes:
+        # a node will mutate either 0 or 1 buffers
+        for alt_name in node.get_mutations():
+            alt_name = rename(alt_name)
+            # this node must run after the prior writer
+            add_user(alt_name, node)
+            node.add_mutation_dep(dependencies.StarDep(alt_name))
+            for other_node in name_to_users[alt_name].items:
+                # this node must run after all prior readers
+                other_name = rename(other_node.get_name())
+                known_dep_node_names = dep_closure(node.get_name())
+                if other_name not in known_dep_node_names:
+                    # If this node already directly or indirectly depends on other_node,
+                    # we don't need to insert an extra dep.
+                    node.add_mutation_dep(dependencies.WeakDep(other_name))
+                    add_user(other_name, node, is_weak=True)
+
+        # add normal non-mutation dependencies
+        for read in node.read_writes.reads:
+            is_weak = isinstance(read, dependencies.WeakDep)
+            add_user(read.name, node, node.can_inplace(read), is_weak)
+
+        node.update_mutated_names(self.mutation_renames)
+
+        # update our renaming scheme for the next iteration
+        for alt_name in node.get_mutations():
+            self.mutation_renames[rename(alt_name)] = node.get_name()
+            self.mutation_renames[alt_name] = node.get_name()
+            self.mutation_real_name[node.get_name()] = self.mutation_real_name.get(
+                alt_name, alt_name
+            )
+
+    # make sure outputs aren't dead-code-eliminated
+    for node_name in V.graph.get_output_names():
+        add_user(node_name, sched.OutputNode(dependencies.StarDep(node_name)))
+
+    # make sure input mutation isn't dead-code-eliminated
+    for name in self.mutation_renames:
+        if name in V.graph.graph_inputs:
+            add_user(name, sched.OutputNode(dependencies.StarDep(name)))
+            V.graph.mutated_inputs.add(name)
+
+    inp_names = {
+        name: index for index, name in enumerate(V.graph.graph_inputs.keys())
+    }
+    V.graph.mutated_input_idxs = [
+        inp_names[name] for name in V.graph.mutated_inputs
+    ]
+
+    # copy users information onto the nodes
+    for node in self.nodes:
+        node.set_users(name_to_users[node.get_name()].items)
+
+    # populate inverse_users
+    for node in self.nodes:
+        for user in node.users:
+            user.node.inverse_users.append(node)
+
+sched.Scheduler.compute_dependencies = pt22_compute_dependencies
 
 # Available starting PT 2.2
 class NoneLayout(ir.IRNode):
@@ -70,9 +218,17 @@ class VllmCudaKernel(ir.FallbackKernel):
             schema=schema,
         )
         # Mark inplace inputs as mutated
-        for kernel_input in mutated_inputs:
-            V.graph.mark_buffer_mutated(kernel_input.get_name())
-            MutationOutput(kernel_input.layout, kernel_input, packed)
+        def mark_mutation(x):
+            if isinstance(x.data, ir.BaseView):
+                x = x.data.unwrap_view()
+            MutationOutput(x.layout, x, packed)
+        
+
+        for kernel_input_idx in mutated_inputs:
+            kernel_input = args[kernel_input_idx]
+            # V.graph.mark_buffer_mutated(kernel_input.get_name())
+            mark_mutation(kernel_input)
+            # MutationOutput(kernel_input.layout, kernel_input, packed)
 
 def register_vllm_lowering(op, mutating_inputs):
     lowering.fallbacks.add(op)
@@ -93,213 +249,3 @@ def register_vllm_lowering(op, mutating_inputs):
             return returns[0]
         else:
             return tuple(returns)
-
-
-# lib.define(
-#     "paged_attention_v2(Tensor out, Tensor exp_sums, Tensor max_logits, Tensor tmp_out, Tensor query, Tensor key_cache, Tensor value_cache, int num_kv_heads, float scale, Tensor block_tables, Tensor context_lens, int block_size, SymInt max_context_len, Tensor? alibi_slopes) -> Tensor"
-# )
-
-
-# @torch.library.impl(lib, "paged_attention_v2", "Meta")
-# def _paged_attention_v2_meta(
-#     out,
-#     exp_sums,
-#     max_logits,
-#     tmp_out,
-#     query,
-#     key_cache,
-#     value_cache,
-#     num_kv_heads,
-#     scale,
-#     block_tables,
-#     context_lens,
-#     block_size,
-#     max_context_len,
-#     alibi_slopes=None,
-# ):
-#     return out.contiguous()
-
-
-# @torch.library.impl(lib, "paged_attention_v2", "CUDA")
-# def _paged_attention_v2(
-#     out,
-#     exp_sums,
-#     max_logits,
-#     tmp_out,
-#     query,
-#     key_cache,
-#     value_cache,
-#     num_kv_heads,
-#     scale,
-#     block_tables,
-#     context_lens,
-#     block_size,
-#     max_context_len,
-#     alibi_slopes=None,
-# ):
-#     out = out.contiguous()
-#     exp_sums = exp_sums.contiguous()
-#     max_logits = max_logits.contiguous()
-#     tmp_out = tmp_out.contiguous()
-#     query = query.contiguous()
-#     key_cache = key_cache.contiguous()
-#     value_cache = value_cache.contiguous()
-#     block_tables = block_tables.contiguous()
-#     context_lens = context_lens.contiguous()
-
-#     attn_ops.paged_attention_v2(
-#         out,
-#         exp_sums,
-#         max_logits,
-#         tmp_out,
-#         query,
-#         key_cache,
-#         value_cache,
-#         num_kv_heads,
-#         scale,
-#         block_tables,
-#         context_lens,
-#         block_size,
-#         max_context_len,
-#         alibi_slopes,
-#     )
-#     return out
-
-
-# lowering.fallbacks.add(torch.ops.paged_attention.paged_attention_v2)
-
-
-# @lowering.register_lowering(
-#     torch.ops.paged_attention.paged_attention_v2, type_promotion_kind=None
-# )
-# def _paged_attention_v2_lowering(
-#     out,
-#     exp_sums,
-#     max_logits,
-#     tmp_out,
-#     query,
-#     key_cache,
-#     value_cache,
-#     num_kv_heads,
-#     scale,
-#     block_tables,
-#     context_lens,
-#     block_size,
-#     max_context_len,
-#     alibi_slopes=None,
-# ):
-#     VllmCudaKernel.create(
-#         torch.ops.paged_attention.paged_attention_v2.default,
-#         out,
-#         exp_sums,
-#         max_logits,
-#         tmp_out,
-#         query,
-#         key_cache,
-#         value_cache,
-#         num_kv_heads,
-#         scale,
-#         block_tables,
-#         context_lens,
-#         block_size,
-#         max_context_len,
-#         alibi_slopes,
-#         mutated_inputs=[out],
-#     )
-#     return out
-
-
-# lib.define(
-#     "paged_attention_v1(Tensor out, Tensor query, Tensor key_cache, Tensor value_cache, int num_kv_heads, float scale, Tensor block_tables, Tensor context_lens, int block_size, SymInt max_context_len, Tensor? alibi_slopes) -> Tensor"
-# )
-
-
-# @torch.library.impl(lib, "paged_attention_v1", "Meta")
-# def _paged_attention_v1_meta(
-#     out,
-#     query,
-#     key_cache,
-#     value_cache,
-#     num_kv_heads,
-#     scale,
-#     block_tables,
-#     context_lens,
-#     block_size,
-#     max_context_len,
-#     alibi_slopes=None,
-# ):
-#     return out.contiguous()
-
-
-# @torch.library.impl(lib, "paged_attention_v1", "CUDA")
-# def _paged_attention_v1(
-#     out,
-#     query,
-#     key_cache,
-#     value_cache,
-#     num_kv_heads,
-#     scale,
-#     block_tables,
-#     context_lens,
-#     block_size,
-#     max_context_len,
-#     alibi_slopes=None,
-# ):
-#     out = out.contiguous()
-#     query = query.contiguous()
-#     key_cache = key_cache.contiguous()
-#     value_cache = value_cache.contiguous()
-#     block_tables = block_tables.contiguous()
-#     context_lens = context_lens.contiguous()
-
-#     attn_ops.paged_attention_v1(
-#         out,
-#         query,
-#         key_cache,
-#         value_cache,
-#         num_kv_heads,
-#         scale,
-#         block_tables,
-#         context_lens,
-#         block_size,
-#         max_context_len,
-#         alibi_slopes,
-#     )
-#     return out
-
-
-# lowering.fallbacks.add(torch.ops.paged_attention.paged_attention_v1)
-
-
-# @lowering.register_lowering(
-#     torch.ops.paged_attention.paged_attention_v1, type_promotion_kind=None
-# )
-# def _paged_attention_v1_lowering(
-#     out,
-#     query,
-#     key_cache,
-#     value_cache,
-#     num_kv_heads,
-#     scale,
-#     block_tables,
-#     context_lens,
-#     block_size,
-#     max_context_len,
-#     alibi_slopes=None,
-# ):
-#     PagedAttnKernel.create(
-#         torch.ops.paged_attention.paged_attention_v1.default,
-#         out,
-#         query,
-#         key_cache,
-#         value_cache,
-#         num_kv_heads,
-#         scale,
-#         block_tables,
-#         context_lens,
-#         block_size,
-#         max_context_len,
-#         alibi_slopes,
-#         mutated_inputs=[out],
-#     )
-#     return out
