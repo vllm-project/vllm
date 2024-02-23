@@ -1,6 +1,5 @@
-import prometheus_client
 from vllm.logger import init_logger
-from prometheus_client import Counter, Gauge, Histogram, CollectorRegistry, disable_created_metrics
+from prometheus_client import Counter, Gauge, Histogram, REGISTRY, disable_created_metrics
 
 import time
 import numpy as np
@@ -8,6 +7,8 @@ from typing import Dict, List
 from dataclasses import dataclass
 
 logger = init_logger(__name__)
+
+disable_created_metrics()
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the metrics definitions.
@@ -17,9 +18,10 @@ logger = init_logger(__name__)
 class Metrics:
 
     def __init__(self, labelnames: List[str]):
-        # Reset Prometheus registry
-        prometheus_client.REGISTRY = CollectorRegistry(auto_describe=True)
-        disable_created_metrics()
+        # Unregister any existing vLLM collectors
+        for collector in list(REGISTRY._collector_to_names):
+            if hasattr(collector, "_name") and "vllm" in collector._name:
+                REGISTRY.unregister(collector)
 
         # System stats
         self.gauge_scheduler_running = Gauge(
