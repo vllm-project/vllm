@@ -3,10 +3,12 @@
 import time
 from typing import Dict, List, Literal, Optional, Union
 
+from enum import Enum
 from pydantic import BaseModel, Field, model_validator
 
 from vllm.utils import random_uuid
 from vllm.sampling_params import SamplingParams
+from vllm.model_executor.structure_logits_processors import JSONStructureLogitsProcessor
 
 import torch
 
@@ -55,6 +57,10 @@ class UsageInfo(BaseModel):
     completion_tokens: Optional[int] = 0
 
 
+class ResponseFormat(BaseModel):
+    type: Literal["text", "json_object"] = "text"
+
+
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[Dict[str, str]]
@@ -89,6 +95,7 @@ class ChatCompletionRequest(BaseModel):
     guided_json: Optional[Union[str, dict, BaseModel]] = None
     guided_regex: Optional[str] = None
     guided_choice: Optional[List[str]] = None
+    response_format: Optional[ResponseFormat] = None
 
     def to_sampling_params(self) -> SamplingParams:
         if self.logprobs and not self.top_logprobs:
@@ -107,6 +114,8 @@ class ChatCompletionRequest(BaseModel):
                 return logits
 
             logits_processors = [logit_bias_logits_processor]
+        if self.response_format and self.response_format.type == "json_object":
+            logits_processors = (logits_processors or []) + [JSONStructureLogitsProcessor()]
 
         return SamplingParams(
             n=self.n,
@@ -183,6 +192,7 @@ class CompletionRequest(BaseModel):
     guided_json: Optional[Union[str, dict, BaseModel]] = None
     guided_regex: Optional[str] = None
     guided_choice: Optional[List[str]] = None
+    response_format: Optional[ResponseFormat] = None
 
     def to_sampling_params(self):
         echo_without_generation = self.echo and self.max_tokens == 0
@@ -200,6 +210,8 @@ class CompletionRequest(BaseModel):
                 return logits
 
             logits_processors = [logit_bias_logits_processor]
+        if self.response_format and self.response_format.type == "json_object":
+            logits_processors = (logits_processors or []) + [JSONStructureLogitsProcessor()]
 
         return SamplingParams(
             n=self.n,

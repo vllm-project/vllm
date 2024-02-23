@@ -24,6 +24,8 @@ from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_engine import LoRA
 
+from vllm.model_executor.structure_logits_processors import JSONStructureLogitsProcessor
+
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
 openai_serving_chat: OpenAIServingChat = None
@@ -141,6 +143,10 @@ def parse_args():
         "If a function is provided, vLLM will add it to the server using @app.middleware('http'). "
         "If a class is provided, vLLM will add it to the server using app.add_middleware(). "
     )
+    parser.add_argument(
+        "--enable-json-mode",
+        action="store_true",
+        help="Enables JSON mode by passing response_format=\{\"type\":\"json_object\"\}")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     return parser.parse_args()
@@ -204,6 +210,12 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump())
 
 
+async def _post_init():
+    engine_model_config = await engine.get_model_config()
+    if args.enable_json_mode:
+        JSONStructureLogitsProcessor.init_static(engine_model_config, openai_serving_chat.tokenizer)
+
+
 if __name__ == "__main__":
     args = parse_args()
 
@@ -248,12 +260,24 @@ if __name__ == "__main__":
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)
+
     openai_serving_chat = OpenAIServingChat(engine, served_model,
                                             args.response_role,
                                             args.lora_modules,
                                             args.chat_template)
     openai_serving_completion = OpenAIServingCompletion(
         engine, served_model, args.lora_modules)
+
+    try:
+        event_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        event_loop = None
+
+    if event_loop is not None and event_loop.is_running(
+    ):  # If the current is instanced by Ray Serve, there is already a running event loop
+        event_loop.create_task(_post_init())
+    else:  # When using single vLLM without engine_use_ray
+        asyncio.run(_post_init())
 
     app.root_path = args.root_path
     uvicorn.run(app,
