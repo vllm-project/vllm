@@ -440,10 +440,11 @@ if os.environ.get("VLLM_USE_PRECOMPILED"):
     package_data["vllm"].append("*.so")
 
 setuptools.setup(
-    name="vllm",
+    name="nm-vllm",
     version=get_vllm_version(),
-    author="vLLM Team",
-    license="Apache 2.0",
+    author="vLLM Team, Neural Magic",
+    author_email="support@neuralmagic.com",
+    license="Custom",
     description=("A high-throughput and memory-efficient inference and "
                  "serving engine for LLMs"),
     long_description=read_readme(),
