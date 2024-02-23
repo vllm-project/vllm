@@ -319,7 +319,7 @@ class CacheConfig:
             pass
         elif self.cache_dtype == "fp8_e5m2":
             nvcc_cuda_version = get_nvcc_cuda_version()
-            if nvcc_cuda_version < Version("11.8"):
+            if nvcc_cuda_version and nvcc_cuda_version < Version("11.8"):
                 raise ValueError(
                     "FP8 is not supported when cuda version is lower than 11.8."
                 )
