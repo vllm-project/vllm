@@ -35,8 +35,12 @@ class SparseW16A16LinearMethod(LinearMethodBase):
         weight = LazyCompressedParameter(
             torch.empty((output_size_per_partition, input_size_per_partition),
                         dtype=params_dtype),
+            # For create_weights(..), we initialize an empty tensor to
+            # save GPU memory. When the parameter will be loaded from
+            # disk it will be copied into this tensor
+            is_empty=True,
             storage_format_cls=self.storage_format_cls,
-            # if we don't support F.linear or something analogous,
+            # If we don't support F.linear or something analogous,
             # transpose when we compress so we can use a basic matmul
             compress_transposed=not supports_linear)
 
