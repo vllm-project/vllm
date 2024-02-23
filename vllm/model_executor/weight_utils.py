@@ -262,7 +262,7 @@ def hf_model_weights_iterator(
             torch.cuda.empty_cache()
 
 
-def kv_cache_scales_iterator(filename: str) -> Iterator[Tuple[int, torch.Tensor]]:
+def kv_cache_scales_iterator(filename: str) -> Iterator[Tuple[int, float]]:
     """
     A simple utility to read in KV cache scaling factors that have been
     previously serialized to disk. Used by the model to populate the appropriate
