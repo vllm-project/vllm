@@ -221,7 +221,7 @@ class EngineArgs:
             '--sparsity',
             '-s',
             type=str,
-            choices=['sparse_w16a16', None],
+            choices=[None, 'sparse_w16a16', 'semi_structured_sparse_w16a16'],
             default=None,
             help='Method used to compress sparse weights. If '
             'None, we first check the `sparsity_config` attribute '
