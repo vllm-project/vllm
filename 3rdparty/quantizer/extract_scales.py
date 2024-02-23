@@ -167,12 +167,12 @@ def main(args):
                             "scale factor.")
                     raise
 
-    if args.output_path is None:
+    if args.output_dir is None:
         output_file = os.path.join(hf_folder, args.output_name)
     else:
-        output_file = os.path.join(args.output_path, args.output_name)
-        if not os.path.isdir(args.output_path):
-            os.makedirs(args.output_path, exist_ok=True)
+        output_file = os.path.join(args.output_dir, args.output_name)
+        if not os.path.isdir(args.output_dir):
+            os.makedirs(args.output_dir, exist_ok=True)
 
     if all(len(layer_scales_map) == 0 for layer_scales_map in rank_tensors_map.values()):
         # Note: this is true even if the rank_tensors_map is empty
