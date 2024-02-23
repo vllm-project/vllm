@@ -6,6 +6,11 @@ from packaging.version import Version
 import torch
 from transformers import PretrainedConfig
 
+try:
+    import flash_attn
+except ImportError:
+    flash_attn = None
+
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config
 from vllm.utils import get_cpu_memory, is_hip, get_nvcc_cuda_version
@@ -79,6 +84,7 @@ class ModelConfig:
         quantization: Optional[str] = None,
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
+        use_flash_attn: Optional[bool] = False,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -93,6 +99,7 @@ class ModelConfig:
         self.quantization = quantization
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
+        self.use_flash_attn = use_flash_attn
 
         if os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true":
             # download model from ModelScope hub,
@@ -117,6 +124,7 @@ class ModelConfig:
         self._verify_tokenizer_mode()
         self._verify_quantization()
         self._verify_cuda_graph()
+        self._verify_flash_attn()
 
     def _verify_load_format(self) -> None:
         load_format = self.load_format.lower()
@@ -192,6 +200,18 @@ class ModelConfig:
             self.max_context_len_to_capture = self.max_model_len
         self.max_context_len_to_capture = min(self.max_context_len_to_capture,
                                               self.max_model_len)
+
+    def _verify_flash_attn(self) -> None:
+        if flash_attn is None:
+            raise ValueError(
+                "flash-attn is not installed. Please install flash-attn>=2.5.0 to use "
+                "the flash attention kernel.")
+        if Version(flash_attn.__version__) < Version("2.5.0"):
+            raise ValueError(
+                "flash-attn >= 2.5.0 is required. Please upgrade flash-attn to "
+                "the latest version.")
+        if is_hip():
+            raise ValueError("flash-attn cannot doesn't support ROCm.")
 
     def verify_with_parallel_config(
         self,

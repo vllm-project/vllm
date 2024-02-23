@@ -7,6 +7,10 @@ import torch.nn as nn
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
                                          LowerTriangularMaskWithTensorBias)
+try:
+    from flash_attn import flash_attn_func, flash_attn_with_kvcache
+except ImportError:
+    flash_attn_func, flash_attn_with_kvcache = None, None
 
 from vllm._C import ops
 from vllm._C import cache_ops
@@ -110,8 +114,10 @@ class PagedAttention(nn.Module):
             value: shape = [batch_size, seq_len, num_kv_heads * head_size]
             key_cache: shape = [num_blocks, num_kv_heads, head_size/x,
                 block_size, x]
+                           or: [num_blocks, block_size, num_kv_heads, head_size]
             value_cache: shape = [num_blocks, num_kv_heads, head_size,
                 block_size]
+                           or: [num_blocks, block_size, num_kv_heads, head_size]
             input_metadata: metadata for the inputs.
         Returns:
             shape = [batch_size, seq_len, num_heads * head_size]
@@ -127,19 +133,55 @@ class PagedAttention(nn.Module):
         # vectors will not be cached. This happens during the initial memory
         # profiling run.
         if key_cache is not None and value_cache is not None:
-            cache_ops.reshape_and_cache(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                input_metadata.slot_mapping.flatten(),
-                input_metadata.kv_cache_dtype,
-            )
+            if input_metadata.use_flash_attn:
+                # Update kv-cache using tensor indexing. We don't use the kernel
+                # `flash_attn_with_kvcache` for kv-cache updating as it submitted
+                # many small kernels for each key/value and is slow.
+                flatten_slot_mapping = input_metadata.slot_mapping.flatten()
+                slot_block_index = flatten_slot_mapping // key_cache.shape[1]
+                slot_block_offset = flatten_slot_mapping % key_cache.shape[1]
+                key_cache[slot_block_index, slot_block_offset, :, :] = key
+                value_cache[slot_block_index, slot_block_offset, :, :] = value
+            else:
+                cache_ops.reshape_and_cache(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    input_metadata.slot_mapping.flatten(),
+                    input_metadata.kv_cache_dtype,
+                )
 
-        if input_metadata.is_prompt:
+        if input_metadata.is_prompt and input_metadata.use_flash_attn:
+            # normal attention
+            query = query.unflatten(0, (batch_size, seq_len))
+            key = key.unflatten(0, (batch_size, seq_len))
+            value = value.unflatten(0, (batch_size, seq_len))
+            if (key_cache is None or value_cache is None
+                    or not input_metadata.context_lens.any()):
+                output = flash_attn_func(
+                    q=query,
+                    k=key,
+                    v=value,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    alibi_slopes=self.alibi_slopes,
+                )
+            else:
+                output = flash_attn_with_kvcache(
+                    q=query,
+                    k_cache=key_cache,
+                    v_cache=value_cache,
+                    cache_seqlens=input_metadata.context_lens + seq_len,
+                    block_table=input_metadata.block_tables,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    alibi_slopes=self.alibi_slopes,
+                )
+        elif input_metadata.is_prompt and not input_metadata.use_flash_attn:
             # normal attention
             if (key_cache is None or value_cache is None
-                    or input_metadata.block_tables.numel() == 0):
+                    or not input_metadata.context_lens.any()):
                 if self.num_kv_heads != self.num_heads:
                     # As of Nov 2023, xformers only supports MHA. For MQA/GQA,
                     # project the key and value tensors to the desired number of
@@ -228,8 +270,12 @@ class PagedAttention(nn.Module):
             # Decoding run.
             output = _paged_attention(
                 query,
+                key,
+                value,
                 key_cache,
                 value_cache,
+                batch_size,
+                seq_len,
                 input_metadata,
                 self.num_kv_heads,
                 self.scale,
@@ -276,8 +322,12 @@ def _make_alibi_bias(
 
 def _paged_attention(
     query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
+    num_seqs: int,
+    seq_len: int,
     input_metadata: InputMetadata,
     num_kv_heads: int,
     scale: float,
@@ -286,7 +336,7 @@ def _paged_attention(
     output = torch.empty_like(query)
 
     block_size = value_cache.shape[3]
-    num_seqs, num_heads, head_size = query.shape
+    _, num_heads, head_size = query.shape
     max_num_partitions = (
         (input_metadata.max_context_len + _PARTITION_SIZE - 1) //
         _PARTITION_SIZE)
@@ -299,7 +349,34 @@ def _paged_attention(
     # For context len > 8192, use V2 kernel to avoid shared memory shortage.
     use_v1 = input_metadata.max_context_len <= 8192 and (
         max_num_partitions == 1 or num_seqs * num_heads > 512)
-    if use_v1:
+
+    # NOTE: in `_prepare_prompt` and `_prepare_decode` is filled in different
+    # manner (which may needs to be fixed in the future): in the former
+    # `context_lens` is the length of contexts whose kv-cache has been stored
+    # (e.g., with prefix cache), however, in the later `context_lens` is the
+    # length of current attention context (includes the token whose kv-cache
+    # will be filled in this round).
+    #
+    # The kernel `flash_attn_with_kvcache` expects `cache_seqlens` to be the
+    # length of the context whose kv-cache has been stored, i.e., the value of
+    # `context_lens - seq_len` for decoding.
+    #
+    # In the contrast, both `paged_attention_v1` and `paged_attention_v2` expects
+    # the `context_lens` to be the length of the current attention context.
+
+    if input_metadata.use_flash_attn:
+        # see also: https://github.com/Dao-AILab/flash-attention/commit/54e80a3829c6d2337570d01e78ebd9529c02d342
+        output = flash_attn_with_kvcache(
+            q=query.reshape(num_seqs, -1, *query.shape[1:]),
+            k_cache=key_cache,
+            v_cache=value_cache,
+            cache_seqlens=input_metadata.context_lens,
+            block_table=input_metadata.block_tables,
+            softmax_scale=scale,
+            causal=True,
+            alibi_slopes=alibi_slopes,
+        )
+    elif use_v1:
         # Run PagedAttention V1.
         ops.paged_attention_v1(
             output,

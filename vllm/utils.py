@@ -226,6 +226,7 @@ def create_kv_caches_with_random(
     model_dtype: Optional[Union[str, torch.dtype]] = None,
     seed: Optional[int] = 0,
     device: Optional[str] = "cuda",
+    use_flash_attn: Optional[bool] = False,
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
@@ -251,8 +252,12 @@ def create_kv_caches_with_random(
         raise ValueError(f"Invalid kv cache dtype: {cache_dtype}")
 
     scale = head_size**-0.5
-    x = 16 // torch.tensor([], dtype=torch_dtype).element_size()
-    key_cache_shape = (num_blocks, num_heads, head_size // x, block_size, x)
+    if use_flash_attn:
+        key_cache_shape = (num_blocks, block_size, num_heads, head_size)
+    else:
+        x = 16 // torch.tensor([], dtype=torch_dtype).element_size()
+        key_cache_shape = (num_blocks, num_heads, head_size // x, block_size,
+                           x)
     key_caches = []
     for _ in range(num_layers):
         key_cache = torch.empty(size=key_cache_shape,
@@ -267,7 +272,10 @@ def create_kv_caches_with_random(
                 f"Does not support key cache of type {cache_dtype}")
         key_caches.append(key_cache)
 
-    value_cache_shape = (num_blocks, num_heads, head_size, block_size)
+    if use_flash_attn:
+        value_cache_shape = (num_blocks, block_size, num_heads, head_size)
+    else:
+        value_cache_shape = (num_blocks, num_heads, head_size, block_size)
     value_caches = []
     for _ in range(num_layers):
         value_cache = torch.empty(size=value_cache_shape,

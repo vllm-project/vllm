@@ -140,12 +140,22 @@ class ModelRunner:
             prompt_lens.append(prompt_len)
             prefix_len = 0
             prefix = seq_group_metadata.prefix
-            if prefix is not None and prefix.computed:
-                prefix_len = prefix.get_length()
-                prompt_tokens = prompt_tokens[prefix_len:]
-                prefix_block_tables.append(prefix.get_block_numbers())
+            if prefix is not None:
+                current_block_tables = prefix.get_block_numbers()
+                if prefix.computed:
+                    prefix_len = prefix.get_length()
+                    prompt_tokens = prompt_tokens[prefix_len:]
             else:
-                prefix_block_tables.append([])
+                current_block_tables = []
+
+            # append seq groups's block table as the key-value cache
+            # will be updated (cached) by the flash-attn kernels
+            if seq_group_metadata.block_tables:
+                current_block_tables.extend(
+                    seq_group_metadata.block_tables[seq_id]
+                    [len(current_block_tables):])
+            prefix_block_tables.append(current_block_tables)
+
             # actual prompt lens
             context_lens.append(prefix_len)
             subquery_lens.append(prompt_len - prefix_len)
@@ -249,6 +259,7 @@ class ModelRunner:
             block_tables=block_tables,
             use_cuda_graph=False,
             kv_cache_dtype=self.kv_cache_dtype,
+            use_flash_attn=getattr(self.model_config, 'use_flash_attn', False),
         )
         return (input_tokens, input_positions, input_metadata, prompt_lens,
                 subquery_lens, lora_index_mapping, lora_prompt_mapping,
@@ -377,6 +388,7 @@ class ModelRunner:
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
             kv_cache_dtype=self.kv_cache_dtype,
+            use_flash_attn=self.model_config.use_flash_attn,
         )
         return (input_tokens, input_positions, input_metadata,
                 lora_index_mapping, lora_prompt_mapping, lora_requests)
@@ -515,6 +527,7 @@ class ModelRunner:
                 "block_tables": input_metadata.block_tables,
                 "use_cuda_graph": input_metadata.use_cuda_graph,
                 "kv_cache_dtype": input_metadata.kv_cache_dtype,
+                "use_flash_attn": input_metadata.use_flash_attn,
                 "selected_token_indices":
                 sampling_metadata.selected_token_indices,
                 "lora_requests": lora_requests,
@@ -538,6 +551,7 @@ class ModelRunner:
                 block_tables=metadata_dict["block_tables"],
                 use_cuda_graph=metadata_dict["use_cuda_graph"],
                 kv_cache_dtype=metadata_dict["kv_cache_dtype"],
+                use_flash_attn=metadata_dict["use_flash_attn"],
             )
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
@@ -722,6 +736,8 @@ class ModelRunner:
                     block_tables=block_tables[:batch_size],
                     use_cuda_graph=True,
                     kv_cache_dtype=self.kv_cache_dtype,
+                    use_flash_attn=getattr(self.model_config, 'use_flash_attn',
+                                           False),
                 )
 
                 if self.lora_config:

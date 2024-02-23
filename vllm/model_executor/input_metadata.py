@@ -27,6 +27,7 @@ class InputMetadata:
         block_tables: Optional[torch.Tensor],
         use_cuda_graph: bool,
         kv_cache_dtype: str,
+        use_flash_attn: bool = False,
     ) -> None:
         self.is_prompt = is_prompt
         self.prompt_lens = prompt_lens
@@ -38,6 +39,7 @@ class InputMetadata:
         self.block_tables = block_tables
         self.use_cuda_graph = use_cuda_graph
         self.kv_cache_dtype = kv_cache_dtype
+        self.use_flash_attn = use_flash_attn
 
         # Set during the execution of the first attention op.
         # FIXME(woosuk): This is a hack.
@@ -48,7 +50,10 @@ class InputMetadata:
                 f"is_prompt={self.is_prompt}, "
                 f"max_context_len={self.max_context_len}, "
                 f"slot_mapping={self.slot_mapping}, "
+                f"prompt_lens={self.prompt_lens}, "
+                f"start_loc={self.start_loc}, "
                 f"context_lens={self.context_lens}, "
                 f"block_tables={self.block_tables}, "
                 f"use_cuda_graph={self.use_cuda_graph}, "
-                f"kv_cache_dtype={self.kv_cache_dtype})")
+                f"kv_cache_dtype={self.kv_cache_dtype}, "
+                f"use_flash_attn={self.use_flash_attn})")

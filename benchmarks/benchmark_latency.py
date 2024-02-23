@@ -26,6 +26,7 @@ def main(args: argparse.Namespace):
         enforce_eager=args.enforce_eager,
         kv_cache_dtype=args.kv_cache_dtype,
         device=args.device,
+        use_flash_attn=args.use_flash_attn,
     )
 
     sampling_params = SamplingParams(
@@ -145,5 +146,9 @@ if __name__ == '__main__':
         default="cuda",
         choices=["cuda"],
         help='device type for vLLM execution, supporting CUDA only currently.')
+    parser.add_argument(
+        "--use-flash-attn",
+        action="store_true",
+        help="Use flash attention (requires flash-attn >= 2.5.0).")
     args = parser.parse_args()
     main(args)

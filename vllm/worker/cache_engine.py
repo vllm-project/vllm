@@ -35,14 +35,20 @@ class CacheEngine:
         self.num_layers = model_config.get_num_layers(parallel_config)
         self.num_heads = model_config.get_num_kv_heads(parallel_config)
 
-        self.block_size = cache_config.block_size
-        self.num_gpu_blocks = cache_config.num_gpu_blocks
-        self.num_cpu_blocks = cache_config.num_cpu_blocks
-
         if cache_config.cache_dtype == "auto":
             self.dtype = model_config.dtype
         else:
             self.dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+
+        if model_config.use_flash_attn and self.dtype not in [
+                torch.half, torch.bfloat16
+        ]:
+            raise ValueError(
+                "flash-attn requires cache_dtype to be half or bfloat16")
+
+        self.block_size = cache_config.block_size
+        self.num_gpu_blocks = cache_config.num_gpu_blocks
+        self.num_cpu_blocks = cache_config.num_cpu_blocks
 
         # Initialize the cache.
         self.gpu_cache = self.allocate_gpu_cache()
@@ -55,21 +61,35 @@ class CacheEngine:
         self.events = [torch.cuda.Event() for _ in range(self.num_layers)]
 
     def get_key_block_shape(self) -> Tuple[int, int, int, int]:
-        element_size = torch.tensor([], dtype=self.dtype).element_size()
-        x = 16 // element_size
-        return (
-            self.num_heads,
-            self.head_size // x,
-            self.block_size,
-            x,
-        )
+        if self.model_config.use_flash_attn:
+            return (
+                self.block_size,
+                self.num_heads,
+                self.head_size,
+            )
+        else:
+            element_size = torch.tensor([], dtype=self.dtype).element_size()
+            x = 16 // element_size
+            return (
+                self.num_heads,
+                self.head_size // x,
+                self.block_size,
+                x,
+            )
 
     def get_value_block_shape(self) -> Tuple[int, int, int]:
-        return (
-            self.num_heads,
-            self.head_size,
-            self.block_size,
-        )
+        if self.model_config.use_flash_attn:
+            return (
+                self.block_size,
+                self.num_heads,
+                self.head_size,
+            )
+        else:
+            return (
+                self.num_heads,
+                self.head_size,
+                self.block_size,
+            )
 
     def allocate_gpu_cache(self) -> List[KVCache]:
         gpu_cache: List[KVCache] = []
@@ -152,6 +172,8 @@ class CacheEngine:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
     ) -> int:
+        ''' Returns the nbytes of kv cache for a single token.
+        '''
         head_size = model_config.get_head_size()
         num_heads = model_config.get_num_kv_heads(parallel_config)
         num_layers = model_config.get_num_layers(parallel_config)
