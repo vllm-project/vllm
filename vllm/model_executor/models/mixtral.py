@@ -106,7 +106,6 @@ class MixtralMoE(nn.Module):
         top_k: int,
         hidden_size: int,
         intermediate_size: int,
-        params_dtype: Optional[torch.dtype] = None,
         tp_size: Optional[int] = None,
         linear_method: Optional[LinearMethodBase] = None,
     ):
@@ -121,14 +120,9 @@ class MixtralMoE(nn.Module):
         if self.linear_method is None:
             self.linear_method = UnquantizedLinearMethod()
 
-        if params_dtype is None:
-            params_dtype = torch.get_default_dtype()
-        self.params_dtype = params_dtype
-
         self.gate = ReplicatedLinear(self.hidden_size,
                                      self.num_total_experts,
                                      bias=False,
-                                     params_dtype=self.params_dtype,
                                      linear_method=None)
 
         if not self.linear_method.support_fused_moe:

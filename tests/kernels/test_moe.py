@@ -2,6 +2,8 @@
 
 Run `pytest tests/kernels/test_moe.py`.
 """
+import tempfile
+
 import pytest
 import torch
 from transformers import MixtralConfig
@@ -17,6 +19,8 @@ from vllm.model_executor.layers.quantization.gptq import (ExllamaState,
                                                           GPTQLinearMethod)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.models.mixtral import MixtralMoE
+from vllm.model_executor.parallel_utils.parallel_state import (
+    destroy_model_parallel, initialize_model_parallel)
 
 
 def torch_moe(a, w1, w2, score, topk):
@@ -55,7 +59,13 @@ def test_fused_moe(
     w2 = torch.randn((e, k, n), device='cuda', dtype=dtype) / 10
 
     score = torch.randn((m, e), device='cuda', dtype=dtype)
-    triton_output = fused_moe(a, w1, w2, score, topk, renormalize=False)
+    triton_output = fused_moe(a,
+                              w1,
+                              w2,
+                              score,
+                              topk,
+                              renormalize=False,
+                              inplace=False)
     torch_output = torch_moe(a, w1, w2, score, topk)
     assert torch.allclose(triton_output, torch_output, atol=1e-2, rtol=0)
 
@@ -65,6 +75,17 @@ def test_fused_moe(
 @torch.inference_mode()
 def test_mixtral_moe(dtype: torch.dtype):
     "Make sure our Mixtral MoE implementation agrees with the one from huggingface."
+    # Initialize dist environment
+    if not torch.distributed.is_initialized():
+        temp_file = tempfile.mkstemp()[1]
+        torch.distributed.init_process_group(
+            backend="nccl",
+            world_size=1,
+            rank=0,
+            init_method=f"file://{temp_file}",
+        )
+    initialize_model_parallel()
+    torch.set_default_dtype(dtype)
 
     # Instantiate our and huggingface's MoE blocks
     config = MixtralConfig()
@@ -74,7 +95,6 @@ def test_mixtral_moe(dtype: torch.dtype):
         top_k=config.num_experts_per_tok,
         hidden_size=config.hidden_size,
         intermediate_size=config.intermediate_size,
-        params_dtype=dtype,
         tp_size=1,
     ).cuda()
 
@@ -83,8 +103,8 @@ def test_mixtral_moe(dtype: torch.dtype):
     for i in range(config.num_local_experts):
         weights = (hf_moe.experts[i].w1.weight.data,
                    hf_moe.experts[i].w3.weight.data)
-        vllm_moe.ws[i][:] = torch.cat(weights, dim=0)
-        vllm_moe.w2s[i][:] = hf_moe.experts[i].w2.weight.data
+        vllm_moe.ws.weight[i][:] = torch.cat(weights, dim=0)
+        vllm_moe.w2s.weight[i][:] = hf_moe.experts[i].w2.weight.data
 
     # Generate input batch of dimensions [batch_size, seq_len, hidden_dim]
     inputs = torch.randn((1, 64, config.hidden_size)).to(dtype).to("cuda")
@@ -92,6 +112,9 @@ def test_mixtral_moe(dtype: torch.dtype):
     # Run forward passes for both MoE blocks
     hf_states, _ = hf_moe.forward(inputs)
     vllm_states = vllm_moe.forward(inputs)
+
+    # destroy dist environment
+    destroy_model_parallel()
 
     mixtral_moe_tol = {
         torch.float32: 1e-3,
