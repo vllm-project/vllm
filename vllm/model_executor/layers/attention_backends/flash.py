@@ -8,6 +8,7 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention_backends.base import BaseAttention
 from vllm.model_executor.layers.attention_backends.paged_attn import (
     PagedAttention)
+from vllm.model_executor.layers.attention_backends.utils import expand_gqa
 
 
 class Attention(BaseAttention):
@@ -28,6 +29,8 @@ class Attention(BaseAttention):
             raise ValueError(
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {suppored_head_sizes}.")
+        self.sliding_window = ((self.sliding_window, self.sliding_window) if
+                               self.sliding_window is not None else (-1, -1))
 
     def forward(
         self,
@@ -80,25 +83,16 @@ class Attention(BaseAttention):
                     value,
                     softmax_scale=self.scale,
                     causal=True,
-                    window_size=(self.sliding_window, self.sliding_window),
+                    window_size=self.sliding_window,
                     alibi_slopes=self.alibi_slopes,
                 )
             else:
                 # prefix-enabled attention
                 if self.num_kv_heads != self.num_heads:
                     # TODO(woosuk): Use MQA/GQA kernels for higher performance.
-                    query = query.view(query.shape[0], self.num_kv_heads,
-                                       self.num_queries_per_kv,
-                                       query.shape[-1])
-                    key = key[:, :,
-                              None, :].expand(key.shape[0], self.num_kv_heads,
-                                              self.num_queries_per_kv,
-                                              key.shape[-1])
-                    value = value[:, :,
-                                  None, :].expand(value.shape[0],
-                                                  self.num_kv_heads,
-                                                  self.num_queries_per_kv,
-                                                  value.shape[-1])
+                    query, key, value = expand_gqa(query, key, value,
+                                                   self.num_heads,
+                                                   self.num_kv_heads)
                 output = PagedAttention.forward_prefix(
                     query,
                     key,
@@ -106,6 +100,8 @@ class Attention(BaseAttention):
                     key_cache,
                     value_cache,
                     input_metadata,
+                    self.num_heads,
+                    self.num_kv_heads,
                     self.alibi_slopes,
                 )
         else:
