@@ -19,6 +19,7 @@ class SamplingMetadata:
         prompt_lens: Lengths of prompts.
         selected_token_indices: Token indices selected for sampling.
         categorized_sample_indices: SamplingType -> token indices to sample.
+        generators: List of torch.Generators to use for seeded sampling
         perform_sampling: Whether to perform sampling. This option is used to
             make the sampling only happens in the driver worker, and disable
             sampling in other worker processes.
@@ -31,6 +32,7 @@ class SamplingMetadata:
         prompt_lens: Optional[List[int]],
         selected_token_indices: torch.Tensor,
         categorized_sample_indices: Optional[Dict[SamplingType, torch.Tensor]],
+        generators: Optional[List[torch.Generator]] = None,
         perform_sampling: bool = True,
     ) -> None:
         self.seq_groups = seq_groups
@@ -38,6 +40,7 @@ class SamplingMetadata:
         self.prompt_lens = prompt_lens
         self.selected_token_indices = selected_token_indices
         self.categorized_sample_indices = categorized_sample_indices
+        self.generators = generators
         self.perform_sampling = perform_sampling
 
         self.num_prompts = len(prompt_lens) if prompt_lens is not None else 0

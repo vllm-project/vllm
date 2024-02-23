@@ -6,8 +6,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.sparsity.base_config import SparsityConfig
 
 from .sparse_w16a16_linear_method import SparseW16A16LinearMethod
-from magic_wand import (CompressedStorageFormat, SparseBitmaskStorageFormat,
-                        SparseBEGemmStorageFormat)
+from magic_wand import (CompressedStorageFormat, SparseBEGemmStorageFormat,
+                        SparseBitmaskStorageFormat)
 
 logger = init_logger(__name__)
 

@@ -18,6 +18,14 @@ from vllm.model_executor.layers.parameters import LazyCompressedParameter
 logger = init_logger(__name__)
 
 
+def adjust_marlin_shard(param, shard_size, shard_offset):
+    marlin_tile_size = getattr(param, "marlin_tile_size", None)
+    if marlin_tile_size is None:
+        return shard_size, shard_offset
+
+    return shard_size * marlin_tile_size, shard_offset * marlin_tile_size
+
+
 class LinearMethodBase(ABC):
     """Base class for different (maybe quantized) linear methods."""
 
@@ -55,7 +63,6 @@ class UnquantizedLinearMethod(LinearMethodBase):
                        params_dtype: torch.dtype) -> Dict[str, Any]:
         weight = Parameter(torch.empty(output_size_per_partition,
                                        input_size_per_partition,
-                                       device=torch.cuda.current_device(),
                                        dtype=params_dtype),
                            requires_grad=False)
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
@@ -114,9 +121,7 @@ class ReplicatedLinear(torch.nn.Module):
                 self.register_parameter(name, weight)
         if bias:
             self.bias = Parameter(
-                torch.empty(self.output_size,
-                            device=torch.cuda.current_device(),
-                            dtype=self.params_dtype))
+                torch.empty(self.output_size, dtype=self.params_dtype))
             set_weight_attrs(self.bias, {"output_dim": 0})
         else:
             self.register_parameter("bias", None)
@@ -184,7 +189,6 @@ class ColumnParallelLinear(torch.nn.Module):
         if bias:
             self.bias = Parameter(
                 torch.empty(self.output_size_per_partition,
-                            device=torch.cuda.current_device(),
                             dtype=params_dtype))
             set_weight_attrs(self.bias, {
                 "output_dim": 0,
@@ -286,6 +290,11 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 if packed_dim == output_dim:
                     shard_size = shard_size // param.pack_factor
                     shard_offset = shard_offset // param.pack_factor
+
+                    # If marlin, we need to adjust the offset and size to account for the tiling.
+                    shard_size, shard_offset = adjust_marlin_shard(
+                        param, shard_size, shard_offset)
+
                 loaded_weight_shard = loaded_weight.narrow(
                     output_dim, shard_offset, shard_size)
                 self.weight_loader(param, loaded_weight_shard, shard_id)
@@ -303,6 +312,11 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             if packed_dim == output_dim:
                 shard_size = shard_size // param.pack_factor
                 shard_offset = shard_offset // param.pack_factor
+
+                # If marlin, we need to adjust the offset and size to account for the tiling.
+                shard_size, shard_offset = adjust_marlin_shard(
+                    param, shard_size, shard_offset)
+
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)
             start_idx = tp_rank * shard_size
@@ -413,6 +427,11 @@ class QKVParallelLinear(ColumnParallelLinear):
                 if packed_dim == output_dim:
                     shard_size = shard_size // param.pack_factor
                     shard_offset = shard_offset // param.pack_factor
+
+                    # If marlin, we need to adjust the offset and size to account for the tiling.
+                    shard_size, shard_offset = adjust_marlin_shard(
+                        param, shard_size, shard_offset)
+
                 loaded_weight_shard = loaded_weight.narrow(
                     output_dim, shard_offset, shard_size)
                 self.weight_loader(param, loaded_weight_shard, shard_id)
@@ -437,6 +456,11 @@ class QKVParallelLinear(ColumnParallelLinear):
             if packed_dim == output_dim:
                 shard_size = shard_size // param.pack_factor
                 shard_offset = shard_offset // param.pack_factor
+
+                # If marlin, we need to adjust the offset and size to account for the tiling.
+                shard_size, shard_offset = adjust_marlin_shard(
+                    param, shard_size, shard_offset)
+
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)
             if loaded_shard_id == "q":
@@ -534,9 +558,7 @@ class RowParallelLinear(torch.nn.Module):
 
         if bias:
             self.bias = Parameter(
-                torch.empty(self.output_size,
-                            device=torch.cuda.current_device(),
-                            dtype=params_dtype))
+                torch.empty(self.output_size, dtype=params_dtype))
             set_weight_attrs(self.bias, {
                 "output_dim": 0,
                 "weight_loader": self.weight_loader,

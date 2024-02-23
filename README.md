@@ -4,7 +4,6 @@
 
 [vLLM](https://github.com/vllm-project/vllm) is a fast and easy-to-use library for LLM inference and serving that Neural Magic regularly lands upstream improvements to. This fork is our opinionated focus on the latest LLM optimizations, such as quantization and sparsity.
 
-
 ## Installation
 
 `nm-vllm` is a Python library that contained pre-compiled C++ and CUDA (12.1) binaries.

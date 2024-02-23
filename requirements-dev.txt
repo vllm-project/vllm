@@ -1,7 +1,7 @@
 # formatting
-ruff==0.1.5
-toml==0.10.2
 yapf==0.32.0
+toml==0.10.2
+ruff==0.1.5
 
 # type checking
 mypy==0.991
@@ -10,12 +10,13 @@ types-requests
 types-setuptools
 
 # testing
+pytest
+pytest-forked
+pytest-asyncio
+pytest-rerunfailures
+httpx
 einops # required for MPT
 flash_attn # required for HuggingFace's llama implementation
-httpx
 openai
-pytest
-pytest-asyncio
-pytest-forked
-ray
 requests
+ray

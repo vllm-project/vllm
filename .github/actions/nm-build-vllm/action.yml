@@ -19,8 +19,6 @@ runs:
   steps:
   - id: build
     run: |
-      # TODO: this is a hack ... fix it later
-      # pyenv hardcoded ... python version hardcoded ...
       COMMIT=${{ github.sha }}
       VENV="${{ inputs.venv }}-${COMMIT:0:7}"
       source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate

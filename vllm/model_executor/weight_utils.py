@@ -11,9 +11,9 @@ from huggingface_hub import snapshot_download, HfFileSystem
 import numpy as np
 from safetensors.torch import load_file, save_file, safe_open
 import torch
-from transformers import PretrainedConfig
 from tqdm.auto import tqdm
 
+from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (get_quantization_config,
                                                      QuantizationConfig)
@@ -84,15 +84,11 @@ def convert_bin_to_safetensor_file(
 
 
 # TODO(rib-2): Once we define hf_sparsity_config
-def get_sparse_config(
-    sparsity: str,
-    model_name_or_path: str,
-    hf_config: PretrainedConfig,
-    cache_dir: Optional[str] = None,
-):
+def get_sparse_config(model_config: ModelConfig):
     from vllm.model_executor.layers.sparsity import get_sparsity_config
-    sparsity_cls = get_sparsity_config(sparsity)
-    hf_sparsity_config = getattr(hf_config, "sparsity_config", None)
+    sparsity_cls = get_sparsity_config(model_config.sparsity)
+    hf_sparsity_config = getattr(model_config.hf_config, "sparsity_config",
+                                 None)
     if hf_sparsity_config is not None:
         raise NotImplementedError(
             "Loading hf sparsity config not yet supported")
@@ -100,25 +96,22 @@ def get_sparse_config(
 
 
 # TODO(woosuk): Move this to other place.
-def get_quant_config(
-    quantization: str,
-    model_name_or_path: str,
-    hf_config: PretrainedConfig,
-    cache_dir: Optional[str] = None,
-) -> QuantizationConfig:
-    quant_cls = get_quantization_config(quantization)
+def get_quant_config(model_config: ModelConfig) -> QuantizationConfig:
+    quant_cls = get_quantization_config(model_config.quantization)
     # Read the quantization config from the HF model config, if available.
-    hf_quant_config = getattr(hf_config, "quantization_config", None)
+    hf_quant_config = getattr(model_config.hf_config, "quantization_config",
+                              None)
     if hf_quant_config is not None:
         return quant_cls.from_config(hf_quant_config)
-
+    model_name_or_path = model_config.model
     is_local = os.path.isdir(model_name_or_path)
     if not is_local:
         # Download the config files.
-        with get_lock(model_name_or_path, cache_dir):
+        with get_lock(model_name_or_path, model_config.download_dir):
             hf_folder = snapshot_download(model_name_or_path,
+                                          revision=model_config.revision,
                                           allow_patterns="*.json",
-                                          cache_dir=cache_dir,
+                                          cache_dir=model_config.download_dir,
                                           tqdm_class=Disabledtqdm)
     else:
         hf_folder = model_name_or_path
@@ -129,10 +122,12 @@ def get_quant_config(
             f.endswith(x) for x in quant_cls.get_config_filenames())
     ]
     if len(quant_config_files) == 0:
-        raise ValueError(f"Cannot find the config file for {quantization}")
+        raise ValueError(
+            f"Cannot find the config file for {model_config.quantization}")
     if len(quant_config_files) > 1:
-        raise ValueError(f"Found multiple config files for {quantization}: "
-                         f"{quant_config_files}")
+        raise ValueError(
+            f"Found multiple config files for {model_config.quantization}: "
+            f"{quant_config_files}")
 
     quant_config_file = quant_config_files[0]
     with open(quant_config_file, "r") as f:

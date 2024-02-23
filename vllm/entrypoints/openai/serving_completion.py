@@ -1,7 +1,7 @@
 import asyncio
 import time
 from fastapi import Request
-from typing import AsyncGenerator, AsyncIterator, Callable, List, Optional
+from typing import AsyncGenerator, AsyncIterator, Callable, List, Optional, Dict, Tuple
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -15,12 +15,12 @@ from .protocol import (
     UsageInfo,
 )
 from vllm.outputs import RequestOutput
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_engine import OpenAIServing, LoRA
 
 logger = init_logger(__name__)
 
-TypeTokenIDs = list[int]
-TypeTopLogProbs = List[Optional[dict[int, float]]]
+TypeTokenIDs = List[int]
+TypeTopLogProbs = List[Optional[Dict[int, float]]]
 TypeCreateLogProbsFn = Callable[
     [TypeTokenIDs, TypeTopLogProbs, Optional[int], int], LogProbs]
 
@@ -29,7 +29,7 @@ async def completion_stream_generator(
     request: CompletionRequest,
     raw_request: Request,
     on_abort,
-    result_generator: AsyncIterator[tuple[int, RequestOutput]],
+    result_generator: AsyncIterator[Tuple[int, RequestOutput]],
     create_logprobs_fn: TypeCreateLogProbsFn,
     request_id: str,
     created_time: int,
@@ -126,7 +126,7 @@ async def completion_stream_generator(
     yield "data: [DONE]\n\n"
 
 
-def parse_prompt_format(prompt) -> tuple[bool, list]:
+def parse_prompt_format(prompt) -> Tuple[bool, list]:
     # get the prompt, openai supports the following
     # "a string, array of strings, array of tokens, or array of token arrays."
     prompt_is_tokens = False
@@ -151,7 +151,7 @@ def parse_prompt_format(prompt) -> tuple[bool, list]:
 
 
 def request_output_to_completion_response(
-    final_res_batch: list[RequestOutput],
+    final_res_batch: List[RequestOutput],
     request: CompletionRequest,
     create_logprobs_fn: TypeCreateLogProbsFn,
     request_id: str,
@@ -249,8 +249,13 @@ def merge_async_iterators(*iterators):
 
 class OpenAIServingCompletion(OpenAIServing):
 
-    def __init__(self, engine: AsyncLLMEngine, served_model: str):
-        super().__init__(engine=engine, served_model=served_model)
+    def __init__(self,
+                 engine: AsyncLLMEngine,
+                 served_model: str,
+                 lora_modules: Optional[List[LoRA]] = None):
+        super().__init__(engine=engine,
+                         served_model=served_model,
+                         lora_modules=lora_modules)
 
     async def create_completion(self, request: CompletionRequest,
                                 raw_request: Request):
@@ -284,6 +289,7 @@ class OpenAIServingCompletion(OpenAIServing):
         generators = []
         try:
             sampling_params = request.to_sampling_params()
+            lora_request = self._maybe_get_lora(request)
             prompt_is_tokens, prompts = parse_prompt_format(request.prompt)
 
             for i, prompt in enumerate(prompts):
@@ -298,11 +304,12 @@ class OpenAIServingCompletion(OpenAIServing):
                     self.engine.generate(None,
                                          sampling_params,
                                          f"{request_id}-{i}",
-                                         prompt_token_ids=input_ids))
+                                         prompt_token_ids=input_ids,
+                                         lora_request=lora_request))
         except ValueError as e:
             return self.create_error_response(str(e))
 
-        result_generator: AsyncIterator[tuple[
+        result_generator: AsyncIterator[Tuple[
             int, RequestOutput]] = merge_async_iterators(*generators)
 
         # Similar to the OpenAI API, when n != best_of, we do not stream the

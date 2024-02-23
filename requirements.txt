@@ -1,13 +1,15 @@
-aioprometheus[starlette]
-fastapi
-# magic_wand == 0.0.1
 ninja  # For faster builds.
-numpy
 psutil
-pydantic >= 2.0  # Required for OpenAI server.
-ray >= 2.5.1
+ray >= 2.9
 sentencepiece  # Required for LLaMA tokenizer.
+numpy
 torch == 2.1.2
-transformers >= 4.37.0 # Required for Qwen2
-uvicorn[standard]
+transformers >= 4.38.0  # Required for Gemma.
 xformers == 0.0.23.post1  # Required for CUDA 12.1.
+fastapi
+uvicorn[standard]
+pydantic >= 2.0  # Required for OpenAI server.
+aioprometheus[starlette]
+pynvml == 11.5.0
+triton >= 2.1.0
+cupy-cuda12x == 12.1.0  # Required for CUDA graphs. CUDA 11.8 users should install cupy-cuda11x instead.
