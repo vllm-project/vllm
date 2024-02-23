@@ -40,6 +40,7 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, ParallelLMHead, DEFAULT_VOCAB_PADDING_SIZE)
 from vllm.model_executor.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
@@ -361,6 +362,10 @@ class LlamaForCausalLM(nn.Module):
     
     # Should not be called unless the KV cache dtype is FP8 on ROCm (AMD GPU)
     def load_kv_cache_scales(self, filename: str) -> None:
-        for layer_idx, scaling_factor in kv_cache_scales_iterator(filename):
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+        for layer_idx, scaling_factor in kv_cache_scales_iterator(
+                                            filename, tp_rank, tp_size,
+                                            self.model.config.num_hidden_layers):
             layer_paged_attn = self.model.layers[layer_idx].self_attn.attn
             layer_paged_attn.kv_cache_scaling_factor = scaling_factor
