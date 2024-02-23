@@ -8,15 +8,14 @@ from vllm.model_executor.input_metadata import InputMetadata
 
 
 class BaseAttention(nn.Module):
-    """MHA/MQA/GQA layer with PagedAttention.
+    """Attention layer.
 
     This class takes query, key, and value tensors as input. The input tensors
     can either contain prompt tokens or generation tokens.
     The class does the following:
 
-    1. Reshape and store the input key and value tensors in the KV cache.
-    2. Perform (multi-head/multi-query/grouped-query) attention using either
-        xformers or the PagedAttention custom op.
+    1. Store the input key and value tensors in the KV cache.
+    2. Perform (multi-head/multi-query/grouped-query) attention.
     3. Return the output tensor.
     """
 
