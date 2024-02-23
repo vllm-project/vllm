@@ -155,15 +155,18 @@ async def test_single_chat_session(server, client: openai.AsyncOpenAI,
     }]
 
     # test single completion
-    chat_completion = await client.chat.completions.create(
-        model=model_name,
-        messages=messages,
-        max_tokens=10,
-    )
+    chat_completion = await client.chat.completions.create(model=model_name,
+                                                           messages=messages,
+                                                           max_tokens=10,
+                                                           logprobs=True,
+                                                           top_logprobs=10)
     assert chat_completion.id is not None
     assert chat_completion.choices is not None and len(
         chat_completion.choices) == 1
     assert chat_completion.choices[0].message is not None
+    assert chat_completion.choices[0].logprobs is not None
+    assert chat_completion.choices[0].logprobs.top_logprobs is not None
+    assert len(chat_completion.choices[0].logprobs.top_logprobs[0]) == 10
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 10
     assert message.role == "assistant"
@@ -198,15 +201,19 @@ async def test_completion_streaming(server, client: openai.AsyncOpenAI,
     single_output = single_completion.choices[0].text
     single_usage = single_completion.usage
 
-    stream = await client.completions.create(
-        model=model_name,
-        prompt=prompt,
-        max_tokens=5,
-        temperature=0.0,
-        stream=True,
-    )
+    stream = await client.completions.create(model=model_name,
+                                             prompt=prompt,
+                                             max_tokens=5,
+                                             temperature=0.0,
+                                             stream=True,
+                                             logprobs=True,
+                                             top_logprobs=10)
     chunks = []
     async for chunk in stream:
+        if chunk.choices[0].content:
+            assert chunk.choices[0].logprobs is not None
+            assert chunk.choices[0].logprobs.top_logprobs is not None
+            assert len(chunk.choices[0].logprobs.top_logprobs[0]) == 10
         chunks.append(chunk.choices[0].text)
     assert chunk.choices[0].finish_reason == "length"
     assert chunk.usage == single_usage
