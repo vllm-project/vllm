@@ -402,7 +402,8 @@ def _sample(
         sample_metadata[sampling_type] = (seq_group_ids, seq_groups,
                                           is_prompts, sample_indices)
         if sampling_type == SamplingType.GREEDY:
-            greedy_samples = torch.argmax(logprobs[sample_indices.long()], dim=-1)
+            greedy_samples = torch.argmax(logprobs[sample_indices.long()],
+                                          dim=-1)
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
             max_best_of = 1
             for seq_group, is_prompt in zip(seq_groups, is_prompts):
