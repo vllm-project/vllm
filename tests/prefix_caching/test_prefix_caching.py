@@ -36,14 +36,10 @@ def test_prefix_caching(
     max_tokens: int,
 ):
     llm = LLM(model=model)
-    # -1 since the last token can change when concatenating prompts.
-    prefix_pos = len(llm.llm_engine.tokenizer.encode(prefix)) - 1
     prompts = [prefix + prompt for prompt in example_prompts]
     sampling_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
     outputs_without_prefix = llm.generate(prompts, sampling_params)
-    outputs_with_prefix = llm.generate(prompts,
-                                       sampling_params,
-                                       prefix_pos=[prefix_pos] * len(prompts))
+    outputs_with_prefix = llm.generate(prompts, sampling_params)
     for output_without_prefix, output_with_prefix in zip(
             outputs_without_prefix, outputs_with_prefix):
         assert (output_without_prefix.outputs[0].token_ids ==

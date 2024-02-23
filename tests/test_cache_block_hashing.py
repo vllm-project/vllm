@@ -58,7 +58,7 @@ def test_auto_prefix_caching(model: str, block_size: int, max_num_seqs: int):
 
             num_blocks = len(prompt_token_ids) // block_size
             for idx in range(num_blocks):
-                hashes[-1][-1].append(seq.hash(idx))
+                hashes[-1][-1].append(seq.hash_of_block(idx))
 
             seq_id += 1
 

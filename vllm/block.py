@@ -57,13 +57,13 @@ class PhysicalTokenBlock:
         block_number: int,
         block_size: int,
         block_hash: int,
-        prefix_len: int,
+        num_hashed_tokens: int,
     ) -> None:
         self.device = device
         self.block_number = block_number
         self.block_size = block_size
         self.block_hash = block_hash
-        self.prefix_len = prefix_len
+        self.num_hashed_tokens = num_hashed_tokens
 
         self.ref_count = 0
         self.last_accessed = monotonic()
@@ -74,7 +74,7 @@ class PhysicalTokenBlock:
     def __repr__(self) -> str:
         return (f'PhysicalTokenBlock(device={self.device}, '
                 f'block_number={self.block_number}, '
-                f'prefix_len={self.prefix_len}, '
+                f'num_hashed_tokens={self.num_hashed_tokens}, '
                 f'ref_count={self.ref_count}, '
                 f'last_accessed={self.last_accessed}, '
                 f'computed={self.computed})')
