@@ -82,11 +82,10 @@ class OpenAIServingChat(OpenAIServing):
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(
-                request, result_generator, request_id, self._create_logprobs)
+                request, result_generator, request_id)
         else:
             return await self.chat_completion_full_generator(
-                request, raw_request, result_generator, request_id,
-                self._create_logprobs)
+                request, raw_request, result_generator, request_id)
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
         if request.add_generation_prompt:
@@ -96,8 +95,7 @@ class OpenAIServingChat(OpenAIServing):
 
     async def chat_completion_stream_generator(
         self, request: ChatCompletionRequest,
-        result_generator: AsyncIterator[RequestOutput], request_id: str,
-        create_logprobs_fn: TypeCreateLogProbsFn
+        result_generator: AsyncIterator[RequestOutput], request_id: str
     ) -> Union[ErrorResponse, AsyncGenerator[str, None]]:
 
         model_name = request.model
@@ -161,10 +159,10 @@ class OpenAIServingChat(OpenAIServing):
                 top_logprobs = output.logprobs[
                     previous_num_tokens[i]:] if output.logprobs else None
 
-                if request.logprobs is not None:
+                if request.logprobs:
                     assert(top_logprobs is not None),\
                            "top_logprobs must be provided when logprobs is requested"
-                    logprobs = create_logprobs_fn(
+                    logprobs = self._create_logprobs(
                         token_ids=delta_token_ids,
                         top_logprobs=top_logprobs,
                         num_output_top_logprobs=request.logprobs,
@@ -221,8 +219,7 @@ class OpenAIServingChat(OpenAIServing):
 
     async def chat_completion_full_generator(
         self, request: ChatCompletionRequest, raw_request: Request,
-        result_generator: AsyncIterator[RequestOutput], request_id: str,
-        create_logprobs_fn: TypeCreateLogProbsFn
+        result_generator: AsyncIterator[RequestOutput], request_id: str
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
 
         model_name = request.model
@@ -244,10 +241,10 @@ class OpenAIServingChat(OpenAIServing):
             token_ids = output.token_ids
             top_logprobs = output.logprobs
 
-            if request.logprobs is not None:
+            if request.logprobs:
                 assert(top_logprobs is not None),\
                        "top_logprobs must be provided when logprobs is requested"
-                logprobs = create_logprobs_fn(
+                logprobs = self._create_logprobs(
                     token_ids=token_ids,
                     top_logprobs=top_logprobs,
                     num_output_top_logprobs=request.logprobs,
