@@ -309,11 +309,11 @@ def kv_cache_scales_iterator(filename: str,
             return layer_scales_map.items()
         
     except FileNotFoundError:
-        logger.error(f"File '{filename}' not found.")
+        logger.error(f"File or directory '{filename}' not found.")
     except json.JSONDecodeError:
         logger.error(f"Error decoding JSON in file '{filename}'.")
     except Exception as e:
-        logger.error(f"An error occurred while reading file '{filename}': {e}")
+        logger.error(f"An error occurred while reading '{filename}': {e}")
     # This section is only reached if any of the excepts are hit
     # Return an empty iterator (tuple) => no KV cache scales are loaded
     # which effectively defaults to 1.0 scales
