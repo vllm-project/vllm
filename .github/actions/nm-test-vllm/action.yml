@@ -4,8 +4,8 @@ inputs:
   test_directory:
     description: 'test directory, path is relative to neuralmagic-vllm'
     required: true
-  test_xml:
-    description: 'filename for xml test results'
+  test_results:
+    description: 'top-level directory for xml test results'
     required: true
   python:
     description: 'python version, e.g. 3.10.12'
@@ -22,15 +22,15 @@ runs:
   steps:
   - id: test
     run: |
-      SUCCESS=0
-      # TODO: this is a hack ... fix it later
-      # pyenv hardcoded ... python version hardcoded ...
       COMMIT=${{ github.sha }}
       VENV="${{ inputs.venv }}-${COMMIT:0:7}"
       source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
       pip3 install --index-url http://192.168.201.226:8080/ --trusted-host 192.168.201.226 magic-wand
       pip3 install -r requirements-dev.txt
-      pytest --junitxml=${{ inputs.test_xml }} ${{ inputs.test_directory }} || SUCCESS=$?
+      # run tests via runner script (serially)
+      SUCCESS=0
+      ./.github/scripts/run-tests -t ${{ inputs.test_directory }} -r ${{ inputs.test_results }} || SUCCESS=$?
+      echo "was this a SUCCESS? ${SUCCESS}"
       echo "status=${SUCCESS}" >> "$GITHUB_OUTPUT"
       exit ${SUCCESS}
     shell: bash

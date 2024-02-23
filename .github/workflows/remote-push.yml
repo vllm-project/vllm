@@ -13,8 +13,6 @@ jobs:
 
     # TODO: expand python matrix later, once CI system has
     #       matured.
-    # TODO: adjust timeout after we get a bit more experience.
-    #       making it 60 is a bit permissive.
 
     # TODO: enable this later
     AWS-AVX2-32G-A10G-24G:
@@ -24,7 +22,8 @@ jobs:
         uses: ./.github/workflows/build-test.yml
         with:
             label: aws-avx2-32G-a10g-24G
-            timeout: 60
+            timeout: 180
             gitref: '${{ github.ref }}'
+            Gi_per_thread: 4
             python: ${{ matrix.python }}
         secrets: inherit

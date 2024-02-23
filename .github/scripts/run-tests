@@ -1,0 +1,66 @@
+#!/bin/bash -e
+
+# simple helper script to manage concurrency while running tests
+
+usage() {
+    echo "Usage: ${0} <options>"
+    echo
+    echo "  -t    - test directory, i.e. location of *.py test files. (default 'tests/')"
+    echo "  -r    - desired results base directory. xml results will mirror provided tests directory structure. (default 'test-results/')"
+    echo "  -h    - this list of options"
+    echo
+    echo "note: all paths are relative to 'neuralmagic-vllm' root"
+    echo
+    exit 1
+}
+
+TEST_DIR=tests
+RESULTS_DIR=test-results
+
+while getopts "ht:r:" OPT; do
+    case "${OPT}" in
+	h)
+	    usage
+	    ;;
+	t)
+	    TEST_DIR="${OPTARG}"
+	    ;;
+    r)
+        RESULTS_DIR="${OPTARG}"
+        ;;
+    esac
+done
+
+# check if variables are valid
+if [ -z "${RESULTS_DIR}" ]; then
+    echo "please set desired results base directory"
+    usage
+fi
+
+if [ -z "${TEST_DIR}" ]; then
+    echo "please set test directory"
+    usage
+fi
+
+if [ ! -d "${TEST_DIR}" ]; then
+    echo "specified test directory, '${TEST_DIR}' does not exist ..."
+    usage
+fi
+
+# run tests serially
+TESTS_DOT_PY=$(find ${TEST_DIR}  -not -name "__init__.py" -name "*.py")
+TESTS_TO_RUN=($TESTS_DOT_PY)
+SUCCESS=0
+for TEST in "${TESTS_TO_RUN[@]}"
+do
+    LOCAL_SUCCESS=0
+    RESULT_XML=$(echo ${TEST} | sed -e "s/${TEST_DIR}/${RESULTS_DIR}/" | sed -e "s/.py/.xml/")
+    pytest --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
+    SUCCESS=$((SUCCESS + LOCAL_SUCCESS))
+done
+
+if [ "${SUCCESS}" -eq "0" ]; then
+    exit 0
+else
+    exit 1
+fi

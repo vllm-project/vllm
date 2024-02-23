@@ -15,6 +15,10 @@ on:
         description: "git commit hash or branch name"
         type: string
         required: true
+      Gi_per_thread:
+        description: 'requested GiB to reserve per thread'
+        type: string
+        required: true
       python:
         description: "python version, e.g. 3.10.12"
         type: string
@@ -33,6 +37,10 @@ on:
         required: true
       gitref:
         description: "git commit hash or branch name"
+        type: string
+        required: true
+      Gi_per_thread:
+        description: 'requested GiB to reserve per thread'
         type: string
         required: true
       python:
@@ -61,7 +69,8 @@ jobs:
               id: setenv
               uses: ./.github/actions/nm-set-env/
               with:
-                hf_home: ${{ secrets.NM_HF_HOME }}
+                hf_token: ${{ secrets.NM_HF_TOKEN }}
+                Gi_per_thread: ${{ inputs.Gi_per_thread }}
 
             - name: set python
               id: set_python
@@ -88,7 +97,7 @@ jobs:
               id: build
               uses: ./.github/actions/nm-build-vllm/
               with:
-                Gi_per_thread: 1
+                Gi_per_thread: ${{ inputs.Gi_per_thread }}
                 python: ${{ inputs.python }}
                 venv: TEST
 
@@ -97,7 +106,7 @@ jobs:
               uses: ./.github/actions/nm-test-vllm/
               with:
                 test_directory: tests
-                test_xml: test-results/all_tests.xml
+                test_results: test-results
                 python: ${{ inputs.python }}
                 venv: TEST
 
@@ -134,12 +143,13 @@ jobs:
                 TEST_STATUS: ${{ steps.test.outputs.status }}
               run: |
                   echo "checkout status: ${CHECKOUT}"
-                  if [[ "${CHECKOUT}" != *"success"* ]]; then exit 1; fi
-                  if [ ${LINT_STATUS} -ne 0 ]; then exit 1; fi
-                  if [ ${BUILD_STATUS} -ne 0 ]; then exit 1; fi
+                  echo "lint status: ${LINT_STATUS}"
                   echo "build status: ${BUILD_STATUS}"
-                  if [ ${TEST_STATUS} -ne 0 ]; then exit 1; fi
                   echo "test status: ${TEST_STATUS}"
+                  if [[ "${CHECKOUT}" != *"success"* ]]; then exit 1; fi
+                  if [ -z "${LINT_STATUS}" ] || [ "${LINT_STATUS}" -ne "0" ]; then exit 1; fi
+                  if [ -z "${BUILD_STATUS}" ] || [ "${BUILD_STATUS}" -ne "0" ]; then exit 1; fi
+                  if [ -z "${TEST_STATUS}" ] || [ "${TEST_STATUS}" -ne "0" ]; then exit 1; fi
 
             - name: complete testmo run
               uses: ./.github/actions/nm-testmo-run-complete/

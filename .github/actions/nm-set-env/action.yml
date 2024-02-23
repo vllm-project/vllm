@@ -1,15 +1,20 @@
 name: set neuralmagic env
 description: 'sets environment variables for neuralmagic'
 inputs:
-  hf_home:
+  hf_token:
     description: 'Hugging Face home'
+    required: true
+  Gi_per_thread:
+    description: 'requested GiB to reserve per thread'
     required: true
 runs:
   using: composite
   steps:
   - run: |
-      echo "HF_HOME=${HF_HOME_TOKEN}" >> $GITHUB_ENV
-      echo "TORCH_CUDA_ARCH_LIST=8.0+PTX" >> $GITHUB_ENV
+      echo "HF_TOKEN=${HF_TOKEN_SECRET}" >> $GITHUB_ENV
+      NUM_THREADS=$(./.github/scripts/determine-threading -G ${{ inputs.Gi_per_thread }})
+      echo "MAX_JOBS=${NUM_THREADS}" >> $GITHUB_ENV
+      echo "VLLM_INSTALL_PUNICA_KERNELS=1" >> $GITHUB_ENV
       echo "PYENV_ROOT=/usr/local/apps/pyenv" >> $GITHUB_ENV
       echo "XDG_CONFIG_HOME=/usr/local/apps" >> $GITHUB_ENV
       WHOAMI=$(whoami)
@@ -17,5 +22,5 @@ runs:
       echo "LD_LIBRARY_PATH=/usr/local/cuda-12.1/lib64::/usr/local/cuda-12.1/lib64:" >> $GITHUB_ENV
       echo "PROJECT_ID=12" >> $GITHUB_ENV
     env:
-        HF_HOME_TOKEN: ${{ inputs.hf_home }}
+        HF_TOKEN_SECRET: ${{ inputs.hf_token }}
     shell: bash
