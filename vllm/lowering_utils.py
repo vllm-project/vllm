@@ -1,5 +1,4 @@
 import collections
-import dataclasses
 from typing import DefaultDict, TypeVar, Generic
 
 import torch
@@ -16,16 +15,17 @@ vllm_lib = torch.library.Library("vllm", "DEF")
 def nodeuser_hash(self):
     return hash((self.node.get_name(), self.can_inplace, self.is_weak))
 
+
 def nodeuser_eq(self, other):
-    return (
-        self.get_name() == other.get_name()
-        and self.can_inplace == other.can_inplace
-        and self.is_weak == other.is_weak
-    )
-    
+    return (self.get_name() == other.get_name()
+            and self.can_inplace == other.can_inplace
+            and self.is_weak == other.is_weak)
+
+
 sched.NodeUser.__hash__ = nodeuser_hash
 sched.NodeUser.__eq__ = nodeuser_eq
-    
+
+
 def pt22_compute_dependencies(self):
     """
     Create dependency edges between nodes, handling aliasing and
