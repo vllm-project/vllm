@@ -262,14 +262,18 @@ def hf_model_weights_iterator(
             torch.cuda.empty_cache()
 
 
-def kv_cache_scales_iterator(filename: str) -> Iterator[Tuple[int, float]]:
+def kv_cache_scales_iterator(filename: str,
+                             tp_rank: int,
+                             tp_size: int,
+                             num_hidden_layers: int) -> Iterator[Tuple[int, torch.Tensor]]:
     """
     A simple utility to read in KV cache scaling factors that have been
     previously serialized to disk. Used by the model to populate the appropriate
-    KV cache scaling factors. The first object of the pair is the cache (and model)
-    layer corresponding to the scaling factor, and the second is the scaling factor
-    itself. Keep this function in sync with the output of
-    3rdparty/quantization/extract_scales.py
+    KV cache scaling factors. The serialization should represent a dictionary
+    whose keys are the TP ranks and values are another dictionary mapping layers
+    to their KV cache scaling factors.
+    Keep this function in sync with the output
+    of 3rdparty/quantization/extract_scales.py
     """
     try:
         with open(filename) as f:
@@ -279,27 +283,42 @@ def kv_cache_scales_iterator(filename: str) -> Iterator[Tuple[int, float]]:
             # dictionary at once allows us to do sanity checks all at once and
             # avoid a situation where we have to abort after having partially
             # loaded scaling factors 
-            raw_map = json.load(f, parse_int=int, parse_constant=float)
-            if not isinstance(raw_map, dict) or len(raw_map) == 0:
-                raise RuntimeError(f"File '{filename}' does not specify a valid "
-                                   "layer:scale_factor map.")
-            # If any of the inputs are malformed, it will raise an error here and
-            # be caught in except
+            raw_rank_map = json.load(f, parse_int=int, parse_constant=float)
+
+            # If any of the inputs are malformed, it raises an error somewhere
+            # in the following lines and is caught in except
+            assert isinstance(raw_rank_map, dict), "Did not load a dictionary from file."
+            assert len(raw_rank_map) != 0, "Loaded dictionary is empty."
+            loaded_tp_size = max(int(rank) for rank in raw_rank_map) + 1
+            assert loaded_tp_size == tp_size, f"Loaded dictionary has TP size {loaded_tp_size} " \
+              f"but LLM engine is currently running with TP size {tp_size}."
+            for rank, scales_map in raw_rank_map.items():
+                assert len(scales_map) == num_hidden_layers, "KV cache scales map for TP rank " \
+                  f"{rank} is malformed. Expected {num_hidden_layers} layers, got {len(scales_map)}."
+            for i in range(tp_size):
+                assert i in raw_rank_map or str(i) in raw_rank_map, "KV cache scales map for TP rank " \
+                  f"{i} not found."
+            assert tp_rank in raw_rank_map or str(tp_rank) in raw_rank_map, "Tried to load KV cache " \
+              f"scales for TP rank {tp_rank} but these were not found."
+            raw_layer_scales_map = raw_rank_map.get(tp_rank) or raw_rank_map.get(str(tp_rank))
             layer_scales_map = {int(layer_idx): float(scale) 
-                                for layer_idx, scale in raw_map.items()}
+                                for layer_idx, scale in raw_layer_scales_map.items()}
+            for i in range(num_hidden_layers):
+                assert i in layer_scales_map, "Could not find KV cache scales for layer " \
+                  f"{i} in TP rank {tp_rank}."
             return layer_scales_map.items()
         
     except FileNotFoundError:
-        logger.error(f"File '{filename}' not found.")
+        logger.error(f"File or directory '{filename}' not found.")
     except json.JSONDecodeError:
         logger.error(f"Error decoding JSON in file '{filename}'.")
     except Exception as e:
-        logger.error(f"An error occurred while reading file '{filename}': {e}")
+        logger.error(f"An error occurred while reading '{filename}': {e}")
     # This section is only reached if any of the excepts are hit
     # Return an empty iterator (tuple) => no KV cache scales are loaded
     # which effectively defaults to 1.0 scales
-    logger.warn("Defaulting to KV cache scaling factors = 1.0 as an error "
-                "occurred while trying to load them from file.")
+    logger.warn(f"Defaulting to KV cache scaling factors = 1.0 for all layers in TP rank {tp_rank}"
+                " as an error occurred during loading.")
     return ()
 
 
