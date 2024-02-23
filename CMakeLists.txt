@@ -494,3 +494,47 @@ define_module_target(_punica_C
   "${VLLM_PUNICA_EXT_SRC}"
   "${VLLM_PUNICA_GPU_FLAGS}"
   "${VLLM_PUNICA_GPU_ARCHES}")
+
+#
+# Add 'supported' target which detects which extensions should be
+# built based on platform/architecture. This is the same logic that
+# setup.py uses to select which extensions should be built.
+#
+# The 'supported' target makes direct use of cmake easier since knowledge
+# of which extensions are supported have been factored in, e.g.
+#
+# cmake --build . --target supported
+#
+add_custom_target(supported)
+
+if (IS_CUDA OR HIP_FOUND)
+  message(STATUS "Enabling C extension.")
+  add_dependencies(supported _C)
+endif()
+
+if (IS_CUDA)
+  message(STATUS "Enabling moe extension.")
+  add_dependencies(supported _moe_C)
+
+  set(ENABLE_PUNICA)
+  # Enable punica if -DVLLM_INSTALL_PUNICA_KERNELS=1 or
+  # VLLM_INSTALL_PUNICA_KERNELS is set in the environment.
+  if (DEFINED VLLM_INSTALL_PUNICA_KERNELS OR ENV{VLLM_INSTALL_PUNICA_KERNELS})
+    set(ENABLE_PUNICA true)
+    foreach (ARCH ${CMAKE_CUDA_ARCHITECTURES_NATIVE})
+      string(REGEX MATCH "\([0-9]+\)" ARCH_VER_STR ${ARCH})
+      string_to_ver(ARCH_VER ${ARCH_VER_STR})
+      if (ARCH_VER VERSION_LESS 8.0)
+        message(STATUS
+          "Unable to add punica extension due to device version ${ARCH_VER} < 8.0.")
+        set(ENABLE_PUNICA false)
+        break()
+      endif()
+    endforeach()
+  endif()
+
+  if (ENABLE_PUNICA)
+    message(STATUS "Enabling punica extension.")
+    add_dependencies(supported _punica_C)
+  endif()
+endif()
