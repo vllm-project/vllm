@@ -11,20 +11,17 @@ from typing import List, Optional, Tuple
 
 
 # Adapted from vllm/model_executor/weight_utils.py
-# The main differences are that we add the NPZ format and that there's no
-# need for a file lock when downloading model weights because this tool is
-# not intended to be run on multiple processes simultaneously.
-# Since our use case is sufficiently different, we define our own function
-# here.
+# The main differences are that we add the NPZ format and simplify
+# its functionality drastically for our purposes (e.g. we assume that
+# the quantized model exists locally and there is no need to download it)
 def _prepare_hf_weights(
-    model_name_or_path: str,
-    cache_dir: Optional[str] = None,
+    quantized_model_dir: str,
     load_format: str = "auto",
     fall_back_to_pt: bool = True,
-    revision: Optional[str] = None,
 ) -> Tuple[str, List[str], bool]:
-    # Download model weights from huggingface.
-    is_local = os.path.isdir(model_name_or_path)
+    if not os.path.isdir(quantized_model_dir):
+        raise FileNotFoundError(f"The quantized model directory `{quantized_model_dir}` "
+                                "does not exist.")
     use_safetensors = False
     # Some quantized models use .pt files for storing the weights.
     if load_format == "auto":
@@ -38,34 +35,17 @@ def _prepare_hf_weights(
         allow_patterns = ["*.npz"]
     else:
         raise ValueError(f"Unknown load_format: {load_format}")
-
     if fall_back_to_pt:
         allow_patterns += ["*.pt"]
 
-    if not is_local:
-        # Before we download we look at that is available:
-        fs = HfFileSystem()
-        file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
-        # depending on what is available we download different things
-        for pattern in allow_patterns:
-            matching = fnmatch.filter(file_list, pattern)
-            if len(matching) > 0:
-                allow_patterns = [pattern]
-                break
-        print(f"Downloading model... Using model weights format {allow_patterns}")
-        hf_folder = snapshot_download(model_name_or_path,
-                                      allow_patterns=allow_patterns,
-                                      cache_dir=cache_dir,
-                                      revision=revision)
-    else:
-        hf_folder = model_name_or_path
     hf_weights_files: List[str] = []
     for pattern in allow_patterns:
-        hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
+        hf_weights_files += glob.glob(os.path.join(quantized_model_dir, pattern))
         if len(hf_weights_files) > 0:
             if pattern == "*.safetensors":
                 use_safetensors = True
             break
+
     if not use_safetensors:
         # Exclude files that are not needed for inference.
         # https://github.com/huggingface/transformers/blob/v4.34.0/src/transformers/trainer.py#L227-L233
@@ -83,9 +63,9 @@ def _prepare_hf_weights(
 
     if len(hf_weights_files) == 0:
         raise RuntimeError(
-            f"Cannot find any model weights with `{model_name_or_path}`")
+            f"Cannot find any model weights with `{quantized_model_dir}`")
 
-    return hf_folder, hf_weights_files, use_safetensors
+    return hf_weights_files, use_safetensors
 
 
 # Adapted from vllm/model_executor/weight_utils.py
@@ -112,12 +92,7 @@ def _hf_tensorfile_iterator(filename: str, load_format: str,
 
 def main(args):
     rank_tensors_map = {}
-    hf_folder, hf_tensor_files, use_safetensors = _prepare_hf_weights(
-                                                    args.quantized_model,
-                                                    args.cache_dir,
-                                                    args.load_format,
-                                                    revision=args.revision,
-                                                    fall_back_to_pt=True)
+    hf_tensor_files, use_safetensors = _prepare_hf_weights(args.quantized_model, args.load_format)
     # Matches the number immediately after this keyword in the tensor filename to
     # determine the TP rank corresponding to said tensor file
     rank_keyword = "rank"
@@ -152,7 +127,7 @@ def main(args):
         
         module_delimiter = ":" if args.load_format == "npz" else "."
         for name, param in _hf_tensorfile_iterator(tensor_file, args.load_format,
-                                                  use_safetensors):
+                                                   use_safetensors):
             if "kv_cache_scaling_factor" in name:
                 nums = [int(s) for s in name.split(module_delimiter) if s.isdecimal()]
                 assert len(nums) == 1, f"Could not determine layer idx for {name}"
@@ -168,7 +143,7 @@ def main(args):
                     raise
 
     if args.output_dir is None:
-        output_file = os.path.join(hf_folder, args.output_name)
+        output_file = os.path.join(args.quantized_model, args.output_name)
     else:
         output_file = os.path.join(args.output_dir, args.output_name)
         if not os.path.isdir(args.output_dir):
@@ -202,22 +177,15 @@ if __name__ == "__main__":
                                      "--kv_cache_scales_path <filename>). This is only used "
                                      "if the KV cache dtype is FP8 and on ROCm (AMD GPU).")
     parser.add_argument("--quantized_model",
-                        help="Specify either the local path to, or name of, a quantized HF model. "
+                        help="Specify the directory containing a single quantized HF model. "
                         "It is expected that the quantization format is FP8_E4M3, for use on ROCm "
                         "(AMD GPU).",
                         required=True)
-    parser.add_argument("--cache_dir",
-                        help="Optionally specify a cache directory to use in the event of a HF "
-                        "model download.",
-                        default=None)
     parser.add_argument("--load_format",
                         help="Optionally specify the format of the model's tensor files "
                         "containing the KV cache scaling factors.",
                         choices=["auto", "safetensors", "npz", "pt"],
                         default="auto")
-    parser.add_argument("--revision",
-                        help="Optionally specify the model's revision number.",
-                        default=None)
     parser.add_argument("--output_dir",
                         help="Optionally specify the output directory. By default the "
                         "KV cache scaling factors will be saved in the model directory, "
