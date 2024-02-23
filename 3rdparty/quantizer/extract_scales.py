@@ -205,7 +205,9 @@ if __name__ == "__main__":
                                      "--kv_cache_scales_path <filename>). This is only used "
                                      "if the KV cache dtype is FP8 and on ROCm (AMD GPU).")
     parser.add_argument("--quantized_model",
-                        help="Specify either the local path to, or name of, a quantized HF model.",
+                        help="Specify either the local path to, or name of, a quantized HF model. "
+                        "It is expected that the quantization format is FP8_E4M3, for use on ROCm "
+                        "(AMD GPU).",
                         required=True)
     parser.add_argument("--cache_dir",
                         help="Optionally specify a cache directory to use in the event of a HF "
