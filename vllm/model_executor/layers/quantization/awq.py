@@ -148,8 +148,7 @@ class AWQLinearMethod(LinearMethodBase):
         scales = weights["scales"]
         qzeros = weights["qzeros"]
         pack_factor = self.quant_config.pack_factor
-        out_shape = (x.shape[:-1] + (qweight.shape[-1] * pack_factor, )
-                     )  #TODO(ravianupindi): change may be required here
+        out_shape = (x.shape[:-1] + (qweight.shape[-1] * pack_factor, ))
         reshaped_x = x.reshape(-1, x.shape[-1])
 
         # num_tokens >= threshold

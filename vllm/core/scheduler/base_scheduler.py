@@ -44,7 +44,6 @@ class SchedulerOutputs:
         self,
         id: int,
         scheduled_seq_groups: Iterable[SequenceGroup],
-        prompt_run: bool,
         prompt_chunk_lens: List[int],
         num_batched_tokens: int,
         num_batched_prompt_tokens: int,
@@ -123,7 +122,6 @@ class BaseScheduler(ABC):
 
         self.num_running_batches = 0
 
-        # TODO(zhuohan): Use deque instead of list for better performance.
         # Sequence groups in the WAITING state.
         self.waiting: Deque[SequenceGroup] = deque()
         # Sequence groups in the RUNNING state.

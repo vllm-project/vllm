@@ -48,13 +48,10 @@ class EngineArgs:
     # scheduler parameters
     scheduler_type: str = "vllm"
     max_num_seqs: int = 256
-    # vllm scheduler parameters
     max_num_batched_tokens: Optional[int] = None
     # sarathi scheduler parameters
-    chunk_size: Optional[int] = None
     enable_rolling_prefills: bool = True
     prefill_fitting_tolerance: float = 0.2
-    max_pre_queue_batches: int = 2
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -214,10 +211,6 @@ class EngineArgs:
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='disable logging statistics')
-        parser.add_argument('--chunk-size',
-                            type=int,
-                            default=EngineArgs.chunk_size,
-                            help='Size of each prefill chunk used in Sarathi')
         parser.add_argument('--enable-rolling-prefills',
                             action="store_true",
                             default=EngineArgs.enable_rolling_prefills,
@@ -229,11 +222,6 @@ class EngineArgs:
             help=
             'Maximum fraction of prefill chunk that can be left empty in Sarathi'
         )
-        parser.add_argument(
-            '--max-pre-queue-batches',
-            type=int,
-            default=EngineArgs.max_pre_queue_batches,
-            help='Maximum number of batches that can be pre-queued in Sarathi')
         # Quantization settings.
         parser.add_argument('--quantization',
                             '-q',
@@ -322,10 +310,9 @@ class EngineArgs:
             scheduler_config = SarathiSchedulerConfig(
                 self.max_num_seqs,
                 model_config.max_model_len,
-                self.chunk_size,
+                self.max_num_batched_tokens,
                 self.enable_rolling_prefills,
                 self.prefill_fitting_tolerance,
-                self.max_pre_queue_batches,
             )
         elif self.scheduler_type == "dsarathi":
             scheduler_config = DSarathiSchedulerConfig(

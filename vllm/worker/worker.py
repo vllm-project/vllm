@@ -1,9 +1,10 @@
 """A GPU worker class."""
 import gc
 import os
+from typing import Dict, List, Tuple, Set, Optional
+
 import torch
 import torch.distributed
-from typing import Dict, List, Tuple, Set, Optional
 
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, BaseSchedulerConfig, LoRAConfig)
@@ -19,6 +20,7 @@ from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
 from vllm.lora.request import LoRARequest
 from vllm.utils import is_hip
+
 
 class Worker:
     """A worker class that executes (a partition of) the model on a GPU.
@@ -63,7 +65,6 @@ class Worker:
         # Uninitialized cache engine. Will be initialized by
         # self.init_cache_engine().
         self.cache_config = None
-        self.sliding_window = None
         self.cache_engine = None
         self.cache_events = None
         self.gpu_cache = None
@@ -96,7 +97,7 @@ class Worker:
         set_random_seed(self.model_config.seed)
 
     def load_model(self):
-        self.model_runner.load_model(self.device)
+        self.model_runner.load_model()
 
     @torch.inference_mode()
     def profile_num_available_blocks(
@@ -146,7 +147,6 @@ class Worker:
 
     def init_cache_engine(self, cache_config: CacheConfig) -> None:
         self.cache_config = cache_config
-        self.sliding_window = cache_config.sliding_window
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
                                         self.parallel_config)
         self.cache_events = self.cache_engine.events
@@ -154,15 +154,13 @@ class Worker:
         self.model_runner.set_block_size(self.cache_engine.block_size)
 
     def warm_up_model(self) -> None:
-        # TODO(ravianupindi): investigate cuda graphs
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model(self.gpu_cache)
+        # Also reset the KV buffers for the worker
+        self.model_runner.reset_kv_buffers()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
-
-        # Also reset the KV buffers for the worker
-        self.model_runner.reset_kv_buffers()
 
     def cache_swap(
         self,

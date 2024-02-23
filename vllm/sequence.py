@@ -1,6 +1,5 @@
 """Sequence and its related classes."""
 import copy
-import enum
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Union
 
@@ -165,20 +164,19 @@ class Sequence:
 
         self.data = SequenceData(prompt_token_ids)
         self.output_logprobs: SampleLogprobs = []
-        self.output_probs: List[List[float]] = []
         self.output_text = ""
 
         self.logical_token_blocks: List[LogicalTokenBlock] = []
         # Initialize the logical token blocks with the prompt token ids.
         self._append_tokens_to_blocks(prompt_token_ids)
+        self.state = SequenceState(seq_id, arrived_at, len(prompt_token_ids))
 
         # Used for incremental detokenization
         self.prefix_offset = 0
         self.read_offset = 0
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
-        self.state = SequenceState(seq_id, arrived_at, len(prompt_token_ids))
-    
+
     @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
@@ -219,10 +217,8 @@ class Sequence:
         self,
         token_id: int,
         logprobs: Dict[int, float],
-        probs: Optional[List[float]]
     ) -> None:
         assert token_id in logprobs
-
         # Take a call whether to append the generated output token to a logical block,
         # for all partial prefill chunks, we can discard the token
         should_append_token = self.data.append_token_id(token_id, logprobs[token_id])
@@ -230,9 +226,6 @@ class Sequence:
         if should_append_token:
             self._append_tokens_to_blocks([token_id])
             self.output_logprobs.append(logprobs)
-            if probs is not None:
-                self.output_probs.append(probs)
-            
             self.state.on_token_generated()
             # We've generated one output, prompt phase is completed
             if len(self.output_logprobs) == 1:
@@ -523,8 +516,6 @@ class SequenceOutput:
         output_token: The output token ID.
         logprobs: The logprobs of the output token.
             (Token id -> logP(x_i+1 | x_0, ..., x_i))
-        probs: The probabilities of all the `vocab_size` tokens that is used to generate
-               the output token
     """
 
     def __init__(
@@ -532,12 +523,10 @@ class SequenceOutput:
         parent_seq_id: int,
         output_token: int,
         logprobs: Dict[int, float],
-        probs: Optional[List[float]]
     ) -> None:
         self.parent_seq_id = parent_seq_id
         self.output_token = output_token
         self.logprobs = logprobs
-        self.probs = probs
 
     def __repr__(self) -> str:
         return (f"SequenceOutput(parent_seq_id={self.parent_seq_id}, "

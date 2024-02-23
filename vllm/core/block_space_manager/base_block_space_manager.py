@@ -110,10 +110,11 @@ class BaseBlockSpaceManager(ABC):
         # FIXME(woosuk): Here we assume that all sequences in the group share
         # the same prompt. This may not be true for preempted sequences.
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
-
         num_required_blocks = self.get_num_initial_blocks(seq)
+
         if seq_group.prefix is not None and seq_group.prefix.allocated:
             num_required_blocks -= seq_group.prefix.get_num_blocks()
+
         if self.block_sliding_window is not None:
             num_required_blocks = min(num_required_blocks,
                                       self.block_sliding_window)

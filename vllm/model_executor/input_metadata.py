@@ -1,7 +1,12 @@
+import enum
+import torch
 from typing import Optional, List, Dict
 
-import torch
 
+class InputType(enum.Enum):
+    PROMPT = enum.auto()
+    DECODE = enum.auto()
+    MIXED = enum.auto()
 
 class InputMetadata:
     """Metadata for input sequences. Used in PagedAttention.
@@ -19,9 +24,7 @@ class InputMetadata:
 
     def __init__(
         self,
-        is_prompt: bool,
-        slot_mapping: torch.Tensor,
-        prompt_lens: Optional[torch.Tensor],
+        input_type: InputType,
         max_seq_len: Optional[int],
         start_loc: Optional[torch.Tensor],
         prompt_seq_ids: List[int],
@@ -36,8 +39,7 @@ class InputMetadata:
         use_cuda_graph: bool,
         kv_cache_dtype: str,
     ) -> None:
-        self.is_prompt = is_prompt
-        self.prompt_lens = prompt_lens
+        self.input_type = input_type
         self.max_seq_len = max_seq_len
         self.start_loc = start_loc
         self.prompt_seq_ids = prompt_seq_ids
@@ -51,10 +53,6 @@ class InputMetadata:
         self.block_tables = block_tables
         self.use_cuda_graph = use_cuda_graph
         self.kv_cache_dtype = kv_cache_dtype
-        self.is_profiling_iteration = is_profiling_iteration
-
-        # TODO(ravianupindi): Enable cuda graphs
-        self.use_cuda_graph = False
 
         assert ([x > 0 for x in current_prompt_chunk_lens].count(False) == 0)
         self.num_prompts = len(
