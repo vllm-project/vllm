@@ -218,7 +218,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
     )
 
 
-@functools.lru_cache(10)
+@functools.lru_cache
 def log_once(msg: str):
     logger.info(msg)
 
