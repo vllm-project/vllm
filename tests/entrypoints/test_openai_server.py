@@ -523,5 +523,30 @@ async def test_guided_decoding_type_error(server, client: openai.AsyncOpenAI):
         )
 
 
+def test_guided_logits_processors():
+    """Basic unit test for RegexLogitsProcessor and JSONLogitsProcessor."""
+    from vllm.model_executor.guided_logits_processors import (
+        RegexLogitsProcessor,
+        JSONLogitsProcessor
+    )
+    from transformers import AutoTokenizer
+    from torch import rand
+    
+    tokenizer = AutoTokenizer.from_pretrained('HuggingFaceH4/zephyr-7b-beta')
+    regexLP = RegexLogitsProcessor(TEST_REGEX, tokenizer)
+    jsonLP = JSONLogitsProcessor(TEST_SCHEMA, tokenizer)
+    tensor = rand(32000)
+
+    regexLP.init_state()
+    token_ids = tokenizer.encode(
+        f"Give an example IPv4 address with this regex: {TEST_REGEX}")
+    assert regexLP(token_ids, tensor).shape == tensor.shape
+    
+    jsonLP.init_state()
+    token_ids = tokenizer.encode(
+        f"Give an employee profile that fits this schema: {TEST_SCHEMA}")
+    assert jsonLP(token_ids, tensor).shape == tensor.shape
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
