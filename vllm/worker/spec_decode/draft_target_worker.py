@@ -241,6 +241,45 @@ class DraftTargetWorker:
                 for seq_group_metadata in seq_group_metadata_list
             ]))
 
+    def _create_target_seq_id_iterator(
+            self, seq_ids: List[SeqId]) -> Iterator[TargetSeqId]:
+        """Create an iterator for creating target sequence ids.
+        Target sequence ids are distinct from sequence ids because we create a
+        distinct target sequence id for each proposal token to be scored.
+
+        This implementation increments a counter starting at 1 + max of all
+        provided input sequence ids.
+        """
+        return count(start=max(seq_ids) + 1)
+
+    def _get_token_ids_to_score(
+            self,
+            full_spec_token_ids: List[int]  # shape: [k]
+    ) -> List[List[TokenId]]:
+        """Given an int tensor of proposal token ids, return a list of
+        token ids that should be scored.
+
+        Returns k+1 output lists. The additional one is used for generating the
+        bonus token.
+
+        Example:
+            Input: [0, 1, 2, 3] (k=4)
+            Output: (k+1 lists)
+                []
+                [0]
+                [0, 1]
+                [0, 1, 2]
+                [0, 1, 2, 3]
+        """
+        empty_token_ids = []
+
+        token_ids_to_score = [empty_token_ids]
+        token_ids_to_score.extend([
+            full_spec_token_ids[:i + 1]
+            for i in range(len(full_spec_token_ids))
+        ])
+        return token_ids_to_score
+
 #class DraftTargetWorker(Profilable, BaseWorker):
 #    """Worker which implements speculative decoding via a draft model for
 #    proposing tokens and a target model for verifying tokens. A modified form of

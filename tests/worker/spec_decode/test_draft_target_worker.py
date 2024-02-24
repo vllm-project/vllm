@@ -52,54 +52,54 @@ def test_get_all_seq_ids():
 
     actual_seq_ids = worker._get_all_seq_ids(seq_group_metadata_list)  # pylint: disable=protected-access
     assert actual_seq_ids == expected_seq_ids
-#
-#
-#@pytest.mark.parametrize('num_target_seq_ids', [100])
-#def test_create_target_seq_id_iterator(num_target_seq_ids: int):
-#    """Assert all target seq ids are greater than input seq ids.
-#    """
-#    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock())
-#
-#    all_seq_ids = [
-#        [1, 3, 5, 7],
-#        list(range(100)) + [0],
-#        [100],
-#    ]
-#
-#    for seq_ids in all_seq_ids:
-#        max_seq_id = max(seq_ids)
-#        iterator = worker._create_target_seq_id_iterator(seq_ids)  # pylint: disable=protected-access
-#        for _ in range(num_target_seq_ids):
-#            assert next(iterator) > max_seq_id
-#
-#
-#@pytest.mark.parametrize('k', [1, 2, 6])
-#def test_get_token_ids_to_score(k: int):
-#    """Verify DraftTargetWorker correctly determines which token ids need
-#    to be scored.
-#    """
-#    proposal_token_ids = torch.tensor(
-#        list(range(k)),
-#        dtype=torch.int64,
-#        device='cuda',
-#    )
-#
-#    expected_output = [
-#        [],
-#    ]
-#    for i in range(proposal_token_ids.shape[0]):
-#        expected_output.append(proposal_token_ids[:i + 1].tolist())
-#
-#    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock())
-#    actual_output = worker._get_token_ids_to_score(proposal_token_ids)  # pylint: disable=protected-access
-#
-#    actual_output = [
-#        x.tolist() if isinstance(x, torch.Tensor) else x for x in actual_output
-#    ]
-#
-#    assert actual_output == expected_output
-#
-#
+
+
+@pytest.mark.parametrize('num_target_seq_ids', [100])
+def test_create_target_seq_id_iterator(num_target_seq_ids: int):
+    """Assert all target seq ids are greater than input seq ids.
+    """
+    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock())
+
+    all_seq_ids = [
+        [1, 3, 5, 7],
+        list(range(100)) + [0],
+        [100],
+    ]
+
+    for seq_ids in all_seq_ids:
+        max_seq_id = max(seq_ids)
+        iterator = worker._create_target_seq_id_iterator(seq_ids)  # pylint: disable=protected-access
+        for _ in range(num_target_seq_ids):
+            assert next(iterator) > max_seq_id
+
+
+@pytest.mark.parametrize('k', [1, 2, 6])
+def test_get_token_ids_to_score(k: int):
+    """Verify DraftTargetWorker correctly determines which token ids need
+    to be scored.
+    """
+    proposal_token_ids = torch.tensor(
+        list(range(k)),
+        dtype=torch.int64,
+        device='cuda',
+    )
+
+    expected_output = [
+        [],
+    ]
+    for i in range(proposal_token_ids.shape[0]):
+        expected_output.append(proposal_token_ids[:i + 1].tolist())
+
+    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock())
+    actual_output = worker._get_token_ids_to_score(proposal_token_ids)  # pylint: disable=protected-access
+
+    actual_output = [
+        x.tolist() if isinstance(x, torch.Tensor) else x for x in actual_output
+    ]
+
+    assert actual_output == expected_output
+
+
 #@pytest.mark.parametrize('k', [1, 2, 6])
 #def test_create_single_target_seq_group_metadata(k: int):
 #    """Verify correct creation of a target seq group metadata.
