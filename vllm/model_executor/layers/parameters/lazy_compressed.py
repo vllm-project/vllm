@@ -5,6 +5,10 @@ import importlib.util
 
 from typing import Type
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 is_magic_wand_available = importlib.util.find_spec("magic_wand") is not None
 
 # These are types from magic_wand, but we only want to import if required
@@ -91,13 +95,37 @@ class LazyCompressedParameter(torch.Tensor):
         return rs
 
     def compress(self) -> None:
-        density = torch.count_nonzero(
-            self.uncompressed_data).item() / numpy.prod(self.shape)
+        from magic_wand import SparseSemiStructuredStorageFormat
 
-        # only compress if we have sufficient sparsity (>=45%), currently
-        # this applies globally across all formats including 2:4
-        if (1 - density) < 0.45:
-            return
+        if self.storage_format_cls == SparseSemiStructuredStorageFormat:
+            # Semi-structured sparsity assumes a 2:4 pattern, where each 4 elements
+            # have at minimum 2 zeros. We need to validate this pattern exists, so
+            # we check the whole tensor before committing to compression.
+
+            # Count zeros in each group of 4
+            reshaped_tensor = self.uncompressed_data.view(-1, 4)
+            zeros = reshaped_tensor == 0
+            zeros_per_group = zeros.sum(dim=1)
+
+            # Check if each group has exactly 2 zeros
+            has_semi_structured_sparsity = torch.all(zeros_per_group == 2)
+
+            if not has_semi_structured_sparsity:
+                logger.warning(
+                    f"Called compress() on tensor of shape {self.shape} but does not "
+                    "have 2:4 sparsity, skipping compression")
+                return
+
+        else:
+            sparsity = 1 - (torch.count_nonzero(self.uncompressed_data).item()
+                            / numpy.prod(self.shape))
+
+            # Only compress if we have sufficient sparsity (>=45%)
+            if sparsity < 0.45:
+                logger.warning(
+                    f"Called compress() on tensor of shape {self.shape} but only has "
+                    f"{sparsity:.2}% sparsity, skipping compression")
+                return
 
         if self.uncompressed_data is None:
             raise ValueError(
