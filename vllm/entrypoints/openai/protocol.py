@@ -6,6 +6,7 @@ from typing import Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field
 
 from vllm.utils import random_uuid
+from vllm.sampling_params import SamplingParams
 
 
 class ErrorResponse(BaseModel):
@@ -13,7 +14,7 @@ class ErrorResponse(BaseModel):
     message: str
     type: str
     param: Optional[str] = None
-    code: Optional[str] = None
+    code: int
 
 
 class ModelPermission(BaseModel):
@@ -59,6 +60,7 @@ class ChatCompletionRequest(BaseModel):
     top_p: Optional[float] = 1.0
     n: Optional[int] = 1
     max_tokens: Optional[int] = None
+    seed: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
     presence_penalty: Optional[float] = 0.0
@@ -70,6 +72,7 @@ class ChatCompletionRequest(BaseModel):
     top_k: Optional[int] = -1
     ignore_eos: Optional[bool] = False
     use_beam_search: Optional[bool] = False
+    early_stopping: Optional[bool] = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     skip_special_tokens: Optional[bool] = True
     spaces_between_special_tokens: Optional[bool] = True
@@ -77,6 +80,32 @@ class ChatCompletionRequest(BaseModel):
     echo: Optional[bool] = False
     repetition_penalty: Optional[float] = 1.0
     min_p: Optional[float] = 0.0
+    include_stop_str_in_output: Optional[bool] = False
+    length_penalty: Optional[float] = 1.0
+
+    def to_sampling_params(self) -> SamplingParams:
+        return SamplingParams(
+            n=self.n,
+            presence_penalty=self.presence_penalty,
+            frequency_penalty=self.frequency_penalty,
+            repetition_penalty=self.repetition_penalty,
+            temperature=self.temperature,
+            top_p=self.top_p,
+            min_p=self.min_p,
+            seed=self.seed,
+            stop=self.stop,
+            stop_token_ids=self.stop_token_ids,
+            max_tokens=self.max_tokens,
+            best_of=self.best_of,
+            top_k=self.top_k,
+            ignore_eos=self.ignore_eos,
+            use_beam_search=self.use_beam_search,
+            early_stopping=self.early_stopping,
+            skip_special_tokens=self.skip_special_tokens,
+            spaces_between_special_tokens=self.spaces_between_special_tokens,
+            include_stop_str_in_output=self.include_stop_str_in_output,
+            length_penalty=self.length_penalty,
+        )
 
 
 class CompletionRequest(BaseModel):
@@ -92,6 +121,7 @@ class CompletionRequest(BaseModel):
     logprobs: Optional[int] = None
     echo: Optional[bool] = False
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
+    seed: Optional[int] = None
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
     best_of: Optional[int] = None
@@ -101,11 +131,42 @@ class CompletionRequest(BaseModel):
     top_k: Optional[int] = -1
     ignore_eos: Optional[bool] = False
     use_beam_search: Optional[bool] = False
+    early_stopping: Optional[bool] = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     skip_special_tokens: Optional[bool] = True
     spaces_between_special_tokens: Optional[bool] = True
     repetition_penalty: Optional[float] = 1.0
     min_p: Optional[float] = 0.0
+    include_stop_str_in_output: Optional[bool] = False
+    length_penalty: Optional[float] = 1.0
+
+    def to_sampling_params(self):
+        echo_without_generation = self.echo and self.max_tokens == 0
+
+        return SamplingParams(
+            n=self.n,
+            best_of=self.best_of,
+            presence_penalty=self.presence_penalty,
+            frequency_penalty=self.frequency_penalty,
+            repetition_penalty=self.repetition_penalty,
+            temperature=self.temperature,
+            top_p=self.top_p,
+            top_k=self.top_k,
+            min_p=self.min_p,
+            seed=self.seed,
+            stop=self.stop,
+            stop_token_ids=self.stop_token_ids,
+            ignore_eos=self.ignore_eos,
+            max_tokens=self.max_tokens if not echo_without_generation else 1,
+            logprobs=self.logprobs,
+            use_beam_search=self.use_beam_search,
+            early_stopping=self.early_stopping,
+            prompt_logprobs=self.logprobs if self.echo else None,
+            skip_special_tokens=self.skip_special_tokens,
+            spaces_between_special_tokens=(self.spaces_between_special_tokens),
+            include_stop_str_in_output=self.include_stop_str_in_output,
+            length_penalty=self.length_penalty,
+        )
 
 
 class LogProbs(BaseModel):
@@ -144,7 +205,7 @@ class CompletionStreamResponse(BaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: List[CompletionResponseStreamChoice]
-    usage: Optional[UsageInfo]
+    usage: Optional[UsageInfo] = Field(default=None)
 
 
 class ChatMessage(BaseModel):
@@ -184,5 +245,4 @@ class ChatCompletionStreamResponse(BaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: List[ChatCompletionResponseStreamChoice]
-    usage: Optional[UsageInfo] = Field(
-        default=None, description="data about request and response")
+    usage: Optional[UsageInfo] = Field(default=None)
