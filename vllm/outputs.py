@@ -1,11 +1,13 @@
 from typing import List, Optional
 import time
+import dataclasses
 
 from vllm.sequence import (PromptLogprobs, SampleLogprobs, SequenceGroup,
                            SequenceStatus, RequestMetrics)
 from vllm.lora.request import LoRARequest
 
 
+@dataclasses.dataclass
 class CompletionOutput:
     """The output data of one completion output of a request.
 
@@ -20,24 +22,13 @@ class CompletionOutput:
         finish_reason: The reason why the sequence is finished.
         lora_request: The LoRA request that was used to generate the output.
     """
-
-    def __init__(
-        self,
-        index: int,
-        text: str,
-        token_ids: List[int],
-        cumulative_logprob: float,
-        logprobs: Optional[SampleLogprobs],
-        finish_reason: Optional[str] = None,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> None:
-        self.index = index
-        self.text = text
-        self.token_ids = token_ids
-        self.cumulative_logprob = cumulative_logprob
-        self.logprobs = logprobs
-        self.finish_reason = finish_reason
-        self.lora_request = lora_request
+    index: int
+    text: str
+    token_ids: List[int]
+    cumulative_logprob: float
+    logprobs: Optional[SampleLogprobs]
+    finish_reason: Optional[str] = None
+    lora_request: Optional[LoRARequest] = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -51,6 +42,7 @@ class CompletionOutput:
                 f"finish_reason={self.finish_reason})")
 
 
+@dataclasses.dataclass
 class RequestOutput:
     """The output data of a request to the LLM.
 
@@ -65,25 +57,14 @@ class RequestOutput:
         lora_request: The LoRA request that was used to generate the output.
     """
 
-    def __init__(
-        self,
-        request_id: str,
-        prompt: str,
-        prompt_token_ids: List[int],
-        prompt_logprobs: Optional[PromptLogprobs],
-        outputs: List[CompletionOutput],
-        finished: bool,
-        metrics: Optional[RequestMetrics] = None,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> None:
-        self.request_id = request_id
-        self.prompt = prompt
-        self.prompt_token_ids = prompt_token_ids
-        self.prompt_logprobs = prompt_logprobs
-        self.outputs = outputs
-        self.finished = finished
-        self.metrics = metrics
-        self.lora_request = lora_request
+    request_id: str
+    prompt: str
+    prompt_token_ids: List[int]
+    prompt_logprobs: Optional[PromptLogprobs]
+    outputs: List[CompletionOutput]
+    finished: bool
+    metrics: Optional[RequestMetrics] = None
+    lora_request: Optional[LoRARequest] = None
 
     @classmethod
     def from_seq_group(cls, seq_group: SequenceGroup) -> "RequestOutput":
