@@ -27,31 +27,31 @@ from .utils import mock_worker, create_batch, ExecuteModelData
 from unittest.mock import MagicMock
 
 
-#def test_get_all_seq_ids():
-#    """Verify get_all_seq_ids extracts all seq ids.
-#    """
-#    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock())
-#
-#    expected_seq_ids = list(range(10)) + list(range(100, 110))
-#
-#    seq_group_metadata_list = [
-#        SequenceGroupMetadata(
-#            request_id=str(seq_id),
-#            is_prompt=True,
-#            is_chunked_prefill=False,
-#            seq_data={
-#                seq_id: MagicMock(),
-#            },
-#            sampling_params=MagicMock(),
-#            block_tables={
-#                seq_id: MagicMock(),
-#            },
-#            lora_request=None,
-#        ) for seq_id in expected_seq_ids
-#    ]
-#
-#    actual_seq_ids = worker._get_all_seq_ids(seq_group_metadata_list)  # pylint: disable=protected-access
-#    assert actual_seq_ids == expected_seq_ids
+def test_get_all_seq_ids():
+    """Verify get_all_seq_ids extracts all seq ids.
+    """
+    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock())
+
+    expected_seq_ids = list(range(10)) + list(range(100, 110))
+
+    seq_group_metadata_list = [
+        SequenceGroupMetadata(
+            request_id=str(seq_id),
+            is_prompt=True,
+            #is_chunked_prefill=False,
+            seq_data={
+                seq_id: MagicMock(),
+            },
+            sampling_params=MagicMock(),
+            block_tables={
+                seq_id: MagicMock(),
+            },
+            lora_request=None,
+        ) for seq_id in expected_seq_ids
+    ]
+
+    actual_seq_ids = worker._get_all_seq_ids(seq_group_metadata_list)  # pylint: disable=protected-access
+    assert actual_seq_ids == expected_seq_ids
 #
 #
 #@pytest.mark.parametrize('num_target_seq_ids', [100])

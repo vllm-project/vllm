@@ -228,6 +228,19 @@ class DraftTargetWorker:
 
         return draft_max_model_len, target_max_model_len
 
+
+    def _get_all_seq_ids(
+            self, seq_group_metadata_list: List[SequenceGroupMetadata]
+    ) -> List[SeqId]:
+        """Given a list of SequenceGroupMetadata, create a list of all
+        sequence ids.
+        """
+        return list(
+            chain.from_iterable([
+                seq_group_metadata.seq_data.keys()
+                for seq_group_metadata in seq_group_metadata_list
+            ]))
+
 #class DraftTargetWorker(Profilable, BaseWorker):
 #    """Worker which implements speculative decoding via a draft model for
 #    proposing tokens and a target model for verifying tokens. A modified form of
