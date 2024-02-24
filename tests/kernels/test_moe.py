@@ -257,7 +257,7 @@ def test_fused_moe_awq(
     e: int,
     topk: int,
 ):
-    # awq requires minimum capablity 75
+    # awq requires minimum capability 75
     if torch.version.hip is not None:
         return
     capability = torch.cuda.get_device_capability()
