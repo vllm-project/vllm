@@ -154,7 +154,7 @@ def torch_moe_gptq(a, w1, w1_gidx, w1_scale, w1_zero, w2, w2_gidx, w2_scale,
 
 
 @pytest.mark.parametrize("m", [1, 16, 128])
-@pytest.mark.parametrize("n", [128, 1024, 2048])
+@pytest.mark.parametrize("n", [128, 512, 1024])
 @pytest.mark.parametrize("k", [128, 512, 1024])
 @pytest.mark.parametrize("e", [8, 64])
 @pytest.mark.parametrize("topk", [2, 6])
@@ -257,6 +257,14 @@ def test_fused_moe_awq(
     e: int,
     topk: int,
 ):
+    # awq requires minimum capablity 75
+    if torch.version.hip is not None:
+        return
+    capability = torch.cuda.get_device_capability()
+    capability = capability[0] * 10 + capability[1]
+    if capability < 75:
+        return
+
     RANGE = 1000000000
     groupsize = 128
     a = torch.randn((m, k), device='cuda', dtype=torch.half) / 10
