@@ -144,7 +144,8 @@ def _apply_logits_processors(
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
     # when prompt_logprobs is not None, we need to skip the prompt tokens.
-    logits_with_prompt = len(sampling_metadata.prompt_lens) > 0 and sum(sampling_metadata.prompt_lens) == logits.shape[0]
+    logits_with_prompt = len(sampling_metadata.prompt_lens) > 0 and sum(
+        sampling_metadata.prompt_lens) == logits.shape[0]
     logits_row_idx = -1
     found_logits_processors = False
     for seq_ids, sampling_params in sampling_metadata.seq_groups:
