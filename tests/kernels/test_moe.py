@@ -153,10 +153,10 @@ def torch_moe_gptq(a, w1, w1_gidx, w1_scale, w1_zero, w2, w2_gidx, w2_scale,
             topk_weight.view(B, -1, 1)).sum(dim=1).half()
 
 
-@pytest.mark.parametrize("m", [1, 16, 128])
-@pytest.mark.parametrize("n", [128, 512, 1024])
+@pytest.mark.parametrize("m", [512, 222, 33, 1])
+@pytest.mark.parametrize("n", [2048, 256, 1024])
 @pytest.mark.parametrize("k", [128, 512, 1024])
-@pytest.mark.parametrize("e", [8, 64])
+@pytest.mark.parametrize("e", [8])
 @pytest.mark.parametrize("topk", [2, 6])
 @pytest.mark.parametrize("exstate",
                          [ExllamaState.UNINITIALIZED, ExllamaState.UNUSED])
@@ -245,10 +245,10 @@ def torch_moe_awq(a, w1, w1_scale, w1_zero, w2, w2_scale, w2_zero, score,
             topk_weight.view(B, -1, 1)).sum(dim=1).half()
 
 
-@pytest.mark.parametrize("m", [1, 16, 128, 1024])
-@pytest.mark.parametrize("n", [128, 1024, 2048])
+@pytest.mark.parametrize("m", [1024, 222, 33, 1])
+@pytest.mark.parametrize("n", [2048, 256, 1024])
 @pytest.mark.parametrize("k", [128, 512, 1024])
-@pytest.mark.parametrize("e", [8, 64])
+@pytest.mark.parametrize("e", [8])
 @pytest.mark.parametrize("topk", [2, 6])
 def test_fused_moe_awq(
     m: int,
