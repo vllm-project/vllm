@@ -4,29 +4,43 @@ project(vllm_extensions LANGUAGES CXX)
 
 #
 # Supported python versions.  These versions will be searched in order, the
-# first match is be selected.
+# first match will be selected.  These should be kept in sync with setup.py.
 #
 set(PYTHON_SUPPORTED_VERSIONS "3.8" "3.9" "3.10" "3.11")
 
-# Supported NVIDIA architectures
+# Supported NVIDIA architectures.
 set(NVIDIA_SUPPORTED_ARCHS "7.0;7.5;8.0;8.6;8.9;9.0")
 
-# Supported AMD GPU architectures
+# Supported AMD GPU architectures.
 set(ROCM_SUPPORTED_ARCHS "gfx908;gfx90a;gfx942;gfx1100")
 
 #
-# Loop thru all supported python versions until we find the first suitable
-# version that has torch installed.
+# Supported/expected torch versions for CUDA/ROCm.
 #
-# Cmake is unable to pick the lowest supported version when multiple
-# versions are available, even with CMAKE_FIND_PACKAGE_SORT_ORDER.
+# Currently, having an incorrect pytorch version results in a warning
+# rather than an error.
+#
+# Note: the CUDA torch version is derived from pyproject.toml and various
+# requirements.txt files and should be kept consistent.  The ROCm torch
+# versions are derived from Dockerfile.rocm
+#
+set(TORCH_SUPPORTED_VERSION_CUDA "2.1.2")
+set(TORCH_SUPPORTED_VERSION_ROCM_5X "2.0.1")
+set(TORCH_SUPPORTED_VERSION_ROCM_6X "2.1.1")
+
+#
+# Loop through all supported python versions until the first suitable version
+# that has torch installed.
+#
+# Note: cmake is unable to pick the lowest supported version when multiple
+# versions are available, even with `CMAKE_FIND_PACKAGE_SORT_ORDER`.
 #
 foreach(VER ${PYTHON_SUPPORTED_VERSIONS})
   message(STATUS "Attempting to find python ${VER} package.")
   find_package(Python ${VER} COMPONENTS Interpreter Development.Module)
   if (Python_FOUND)
-    # Attempt to import torch from python we just found. If so, stop
-    # searching for other versions of python.
+    # Attempt to import torch from python was just found. If torch can
+    # be imported, stop searching for other versions of python.
     # Note: find_package(Torch) won't work here because cmake might not
     # have the proper search path set yet.
     execute_process(
@@ -37,7 +51,8 @@ foreach(VER ${PYTHON_SUPPORTED_VERSIONS})
       ERROR_VARIABLE PYTHON_STDERR)
 
     if(PYTHON_ERROR_CODE EQUAL 0)
-      message(STATUS "Found python version ${Python_VERSION} (${Python_EXECUTABLE}).")
+      message(STATUS
+        "Found python version ${Python_VERSION} (${Python_EXECUTABLE}).")
       break()
     endif()
   endif()
@@ -45,13 +60,14 @@ endforeach()
 
 if (NOT Python_FOUND)
   message(FATAL_ERROR
-    "No supported version of python found. ('${PYTHON_SUPPORTED_VERSIONS}')")
+    "No supported version of python (with pytorch) found. "
+    "('${PYTHON_SUPPORTED_VERSIONS}')")
 endif()
 
 #
-# Run EXPR in python.  The standard output of python is stored in OUT and has
-# trailing whitespace stripped.  If an error is encountered when running python,
-# a fatal message ERR_MSG is issued.
+# Run `EXPR` in python.  The standard output of python is stored in `OUT` and
+# has trailing whitespace stripped.  If an error is encountered when running
+# python, a fatal message `ERR_MSG` is issued.
 #
 macro (run_python OUT EXPR ERR_MSG)
   execute_process(
@@ -68,36 +84,38 @@ macro (run_python OUT EXPR ERR_MSG)
 endmacro()
 
 #
-# Try to find the MPI package
+# Try to find the MPI package.
 #
 find_package(MPI)
 
 #
-# Find where user site-packages and torch are installed and add it to cmake's
-# search path.
+# Update cmake's `CMAKE_PREFIX_PATH` with probably torch locations.
 #
 
-# Run EXPR in python after importing PKG. Use the result of this to extend
-# CMAKE_PREFIX_PATH so we can import the torch cmake configuration.
+# Run `EXPR` in python after importing `PKG`. Use the result of this to extend
+# `CMAKE_PREFIX_PATH` so the torch cmake configuration can be imported.
 macro (append_cmake_prefix_path PKG EXPR)
   run_python(PREFIX_PATH
     "import ${PKG}; print(${EXPR})" "Failed to locate ${PKG} path")
   list(APPEND CMAKE_PREFIX_PATH ${PREFIX_PATH})
 endmacro()
 
-# Add user site-packages and torch path to CMAKE_PREFIX_PATH
+# Add user site-packages path to `CMAKE_PREFIX_PATH`.
 append_cmake_prefix_path("site" "site.getusersitepackages()")
+
+# Query torch for its install path and add to `CMAKE_PREFIX_PATH`.
 append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
 
 #
 # Import torch cmake configuration.
-# Torch also imports CUDA/HIP packages with some customizations, so we do not
-# need to do this explicitly with check_language/enable_language, etc.
+# Torch also imports CUDA (and partially HIP) languages with some customizations,
+# so there is no need to do this explicitly with check_language/enable_language,
+# etc.
 #
 find_package(Torch REQUIRED)
 
 # For some reason torch does not add libtorch_python.so to the list of torch
-# libraries to link.  Find it by hand using 'append_torchlib_if_found' from
+# libraries to link.  Find it by hand using `append_torchlib_if_found` from
 # torch's cmake setup.
 append_torchlib_if_found(torch_python)
 
@@ -111,23 +129,23 @@ endif()
 if (NOT HIP_FOUND AND CUDA_FOUND)
   set(IS_CUDA true)
 
-  # Verify torch version and warn if it is not expected.
-  if (NOT Torch_VERSION VERSION_EQUAL 2.1.2)
-    message(WARNING "Pytorch version 2.1.2 expected for CUDA build, "
-      "saw ${Torch_VERSION} instead.")
+  if (NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_CUDA})
+    message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_CUDA} "
+      "expected for CUDA build, saw ${Torch_VERSION} instead.")
   endif()
 else()
-  # Verify torch version and warn if it is not expected (derived from Dockerfile.rocm)
-  # ROCm 5.7 -> torch 2.0.1
-  if (ROCM_VERSION_DEV_MAJOR EQUAL 5 AND NOT Torch_VERSION VERSION_EQUAL 2.0.1)
-    message(WARNING "Pytorch version 2.0.1 expected for ROCMm 5.x build, "
-      "saw ${Torch_VERSION} instead.")
+  # ROCm 5.x
+  if (ROCM_VERSION_DEV_MAJOR EQUAL 5 AND
+      NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_ROCM_5X})
+    message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_ROCM_5X} "
+      "expected for ROCMm 5.x build, saw ${Torch_VERSION} instead.")
   endif()
 
-  # ROCm 6.0 -> torch 2.1.1
-  if (ROCM_VERSION_DEV_MAJOR EQUAL 6 AND NOT Torch_VERSION VERSION_EQUAL 2.1.1)
-    message(WARNING "Pytorch version 2.1.1 expected for ROCMm 6.x build, "
-      "saw ${Torch_VERSION} instead.")
+  # ROCm 6.x
+  if (ROCM_VERSION_DEV_MAJOR EQUAL 6 AND
+      NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_ROCM_6X})
+    message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_ROCM_6X} "
+      "expected for ROCMm 6.x build, saw ${Torch_VERSION} instead.")
   endif()
 endif()
 
@@ -135,20 +153,19 @@ endif()
 # Setup extra platform specific GPU compilation flags, e.g. NVCC flags for CUDA
 # and hip flags for ROCm.
 #
-# Note: CUDA + HIP are detected by pytorch package so there's no need to repeat
-# detect them explicitly with check_language, etc.
+# Note: CUDA (and partially HIP) is detected by pytorch package so there's no
+# need to repeat detecting it explicitly with check_language, etc.
 #
 if (HIP_FOUND)
-  # Importing torch recognizes and sets up some HIP/ROCm configuration but
-  # does not let cmake recognize .hip files. If we want cmake to be able to
-  # understand the .hip extension automatically, we need to enable HIP
-  # explicitly.
+  # Importing torch recognizes and sets up some HIP/ROCm configuration but does
+  # not let cmake recognize .hip files. In order to get cmake to understand the
+  # .hip extension automatically, HIP must be enabled explicitly.
   enable_language(HIP)
 
   #
-  # VLLM_HIP_ARCHITECUTRES controls the --offload-arch flags.
-  # CMAKE_HIP_ARCHITECTURES is set up by pytorch and can be controlled
-  # via the PYTORCH_ROCM_ARCH env variable.
+  # `VLLM_HIP_ARCHITECUTRES` controls the `--offload-arch` flags.
+  # `CMAKE_HIP_ARCHITECTURES` is set up by torch and can be controlled
+  # via the `PYTORCH_ROCM_ARCH` env variable.
   #
 
   #
@@ -164,8 +181,8 @@ if (HIP_FOUND)
 
   if(NOT VLLM_HIP_ARCHITECTURES)
     message(FATAL_ERROR
-      "None of the detected ROCM architectures: ${CMAKE_HIP_ARCHITECTURES} is"
-      " supported. Supported ROCM architectures are: ${ROCM_SUPPORTED_ARCHS}.")
+      "None of the detected ROCm architectures: ${CMAKE_HIP_ARCHITECTURES} is"
+      " supported. Supported ROCm architectures are: ${ROCM_SUPPORTED_ARCHS}.")
   endif()
 
   set(VLLM_GPU_ARCHES ${VLLM_HIP_ARCHITECTURES})
@@ -218,31 +235,32 @@ else()
   message(DEBUG "punica nvcc: ${VLLM_PUNICA_GPU_FLAGS}")
 
   #
-  # Setup/process CUDA arch flags
+  # Setup/process CUDA arch flags.
   #
-  # The torch cmake setup detects and hardcodes the detected architecture flags
-  # in CMAKE_CUDA_FLAGS. Since CMAKE_CUDA_FLAGS is a "global" variable, we can't
-  # modify it on a per-target basis, i.e. for the punica extension.
-  # So we have to extract and remove all the '-gencode' flags from
-  # CMAKE_CUDA_FLAGS for processing. We can't use 'target_compiler_options'
-  # for adding '-gencode' arguments so we use the target's CUDA_ARCHITECTURES
-  # property instead. This requires repackaging the architecture flags into a
-  # format that cmake expects for CUDA_ARCHITECTURES.
+  # The torch cmake setup hardcodes the detected architecture flags in
+  # `CMAKE_CUDA_FLAGS`.  Since `CMAKE_CUDA_FLAGS` is a "global" variable, it
+  # can't modified on a per-target basis, e.g. for the `punica` extension.
+  # So, all the `-gencode` flags need to be extracted and removed from
+  # `CMAKE_CUDA_FLAGS` for processing so they can be passed by another method.
+  # Since it's not possible to use `target_compiler_options` for adding target
+  # specific `-gencode` arguments, the target's `CUDA_ARCHITECTURES` property
+  # must be used instead.  This requires repackaging the architecture flags
+  # into a format that cmake expects for `CUDA_ARCHITECTURES`.
   #
-  # This is a bit fragile in that it depends on torch using -gencode as opposed
+  # This is a bit fragile in that it depends on torch using `-gencode` as opposed
   # to one of the other nvcc options to specify architectures.
   #
-  # Note: torch uses the TORCH_CUDA_ARCH_LIST environment variable to override
+  # Note: torch uses the `TORCH_CUDA_ARCH_LIST` environment variable to override
   # detected architectures.
   #
   message(DEBUG "initial CMAKE_CUDA_FLAGS: ${CMAKE_CUDA_FLAGS}")
 
-  # Extract all '-gencode' flags from CMAKE_CUDA_FLAGS
+  # Extract all `-gencode` flags from `CMAKE_CUDA_FLAGS`
   string(REGEX MATCHALL "-gencode arch=[^ ]+" VLLM_CUDA_ARCH_FLAGS
     ${CMAKE_CUDA_FLAGS})
 
-  # Remove all '-gencode' flags from CMAKE_CUDA_FLAGS since we will be modifying
-  # them and passing them back in via the CUDA_ARCHITECTURES property.
+  # Remove all `-gencode` flags from `CMAKE_CUDA_FLAGS` since they will be modified
+  # and passed back via the `CUDA_ARCHITECTURES` property.
   string(REGEX REPLACE "-gencode arch=[^ ]+ *" "" CMAKE_CUDA_FLAGS
     ${CMAKE_CUDA_FLAGS})
 
@@ -256,7 +274,7 @@ else()
 
   message(DEBUG "arch flags: ${VLLM_CUDA_ARCH_FLAGS}")
 
-  # Macro for converting a 'gencode' version number to a cmake version number.
+  # Macro for converting a `gencode` version number to a cmake version number.
   macro(string_to_ver OUT_VER IN_STR)
     string(REGEX REPLACE "\([0-9]+\)\([0-9]\)" "\\1.\\2" ${OUT_VER} ${IN_STR})
   endmacro()
@@ -265,11 +283,11 @@ else()
   set(VLLM_GPU_ARCHES)
   set(VLLM_PUNICA_GPU_ARCHES)
 
-  # Process each 'gencode' flag.
+  # Process each `gencode` flag.
   foreach(ARCH ${VLLM_CUDA_ARCH_FLAGS})
-    # For each flag we want to extract the version number and whether
-    # it refers to PTX or native code.
-    # Note: if a regex matches then CMAKE_MATCH_1 holds the binding
+    # For each flag, extract the version number and whether it refers to PTX
+    # or native code.
+    # Note: if a regex matches then `CMAKE_MATCH_1` holds the binding
     # for that match.
 
     string(REGEX MATCH "arch=compute_\([0-9]+a?\)" COMPUTE ${ARCH})
@@ -307,17 +325,17 @@ else()
       set(CODE_ARCH ${CODE})
     endif()
 
-    # Check if the current version is in the supported arch list
+    # Check if the current version is in the supported arch list.
     string_to_ver(CODE_VER ${CODE_ARCH})
     if (NOT CODE_VER IN_LIST NVIDIA_SUPPORTED_ARCHS)
       message(STATUS "discarding unsupported CUDA arch ${VER}.")
       continue()
     endif()
 
-    # Add it to the arch list
+    # Add it to the arch list.
     list(APPEND VLLM_GPU_ARCHES "${CODE_ARCH}${VIRT}")
 
-    # Add it to punica arch list if the version is >= 8.0
+    # Add it to punica arch list if the version is >= 8.0.
     if (CODE_VER GREATER_EQUAL 8.0)
       list(APPEND VLLM_PUNICA_GPU_ARCHES "${CODE_ARCH}${VIRT}")
     endif()
@@ -328,17 +346,17 @@ else()
 endif()
 
 #
-# Define targets
+# Define extension targets
 #
 
 #
-# Add a target named `NAME` that runs the hipify preprocessor on a set of
-# CUDA source files. The names of the corresponding "hipified" sources
-# are stored in `OUT_SRCS`.
+# Add a target named `hipify${NAME}` that runs the hipify preprocessor on a set
+# of CUDA source files. The names of the corresponding "hipified" sources are
+# stored in `OUT_SRCS`.
 #
 macro(hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
   #
-  # Split into C++ and non-C++ (i.e. CUDA) sources
+  # Split into C++ and non-C++ (i.e. CUDA) sources.
   #
   set(SRCS ${ORIG_SRCS})
   set(CXX_SRCS ${ORIG_SRCS})
@@ -349,7 +367,9 @@ macro(hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
   message(DEBUG "cxx sources: ${CXX_SRCS}")
 
   #
-  # Generate ROCM/HIP source file names from CUDA file names.
+  # Generate ROCm/HIP source file names from CUDA file names.
+  # Since HIP files are generated code, they will appear in the build area
+  # `CMAKE_CURRENT_BINARY_DIR` directory rather than the original csrc dir.
   #
   set(HIP_SRCS)
   foreach (SRC ${SRCS})
@@ -365,7 +385,7 @@ macro(hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
     COMMAND ${CMAKE_SOURCE_DIR}/hipify.py -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} ${SRCS}
     DEPENDS hipify.py ${SRCS}
     BYPRODUCTS ${HIP_SRCS}
-    COMMENT "Running hipify on extension source files.")
+    COMMENT "Running hipify on ${NAME} extension source files.")
 
   # Swap out original extension sources with hipified sources.
   set(${OUT_SRCS} ${HIP_SRCS})
@@ -382,15 +402,17 @@ endmacro()
 #                       directory.
 # MOD_EXTRA_GPU_FLAGS - extra compiler flags passed to NVCC/hip.
 # MOD_GPU_ARCHES      - a list of target GPU architectures in cmake format.
-#                       Refer to cmake documentation on CMAKE_CUDA_ARCHITECTURES
-#                       and CMAKE_HIP_ARCHITECTURES for more info.
+#                       Refer to documentation on `CMAKE_CUDA_ARCHITECTURES`
+#                       and `CMAKE_HIP_ARCHITECTURES` for more info.
 #
 # Note: optimization level/debug info is set via cmake build type.
+#
+# TODO: consider passing the language (CUDA/HIP/etc.) as an argument.
 #
 function(define_module_target MOD_NAME MOD_SRC MOD_EXTRA_GPU_FLAGS
     MOD_GPU_ARCHES)
 
-  # Add hipify preprocessing step if we are building with HIP/ROCm.
+  # Add hipify preprocessing step when building with HIP/ROCm.
   if (NOT IS_CUDA AND HIP_FOUND)
     hipify_sources_target(MOD_SRC ${MOD_NAME} "${MOD_SRC}")
   endif()
@@ -496,13 +518,16 @@ define_module_target(_punica_C
   "${VLLM_PUNICA_GPU_ARCHES}")
 
 #
-# Add 'supported' target which detects which extensions should be
-# built based on platform/architecture. This is the same logic that
-# setup.py uses to select which extensions should be built.
+# Add the `supported` target which detects which extensions should be
+# built based on platform/architecture.  This is the same logic that
+# setup.py uses to select which extensions should be built and should
+# be kept in sync.
 #
-# The 'supported' target makes direct use of cmake easier since knowledge
-# of which extensions are supported have been factored in, e.g.
+# The `supported` target makes direct use of cmake easier since knowledge
+# of which extensions are supported has been factored in, e.g.
 #
+# mkdir build && cd build
+# cmake -G Ninja ..
 # cmake --build . --target supported
 #
 add_custom_target(supported)
