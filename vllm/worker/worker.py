@@ -93,8 +93,6 @@ class Worker:
         # Initialize the distributed environment.
         init_distributed_environment(self.parallel_config, self.rank,
                                      cupy_port, self.distributed_init_method)
-        if not self.parallel_config.disable_custom_all_reduce:
-            init_custom_ar()
         # Initialize the model.
         set_random_seed(self.model_config.seed)
 
@@ -287,6 +285,10 @@ def init_distributed_environment(
         cupy_utils.all_reduce(torch.zeros(1).cuda())
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
+
+    # Initialize a custom fast all-reduce implementation.
+    if not parallel_config.disable_custom_all_reduce:
+        init_custom_ar()
 
 
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):

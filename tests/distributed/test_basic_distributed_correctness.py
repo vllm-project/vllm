@@ -1,30 +1,21 @@
-"""Compare the outputs of HF and vLLM when using greedy sampling.
+"""Compare the outputs of HF and distributed vLLM when using greedy sampling.
 
-Run `pytest tests/models/test_models.py --forked`.
+Run `pytest tests/distributed/test_basic_distributed_correctness.py --forked`.
 """
 import pytest
+import torch
 
 MODELS = [
     "facebook/opt-125m",
     "meta-llama/Llama-2-7b-hf",
-    "mistralai/Mistral-7B-v0.1",
-    "Deci/DeciLM-7b",
-    "tiiuae/falcon-7b",
-    "gpt2",
-    "bigcode/tiny_starcoder_py",
-    "EleutherAI/gpt-j-6b",
-    "EleutherAI/pythia-70m",
-    "bigscience/bloom-560m",
-    "mosaicml/mpt-7b",
-    "microsoft/phi-2",
-    "stabilityai/stablelm-3b-4e1t",
-    "allenai/OLMo-1B",
 ]
 
 
+@pytest.mark.skipif(torch.cuda.device_count() < 2,
+                    reason="Need at least 2 GPUs to run the test.")
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["float"])
-@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [5])
 def test_models(
     hf_runner,
     vllm_runner,
@@ -37,7 +28,7 @@ def test_models(
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
     del hf_model
 
-    vllm_model = vllm_runner(model, dtype=dtype)
+    vllm_model = vllm_runner(model, dtype=dtype, tensor_parallel_size=2)
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
 
