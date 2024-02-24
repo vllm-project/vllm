@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field
 from vllm.utils import random_uuid
 from vllm.sampling_params import SamplingParams
 
+import torch
+
 
 class ErrorResponse(BaseModel):
     object: str = "error"
@@ -137,6 +139,16 @@ class CompletionRequest(BaseModel):
     def to_sampling_params(self):
         echo_without_generation = self.echo and self.max_tokens == 0
 
+        logits_processors = None
+
+        if self.logit_bias:
+            def logit_bias_logits_processor(token_ids: List[int], logits: torch.Tensor) -> torch.Tensor:
+                for token_id, bias in self.logit_bias.items():
+                    bias = min(100, max(-100, bias)) # Clamp the bias between -100 and 100
+                    logits[int(token_id)] += bias
+                return logits
+            logits_processors = [logit_bias_logits_processor]
+
         return SamplingParams(
             n=self.n,
             best_of=self.best_of,
@@ -158,6 +170,7 @@ class CompletionRequest(BaseModel):
             spaces_between_special_tokens=(self.spaces_between_special_tokens),
             include_stop_str_in_output=self.include_stop_str_in_output,
             length_penalty=self.length_penalty,
+            logits_processors=logits_processors,
         )
 
 
