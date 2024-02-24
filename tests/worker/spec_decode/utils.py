@@ -1,5 +1,6 @@
 import torch
 from typing import List, Optional, Dict
+from unittest.mock import MagicMock
 
 from vllm.worker.worker import Worker
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
@@ -8,6 +9,7 @@ from vllm.sequence import SequenceGroupMetadata, SequenceData
 from vllm.sampling_params import SamplingParams
 from vllm.worker.cache_engine import CacheEngine
 from vllm.model_executor.utils import set_random_seed
+from itertools import count
 from dataclasses import dataclass, fields
 
 
@@ -47,7 +49,14 @@ def create_execute_model_data(
         blocks_to_swap_in=blocks_to_swap_in,
         blocks_to_swap_out=blocks_to_swap_out,
         blocks_to_copy=blocks_to_copy,
-    )
+    ) 
+
+def mock_worker(vocab_size: int = 30_000,
+                max_model_len: int = 2048) -> MagicMock:
+    worker = MagicMock()
+    worker.vocab_size = vocab_size
+    worker.max_model_len = max_model_len
+    return worker
 
 
 def patch_execute_model_with_seeds(worker: Worker, rand_seeds: List[int]):
@@ -176,3 +185,28 @@ def assert_logprobs_dict_allclose(
             actual = torch.tensor(single_step_actual_logprobs[token_id])
             expected = torch.tensor(single_step_expected_logprobs[token_id])
             assert torch.allclose(actual, expected)
+
+def create_batch(batch_size,
+                 k,
+                 prompt_len: int = 10,
+                 prev_output_token_len: int = 10,
+                 seq_ids: Optional[List[int]] = None):
+    block_size = 8
+    num_gpu_blocks = 2048 // block_size
+    iterator = count()
+    prompts = [[next(iterator) for _ in range(prompt_len)]
+               for _ in range(batch_size)]
+    prev_output_tokens = [[
+        next(iterator) for _ in range(prev_output_token_len)
+    ] for _ in range(batch_size)]
+    final_seq_lens = [
+        len(prompt) + len(prev_output_token) + k + 1
+        for prompt, prev_output_token in zip(prompts, prev_output_tokens)
+    ]
+    execute_model_data = create_execute_model_data(
+        create_seq_group_metadata_from_prompts(prompts, num_gpu_blocks,
+                                               block_size, final_seq_lens,
+                                               prev_output_tokens, seq_ids),
+        )
+        #num_preallocated_slots=k)
+    return execute_model_data, prompts, prev_output_tokens
