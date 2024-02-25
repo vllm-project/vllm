@@ -219,12 +219,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
 
 
 @functools.lru_cache
-def log_once(msg: str):
-    logger.info(msg)
-
-
-def get_moe_configs(num_experts: int,
-                    intermediate_size: int) -> Optional[Dict[int, Any]]:
+def get_moe_configs(E: int, N: int) -> Optional[Dict[int, Any]]:
     """
     Return optimized configurations for the fused MoE kernel.
 
@@ -239,11 +234,11 @@ def get_moe_configs(num_experts: int,
 
     config_file_path = os.path.join(
         os.path.dirname(os.path.realpath(__file__)), "configs",
-        f"E={num_experts},N={intermediate_size},device_name={device_name}.json"
+        f"E={E},N={N},device_name={device_name}.json"
     )
     if os.path.exists(config_file_path):
         with open(config_file_path) as f:
-            log_once(
+            logger.info(
                 f"Using configuration from {config_file_path} for MoE layer.")
             # If a configuration has been found, return it
             return {int(key): val for key, val in json.load(f).items()}
@@ -260,7 +255,7 @@ def fused_moe(
     topk: int,
     renormalize: bool,
     inplace: bool = False,
-    configs: Dict[int, Any] = None,
+    config: Dict[str, Any] = None,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of weights, w1 and w2, and top-k gating mechanism.
@@ -273,7 +268,7 @@ def fused_moe(
     - topk (int): The number of top-k experts to select.
     - renormalize (bool): If True, renormalize the top-k weights to sum to 1.
     - inplace (bool): If True, perform the operation in-place. Defaults to False.
-    - configs (Dict[int, Any]): Optional mapping from batch size to kernel configuration.
+    - configs (Dict[str, Any]): Optional override for the kernel configuration.
     
     Returns:
     - torch.Tensor: The output tensor after applying the MoE layer.
@@ -323,23 +318,29 @@ def fused_moe(
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
-    if configs:
-        config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
-    else:
-        config = {
-            'BLOCK_SIZE_M': 64,
-            'BLOCK_SIZE_N': 64,
-            'BLOCK_SIZE_K': 32,
-            'GROUP_SIZE_M': 8
-        }
+    if not config:
+        # First try to load optimal config from the file
+        configs = get_moe_configs(E, N)
 
-        if topk_ids.numel() <= w1.shape[0]:
+        if configs:
+            # If an optimal configuration map has been found, look up the optimal config
+            config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
+        else:
+            # Else use the default config
             config = {
-                'BLOCK_SIZE_M': 16,
-                'BLOCK_SIZE_N': 32,
-                'BLOCK_SIZE_K': 64,
-                'GROUP_SIZE_M': 1
+                'BLOCK_SIZE_M': 64,
+                'BLOCK_SIZE_N': 64,
+                'BLOCK_SIZE_K': 32,
+                'GROUP_SIZE_M': 8
             }
+
+            if M <= E:
+                config = {
+                    'BLOCK_SIZE_M': 16,
+                    'BLOCK_SIZE_N': 32,
+                    'BLOCK_SIZE_K': 64,
+                    'GROUP_SIZE_M': 1
+                }
 
     intermediate_cache1 = torch.empty((M, topk_ids.shape[1], N),
                                       device=hidden_states.device,
