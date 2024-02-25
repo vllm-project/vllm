@@ -15,11 +15,6 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing, LoRA
 
 logger = init_logger(__name__)
 
-TypeTokenIDs = List[int]
-TypeTopLogProbs = List[Optional[Dict[int, float]]]
-TypeCreateLogProbsFn = Callable[
-    [TypeTokenIDs, TypeTopLogProbs, Optional[int], int], LogProbs]
-
 
 class OpenAIServingChat(OpenAIServing):
 
