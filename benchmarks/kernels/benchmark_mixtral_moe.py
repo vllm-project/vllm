@@ -143,7 +143,6 @@ def run_timing(num_calls: int, bs: int, d_model: int, num_total_experts: int,
     ),
                               dim=-1)
 
-
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
 
