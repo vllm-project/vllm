@@ -38,16 +38,10 @@ class OpenAIServingChat(OpenAIServing):
 
         NOTE: Currently we do not support the following features:
             - function_call (Users should implement this by themselves)
-            - logit_bias (to be supported by vLLM engine)
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
-
-        if request.logit_bias is not None and len(request.logit_bias) > 0:
-            # TODO: support logit_bias in vLLM engine.
-            return self.create_error_response(
-                "logit_bias is not currently supported")
 
         try:
             prompt = self.tokenizer.apply_chat_template(

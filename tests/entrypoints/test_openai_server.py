@@ -251,7 +251,7 @@ async def test_batch_completions(server, client: openai.AsyncOpenAI):
         texts[choice.index] += choice.text
     assert texts[0] == texts[1]
 
-async def test_logits_bias_completion(server, client: openai.AsyncOpenAI):
+async def test_logits_bias(server, client: openai.AsyncOpenAI):
     prompt = "Hello, my name is"
     max_tokens = 5
     tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
@@ -265,7 +265,6 @@ async def test_logits_bias_completion(server, client: openai.AsyncOpenAI):
         temperature=0.0,
         logit_bias={str(token_id): 100},
     )
-    print("RESPONSE: ", completion)
     assert completion.choices[0].text is not None and len(
         completion.choices[0].text) >= 5
     response_tokens = tokenizer(completion.choices[0].text, add_special_tokens=False)["input_ids"]
