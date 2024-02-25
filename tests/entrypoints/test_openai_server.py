@@ -251,6 +251,7 @@ async def test_batch_completions(server, client: openai.AsyncOpenAI):
         texts[choice.index] += choice.text
     assert texts[0] == texts[1]
 
+
 async def test_logits_bias(server, client: openai.AsyncOpenAI):
     prompt = "Hello, my name is"
     max_tokens = 5
@@ -267,9 +268,14 @@ async def test_logits_bias(server, client: openai.AsyncOpenAI):
     )
     assert completion.choices[0].text is not None and len(
         completion.choices[0].text) >= 5
-    response_tokens = tokenizer(completion.choices[0].text, add_special_tokens=False)["input_ids"]
-    expected_tokens = tokenizer(tokenizer.decode([token_id]*5), add_special_tokens=False)["input_ids"]
-    assert all([response == expected for response, expected in zip(response_tokens, expected_tokens)])
+    response_tokens = tokenizer(completion.choices[0].text,
+                                add_special_tokens=False)["input_ids"]
+    expected_tokens = tokenizer(tokenizer.decode([token_id] * 5),
+                                add_special_tokens=False)["input_ids"]
+    assert all([
+        response == expected
+        for response, expected in zip(response_tokens, expected_tokens)
+    ])
 
     # Test ban
     completion = await client.completions.create(
@@ -278,14 +284,16 @@ async def test_logits_bias(server, client: openai.AsyncOpenAI):
         max_tokens=max_tokens,
         temperature=0.0,
     )
-    response_tokens = tokenizer(completion.choices[0].text, add_special_tokens=False)["input_ids"]
+    response_tokens = tokenizer(completion.choices[0].text,
+                                add_special_tokens=False)["input_ids"]
     first_response = completion.choices[0].text
     completion = await client.completions.create(
         model=MODEL_NAME,
         prompt=prompt,
         max_tokens=max_tokens,
         temperature=0.0,
-        logit_bias={str(token): -100 for token in response_tokens},
+        logit_bias={str(token): -100
+                    for token in response_tokens},
     )
     assert first_response != completion.choices[0].text
 
