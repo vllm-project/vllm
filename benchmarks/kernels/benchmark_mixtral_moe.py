@@ -45,16 +45,14 @@ def run_grid(bs, method):
             for block_size_k in [64, 128, 256]:
                 for group_size_m in [1, 16, 32, 64]:
                     for num_warps in [4, 8]:
-                        configs.append(
-                            {
-                                "BLOCK_SIZE_M": block_size_m,
-                                "BLOCK_SIZE_N": block_size_n,
-                                "BLOCK_SIZE_K": block_size_k,
-                                "GROUP_SIZE_M": group_size_m,
-                                "num_warps": num_warps,
-                                "num_stages": 4,
-                            }
-                        )
+                        configs.append({
+                            "BLOCK_SIZE_M": block_size_m,
+                            "BLOCK_SIZE_N": block_size_n,
+                            "BLOCK_SIZE_K": block_size_k,
+                            "GROUP_SIZE_M": group_size_m,
+                            "num_warps": num_warps,
+                            "num_stages": 4,
+                        })
 
     best_config = None
     best_time_us = 1e20
@@ -116,8 +114,8 @@ def run_grid(bs, method):
 
 
 def run_timing(num_calls: int, bs: int, d_model: int, num_total_experts: int,
-               top_k: int, tp_size: int, model_intermediate_size: int,
-               method, config) -> float:
+               top_k: int, tp_size: int, model_intermediate_size: int, method,
+               config) -> float:
     shard_intermediate_size = model_intermediate_size // tp_size
 
     hidden_states = torch.rand(
@@ -138,13 +136,12 @@ def run_timing(num_calls: int, bs: int, d_model: int, num_total_experts: int,
         dtype=hidden_states.dtype,
     )
 
-    gating_output = F.softmax(
-        torch.rand(
-            (num_calls, bs, num_total_experts),
-            device=hidden_states.device,
-            dtype=torch.float32,
-        ),
-    dim=-1)
+    gating_output = F.softmax(torch.rand(
+        (num_calls, bs, num_total_experts),
+        device=hidden_states.device,
+        dtype=torch.float32,
+    ),
+                              dim=-1)
 
 
     start_event = torch.cuda.Event(enable_timing=True)
@@ -171,4 +168,3 @@ def run_timing(num_calls: int, bs: int, d_model: int, num_total_experts: int,
 
 if __name__ == "__main__":
     sys.exit(main())
-
