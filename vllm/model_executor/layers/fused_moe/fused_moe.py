@@ -268,7 +268,7 @@ def fused_moe(
     - topk (int): The number of top-k experts to select.
     - renormalize (bool): If True, renormalize the top-k weights to sum to 1.
     - inplace (bool): If True, perform the operation in-place. Defaults to False.
-    - configs (Dict[str, Any]): Optional override for the kernel configuration.
+    - config (Dict[str, Any]): Optional override for the kernel configuration.
     
     Returns:
     - torch.Tensor: The output tensor after applying the MoE layer.
