@@ -9,7 +9,7 @@ xformers == 0.0.23.post1  # Required for CUDA 12.1.
 fastapi
 uvicorn[standard]
 pydantic >= 2.0  # Required for OpenAI server.
-aioprometheus[starlette]
+prometheus_client
 pynvml == 11.5.0
 triton >= 2.1.0
 cupy-cuda12x == 12.1.0  # Required for CUDA graphs. CUDA 11.8 users should install cupy-cuda11x instead.
