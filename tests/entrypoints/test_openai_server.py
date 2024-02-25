@@ -206,8 +206,7 @@ async def test_completion_streaming(server, client: openai.AsyncOpenAI,
                                              max_tokens=5,
                                              temperature=0.0,
                                              stream=True,
-                                             logprobs=True,
-                                             top_logprobs=10)
+                                             logprobs=10)
     chunks = []
     async for chunk in stream:
         if chunk.choices[0].content:
