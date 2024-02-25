@@ -11,7 +11,7 @@ import openai  # use the official client for correctness check
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 MAX_SERVER_START_WAIT_S = 600  # wait for server to start for 60 seconds
-MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"  # any model with a chat template should work here
+MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"  # any model with a chat template should work here
 
 pytestmark = pytest.mark.asyncio
 
@@ -62,9 +62,9 @@ def server():
         "--model",
         MODEL_NAME,
         "--dtype",
-        "float16",  # use half precision for speed and memory savings in CI environment
+        "bfloat16",  # use half precision for speed and memory savings in CI environment
         "--max-model-len",
-        "2048",
+        "8192",
         "--enforce-eager",
     ])
     ray.get(server_runner.ready.remote())

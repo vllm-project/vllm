@@ -36,7 +36,7 @@ class OpenAIServingChat(OpenAIServing):
         See  https://platform.openai.com/docs/api-reference/chat/create
         for the API specification. This API mimics the OpenAI ChatCompletion API.
 
-        NOTE: Currently we do not support the following features:
+        NOTE: Currently we do not support the following feature:
             - function_call (Users should implement this by themselves)
         """
         error_check_ret = await self._check_model(request)
