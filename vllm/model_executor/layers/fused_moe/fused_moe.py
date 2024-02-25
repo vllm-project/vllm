@@ -320,7 +320,7 @@ def fused_moe(
 
     if not config:
         # First try to load optimal config from the file
-        configs = get_moe_configs(E, N)
+        configs = get_moe_configs(E, w2.shape[2])
 
         if configs:
             # If an optimal configuration map has been found, look up the optimal config
