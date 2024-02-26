@@ -52,7 +52,7 @@ Optional arguments:
 ```
 ```python
 Example:
-python3 3rdparty/quantizer/extract_scales.py --model <QUANTIZED_MODEL_DIR> --tp_size <n> --output_dir <PATH_TO_OUTPUT_DIR>
+python3 3rdparty/quantizer/extract_scales.py --model <QUANTIZED_MODEL_DIR> --tp_size <TENSOR_PARALLEL_SIZE> --output_dir <PATH_TO_OUTPUT_DIR>
 ```
 ### 4. Load KV Cache Scaling Factors into VLLM.
 This script evaluates the inference throughput of language models using various backends such as vLLM. It measures the time taken to process a given number of prompts and generate sequences for each prompt. The recently generated KV cache scaling factors are now integrated into the benchmarking process and allow for kv cache scaling factors to be utilized for FP8.
@@ -92,5 +92,5 @@ optional arguments:
 ```
 ```
 Example:
-python3 benchmarks/benchmark_throughput.py --input-len <n> --output-len <n> -tp <n> --kv-cache-dtype fp8 --kv-cache-scales-path </path/to/kv_cache_scales.json>
+python3 benchmarks/benchmark_throughput.py --input-len <INPUT_LEN> --output-len <OUTPUT_LEN> -tp <TENSOR_PARALLEL_SIZE> --kv-cache-dtype fp8 --kv-cache-scales-path </path/to/kv_cache_scales.json>
 ```python
