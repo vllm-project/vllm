@@ -128,7 +128,8 @@ class LLMEngine:
         # Metric Logging.
         if self.log_stats:
             self.stat_logger = StatLogger(
-                local_interval=_LOCAL_LOGGING_INTERVAL_SEC)
+                local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
+                labels=dict(model_name=model_config.model))
 
         self.forward_dag = None
         if USE_RAY_COMPILED_DAG:
@@ -871,6 +872,9 @@ class LLMEngine:
             if prompt_run:
                 num_prompt_tokens = sum(
                     len(seq_group.prompt_token_ids)
+                    for seq_group in scheduler_outputs.scheduled_seq_groups)
+                num_generation_tokens = sum(
+                    seq_group.num_seqs()
                     for seq_group in scheduler_outputs.scheduled_seq_groups)
             else:
                 num_generation_tokens = scheduler_outputs.num_batched_tokens
