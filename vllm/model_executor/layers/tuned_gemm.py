@@ -97,7 +97,11 @@ class TunedGemm:
             #print(">>> found rocblas")
             out = rocb_mm(inp_view,weights.t(),solidx)
         else:
-            #print('>>>Tgemm Default',inp.shape,weights.shape,soltype,solidx)
+            
+            if (self.save_gemm == 1):
+                print('>>>Tgemm Default',inp_view.shape, inp.shape,weights.shape,soltype,solidx)
+                self.tuned_df = pd.concat([self.tuned_df, pd.DataFrame({'M':[weights.shape[0]], 'N':[inp.shape[0]*inp.shape[1]], 'K':[weights.shape[1]]})]).drop_duplicates()
+                self.tuned_df.to_csv(self.untune_path, index=False)
             out = F.linear(inp,weights)
         if batched:
             return out.view(inp.shape[0], inp.shape[1], weights.shape[0])
