@@ -101,7 +101,10 @@ class OpenAIServingChat(OpenAIServing):
         role = self.get_chat_request_role(request)
         for i in range(request.n):
             choice_data = ChatCompletionResponseStreamChoice(
-                index=i, delta=DeltaMessage(role=role), finish_reason=None)
+                index=i,
+                delta=DeltaMessage(role=role),
+                logprobs=None,
+                finish_reason=None)
             chunk = ChatCompletionStreamResponse(id=request_id,
                                                  object=chunk_object_type,
                                                  created=created_time,
@@ -118,6 +121,7 @@ class OpenAIServingChat(OpenAIServing):
                         "content") and request.messages[-1].get(
                             "role") == role:
                 last_msg_content = request.messages[-1]["content"]
+
             if last_msg_content:
                 for i in range(request.n):
                     choice_data = ChatCompletionResponseStreamChoice(
@@ -129,6 +133,7 @@ class OpenAIServingChat(OpenAIServing):
                         object=chunk_object_type,
                         created=created_time,
                         choices=[choice_data],
+                        logprobs=None,
                         model=model_name)
                     data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
@@ -145,15 +150,29 @@ class OpenAIServingChat(OpenAIServing):
                 if finish_reason_sent[i]:
                     continue
 
+                delta_token_ids = output.token_ids[previous_num_tokens[i]:]
+                top_logprobs = output.logprobs[
+                    previous_num_tokens[i]:] if output.logprobs else None
+
+                if request.logprobs:
+                    logprobs = self._create_logprobs(
+                        token_ids=delta_token_ids,
+                        top_logprobs=top_logprobs,
+                        num_output_top_logprobs=request.logprobs,
+                        initial_text_offset=len(previous_texts[i]),
+                    )
+                else:
+                    logprobs = None
+
                 delta_text = output.text[len(previous_texts[i]):]
                 previous_texts[i] = output.text
                 previous_num_tokens[i] = len(output.token_ids)
-
                 if output.finish_reason is None:
                     # Send token-by-token response for each request.n
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=i,
                         delta=DeltaMessage(content=delta_text),
+                        logprobs=logprobs,
                         finish_reason=None)
                     chunk = ChatCompletionStreamResponse(
                         id=request_id,
@@ -174,6 +193,7 @@ class OpenAIServingChat(OpenAIServing):
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=i,
                         delta=DeltaMessage(content=delta_text),
+                        logprobs=logprobs,
                         finish_reason=output.finish_reason)
                     chunk = ChatCompletionStreamResponse(
                         id=request_id,
@@ -208,11 +228,25 @@ class OpenAIServingChat(OpenAIServing):
         assert final_res is not None
 
         choices = []
+
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
+            token_ids = output.token_ids
+            top_logprobs = output.logprobs
+
+            if request.logprobs:
+                logprobs = self._create_logprobs(
+                    token_ids=token_ids,
+                    top_logprobs=top_logprobs,
+                    num_output_top_logprobs=request.logprobs,
+                )
+            else:
+                logprobs = None
+
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
                 message=ChatMessage(role=role, content=output.text),
+                logprobs=logprobs,
                 finish_reason=output.finish_reason,
             )
             choices.append(choice_data)
