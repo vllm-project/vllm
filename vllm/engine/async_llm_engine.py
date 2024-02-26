@@ -2,7 +2,7 @@ import asyncio
 import time
 from functools import partial
 from typing import (Any, Dict, Iterable, List, Optional, Set, Tuple, Type,
-                    Union, AsyncIterator)
+                    Union, AsyncIterator, TYPE_CHECKING)
 
 from vllm.lora.request import LoRARequest
 from vllm.config import ModelConfig
@@ -12,6 +12,9 @@ from vllm.engine.ray_utils import initialize_cluster, ray
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
+
+if TYPE_CHECKING:
+    import torch
 
 logger = init_logger(__name__)
 
@@ -226,6 +229,7 @@ class _AsyncLLMEngine(LLMEngine):
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         prefix_pos: Optional[int] = None,
+        image_request: Optional["torch.Tensor"] = None,
     ) -> None:
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
@@ -246,6 +250,7 @@ class _AsyncLLMEngine(LLMEngine):
             arrival_time=arrival_time,
             lora_request=lora_request,
             prefix_pos=prefix_pos,
+            image_request=image_request,
         )
 
     async def _run_workers_async(
@@ -420,6 +425,7 @@ class AsyncLLMEngine:
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         prefix_pos: Optional[int] = None,
+        image_request: Optional["torch.Tensor"] = None,
     ) -> AsyncStream:
         if self.log_requests:
             shortened_prompt = prompt
@@ -470,7 +476,9 @@ class AsyncLLMEngine:
             prompt_token_ids=prompt_token_ids,
             arrival_time=arrival_time,
             lora_request=lora_request,
-            prefix_pos=prefix_pos)
+            prefix_pos=prefix_pos,
+            image_request=image_request,
+        )
 
         return stream
 
@@ -482,6 +490,7 @@ class AsyncLLMEngine:
         prompt_token_ids: Optional[List[int]] = None,
         lora_request: Optional[LoRARequest] = None,
         prefix_pos: Optional[int] = None,
+        image_request: Optional["torch.Tensor"] = None,
     ) -> AsyncIterator[RequestOutput]:
         """Generate outputs for a request.
 
@@ -502,6 +511,10 @@ class AsyncLLMEngine:
                 cache and reuse it for the next request with the same prefix.
                 This is an experimental feature, and may be replaced with
                 automatic prefix caching in the future.
+            image_request: An image tensor per request. The semantic meaning
+                and shape depend on image_input_shape settings.
+                See `VisionLanguageConfig.image_input_shape` for details.
+
 
         Yields:
             The output `RequestOutput` objects from the LLMEngine for the
@@ -563,6 +576,7 @@ class AsyncLLMEngine:
                 arrival_time=arrival_time,
                 lora_request=lora_request,
                 prefix_pos=prefix_pos,
+                image_request=image_request,
             )
 
             async for request_output in stream:

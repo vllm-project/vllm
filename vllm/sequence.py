@@ -2,12 +2,15 @@
 import copy
 import enum
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, TYPE_CHECKING
 
 from vllm.block import LogicalTokenBlock
 from vllm.prefix import Prefix
 from vllm.sampling_params import SamplingParams
 from vllm.lora.request import LoRARequest
+
+if TYPE_CHECKING:
+    import torch
 
 PromptLogprobs = List[Optional[Dict[int, float]]]
 SampleLogprobs = List[Dict[int, float]]
@@ -266,6 +269,10 @@ class SequenceGroup:
         arrival_time: The arrival time of the request.
         lora_request: LoRA request.
         prefix: The prefix of the prompt of the sequence group.
+        image_request: The image request for vision language model.
+            The required shape and semantic meaning of it depends on the vision
+            language config of the hosted model. 
+            See `VisionLanguageConfig` in `config.py`.
     """
 
     def __init__(
@@ -276,6 +283,7 @@ class SequenceGroup:
         arrival_time: float,
         lora_request: Optional[LoRARequest] = None,
         prefix: Optional[Prefix] = None,
+        image_request: Optional["torch.Tensor"] = None,
     ) -> None:
         self.request_id = request_id
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
@@ -289,6 +297,7 @@ class SequenceGroup:
         self.prefix: Optional[Prefix] = prefix
         self.prompt_logprobs: Optional[PromptLogprobs] = None
         self.state = SequenceGroupState()
+        self.image_request = image_request
 
     @property
     def prompt(self) -> str:
@@ -409,6 +418,10 @@ class SequenceGroupMetadata:
         state: Internal state tied to this sequence group.
         lora_request: LoRA request.
         prefix: The prefix of the prompt of the sequence group.
+        image_request: The image request for vision language model.
+            The required shape and semantic meaning of it depends on the vision
+            language config of the hosted model. 
+            See `VisionLanguageConfig` in `config.py`.
     """
 
     def __init__(
@@ -421,6 +434,7 @@ class SequenceGroupMetadata:
         lora_request: Optional[LoRARequest] = None,
         prefix: Optional[Prefix] = None,
         state: Optional[SequenceGroupState] = None,
+        image_request: Optional["torch.Tensor"] = None,
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
@@ -429,6 +443,7 @@ class SequenceGroupMetadata:
         self.block_tables = block_tables
         self.lora_request = lora_request
         self.prefix = prefix
+        self.image_request = image_request
         self.state = SequenceGroupState() if state is None else state
 
     @property

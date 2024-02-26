@@ -1,6 +1,7 @@
 from typing import List, Optional, Union
 
 from tqdm import tqdm
+import torch
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.lora.request import LoRARequest
@@ -127,6 +128,7 @@ class LLM:
         prefix_pos: Optional[Union[int, List[int]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
+        image_request: Optional["torch.Tensor"] = None,
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -147,6 +149,10 @@ class LLM:
                 automatic prefix caching in the future.
             use_tqdm: Whether to use tqdm to display the progress bar.
             lora_request: LoRA request to use for generation, if any.
+            image_request: A batch of image tensors of float16.
+                The semantic meaning and shape depend on image_input_shape
+                settings.
+                See `VisionLanguageConfig.image_input_shape` for details.
 
         Returns:
             A list of `RequestOutput` objects containing the generated
@@ -166,6 +172,10 @@ class LLM:
             # Use default sampling params.
             sampling_params = SamplingParams()
 
+        if image_request is not None and image_request.dtype != torch.float16:
+            print("Converting image tensor to float16.")
+            image_request = image_request.to(torch.float16)
+
         # Add requests to the engine.
         num_requests = len(prompts) if prompts is not None else len(
             prompt_token_ids)
@@ -174,11 +184,16 @@ class LLM:
             prefix_pos_i = prefix_pos[i] if prefix_pos is not None else None
             token_ids = None if prompt_token_ids is None else prompt_token_ids[
                 i]
-            self._add_request(prompt,
-                              sampling_params,
-                              token_ids,
-                              lora_request=lora_request,
-                              prefix_pos=prefix_pos_i)
+            self._add_request(
+                prompt,
+                sampling_params,
+                token_ids,
+                lora_request=lora_request,
+                prefix_pos=prefix_pos_i,
+                # Get ith image while maintaining the batch dim.
+                image_request=image_request[i].unsqueeze(0)
+                if image_request is not None else None,
+            )
         return self._run_engine(use_tqdm)
 
     def _add_request(
@@ -188,6 +203,7 @@ class LLM:
         prompt_token_ids: Optional[List[int]],
         lora_request: Optional[LoRARequest] = None,
         prefix_pos: Optional[int] = None,
+        image_request: Optional["torch.Tensor"] = None,
     ) -> None:
         request_id = str(next(self.request_counter))
         self.llm_engine.add_request(request_id,
@@ -195,7 +211,8 @@ class LLM:
                                     sampling_params,
                                     prompt_token_ids,
                                     lora_request=lora_request,
-                                    prefix_pos=prefix_pos)
+                                    prefix_pos=prefix_pos,
+                                    image_request=image_request)
 
     def _run_engine(self, use_tqdm: bool) -> List[RequestOutput]:
         # Initialize tqdm.

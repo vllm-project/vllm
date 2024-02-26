@@ -5,10 +5,15 @@ from typing import Optional, Type
 import torch
 import torch.nn as nn
 
-from vllm.config import DeviceConfig, ModelConfig, LoRAConfig
+from vllm.config import DeviceConfig, ModelConfig, LoRAConfig, VisionLanguageConfig
 from vllm.model_executor.models import ModelRegistry
+from vllm.model_executor.models.llava import LlavaForConditionalGeneration
 from vllm.model_executor.weight_utils import (get_quant_config,
                                               initialize_dummy_weights)
+
+_VISION_MODEL_CLASSES = [
+    LlavaForConditionalGeneration,
+]
 
 
 @contextlib.contextmanager
@@ -37,9 +42,12 @@ def _get_model_architecture(model_config: ModelConfig) -> Type[nn.Module]:
         f"Supported architectures: {ModelRegistry.get_supported_archs()}")
 
 
-def get_model(model_config: ModelConfig,
-              device_config: DeviceConfig,
-              lora_config: Optional[LoRAConfig] = None) -> nn.Module:
+def get_model(
+    model_config: ModelConfig,
+    device_config: DeviceConfig,
+    lora_config: Optional[LoRAConfig] = None,
+    vision_language_config: Optional[VisionLanguageConfig] = None
+) -> nn.Module:
     model_class = _get_model_architecture(model_config)
 
     # Get the (maybe quantized) linear method.
@@ -76,7 +84,11 @@ def get_model(model_config: ModelConfig,
                     "be added in the future. If this is important to you, "
                     "please open an issue on github.")
             else:
-                model = model_class(model_config.hf_config, linear_method)
+                if model_class not in _VISION_MODEL_CLASSES:
+                    model = model_class(model_config.hf_config, linear_method)
+                else:
+                    model = model_class(model_config.hf_config,
+                                        vision_language_config, linear_method)
         if model_config.load_format == "dummy":
             # NOTE(woosuk): For accurate performance evaluation, we assign
             # random values to the weights.

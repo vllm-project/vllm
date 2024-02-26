@@ -41,3 +41,14 @@ def get_config(model: str,
                                               revision=revision,
                                               code_revision=code_revision)
     return config
+
+
+def get_hf_text_config(config: PretrainedConfig):
+    """Get the "sub" config relevant to llm for multi modal models.
+        No op for pure text models.
+    """
+    if hasattr(config, "text_config"):
+        assert hasattr(config.text_config, "num_attention_heads")
+        return config.text_config
+    else:
+        return config

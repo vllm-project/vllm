@@ -388,6 +388,12 @@ class Scheduler:
                 lora_request=seq_group.lora_request,
                 prefix=seq_group.prefix,
                 state=seq_group.state,
+                # `image_request` will only be present for the 1st comm
+                # between engine and worker.
+                # the subsequent comms can still use delta, but
+                # `image_request` will be None.
+                image_request=seq_group.image_request
+                if scheduler_outputs.prompt_run else None,
             )
             seq_group_metadata_list.append(seq_group_metadata)
         return seq_group_metadata_list, scheduler_outputs

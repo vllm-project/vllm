@@ -4,7 +4,27 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, LoRAConfig)
+                         ParallelConfig, SchedulerConfig, LoRAConfig,
+                         VisionLanguageConfig)
+
+
+def image_input_enum_type(value: str):
+    try:
+        return VisionLanguageConfig.ImageInputType[value.upper()]
+    except KeyError as e:
+        raise argparse.ArgumentTypeError(
+            f'{value} is not a valid choice. '
+            f'Expecting to choose from '
+            f'{[x.name for x in VisionLanguageConfig.ImageInputType]}.') from e
+
+
+def int_tuple(s: str):
+    try:
+        return tuple(map(int, s.split(',')))
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(
+            'Tuple must be a series of integers separated by commas '
+            '(e.g., 1, 2, 3).') from e
 
 
 @dataclass
@@ -45,6 +65,11 @@ class EngineArgs:
     lora_dtype = 'auto'
     max_cpu_loras: Optional[int] = None
     device: str = 'cuda'
+    # Related to Vision-language models such as llava
+    image_input_type: Optional[str] = None
+    image_token_id: Optional[int] = None
+    image_input_shape: Optional[tuple] = None
+    image_feature_size: Optional[int] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -264,6 +289,31 @@ class EngineArgs:
             help=('Maximum number of LoRAs to store in CPU memory. '
                   'Must be >= than max_num_seqs. '
                   'Defaults to max_num_seqs.'))
+
+        # Related to Vision-language models such as llava
+        parser.add_argument(
+            '--image-input-type',
+            type=image_input_enum_type,
+            default=None,
+            choices=list(VisionLanguageConfig.ImageInputType),
+            help=('The image input type passed into vLLM. '
+                  'Should be one of "pixel_values" or "image_features".'))
+        parser.add_argument('--image-token-id',
+                            type=int,
+                            default=None,
+                            help=('Input id for image token.'))
+        parser.add_argument(
+            '--image-input-shape',
+            type=int_tuple,
+            default=None,
+            help=(
+                'Image input shape which should be consistent with image input '
+                'type.'))
+        parser.add_argument(
+            '--image-feature-size',
+            type=int,
+            default=None,
+            help=('The image feature size along the context dimension.'))
         parser.add_argument(
             "--device",
             type=str,
@@ -284,7 +334,8 @@ class EngineArgs:
     def create_engine_configs(
         self,
     ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig,
-               DeviceConfig, Optional[LoRAConfig]]:
+               DeviceConfig, Optional[LoRAConfig],
+               Optional[VisionLanguageConfig]]:
         device_config = DeviceConfig(self.device)
         model_config = ModelConfig(
             self.model, self.tokenizer, self.tokenizer_mode,
@@ -312,8 +363,24 @@ class EngineArgs:
             lora_dtype=self.lora_dtype,
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
+
+        if self.image_input_type:
+            if (not self.image_token_id or not self.image_input_shape
+                    or not self.image_feature_size):
+                raise ValueError(
+                    'Specify `image_token_id`, `image_input_shape` and '
+                    '`image_feature_size` together with `image_input_type`.')
+            vision_language_config = VisionLanguageConfig(
+                image_input_type=self.image_input_type,
+                image_token_id=self.image_token_id,
+                image_input_shape=self.image_input_shape,
+                image_feature_size=self.image_feature_size,
+            )
+        else:
+            vision_language_config = None
+
         return (model_config, cache_config, parallel_config, scheduler_config,
-                device_config, lora_config)
+                device_config, lora_config, vision_language_config)
 
 
 @dataclass

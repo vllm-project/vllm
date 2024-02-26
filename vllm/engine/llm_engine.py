@@ -26,7 +26,9 @@ if ray:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 if TYPE_CHECKING:
+    import torch
     from ray.util.placement_group import PlacementGroup
+    from vllm.config import VisionLanguageConfig  # pylint: disable=ungrouped-imports
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -73,6 +75,7 @@ class LLMEngine:
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
+        vision_language_config: Optional["VisionLanguageConfig"],
         placement_group: Optional["PlacementGroup"],
         log_stats: bool,
     ) -> None:
@@ -100,6 +103,7 @@ class LLMEngine:
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
+        self.vision_language_config = vision_language_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
@@ -158,6 +162,7 @@ class LLMEngine:
             rank=0,
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
+            vision_language_config=self.vision_language_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )
@@ -266,6 +271,7 @@ class LLMEngine:
                     rank,
                     distributed_init_method,
                     lora_config=self.lora_config,
+                    vision_language_config=self.vision_language_config,
                     kv_cache_dtype=self.cache_config.cache_dtype,
                 ))
 
@@ -280,6 +286,7 @@ class LLMEngine:
             driver_rank,
             distributed_init_method,
             lora_config=self.lora_config,
+            vision_language_config=self.vision_language_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )
@@ -397,6 +404,7 @@ class LLMEngine:
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         prefix_pos: Optional[int] = None,
+        image_request: Optional["torch.Tensor"] = None,
     ) -> None:
         """Add a request to the engine's request pool.
 
@@ -418,6 +426,10 @@ class LLMEngine:
                 cache and reuse it for the next request with the same prefix.
                 This is an experimental feature, and may be replaced with
                 automatic prefix caching in the future.
+            image_request: An image tensor per request.
+                The semantic meaning and shape depend on image_input_shape
+                    settings.
+                See `VisionLanguageConfig.image_input_shape` for details.
 
         Details:
             - Set arrival_time to the current time if it is None.
@@ -470,7 +482,8 @@ class LLMEngine:
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,
-                                  arrival_time, lora_request, prefix)
+                                  arrival_time, lora_request, prefix,
+                                  image_request)
 
         # Add the sequence group to the scheduler.
         self.scheduler.add_seq_group(seq_group)
