@@ -80,10 +80,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     &reshape_and_cache,
     "Reshape the key and value tensors and cache them");
   cache_ops.def(
-    "gather_cached_kv",
-    &gather_cached_kv,
-    "Gather key and value from the cache into contiguous QKV tensors");
-  cache_ops.def(
     "convert_fp8_e5m2",
     &convert_fp8_e5m2,
     "Convert the key and value cache to fp8_e5m2 data type");
