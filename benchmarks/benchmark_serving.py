@@ -7,7 +7,7 @@ On the server side, run one of the following commands:
         --disable-log-requests
 
     (TGI backend)
-    ./launch_hf_server.sh <your_model>
+    ./launch_tgi_server.sh <your_model> <max_batch_total_tokens>
 
 On the client side, run:
     python benchmarks/benchmark_serving.py \
@@ -375,7 +375,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--disable-tqdm",
         action="store_true",
-        help="Specify to disbale tqdm progress bar.",
+        help="Specify to disable tqdm progress bar.",
     )
     parser.add_argument(
         "--save-result",

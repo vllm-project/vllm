@@ -537,7 +537,7 @@ if triton.__version__ >= "2.1.0":
         alibi_start_q = tl.arange(
             0, BLOCK_M) + block_start_loc + cur_batch_ctx_len
         alibi_start_k = cur_batch_ctx_len
-        # # init debuger
+        # # init debugger
         # offset_db_q = tl.arange(0, BLOCK_M) + block_start_loc
         # offset_db_k = tl.arange(0, BLOCK_N)
         # calc q[BLOCK_M, BLOCK_MODEL] mul k[prefix_len: , BLOCK_DMODEL]

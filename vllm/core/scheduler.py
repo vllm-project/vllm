@@ -158,7 +158,7 @@ class Scheduler:
         return len(self.waiting) + len(self.running) + len(self.swapped)
 
     def _schedule(self) -> SchedulerOutputs:
-        # Blocks that need to be swaped or copied before model execution.
+        # Blocks that need to be swapped or copied before model execution.
         blocks_to_swap_in: Dict[int, int] = {}
         blocks_to_swap_out: Dict[int, int] = {}
         blocks_to_copy: Dict[int, List[int]] = {}
@@ -387,6 +387,7 @@ class Scheduler:
                 block_tables=block_tables,
                 lora_request=seq_group.lora_request,
                 prefix=seq_group.prefix,
+                state=seq_group.state,
             )
             seq_group_metadata_list.append(seq_group_metadata)
         return seq_group_metadata_list, scheduler_outputs
