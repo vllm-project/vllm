@@ -84,13 +84,13 @@ class RequestTracker:
         self._finished_requests: asyncio.Queue[str] = asyncio.Queue()
         self._new_requests: asyncio.Queue[Tuple[AsyncStream,
                                                 dict]] = asyncio.Queue()
-        self.new_requests_event = None
+        self.new_requests_event = asyncio.Event()
 
     def __contains__(self, item):
         return item in self._request_streams
 
-    def init_event(self):
-        self.new_requests_event = asyncio.Event()
+    def __len__(self) -> int:
+        return len(self._request_streams)
 
     def propagate_exception(self,
                             exc: Exception,
@@ -169,12 +169,16 @@ class RequestTracker:
             self._request_streams[stream.request_id] = stream
             new_requests.append(new_request)
 
-        self.new_requests_event.clear()
-
         return new_requests, finished_requests
 
-    async def wait_for_new_requests(self):
-        await self.new_requests_event.wait()
+    async def wait_for_new_requests(self, clear: bool):
+        if not self.has_new_requests():
+            await self.new_requests_event.wait()
+        if clear:
+            self.new_requests_event.clear()
+
+    def has_new_requests(self):
+        return not self._new_requests.empty()
 
 
 class _AsyncLLMEngine(LLMEngine):
