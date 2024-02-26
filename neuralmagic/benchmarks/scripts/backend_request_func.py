@@ -43,6 +43,12 @@ def trim_prefix(text: str, prefix_str: str) -> str:
     return text[len(prefix_str):]
 
 
+def trim_suffix(text: str, suffix_str: str) -> str:
+    assert len(text) >= len(suffix_str)
+    assert text[-1 * len(suffix_str):] == suffix_str
+    return text[:-1 * len(suffix_str)]
+
+
 async def async_request_tgi(
     request_func_input: RequestFuncInput,
     pbar: Optional[tqdm] = None,
@@ -71,12 +77,12 @@ async def async_request_tgi(
         try:
             async with session.post(url=api_url, json=payload) as response:
                 if response.status == 200:
-                    data = ""
+                    data = None
                     async for part_data in response.content.iter_any():
                         if ttft == 0:
                             ttft = time.perf_counter() - st
                             output.ttft = ttft
-                        data += part_data
+                        data = part_data
                     output.latency = time.perf_counter() - st
 
                     body = trim_prefix(data.decode("utf-8"), "data:")
@@ -119,18 +125,19 @@ async def async_request_vllm(
         try:
             async with session.post(url=api_url, json=payload) as response:
                 if response.status == 200:
-                    data = ""
+                    data = None
                     async for part_data in response.content.iter_any():
                         if ttft == 0:
                             ttft = time.perf_counter() - st
                             output.ttft = ttft
-                        data += part_data
+                        data = part_data
                     output.latency = time.perf_counter() - st
 
                     # When streaming, '\0' is appended to the end of the response.
-                    body = data.decode("utf-8").strip("\0")
+                    body = trim_suffix(data.decode('utf-8'), "\0")
                     output.generated_text = json.loads(
                         body)["text"][0][len(request_func_input.prompt):]
+
                     output.success = True
 
                 else:
@@ -169,12 +176,12 @@ async def async_request_trt_llm(
         try:
             async with session.post(url=api_url, json=payload) as resp:
                 if resp.status == 200:
-                    data = ""
+                    data = None
                     async for part_data in resp.content.iter_any():
                         if ttft == 0:
                             ttft = time.perf_counter() - st
                             output.ttft = ttft
-                        data += part_data
+                        data = part_data
                     output.latency = time.perf_counter() - st
 
                     body = trim_prefix(data.decode("utf-8"), "data:")
