@@ -1,0 +1,33 @@
+name: build neuralmagic-vllm whl
+description: 'build whl file of neuralmagic-vllm'
+inputs:
+  python:
+    description: 'python version, e.g. 3.10.12'
+    required: true
+  venv:
+    description: 'name for python virtual environment'
+    required: true
+outputs:
+  status:
+    description: "final build status from 'pip3 wheel dist .'"
+    value: ${{ steps.whl.outputs.status }}
+  whl:
+    description: 'basename for generated whl'
+    value: ${{ steps.build_whl.outputs.whl }}
+runs:
+  using: composite
+  steps:
+  - id: whl
+    run: |
+      COMMIT=${{ github.sha }}
+      VENV="${{ inputs.venv }}-${COMMIT:0:7}"
+      source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
+      SUCCESS=0
+      pip3 wheel --no-deps -w dist . || SUCCESS=$?
+      echo "status=${SUCCESS}" >> "$GITHUB_OUTPUT"
+      BASE=$(./.github/scripts/convert-version ${{ inputs.python }})
+      WHL_FILEPATH=$(find dist -iname "*nm_vllm*${BASE}*.whl")
+      WHL=$(basename ${WHL_FILEPATH})
+      echo "whl=${WHL}" >> "$GITHUB_OUTPUT"
+      exit ${SUCCESS}
+    shell: bash

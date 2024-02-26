@@ -1,0 +1,20 @@
+#!/bin/bash -e
+
+# convert python version to whl style
+INPUT=${1}
+BASE=
+
+if [[ "${INPUT}" == *"3.11."* ]]; then
+    BASE="cp311-cp311";
+elif [[ "${INPUT}" == *"3.10."* ]]; then
+    BASE="cp310-cp310";
+elif [[ "${INPUT}" == *"3.9."* ]]; then
+    BASE="cp39-cp39";
+elif [[ "${INPUT}" == *"3.8."* ]]; then
+    BASE="cp38-cp38";
+else
+    echo "unsupported or unspecified python version '${1}'"
+    exit 1
+fi
+
+echo "${BASE}"
