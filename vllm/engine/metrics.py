@@ -17,7 +17,7 @@ disable_created_metrics()
 # begin-metrics-definitions
 class Metrics:
 
-    def __init__(self, labelnames: List[str]):
+    def __init__(self, labelnames: List[str], max_model_len: int):
         # Unregister any existing vLLM collectors
         for collector in list(REGISTRY._collector_to_names):
             if hasattr(collector, "_name") and "vllm" in collector._name:
@@ -62,19 +62,13 @@ class Metrics:
             name="vllm:request_prompt_tokens",
             documentation="Number of prefill tokens processed.",
             labelnames=labelnames,
-            buckets=[
-                1, 2, 5, 10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000,
-                10_000, 20_000, 50_000, 100_000
-            ],
+            buckets=build_1_2_5_buckets(max_model_len),
         )
         self.histogram_request_generation_tokens = Histogram(
             name="vllm:request_generation_tokens",
             documentation="Number of generation tokens processed.",
             labelnames=labelnames,
-            buckets=[
-                1, 2, 5, 10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000,
-                10_000, 20_000, 50_000, 100_000
-            ],
+            buckets=build_1_2_5_buckets(max_model_len),
         )
         self.histogram_time_to_first_token = Histogram(
             name="vllm:time_to_first_token_seconds",
@@ -101,10 +95,7 @@ class Metrics:
             name="vllm:request_params_max_tokens",
             documentation="Histogram of the max_tokens request parameter.",
             labelnames=labelnames,
-            buckets=[
-                1, 2, 5, 10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000,
-                10_000, 20_000, 50_000, 100_000
-            ],
+            buckets=build_1_2_5_buckets(max_model_len),
         )
         self.histogram_request_n = Histogram(
             name="vllm:request_params_n",
@@ -127,6 +118,28 @@ class Metrics:
 
 
 # end-metrics-definitions
+
+
+def build_1_2_5_buckets(max_value: int):
+    """
+    Builds a list of buckets with increasing powers of 10 multiplied by mantissa 
+    values (1, 2, 5) until the value exceeds the specified maximum.
+
+    Example:
+    >>> build_1_2_5_buckets(100)
+    [1, 2, 5, 10, 20, 50, 100]
+    """
+    mantissa_lst = [1, 2, 5]
+    exponent = 0
+    buckets = []
+    while True:
+        for m in mantissa_lst:
+            value = m * 10**exponent
+            if value <= max_value:
+                buckets.append(value)
+            else:
+                return buckets
+        exponent += 1
 
 
 @dataclass
@@ -157,7 +170,8 @@ class Stats:
 class StatLogger:
     """StatLogger is used LLMEngine to log to Promethus and Stdout."""
 
-    def __init__(self, local_interval: float, labels: Dict[str, str]) -> None:
+    def __init__(self, local_interval: float, labels: Dict[str, str],
+                 max_model_len: int) -> None:
         # Metadata for logging locally.
         self.last_local_log = time.monotonic()
         self.local_interval = local_interval
@@ -168,7 +182,8 @@ class StatLogger:
 
         # Prometheus metrics
         self.labels = labels
-        self.metrics = Metrics(labelnames=list(labels.keys()))
+        self.metrics = Metrics(labelnames=list(labels.keys()),
+                               max_model_len=max_model_len)
 
     def _get_throughput(self, tracked_stats: List[int], now: float) -> float:
         return float(np.sum(tracked_stats) / (now - self.last_local_log))

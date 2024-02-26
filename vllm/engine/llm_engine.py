@@ -129,7 +129,8 @@ class LLMEngine:
         if self.log_stats:
             self.stat_logger = StatLogger(
                 local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
-                labels=dict(model_name=model_config.model))
+                labels=dict(model_name=model_config.model),
+                max_model_len=self.model_config.max_model_len)
 
         self.forward_dag = None
         if USE_RAY_COMPILED_DAG:
