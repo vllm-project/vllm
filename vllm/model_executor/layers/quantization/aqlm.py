@@ -6,42 +6,46 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm._C import ops
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               set_weight_attrs)
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.linear import LinearMethodBase, set_weight_attrs
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
 
-class GPTQConfig(QuantizationConfig):
-    """Config class for GPTQ.
+class AQLMConfig(QuantizationConfig):
+    """Config class for AQLM.
 
-    Reference: https://arxiv.org/abs/2210.17323
+    Reference: https://github.com/Vahe1994/AQLM
     """
 
     def __init__(
         self,
-        weight_bits: int,
-        group_size: int,
-        desc_act: bool,
+        in_group_size: int,
+        nbits_per_codebook: int,
+        num_codebooks: int,
+        out_group_size: int,
     ) -> None:
-        self.weight_bits = weight_bits
-        self.group_size = group_size
-        self.desc_act = desc_act
-        self.pack_factor = 32 // self.weight_bits
+        self.in_group_size = in_group_size
+        self.nbits_per_codebook = nbits_per_codebook
+        self.num_codebooks = num_codebooks
+        self.out_group_size = out_group_size
+        # self.pack_factor = 32 // self.weight_bits
         # exllama kernel v1 only supports 4 bit
-        if self.weight_bits != 4:
-            raise ValueError(
-                "Currently, only 4-bit weight quantization is supported for "
-                f"GPTQ, but got {self.weight_bits} bits.")
+        # if self.weight_bits != 4:
+        # raise ValueError(
+        # "Currently, only 4-bit weight quantization is supported for "
+        # f"GPTQ, but got {self.weight_bits} bits."
+        # )
 
     def __repr__(self) -> str:
-        return (f"GPTQConfig(weight_bits={self.weight_bits}, "
-                f"group_size={self.group_size}, "
-                f"desc_act={self.desc_act})")
+        return (
+            f"AQLMConfig(in_group_size={self.in_group_size}, "
+            f"nbits_per_codebook={self.nbits_per_codebook}, "
+            f"num_codebooks={self.num_codebooks}, "
+            f"out_group_size={self.out_group_size})"
+        )
 
     @classmethod
     def get_name(cls) -> str:
-        return "gptq"
+        return "aqlm"
 
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
@@ -52,39 +56,58 @@ class GPTQConfig(QuantizationConfig):
     def get_min_capability(cls) -> int:
         return 60
 
+    # such as.  (This one looks correct)
+    # https://huggingface.co/BlackSamorez/Llama-2-7b-AQLM-2Bit-1x16-hf/blob/main/config.json
+    #
+    # "quantization_config": {
+    #   "in_group_size": 8,
+    #   "nbits_per_codebook": 16,
+    #   "num_codebooks": 1,
+    #   "out_group_size": 1,
+
+    #   "linear_weights_not_to_quantize": [ <--- hmmm ????
+    #       "model.embed_tokens.weight",
+    #       "lm_head.weight"
+
+    # "quant_method": "aqlm" duh <- shows it's aqlm.  Do we auto-detect?  How?
+    # },
+
+    # this one looks non-standard, has no quantization_config, just an AQLM block.
+    # https://huggingface.co/BlackSamorez/Llama-2-70b-AQLM-4Bit-2x16-hf/blob/main/config.json
+    # "aqlm": {
+    #    "in_group_size": 8,
+    #    "nbits_per_codebook": 16,
+    #    "num_codebooks": 2,
+    # "   "out_group_size": 1
+
     @classmethod
     def get_config_filenames(cls) -> List[str]:
-        return ["quantize_config.json"]
+        return []  # no extra configs.
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "GPTQConfig":
-        weight_bits = cls.get_from_keys(config, ["bits"])
-        group_size = cls.get_from_keys(config, ["group_size"])
-        desc_act = cls.get_from_keys(config, ["desc_act"])
-        return cls(weight_bits, group_size, desc_act)
+    def from_config(cls, config: Dict[str, Any]) -> "AQLMConfig":
+        in_group_size = cls.get_from_keys(config, ["in_group_size"])
+        nbits_per_codebook = cls.get_from_keys(config, ["nbits_per_codebook"])
+        num_code_books = cls.get_from_keys(config, ["num_codebooks"])
+        out_group_size = cls.get_from_keys(config, ["out_group_size"])
+        # TODO linear_weights_not_to_quantize ?
+        return cls(in_group_size, nbits_per_codebook, num_code_books, out_group_size)
 
-    def get_linear_method(self) -> "GPTQLinearMethod":
-        return GPTQLinearMethod(self)
+    def get_linear_method(self) -> "AQLMLinearMethod":
+        return AQLMLinearMethod(self)
 
     def get_scaled_act_names(self) -> List[str]:
         return []
 
 
-class ExllamaState(Enum):
-
-    UNUSED = enum.auto()
-    UNINITIALIZED = enum.auto()
-    READY = enum.auto()
-
-
-class GPTQLinearMethod(LinearMethodBase):
-    """Linear method for GPTQ.
+class AQLMLinearMethod(LinearMethodBase):
+    """Linear method for AQLM.
 
     Args:
-        quant_config: The GPTQ quantization config.
+        quant_config: The AQLM quantization config.
     """
 
-    def __init__(self, quant_config: GPTQConfig):
+    def __init__(self, quant_config: AQLMConfig):
         self.quant_config = quant_config
 
     def create_weights(
@@ -100,28 +123,21 @@ class GPTQLinearMethod(LinearMethodBase):
             raise ValueError(
                 "The input size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
-                "tensor parallel size.")
+                "tensor parallel size."
+            )
         if output_size_per_partition % self.quant_config.pack_factor != 0:
             raise ValueError(
                 "The output size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
-                "tensor parallel size.")
+                "tensor parallel size."
+            )
 
         if self.quant_config.group_size != -1:
             group_size = self.quant_config.group_size
         else:
             group_size = input_size
-        exllama_state = ExllamaState.UNINITIALIZED
         scale_and_zero_size = input_size // group_size
         scale_and_zero_input_dim = None
-        if input_size != input_size_per_partition and self.quant_config.group_size != -1:
-            # For act-order models, we cannot use Exllama for row parallel layer
-            if self.quant_config.desc_act:
-                exllama_state = ExllamaState.UNUSED
-            else:
-                # we need to partition qzeros and scales for exllama kernel
-                scale_and_zero_size = input_size_per_partition // group_size
-                scale_and_zero_input_dim = 0
 
         qweight = Parameter(
             torch.empty(
@@ -132,12 +148,14 @@ class GPTQLinearMethod(LinearMethodBase):
             requires_grad=False,
         )
         set_weight_attrs(
-            qweight, {
+            qweight,
+            {
                 "input_dim": 0,
                 "output_dim": 1,
                 "packed_dim": 0,
                 "pack_factor": self.quant_config.pack_factor,
-            })
+            },
+        )
         g_idx = Parameter(
             torch.tensor(
                 [
@@ -159,12 +177,14 @@ class GPTQLinearMethod(LinearMethodBase):
             requires_grad=False,
         )
         set_weight_attrs(
-            qzeros, {
+            qzeros,
+            {
                 "input_dim": scale_and_zero_input_dim,
                 "output_dim": 1,
                 "packed_dim": 1,
                 "pack_factor": self.quant_config.pack_factor,
-            })
+            },
+        )
         scales = Parameter(
             torch.empty(
                 scale_and_zero_size,
@@ -173,39 +193,36 @@ class GPTQLinearMethod(LinearMethodBase):
             ),
             requires_grad=False,
         )
-        set_weight_attrs(scales, {
-            "input_dim": scale_and_zero_input_dim,
-            "output_dim": 1,
-        })
+        set_weight_attrs(
+            scales,
+            {
+                "input_dim": scale_and_zero_input_dim,
+                "output_dim": 1,
+            },
+        )
         return {
             "qweight": qweight,
             "g_idx": g_idx,
             "qzeros": qzeros,
-            "scales": scales,
-            "exllama_state": exllama_state,
+            "scales": scales
         }
 
-    def apply_weights(self,
-                      weights: Dict[str, Any],
-                      x: torch.Tensor,
-                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def apply_weights(
+        self,
+        weights: Dict[str, Any],
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         qweight = weights["qweight"]
-        out_shape = x.shape[:-1] + (qweight.shape[-1], )
+        out_shape = x.shape[:-1] + (qweight.shape[-1],)
         reshaped_x = x.reshape(-1, x.shape[-1])
-        # exllama needs to shuffle the weight after the weight is loaded
-        # here we do the shuffle on first forward pass
-        if weights["exllama_state"] == ExllamaState.UNINITIALIZED:
-            if self.quant_config.desc_act:
-                weights["g_idx"] = torch.argsort(weights["g_idx"]).to(
-                    torch.int)
-            else:
-                weights["g_idx"] = torch.empty((1, 1), device="meta")
-            weights["exllama_state"] = ExllamaState.READY
-            ops.gptq_shuffle(weights["qweight"], weights["g_idx"])
-        output = ops.gptq_gemm(reshaped_x, weights["qweight"],
-                               weights["qzeros"], weights["scales"],
-                               weights["g_idx"],
-                               weights["exllama_state"] == ExllamaState.READY)
+        output = ops.aqlm_gemm(
+            reshaped_x,
+            weights["qweight"],
+            weights["qzeros"],
+            weights["scales"],
+            weights["g_idx"],
+        )
         if bias is not None:
             output = output + bias
         return output.reshape(out_shape)

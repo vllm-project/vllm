@@ -15,14 +15,15 @@ from tqdm.auto import tqdm
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import (get_quantization_config,
-                                                     QuantizationConfig)
+from vllm.model_executor.layers.quantization import (
+    get_quantization_config,
+    QuantizationConfig,
+)
 
 logger = init_logger(__name__)
 
 
 class Disabledtqdm(tqdm):
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs, disable=True)
 
@@ -68,10 +69,12 @@ def convert_bin_to_safetensor_file(
     sf_size = os.stat(sf_filename).st_size
     pt_size = os.stat(pt_filename).st_size
     if (sf_size - pt_size) / pt_size > 0.01:
-        raise RuntimeError(f"""The file size different is more than 1%:
+        raise RuntimeError(
+            f"""The file size different is more than 1%:
          - {sf_filename}: {sf_size}
          - {pt_filename}: {pt_size}
-         """)
+         """
+        )
 
     # check if the tensors are the same
     reloaded = load_file(sf_filename)
@@ -85,36 +88,36 @@ def convert_bin_to_safetensor_file(
 # TODO(woosuk): Move this to other place.
 def get_quant_config(model_config: ModelConfig) -> QuantizationConfig:
     quant_cls = get_quantization_config(model_config.quantization)
-    # Read the quantization config from the HF model config, if available.
-    hf_quant_config = getattr(model_config.hf_config, "quantization_config",
-                              None)
-    if hf_quant_config is not None:
-        return quant_cls.from_config(hf_quant_config)
+    if model_config.hf_quant_config is not None:
+        return quant_cls.from_config(model_config.hf_quant_config)
     model_name_or_path = model_config.model
     is_local = os.path.isdir(model_name_or_path)
     if not is_local:
         # Download the config files.
         with get_lock(model_name_or_path, model_config.download_dir):
-            hf_folder = snapshot_download(model_name_or_path,
-                                          revision=model_config.revision,
-                                          allow_patterns="*.json",
-                                          cache_dir=model_config.download_dir,
-                                          tqdm_class=Disabledtqdm)
+            hf_folder = snapshot_download(
+                model_name_or_path,
+                revision=model_config.revision,
+                allow_patterns="*.json",
+                cache_dir=model_config.download_dir,
+                tqdm_class=Disabledtqdm,
+            )
     else:
         hf_folder = model_name_or_path
     config_files = glob.glob(os.path.join(hf_folder, "*.json"))
 
     quant_config_files = [
-        f for f in config_files if any(
-            f.endswith(x) for x in quant_cls.get_config_filenames())
+        f
+        for f in config_files
+        if any(f.endswith(x) for x in quant_cls.get_config_filenames())
     ]
     if len(quant_config_files) == 0:
-        raise ValueError(
-            f"Cannot find the config file for {model_config.quantization}")
+        raise ValueError(f"Cannot find the config file for {model_config.quantization}")
     if len(quant_config_files) > 1:
         raise ValueError(
             f"Found multiple config files for {model_config.quantization}: "
-            f"{quant_config_files}")
+            f"{quant_config_files}"
+        )
 
     quant_config_file = quant_config_files[0]
     with open(quant_config_file, "r") as f:
@@ -164,11 +167,13 @@ def prepare_hf_model_weights(
         # Use file lock to prevent multiple processes from
         # downloading the same model weights at the same time.
         with get_lock(model_name_or_path, cache_dir):
-            hf_folder = snapshot_download(model_name_or_path,
-                                          allow_patterns=allow_patterns,
-                                          cache_dir=cache_dir,
-                                          tqdm_class=Disabledtqdm,
-                                          revision=revision)
+            hf_folder = snapshot_download(
+                model_name_or_path,
+                allow_patterns=allow_patterns,
+                cache_dir=cache_dir,
+                tqdm_class=Disabledtqdm,
+                revision=revision,
+            )
     else:
         hf_folder = model_name_or_path
     hf_weights_files: List[str] = []
@@ -189,13 +194,11 @@ def prepare_hf_model_weights(
             "scaler.pt",
         ]
         hf_weights_files = [
-            f for f in hf_weights_files
-            if not any(f.endswith(x) for x in blacklist)
+            f for f in hf_weights_files if not any(f.endswith(x) for x in blacklist)
         ]
 
     if len(hf_weights_files) == 0:
-        raise RuntimeError(
-            f"Cannot find any model weights with `{model_name_or_path}`")
+        raise RuntimeError(f"Cannot find any model weights with `{model_name_or_path}`")
 
     return hf_folder, hf_weights_files, use_safetensors
 
@@ -212,7 +215,8 @@ def hf_model_weights_iterator(
         cache_dir=cache_dir,
         load_format=load_format,
         fall_back_to_pt=fall_back_to_pt,
-        revision=revision)
+        revision=revision,
+    )
 
     if load_format == "npcache":
         # Currently np_cache only support *.bin checkpoints
@@ -276,8 +280,7 @@ def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
     return x
 
 
-def default_weight_loader(param: torch.Tensor,
-                          loaded_weight: torch.Tensor) -> None:
+def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
     """Default weight loader."""
     assert param.size() == loaded_weight.size()
     param.data.copy_(loaded_weight)
