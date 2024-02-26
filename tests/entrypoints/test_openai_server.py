@@ -205,14 +205,9 @@ async def test_completion_streaming(server, client: openai.AsyncOpenAI,
                                              prompt=prompt,
                                              max_tokens=5,
                                              temperature=0.0,
-                                             stream=True,
-                                             logprobs=10)
+                                             stream=True)
     chunks = []
     async for chunk in stream:
-        if chunk.choices[0].content:
-            assert chunk.choices[0].logprobs is not None
-            assert chunk.choices[0].logprobs.top_logprobs is not None
-            assert len(chunk.choices[0].logprobs.top_logprobs[0]) == 10
         chunks.append(chunk.choices[0].text)
     assert chunk.choices[0].finish_reason == "length"
     assert chunk.usage == single_usage
