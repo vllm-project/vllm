@@ -72,6 +72,8 @@ class AQLMConfig(QuantizationConfig):
     # "quant_method": "aqlm" duh <- shows it's aqlm.  Do we auto-detect?  How?
     # },
 
+    #https://huggingface.co/meta-llama/Llama-2-7b-hf 
+
     # this one looks non-standard, has no quantization_config, just an AQLM block.
     # https://huggingface.co/BlackSamorez/Llama-2-70b-AQLM-4Bit-2x16-hf/blob/main/config.json
     # "aqlm": {
