@@ -265,7 +265,7 @@ def hf_model_weights_iterator(
 def kv_cache_scales_iterator(filename: str,
                              tp_rank: int,
                              tp_size: int,
-                             num_hidden_layers: int) -> Iterator[Tuple[int, torch.Tensor]]:
+                             num_hidden_layers: int) -> Iterator[Tuple[int, float]]:
     """
     A simple utility to read in KV cache scaling factors that have been
     previously serialized to disk. Used by the model to populate the appropriate

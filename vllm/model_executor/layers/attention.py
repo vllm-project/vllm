@@ -55,6 +55,10 @@ class PagedAttention(nn.Module):
         # This will be set to a float by model initialization per attention,
         # if and only if we are using it. N.B. currently we only support per
         # tensor scalar scaling factors & only applicable to ROCm (AMD GPU).
+        # The scaling factor convention we are assuming is
+        # quantized_value * scaling_factor ~= true_value
+        # which is consistent with the practice of setting
+        # scaling_factor = tensor_amax / FPtype_max
         self.kv_cache_scaling_factor = None
 
         assert self.num_heads % self.num_kv_heads == 0
