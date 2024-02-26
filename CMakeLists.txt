@@ -232,9 +232,6 @@ else()
     "-D__CUDA_NO_BFLOAT16_CONVERSIONS__"
     "-D__CUDA_NO_HALF2_OPERATORS__")
 
-  message(DEBUG "nvcc: ${VLLM_GPU_FLAGS}")
-  message(DEBUG "punica nvcc: ${VLLM_PUNICA_GPU_FLAGS}")
-
   #
   # Setup/process CUDA arch flags.
   #
@@ -273,6 +270,7 @@ else()
       "CMAKE_CUDA_FLAGS. (${CMAKE_CUDA_FLAGS})")
   endif()
 
+  message(DEBUG "final CMAKE_CUDA_FLAGS: ${CMAKE_CUDA_FLAGS}")
   message(DEBUG "arch flags: ${VLLM_CUDA_ARCH_FLAGS}")
 
   # Macro for converting a `gencode` version number to a cmake version number.
@@ -364,9 +362,6 @@ macro(hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
   list(FILTER SRCS EXCLUDE REGEX "\.(cc)|(cpp)$")
   list(FILTER CXX_SRCS INCLUDE REGEX "\.(cc)|(cpp)$")
 
-  message(DEBUG "sources: ${SRCS}")
-  message(DEBUG "cxx sources: ${CXX_SRCS}")
-
   #
   # Generate ROCm/HIP source file names from CUDA file names.
   # Since HIP files are generated code, they will appear in the build area
@@ -378,7 +373,6 @@ macro(hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
     string(REGEX REPLACE "cuda" "hip" SRC ${SRC})
     list(APPEND HIP_SRCS "${CMAKE_CURRENT_BINARY_DIR}/${SRC}")
   endforeach()
-  message(DEBUG "hip src: ${HIP_SRCS}")
 
   set(CSRC_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/csrc)
   add_custom_target(
@@ -391,14 +385,13 @@ macro(hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
   # Swap out original extension sources with hipified sources.
   set(${OUT_SRCS} ${HIP_SRCS})
   list(APPEND ${OUT_SRCS} ${CXX_SRCS})
-
-  message(DEBUG "final ext src: ${OUT_SRCS}")
 endmacro()
 
 #
 # Define a target named `MOD_NAME` for a single extension. The
 # arguments are:
 #
+# MOD_GPU_LANG        - the GPU language for this module, e.g CUDA, HIP, etc.
 # MOD_SRC             - the list of source files relative to CMakeLists.txt
 #                       directory.
 # MOD_EXTRA_GPU_FLAGS - extra compiler flags passed to NVCC/hip.
