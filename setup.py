@@ -20,6 +20,10 @@ assert sys.platform.startswith(
 MAIN_CUDA_VERSION = "12.1"
 
 
+def is_sccache_available() -> bool:
+    return which("sccache") is not None
+
+
 def is_ccache_available() -> bool:
     return which("ccache") is not None
 
@@ -42,6 +46,8 @@ class CMakeExtension(Extension):
 
 
 class cmake_build_ext(build_ext):
+    # A flag to ensure that the cmake config step only runs once.
+    did_config = False
 
     def build_extensions(self):
         # Ensure that CMake is present and working
@@ -74,7 +80,12 @@ class cmake_build_ext(build_ext):
             if verbose:
                 cmake_args += ['-DCMAKE_VERBOSE_MAKEFILE=ON']
 
-            if is_ccache_available():
+            if is_sccache_available():
+                cmake_args += [
+                    '-DCMAKE_CXX_COMPILER_LAUNCHER=sccache',
+                    '-DCMAKE_CUDA_COMPILER_LAUNCHER=sccache',
+                ]
+            elif is_ccache_available():
                 cmake_args += [
                     '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache',
                     '-DCMAKE_CUDA_COMPILER_LAUNCHER=ccache',
@@ -83,7 +94,11 @@ class cmake_build_ext(build_ext):
             #
             # Setup parallelism
             #
-            num_jobs = os.cpu_count()
+            try:
+                num_jobs = len(os.sched_getaffinity(0))
+            except AttributeError:
+                num_jobs = os.cpu_count()
+
             nvcc_cuda_version = get_nvcc_cuda_version()
             if nvcc_cuda_version >= Version("11.2"):
                 nvcc_threads = int(os.getenv("NVCC_THREADS", 8))
@@ -107,16 +122,17 @@ class cmake_build_ext(build_ext):
                 build_jobs = ['-j', str(num_jobs)]
 
             # Config
-            # TODO: this only needs to happen once
-            subprocess.check_call(['cmake', ext.cmake_lists_dir] + build_tool +
-                                  cmake_args,
-                                  cwd=self.build_temp)
+            if not cmake_build_ext.did_config:
+                cmake_build_ext.did_config = True
+                subprocess.check_call(
+                    ['cmake', ext.cmake_lists_dir, *build_tool, *cmake_args],
+                    cwd=self.build_temp)
 
             # Build
             build_args = [
                 '--build', '.', '--config', cfg, '--target', ext_target_name
             ]
-            subprocess.check_call(['cmake'] + build_args + build_jobs,
+            subprocess.check_call(['cmake', *build_args, *build_jobs],
                                   cwd=self.build_temp)
 
 

@@ -84,12 +84,7 @@ macro (run_python OUT EXPR ERR_MSG)
 endmacro()
 
 #
-# Try to find the MPI package.
-#
-find_package(MPI)
-
-#
-# Update cmake's `CMAKE_PREFIX_PATH` with probably torch locations.
+# Update cmake's `CMAKE_PREFIX_PATH` with probable torch locations.
 #
 
 # Run `EXPR` in python after importing `PKG`. Use the result of this to extend
@@ -509,28 +504,28 @@ define_module_target(_punica_C
   "${VLLM_PUNICA_GPU_ARCHES}")
 
 #
-# Add the `supported` target which detects which extensions should be
+# Add the `default` target which detects which extensions should be
 # built based on platform/architecture.  This is the same logic that
 # setup.py uses to select which extensions should be built and should
 # be kept in sync.
 #
-# The `supported` target makes direct use of cmake easier since knowledge
+# The `default` target makes direct use of cmake easier since knowledge
 # of which extensions are supported has been factored in, e.g.
 #
 # mkdir build && cd build
 # cmake -G Ninja ..
-# cmake --build . --target supported
+# cmake --build . --target default
 #
-add_custom_target(supported)
+add_custom_target(default)
 
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   message(STATUS "Enabling C extension.")
-  add_dependencies(supported _C)
+  add_dependencies(default _C)
 endif()
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   message(STATUS "Enabling moe extension.")
-  add_dependencies(supported _moe_C)
+  add_dependencies(default _moe_C)
 
   set(ENABLE_PUNICA)
   # Enable punica if -DVLLM_INSTALL_PUNICA_KERNELS=1 or
@@ -551,6 +546,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   if (ENABLE_PUNICA)
     message(STATUS "Enabling punica extension.")
-    add_dependencies(supported _punica_C)
+    add_dependencies(default _punica_C)
   endif()
 endif()
