@@ -156,7 +156,7 @@ def run_timing(num_calls: int, bs: int, d_model: int, num_total_experts: int,
             topk=2,
             renormalize=True,
             inplace=True,
-            config=config,
+            override_config=config,
         )
     end_event.record()
     end_event.synchronize()

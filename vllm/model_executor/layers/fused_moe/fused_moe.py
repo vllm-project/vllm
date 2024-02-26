@@ -254,7 +254,7 @@ def fused_moe(
     topk: int,
     renormalize: bool,
     inplace: bool = False,
-    config: Optional[Dict[str, Any]] = None,
+    override_config: Optional[Dict[str, Any]] = None,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of weights, w1 and w2, and top-k gating mechanism.
@@ -267,7 +267,7 @@ def fused_moe(
     - topk (int): The number of top-k experts to select.
     - renormalize (bool): If True, renormalize the top-k weights to sum to 1.
     - inplace (bool): If True, perform the operation in-place. Defaults to False.
-    - config (Dict[str, Any]): Optional override for the kernel configuration.
+    - override_config (Optional[Dict[str, Any]]): Optional override for the kernel configuration.
     
     Returns:
     - torch.Tensor: The output tensor after applying the MoE layer.
@@ -317,7 +317,9 @@ def fused_moe(
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
-    if not config:
+    if override_config:
+        config = override_config
+    else:
         # First try to load optimal config from the file
         configs = get_moe_configs(E, w2.shape[2])
 
