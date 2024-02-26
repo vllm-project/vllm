@@ -119,21 +119,20 @@ find_package(Torch REQUIRED)
 # torch's cmake setup.
 append_torchlib_if_found(torch_python)
 
-if ((NOT HIP_FOUND) AND (NOT CUDA_FOUND))
-  message(FATAL_ERROR "Can't find CUDA or HIP installation.")
-endif()
-
 #
-# Check the torch version and warn if it isn't what is expected.
+# Set up GPU language and check the torch version and warn if it isn't
+# what is expected.
 #
 if (NOT HIP_FOUND AND CUDA_FOUND)
-  set(IS_CUDA true)
+  set(VLLM_GPU_LANG "CUDA")
 
   if (NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_CUDA})
     message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_CUDA} "
       "expected for CUDA build, saw ${Torch_VERSION} instead.")
   endif()
-else()
+elseif(HIP_FOUND)
+  set(VLLM_GPU_LANG "HIP")
+
   # ROCm 5.x
   if (ROCM_VERSION_DEV_MAJOR EQUAL 5 AND
       NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_ROCM_5X})
@@ -147,6 +146,8 @@ else()
     message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_ROCM_6X} "
       "expected for ROCMm 6.x build, saw ${Torch_VERSION} instead.")
   endif()
+else()
+  message(FATAL_ERROR "Can't find CUDA or HIP installation.")
 endif()
 
 #
@@ -407,34 +408,28 @@ endmacro()
 #
 # Note: optimization level/debug info is set via cmake build type.
 #
-# TODO: consider passing the language (CUDA/HIP/etc.) as an argument.
-#
-function(define_module_target MOD_NAME MOD_SRC MOD_EXTRA_GPU_FLAGS
+function(define_module_target MOD_NAME MOD_GPU_LANG MOD_SRC MOD_EXTRA_GPU_FLAGS
     MOD_GPU_ARCHES)
 
   # Add hipify preprocessing step when building with HIP/ROCm.
-  if (NOT IS_CUDA AND HIP_FOUND)
+  if (MOD_GPU_LANG STREQUAL "HIP")
     hipify_sources_target(MOD_SRC ${MOD_NAME} "${MOD_SRC}")
   endif()
 
   Python_add_library(${MOD_NAME} MODULE ${MOD_SRC} WITH_SOABI)
 
-  if (IS_CUDA)
-    set(GPU_LANG "CUDA")
-  else()
-    set(GPU_LANG "HIP")
-
+  if (MOD_GPU_LANG STREQUAL "HIP")
     # Make this target dependent on the hipify preprocessor step.
     add_dependencies(${MOD_NAME} hipify${MOD_NAME})
   endif()
 
-  set_target_properties(${MOD_NAME} PROPERTIES ${GPU_LANG}_ARCHITECTURES
+  set_target_properties(${MOD_NAME} PROPERTIES ${MOD_GPU_LANG}_ARCHITECTURES
       "${MOD_GPU_ARCHES}")
 
   set_property(TARGET ${MOD_NAME} PROPERTY CXX_STANDARD 17)
 
   target_compile_options(${MOD_NAME} PRIVATE
-    $<$<COMPILE_LANGUAGE:${GPU_LANG}>:${MOD_EXTRA_GPU_FLAGS}>)
+    $<$<COMPILE_LANGUAGE:${MOD_GPU_LANG}>:${MOD_EXTRA_GPU_FLAGS}>)
 
   target_compile_definitions(${MOD_NAME} PRIVATE
     "-DTORCH_EXTENSION_NAME=${MOD_NAME}")
@@ -463,13 +458,14 @@ set(VLLM_EXT_SRC
   "csrc/moe_align_block_size_kernels.cu"
   "csrc/pybind.cpp")
 
-if(IS_CUDA)
+if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_EXT_SRC
     "csrc/quantization/awq/gemm_kernels.cu"
     "csrc/custom_all_reduce.cu")
 endif()
 
 define_module_target(_C
+  "${VLLM_GPU_LANG}"
   "${VLLM_EXT_SRC}"
   "${VLLM_GPU_FLAGS}"
   "${VLLM_GPU_ARCHES}")
@@ -483,6 +479,7 @@ set(VLLM_MOE_EXT_SRC
   "csrc/moe/topk_softmax_kernels.cu")
 
 define_module_target(_moe_C
+  "${VLLM_GPU_LANG}"
   "${VLLM_MOE_EXT_SRC}"
   "${VLLM_GPU_FLAGS}"
   "${VLLM_GPU_ARCHES}")
@@ -513,6 +510,7 @@ set(VLLM_PUNICA_EXT_SRC
   "csrc/punica/punica_ops.cc")
 
 define_module_target(_punica_C
+  "${VLLM_GPU_LANG}"
   "${VLLM_PUNICA_EXT_SRC}"
   "${VLLM_PUNICA_GPU_FLAGS}"
   "${VLLM_PUNICA_GPU_ARCHES}")
@@ -532,12 +530,12 @@ define_module_target(_punica_C
 #
 add_custom_target(supported)
 
-if (IS_CUDA OR HIP_FOUND)
+if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   message(STATUS "Enabling C extension.")
   add_dependencies(supported _C)
 endif()
 
-if (IS_CUDA)
+if(VLLM_GPU_LANG STREQUAL "CUDA")
   message(STATUS "Enabling moe extension.")
   add_dependencies(supported _moe_C)
 
