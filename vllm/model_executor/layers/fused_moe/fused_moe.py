@@ -254,7 +254,7 @@ def fused_moe(
     topk: int,
     renormalize: bool,
     inplace: bool = False,
-    config: Dict[str, Any] = None,
+    config: Optional[Dict[str, Any]] = None,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of weights, w1 and w2, and top-k gating mechanism.
