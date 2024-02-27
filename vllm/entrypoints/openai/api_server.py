@@ -21,13 +21,13 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest, ErrorResponse)
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.logger import default_config_path, init_logger, setup_logger
-
+from vllm.logger import init_logger
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
 openai_serving_chat: OpenAIServingChat = None
 openai_serving_completion: OpenAIServingCompletion = None
+logger = init_logger(__name__)
 
 
 @asynccontextmanager
@@ -55,10 +55,6 @@ def parse_args():
 # Add prometheus asgi middleware to route /metrics requests
 metrics_app = make_asgi_app()
 app.mount("/metrics", metrics_app)
-
-args = parse_args()
-setup_logger(default_config_path)
-logger = init_logger(__name__)
 
 
 @app.exception_handler(RequestValidationError)
@@ -116,6 +112,8 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 
 
 if __name__ == "__main__":
+    args = parse_args()
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=args.allowed_origins,
