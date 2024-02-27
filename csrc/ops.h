@@ -69,13 +69,13 @@ void gelu_fast(
   torch::Tensor& out,
   torch::Tensor& input);
 
-torch::Tensor aqlm_gemm(
-  torch::Tensor a,
-  torch::Tensor b_q_weight,
-  torch::Tensor b_gptq_qzeros,
-  torch::Tensor b_gptq_scales,
-  torch::Tensor b_g_idx,
-  bool use_exllama);
+torch::Tensor code1x16_matmat(
+  const torch::Tensor& input,
+  const torch::Tensor& codes,
+  const torch::Tensor& codebooks,
+  const torch::Tensor& scales
+  //const std::optional<torch::Tensor>& bias
+);
 
 #ifndef USE_ROCM
 torch::Tensor awq_gemm(

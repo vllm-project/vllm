@@ -11,7 +11,12 @@ from packaging.version import parse, Version
 import setuptools
 import torch
 import torch.utils.cpp_extension as torch_cpp_ext
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME, ROCM_HOME
+from torch.utils.cpp_extension import (
+    BuildExtension,
+    CUDAExtension,
+    CUDA_HOME,
+    ROCM_HOME,
+)
 
 ROOT_DIR = os.path.dirname(__file__)
 
@@ -61,7 +66,8 @@ if _is_hip():
 
 if _is_cuda() and CUDA_HOME is None:
     raise RuntimeError(
-        "Cannot find CUDA_HOME. CUDA must be available to build the package.")
+        "Cannot find CUDA_HOME. CUDA must be available to build the package."
+    )
 
 ABI = 1 if torch._C._GLIBCXX_USE_CXX11_ABI else 0
 CXX_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
@@ -70,10 +76,12 @@ NVCC_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
 
 def get_hipcc_rocm_version():
     # Run the hipcc --version command
-    result = subprocess.run(['hipcc', '--version'],
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            text=True)
+    result = subprocess.run(
+        ["hipcc", "--version"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
 
     # Check if the command was executed successfully
     if result.returncode != 0:
@@ -81,7 +89,7 @@ def get_hipcc_rocm_version():
         return None
 
     # Extract the version using a regular expression
-    match = re.search(r'HIP version: (\S+)', result.stdout)
+    match = re.search(r"HIP version: (\S+)", result.stdout)
     if match:
         # Return the version string
         return match.group(1)
@@ -97,9 +105,9 @@ def glob(pattern: str):
 
 def get_neuronxcc_version():
     import sysconfig
+
     site_dir = sysconfig.get_paths()["purelib"]
-    version_file = os.path.join(site_dir, "neuronxcc", "version",
-                                "__init__.py")
+    version_file = os.path.join(site_dir, "neuronxcc", "version", "__init__.py")
 
     # Check if the command was executed successfully
     with open(version_file, "rt") as fp:
@@ -119,8 +127,9 @@ def get_nvcc_cuda_version(cuda_dir: str) -> Version:
 
     Adapted from https://github.com/NVIDIA/apex/blob/8b7a1ff183741dd8f9b87e7bafd04cfde99cea28/setup.py
     """
-    nvcc_output = subprocess.check_output([cuda_dir + "/bin/nvcc", "-V"],
-                                          universal_newlines=True)
+    nvcc_output = subprocess.check_output(
+        [cuda_dir + "/bin/nvcc", "-V"], universal_newlines=True
+    )
     output = nvcc_output.split()
     release_idx = output.index("release") + 1
     nvcc_cuda_version = parse(output[release_idx].split(",")[0])
@@ -142,8 +151,12 @@ def get_pytorch_rocm_arch() -> Set[str]:
     # If we don't have PYTORCH_ROCM_ARCH specified pull the list from rocm_agent_enumerator
     if env_arch_list is None:
         command = "rocm_agent_enumerator"
-        env_arch_list = subprocess.check_output([command]).decode('utf-8')\
-                        .strip().replace("\n", ";")
+        env_arch_list = (
+            subprocess.check_output([command])
+            .decode("utf-8")
+            .strip()
+            .replace("\n", ";")
+        )
         arch_source_str = "rocm_agent_enumerator"
     else:
         arch_source_str = "PYTORCH_ROCM_ARCH env variable"
@@ -159,7 +172,8 @@ def get_pytorch_rocm_arch() -> Set[str]:
         raise RuntimeError(
             f"None of the ROCM architectures in {arch_source_str} "
             f"({env_arch_list}) is supported. "
-            f"Supported ROCM architectures are: {ROCM_SUPPORTED_ARCHS}.")
+            f"Supported ROCM architectures are: {ROCM_SUPPORTED_ARCHS}."
+        )
     invalid_arch_list = pytorch_rocm_arch - ROCM_SUPPORTED_ARCHS
     if invalid_arch_list:
         warnings.warn(
@@ -167,7 +181,8 @@ def get_pytorch_rocm_arch() -> Set[str]:
             f"excluded from the {arch_source_str} output "
             f"({env_arch_list}). Supported ROCM architectures are: "
             f"{ROCM_SUPPORTED_ARCHS}.",
-            stacklevel=2)
+            stacklevel=2,
+        )
     return arch_list
 
 
@@ -189,15 +204,16 @@ def get_torch_arch_list() -> Set[str]:
 
     # Filter out the invalid architectures and print a warning.
     valid_archs = NVIDIA_SUPPORTED_ARCHS.union(
-        {s + "+PTX"
-         for s in NVIDIA_SUPPORTED_ARCHS})
+        {s + "+PTX" for s in NVIDIA_SUPPORTED_ARCHS}
+    )
     arch_list = torch_arch_list.intersection(valid_archs)
     # If none of the specified architectures are valid, raise an error.
     if not arch_list:
         raise RuntimeError(
             "None of the CUDA architectures in `TORCH_CUDA_ARCH_LIST` env "
             f"variable ({env_arch_list}) is supported. "
-            f"Supported CUDA architectures are: {valid_archs}.")
+            f"Supported CUDA architectures are: {valid_archs}."
+        )
     invalid_arch_list = torch_arch_list - valid_archs
     if invalid_arch_list:
         warnings.warn(
@@ -205,7 +221,8 @@ def get_torch_arch_list() -> Set[str]:
             "excluded from the `TORCH_CUDA_ARCH_LIST` env variable "
             f"({env_arch_list}). Supported CUDA architectures are: "
             f"{valid_archs}.",
-            stacklevel=2)
+            stacklevel=2,
+        )
     return arch_list
 
 
@@ -224,7 +241,8 @@ if _is_cuda() and not compute_capabilities:
         major, minor = torch.cuda.get_device_capability(i)
         if major < 7:
             raise RuntimeError(
-                "GPUs with compute capability below 7.0 are not supported.")
+                "GPUs with compute capability below 7.0 are not supported."
+            )
         compute_capabilities.add(f"{major}.{minor}")
 
 ext_modules = []
@@ -242,12 +260,13 @@ if _is_cuda():
             compute_capabilities.remove("9.0")
     # Validate the NVCC CUDA version.
     if nvcc_cuda_version < Version("11.0"):
+        raise RuntimeError("CUDA 11.0 or higher is required to build the package.")
+    if nvcc_cuda_version < Version("11.1") and any(
+        cc.startswith("8.6") for cc in compute_capabilities
+    ):
         raise RuntimeError(
-            "CUDA 11.0 or higher is required to build the package.")
-    if (nvcc_cuda_version < Version("11.1")
-            and any(cc.startswith("8.6") for cc in compute_capabilities)):
-        raise RuntimeError(
-            "CUDA 11.1 or higher is required for compute capability 8.6.")
+            "CUDA 11.1 or higher is required for compute capability 8.6."
+        )
     if nvcc_cuda_version < Version("11.8"):
         if any(cc.startswith("8.9") for cc in compute_capabilities):
             # CUDA 11.8 is required to generate the code targeting compute capability 8.9.
@@ -258,13 +277,16 @@ if _is_cuda():
             warnings.warn(
                 "CUDA 11.8 or higher is required for compute capability 8.9. "
                 "Targeting compute capability 8.0 instead.",
-                stacklevel=2)
-            compute_capabilities = set(cc for cc in compute_capabilities
-                                       if not cc.startswith("8.9"))
+                stacklevel=2,
+            )
+            compute_capabilities = set(
+                cc for cc in compute_capabilities if not cc.startswith("8.9")
+            )
             compute_capabilities.add("8.0+PTX")
         if any(cc.startswith("9.0") for cc in compute_capabilities):
             raise RuntimeError(
-                "CUDA 11.8 or higher is required for compute capability 9.0.")
+                "CUDA 11.8 or higher is required for compute capability 9.0."
+            )
 
     NVCC_FLAGS_PUNICA = NVCC_FLAGS.copy()
 
@@ -273,16 +295,13 @@ if _is_cuda():
         num = capability[0] + capability[2]
         NVCC_FLAGS += ["-gencode", f"arch=compute_{num},code=sm_{num}"]
         if capability.endswith("+PTX"):
-            NVCC_FLAGS += [
-                "-gencode", f"arch=compute_{num},code=compute_{num}"
-            ]
+            NVCC_FLAGS += ["-gencode", f"arch=compute_{num},code=compute_{num}"]
         if int(capability[0]) >= 8:
-            NVCC_FLAGS_PUNICA += [
-                "-gencode", f"arch=compute_{num},code=sm_{num}"
-            ]
+            NVCC_FLAGS_PUNICA += ["-gencode", f"arch=compute_{num},code=sm_{num}"]
             if capability.endswith("+PTX"):
                 NVCC_FLAGS_PUNICA += [
-                    "-gencode", f"arch=compute_{num},code=compute_{num}"
+                    "-gencode",
+                    f"arch=compute_{num},code=compute_{num}",
                 ]
 
     # Use NVCC threads to parallelize the build.
@@ -297,10 +316,10 @@ if _is_cuda():
     # changes for punica kernels
     NVCC_FLAGS += torch_cpp_ext.COMMON_NVCC_FLAGS
     REMOVE_NVCC_FLAGS = [
-        '-D__CUDA_NO_HALF_OPERATORS__',
-        '-D__CUDA_NO_HALF_CONVERSIONS__',
-        '-D__CUDA_NO_BFLOAT16_CONVERSIONS__',
-        '-D__CUDA_NO_HALF2_OPERATORS__',
+        "-D__CUDA_NO_HALF_OPERATORS__",
+        "-D__CUDA_NO_HALF_CONVERSIONS__",
+        "-D__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        "-D__CUDA_NO_HALF2_OPERATORS__",
     ]
     for flag in REMOVE_NVCC_FLAGS:
         with contextlib.suppress(ValueError):
@@ -317,13 +336,13 @@ if _is_cuda():
         ext_modules.append(
             CUDAExtension(
                 name="vllm._punica_C",
-                sources=["csrc/punica/punica_ops.cc"] +
-                glob("csrc/punica/bgmv/*.cu"),
+                sources=["csrc/punica/punica_ops.cc"] + glob("csrc/punica/bgmv/*.cu"),
                 extra_compile_args={
                     "cxx": CXX_FLAGS,
                     "nvcc": NVCC_FLAGS_PUNICA,
                 },
-            ))
+            )
+        )
 elif _is_neuron():
     neuronxcc_version = get_neuronxcc_version()
 
@@ -333,6 +352,8 @@ vllm_extension_sources = [
     "csrc/pos_encoding_kernels.cu",
     "csrc/activation_kernels.cu",
     "csrc/layernorm_kernels.cu",
+    "csrc/quantization/aqlm/aqlm_cuda_entry.cpp",
+    "csrc/quantization/aqlm/aqlm_cuda_kernal.cu",
     "csrc/quantization/squeezellm/quant_cuda_kernel.cu",
     "csrc/quantization/gptq/q_gemm.cu",
     "csrc/cuda_utils_kernels.cu",
@@ -353,7 +374,8 @@ if _is_cuda():
                 "cxx": CXX_FLAGS,
                 "nvcc": NVCC_FLAGS,
             },
-        ))
+        )
+    )
 
 if not _is_neuron():
     vllm_extension = CUDAExtension(
@@ -378,8 +400,9 @@ def find_version(filepath: str) -> str:
     Adapted from https://github.com/ray-project/ray/blob/0b190ee1160eeca9796bc091e07eaebf4c85b511/python/setup.py
     """
     with open(filepath) as fp:
-        version_match = re.search(r"^__version__ = ['\"]([^'\"]*)['\"]",
-                                  fp.read(), re.M)
+        version_match = re.search(
+            r"^__version__ = ['\"]([^'\"]*)['\"]", fp.read(), re.M
+        )
         if version_match:
             return version_match.group(1)
         raise RuntimeError("Unable to find version string.")
@@ -442,8 +465,10 @@ setuptools.setup(
     version=get_vllm_version(),
     author="vLLM Team",
     license="Apache 2.0",
-    description=("A high-throughput and memory-efficient inference and "
-                 "serving engine for LLMs"),
+    description=(
+        "A high-throughput and memory-efficient inference and "
+        "serving engine for LLMs"
+    ),
     long_description=read_readme(),
     long_description_content_type="text/markdown",
     url="https://github.com/vllm-project/vllm",
@@ -459,8 +484,9 @@ setuptools.setup(
         "License :: OSI Approved :: Apache Software License",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
-    packages=setuptools.find_packages(exclude=("benchmarks", "csrc", "docs",
-                                               "examples", "tests")),
+    packages=setuptools.find_packages(
+        exclude=("benchmarks", "csrc", "docs", "examples", "tests")
+    ),
     python_requires=">=3.8",
     install_requires=get_requirements(),
     ext_modules=ext_modules,

@@ -214,16 +214,21 @@ class AQLMLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        qweight = weights["qweight"]
-        out_shape = x.shape[:-1] + (qweight.shape[-1],)
-        reshaped_x = x.reshape(-1, x.shape[-1])
+        # qweight = weights["qweight"] do I need the same flattening?
+        # out_shape = x.shape[:-1] + (qweight.shape[-1],)
+        # reshaped_x = x.reshape(-1, x.shape[-1]) #
+
+        print("input shape is ", x)
+
         output = ops.aqlm_gemm(
-            reshaped_x,
-            weights["qweight"],
-            weights["qzeros"],
+            x,  # hmm, reshape?
+            weights["codes"],
+            weights["codebooks"],
             weights["scales"],
-            weights["g_idx"],
         )
+
+        print("output shape is ", output)
+        
         if bias is not None:
             output = output + bias
-        return output.reshape(out_shape)
+        return output  # .reshape(out_shape)  ???
