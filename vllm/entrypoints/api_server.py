@@ -122,7 +122,7 @@ if __name__ == "__main__":
             lora_name=lora.name,
             lora_int_id=i,
             lora_local_path=lora.local_path,
-        ) 
+        )
         for i, lora in enumerate(args.lora_modules, start=1)
     } if args.enable_lora else {}
 
