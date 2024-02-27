@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import NamedTuple, Optional
 
 from neuralmagic.tools.call_cmd import call_cmd
-from neuralmagic.benchmarks.common import script_args_to_cla, benchmark_configs
+from neuralmagic.benchmarks.common import script_args_to_cla, benchmark_configs, max_model_length_from_model_id
 
 
 def run_benchmark_throughput_script(config: NamedTuple,
@@ -15,16 +15,31 @@ def run_benchmark_throughput_script(config: NamedTuple,
     script_path = f"neuralmagic.benchmarks.scripts.{config.script_name}"
 
     for model in config.models:
-        for script_args in script_args_to_cla(config):
-            bench_cmd = (["python3", "-m", f"{script_path}"] + script_args +
-                         ["--model", f"{model}"] + ["--tokenizer", f"{model}"])
 
-            if output_directory:
-                bench_cmd = bench_cmd + [
-                    "--save-directory", f"{output_directory}"
-                ]
+        supported_max_model_len = max_model_length_from_model_id(model)
 
-            call_cmd(bench_cmd, stdout=None, stderr=None)
+        # If the requested model-len is too big, try running with the maximum supported for this model.
+        max_model_lens = set(
+            map(lambda v: min(v, supported_max_model_len),
+                config.max_model_lens))
+        if (config.max_model_lens != list(max_model_lens)):
+            print(
+                f"WARNING: max_model_len modified to {max_model_lens} from {config.max_model_lens} for model {model}"
+            )
+
+        for max_model_len in max_model_lens:
+            for script_args in script_args_to_cla(config):
+                bench_cmd = (["python3", "-m", f"{script_path}"] +
+                             script_args + ["--model", f"{model}"] +
+                             ["--tokenizer", f"{model}"] +
+                             ["--max-model-len", f"{max_model_len}"])
+
+                if output_directory:
+                    bench_cmd = bench_cmd + [
+                        "--save-directory", f"{output_directory}"
+                    ]
+
+                call_cmd(bench_cmd, stdout=None, stderr=None)
 
 
 if __name__ == '__main__':

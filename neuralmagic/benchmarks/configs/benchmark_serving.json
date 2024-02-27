@@ -8,6 +8,9 @@
 				"mistralai/Mistral-7B-Instruct-v0.2",
 				"NousResearch/Llama-2-7b-chat-hf"
 			],
+			"max_model_lens": [
+				4096
+			],
 			"sparsity": [],
 			"script_name": "benchmark_serving",
 			"script_args": {
@@ -32,6 +35,9 @@
 				"TinyLlama/TinyLlama-1.1B-Chat-v1.0",
 				"mistralai/Mistral-7B-Instruct-v0.2",
 				"NousResearch/Llama-2-7b-chat-hf"
+			],
+			"max_model_lens": [
+				4096
 			],
 			"sparsity": [],
 			"script_name": "benchmark_serving",

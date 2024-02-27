@@ -8,6 +8,7 @@
 				"mistralai/Mistral-7B-Instruct-v0.2",
 				"NousResearch/Llama-2-7b-chat-hf"
 			],
+			"max_model_lens" : [4096],
 			"script_name": "benchmark_throughput",
 			"script_args": {
 				"backend": [
@@ -44,6 +45,7 @@
 				"mistralai/Mistral-7B-Instruct-v0.2",
 				"NousResearch/Llama-2-7b-chat-hf"
 			],
+			"max_model_lens" : [4096],
 			"script_name": "benchmark_throughput",
 			"script_args": {
 				"backend": [
@@ -87,6 +89,7 @@
 				"mistralai/Mistral-7B-Instruct-v0.2",
 				"NousResearch/Llama-2-7b-chat-hf"
 			],
+			"max_model_lens" : [4096],
 			"script_name": "benchmark_throughput",
 			"script_args": {
 				"backend": [

@@ -6,12 +6,20 @@ on:
         description: "requested runner label (specifies instance)"
         type: string
         required: true
+      benchmark_config_list_file:
+        description: "Path to a file containing a list of benchmark-configs to run benchmarks with. For reference look at .github/data/nm_benchmark_configs_list.txt"
+        type: string
+        required: true
       timeout:
         description: "approximate number of minutes to keep instance up (should be at least 20)."
         type: string
         required: true
       gitref:
         description: "git commit hash or branch name"
+        type: string
+        required: true
+      python:
+        description: "python version, e.g. 3.10.12"
         type: string
         required: true
 
@@ -35,16 +43,35 @@ jobs:
           gitref: ${{ inputs.gitref }}
           label: ${{ inputs.label }}
           timeout: ${{ inputs.timeout }}
-  
-      # Call the `build` action when available
-      #- name: build
-      #  id: build
-      #  uses: ./.github/actions/build/
+
+      - name: setenv
+        id: setenv
+        uses: ./.github/actions/nm-set-env/
+        with:
+          hf_home: ${{ secrets.NM_HF_HOME }}
+
+      - name: set python
+        id: set_python
+        uses: ./.github/actions/nm-set-python/
+        with:
+          python: ${{ inputs.python }}
+          venv: TEST
+
+      - name: build
+        id: build
+        uses: ./.github/actions/nm-build-vllm/
+        with:
+          Gi_per_thread: 1
+          python: ${{ inputs.python }}
+          venv: TEST
 
       - name: run benchmarks
         uses: ./.github/actions/nm-benchmark/
         with:
+          benchmark_config_list_file: ${{ inputs.benchmark_config_list_file }}
           output_directory: benchmark-results
+          python: ${{ inputs.python }}
+          venv: TEST
 
       - name: store benchmark result artifacts
         uses: actions/upload-artifact@v4
@@ -52,7 +79,7 @@ jobs:
         with:
           name: ${{ github.run_id }}-${{ inputs.label }}
           path: benchmark-results
-          retention-days: 90
+          retention-days: 15
 
       #######################################################
       # TODO (Varun) : Remove pause once things are automated

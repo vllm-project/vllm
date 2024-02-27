@@ -1,8 +1,17 @@
 name: run vllm benchmarks
 description: 'run vllm benchmarks'
 inputs:
+  benchmark_config_list_file:
+    description: 'Path to a file containing a list of benchmark-configs to run benchmarks with. For reference look at .github/data/nm_benchmark_configs_list.txt'
+    required: true
   output_directory:
     description: 'output directory to store the benchmark results'
+    required: true
+  python:
+    description: 'python version, e.g. 3.10.12'
+    required: true
+  venv:
+    description: 'name for python virtual environment'
     required: true
 runs:
   using: composite
@@ -10,8 +19,12 @@ runs:
   - id: benchmark
     run: |
       mkdir -p ${{ inputs.output_directory }}
+      COMMIT=${{ github.sha }}
+      VENV="${{ inputs.venv }}-${COMMIT:0:7}"
+      source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
+      pip3 install -r neuralmagic/benchmarks/requirements-benchmark.txt
       SUCCESS=0
-      .github/workflows/scripts/nm-run-benchmarks.sh ${{ inputs.output_directory }} || SUCCESS=$?
+      .github/workflows/scripts/nm-run-benchmarks.sh ${{ inputs.benchmark_config_list_file }} ${{ inputs.output_directory }} || SUCCESS=$?
       echo "test=${SUCCESS}" >> "$GITHUB_OUTPUT"
       exit ${SUCCESS}
     shell: bash

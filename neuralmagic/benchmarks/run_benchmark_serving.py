@@ -2,19 +2,20 @@ import argparse
 import subprocess
 import requests
 import time
+import itertools
 
 from typing import NamedTuple, Optional
 from pathlib import Path
 
 from neuralmagic.tools.call_cmd import call_cmd
-from neuralmagic.benchmarks.common import download_model, script_args_to_cla, benchmark_configs
+from neuralmagic.benchmarks.common import download_model, max_model_length_from_model_id, script_args_to_cla, benchmark_configs
 from neuralmagic.benchmarks.scripts.common import warmup_server
 
 BENCH_SERVER_HOST = "localhost"
 BENCH_SERVER_PORT = 9000
 
 
-def is_server_running(host: str, port: int, timeout=60) -> bool:
+def is_server_running(host: str, port: int, timeout=300) -> bool:
 
     def try_connection() -> bool:
         try:
@@ -64,12 +65,27 @@ def run_benchmark_serving_script(config: NamedTuple,
     script_path = f"neuralmagic.benchmarks.scripts.{config.script_name}"
 
     sparsities = [None] if len(config.sparsity) == 0 else config.sparsity
-    for model in config.models:
+
+    for model, sparsity in itertools.product(config.models, sparsities):
+
         # download model beforehand so the server can start without any holdup
         download_model(model)
 
-        for sparsity in sparsities:
-            server_cmd = f"python3 -m vllm.entrypoints.api_server --model {model} --tokenizer {model} --host {BENCH_SERVER_HOST} --port {BENCH_SERVER_PORT} --disable-log-requests"
+        supported_max_model_len = max_model_length_from_model_id(model)
+
+        # If the requested model-len is too big, try running with the maximum supported for this model.
+        max_model_lens = set(
+            map(lambda v: min(v, supported_max_model_len),
+                config.max_model_lens))
+        if (config.max_model_lens != list(max_model_lens)):
+            print(
+                f"WARNING: max_model_len modified to {max_model_lens} from {config.max_model_lens} for model {model}"
+            )
+
+        for max_model_len in max_model_lens:
+
+            server_cmd = f"python3 -m vllm.entrypoints.api_server --model {model} --tokenizer {model} --max-model-len {max_model_len} --host {BENCH_SERVER_HOST} --port {BENCH_SERVER_PORT} --disable-log-requests"
+
             if sparsity:
                 server_cmd += f" --sparsity {sparsity} "
 

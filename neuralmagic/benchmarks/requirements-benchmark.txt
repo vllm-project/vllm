@@ -1,3 +1,4 @@
 # requirements specific to the vllm neuralmagic fork
+requests
 aiohttp
 datasets
