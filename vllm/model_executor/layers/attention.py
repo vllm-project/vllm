@@ -59,7 +59,7 @@ class PagedAttention(nn.Module):
         # quantized_value * scaling_factor ~= true_value
         # which is consistent with the practice of setting
         # scaling_factor = tensor_amax / FPtype_max
-        self.kv_cache_scaling_factor = None
+        self.kv_cache_scaling_factor = 1.0
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
