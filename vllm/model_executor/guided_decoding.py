@@ -6,7 +6,6 @@ from functools import lru_cache
 from json import dumps as json_dumps
 from re import escape as regex_escape
 from typing import Union, Tuple
-from types import SimpleNamespace
 from pydantic import BaseModel
 
 from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest
