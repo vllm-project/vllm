@@ -76,7 +76,7 @@ class LLMEngine:
             lora_config: Optional[LoRAConfig],
             placement_group: Optional["PlacementGroup"],
             log_stats: bool,
-            usage_context: UsageContext = UsageContext.UNKNOWN_CONTEXT
+            usage_context: UsageContext = UsageContext.ENGINE_CONTEXT
     ) -> None:
         logger.info(
             "Initializing an LLM engine with config: "
@@ -373,7 +373,7 @@ class LLMEngine:
     def from_engine_args(
         cls,
         engine_args: EngineArgs,
-        usage_context: UsageContext = UsageContext.UNKNOWN_CONTEXT
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT
     ) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.

@@ -616,7 +616,7 @@ class AsyncLLMEngine:
         cls,
         engine_args: AsyncEngineArgs,
         start_engine_loop: bool = True,
-        usage_context: UsageContext = UsageContext.UNKNOWN_CONTEXT
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT
     ) -> "AsyncLLMEngine":
         """Creates an async LLM engine from the engine arguments."""
         # Create the engine configs.

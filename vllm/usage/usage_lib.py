@@ -69,10 +69,10 @@ def _detect_cloud_provider() -> str:
 
 class UsageContext(Enum):
     UNKNOWN_CONTEXT = "UNKNOWN_CONTEXT"
-    LLM = "LLM"
+    LLM_CLASS = "LLM_CLASS"
     API_SERVER = "API_SERVER"
     OPENAI_API_SERVER = "OPENAI_API_SERVER"
-
+    ENGINE_CONTEXT = "ENGINE_CONTEXT"
 
 class UsageMessage:
 
