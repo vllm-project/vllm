@@ -12,7 +12,7 @@ from vllm.model_executor.layers.triton_kernel.prefix_prefill import (
 _PARTITION_SIZE = 512
 
 
-class PagedAttention:
+class PagedAttentionImpl:
 
     @staticmethod
     def get_supported_head_sizes() -> List[int]:

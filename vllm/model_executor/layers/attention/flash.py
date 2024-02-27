@@ -5,12 +5,12 @@ from flash_attn import flash_attn_func
 import torch
 
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.attention.base import BaseAttention
-from vllm.model_executor.layers.attention.paged_attn import PagedAttention
+from vllm.model_executor.layers.attention.base import Attention
+from vllm.model_executor.layers.attention.paged_attn import PagedAttentionImpl
 from vllm.model_executor.layers.attention.utils import expand_gqa
 
 
-class Attention(BaseAttention):
+class Attention(Attention):
 
     def __init__(
         self,
@@ -23,7 +23,7 @@ class Attention(BaseAttention):
     ) -> None:
         super().__init__(num_heads, head_size, scale, num_kv_heads,
                          alibi_slopes, sliding_window)
-        suppored_head_sizes = PagedAttention.get_supported_head_sizes()
+        suppored_head_sizes = PagedAttentionImpl.get_supported_head_sizes()
         if head_size not in suppored_head_sizes:
             raise ValueError(
                 f"Head size {head_size} is not supported by PagedAttention. "
@@ -65,8 +65,8 @@ class Attention(BaseAttention):
         # vectors will not be cached. This happens during the initial memory
         # profiling run.
         if key_cache is not None and value_cache is not None:
-            PagedAttention.reshape_and_cache(key, value, key_cache,
-                                             value_cache, input_metadata)
+            PagedAttentionImpl.reshape_and_cache(key, value, key_cache,
+                                                 value_cache, input_metadata)
 
         if input_metadata.is_prompt:
             # Prompt run.
@@ -92,7 +92,7 @@ class Attention(BaseAttention):
                     query, key, value = expand_gqa(query, key, value,
                                                    self.num_heads,
                                                    self.num_kv_heads)
-                output = PagedAttention.forward_prefix(
+                output = PagedAttentionImpl.forward_prefix(
                     query,
                     key,
                     value,
@@ -105,7 +105,7 @@ class Attention(BaseAttention):
                 )
         else:
             # Decoding run.
-            output = PagedAttention.forward(
+            output = PagedAttentionImpl.forward(
                 query,
                 key_cache,
                 value_cache,

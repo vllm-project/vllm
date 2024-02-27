@@ -5,9 +5,10 @@ import torch
 import torch.nn as nn
 
 from vllm.model_executor.input_metadata import InputMetadata
+from vllm.utils import is_hip
 
 
-class BaseAttention(nn.Module):
+class Attention(nn.Module):
     """Attention layer.
 
     This class takes query, key, and value tensors as input. The input tensors
@@ -41,6 +42,13 @@ class BaseAttention(nn.Module):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
+        if not is_hip() and torch.cuda.get_device_capability()[0] >= 8:
+            from vllm.model_executor.layers.attention.flash import Attention
+            self.backend = Attention(*args, **kwargs)
+        else:
+            from vllm.model_executor.layers.attention.non_flash import Attention
+            self.backend = Attention(*args, **kwargs)
+
     def forward(
         self,
         query: torch.Tensor,
@@ -50,5 +58,4 @@ class BaseAttention(nn.Module):
         value_cache: Optional[torch.Tensor],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
-        raise NotImplementedError(
-            "This method should be overridden by subclasses.")
+        self.backend
