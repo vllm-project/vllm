@@ -1,9 +1,9 @@
 # coding=utf-8
 # Adapted from
-# https://huggingface.co/Qwen/Qwen-7B/blob/main/modeling_qwen.py
-# Copyright (c) Alibaba Cloud.
-# LICENSE: https://huggingface.co/Qwen/Qwen-7B/blob/main/LICENSE
-"""Inference-only QWen model compatible with HuggingFace weights."""
+# https://huggingface.co/OrionStarAI/Orion-14B-Base/blob/main/modeling_orion.py
+# Copyright (c) OrionStar Inc.
+# LICENSE: https://huggingface.co/OrionStarAI/Orion-14B-Base/blob/main/LICENSE
+"""Inference-only Orion-14B model compatible with HuggingFace weights."""
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -13,7 +13,6 @@ from transformers import PretrainedConfig
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import PagedAttention
-from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -32,24 +31,24 @@ from vllm.sequence import SamplerOutput
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
-class QWenMLP(nn.Module):
+class OrionMLP(nn.Module):
 
     def __init__(
         self,
         hidden_size: int,
         intermediate_size: int,
-        hidden_act: str = "silu",
+        hidden_act: str,
         linear_method: Optional[LinearMethodBase] = None,
-    ):
+    ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size, [intermediate_size] * 2,
             bias=False,
             linear_method=linear_method)
-        self.c_proj = RowParallelLinear(intermediate_size,
-                                        hidden_size,
-                                        bias=False,
-                                        linear_method=linear_method)
+        self.down_proj = RowParallelLinear(intermediate_size,
+                                           hidden_size,
+                                           bias=False,
+                                           linear_method=linear_method)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -58,44 +57,59 @@ class QWenMLP(nn.Module):
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
-        x, _ = self.c_proj(x)
+        x, _ = self.down_proj(x)
         return x
 
 
-class QWenAttention(nn.Module):
+class OrionAttention(nn.Module):
 
     def __init__(
         self,
         hidden_size: int,
         num_heads: int,
-        max_position_embeddings: int,
+        num_kv_heads: int,
         rope_theta: float = 10000,
         rope_scaling: Optional[Dict[str, Any]] = None,
+        max_position_embeddings: int = 8192,
         linear_method: Optional[LinearMethodBase] = None,
-    ):
+    ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
-        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size(
-        )
+        tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
-        assert self.total_num_heads % tensor_model_parallel_world_size == 0
-        self.num_heads = (self.total_num_heads //
-                          tensor_model_parallel_world_size)
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
+        self.total_num_kv_heads = num_kv_heads
+        if self.total_num_kv_heads >= tp_size:
+            # Number of KV heads is greater than TP size, so we partition
+            # the KV heads across multiple tensor parallel GPUs.
+            assert self.total_num_kv_heads % tp_size == 0
+        else:
+            # Number of KV heads is less than TP size, so we replicate
+            # the KV heads across multiple tensor parallel GPUs.
+            assert tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         self.head_dim = hidden_size // self.total_num_heads
-        self.c_attn = QKVParallelLinear(
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+        self.scaling = self.head_dim**-0.5
+        self.rope_theta = rope_theta
+        self.max_position_embeddings = max_position_embeddings
+
+        self.qkv_proj = QKVParallelLinear(
             hidden_size,
             self.head_dim,
             self.total_num_heads,
-            bias=True,
+            self.total_num_kv_heads,
+            bias=False,
             linear_method=linear_method,
         )
-        self.c_proj = RowParallelLinear(
+        self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
             linear_method=linear_method,
         )
-        self.scaling = self.head_dim**-0.5
 
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -104,7 +118,10 @@ class QWenAttention(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
         )
-        self.attn = PagedAttention(self.num_heads, self.head_dim, self.scaling)
+        self.attn = PagedAttention(self.num_heads,
+                                   self.head_dim,
+                                   self.scaling,
+                                   num_kv_heads=self.num_kv_heads)
 
     def forward(
         self,
@@ -113,40 +130,48 @@ class QWenAttention(nn.Module):
         kv_cache: KVCache,
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
-        qkv, _ = self.c_attn(hidden_states)
-        q, k, v = qkv.chunk(chunks=3, dim=-1)
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         k_cache, v_cache = kv_cache
         attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
-
-        output, _ = self.c_proj(attn_output)
+        output, _ = self.o_proj(attn_output)
         return output
 
 
-class QWenBlock(nn.Module):
+class OrionDecoderLayer(nn.Module):
 
     def __init__(
         self,
         config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
-    ):
+    ) -> None:
         super().__init__()
-        self.ln_1 = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
-
+        self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
-        self.attn = QWenAttention(config.hidden_size,
-                                  config.num_attention_heads,
-                                  config.max_position_embeddings,
-                                  rope_theta=rope_theta,
-                                  rope_scaling=rope_scaling,
-                                  linear_method=linear_method)
+        max_position_embeddings = getattr(config, "max_position_embeddings",
+                                          8192)
+        self.self_attn = OrionAttention(
+            hidden_size=self.hidden_size,
+            num_heads=config.num_attention_heads,
+            num_kv_heads=config.num_key_value_heads,
+            rope_theta=rope_theta,
+            rope_scaling=rope_scaling,
+            max_position_embeddings=max_position_embeddings,
+            linear_method=linear_method,
+        )
+        self.mlp = OrionMLP(
+            hidden_size=self.hidden_size,
+            intermediate_size=config.intermediate_size,
+            hidden_act=config.hidden_act,
+            linear_method=linear_method,
+        )
 
-        self.ln_2 = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
-
-        self.mlp = QWenMLP(config.hidden_size,
-                           config.intermediate_size // 2,
-                           linear_method=linear_method)
+        self.input_layernorm = nn.LayerNorm(config.hidden_size,
+                                            eps=config.rms_norm_eps)
+        self.post_attention_layernorm = nn.LayerNorm(config.hidden_size,
+                                                     eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -157,44 +182,45 @@ class QWenBlock(nn.Module):
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.ln_1(hidden_states)
-        else:
-            hidden_states, residual = self.ln_1(hidden_states, residual)
-        hidden_states = self.attn(
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
         )
 
+        hidden_states = residual + hidden_states
+
         # Fully Connected
-        hidden_states, residual = self.ln_2(hidden_states, residual)
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        return hidden_states, residual
+        hidden_states = residual + hidden_states
+        return hidden_states, None
 
 
-class QWenModel(nn.Module):
+class OrionModel(nn.Module):
 
     def __init__(
         self,
         config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
-    ):
+    ) -> None:
         super().__init__()
         self.config = config
+        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-
-        self.wte = VocabParallelEmbedding(
+        self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
         )
-        self.h = nn.ModuleList([
-            QWenBlock(config, linear_method)
+        self.layers = nn.ModuleList([
+            OrionDecoderLayer(config, linear_method)
             for _ in range(config.num_hidden_layers)
         ])
-        self.ln_f = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
+        self.norm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -203,10 +229,10 @@ class QWenModel(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
-        hidden_states = self.wte(input_ids)
+        hidden_states = self.embed_tokens(input_ids)
         residual = None
-        for i in range(len(self.h)):
-            layer = self.h[i]
+        for i in range(len(self.layers)):
+            layer = self.layers[i]
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
@@ -214,21 +240,21 @@ class QWenModel(nn.Module):
                 input_metadata,
                 residual,
             )
-        hidden_states, _ = self.ln_f(hidden_states, residual)
+        hidden_states = self.norm(hidden_states)
         return hidden_states
 
 
-class QWenLMHeadModel(nn.Module):
+class OrionForCausalLM(nn.Module):
 
     def __init__(
         self,
         config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
-    ):
+    ) -> None:
         super().__init__()
         self.config = config
         self.linear_method = linear_method
-        self.transformer = QWenModel(config, linear_method)
+        self.model = OrionModel(config, linear_method)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         self.sampler = Sampler(config.vocab_size)
 
@@ -239,8 +265,8 @@ class QWenLMHeadModel(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
-        hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         input_metadata)
+        hidden_states = self.model(input_ids, positions, kv_caches,
+                                   input_metadata)
         return hidden_states
 
     def sample(
@@ -259,13 +285,21 @@ class QWenLMHeadModel(nn.Module):
                      revision: Optional[str] = None):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
-            ("gate_up_proj", "w2", 0),
-            ("gate_up_proj", "w1", 1),
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
+                continue
+            if ("rotary_emb.cos_cached" in name
+                    or "rotary_emb.sin_cached" in name):
+                # Models trained using ColossalAI may include these tensors in
+                # the checkpoint. Skip them.
                 continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:

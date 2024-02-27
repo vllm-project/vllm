@@ -128,7 +128,8 @@ class LLMEngine:
         # Metric Logging.
         if self.log_stats:
             self.stat_logger = StatLogger(
-                local_interval=_LOCAL_LOGGING_INTERVAL_SEC)
+                local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
+                labels=dict(model_name=model_config.model))
 
         self.forward_dag = None
         if USE_RAY_COMPILED_DAG:
@@ -283,7 +284,10 @@ class LLMEngine:
             is_driver_worker=True,
         )
 
-        self._run_workers("init_model", cupy_port=get_open_port())
+        # don't use cupy for eager mode
+        self._run_workers("init_model",
+                          cupy_port=get_open_port()
+                          if not model_config.enforce_eager else None)
         self._run_workers(
             "load_model",
             max_concurrent_workers=self.parallel_config.
