@@ -352,8 +352,6 @@ vllm_extension_sources = [
     "csrc/pos_encoding_kernels.cu",
     "csrc/activation_kernels.cu",
     "csrc/layernorm_kernels.cu",
-    "csrc/quantization/aqlm/aqlm_cuda_entry.cpp",
-    "csrc/quantization/aqlm/aqlm_cuda_kernal.cu",
     "csrc/quantization/squeezellm/quant_cuda_kernel.cu",
     "csrc/quantization/gptq/q_gemm.cu",
     "csrc/cuda_utils_kernels.cu",
@@ -362,6 +360,8 @@ vllm_extension_sources = [
 ]
 
 if _is_cuda():
+    vllm_extension_sources.append("csrc/quantization/aqlm/aqlm_cuda_entry.cpp")
+    vllm_extension_sources.append("csrc/quantization/aqlm/aqlm_cuda_kernel.cu")
     vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
     vllm_extension_sources.append("csrc/custom_all_reduce.cu")
 
