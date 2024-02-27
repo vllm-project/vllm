@@ -12,6 +12,13 @@ from shutil import which
 import torch
 from torch.utils.cpp_extension import CUDA_HOME
 
+
+BUILD_XPU_OPS = os.getenv('VLLM_BUILD_XPU_OPS', "0") == "1"
+
+
+def _is_xpu() -> bool:
+    return BUILD_XPU_OPS
+
 ROOT_DIR = os.path.dirname(__file__)
 
 # vLLM only supports Linux platform
@@ -184,8 +191,31 @@ def _is_neuron() -> bool:
     return torch_neuronx_installed
 
 
-def _install_punica() -> bool:
-    return bool(int(os.getenv("VLLM_INSTALL_PUNICA_KERNELS", "0")))
+def _is_cuda() -> bool:
+    return (torch.version.cuda is not None) and not _is_neuron() and not _is_xpu()
+
+
+# Compiler flags.
+CXX_FLAGS = ["-g", "-O2", "-std=c++17"]
+# TODO(woosuk): Should we use -O3?
+NVCC_FLAGS = ["-O2", "-std=c++17"]
+
+if _is_hip():
+    if ROCM_HOME is None:
+        raise RuntimeError(
+            "Cannot find ROCM_HOME. ROCm must be available to build the package."
+        )
+    NVCC_FLAGS += ["-DUSE_ROCM"]
+    NVCC_FLAGS += ["-U__HIP_NO_HALF_CONVERSIONS__"]
+    NVCC_FLAGS += ["-U__HIP_NO_HALF_OPERATORS__"]
+
+if _is_cuda() and CUDA_HOME is None:
+    raise RuntimeError(
+        "Cannot find CUDA_HOME. CUDA must be available to build the package.")
+
+ABI = 1 if torch._C._GLIBCXX_USE_CXX11_ABI else 0
+CXX_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
+NVCC_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
 
 
 def get_hipcc_rocm_version():
@@ -208,6 +238,15 @@ def get_hipcc_rocm_version():
     else:
         print("Could not find HIP version in the output")
         return None
+
+
+def get_xpu_version():
+    return "0.0.1"
+
+
+def glob(pattern: str):
+    root = Path(__name__).parent
+    return [str(p) for p in root.glob(pattern)]
 
 
 def get_neuronxcc_version():
@@ -273,6 +312,9 @@ def get_vllm_version() -> str:
         if hipcc_version != MAIN_CUDA_VERSION:
             rocm_version_str = hipcc_version.replace(".", "")[:3]
             version += f"+rocm{rocm_version_str}"
+    elif _is_xpu():
+        xpu_version = get_xpu_version()
+        version += f"+xpu{xpu_version}"
     elif _is_neuron():
         # Get the Neuron version
         neuron_version = str(get_neuronxcc_version())

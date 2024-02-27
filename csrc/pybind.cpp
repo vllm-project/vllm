@@ -1,7 +1,15 @@
 #include "cache.h"
 #include "cuda_utils.h"
 #include "ops.h"
+#include "dispatch_utils.h"
 #include <torch/extension.h>
+
+#ifdef VLLM_BUILD_XPU_OPS
+#include "xpu/xpu_ops.h"
+int get_device_attribute(
+    int attribute,
+    int device_id) { return 94387; }
+#endif
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // vLLM custom ops
@@ -75,7 +83,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     "moe_align_block_size",
     &moe_align_block_size,
     "Aligning the number of tokens to be processed by each expert such that it is divisible by the block size.");
-
   // Cache ops
   pybind11::module cache_ops = m.def_submodule("cache_ops", "vLLM cache ops");
   cache_ops.def(
@@ -108,6 +115,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     "Gets the maximum shared memory per block device attribute.");
 
 #ifndef USE_ROCM
+#ifndef VLLM_BUILD_XPU_OPS
   // Custom all-reduce kernels
   pybind11::module custom_ar = m.def_submodule("custom_ar", "custom allreduce");
   custom_ar.def("init_custom_ar", &init_custom_ar, "init_custom_ar");
@@ -121,6 +129,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                 "get_graph_buffer_ipc_meta");
   custom_ar.def("register_graph_buffers", &register_graph_buffers,
                 "register_graph_buffers");
+#endif
 #endif
 
 }
