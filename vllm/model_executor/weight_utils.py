@@ -261,7 +261,7 @@ def hf_model_weights_iterator(
             torch.cuda.empty_cache()
 
 
-def kv_cache_scales_iterator(filename: str,
+def kv_cache_scales_loader(filename: str,
                              tp_rank: int,
                              tp_size: int,
                              num_hidden_layers: int) -> Iterator[Tuple[int, float]]:
@@ -276,12 +276,12 @@ def kv_cache_scales_iterator(filename: str,
     """
     try:
         with open(filename) as f:
-            # For now we do not obtain any of the benefits of iterators
-            # but since the number of layers = number of scales is typically
-            # small, this is not a concern. Loading and processing the entire
-            # dictionary at once allows us to do sanity checks all at once and
-            # avoid a situation where we have to abort after having partially
-            # loaded scaling factors 
+            # Loading and processing the entire dictionary at once allows us 
+            # to do sanity checks all at once and avoid a situation where we
+            # have to abort after having partially loaded scaling factors 
+            # Since the number of layers is small and (for now) we use scalar
+            # scaling factors (so the size they use is also small), this is
+            # not a concern at present.
             raw_rank_map = json.load(f, parse_int=int, parse_constant=float)
 
             # If any of the inputs are malformed, it raises an error somewhere
