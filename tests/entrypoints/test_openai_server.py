@@ -9,6 +9,8 @@ import ray  # using Ray for overall ease of process management, parallel request
 import openai  # use the official client for correctness check
 from huggingface_hub import snapshot_download  # downloading lora to test lora requests
 
+from vllm.transformers_utils.tokenizer import get_tokenizer
+
 MAX_SERVER_START_WAIT_S = 600  # wait for server to start for 60 seconds
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"  # any model with a chat template should work here
 LORA_NAME = "typeof/zephyr-7b-beta-lora"  # technically this needs Mistral-7B-v0.1 as base, but we're not testing generation quality here
@@ -308,6 +310,52 @@ async def test_batch_completions(server, client: openai.AsyncOpenAI,
         choice = chunk.choices[0]
         texts[choice.index] += choice.text
     assert texts[0] == texts[1]
+
+
+async def test_logits_bias(server, client: openai.AsyncOpenAI):
+    prompt = "Hello, my name is"
+    max_tokens = 5
+    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
+
+    # Test exclusive selection
+    token_id = 1000
+    completion = await client.completions.create(
+        model=MODEL_NAME,
+        prompt=prompt,
+        max_tokens=max_tokens,
+        temperature=0.0,
+        logit_bias={str(token_id): 100},
+    )
+    assert completion.choices[0].text is not None and len(
+        completion.choices[0].text) >= 5
+    response_tokens = tokenizer(completion.choices[0].text,
+                                add_special_tokens=False)["input_ids"]
+    expected_tokens = tokenizer(tokenizer.decode([token_id] * 5),
+                                add_special_tokens=False)["input_ids"]
+    assert all([
+        response == expected
+        for response, expected in zip(response_tokens, expected_tokens)
+    ])
+
+    # Test ban
+    completion = await client.completions.create(
+        model=MODEL_NAME,
+        prompt=prompt,
+        max_tokens=max_tokens,
+        temperature=0.0,
+    )
+    response_tokens = tokenizer(completion.choices[0].text,
+                                add_special_tokens=False)["input_ids"]
+    first_response = completion.choices[0].text
+    completion = await client.completions.create(
+        model=MODEL_NAME,
+        prompt=prompt,
+        max_tokens=max_tokens,
+        temperature=0.0,
+        logit_bias={str(token): -100
+                    for token in response_tokens},
+    )
+    assert first_response != completion.choices[0].text
 
 
 if __name__ == "__main__":
