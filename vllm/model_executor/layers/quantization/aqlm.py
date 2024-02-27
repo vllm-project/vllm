@@ -10,6 +10,18 @@ from vllm.model_executor.layers.linear import LinearMethodBase, set_weight_attrs
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
 
+def get_int_dtype(nbits: int) -> torch.dtype:
+    if nbits <= 8:
+        return torch.int8
+    if nbits <= 16:
+        return torch.int16
+    if nbits <= 32:
+        return torch.int32
+    if nbits <= 64:
+        return torch.int64
+    raise ValueError(f"No dtype available for {nbits}-bit codebooks")
+
+
 class AQLMConfig(QuantizationConfig):
     """Config class for AQLM.
 
@@ -27,13 +39,13 @@ class AQLMConfig(QuantizationConfig):
         self.nbits_per_codebook = nbits_per_codebook
         self.num_codebooks = num_codebooks
         self.out_group_size = out_group_size
-        # self.pack_factor = 32 // self.weight_bits
-        # exllama kernel v1 only supports 4 bit
-        # if self.weight_bits != 4:
-        # raise ValueError(
-        # "Currently, only 4-bit weight quantization is supported for "
-        # f"GPTQ, but got {self.weight_bits} bits."
-        # )
+
+        # I think pack factor is *probably* how many elements fit into one quantized tensor element.
+        # though out group size makes it interesting, because really we are doing 2D blocks, potentially.
+        # maybe this is vllms first 2D packing?  Arg.
+        self.pack_factor = (
+            self.in_group_size * self.out_group_size // self.num_codebooks
+        )
 
     def __repr__(self) -> str:
         return (
@@ -64,23 +76,21 @@ class AQLMConfig(QuantizationConfig):
     #   "nbits_per_codebook": 16,
     #   "num_codebooks": 1,
     #   "out_group_size": 1,
-
+    #   "quant_method": "aqlm"
     #   "linear_weights_not_to_quantize": [ <--- hmmm ????
     #       "model.embed_tokens.weight",
     #       "lm_head.weight"
-
-    # "quant_method": "aqlm" duh <- shows it's aqlm.  Do we auto-detect?  How?
     # },
 
-    #https://huggingface.co/meta-llama/Llama-2-7b-hf 
+    # https://huggingface.co/meta-llama/Llama-2-7b-hf <- can't see it, locked behind meta.
 
-    # this one looks non-standard, has no quantization_config, just an AQLM block.
+    # this is no-standard, has no "quantization_config", just an "aqlm" block.
     # https://huggingface.co/BlackSamorez/Llama-2-70b-AQLM-4Bit-2x16-hf/blob/main/config.json
     # "aqlm": {
     #    "in_group_size": 8,
     #    "nbits_per_codebook": 16,
     #    "num_codebooks": 2,
-    # "   "out_group_size": 1
+    #    "out_group_size": 1
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
@@ -121,76 +131,65 @@ class AQLMLinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
     ) -> Dict[str, Any]:
         del output_size  # Unused.
-        if input_size_per_partition % self.quant_config.group_size != 0:
+        del input_size  # Unused.
+
+        if params_dtype != torch.half:
+            raise ValueError("Only half is currently supported by aqlm")
+        if input_size_per_partition % self.quant_config.in_group_size != 0:
             raise ValueError(
                 "The input size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
                 "tensor parallel size."
             )
-        if output_size_per_partition % self.quant_config.pack_factor != 0:
+        if output_size_per_partition % self.quant_config.out_group_size != 0:
             raise ValueError(
                 "The output size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
                 "tensor parallel size."
             )
 
-        if self.quant_config.group_size != -1:
-            group_size = self.quant_config.group_size
-        else:
-            group_size = input_size
-        scale_and_zero_size = input_size // group_size
-        scale_and_zero_input_dim = None
-
-        qweight = Parameter(
+        # or does this need more dimensions and use the correct nbits_per_codebook as an int type.  Does that pack them?
+        codes = Parameter(
             torch.empty(
+                output_size_per_partition,  # not entirely sure what to do with out groups, if we need this pack factor.
                 input_size_per_partition // self.quant_config.pack_factor,
-                output_size_per_partition,
-                dtype=torch.int32,
+                1,
+                dtype=get_int_dtype(self.quant_config.nbits_per_codebook),
             ),
             requires_grad=False,
         )
+
         set_weight_attrs(
-            qweight,
+            codes,
             {
-                "input_dim": 0,
-                "output_dim": 1,
-                "packed_dim": 0,
-                "pack_factor": self.quant_config.pack_factor,
-            },
-        )
-        g_idx = Parameter(
-            torch.tensor(
-                [
-                    i // self.quant_config.group_size
-                    for i in range(input_size_per_partition)
-                ],
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
-        # Ignore warning from fused linear layers such as QKVParallelLinear.
-        set_weight_attrs(g_idx, {"input_dim": 0, "ignore_warning": True})
-        qzeros = Parameter(
-            torch.empty(
-                scale_and_zero_size,
-                output_size_per_partition // self.quant_config.pack_factor,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
-        set_weight_attrs(
-            qzeros,
-            {
-                "input_dim": scale_and_zero_input_dim,
-                "output_dim": 1,
+                "input_dim": 1,
+                "output_dim": 0,
                 "packed_dim": 1,
                 "pack_factor": self.quant_config.pack_factor,
             },
         )
+
+        codebooks = Parameter(
+            torch.empty(
+                self.quant_config.num_codebooks,
+                2**self.quant_config.nbits_per_codebook,
+                self.quant_config.out_group_size,
+                self.quant_config.in_group_size,
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        # no attributes?  It's fixed size, no input or output dim, need the whole thing.
+        # looks like named attributes are for sharding so it knows how to split something up.
+
         scales = Parameter(
             torch.empty(
-                scale_and_zero_size,
-                output_size_per_partition,
+                (
+                    output_size_per_partition // self.quant_config.out_group_size,
+                    1,  # do we really need these other dimensions?  They don't count, or?
+                    1,
+                    1,
+                ),
                 dtype=params_dtype,
             ),
             requires_grad=False,
@@ -198,15 +197,15 @@ class AQLMLinearMethod(LinearMethodBase):
         set_weight_attrs(
             scales,
             {
-                "input_dim": scale_and_zero_input_dim,
-                "output_dim": 1,
+                "output_dim": 0,
+                # "pack_factor": self.quant_config.pack_factor,   I guess not really a pack factor, just smaller?
             },
         )
+
         return {
-            "qweight": qweight,
-            "g_idx": g_idx,
-            "qzeros": qzeros,
-            "scales": scales
+            "codes": codes,
+            "codebooks": codebooks,
+            "scales": scales,
         }
 
     def apply_weights(
