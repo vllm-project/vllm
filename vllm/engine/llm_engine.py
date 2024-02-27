@@ -76,8 +76,7 @@ class LLMEngine:
             lora_config: Optional[LoRAConfig],
             placement_group: Optional["PlacementGroup"],
             log_stats: bool,
-            usage_context: UsageContext = UsageContext.ENGINE_CONTEXT
-    ) -> None:
+            usage_context: UsageContext = UsageContext.ENGINE_CONTEXT) -> None:
         logger.info(
             "Initializing an LLM engine with config: "
             f"model={model_config.model!r}, "

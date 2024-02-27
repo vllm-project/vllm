@@ -6,6 +6,7 @@ numpy
 torch == 2.1.2
 requests
 psutil
+py-cpuinfo
 transformers >= 4.38.0  # Required for Gemma.
 xformers == 0.0.23.post1  # Required for CUDA 12.1.
 fastapi

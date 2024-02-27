@@ -6,17 +6,22 @@ import pkg_resources
 import requests
 import datetime
 import psutil
+import cpuinfo
 from threading import Thread
 from pathlib import Path
 from typing import Optional
 from enum import Enum
 
+_xdg_config_home = os.getenv('XDG_CONFIG_HOME',
+                             os.path.expanduser('~/.config'))
+_vllm_internal_path = 'vllm/usage_stats.json'
+
 _USAGE_STATS_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    'usage_stats.json')  #File path to store usage data locally
+    _xdg_config_home,
+    _vllm_internal_path)  #File path to store usage data locally
 _USAGE_STATS_ENABLED = None
-_USAGE_STATS_SEVER = os.environ.get('VLLM_USAGE_STATS_SERVER',
-                                    'https://stats.vllm.ai')
+_USAGE_STATS_SERVER = os.environ.get('VLLM_USAGE_STATS_SERVER',
+                                     'https://stats.vllm.ai')
 _USAGE_STATS_URL = "https://vector-dev-server-uzyrqjjayq-uc.a.run.app"  #Placeholder for sending usage data to vector.dev http server
 
 
@@ -60,7 +65,7 @@ def _detect_cloud_provider() -> str:
         'google': "GCP",
         'oraclecloud': "OCI",
     }
-    
+
     for vendor_file in vendor_files:
         path = Path(vendor_file)
         if path.is_file():
@@ -115,7 +120,7 @@ class UsageMessage:
         self.model = model
         self.log_time = _get_current_timestamp_ns()
         self.num_cpu = os.cpu_count()
-        self.cpu_type = platform.processor()
+        self.cpu_type = cpuinfo.get_cpu_info()['brand_raw']
         self.total_memory = psutil.virtual_memory().total
         self._write_to_file()
         headers = {'Content-type': 'application/json'}
@@ -126,7 +131,8 @@ class UsageMessage:
             print("Usage Log Request Failed")
 
     def _write_to_file(self):
-        with open(_USAGE_STATS_FILE, "w") as outfile:
+        os.makedirs(os.path.dirname(_USAGE_STATS_FILE), exist_ok=True)
+        with open(_USAGE_STATS_FILE, "w+") as outfile:
             json.dump(vars(self), outfile)
 
 
