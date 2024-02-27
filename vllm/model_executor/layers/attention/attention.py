@@ -36,14 +36,16 @@ class Attention(nn.Module):
         super().__init__()
         if _use_flash_attn():
             from vllm.model_executor.layers.attention.backends.flash_attn import FlashAttentionBackend  # noqa: E501
-            self.backend = FlashAttentionBackend(num_heads, head_size, scale,
-                                                 num_kv_heads, alibi_slopes,
-                                                 sliding_window)
+            self.flash_attn_backend = FlashAttentionBackend(
+                num_heads, head_size, scale,
+                num_kv_heads, alibi_slopes,
+                sliding_window)
         else:
             from vllm.model_executor.layers.attention.backends.xformers import XFormersBackend  # noqa: E501
-            self.backend = XFormersBackend(num_heads, head_size, scale,
-                                           num_kv_heads, alibi_slopes,
-                                           sliding_window)
+            self.xformer_backend = XFormersBackend(
+                num_heads, head_size, scale,
+                num_kv_heads, alibi_slopes,
+                sliding_window)
 
     def forward(
         self,
@@ -54,8 +56,15 @@ class Attention(nn.Module):
         value_cache: Optional[torch.Tensor],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
-        return self.backend.forward(query, key, value, key_cache, value_cache,
-                                    input_metadata)
+        if input_metadata.use_flash_attn and \
+                self.flash_attn_backend is not None:
+            return self.flash_attn_backend.forward(query, key, value,
+                                                   key_cache, value_cache,
+                                                   input_metadata)
+        else:
+            return self.xformer_backend.forward(query, key, value,
+                                                key_cache, value_cache,
+                                                input_metadata)
 
 
 @lru_cache(maxsize=1)

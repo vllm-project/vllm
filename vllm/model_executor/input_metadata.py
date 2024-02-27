@@ -27,6 +27,7 @@ class InputMetadata:
     block_tables: Optional[torch.Tensor]
     use_cuda_graph: bool
     kv_cache_dtype: str
+    use_flash_attn: bool = False
 
     def __post_init__(self):
         # will not appear in the __repr__ and __init__

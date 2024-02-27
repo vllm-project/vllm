@@ -27,6 +27,7 @@ def main(args: argparse.Namespace):
         kv_cache_dtype=args.kv_cache_dtype,
         device=args.device,
         ray_workers_use_nsight=args.ray_workers_use_nsight,
+        use_flash_attn=args.use_flash_attn,
     )
 
     sampling_params = SamplingParams(
@@ -151,5 +152,9 @@ if __name__ == '__main__':
         action='store_true',
         help="If specified, use nsight to profile ray workers",
     )
+    parser.add_argument(
+        "--use-flash-attn",
+        action="store_true",
+        help="Use flash attention (requires flash-attn >= 2.5.0).")
     args = parser.parse_args()
     main(args)

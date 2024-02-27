@@ -1,7 +1,7 @@
 """Attention layer with Flash and PagedAttention."""
 from typing import List, Optional
 
-from flash_attn import flash_attn_func
+from flash_attn import flash_attn_func, flash_attn_with_kvcache
 import torch
 
 from vllm.model_executor.input_metadata import InputMetadata
@@ -74,17 +74,22 @@ class FlashAttentionBackend:
         # vectors will not be cached. This happens during the initial memory
         # profiling run.
         if key_cache is not None and value_cache is not None:
-            PagedAttentionImpl.reshape_and_cache(key, value, key_cache,
-                                                 value_cache, input_metadata)
+            # Update kv-cache using tensor indexing. We don't use the kernel
+            # `flash_attn_with_kvcache` for kv-cache updating as it submitted
+            # many small kernels for each key/value and is slow.
+            flatten_slot_mapping = input_metadata.slot_mapping.flatten()
+            slot_block_index = flatten_slot_mapping // key_cache.shape[1]
+            slot_block_offset = flatten_slot_mapping % key_cache.shape[1]
+            key_cache[slot_block_index, slot_block_offset, :, :] = key
+            value_cache[slot_block_index, slot_block_offset, :, :] = value
 
         if input_metadata.is_prompt:
-            # Prompt run.
+            # normal attention
+            query = query.unflatten(0, (batch_size, seq_len))
+            key = key.unflatten(0, (batch_size, seq_len))
+            value = value.unflatten(0, (batch_size, seq_len))
             if (key_cache is None or value_cache is None
-                    or input_metadata.block_tables.numel() == 0):
-                # normal attention
-                query = query.unflatten(0, (batch_size, seq_len))
-                key = key.unflatten(0, (batch_size, seq_len))
-                value = value.unflatten(0, (batch_size, seq_len))
+                    or not input_metadata.context_lens.any()):
                 output = flash_attn_func(
                     query,
                     key,
@@ -96,25 +101,52 @@ class FlashAttentionBackend:
                 )
             else:
                 # prefix-enabled attention
-                output = PagedAttentionImpl.forward_prefix(
-                    query,
-                    key,
-                    value,
-                    key_cache,
-                    value_cache,
-                    input_metadata,
-                    self.alibi_slopes,
+                output = flash_attn_with_kvcache(
+                    q=query,
+                    k_cache=key_cache,
+                    v_cache=value_cache,
+                    cache_seqlens=input_metadata.context_lens + seq_len,
+                    block_table=input_metadata.block_tables,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    window_size=self.sliding_window,
+                    alibi_slopes=self.alibi_slopes,
                 )
         else:
             # Decoding run.
-            output = PagedAttentionImpl.forward_decode(
-                query,
-                key_cache,
-                value_cache,
-                input_metadata,
-                self.num_kv_heads,
-                self.scale,
-                self.alibi_slopes,
+
+            # NOTE: in `_prepare_prompt` and `_prepare_decode` is filled in
+            # different manner (which may needs to be fixed in the future): in
+            # the former `context_lens` is the length of contexts whose kv-cache
+            # has been stored in previous rounds, (e.g., with prefix cache).
+            # However, in the later `context_lens` is the length of current
+            # attention context (includes the token whose kv-cache will be
+            # computed and filled in this round).
+            #
+            # - The kernel `flash_attn_with_kvcache` expects `cache_seqlens` to
+            #   be the length of the context whose kv-cache has been stored.
+            # - The kernel `context_attention_fwd` expects it to be the length
+            #   of already computed query-key-values in previous rounds.
+            # - The kernel `paged_attention_v1/v2` expect it to be the length of
+            #   current attention context., same as flash-attn (without k & v).
+            #
+            # The flash-attn kernel can also be used with the k/v in current
+            # round as argument as they will be stored into the key-value cache
+            # inside the kernel. In which case, the `cache_seqlens` is expected
+            # to be the context length of tokens whose k/v has already been
+            # stored into kv-cache. However, it is found inefficient (especially
+            # for prompting) due to too many calls of cudaMemcpy kernels.
+
+            # see also: https://github.com/Dao-AILab/flash-attention/commit/54e80a3829c6d2337570d01e78ebd9529c02d342
+            output = flash_attn_with_kvcache(
+                q=query.reshape(batch_size, -1, *query.shape[1:]),
+                k_cache=key_cache,
+                v_cache=value_cache,
+                cache_seqlens=input_metadata.context_lens,
+                block_table=input_metadata.block_tables,
+                softmax_scale=self.scale,
+                causal=True,
+                alibi_slopes=self.alibi_slopes,
             )
 
         # Reshape the output tensor.

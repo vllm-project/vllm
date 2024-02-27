@@ -6,6 +6,11 @@ import torch
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 
+try:
+    from flash_attn import flash_attn_func, flash_attn_varlen_func, flash_attn_with_kvcache
+except ImportError:
+    flash_attn_func, flash_attn_varlen_func, flash_attn_with_kvcache = None, None, None
+
 from vllm._C import ops, cache_ops
 from vllm.utils import get_max_shared_memory_bytes
 from vllm.utils import is_hip
@@ -111,7 +116,7 @@ def ref_single_query_cached_kv_attention(
         output[i].copy_(out, non_blocking=True)
 
 
-@pytest.mark.parametrize("version", ["v1", "v2"])
+@pytest.mark.parametrize("version", ["v1", "v2", "flash-attn"])
 @pytest.mark.parametrize("num_seqs", NUM_GEN_SEQS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -144,6 +149,16 @@ def test_paged_attention(
     query = torch.empty(num_seqs, num_query_heads, head_size, dtype=dtype)
     query.uniform_(-scale, scale)
 
+    use_flash_attn = version == "flash-attn"
+    if use_flash_attn:
+        if dtype not in [torch.half, torch.bfloat16
+                         ] or kv_cache_dtype != "auto":
+            pytest.skip(
+                "flash-attn requires dtype and kv_cache_dtype to be half or bfloat16"
+            )
+        if head_size >= 128:
+            pytest.skip("flash-attn tests may OOM due to larger block size")
+
     assert num_query_heads % num_kv_heads == 0
     num_queries_per_kv = num_query_heads // num_kv_heads
     alibi_slopes = None
@@ -156,6 +171,8 @@ def test_paged_attention(
     context_lens = torch.tensor(context_lens, dtype=torch.int)
 
     # Create the block tables.
+    if use_flash_attn:
+        block_size = ((block_size + 256 - 1) // 256) * 256
     max_num_blocks_per_seq = (max_context_len + block_size - 1) // block_size
     block_tables = []
     for _ in range(num_seqs):
@@ -170,7 +187,7 @@ def test_paged_attention(
     key_caches, value_caches = kv_cache_factory(NUM_BLOCKS, block_size, 1,
                                                 num_kv_heads, head_size,
                                                 kv_cache_dtype, dtype, seed,
-                                                device)
+                                                device, use_flash_attn)
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Call the paged attention kernel.
@@ -221,13 +238,30 @@ def test_paged_attention(
             alibi_slopes,
             kv_cache_dtype,
         )
+    elif version == "flash-attn":
+        output = flash_attn_with_kvcache(
+            q=query.reshape(num_seqs, -1, *query.shape[1:]),
+            k_cache=key_cache,
+            v_cache=value_cache,
+            cache_seqlens=context_lens,
+            block_table=block_tables,
+            softmax_scale=scale,
+            causal=True,
+            alibi_slopes=alibi_slopes,
+        )
+        output = output.reshape_as(query)
     else:
         raise AssertionError(f"Unknown version: {version}")
 
     # Run the reference implementation.
+    x = 16 // torch.tensor([], dtype=dtype).element_size()
+    if use_flash_attn:
+        key_cache = key_cache.unflatten(-1, (head_size // x, x)).permute(
+            0, 2, 4, 1, 3)
+        value_cache = value_cache.permute(0, 2, 3, 1)
+
     if kv_cache_dtype == "fp8_e5m2":
         # Convert cache data back to dtype.
-        x = 16 // torch.tensor([], dtype=dtype).element_size()
         key_cache_shape = (NUM_BLOCKS, num_kv_heads, head_size // x,
                            block_size, x)
         dequantized_key_cache = torch.empty(size=key_cache_shape,
@@ -266,7 +300,9 @@ def test_paged_attention(
     # so we use a relaxed tolerance for the test.
     if kv_cache_dtype == "fp8_e5m2":
         atol, rtol = 1e-2, 1e-5
-    assert torch.allclose(output, ref_output, atol=atol, rtol=rtol)
+    if use_flash_attn and use_alibi:
+        atol, rtol = 2e-1, 5e-2
+    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)
 
 
 def ref_multi_query_kv_attention(
@@ -303,6 +339,8 @@ def ref_multi_query_kv_attention(
 
 
 # TODO(woosuk): Add tests for USE_ALIBI=True.
+@pytest.mark.parametrize("version",
+                         ["xformers", "flash-attn", "flash-attn-varlen"])
 @pytest.mark.parametrize("num_seqs", NUM_PREFILL_SEQS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -311,6 +349,7 @@ def ref_multi_query_kv_attention(
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_multi_query_kv_attention(
+    version: str,
     num_seqs: int,
     num_heads: Tuple[int, int],
     head_size: int,
@@ -329,6 +368,17 @@ def test_multi_query_kv_attention(
     max_len = min(MAX_SEQ_LEN, 4096)
     seq_lens = random.sample(range(1, max_len), num_seqs)
     num_tokens = sum(seq_lens)
+    max_seq_len = max(seq_lens)
+
+    use_flash_attn = version in ["flash-attn", "flash-attn-varlen"]
+    if use_flash_attn and dtype not in [torch.half, torch.bfloat16]:
+        pytest.skip(
+            "flash-attn requires kv_cache_dtype to be half or bfloat16")
+
+    cu_seq_lens = [0]
+    for seq_len in seq_lens:
+        cu_seq_lens.append(cu_seq_lens[-1] + seq_len)
+    cu_seq_lens = torch.tensor(cu_seq_lens, dtype=torch.int, device=device)
 
     scale = float(1.0 / (head_size**0.5))
     num_query_heads, num_kv_heads = num_heads
@@ -343,30 +393,81 @@ def test_multi_query_kv_attention(
     num_queries_per_kv = num_query_heads // num_kv_heads
     if num_queries_per_kv > 1:
         # Handle MQA and GQA
-        key = torch.repeat_interleave(key, num_queries_per_kv, dim=1)
-        value = torch.repeat_interleave(value, num_queries_per_kv, dim=1)
-    attn_bias = BlockDiagonalCausalMask.from_seqlens(seq_lens)
-    output = xops.memory_efficient_attention_forward(
-        query.unsqueeze(0),
-        key.unsqueeze(0),
-        value.unsqueeze(0),
-        attn_bias=attn_bias,
-        p=0.0,
-        scale=scale,
-    )
-    output = output.squeeze(0)
+        key_repeated = torch.repeat_interleave(key, num_queries_per_kv, dim=1)
+        value_repeated = torch.repeat_interleave(value,
+                                                 num_queries_per_kv,
+                                                 dim=1)
+    else:
+        key_repeated = key
+        value_repeated = value
 
-    cu_seq_lens = [0]
-    for seq_len in seq_lens:
-        cu_seq_lens.append(cu_seq_lens[-1] + seq_len)
+    if version == "xformers":
+        attn_bias = BlockDiagonalCausalMask.from_seqlens(seq_lens)
+        output = xops.memory_efficient_attention_forward(
+            query.unsqueeze(0),
+            key_repeated.unsqueeze(0),
+            value_repeated.unsqueeze(0),
+            attn_bias=attn_bias,
+            p=0.0,
+            scale=scale,
+        )
+        output = output.squeeze(0)
+    elif version == "flash-attn":
+        # padding the inputs, use the same logic with batched prefill
+        # in attention.py.
+        qs, ks, vs = [], [], []
+        for i, seq_len in enumerate(seq_lens):
+            left, right = cu_seq_lens[i], cu_seq_lens[i + 1]
+            qs.append(
+                torch.nn.functional.pad(
+                    query[left:right], (0, 0, 0, 0, 0, max_seq_len - seq_len)))
+            ks.append(
+                torch.nn.functional.pad(
+                    key[left:right], (0, 0, 0, 0, 0, max_seq_len - seq_len)))
+            vs.append(
+                torch.nn.functional.pad(
+                    value[left:right], (0, 0, 0, 0, 0, max_seq_len - seq_len)))
+        query_padded = torch.stack(qs, dim=0)
+        key_padded = torch.stack(ks, dim=0)
+        value_padded = torch.stack(vs, dim=0)
+
+        output = flash_attn_func(
+            query_padded,
+            key_padded,
+            value_padded,
+            softmax_scale=scale,
+            causal=True,
+        )
+        outputs = []
+        for i, seq_len in enumerate(seq_lens):
+            outputs.append(output[i, :seq_len])
+        output = torch.cat(outputs, dim=0)
+    elif version == "flash-attn-varlen":
+        # We test `flash_attn_varlen_func` here (which is more equalivant to
+        # xformers's MEAF kernel), but it is not actually used in attention.py
+        # for prefilling as inputs are padded in vLLM.
+        output = flash_attn_varlen_func(
+            query,
+            key,
+            value,
+            cu_seqlens_q=cu_seq_lens,
+            cu_seqlens_k=cu_seq_lens,
+            max_seqlen_q=max_seq_len,
+            max_seqlen_k=max_seq_len,
+            softmax_scale=scale,
+            causal=True,
+        )
+    else:
+        raise AssertionError(f"Unknown version: {version}")
+
     ref_output = ref_multi_query_kv_attention(
         cu_seq_lens,
         query,
-        key,
-        value,
+        key_repeated,
+        value_repeated,
         scale,
         dtype,
     )
     atol = get_default_atol(output) if is_hip() else 1e-3
     rtol = get_default_rtol(output) if is_hip() else 1e-5
-    assert torch.allclose(output, ref_output, atol=atol, rtol=rtol)
+    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)

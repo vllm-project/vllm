@@ -52,6 +52,7 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
     ray_workers_use_nsight: bool = False
+    use_flash_attn: Optional[bool] = False
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -310,6 +311,10 @@ class EngineArgs:
                             default=EngineArgs.device,
                             choices=["auto", "cuda", "neuron"],
                             help='Device type for vLLM execution.')
+        parser.add_argument(
+            '--use-flash-attn',
+            action='store_true',
+            help='Use flash attention (requires flash-attn >= 2.5.0).')
         return parser
 
     @classmethod
@@ -324,6 +329,12 @@ class EngineArgs:
         self,
     ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig,
                DeviceConfig, Optional[LoRAConfig]]:
+
+        if self.use_flash_attn:
+            # flash-attn's flash_attn_with_kvcache requires block size must be
+            # a multiple of 256.
+            self.block_size = ((self.block_size + 256 - 1) // 256) * 256
+
         device_config = DeviceConfig(self.device)
         model_config = ModelConfig(
             self.model, self.tokenizer, self.tokenizer_mode,
@@ -331,7 +342,7 @@ class EngineArgs:
             self.dtype, self.seed, self.revision, self.code_revision,
             self.tokenizer_revision, self.max_model_len, self.quantization,
             self.enforce_eager, self.max_context_len_to_capture,
-            self.max_logprobs)
+            self.max_logprobs, self.use_flash_attn)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,

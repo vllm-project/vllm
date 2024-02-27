@@ -75,6 +75,7 @@ def run_vllm(
     device: str,
     enable_prefix_caching: bool,
     gpu_memory_utilization: float = 0.9,
+    use_flash_attn: Optional[bool] = False,
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(model=model,
@@ -89,7 +90,8 @@ def run_vllm(
               enforce_eager=enforce_eager,
               kv_cache_dtype=kv_cache_dtype,
               device=device,
-              enable_prefix_caching=enable_prefix_caching)
+              enable_prefix_caching=enable_prefix_caching,
+              use_flash_attn=use_flash_attn)
 
     # Add the requests to the engine.
     for prompt, _, output_len in requests:
@@ -213,7 +215,8 @@ def main(args: argparse.Namespace):
             args.tensor_parallel_size, args.seed, args.n, args.use_beam_search,
             args.trust_remote_code, args.dtype, args.max_model_len,
             args.enforce_eager, args.kv_cache_dtype, args.device,
-            args.enable_prefix_caching, args.gpu_memory_utilization)
+            args.enable_prefix_caching, args.gpu_memory_utilization,
+            args.use_flash_attn)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -314,6 +317,10 @@ if __name__ == "__main__":
         "--enable-prefix-caching",
         action='store_true',
         help="enable automatic prefix caching for vLLM backend.")
+    parser.add_argument(
+        "--use-flash-attn",
+        action="store_true",
+        help="Use flash attention (requires flash-attn >= 2.5.0).")
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model

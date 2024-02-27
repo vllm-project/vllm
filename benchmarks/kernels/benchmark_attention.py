@@ -3,18 +3,21 @@ import argparse
 import random
 import time
 
+import numpy as np
 import torch
 
 try:
-    from flash_attn import flash_attn_with_kvcache
+    from flash_attn import flash_attn_func, flash_attn_with_kvcache
 except ImportError:
-    flash_attn_with_kvcache = None
+    flash_attn_func, flash_attn_with_kvcache = None, None
 
+from xformers import ops as xops
+from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
+
+from vllm._C import cache_ops
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, create_kv_caches_with_random
-from vllm._C import ops
 
 NUM_BLOCKS = 1024
-PARTITION_SIZE = 512
 
 
 @torch.inference_mode()
@@ -38,7 +41,7 @@ def main(
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
 
-    use_flash_attn = version == "flash-attn"
+    use_flash_attn = version in ["flash-attn", "flash-attn-kvcache"]
     if use_flash_attn:
         if dtype not in [torch.half, torch.bfloat16
                          ] or kv_cache_dtype != "auto":
@@ -46,37 +49,54 @@ def main(
                 "skip: flash-attn requires dtype and kv_cache_dtype to be half or bfloat16"
             )
 
+    context_lens = [context_len for _ in range(num_seqs)]
+    max_context_len = max(context_lens)
+    context_lens_tensor = torch.tensor(context_lens,
+                                       dtype=torch.int,
+                                       device=device)
+    zero_context_lens_tensor = torch.zeros_like(context_lens_tensor)
+
     scale = float(1.0 / (head_size**0.5))
-    query = torch.empty(num_seqs,
-                        num_query_heads,
-                        head_size,
-                        dtype=dtype,
-                        device=device)
-    query.uniform_(-scale, scale)
+    qkv = torch.empty(num_seqs,
+                      max_context_len,
+                      num_query_heads + 2 * num_kv_heads,
+                      head_size,
+                      dtype=dtype,
+                      device=device)
+    qkv.uniform_(-scale, scale)
+    query, key, value = qkv.split(
+        [num_query_heads, num_kv_heads, num_kv_heads], dim=2)
 
     assert num_query_heads % num_kv_heads == 0
+    num_queries_per_kv = num_query_heads // num_kv_heads
+
     alibi_slopes = None
     if use_alibi:
         alibi_slopes = torch.randn(num_query_heads,
                                    dtype=torch.float,
                                    device=device)
 
-    context_lens = [context_len for _ in range(num_seqs)]
-    max_context_len = max(context_lens)
-    context_lens = torch.tensor(context_lens, dtype=torch.int, device=device)
-
     # Create the block tables.
     if use_flash_attn:
         block_size = ((block_size + 256 - 1) // 256) * 256
     max_num_blocks_per_seq = (max_context_len + block_size - 1) // block_size
-    block_tables = []
-    for _ in range(num_seqs):
+    block_tables, slot_mapping = [], []
+    for seq_idx in range(num_seqs):
         block_table = [
             random.randint(0, NUM_BLOCKS - 1)
             for _ in range(max_num_blocks_per_seq)
         ]
         block_tables.append(block_table)
+        slot_mapping.append([])
+        for i in range(context_lens[seq_idx]):
+            block_number = block_table[i // block_size]
+            block_offset = i % block_size
+            slot = block_number * block_size + block_offset
+            slot_mapping[-1].append(slot)
+        for _ in range(max_context_len - context_lens[seq_idx]):
+            slot_mapping[-1].append(-1)
     block_tables = torch.tensor(block_tables, dtype=torch.int, device=device)
+    slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device=device)
 
     # Create the KV cache.
     key_caches, value_caches = create_kv_caches_with_random(
@@ -91,22 +111,19 @@ def main(
         use_flash_attn=use_flash_attn)
     key_cache, value_cache = key_caches[0], value_caches[0]
 
-    # Prepare for the paged attention kernel.
-    output = torch.empty_like(query)
-    if version == "v2":
-        num_partitions = ((max_context_len + PARTITION_SIZE - 1) //
-                          PARTITION_SIZE)
-        tmp_output = torch.empty(
-            size=(num_seqs, num_query_heads, num_partitions, head_size),
-            dtype=output.dtype,
-            device=output.device,
-        )
-        exp_sums = torch.empty(
-            size=(num_seqs, num_query_heads, num_partitions),
-            dtype=torch.float32,
-            device=output.device,
-        )
-        max_logits = torch.empty_like(exp_sums)
+    if version == "xformers":
+        attn_bias = BlockDiagonalCausalMask.from_seqlens(context_lens)
+        if num_queries_per_kv > 1:
+            # Handle MQA and GQA
+            key_repeated = torch.repeat_interleave(key,
+                                                   num_queries_per_kv,
+                                                   dim=2)
+            value_repeated = torch.repeat_interleave(value,
+                                                     num_queries_per_kv,
+                                                     dim=2)
+        else:
+            key_repeated = key
+            value_repeated = value
 
     def run_cuda_benchmark(num_iters: int, profile: bool = False) -> float:
         torch.cuda.synchronize()
@@ -115,45 +132,50 @@ def main(
         start_time = time.perf_counter()
 
         for _ in range(num_iters):
-            if version == "v1":
-                ops.paged_attention_v1(
-                    output,
-                    query,
+            if version == "xformers":
+                cache_ops.reshape_and_cache(
+                    key.reshape(-1, *key.shape[2:]),
+                    value.reshape(-1, *key.shape[2:]),
                     key_cache,
                     value_cache,
-                    num_kv_heads,
-                    scale,
-                    block_tables,
-                    context_lens,
-                    block_size,
-                    max_context_len,
-                    alibi_slopes,
+                    slot_mapping.flatten(),
                     kv_cache_dtype,
                 )
-            elif version == "v2":
-                ops.paged_attention_v2(
-                    output,
-                    exp_sums,
-                    max_logits,
-                    tmp_output,
-                    query,
-                    key_cache,
-                    value_cache,
-                    num_kv_heads,
-                    scale,
-                    block_tables,
-                    context_lens,
-                    block_size,
-                    max_context_len,
-                    alibi_slopes,
-                    kv_cache_dtype,
+                output = xops.memory_efficient_attention_forward(
+                    query.reshape(1, -1, *query.shape[2:]),
+                    key_repeated.reshape(1, -1, *key_repeated.shape[2:]),
+                    value_repeated.reshape(1, -1, *value_repeated.shape[2:]),
+                    attn_bias=attn_bias,
+                    p=0.0,
+                    scale=scale,
                 )
+                output = output.reshape(query.shape)
             elif version == "flash-attn":
-                flash_attn_with_kvcache(
-                    q=query.reshape(num_seqs, -1, *query.shape[1:]),
+                flat_slot_mapping = slot_mapping.flatten()
+                slot_block_index = flat_slot_mapping // block_size
+                slot_block_offset = flat_slot_mapping % block_size
+                key_cache[slot_block_index,
+                          slot_block_offset, :, :] = key.reshape(
+                              -1, *key.shape[2:])
+                value_cache[slot_block_index,
+                            slot_block_offset, :, :] = value.reshape(
+                                -1, *key.shape[2:])
+                output = flash_attn_func(
+                    q=query,
+                    k=key,
+                    v=value,
+                    softmax_scale=scale,
+                    causal=True,
+                    alibi_slopes=alibi_slopes,
+                )
+            elif version == "flash-attn-kvcache":
+                output = flash_attn_with_kvcache(
+                    q=query,
                     k_cache=key_cache,
                     v_cache=value_cache,
-                    cache_seqlens=context_lens,
+                    k=key,
+                    v=value,
+                    cache_seqlens=zero_context_lens_tensor,
                     block_table=block_tables,
                     softmax_scale=scale,
                     causal=True,
@@ -178,16 +200,19 @@ def main(
         latency = run_benchmark(num_iters=1, profile=True)
     else:
         latency = run_benchmark(num_iters=100, profile=False)
-    print(f"Kernel running time: {latency * 1000000:.3f} us")
+    print(
+        f"Version: {version}, Context Length: {context_len}, Batch size: {num_seqs}, Kernel running time: {latency * 1000000:.3f} us"
+    )
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description="Benchmark the paged attention kernel.")
-    parser.add_argument("--version",
-                        type=str,
-                        choices=["v1", "v2", "flash-attn"],
-                        default="v2")
+    parser.add_argument(
+        "--version",
+        type=str,
+        choices=["xformers", "flash-attn", "flash-attn-kvcache"],
+        default="xformers")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--context-len", type=int, default=4096)
     parser.add_argument("--num-query-heads", type=int, default=64)

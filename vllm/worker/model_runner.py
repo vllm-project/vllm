@@ -149,18 +149,28 @@ class ModelRunner:
             prompt_tokens = seq_data.get_token_ids()
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
+
             computed_len = 0
 
             # NOTE: This only works for oooooooxxx style attention.
             computed_block_nums = seq_group_metadata.computed_block_nums
-            if computed_block_nums is not None and len(
-                    computed_block_nums) > 0 and self.sliding_window is None:
-                # Prefix is not supported with sliding_window
-                computed_len = len(computed_block_nums) * self.block_size
-                prompt_tokens = prompt_tokens[computed_len:]
-                prefix_block_tables.append(computed_block_nums)
+            if computed_block_nums is not None:
+                if len(computed_block_nums) > 0 and self.sliding_window is None:
+                    # Prefix is not supported with sliding_window
+                    computed_len = len(computed_block_nums) * self.block_size
+                    prompt_tokens = prompt_tokens[computed_len:]
+                current_block_tables = computed_block_nums
             else:
-                prefix_block_tables.append([])
+                current_block_tables = []
+
+            # append seq groups's block table as the key-value cache
+            # will be updated (cached) by the flash-attn kernels
+            if seq_group_metadata.block_tables:
+                current_block_tables.extend(
+                    seq_group_metadata.block_tables[seq_id]
+                    [len(current_block_tables):])
+            prefix_block_tables.append(current_block_tables)
+
             # actual prompt lens
             context_lens.append(computed_len)
             subquery_lens.append(prompt_len - computed_len)
@@ -265,6 +275,7 @@ class ModelRunner:
             block_tables=block_tables,
             use_cuda_graph=False,
             kv_cache_dtype=self.kv_cache_dtype,
+            use_flash_attn=getattr(self.model_config, 'use_flash_attn', False),
         )
         return (input_tokens, input_positions, input_metadata, prompt_lens,
                 subquery_lens, lora_index_mapping, lora_prompt_mapping,
@@ -393,6 +404,7 @@ class ModelRunner:
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
             kv_cache_dtype=self.kv_cache_dtype,
+            use_flash_attn=self.model_config.use_flash_attn,
         )
         return (input_tokens, input_positions, input_metadata,
                 lora_index_mapping, lora_prompt_mapping, lora_requests)
@@ -720,6 +732,8 @@ class ModelRunner:
                     block_tables=block_tables[:batch_size],
                     use_cuda_graph=True,
                     kv_cache_dtype=self.kv_cache_dtype,
+                    use_flash_attn=getattr(self.model_config, 'use_flash_attn',
+                                           False),
                 )
 
                 if self.lora_config:
