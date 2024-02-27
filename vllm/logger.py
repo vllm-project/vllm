@@ -11,6 +11,8 @@ from pathlib import Path
 
 from loguru import logger
 
+VLLM_CONFIGURE_LOGGING = int(os.getenv("VLLM_CONFIGURE_LOGGING", "1"))
+
 
 class InterceptHandler(logging.Handler):
     """A custom logging handler for intercepting logs and redirecting them.
@@ -46,11 +48,13 @@ class InterceptHandler(logging.Handler):
             level = self.loglevel_mapping[record.levelno]
 
         frame, depth = inspect.currentframe(), 0
-        while frame and (depth == 0 or frame.f_code.co_filename == logging.__file__):
+        while frame and (depth == 0
+                         or frame.f_code.co_filename == logging.__file__):
             frame = frame.f_back
             depth += 1
 
-        logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
+        logger.opt(depth=depth,
+                   exception=record.exc_info).log(level, record.getMessage())
 
 
 class CustomizeLogger:
@@ -196,7 +200,11 @@ class CustomizeLogger:
             )
 
         # Basic configuration for intercepting standard logging messages
-        logging.basicConfig(handlers=[InterceptHandler()], level=0)
+        logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
+
+        for _log in ["uvicorn", "uvicorn.error"]:
+            logging.getLogger(_log).handlers = [InterceptHandler()]
+            logging.getLogger(_log).propagate = True
 
         return logger.bind(name="vllm")
 
@@ -210,6 +218,7 @@ class CustomizeLogger:
         Returns:
             dict: Loaded configuration.
         """
+        config = None
         with open(config_path) as config_file:
             config = json.load(config_file)
         return config
@@ -218,8 +227,18 @@ class CustomizeLogger:
 dir_path = os.path.dirname(os.path.realpath(__file__))
 default_config_path = f"{dir_path}/default_logging_config.json"
 config_path = Path(os.getenv("VLLM_LOGGING_CONFIG_PATH", default_config_path))
-_root_logger = CustomizeLogger.make_logger(config_path)
+_root_logger = None
+
+if VLLM_CONFIGURE_LOGGING:
+    _root_logger = CustomizeLogger.make_logger(config_path)
+else:
+    _root_logger = logging.getLogger("vllm")
 
 
 def init_logger(name: str):
-    return _root_logger.bind(name=name)
+    if VLLM_CONFIGURE_LOGGING:
+        return _root_logger.bind(name=name)
+    else:
+        _logger = logging.getLogger(name)
+        _logger.setLevel(os.getenv("LOG_LEVEL", "DEBUG"))
+        return _logger
