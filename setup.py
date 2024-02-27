@@ -2,6 +2,7 @@ import io
 import os
 import re
 import subprocess
+import sys
 from typing import List
 
 from packaging.version import parse, Version
@@ -120,6 +121,12 @@ class cmake_build_ext(build_ext):
             else:
                 build_tool = ['-G', 'Unix Makefiles']
                 build_jobs = ['-j', str(num_jobs)]
+
+            # Pass the python executable to cmake so it can find an exact
+            # match.
+            cmake_args += [
+                '-DVLLM_PYTHON_EXECUTABLE={}'.format(sys.executable)
+            ]
 
             # Config
             if not cmake_build_ext.did_config:

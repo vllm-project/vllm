@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.21)
 
 project(vllm_extensions LANGUAGES CXX)
 
+include(utils.cmake)
+
 #
 # Supported python versions.  These versions will be searched in order, the
 # first match will be selected.  These should be kept in sync with setup.py.
@@ -29,76 +31,20 @@ set(TORCH_SUPPORTED_VERSION_ROCM_5X "2.0.1")
 set(TORCH_SUPPORTED_VERSION_ROCM_6X "2.1.1")
 
 #
-# Loop through all supported python versions until the first suitable version
-# that has torch installed.
+# Try to find python package with an executable that exactly matches
+# `VLLM_PYTHON_EXECUTABLE` and is one of the supported versions.
 #
-# Note: cmake is unable to pick the lowest supported version when multiple
-# versions are available, even with `CMAKE_FIND_PACKAGE_SORT_ORDER`.
-#
-foreach(VER ${PYTHON_SUPPORTED_VERSIONS})
-  message(STATUS "Attempting to find python ${VER} package.")
-  find_package(Python ${VER} COMPONENTS Interpreter Development.Module)
-  if (Python_FOUND)
-    # Attempt to import torch from python was just found. If torch can
-    # be imported, stop searching for other versions of python.
-    # Note: find_package(Torch) won't work here because cmake might not
-    # have the proper search path set yet.
-    execute_process(
-      COMMAND
-      "${Python_EXECUTABLE}" "-c" "import torch"
-      OUTPUT_VARIABLE PYTHON_OUT
-      RESULT_VARIABLE PYTHON_ERROR_CODE
-      ERROR_VARIABLE PYTHON_STDERR)
-
-    if(PYTHON_ERROR_CODE EQUAL 0)
-      message(STATUS
-        "Found python version ${Python_VERSION} (${Python_EXECUTABLE}).")
-      break()
-    endif()
-  endif()
-endforeach()
-
-if (NOT Python_FOUND)
+if (VLLM_PYTHON_EXECUTABLE)
+  find_python_from_executable(${VLLM_PYTHON_EXECUTABLE} "${PYTHON_SUPPORTED_VERSIONS}")
+else()
   message(FATAL_ERROR
-    "No supported version of python (with pytorch) found. "
-    "('${PYTHON_SUPPORTED_VERSIONS}')")
+    "Please set VLLM_PYTHON_EXECUTABLE to the desired python version before "
+    "running cmake configure.")
 endif()
 
 #
-# Run `EXPR` in python.  The standard output of python is stored in `OUT` and
-# has trailing whitespace stripped.  If an error is encountered when running
-# python, a fatal message `ERR_MSG` is issued.
+# Update cmake's `CMAKE_PREFIX_PATH` with torch location.
 #
-macro (run_python OUT EXPR ERR_MSG)
-  execute_process(
-    COMMAND
-    "${Python_EXECUTABLE}" "-c" "${EXPR}"
-    OUTPUT_VARIABLE ${OUT}
-    RESULT_VARIABLE PYTHON_ERROR_CODE
-    ERROR_VARIABLE PYTHON_STDERR
-    OUTPUT_STRIP_TRAILING_WHITESPACE)
-
-  if(NOT PYTHON_ERROR_CODE EQUAL 0)
-    message(FATAL_ERROR "${ERR_MSG}: ${PYTHON_STDERR}")
-  endif()
-endmacro()
-
-#
-# Update cmake's `CMAKE_PREFIX_PATH` with probable torch locations.
-#
-
-# Run `EXPR` in python after importing `PKG`. Use the result of this to extend
-# `CMAKE_PREFIX_PATH` so the torch cmake configuration can be imported.
-macro (append_cmake_prefix_path PKG EXPR)
-  run_python(PREFIX_PATH
-    "import ${PKG}; print(${EXPR})" "Failed to locate ${PKG} path")
-  list(APPEND CMAKE_PREFIX_PATH ${PREFIX_PATH})
-endmacro()
-
-# Add user site-packages path to `CMAKE_PREFIX_PATH`.
-append_cmake_prefix_path("site" "site.getusersitepackages()")
-
-# Query torch for its install path and add to `CMAKE_PREFIX_PATH`.
 append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
 
 #
@@ -344,93 +290,6 @@ endif()
 #
 
 #
-# Add a target named `hipify${NAME}` that runs the hipify preprocessor on a set
-# of CUDA source files. The names of the corresponding "hipified" sources are
-# stored in `OUT_SRCS`.
-#
-macro(hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
-  #
-  # Split into C++ and non-C++ (i.e. CUDA) sources.
-  #
-  set(SRCS ${ORIG_SRCS})
-  set(CXX_SRCS ${ORIG_SRCS})
-  list(FILTER SRCS EXCLUDE REGEX "\.(cc)|(cpp)$")
-  list(FILTER CXX_SRCS INCLUDE REGEX "\.(cc)|(cpp)$")
-
-  #
-  # Generate ROCm/HIP source file names from CUDA file names.
-  # Since HIP files are generated code, they will appear in the build area
-  # `CMAKE_CURRENT_BINARY_DIR` directory rather than the original csrc dir.
-  #
-  set(HIP_SRCS)
-  foreach (SRC ${SRCS})
-    string(REGEX REPLACE "\.cu$" "\.hip" SRC ${SRC})
-    string(REGEX REPLACE "cuda" "hip" SRC ${SRC})
-    list(APPEND HIP_SRCS "${CMAKE_CURRENT_BINARY_DIR}/${SRC}")
-  endforeach()
-
-  set(CSRC_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/csrc)
-  add_custom_target(
-    hipify${NAME}
-    COMMAND ${CMAKE_SOURCE_DIR}/hipify.py -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} ${SRCS}
-    DEPENDS hipify.py ${SRCS}
-    BYPRODUCTS ${HIP_SRCS}
-    COMMENT "Running hipify on ${NAME} extension source files.")
-
-  # Swap out original extension sources with hipified sources.
-  set(${OUT_SRCS} ${HIP_SRCS})
-  list(APPEND ${OUT_SRCS} ${CXX_SRCS})
-endmacro()
-
-#
-# Define a target named `MOD_NAME` for a single extension. The
-# arguments are:
-#
-# MOD_GPU_LANG        - the GPU language for this module, e.g CUDA, HIP, etc.
-# MOD_SRC             - the list of source files relative to CMakeLists.txt
-#                       directory.
-# MOD_EXTRA_GPU_FLAGS - extra compiler flags passed to NVCC/hip.
-# MOD_GPU_ARCHES      - a list of target GPU architectures in cmake format.
-#                       Refer to documentation on `CMAKE_CUDA_ARCHITECTURES`
-#                       and `CMAKE_HIP_ARCHITECTURES` for more info.
-#
-# Note: optimization level/debug info is set via cmake build type.
-#
-function(define_module_target MOD_NAME MOD_GPU_LANG MOD_SRC MOD_EXTRA_GPU_FLAGS
-    MOD_GPU_ARCHES)
-
-  # Add hipify preprocessing step when building with HIP/ROCm.
-  if (MOD_GPU_LANG STREQUAL "HIP")
-    hipify_sources_target(MOD_SRC ${MOD_NAME} "${MOD_SRC}")
-  endif()
-
-  Python_add_library(${MOD_NAME} MODULE ${MOD_SRC} WITH_SOABI)
-
-  if (MOD_GPU_LANG STREQUAL "HIP")
-    # Make this target dependent on the hipify preprocessor step.
-    add_dependencies(${MOD_NAME} hipify${MOD_NAME})
-  endif()
-
-  set_target_properties(${MOD_NAME} PROPERTIES ${MOD_GPU_LANG}_ARCHITECTURES
-      "${MOD_GPU_ARCHES}")
-
-  set_property(TARGET ${MOD_NAME} PROPERTY CXX_STANDARD 17)
-
-  target_compile_options(${MOD_NAME} PRIVATE
-    $<$<COMPILE_LANGUAGE:${MOD_GPU_LANG}>:${MOD_EXTRA_GPU_FLAGS}>)
-
-  target_compile_definitions(${MOD_NAME} PRIVATE
-    "-DTORCH_EXTENSION_NAME=${MOD_NAME}")
-
-  target_include_directories(${MOD_NAME} PRIVATE
-    csrc PRIVATE ${MPI_CXX_INCLUDE_DIRS})
-
-  target_link_libraries(${MOD_NAME} PRIVATE ${TORCH_LIBRARIES})
-
-  install(TARGETS ${MOD_NAME} LIBRARY DESTINATION vllm)
-endfunction()
-
-#
 # _C extension
 #
 
@@ -452,7 +311,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/custom_all_reduce.cu")
 endif()
 
-define_module_target(_C
+define_gpu_extension_target(
+  _C
+  vllm
   "${VLLM_GPU_LANG}"
   "${VLLM_EXT_SRC}"
   "${VLLM_GPU_FLAGS}"
@@ -466,7 +327,9 @@ set(VLLM_MOE_EXT_SRC
   "csrc/moe/moe_ops.cpp"
   "csrc/moe/topk_softmax_kernels.cu")
 
-define_module_target(_moe_C
+define_gpu_extension_target(
+  _moe_C
+  vllm
   "${VLLM_GPU_LANG}"
   "${VLLM_MOE_EXT_SRC}"
   "${VLLM_GPU_FLAGS}"
@@ -497,7 +360,9 @@ set(VLLM_PUNICA_EXT_SRC
   "csrc/punica/bgmv/bgmv_fp32_fp32_fp16.cu"
   "csrc/punica/punica_ops.cc")
 
-define_module_target(_punica_C
+define_gpu_extension_target(
+  _punica_C
+  vllm
   "${VLLM_GPU_LANG}"
   "${VLLM_PUNICA_EXT_SRC}"
   "${VLLM_PUNICA_GPU_FLAGS}"
