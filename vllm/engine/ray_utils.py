@@ -70,7 +70,7 @@ if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
 
-def initialize_cluster(
+def initialize_ray_cluster(
     parallel_config: ParallelConfig,
     engine_use_ray: bool = False,
     ray_address: Optional[str] = None,

@@ -9,7 +9,7 @@ from vllm.lora.request import LoRARequest
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.llm_engine import LLMEngine
-from vllm.engine.ray_utils import initialize_cluster, ray
+from vllm.engine.ray_utils import initialize_ray_cluster, ray
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
@@ -680,8 +680,8 @@ class AsyncLLMEngine:
         engine_configs = engine_args.create_engine_configs()
         parallel_config = engine_configs[2]
         # Initialize the cluster.
-        placement_group = initialize_cluster(parallel_config,
-                                             engine_args.engine_use_ray)
+        placement_group = initialize_ray_cluster(parallel_config,
+                                                 engine_args.engine_use_ray)
         # Create the async LLM engine.
         engine = cls(parallel_config.worker_use_ray,
                      engine_args.engine_use_ray,

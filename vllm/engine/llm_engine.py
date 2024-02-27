@@ -14,7 +14,7 @@ from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics import StatLogger, Stats
-from vllm.engine.ray_utils import RayWorkerVllm, initialize_cluster, ray
+from vllm.engine.ray_utils import RayWorkerVllm, initialize_ray_cluster, ray
 from vllm.engine.local_worker_utils import LocalWorkerVllm, WorkerMonitor, ResultHandler
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -120,7 +120,6 @@ class LLMEngine:
         self.seq_counter = Counter()
 
         # Create the parallel GPU workers.
-        self.worker_monitor = None
         if self.parallel_config.worker_use_ray:
             # Disable Ray usage stats collection.
             ray_usage = os.environ.get("RAY_USAGE_STATS_ENABLED", "0")
@@ -214,8 +213,9 @@ class LLMEngine:
 
     def __del__(self):
         # Terminate local worker processes when engine is garbage collected
-        if self.worker_monitor is not None:
-            self.worker_monitor.close()
+        if (worker_monitor := getattr(self, "worker_monitor",
+                                      None)) is not None:
+            worker_monitor.close()
 
     def _init_driver_worker_and_model(self, rank: int, local_rank: int,
                                       distributed_init_method: str):
@@ -431,7 +431,7 @@ class LLMEngine:
         engine_configs = engine_args.create_engine_configs()
         parallel_config = engine_configs[2]
         # Initialize the cluster.
-        placement_group = initialize_cluster(parallel_config)
+        placement_group = initialize_ray_cluster(parallel_config)
         # Create the LLM engine.
         engine = cls(*engine_configs,
                      placement_group,
