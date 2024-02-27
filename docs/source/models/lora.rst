@@ -51,36 +51,14 @@ the third parameter is the path to the LoRA adapter.
 Check out `examples/multilora_inference.py <https://github.com/vllm-project/vllm/blob/main/examples/multilora_inference.py>`_
 for an example of how to use LoRA adapters with the async engine and how to use more advanced configuration options.
 
-Serving LoRA Adapters (Sample Service)
---------------------------------------
-The sample service entrypoint can be used to serve LoRA modules. To do so, we use
-``--lora-modules {name}={path} {name}={path}`` to specify each LoRA module when we kickoff the server: 
-
-.. code-block:: bash 
-    python -m vllm.entrypoints.api_server \
-        --model meta-llama/Llama-2-7b-hf \
-        --lora-modules sql-lora=~/.cache/huggingface/hub/models--yard1--llama-2-7b-sql-lora-test/
-
-This will start a fast-api server that accepts requests. An example is as follows:
-
-.. code-block:: bash
-    curl http://localhost:8000/generate -H "Content-Type: application/json" -d '{
-        "prompt": "San Francisco is a",
-        "max_tokens": 7,
-        "temperature": 1,
-        "adapter": "sql-lora"
-    }'
-
-Note that if the `adapter` parameter is not included, the responses will be from the base model only.  
-The `adapter` is expected to be the string corresponding to one of the adapter name passed with `lora-modules`. 
-
-Serving LoRA Adapters 
+Serving LoRA Adapters
 ---------------------
-LoRA adapted models can also be served with the Open-AI compatible vLLM server:
+LoRA adapted models can also be served with the Open-AI compatible vLLM server. To do so, we use
+``--lora-modules {name}={path} {name}={path}`` to specify each LoRA module when we kickoff the server:
 
 .. code-block:: bash
 
-    python -m vllm.entrypoints.openai.api_server \
+    python -m vllm.entrypoints.api_server \
         --model meta-llama/Llama-2-7b-hf \
         --enable-lora \
         --lora-modules sql-lora=~/.cache/huggingface/hub/models--yard1--llama-2-7b-sql-lora-test/
@@ -111,4 +89,3 @@ with its base model:
 Requests can specify the LoRA adapter as if it were any other model via the ``model`` request parameter. The requests will be
 processed according to the server-wide LoRA configuration (i.e. in parallel with base model requests, and potentially other
 LoRA adapter requests if they were provided and ``max_loras`` is set high enough).
-
