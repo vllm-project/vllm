@@ -1,4 +1,6 @@
 # Copyright 2024- the Outlines developers
+# This file is adapted from
+# https://github.com/outlines-dev/outlines/blob/main/outlines/serve/vllm.py
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -60,9 +62,9 @@ class RegexLogitsProcessor:
 
         mask = torch.full((scores.shape[-1],), -math.inf, device=scores.device)
         mask[allowed_tokens] = 0
-        biased_scores = scores + mask
+        scores.add_(mask)
 
-        return biased_scores
+        return scores
 
     def adapt_tokenizer(self, tokenizer):
         """Adapt vLLM's tokenizer to use to compile the FSM.

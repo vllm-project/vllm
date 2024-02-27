@@ -32,13 +32,16 @@ async def get_guided_decoding_logits_processor(
     guide, mode = _get_guide_and_mode(request)
     if not guide:
         return None
+    
+    global global_pool
+    if 'global_pool' not in globals():
+        global_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
     loop = asyncio.get_running_loop()
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        result = await loop.run_in_executor(
-            pool, _get_cached_logits_processor,
-            guide, tokenizer, mode
-        )
+    result = await loop.run_in_executor(
+        global_pool, _get_cached_logits_processor,
+        guide, tokenizer, mode
+    )
     
     logits_processor = copy(result)
     # reset logits processor's internal state
