@@ -1,5 +1,5 @@
 #
-# Attempt to find the python pacakge that uses the same python executable as
+# Attempt to find the python package that uses the same python executable as
 # `EXECUTABLE` and is one of the `SUPPORTED_VERSIONS`.
 #
 macro (find_python_from_executable EXECUTABLE SUPPORTED_VERSIONS)
