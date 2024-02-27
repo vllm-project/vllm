@@ -1,6 +1,7 @@
 # coding=utf-8
 # Adapted from
-# https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
+# https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/qwen2/modeling_qwen2.py
+# Copyright 2024 The Qwen team.
 # Copyright 2023 The vLLM team.
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 #
@@ -20,12 +21,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only Mistral model compatible with HuggingFace weights."""
+"""Inference-only Qwen2 model compatible with HuggingFace weights."""
 from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
-from transformers import MistralConfig
+from transformers import Qwen2Config
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -49,7 +50,7 @@ from vllm.sequence import SamplerOutput
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
-class MistralMLP(nn.Module):
+class Qwen2MLP(nn.Module):
 
     def __init__(
         self,
@@ -79,7 +80,7 @@ class MistralMLP(nn.Module):
         return x
 
 
-class MistralAttention(nn.Module):
+class Qwen2Attention(nn.Module):
 
     def __init__(self,
                  hidden_size: int,
@@ -87,6 +88,7 @@ class MistralAttention(nn.Module):
                  num_kv_heads: int,
                  max_position: int = 4096 * 32,
                  rope_theta: float = 10000,
+                 use_sliding_window: bool = False,
                  linear_method: Optional[LinearMethodBase] = None,
                  sliding_window: Optional[int] = None) -> None:
         super().__init__()
@@ -110,14 +112,14 @@ class MistralAttention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
-        self.sliding_window = sliding_window
+        self.sliding_window = sliding_window if use_sliding_window else None
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
             self.head_dim,
             self.total_num_heads,
             self.total_num_kv_heads,
-            bias=False,
+            bias=True,
             linear_method=linear_method,
         )
         self.o_proj = RowParallelLinear(
@@ -155,26 +157,29 @@ class MistralAttention(nn.Module):
         return output
 
 
-class MistralDecoderLayer(nn.Module):
+class Qwen2DecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: MistralConfig,
+        config: Qwen2Config,
+        layer_idx: int,
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         # Requires transformers > 4.32.0
-        rope_theta = getattr(config, "rope_theta", 10000)
-        self.self_attn = MistralAttention(
+        rope_theta = getattr(config, "rope_theta", 1000000)
+        use_sliding_window = config.use_sliding_window and layer_idx < config.max_window_layers
+        self.self_attn = Qwen2Attention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
+            use_sliding_window=use_sliding_window,
             linear_method=linear_method,
             sliding_window=config.sliding_window)
-        self.mlp = MistralMLP(
+        self.mlp = Qwen2MLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
@@ -214,11 +219,11 @@ class MistralDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-class MistralModel(nn.Module):
+class Qwen2Model(nn.Module):
 
     def __init__(
         self,
-        config: MistralConfig,
+        config: Qwen2Config,
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
@@ -231,8 +236,8 @@ class MistralModel(nn.Module):
             config.hidden_size,
         )
         self.layers = nn.ModuleList([
-            MistralDecoderLayer(config, linear_method)
-            for _ in range(config.num_hidden_layers)
+            Qwen2DecoderLayer(config, layer_idx, linear_method)
+            for layer_idx in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -258,17 +263,17 @@ class MistralModel(nn.Module):
         return hidden_states
 
 
-class MistralForCausalLM(nn.Module):
+class Qwen2ForCausalLM(nn.Module):
 
     def __init__(
         self,
-        config: MistralConfig,
+        config: Qwen2Config,
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
         self.config = config
         self.linear_method = linear_method
-        self.model = MistralModel(config, linear_method)
+        self.model = Qwen2Model(config, linear_method)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         self.sampler = Sampler(config.vocab_size)
 

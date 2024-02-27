@@ -537,7 +537,7 @@ if triton.__version__ >= "2.1.0":
         alibi_start_q = tl.arange(
             0, BLOCK_M) + block_start_loc + cur_batch_ctx_len
         alibi_start_k = cur_batch_ctx_len
-        # # init debuger
+        # # init debugger
         # offset_db_q = tl.arange(0, BLOCK_M) + block_start_loc
         # offset_db_k = tl.arange(0, BLOCK_N)
         # calc q[BLOCK_M, BLOCK_MODEL] mul k[prefix_len: , BLOCK_DMODEL]
@@ -618,7 +618,9 @@ if triton.__version__ >= "2.1.0":
                               b_ctx_len,
                               max_input_len,
                               alibi_slopes=None):
-        BLOCK = 128
+
+        cap = torch.cuda.get_device_capability()
+        BLOCK = 128 if cap[0] >= 8 else 64
         # shape constraints
         Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
         assert Lq == Lk and Lk == Lv

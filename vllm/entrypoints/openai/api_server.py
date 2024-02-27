@@ -2,8 +2,11 @@ import argparse
 import asyncio
 import json
 from contextlib import asynccontextmanager
-from aioprometheus import MetricsMiddleware
-from aioprometheus.asgi.starlette import metrics
+import os
+import importlib
+import inspect
+
+from prometheus_client import make_asgi_app
 import fastapi
 import uvicorn
 from http import HTTPStatus
@@ -14,11 +17,11 @@ from fastapi.responses import JSONResponse, StreamingResponse, Response
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.engine.metrics import add_global_metrics_labels
 from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest, ErrorResponse
 from vllm.logger import init_logger
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
+from vllm.entrypoints.openai.serving_engine import LoRA
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
@@ -44,6 +47,16 @@ async def lifespan(app: fastapi.FastAPI):
 app = fastapi.FastAPI(lifespan=lifespan)
 
 
+class LoRAParserAction(argparse.Action):
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        lora_list = []
+        for item in values:
+            name, path = item.split('=')
+            lora_list.append(LoRA(name, path))
+        setattr(namespace, self.dest, lora_list)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="vLLM OpenAI-Compatible RESTful API server.")
@@ -64,12 +77,28 @@ def parse_args():
                         type=json.loads,
                         default=["*"],
                         help="allowed headers")
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        default=None,
+        help=
+        "If provided, the server will require this key to be presented in the header."
+    )
     parser.add_argument("--served-model-name",
                         type=str,
                         default=None,
                         help="The model name used in the API. If not "
                         "specified, the model name will be the same as "
                         "the huggingface name.")
+    parser.add_argument(
+        "--lora-modules",
+        type=str,
+        default=None,
+        nargs='+',
+        action=LoRAParserAction,
+        help=
+        "LoRA module configurations in the format name=path. Multiple modules can be specified."
+    )
     parser.add_argument("--chat-template",
                         type=str,
                         default=None,
@@ -94,13 +123,25 @@ def parse_args():
         type=str,
         default=None,
         help="FastAPI root_path when app is behind a path based routing proxy")
+    parser.add_argument(
+        "--middleware",
+        type=str,
+        action="append",
+        default=[],
+        help="Additional ASGI middleware to apply to the app. "
+        "We accept multiple --middleware arguments. "
+        "The value should be an import path. "
+        "If a function is provided, vLLM will add it to the server using @app.middleware('http'). "
+        "If a class is provided, vLLM will add it to the server using app.add_middleware(). "
+    )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     return parser.parse_args()
 
 
-app.add_middleware(MetricsMiddleware)  # Trace HTTP server metrics
-app.add_route("/metrics", metrics)  # Exposes HTTP metrics
+# Add prometheus asgi middleware to route /metrics requests
+metrics_app = make_asgi_app()
+app.mount("/metrics", metrics_app)
 
 
 @app.exception_handler(RequestValidationError)
@@ -161,6 +202,29 @@ if __name__ == "__main__":
         allow_headers=args.allowed_headers,
     )
 
+    if token := os.environ.get("VLLM_API_KEY") or args.api_key:
+
+        @app.middleware("http")
+        async def authentication(request: Request, call_next):
+            if not request.url.path.startswith("/v1"):
+                return await call_next(request)
+            if request.headers.get("Authorization") != "Bearer " + token:
+                return JSONResponse(content={"error": "Unauthorized"},
+                                    status_code=401)
+            return await call_next(request)
+
+    for middleware in args.middleware:
+        module_path, object_name = middleware.rsplit(".", 1)
+        imported = getattr(importlib.import_module(module_path), object_name)
+        if inspect.isclass(imported):
+            app.add_middleware(imported)
+        elif inspect.iscoroutinefunction(imported):
+            app.middleware("http")(imported)
+        else:
+            raise ValueError(
+                f"Invalid middleware {middleware}. Must be a function or a class."
+            )
+
     logger.info(f"args: {args}")
 
     if args.served_model_name is not None:
@@ -172,11 +236,10 @@ if __name__ == "__main__":
     engine = AsyncLLMEngine.from_engine_args(engine_args)
     openai_serving_chat = OpenAIServingChat(engine, served_model,
                                             args.response_role,
+                                            args.lora_modules,
                                             args.chat_template)
-    openai_serving_completion = OpenAIServingCompletion(engine, served_model)
-
-    # Register labels for metrics
-    add_global_metrics_labels(model_name=engine_args.model)
+    openai_serving_completion = OpenAIServingCompletion(
+        engine, served_model, args.lora_modules)
 
     app.root_path = args.root_path
     uvicorn.run(app,
