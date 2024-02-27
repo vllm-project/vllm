@@ -74,6 +74,7 @@ class UsageContext(Enum):
     OPENAI_API_SERVER = "OPENAI_API_SERVER"
     ENGINE_CONTEXT = "ENGINE_CONTEXT"
 
+
 class UsageMessage:
 
     def __init__(self) -> None:
@@ -87,6 +88,7 @@ class UsageMessage:
         self.log_time: Optional[int] = None
         #Logical CPU count
         self.num_cpu: Optional[int] = None
+        self.cpu_type: Optional[str] = None
         self.total_memory: Optional[int] = None
 
     def report_usage(self, model: str, context: UsageContext) -> None:
@@ -109,6 +111,7 @@ class UsageMessage:
         self.model = model
         self.log_time = _get_current_timestamp_ns()
         self.num_cpu = os.cpu_count()
+        self.cpu_type = platform.processor()
         self.total_memory = psutil.virtual_memory().total
         self._write_to_file()
         headers = {'Content-type': 'application/json'}
