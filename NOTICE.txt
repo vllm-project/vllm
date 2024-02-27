@@ -1,0 +1,29 @@
+DeepSparse
+Copyright 2021 - present / Neuralmagic, Inc. All Rights Reserved.
+
+This product includes software developed at Neuralmagic, Inc. (https://www.neuralmagic.com).
+
+Source code in the deepsparse GitHub repository is variously licensed under the Apache License
+Version 2.0, an Apache-compatible license.
+
+* For a copy of the Apache License Version 2.0, please see [Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0).
+
+DeepSparse Community (https://docs.neuralmagic.com/products/deepsparse) is free to use and licensed under the Neural Magic DeepSparse Community License (https://github.com/neuralmagic/deepsparse/blob/main/LICENSE). Some source code, example files and scripts included in the deepsparse GitHub repository or directory are licensed under the Apache License Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0) as noted.
+
+DeepSparse Enterprise (https://docs.neuralmagic.com/products/deepsparse-ent) requires a Trial License or can be fully licensed (https://neuralmagic.com/legal/master-software-license-and-service-agreement/) for production, commercial applications.
+
+* For a copy of all other Apache-compatible licenses and notices,
+  they will be referenced below.
+
+========================================================================
+NOTICES
+========================================================================
+
+All implementations in this repository or directory are subject to Neural Magic's Legal Policies
+https://www.neuralmagic.com/legal
+
+Package dependencies are defined in the Python setup.py file in the top-level directory of the deepsparse GitHub repository and have their own Apache-compatible licenses and terms.
+
+ONNX License https://github.com/onnx/onnx/blob/main/LICENSE
+
+Other external dependencies, if referenced in the various subdirectories, are subject to their associated licenses and terms.
