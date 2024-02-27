@@ -1,0 +1,73 @@
+Updated: November 16, 2022
+
+NEURAL MAGIC DEEPSPARSE COMMUNITY LICENSE AGREEMENT
+
+Please read this Neural Magic DeepSparse Community License Agreement (“Agreement”) 
+carefully before using Software for the first time. By using the Software, you agree 
+to these terms. If you do not agree to the terms of this Agreement, the Software may 
+not be installed on your computer systems. 
+
+DeepSparse (“Software”) consists of a current version of: (a) machine 
+executable (object) code, (b) DeepSparse-branded components, and (c) any existing user guide and release notes. The 
+Software is copyrighted by Neuralmagic, Inc. (“Neural Magic”), a Delaware corporation 
+with offices at 55 Davis Square STE 3, Somerville, MA 02144 United States, and is licensed and not 
+sold. Licensing questions about this Software should be directed to 
+license@neuralmagic.com.
+
+    1. 	License. Subject to the terms of this Agreement, Neural Magic grants you a 
+    non-exclusive, non-transferable license to use the Software solely for evaluation 
+    use in development and testing environments, and not for production use. You will 
+    ensure that anyone who obtains and uses the Software does so only in compliance 
+    with the terms of this Agreement. No right to sublicense is granted. All other 
+    rights in and to the Software are hereby reserved. We may terminate your right to 
+    use the Software at any time upon notice to you.
+
+    2. 	Restrictions. As the source code of the Software is confidential, you may not 
+    decompile, reverse engineer, disassemble, or otherwise attempt to derive the source 
+    code of the Software for any purpose. Except as permitted by applicable law and this 
+    Agreement, you may not sublicense the Software. You may not use or otherwise export 
+    the Software except as authorized by United States law. You may also not modify, 
+    translate, or create derivative works of the Software or) sell, lease, license, 
+    sublicense, market or distribute the Software or use the Software for any timesharing, 
+    service bureau, subscription, rental or similar uses without the express prior written 
+    consent of Neural Magic in each instance or use the Software on behalf of any third party. 
+
+    3. 	No Warranty. The Software is provided to you "AS IS" and without warranty. You are not 
+    entitled to any hard copy documentation, maintenance, support or updates for the Software 
+    unless you have entered into a separate commercial agreement under which support 
+    obligations are specified.
+
+    WE EXPRESSLY DISCLAIM ALL WARRANTIES RELATED TO THE SOFTWARE, EXPRESS OR IMPLIED, 
+    INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR 
+    A PARTICULAR PURPOSE. WE DO NOT WARRANT THAT THE FUNCTIONS CONTAINED IN THE SOFTWARE WILL 
+    MEET YOUR REQUIREMENTS, OR THAT THE OPERATION OF THE SOFTWARE WILL BE UNINTERRUPTED OR 
+    ERROR-FREE, OR THAT DEFECTS IN THE SOFTWARE WILL BE CORRECTED. WE DO NOT WARRANT OR MAKE 
+    ANY REPRESENTATIONS REGARDING THE USE OR THE RESULTS OF THE USE OF THE SOFTWARE OR RELATED
+    DOCUMENTATION IN TERMS OF THEIR CORRECTNESS, ACCURACY, RELIABILITY OR OTHERWISE. SOME 
+    JURISDICTIONS DO NOT ALLOW THE EXCLUSION OF IMPLIED WARRANTIES, SO PORTIONS OF THE ABOVE 
+    EXCLUSION MAY NOT APPLY TO YOU.
+
+    4. 	Limitation of Liability. In no event shall we be liable to you for any damages with 
+    respect to your use of the Software. Further:
+
+    UNDER NO CIRCUMSTANCES, INCLUDING NEGLIGENCE, SHALL WE BE LIABLE FOR ANY INCIDENTAL, 
+    SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES ARISING OUT OF OR RELATING TO THIS LICENSE, 
+    INCLUDING, BUT NOT LIMITED TO, DAMAGES RESULTING FROM ANY LOSS OF DATA CAUSED BY THE 
+    SOFTWARE. SOME JURISDICTIONS DO NOT ALLOW THE LIMITATION OF INCIDENTAL OR CONSEQUENTIAL 
+    DAMAGES SO THIS LIMITATION MAY NOT APPLY TO YOU.
+
+    5. 	Controlling Law and Severability. This Agreement shall be governed by the laws of the
+    United States and those of the Commonwealth of Massachusetts. If for any reason a court of 
+    competent jurisdiction finds any provision, or portion thereof, to be unenforceable, the 
+    remainder of this Agreement shall continue in full force and effect. Any dispute regarding 
+    this Agreement shall be resolved in either the state or federal courts in Massachusetts. 
+ 
+    6. 	Complete Agreement. This Agreement constitutes the entire agreement between us with 
+    respect to the version of the Software license hereunder. No amendment to or modification 
+    of this Agreement will be binding unless in writing. 
+ 
+Your rights under this Agreement will terminate automatically without notice if you fail to 
+comply with any term(s) of this Agreement.
+
+
+Neuralmagic, Inc.’s Legal Policies https://www.neuralmagic.com/legal
