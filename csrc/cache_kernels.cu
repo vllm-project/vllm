@@ -165,7 +165,8 @@ __global__ void reshape_and_cache_kernel(
   const int num_heads,
   const int head_size,
   const int block_size,
-  const int x) {
+  const int x,
+  const float kv_scale) {
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
   if (slot_idx < 0) {
@@ -202,8 +203,8 @@ __global__ void reshape_and_cache_kernel(
       key_cache[tgt_key_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_key);
       value_cache[tgt_value_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_value);
 #elif defined(ENABLE_FP8_E4M3)
-      key_cache[tgt_key_idx] = fp8_e4m3::vec_conversion<uint8_t, scalar_t>(tgt_key);
-      value_cache[tgt_value_idx] = fp8_e4m3::vec_conversion<uint8_t, scalar_t>(tgt_value);
+      key_cache[tgt_key_idx] = fp8_e4m3::scaled_vec_conversion<uint8_t, scalar_t>(tgt_key, kv_scale);
+      value_cache[tgt_value_idx] = fp8_e4m3::scaled_vec_conversion<uint8_t, scalar_t>(tgt_value, kv_scale);
 #else
       assert(false);
 #endif
@@ -216,8 +217,8 @@ __global__ void reshape_and_cache_kernel(
 
 } // namespace vllm
 
-#define CALL_RESHAPE_AND_CACHE(KV_T, CACHE_T, IS_FP8_KV_CACHE)                                \
-  vllm::reshape_and_cache_kernel<KV_T, CACHE_T, IS_FP8_KV_CACHE><<<grid, block, 0, stream>>>( \
+#define CALL_RESHAPE_AND_CACHE(KV_T, CACHE_T, IS_FP8_KV_CACHE)                                     \
+  vllm::reshape_and_cache_kernel<KV_T, CACHE_T, IS_FP8_KV_CACHE><<<grid, block, 0, stream>>>(      \
     reinterpret_cast<KV_T*>(key.data_ptr()),                                                       \
     reinterpret_cast<KV_T*>(value.data_ptr()),                                                     \
     reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),                                              \
@@ -228,7 +229,8 @@ __global__ void reshape_and_cache_kernel(
     num_heads,                                                                                     \
     head_size,                                                                                     \
     block_size,                                                                                    \
-    x);
+    x,                                                                                             \
+    kv_scale);
 
 void reshape_and_cache(
   torch::Tensor& key,           // [num_tokens, num_heads, head_size]
@@ -236,7 +238,8 @@ void reshape_and_cache(
   torch::Tensor& key_cache,     // [num_blocks, num_heads, head_size/x, block_size, x]
   torch::Tensor& value_cache,   // [num_blocks, num_heads, head_size, block_size]
   torch::Tensor& slot_mapping,  // [num_tokens]
-  const std::string& kv_cache_dtype)
+  const std::string& kv_cache_dtype,
+  const float kv_scale)
 {
   int num_tokens = key.size(0);
   int num_heads = key.size(1);
