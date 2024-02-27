@@ -9,8 +9,16 @@ from vllm.prefix import Prefix
 from vllm.sampling_params import SamplingParams
 from vllm.lora.request import LoRARequest
 
-PromptLogprobs = List[Optional[Dict[int, float]]]
-SampleLogprobs = List[Dict[int, float]]
+
+@dataclass
+class Logprob:
+    """Infos for supporting OpenAI compatible logprobs."""
+    logprob: float
+    decoded_token: Optional[str] = None
+
+
+PromptLogprobs = List[Optional[Dict[int, Logprob]]]
+SampleLogprobs = List[Dict[int, Logprob]]
 
 
 class SequenceStatus(enum.Enum):
@@ -187,12 +195,12 @@ class Sequence:
     def append_token_id(
         self,
         token_id: int,
-        logprobs: Dict[int, float],
+        logprobs: Dict[int, Logprob],
     ) -> None:
         assert token_id in logprobs
         self._append_tokens_to_blocks([token_id])
         self.output_logprobs.append(logprobs)
-        self.data.append_token_id(token_id, logprobs[token_id])
+        self.data.append_token_id(token_id, logprobs[token_id].logprob)
 
     def get_len(self) -> int:
         return self.data.get_len()
@@ -465,9 +473,13 @@ class SequenceOutput:
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, SequenceOutput):
             raise NotImplementedError()
-        return (self.parent_seq_id == other.parent_seq_id
-                and self.output_token == other.output_token
-                and self.logprobs == other.logprobs)
+        equal = (self.parent_seq_id == other.parent_seq_id
+                 and self.output_token == other.output_token)
+        log_probs_equal = ((len(other.logprobs) == len(self.logprobs))
+                           and all(other_logprob == self_logprob
+                                   for other_logprob, self_logprob in zip(
+                                       other.logprobs, self.logprobs)))
+        return equal and log_probs_equal
 
 
 class SequenceGroupOutput:
