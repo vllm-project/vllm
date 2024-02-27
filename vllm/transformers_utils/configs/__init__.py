@@ -6,7 +6,6 @@ from vllm.transformers_utils.configs.mpt import MPTConfig
 from vllm.transformers_utils.configs.falcon import RWConfig
 from vllm.transformers_utils.configs.orion import OrionConfig
 
-
 __all__ = [
     "ChatGLMConfig",
     "MPTConfig",

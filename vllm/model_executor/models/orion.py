@@ -8,7 +8,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
-from torch.nn import LayerNorm
+from transformers import PretrainedConfig
+
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import PagedAttention
@@ -26,7 +27,6 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
-from vllm.transformers_utils.configs.orion import OrionConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -143,7 +143,7 @@ class OrionDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: OrionConfig,
+        config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
@@ -168,10 +168,10 @@ class OrionDecoderLayer(nn.Module):
             linear_method=linear_method,
         )
 
-        self.input_layernorm = LayerNorm(config.hidden_size,
-                                         eps=config.rms_norm_eps)
-        self.post_attention_layernorm = LayerNorm(config.hidden_size,
-                                                  eps=config.rms_norm_eps)
+        self.input_layernorm = nn.LayerNorm(config.hidden_size,
+                                            eps=config.rms_norm_eps)
+        self.post_attention_layernorm = nn.LayerNorm(config.hidden_size,
+                                                     eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -205,7 +205,7 @@ class OrionModel(nn.Module):
 
     def __init__(
         self,
-        config: OrionConfig,
+        config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
@@ -220,7 +220,7 @@ class OrionModel(nn.Module):
             OrionDecoderLayer(config, linear_method)
             for _ in range(config.num_hidden_layers)
         ])
-        self.norm = LayerNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -248,7 +248,7 @@ class OrionForCausalLM(nn.Module):
 
     def __init__(
         self,
-        config: OrionConfig,
+        config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
