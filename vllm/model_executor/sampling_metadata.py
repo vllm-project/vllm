@@ -30,6 +30,7 @@ class SamplingMetadata:
         seq_groups: Optional[List[Tuple[List[int], SamplingParams]]],
         seq_data: Optional[Dict[int, SequenceData]],
         prompt_lens: Optional[List[int]],
+        subquery_lens: Optional[List[int]],
         selected_token_indices: torch.Tensor,
         categorized_sample_indices: Optional[Dict[SamplingType, torch.Tensor]],
         generators: Optional[List[torch.Generator]] = None,
@@ -38,6 +39,7 @@ class SamplingMetadata:
         self.seq_groups = seq_groups
         self.seq_data = seq_data
         self.prompt_lens = prompt_lens
+        self.subquery_lens = subquery_lens
         self.selected_token_indices = selected_token_indices
         self.categorized_sample_indices = categorized_sample_indices
         self.generators = generators
@@ -51,8 +53,9 @@ class SamplingMetadata:
             f"seq_groups={self.seq_groups}, "
             f"seq_data={self.seq_data}, "
             f"prompt_lens={self.prompt_lens}, "
+            f"subquery_lens={self.subquery_lens}, "
             f"selected_token_indices={self.selected_token_indices}, "
-            f"categorized_sample_indices={self.categorized_sample_indices}), "
+            f"categorized_sample_indices={self.categorized_sample_indices}, "
             f"perform_sampling={self.perform_sampling})")
 
 
@@ -87,6 +90,8 @@ class SamplingTensors:
         do_penalties = False
         do_top_p_top_k = False
         do_min_p = False
+
+        subquery_lens_index = 0
         for i, seq_group in enumerate(sampling_metadata.seq_groups):
             seq_ids, sampling_params = seq_group
             temperature = sampling_params.temperature
@@ -112,30 +117,38 @@ class SamplingTensors:
                                      or abs(f) >= _SAMPLING_EPS
                                      or abs(r - 1.0) >= _SAMPLING_EPS):
                 do_penalties = True
-            if (i < sampling_metadata.num_prompts
-                    and sampling_params.prompt_logprobs is not None):
-                # For tokens in the prompt that we only need to get their logprobs
-                prompt_len = sampling_metadata.prompt_lens[i]
-                temperatures += [temperature] * (prompt_len - 1)
-                top_ps += [top_p] * (prompt_len - 1)
-                top_ks += [top_k] * (prompt_len - 1)
-                min_ps += [min_p] * (prompt_len - 1)
-                presence_penalties += [0] * (prompt_len - 1)
-                frequency_penalties += [0] * (prompt_len - 1)
-                repetition_penalties += [1] * (prompt_len - 1)
-                prompt_tokens.extend([] for _ in range(prompt_len - 1))
-                output_tokens.extend([] for _ in range(prompt_len - 1))
-            for seq_id in seq_ids:
+            if i < sampling_metadata.num_prompts:
+                if sampling_params.prompt_logprobs is not None:
+                    # For tokens in the prompt that we only need to get their logprobs
+                    subquery_lens = [sampling_metadata.prompt_lens[i]
+                                     ] * len(seq_ids)
+                else:
+                    subquery_lens = [1] * len(seq_ids)
+            else:
+                if sampling_metadata.subquery_lens is None:
+                    subquery_lens = [1] * len(seq_ids)
+                else:
+                    subquery_lens = sampling_metadata.subquery_lens[
+                        subquery_lens_index:subquery_lens_index + len(seq_ids)]
+                    # move to the next set of subquery_lens entries
+                    subquery_lens_index += len(seq_ids)
+
+            total_subquery_lens = sum(subquery_lens)
+            temperatures += [temperature] * total_subquery_lens
+            top_ps += [top_p] * total_subquery_lens
+            top_ks += [top_k] * total_subquery_lens
+            min_ps += [min_p] * total_subquery_lens
+            presence_penalties += [0] * total_subquery_lens
+            frequency_penalties += [0] * total_subquery_lens
+            repetition_penalties += [1] * total_subquery_lens
+
+            for seq_id, subquery_len in zip(seq_ids, subquery_lens):
+                prompt_tokens.extend([] for _ in range(subquery_len - 1))
+                output_tokens.extend([] for _ in range(subquery_len - 1))
+
                 seq_data = sampling_metadata.seq_data[seq_id]
                 prompt_tokens.append(seq_data.prompt_token_ids)
                 output_tokens.append(seq_data.output_token_ids)
-            temperatures += [temperature] * len(seq_ids)
-            top_ps += [top_p] * len(seq_ids)
-            top_ks += [top_k] * len(seq_ids)
-            min_ps += [min_p] * len(seq_ids)
-            presence_penalties += [p] * len(seq_ids)
-            frequency_penalties += [f] * len(seq_ids)
-            repetition_penalties += [r] * len(seq_ids)
 
         sampling_tensors = SamplingTensors.from_lists(
             temperatures, top_ps, top_ks, min_ps, presence_penalties,

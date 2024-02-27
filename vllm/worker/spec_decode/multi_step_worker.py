@@ -1,4 +1,4 @@
-from typing import List, Dict
+from typing import List, Dict, Optional
 import copy
 
 import torch
@@ -20,6 +20,27 @@ class MultiStepWorker(Worker):
     """
 
     @torch.inference_mode()
+    def execute_model(
+        self,
+        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]] = None,
+        blocks_to_swap_in: Optional[Dict[int, int]] = None,
+        blocks_to_swap_out: Optional[Dict[int, int]] = None,
+        blocks_to_copy: Optional[Dict[int, List[int]]] = None,
+    ) -> Optional[SamplerOutput]:
+        self._raise_if_unsupported(seq_group_metadata_list, blocks_to_swap_in,
+                                   blocks_to_swap_out, blocks_to_copy)
+
+        # Shallow copy input data to avoid the effect of associated prefixes.
+        copied_seq_group_metadata_list = self._shallow_copy_inputs(
+            seq_group_metadata_list)
+        return super().execute_model(
+            seq_group_metadata_list=copied_seq_group_metadata_list,
+            blocks_to_swap_in=blocks_to_swap_in,
+            blocks_to_swap_out=blocks_to_swap_out,
+            blocks_to_copy=blocks_to_copy,
+        )
+
+    @torch.inference_mode()
     def execute_model_multi_step(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -33,6 +54,9 @@ class MultiStepWorker(Worker):
         """
         self._raise_if_unsupported(seq_group_metadata_list, blocks_to_swap_in,
                                    blocks_to_swap_out, blocks_to_copy)
+
+        if num_steps == 0:
+            return []
 
         # Shallow copy input data so modifications (such as appending tokens)
         # do not cause side-effects.
@@ -54,13 +78,18 @@ class MultiStepWorker(Worker):
 
             self._append_new_tokens(model_output,
                                     copied_seq_group_metadata_list)
+            # clear candidate tokens after the first step
+            for seq_group_metadata in copied_seq_group_metadata_list:
+                for _, seq_data in seq_group_metadata.seq_data.items():
+                    seq_data.candidate_token_ids = []
+                seq_group_metadata.parallel_decoding_lookahead = 1
             model_outputs.append(model_output)
 
         return model_outputs
 
     def _append_new_tokens(
             self, model_output: SamplerOutput,
-            seq_group_metadata_list: SequenceGroupMetadata) -> None:
+            seq_group_metadata_list: List[SequenceGroupMetadata]) -> None:
         """Given model output from a single run, append the tokens to the
         sequences. This is normally done outside of the worker, but it is
         required if the worker is to perform multiple forward passes.
@@ -73,10 +102,23 @@ class MultiStepWorker(Worker):
                 # NOTE: Beam search is not supported, so we can assume that
                 # parent_seq_id == seq_id.
                 seq = seq_group_metadata.seq_data[seq_output.parent_seq_id]
-
                 token_id = seq_output.output_token
-                token_logprob = seq_output.logprobs[token_id]
 
+                # The bonus token from the target model's output is the
+                # candidate token for the draft model's first input. And
+                # it should be append to draft's outputs.
+                if seq.candidate_token_ids:
+                    # only append the first candidate token
+                    token = seq.candidate_token_ids[0]
+                    token_logprob = seq_output.logprobs[0].get(token, 0.0)
+                    seq.append_token_id(token, token_logprob)
+                # append the sampled last token
+                if isinstance(token_id, list):
+                    token_id = token_id[-1]
+                    logprobs = seq_output.logprobs[-1]
+                else:
+                    logprobs = seq_output.logprobs
+                token_logprob = logprobs[token_id]
                 seq.append_token_id(token_id, token_logprob)
 
     def _shallow_copy_inputs(
@@ -112,13 +154,25 @@ class MultiStepWorker(Worker):
             new_seq_group_metadata_list.append(seq_group_metadata)
 
             # We must shallow-copy seq_data as we will append token ids
-            new_seq_data = {}
+            new_seq_data, parallel_decoding_lookahead = {}, 1
             for seq_id, old_seq_data in seq_group_metadata.seq_data.items():
                 new_seq_data[seq_id] = copy.copy(old_seq_data)
                 new_seq_data[
                     seq_id].output_token_ids = old_seq_data.output_token_ids[:]
 
+                # pop the last token from inputs if it is actually part of the
+                # candidate tokens (token that accepted from the target model's output)
+                if new_seq_data[seq_id].candidate_token_ids:
+                    assert new_seq_data[seq_id].candidate_token_ids[
+                        -1] == new_seq_data[seq_id].output_token_ids[-1]
+                    new_seq_data[seq_id].output_token_ids.pop()
+                    parallel_decoding_lookahead = 2
+
+            # draft model won't share the prefix
+            seq_group_metadata.prefix = None
+
             seq_group_metadata.seq_data = new_seq_data
+            seq_group_metadata.parallel_decoding_lookahead = parallel_decoding_lookahead
 
         return new_seq_group_metadata_list
 
@@ -169,7 +223,10 @@ class MultiStepWorker(Worker):
         """
         if any([blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy]):
             raise NotImplementedError(
-                "MultiStepWorker does not support cache operations")
+                "MultiStepWorker does not support cache operations: "
+                f"blocks_to_swap_in = {blocks_to_swap_in}, "
+                f"blocks_to_swap_out = {blocks_to_swap_out}, "
+                f"blocks_to_copy = {blocks_to_copy}.")
 
         if any(
                 len(seq_group_metadata.seq_data.keys()) != 1

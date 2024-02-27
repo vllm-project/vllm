@@ -1,10 +1,13 @@
 """Sequence and its related classes."""
 import copy
-import enum
 from dataclasses import dataclass
+import enum
 from typing import Dict, List, Optional, Union
 
+import torch
+
 from vllm.block import LogicalTokenBlock
+from vllm.block import _BLANK_TOKEN_ID
 from vllm.prefix import Prefix
 from vllm.sampling_params import SamplingParams
 from vllm.lora.request import LoRARequest
@@ -87,6 +90,7 @@ class SequenceData:
     ) -> None:
         self.prompt_token_ids = prompt_token_ids
         self.output_token_ids: List[int] = []
+        self.candidate_token_ids: List[int] = []
         self.cumulative_logprob = 0.0
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
@@ -110,10 +114,14 @@ class SequenceData:
             return self.prompt_token_ids[-1]
         return self.output_token_ids[-1]
 
+    def get_candidate_token_ids(self) -> List[int]:
+        return self.candidate_token_ids
+
     def __repr__(self) -> str:
         return (f"SequenceData("
                 f"prompt_token_ids={self.prompt_token_ids}, "
                 f"output_token_ids={self.output_token_ids}, "
+                f"candidate_token_ids={self.candidate_token_ids}, "
                 f"cumulative_logprob={self.cumulative_logprob})")
 
 
@@ -168,31 +176,39 @@ class Sequence:
         )
         self.logical_token_blocks.append(block)
 
-    def _append_tokens_to_blocks(self, token_ids: List[int]) -> None:
+    def _append_tokens_to_blocks(self,
+                                 token_ids: List[int],
+                                 reserved: bool = False) -> None:
         cursor = 0
         while cursor < len(token_ids):
             if not self.logical_token_blocks:
                 self._append_logical_block()
 
             last_block = self.logical_token_blocks[-1]
-            if last_block.is_full():
-                self._append_logical_block()
-                last_block = self.logical_token_blocks[-1]
-
             num_empty_slots = last_block.get_num_empty_slots()
-            last_block.append_tokens(token_ids[cursor:cursor +
-                                               num_empty_slots])
+            if not reserved:
+                last_block.append_tokens(token_ids[cursor:cursor +
+                                                   num_empty_slots])
             cursor += num_empty_slots
+            if cursor < len(token_ids):
+                self._append_logical_block()
 
     def append_token_id(
         self,
         token_id: int,
         logprobs: Dict[int, float],
     ) -> None:
-        assert token_id in logprobs
+        # When speculative decoding, the token may not be in the logprobs from sampler.
+        # assert token_id in logprobs
+        if token_id not in logprobs:
+            logprobs[token_id] = 0.0
         self._append_tokens_to_blocks([token_id])
         self.output_logprobs.append(logprobs)
         self.data.append_token_id(token_id, logprobs[token_id])
+
+    def reserve_logical_blocks(self, reserve: Optional[int] = 0):
+        self._append_tokens_to_blocks([_BLANK_TOKEN_ID] * reserve,
+                                      reserved=True)
 
     def get_len(self) -> int:
         return self.data.get_len()
@@ -208,6 +224,9 @@ class Sequence:
 
     def get_last_token_id(self) -> int:
         return self.data.get_last_token_id()
+
+    def get_candidate_token_ids(self) -> List[int]:
+        return self.data.get_candidate_token_ids()
 
     def get_output_token_ids(self) -> List[int]:
         return self.data.output_token_ids
@@ -421,6 +440,7 @@ class SequenceGroupMetadata:
         lora_request: Optional[LoRARequest] = None,
         prefix: Optional[Prefix] = None,
         state: Optional[SequenceGroupState] = None,
+        parallel_decoding_lookahead: Optional[int] = 1,
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
@@ -430,10 +450,22 @@ class SequenceGroupMetadata:
         self.lora_request = lora_request
         self.prefix = prefix
         self.state = SequenceGroupState() if state is None else state
+        self.parallel_decoding_lookahead = parallel_decoding_lookahead
 
     @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
+
+    def __repr__(self) -> str:
+        return (
+            f"SequenceGroupMetadata(request_id={self.request_id}, "
+            f"is_prompt={self.is_prompt}, "
+            f"seq_data={self.seq_data}, "
+            f"sampling_params={self.sampling_params}, "
+            f"block_tables={self.block_tables}, "
+            f"lora_request={self.lora_request}, "
+            f"prefix={self.prefix}, "
+            f"parallel_decoding_lookahead={self.parallel_decoding_lookahead})")
 
 
 class SequenceOutput:
@@ -477,9 +509,11 @@ class SequenceGroupOutput:
         self,
         samples: List[SequenceOutput],
         prompt_logprobs: Optional[PromptLogprobs],
+        decoding_probs: Optional[torch.Tensor] = None,
     ) -> None:
         self.samples = samples
         self.prompt_logprobs = prompt_logprobs
+        self.decoding_probs = decoding_probs
 
     def __repr__(self) -> str:
         return (f"SequenceGroupOutput(samples={self.samples}, "

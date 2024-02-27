@@ -61,12 +61,14 @@ def sample_requests(
 def run_vllm(
     requests: List[Tuple[str, int, int]],
     model: str,
+    draft_model: str,
     tokenizer: str,
     quantization: Optional[str],
     tensor_parallel_size: int,
     seed: int,
     n: int,
     use_beam_search: bool,
+    temperature: float,
     trust_remote_code: bool,
     dtype: str,
     max_model_len: Optional[int],
@@ -74,10 +76,12 @@ def run_vllm(
     kv_cache_dtype: str,
     device: str,
     use_flash_attn: Optional[bool] = False,
+    parallel_decoding_lookahead: Optional[int] = 1,
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(
         model=model,
+        draft_model=draft_model,
         tokenizer=tokenizer,
         quantization=quantization,
         tensor_parallel_size=tensor_parallel_size,
@@ -89,13 +93,14 @@ def run_vllm(
         kv_cache_dtype=kv_cache_dtype,
         device=device,
         use_flash_attn=use_flash_attn,
+        parallel_decoding_lookahead=parallel_decoding_lookahead,
     )
 
     # Add the requests to the engine.
     for prompt, _, output_len in requests:
         sampling_params = SamplingParams(
             n=n,
-            temperature=0.0 if use_beam_search else 1.0,
+            temperature=0.0 if use_beam_search else temperature,
             top_p=1.0,
             use_beam_search=use_beam_search,
             ignore_eos=True,
@@ -208,13 +213,13 @@ def main(args: argparse.Namespace):
                                    args.output_len)
 
     if args.backend == "vllm":
-        elapsed_time = run_vllm(requests, args.model, args.tokenizer,
-                                args.quantization, args.tensor_parallel_size,
-                                args.seed, args.n, args.use_beam_search,
-                                args.trust_remote_code, args.dtype,
-                                args.max_model_len, args.enforce_eager,
-                                args.kv_cache_dtype, args.device,
-                                args.use_flash_attn)
+        elapsed_time = run_vllm(
+            requests, args.model, args.draft_model, args.tokenizer,
+            args.quantization, args.tensor_parallel_size, args.seed, args.n,
+            args.use_beam_search, args.temperature, args.trust_remote_code,
+            args.dtype, args.max_model_len, args.enforce_eager,
+            args.kv_cache_dtype, args.device, args.use_flash_attn,
+            args.parallel_decoding_lookahead)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -251,6 +256,7 @@ if __name__ == "__main__":
                         help="Output length for each request. Overrides the "
                         "output length from the dataset.")
     parser.add_argument("--model", type=str, default="facebook/opt-125m")
+    parser.add_argument("--draft-model", type=str, default=None)
     parser.add_argument("--tokenizer", type=str, default=None)
     parser.add_argument('--quantization',
                         '-q',
@@ -262,6 +268,7 @@ if __name__ == "__main__":
                         default=1,
                         help="Number of generated sequences per prompt.")
     parser.add_argument("--use-beam-search", action="store_true")
+    parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--num-prompts",
                         type=int,
                         default=1000,
@@ -309,6 +316,11 @@ if __name__ == "__main__":
         "--use-flash-attn",
         action="store_true",
         help="Use flash attention (requires flash-attn >= 2.5.0).")
+    parser.add_argument(
+        "--parallel-decoding-lookahead",
+        type=int,
+        default=1,
+        help="Number of lookahead steps for speculative decoding.")
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model

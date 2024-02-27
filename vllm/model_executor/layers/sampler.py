@@ -110,7 +110,7 @@ class Sampler(nn.Module):
         prompt_logprobs, sample_logprobs = _get_logprobs(
             logprobs, sampling_metadata, sample_results)
         return _build_sampler_output(sample_results, sampling_metadata,
-                                     prompt_logprobs, sample_logprobs)
+                                     prompt_logprobs, sample_logprobs, probs)
 
 
 def _prune_hidden_states(
@@ -237,47 +237,71 @@ def _apply_min_p(
 
 def _greedy_sample(
     selected_seq_groups: List[Tuple[List[int], SamplingParams]],
+    is_prompts: List[bool],
     samples: torch.Tensor,
+    subquery_lens: Optional[List[int]] = None,
 ) -> List[Tuple[List[int], List[int]]]:
-    samples = samples.tolist()
+    samples = samples.cpu()
     sample_idx = 0
     results = []
-    for seq_group in selected_seq_groups:
+    for i, (seq_group,
+            is_prompt) in enumerate(zip(selected_seq_groups, is_prompts)):
         seq_ids, _ = seq_group
         num_parent_seqs = len(seq_ids)
         assert num_parent_seqs == 1, (
             "Greedy sampling should have only one seq.")
-        parent_ids = list(range(num_parent_seqs))
-        next_token_ids = [samples[sample_idx]]
+        if is_prompt or subquery_lens is None:
+            next_token_ids = [samples[sample_idx].tolist()]
+            parent_ids = list(range(num_parent_seqs))
+            sample_idx += 1
+        else:
+            next_token_ids = samples[sample_idx:sample_idx +
+                                     subquery_lens[i]].tolist()
+            sample_idx += subquery_lens[i]
+            parent_ids = [
+                parent_id for parent_id in range(num_parent_seqs)
+                for _ in range(subquery_lens[i])
+            ]
         results.append((next_token_ids, parent_ids))
-        sample_idx += num_parent_seqs
+    assert sample_idx == samples.size(0)
     return results
 
 
 def _random_sample(
     selected_seq_groups: List[Tuple[List[int], SamplingParams]],
     is_prompts: List[bool],
-    random_samples: torch.Tensor,
+    samples: torch.Tensor,
+    subquery_lens: Optional[List[int]] = None,
 ) -> List[Tuple[List[int], List[int]]]:
     # Find the maximum best_of value of the prompt phase requests.
-    random_samples = random_samples.cpu()
+    samples = samples.cpu()
     sample_idx = 0
     results = []
     for seq_group, is_prompt in zip(selected_seq_groups, is_prompts):
         seq_ids, sampling_params = seq_group
-        num_parent_seqs = len(seq_ids)
-        if is_prompt:
+        if is_prompt or subquery_lens is None:
             # Prompt phase.
-            parent_ids = [0] * sampling_params.best_of
-            next_token_ids = random_samples[
+            next_token_ids = samples[
                 sample_idx, :sampling_params.best_of].tolist()
+            parent_ids = [0]
+            sample_idx += 1
         else:
             # Generation phase.
-            parent_ids = list(range(num_parent_seqs))
-            next_token_ids = random_samples[sample_idx:sample_idx +
-                                            num_parent_seqs, 0].tolist()
+            next_token_ids, parent_ids = [], []
+            for idx, _ in enumerate(seq_ids):
+                subquery_len = subquery_lens[idx]
+                next_token_ids.extend(samples[
+                    sample_idx:sample_idx +
+                    subquery_len, :sampling_params.best_of].flatten().tolist())
+                parent_ids.extend([idx] * subquery_lens[idx])
+                sample_idx += subquery_len
+                idx += 1
+        parent_ids = [
+            parent_id for parent_id in parent_ids
+            for _ in range(sampling_params.best_of)
+        ]
         results.append((next_token_ids, parent_ids))
-        sample_idx += num_parent_seqs
+    assert sample_idx == samples.size(0)
     return results
 
 
@@ -421,10 +445,13 @@ def _sample(
         seq_group_ids, seq_groups, is_prompts, sample_indices = sample_metadata[
             sampling_type]
         if sampling_type == SamplingType.GREEDY:
-            sample_results = _greedy_sample(seq_groups, greedy_samples)
+            sample_results = _greedy_sample(seq_groups, is_prompts,
+                                            greedy_samples,
+                                            sampling_metadata.subquery_lens)
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
             sample_results = _random_sample(seq_groups, is_prompts,
-                                            multinomial_samples[sampling_type])
+                                            multinomial_samples[sampling_type],
+                                            sampling_metadata.subquery_lens)
         elif sampling_type == SamplingType.BEAM:
             sample_results = _beam_search_sample(seq_groups, is_prompts,
                                                  sampling_metadata.seq_data,
@@ -448,31 +475,63 @@ def _get_logprobs(
     batched_logprobs_query_seq_indices: List[int] = []
     batched_logprobs_query_token_indices: List[int] = []
     largest_num_logprobs = 0
-    sample_idx = 0
+    sample_idx, subquery_len_index = 0, 0
     for i, (seq_group, sample_result) in enumerate(
             zip(sampling_metadata.seq_groups, sample_results)):
         seq_ids, sampling_params = seq_group
         next_token_ids, parent_ids = sample_result
         num_parent_seqs = len(seq_ids)
-        if (i < sampling_metadata.num_prompts
-                and sampling_params.prompt_logprobs is not None):
-            largest_num_logprobs = max(largest_num_logprobs,
-                                       sampling_params.prompt_logprobs)
-            prompt_len = sampling_metadata.prompt_lens[i]
-            prompt_tokens = sampling_metadata.seq_data[
-                seq_ids[0]].prompt_token_ids
-            batched_logprobs_query_seq_indices.extend(
-                sample_idx + j for j in range(prompt_len - 1))
-            batched_logprobs_query_token_indices.extend(
-                token_id for token_id in prompt_tokens[1:])
-            sample_idx += prompt_len - 1
+        num_subquery_samples = 0
+        if i < sampling_metadata.num_prompts:
+            if sampling_params.prompt_logprobs is not None:
+                largest_num_logprobs = max(largest_num_logprobs,
+                                           sampling_params.prompt_logprobs)
+                subquery_seqs = [
+                    j for j in range(sampling_metadata.prompt_lens[i] - 1)
+                ] + parent_ids
+                subquery_tokens = sampling_metadata.seq_data[
+                    seq_ids[0]].prompt_token_ids[1:] + next_token_ids
+                num_subquery_samples += sampling_metadata.prompt_lens[
+                    i] - 1 + num_parent_seqs
+            else:
+                subquery_seqs = parent_ids
+                subquery_tokens = next_token_ids
+                num_subquery_samples += num_parent_seqs
+        else:
+            if sampling_metadata.subquery_lens is None:
+                subquery_seqs = parent_ids
+                subquery_tokens = next_token_ids
+                num_subquery_samples += num_parent_seqs
+            else:
+                # When using beam search, the length of sample result will
+                # be twice of sequence length, see also: _beam_search_sample.
+                beam_factor = len(next_token_ids) // sum(
+                    sampling_metadata.
+                    subquery_lens[subquery_len_index:subquery_len_index +
+                                  num_parent_seqs])
+                subquery_seqs, subquery_tokens = [], []
+                next_tokens_offset = 0
+                for i in range(num_parent_seqs):
+                    subquery_len = sampling_metadata.subquery_lens[
+                        subquery_len_index + i]
+                    subquery_seqs.extend([
+                        k for k in parent_ids[i * beam_factor:(i + 1) *
+                                              beam_factor]
+                        for _ in range(subquery_len)
+                    ])
+                    subquery_tokens.extend(
+                        next_token_ids[next_tokens_offset:next_tokens_offset +
+                                       subquery_len * beam_factor])
+                    next_tokens_offset += subquery_len * beam_factor
+                    num_subquery_samples += subquery_len
+                subquery_len_index += num_parent_seqs
         batched_logprobs_query_seq_indices.extend(
-            [sample_idx + parent_id for parent_id in parent_ids])
-        batched_logprobs_query_token_indices.extend(next_token_ids)
+            [sample_idx + seq for seq in subquery_seqs])
+        batched_logprobs_query_token_indices.extend(subquery_tokens)
         if sampling_params.logprobs is not None:
             largest_num_logprobs = max(largest_num_logprobs,
                                        sampling_params.logprobs)
-        sample_idx += num_parent_seqs
+        sample_idx += num_subquery_samples
     assert sample_idx == logprobs.size(0)
 
     # Batched query for logprobs of selected token
@@ -507,7 +566,6 @@ def _get_logprobs(
         if (i < sampling_metadata.num_prompts
                 and sampling_params.prompt_logprobs is not None):
             num_logprobs = sampling_params.prompt_logprobs
-            prompt_len = sampling_metadata.prompt_lens[i]
             prompt_tokens = sampling_metadata.seq_data[
                 seq_ids[0]].prompt_token_ids
             group_prompt_logprobs: PromptLogprobs = [None]
@@ -557,20 +615,39 @@ def _build_sampler_output(
     sampling_metadata: SamplingMetadata,
     prompt_logprobs: List[Optional[PromptLogprobs]],
     sample_logprobs: List[SampleLogprobs],
+    decoding_probs: torch.Tensor,
 ) -> SamplerOutput:
     sampler_output = []
-    for (seq_group, sample_result, group_prompt_logprobs,
-         group_sample_logprobs) in zip(sampling_metadata.seq_groups,
-                                       sample_results, prompt_logprobs,
-                                       sample_logprobs):
+    sample_idx = 0
+    decoding_probs = decoding_probs.reshape(-1, decoding_probs.shape[-1])
+    for i, (seq_group, sample_result, group_prompt_logprobs,
+            group_sample_logprobs) in enumerate(
+                zip(sampling_metadata.seq_groups, sample_results,
+                    prompt_logprobs, sample_logprobs)):
         seq_ids, _ = seq_group
         next_token_ids, parent_ids = sample_result
         seq_outputs = []
+
+        # return multiple token ids as output for parallel decoding
+        if i >= sampling_metadata.num_prompts and \
+                sampling_metadata.subquery_lens is not None:
+            subquery_len = sampling_metadata.subquery_lens[i]
+        else:
+            subquery_len = 1
+        group_decoding_probs = decoding_probs[sample_idx:sample_idx +
+                                              subquery_len]
+        sample_idx += subquery_len
+
+        if subquery_len > 1:
+            next_token_ids, group_sample_logprobs = \
+                [next_token_ids], [group_sample_logprobs]
+
         for parent_id, next_token_id, logprobs in zip(parent_ids,
                                                       next_token_ids,
                                                       group_sample_logprobs):
             seq_outputs.append(
                 SequenceOutput(seq_ids[parent_id], next_token_id, logprobs))
         sampler_output.append(
-            SequenceGroupOutput(seq_outputs, group_prompt_logprobs))
+            SequenceGroupOutput(seq_outputs, group_prompt_logprobs,
+                                group_decoding_probs))
     return sampler_output

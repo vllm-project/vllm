@@ -73,6 +73,11 @@ class Stats:
     num_running: int
     num_waiting: int
     num_swapped: int
+
+    num_draft_tokens: int
+    num_emitted_tokens: int
+    reject_sampler_accept_rate: float
+
     gpu_cache_usage: float
     cpu_cache_usage: float
 
@@ -157,6 +162,15 @@ class StatLogger:
                 prompt_throughput=prompt_throughput,
                 generation_throughput=generation_throughput)
 
+            if stats.num_draft_tokens:
+                specualtive_decoding_message = (
+                    f'Drafted: {stats.num_draft_tokens}, '
+                    f'Emitted: {stats.num_emitted_tokens}, '
+                    f'Accepted rate: {stats.reject_sampler_accept_rate:.2f}%, '
+                )
+            else:
+                specualtive_decoding_message = ''
+
             # Log to stdout.
             logger.info(
                 f"Avg prompt throughput: {prompt_throughput:.1f} tokens/s, "
@@ -164,6 +178,7 @@ class StatLogger:
                 f"Running: {stats.num_running} reqs, "
                 f"Swapped: {stats.num_swapped} reqs, "
                 f"Pending: {stats.num_waiting} reqs, "
+                f"{specualtive_decoding_message}"
                 f"GPU KV cache usage: {stats.gpu_cache_usage * 100:.1f}%, "
                 f"CPU KV cache usage: {stats.cpu_cache_usage * 100:.1f}%")
 

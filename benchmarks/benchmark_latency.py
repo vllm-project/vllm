@@ -18,6 +18,7 @@ def main(args: argparse.Namespace):
     # the engine will automatically process the request in multiple batches.
     llm = LLM(
         model=args.model,
+        draft_model=args.draft_model,
         tokenizer=args.tokenizer,
         quantization=args.quantization,
         tensor_parallel_size=args.tensor_parallel_size,
@@ -27,11 +28,12 @@ def main(args: argparse.Namespace):
         kv_cache_dtype=args.kv_cache_dtype,
         device=args.device,
         use_flash_attn=args.use_flash_attn,
+        parallel_decoding_lookahead=args.parallel_decoding_lookahead,
     )
 
     sampling_params = SamplingParams(
         n=args.n,
-        temperature=0.0 if args.use_beam_search else 1.0,
+        temperature=0.0 if args.use_beam_search else args.temperature,
         top_p=1.0,
         use_beam_search=args.use_beam_search,
         ignore_eos=True,
@@ -90,6 +92,7 @@ if __name__ == '__main__':
         description='Benchmark the latency of processing a single batch of '
         'requests till completion.')
     parser.add_argument('--model', type=str, default='facebook/opt-125m')
+    parser.add_argument("--draft-model", type=str, default=None)
     parser.add_argument('--tokenizer', type=str, default=None)
     parser.add_argument('--quantization',
                         '-q',
@@ -104,6 +107,7 @@ if __name__ == '__main__':
                         default=1,
                         help='Number of generated sequences per prompt.')
     parser.add_argument('--use-beam-search', action='store_true')
+    parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument('--num-iters',
                         type=int,
                         default=3,
@@ -150,5 +154,10 @@ if __name__ == '__main__':
         "--use-flash-attn",
         action="store_true",
         help="Use flash attention (requires flash-attn >= 2.5.0).")
+    parser.add_argument(
+        "--parallel-decoding-lookahead",
+        type=int,
+        default=1,
+        help="Number of lookahead steps for speculativespeculative decoding.")
     args = parser.parse_args()
     main(args)

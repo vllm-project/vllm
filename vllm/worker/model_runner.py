@@ -280,9 +280,12 @@ class ModelRunner:
         lora_prompt_mapping: List[int] = []
         lora_requests: Set[LoRARequest] = set()
 
+        prompt_lens: List[int] = []
+        subquery_lens: List[int] = []
         for seq_group_metadata in seq_group_metadata_list:
             assert not seq_group_metadata.is_prompt
 
+            lookahead = seq_group_metadata.parallel_decoding_lookahead
             seq_ids = list(seq_group_metadata.seq_data.keys())
             lora_id = seq_group_metadata.lora_int_id
 
@@ -292,21 +295,30 @@ class ModelRunner:
             for seq_id in seq_ids:
                 seq_data = seq_group_metadata.seq_data[seq_id]
                 generation_token = seq_data.get_last_token_id()
-                input_tokens.append([generation_token])
+                input_tokens.append(
+                    [generation_token] +
+                    seq_data.get_candidate_token_ids()[:lookahead - 1])
 
-                seq_len = seq_data.get_len()
-                position = seq_len - 1
-                input_positions.append([position])
+                position = seq_data.get_len() - 1
+                seq_len = seq_data.get_len() + lookahead - 1
+                input_positions.append(
+                    [position + i for i in range(lookahead)])
 
                 context_len = seq_len if self.sliding_window is None else min(
                     seq_len, self.sliding_window)
                 context_lens.append(context_len)
+                prompt_lens.append(seq_len)
+                subquery_lens.append(lookahead)
 
                 block_table = seq_group_metadata.block_tables[seq_id]
-                block_number = block_table[position // self.block_size]
-                block_offset = position % self.block_size
-                slot = block_number * self.block_size + block_offset
-                slot_mapping.append([slot])
+                slots = []
+                for p in [position + i for i in range(lookahead)]:
+                    block_number = block_table[p // self.block_size]
+                    block_offset = p % self.block_size
+                    slot = block_number * self.block_size + block_offset
+                    slots.append(slot)
+                slot_mapping.append(slots)
+
                 lora_index_mapping.append([lora_id])
                 lora_prompt_mapping.append(lora_id)
 
@@ -332,21 +344,24 @@ class ModelRunner:
                 input_positions.append([])
                 slot_mapping.append([])
                 context_lens.append(1)
+                prompt_lens.append(2)
+                subquery_lens.append(1)
                 block_tables.append([])
             batch_size = graph_batch_size
 
+        max_prompt_len = max(subquery_lens)
         input_tokens = _make_tensor_with_pad(input_tokens,
-                                             max_len=1,
+                                             max_len=max_prompt_len,
                                              pad=0,
                                              dtype=torch.long,
                                              device=self.device)
         input_positions = _make_tensor_with_pad(input_positions,
-                                                max_len=1,
+                                                max_len=max_prompt_len,
                                                 pad=0,
                                                 dtype=torch.long,
                                                 device=self.device)
         slot_mapping = _make_tensor_with_pad(slot_mapping,
-                                             max_len=1,
+                                             max_len=max_prompt_len,
                                              pad=_PAD_SLOT_ID,
                                              dtype=torch.long,
                                              device=self.device)
@@ -377,21 +392,31 @@ class ModelRunner:
             _pad_to_max(mapping, 1, pad=0) for mapping in lora_index_mapping
         ]
 
+        start_loc_tensor = torch.arange(0,
+                                        len(prompt_lens) * max_prompt_len,
+                                        max_prompt_len,
+                                        dtype=torch.long,
+                                        device=self.device)
+        prompt_lens_tensor = torch.tensor(prompt_lens,
+                                          dtype=torch.long,
+                                          device=self.device)
+
         input_metadata = InputMetadata(
             is_prompt=False,
             slot_mapping=slot_mapping,
-            prompt_lens=None,
-            max_seq_len=None,
-            start_loc=None,
+            prompt_lens=prompt_lens_tensor,
+            max_seq_len=max_prompt_len,
+            start_loc=start_loc_tensor,
             max_context_len=max_context_len,
             context_lens=context_lens,
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
             kv_cache_dtype=self.kv_cache_dtype,
-            use_flash_attn=self.model_config.use_flash_attn,
+            use_flash_attn=getattr(self.model_config, 'use_flash_attn', False),
         )
-        return (input_tokens, input_positions, input_metadata,
-                lora_index_mapping, lora_prompt_mapping, lora_requests)
+        return (input_tokens, input_positions, input_metadata, prompt_lens,
+                subquery_lens, lora_index_mapping, lora_prompt_mapping,
+                lora_requests)
 
     def _prepare_sample(
         self,
@@ -407,6 +432,7 @@ class ModelRunner:
         categorized_sample_indices_start_idx = 0
 
         max_subquery_len = max(subquery_lens) if subquery_lens else 1
+        subquery_lens_index = 0
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             seq_ids = list(seq_group_metadata.seq_data.keys())
             sampling_params = seq_group_metadata.sampling_params
@@ -437,17 +463,27 @@ class ModelRunner:
                     seq_group_metadata.state.generator = torch.Generator(
                         device="cuda").manual_seed(sampling_params.seed)
             else:
-                num_seqs = len(seq_ids)
-                selected_token_indices.extend(
-                    range(selected_token_start_idx,
-                          selected_token_start_idx + num_seqs))
-                selected_token_start_idx += num_seqs
+                for _ in seq_group_metadata.seq_data:
+                    if subquery_lens is not None:
+                        subquery_len = subquery_lens[subquery_lens_index]
+                    else:
+                        subquery_len = 1
 
-                categorized_sample_indices[
-                    sampling_params.sampling_type].extend(
-                        range(categorized_sample_indices_start_idx,
-                              categorized_sample_indices_start_idx + num_seqs))
-                categorized_sample_indices_start_idx += num_seqs
+                    categorized_sample_indices[
+                        sampling_params.sampling_type].extend(
+                            range(
+                                categorized_sample_indices_start_idx,
+                                categorized_sample_indices_start_idx +
+                                subquery_len))
+                    categorized_sample_indices_start_idx += subquery_len
+
+                    selected_token_indices.extend(
+                        range(selected_token_start_idx,
+                              selected_token_start_idx + subquery_len))
+                    selected_token_start_idx += max_subquery_len
+
+                    # move the next entry in subquery_lens
+                    subquery_lens_index += 1
 
             if sampling_params.seed is not None:
                 generators.append(seq_group_metadata.state.generator)
@@ -472,6 +508,7 @@ class ModelRunner:
             seq_groups=seq_groups,
             seq_data=seq_data,
             prompt_lens=prompt_lens,
+            subquery_lens=subquery_lens,
             selected_token_indices=selected_token_indices,
             categorized_sample_indices=categorized_sample_indices,
             generators=generators,
@@ -493,11 +530,10 @@ class ModelRunner:
                  subquery_lens, lora_index_mapping, lora_prompt_mapping,
                  lora_requests) = self._prepare_prompt(seq_group_metadata_list)
             else:
-                (input_tokens, input_positions, input_metadata,
-                 lora_index_mapping, lora_prompt_mapping,
+                (input_tokens, input_positions, input_metadata, prompt_lens,
+                 subquery_lens, lora_index_mapping, lora_prompt_mapping,
                  lora_requests) = self._prepare_decode(seq_group_metadata_list)
                 prompt_lens = []
-                subquery_lens = None
             sampling_metadata = self._prepare_sample(seq_group_metadata_list,
                                                      prompt_lens,
                                                      subquery_lens)
@@ -528,6 +564,7 @@ class ModelRunner:
                 "use_cuda_graph": input_metadata.use_cuda_graph,
                 "kv_cache_dtype": input_metadata.kv_cache_dtype,
                 "use_flash_attn": input_metadata.use_flash_attn,
+                "subquery_lens": sampling_metadata.subquery_lens,
                 "selected_token_indices":
                 sampling_metadata.selected_token_indices,
                 "lora_requests": lora_requests,
@@ -557,6 +594,7 @@ class ModelRunner:
                 seq_groups=None,
                 seq_data=None,
                 prompt_lens=None,
+                subquery_lens=metadata_dict["subquery_lens"],
                 selected_token_indices=metadata_dict["selected_token_indices"],
                 categorized_sample_indices=None,
                 generators=None,
@@ -700,12 +738,32 @@ class ModelRunner:
 
         # Prepare dummy inputs. These will be reused for all batch sizes.
         max_batch_size = max(_BATCH_SIZES_TO_CAPTURE)
-        input_tokens = torch.zeros(max_batch_size, 1, dtype=torch.long).cuda()
-        input_positions = torch.zeros(max_batch_size, 1,
-                                      dtype=torch.long).cuda()
-        slot_mapping = torch.empty(max_batch_size, 1, dtype=torch.long).cuda()
+        input_tokens = torch.zeros(
+            max_batch_size,
+            self.scheduler_config.parallel_decoding_lookahead,
+            dtype=torch.long,
+            device='cuda')
+        input_positions = torch.zeros(
+            max_batch_size,
+            self.scheduler_config.parallel_decoding_lookahead,
+            dtype=torch.long,
+            device='cuda')
+        slot_mapping = torch.empty(
+            max_batch_size,
+            self.scheduler_config.parallel_decoding_lookahead,
+            dtype=torch.long,
+            device='cuda')
         slot_mapping.fill_(_PAD_SLOT_ID)
-        context_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
+        context_lens = torch.ones(max_batch_size,
+                                  dtype=torch.int32,
+                                  device='cuda')
+        max_prompt_len = self.scheduler_config.parallel_decoding_lookahead
+        prompt_lens = context_lens + max_prompt_len
+        start_loc = torch.arange(0,
+                                 len(prompt_lens) * max_prompt_len,
+                                 max_prompt_len,
+                                 dtype=torch.long,
+                                 device=self.device)
         block_tables = torch.from_numpy(self.graph_block_tables).cuda()
 
         graph_batch_size = _get_graph_batch_size(
@@ -728,9 +786,9 @@ class ModelRunner:
                 input_metadata = InputMetadata(
                     is_prompt=False,
                     slot_mapping=slot_mapping[:batch_size],
-                    prompt_lens=None,
-                    max_seq_len=None,
-                    start_loc=None,
+                    prompt_lens=prompt_lens,
+                    max_seq_len=max_prompt_len,
+                    start_loc=start_loc,
                     max_context_len=self.max_context_len_to_capture,
                     context_lens=context_lens[:batch_size],
                     block_tables=block_tables[:batch_size],

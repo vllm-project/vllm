@@ -6,7 +6,8 @@ import pickle
 from typing import (TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple,
                     Union)
 
-from vllm.lora.request import LoRARequest
+import torch
+
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, LoRAConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
@@ -14,12 +15,14 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics import StatLogger, Stats
 from vllm.engine.ray_utils import RayWorkerVllm, initialize_cluster, ray
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
-                           SequenceGroupOutput, SequenceOutput, SequenceStatus)
+                           SequenceGroupMetadata, SequenceGroupOutput,
+                           SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
-                                               TokenizerGroup)
+                                               get_tokenizer, TokenizerGroup)
 from vllm.utils import Counter, set_cuda_visible_devices, get_ip, get_open_port, get_distributed_init_method
 
 if ray:
@@ -73,12 +76,14 @@ class LLMEngine:
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
+        draft_model_config: Optional[ModelConfig],
         placement_group: Optional["PlacementGroup"],
         log_stats: bool,
     ) -> None:
         logger.info(
             "Initializing an LLM engine with config: "
             f"model={model_config.model!r}, "
+            f"draft_model={draft_model_config.model if draft_model_config else None !r}, "
             f"tokenizer={model_config.tokenizer!r}, "
             f"tokenizer_mode={model_config.tokenizer_mode}, "
             f"revision={model_config.revision}, "
@@ -103,11 +108,27 @@ class LLMEngine:
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
+        self.draft_model_config = draft_model_config
         self.log_stats = log_stats
         self._verify_args()
+        self._verify_vocab()
 
         self._init_tokenizer()
         self.seq_counter = Counter()
+
+        self.driver_worker = None
+        self.driver_dummy_worker = None
+        self.workers = []
+        self.draft_driver_worker = None
+        self.draft_driver_dummy_worker = None
+        self.draft_workers = []
+
+        self.reject_sampler = None
+
+        # Lazy import the Worker to avoid importing torch.cuda/xformers
+        # before CUDA_VISIBLE_DEVICES is set in the Worker
+        from vllm.worker.worker import Worker
+        from vllm.worker.spec_decode.multi_step_worker import MultiStepWorker
 
         # Create the parallel GPU workers.
         if self.parallel_config.worker_use_ray:
@@ -115,9 +136,23 @@ class LLMEngine:
             ray_usage = os.environ.get("RAY_USAGE_STATS_ENABLED", "0")
             if ray_usage != "1":
                 os.environ["RAY_USAGE_STATS_ENABLED"] = "0"
-            self._init_workers_ray(placement_group)
+
+            self.driver_worker, self.driver_dummy_worker, self.workers = self._init_workers_ray(
+                placement_group, Worker, model_config)
+            if self.draft_model_config is not None:
+                self.draft_driver_worker, self.draft_driver_dummy_worker, self.draft_workers = self._init_workers_ray(
+                    placement_group,
+                    MultiStepWorker,
+                    model_config=self.draft_model_config)
         else:
-            self._init_workers()
+            self.driver_worker, self.workers = self._init_workers(
+                Worker, model_config=model_config)
+            if self.draft_model_config is not None:
+                self.draft_driver_worker, self.draft_workers = self._init_workers(
+                    MultiStepWorker, model_config=draft_model_config)
+
+        if self.draft_model_config is not None:
+            self._init_reject_sampler()
 
         # Profile the memory usage and initialize the cache.
         self._init_cache()
@@ -137,19 +172,24 @@ class LLMEngine:
     def get_tokenizer_for_seq(self, sequence: Sequence):
         return self.tokenizer.get_lora_tokenizer(sequence.lora_request)
 
-    def _init_workers(self):
+    def _init_workers(
+        self,
+        worker_cls: Any,
+        model_config: ModelConfig,
+    ) -> Tuple[Any, Optional[Any], List[Any]]:
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
         from vllm.worker.worker import Worker
+        from vllm.worker.spec_decode.multi_step_worker import MultiStepWorker
 
         assert self.parallel_config.world_size == 1, (
             "Ray is required if parallel_config.world_size > 1.")
 
-        self.workers: List[Worker] = []
+        workers: List[Union[Worker, MultiStepWorker]] = []
         distributed_init_method = get_distributed_init_method(
             get_ip(), get_open_port())
-        self.driver_worker = Worker(
-            self.model_config,
+        driver_worker = worker_cls(
+            model_config,
             self.parallel_config,
             self.scheduler_config,
             self.device_config,
@@ -160,8 +200,19 @@ class LLMEngine:
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )
-        self._run_workers("init_model")
-        self._run_workers("load_model")
+        self._run_workers("init_model",
+                          driver_worker=driver_worker,
+                          workers=workers)
+        self._run_workers("load_model",
+                          driver_worker=driver_worker,
+                          workers=workers)
+        return driver_worker, workers
+
+    def _init_reject_sampler(self):
+        from vllm.model_executor.layers.rejection_sampler import RejectionSampler
+
+        self.reject_sampler = RejectionSampler(strict_mode=False)
+        self.reject_sampler.init_gpu_tensors(rank=0)
 
     def _init_tokenizer(self, **tokenizer_init_kwargs):
         init_kwargs = dict(
@@ -175,15 +226,20 @@ class LLMEngine:
         self.tokenizer: TokenizerGroup = TokenizerGroup(
             self.model_config.tokenizer, **init_kwargs)
 
-    def _init_workers_ray(self, placement_group: "PlacementGroup",
-                          **ray_remote_kwargs):
+    def _init_workers_ray(
+        self,
+        placement_group: "PlacementGroup",
+        worker_cls: Any,
+        model_config: ModelConfig,
+        **ray_remote_kwargs,
+    ) -> Tuple[RayWorkerVllm, RayWorkerVllm, List[RayWorkerVllm]]:
         if self.parallel_config.tensor_parallel_size == 1:
             num_gpus = self.cache_config.gpu_memory_utilization
         else:
             num_gpus = 1
 
-        self.driver_dummy_worker: RayWorkerVllm = None
-        self.workers: List[RayWorkerVllm] = []
+        driver_dummy_worker: RayWorkerVllm = None
+        workers: List[RayWorkerVllm] = []
 
         driver_ip = get_ip()
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
@@ -199,26 +255,26 @@ class LLMEngine:
                 num_gpus=num_gpus,
                 scheduling_strategy=scheduling_strategy,
                 **ray_remote_kwargs,
-            )(RayWorkerVllm).remote(self.model_config.trust_remote_code)
+            )(RayWorkerVllm).remote(model_config.trust_remote_code)
 
             worker_ip = ray.get(worker.get_node_ip.remote())
-            if worker_ip == driver_ip and self.driver_dummy_worker is None:
+            if worker_ip == driver_ip and driver_dummy_worker is None:
                 # If the worker is on the same node as the driver, we use it
                 # as the resource holder for the driver process.
-                self.driver_dummy_worker = worker
+                driver_dummy_worker = worker
             else:
-                self.workers.append(worker)
+                workers.append(worker)
 
-        if self.driver_dummy_worker is None:
+        if driver_dummy_worker is None:
             raise ValueError(
                 "Ray does not allocate any GPUs on the driver node. Consider "
                 "adjusting the Ray placement group or running the driver on a "
                 "GPU node.")
 
         driver_node_id, driver_gpu_ids = ray.get(
-            self.driver_dummy_worker.get_node_and_gpu_ids.remote())
+            driver_dummy_worker.get_node_and_gpu_ids.remote())
         worker_node_and_gpu_ids = ray.get(
-            [worker.get_node_and_gpu_ids.remote() for worker in self.workers])
+            [worker.get_node_and_gpu_ids.remote() for worker in workers])
 
         node_workers = defaultdict(list)
         node_gpus = defaultdict(list)
@@ -234,29 +290,25 @@ class LLMEngine:
 
         # Set CUDA_VISIBLE_DEVICES for the driver.
         set_cuda_visible_devices(node_gpus[driver_node_id])
-        for worker, (node_id, _) in zip(self.workers, worker_node_and_gpu_ids):
+        for worker, (node_id, _) in zip(workers, worker_node_and_gpu_ids):
             worker.set_cuda_visible_devices.remote(node_gpus[node_id])
 
         distributed_init_method = get_distributed_init_method(
             driver_ip, get_open_port())
 
-        # Lazy import the Worker to avoid importing torch.cuda/xformers
-        # before CUDA_VISIBLE_DEVICES is set in the Worker
-        from vllm.worker.worker import Worker
-
         # Initialize torch distributed process group for the workers.
-        model_config = copy.deepcopy(self.model_config)
+        model_config = copy.deepcopy(model_config)
         parallel_config = copy.deepcopy(self.parallel_config)
         scheduler_config = copy.deepcopy(self.scheduler_config)
         device_config = copy.deepcopy(self.device_config)
 
         for rank, (worker, (node_id,
-                            _)) in enumerate(zip(self.workers,
+                            _)) in enumerate(zip(workers,
                                                  worker_node_and_gpu_ids),
                                              start=1):
             local_rank = node_workers[node_id].index(rank)
             worker.init_worker.remote(
-                lambda rank=rank, local_rank=local_rank: Worker(
+                lambda rank=rank, local_rank=local_rank: worker_cls(
                     model_config,
                     parallel_config,
                     scheduler_config,
@@ -270,7 +322,7 @@ class LLMEngine:
 
         driver_rank = 0
         driver_local_rank = node_workers[driver_node_id].index(driver_rank)
-        self.driver_worker = Worker(
+        driver_worker = worker_cls(
             model_config,
             parallel_config,
             scheduler_config,
@@ -283,12 +335,18 @@ class LLMEngine:
             is_driver_worker=True,
         )
 
-        self._run_workers("init_model", cupy_port=get_open_port())
+        self._run_workers("init_model",
+                          cupy_port=get_open_port(),
+                          driver_worker=driver_worker,
+                          workers=workers)
         self._run_workers(
             "load_model",
             max_concurrent_workers=self.parallel_config.
             max_parallel_loading_workers,
+            driver_worker=driver_worker,
+            workers=workers,
         )
+        return driver_worker, driver_dummy_worker, workers
 
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
@@ -297,6 +355,27 @@ class LLMEngine:
             self.lora_config.verify_with_model_config(self.model_config)
             self.lora_config.verify_with_scheduler_config(
                 self.scheduler_config)
+
+    def _verify_vocab(self) -> None:
+        if not self.draft_model_config:
+            return
+
+        target_tokenizer = get_tokenizer(self.model_config.tokenizer)
+        draft_tokenizer = get_tokenizer(self.draft_model_config.tokenizer)
+        assert target_tokenizer.vocab_size == draft_tokenizer.vocab_size, (
+            f"Target model's vocab size ({target_tokenizer.vocab_size}) "
+            f"does not match with draft model's vocab size "
+            f"({draft_tokenizer.vocab_size}).")
+
+        # referred from llama.cpp
+        SPEC_VOCAB_CHECK_START_TOKEN_ID = 5
+        for i in range(SPEC_VOCAB_CHECK_START_TOKEN_ID,
+                       target_tokenizer.vocab_size):
+            target_token = target_tokenizer.convert_ids_to_tokens(i)
+            draft_token = draft_tokenizer.convert_ids_to_tokens(i)
+            assert target_token == draft_token, (
+                f"Target model's vocab does not match with draft model's vocab "
+                f"at index {i}: {target_token} != {draft_token}")
 
     def _init_cache(self) -> None:
         """Profiles the memory usage and initializes the KV cache.
@@ -319,6 +398,8 @@ class LLMEngine:
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameters.
         """
+        from vllm.worker.cache_engine import CacheEngine
+
         # Get the maximum number of blocks that can be allocated on GPU and CPU.
         num_blocks = self._run_workers(
             "profile_num_available_blocks",
@@ -333,6 +414,26 @@ class LLMEngine:
         # operators can be applied to all workers.
         num_gpu_blocks = min(b[0] for b in num_blocks)
         num_cpu_blocks = min(b[1] for b in num_blocks)
+
+        # redistribute kv-cache blocks between target and draft model
+        cache_block_size = CacheEngine.get_cache_block_size(
+            self.cache_config.block_size,
+            self.cache_config.cache_dtype,
+            self.model_config,
+            self.parallel_config,
+        )
+        gpu_blocks_memory = num_gpu_blocks * self.cache_config.block_size * cache_block_size
+
+        if self.draft_model_config is not None:
+            cache_block_size += CacheEngine.get_cache_block_size(
+                self.cache_config.block_size,
+                self.cache_config.cache_dtype,
+                self.draft_model_config,
+                self.parallel_config,
+            )
+        num_gpu_blocks = gpu_blocks_memory // (self.cache_config.block_size *
+                                               cache_block_size)
+
         # FIXME(woosuk): Change to debug log.
         logger.info(f"# GPU blocks: {num_gpu_blocks}, "
                     f"# CPU blocks: {num_cpu_blocks}")
@@ -358,6 +459,17 @@ class LLMEngine:
         # Warm up the model. This includes capturing the model into CUDA graph
         # if enforce_eager is False.
         self._run_workers("warm_up_model")
+
+        # Initialize the cache.
+        self._run_workers("init_cache_engine",
+                          cache_config=self.cache_config,
+                          driver_worker=self.draft_driver_worker,
+                          workers=self.draft_workers)
+        # Warm up the model. This includes capturing the model into CUDA graph
+        # if enforce_eager is False.
+        self._run_workers("warm_up_model",
+                          driver_worker=self.draft_driver_worker,
+                          workers=self.draft_workers)
 
     @classmethod
     def from_engine_args(cls, engine_args: EngineArgs) -> "LLMEngine":
@@ -452,6 +564,10 @@ class LLMEngine:
             prompt=prompt,
             prompt_token_ids=prompt_token_ids,
             lora_request=lora_request)
+
+        if self.scheduler_config.parallel_decoding_lookahead > 1 and sampling_params.use_beam_search:
+            raise NotImplementedError(
+                "Speculative decoding doesn't support beam search.")
 
         # Create the sequences.
         block_size = self.cache_config.block_size
@@ -573,6 +689,7 @@ class LLMEngine:
             parent_child_dict[sample.parent_seq_id].append(sample)
         # List of (child, parent)
         child_seqs: List[Tuple[Sequence, Sequence]] = []
+        child_seqs_accepted: List[int] = []
 
         # Process the child samples for each parent sequence
         for parent in parent_seqs:
@@ -590,19 +707,37 @@ class LLMEngine:
             for child_sample in child_samples[:-1]:
                 new_child_seq_id = next(self.seq_counter)
                 child = parent.fork(new_child_seq_id)
-                child.append_token_id(child_sample.output_token,
-                                      child_sample.logprobs)
+                if isinstance(child_sample.output_token, (list, tuple)):
+                    for output_token, logprobs in zip(
+                            child_sample.output_token, child_sample.logprobs):
+                        child.append_token_id(output_token, logprobs)
+                    child_seqs_accepted.append(len(child_sample.output_token))
+                else:
+                    child.append_token_id(child_sample.output_token,
+                                          child_sample.logprobs)
+                    child_seqs_accepted.append(1)
                 child_seqs.append((child, parent))
             # Continue the parent sequence for the last child sample.
             # We reuse the parent sequence here to reduce redundant memory
             # copies, especially when using non-beam search sampling methods.
             last_child_sample = child_samples[-1]
-            parent.append_token_id(last_child_sample.output_token,
-                                   last_child_sample.logprobs)
+            if isinstance(last_child_sample.output_token, (list, tuple)):
+                for output_token, logprobs in zip(
+                        last_child_sample.output_token,
+                        last_child_sample.logprobs):
+                    parent.append_token_id(output_token, logprobs)
+                    child_seqs_accepted.append(
+                        len(last_child_sample.output_token))
+            else:
+                parent.append_token_id(last_child_sample.output_token,
+                                       last_child_sample.logprobs)
+                child_seqs_accepted.append(1)
             child_seqs.append((parent, parent))
 
-        for seq, _ in child_seqs:
-            self._decode_sequence(seq, seq_group.sampling_params)
+        for (seq, _), accepted in zip(child_seqs, child_seqs_accepted):
+            self._decode_sequence(seq,
+                                  seq_group.sampling_params,
+                                  accepted=accepted)
             self._check_stop(seq, seq_group.sampling_params)
 
         # Non-beam search case
@@ -756,7 +891,6 @@ class LLMEngine:
         # Log stats.
         if self.log_stats:
             self.stat_logger.log(self._get_stats(scheduler_outputs))
-
         return request_outputs
 
     def step(self) -> List[RequestOutput]:
@@ -814,7 +948,39 @@ class LLMEngine:
 
         if not scheduler_outputs.is_empty():
             # Execute the model.
-            all_outputs = self._run_workers(
+
+            # execute the draft model
+            if scheduler_outputs.prompt_run:
+                draft_step_func = 'execute_model'
+                kwargs = {}
+            else:
+                draft_step_func = 'execute_model_multi_step'
+                kwargs = {
+                    # speculative decoding: sampling (k-1) token from the draft model
+                    "num_steps":
+                    scheduler_outputs.parallel_decoding_lookahead - 1,
+                }
+            all_draft_outputs: List[SamplerOutput] = self._run_workers(
+                draft_step_func,
+                driver_kwargs={
+                    "seq_group_metadata_list": seq_group_metadata_list,
+                    "blocks_to_swap_in": scheduler_outputs.blocks_to_swap_in,
+                    "blocks_to_swap_out": scheduler_outputs.blocks_to_swap_out,
+                    # blocks copy won't happen to draft model: no prefix cache and no beam search
+                    "blocks_to_copy": {},
+                    **kwargs,
+                },
+                driver_worker=self.draft_driver_worker,
+                workers=self.draft_workers)
+            draft_output = all_draft_outputs[0] if len(
+                all_draft_outputs) > 0 else None
+
+            # add possible draft tokens to the sequences
+            self._apply_draft_output(seq_group_metadata_list,
+                                     scheduler_outputs, draft_output)
+
+            # execute the target model
+            all_outputs: List[SamplerOutput] = self._run_workers(
                 "execute_model",
                 driver_kwargs={
                     "seq_group_metadata_list": seq_group_metadata_list,
@@ -826,18 +992,189 @@ class LLMEngine:
 
             # Only the driver worker returns the sampling results.
             output = all_outputs[0]
+
+            # apply reject sampling
+            self._apply_reject_sampling(seq_group_metadata_list,
+                                        scheduler_outputs, draft_output,
+                                        output)
         else:
             output = []
 
         return self._process_model_outputs(output, scheduler_outputs)
+
+    def _apply_draft_output(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        scheduler_outputs: SchedulerOutputs,
+        draft_output: List[SamplerOutput],
+    ):
+        if draft_output is None or \
+                scheduler_outputs.prompt_run or \
+                scheduler_outputs.parallel_decoding_lookahead == 1:
+            # clear the candidate token ids from previous step
+            for i, seq_group_metadata in enumerate(seq_group_metadata_list):
+                for _, seq_data in seq_group_metadata.seq_data.items():
+                    seq_data.candidate_token_ids = []
+            return
+
+        batch_size = len(seq_group_metadata_list)
+        num_draft_tokens = scheduler_outputs.parallel_decoding_lookahead - 1
+        draft_token_ids = [[-1] * num_draft_tokens for _ in range(batch_size)]
+
+        for j, seq_group_outputs in enumerate(draft_output):
+            for i, seq_group_output in enumerate(seq_group_outputs):
+                assert len(seq_group_output.samples
+                           ) == 1, "no beam search when speculative decoding"
+                if isinstance(seq_group_output.samples[0].output_token, list):
+                    draft_token_ids[i][j] = seq_group_output.samples[
+                        0].output_token[-1]
+                else:
+                    draft_token_ids[i][j] = seq_group_output.samples[
+                        0].output_token
+
+        for i, seq_group_metadata in enumerate(seq_group_metadata_list):
+            for _, seq_data in seq_group_metadata.seq_data.items():
+                seq_data.candidate_token_ids = draft_token_ids[i]
+
+    def _apply_reject_sampling(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        scheduler_outputs: SchedulerOutputs,
+        draft_output: List[SamplerOutput],
+        target_output: SamplerOutput,
+    ):
+        if draft_output is None or \
+                scheduler_outputs.prompt_run or \
+                scheduler_outputs.parallel_decoding_lookahead == 1:
+            return
+
+        batch_size = len(seq_group_metadata_list)
+        num_draft_tokens = scheduler_outputs.parallel_decoding_lookahead - 1
+
+        target_probs = torch.empty(batch_size,
+                                   num_draft_tokens,
+                                   self.model_config.get_vocab_size(),
+                                   dtype=torch.float,
+                                   device='cuda')
+        bonus_token_ids = [[] for _ in range(batch_size)]
+        draft_probs = torch.empty(batch_size,
+                                  num_draft_tokens,
+                                  self.model_config.get_vocab_size(),
+                                  dtype=torch.float,
+                                  device='cuda')
+        draft_token_ids = [[-1] * num_draft_tokens for _ in range(batch_size)]
+
+        for j, seq_group_outputs in enumerate(draft_output):
+            for i, seq_group_output in enumerate(seq_group_outputs):
+                assert len(seq_group_output.samples
+                           ) == 1, "no beam search when speculative decoding"
+                if isinstance(seq_group_output.samples[0].output_token, list):
+                    draft_token_ids[i][j] = seq_group_output.samples[
+                        0].output_token[-1]
+                    draft_probs[i,
+                                j, :] = seq_group_output.decoding_probs[-1, :]
+                else:
+                    draft_token_ids[i][j] = seq_group_output.samples[
+                        0].output_token
+                    draft_probs[i, j, :] = seq_group_output.decoding_probs
+        for i, seq_group_output in enumerate(target_output):
+            assert len(seq_group_output.samples
+                       ) == 1, "no beam search when speculative decoding"
+            target_probs[i, :, :] = seq_group_output.decoding_probs[:-1, :]
+            bonus_token_ids[i] = seq_group_output.samples[0].output_token[-1:]
+
+        bonus_token_ids = torch.tensor(bonus_token_ids,
+                                       dtype=torch.long,
+                                       device='cuda')
+        draft_token_ids = torch.tensor(draft_token_ids,
+                                       dtype=torch.long,
+                                       device='cuda')
+
+        # apply the reject sampling
+        output_token_ids = self.reject_sampler(target_probs=target_probs,
+                                               bonus_token_ids=bonus_token_ids,
+                                               draft_probs=draft_probs,
+                                               draft_token_ids=draft_token_ids)
+        output_token_ids = output_token_ids.tolist()
+        num_batch_tokens = 0
+        for i, (seq_group_metadata, seq_group, sampled_token_ids, seq_group_output) in \
+                enumerate(zip(seq_group_metadata_list,
+                              scheduler_outputs.scheduled_seq_groups,
+                              output_token_ids,
+                              target_output)):
+            ignore_eos = seq_group.sampling_params.ignore_eos
+            eos_token_id = self.get_tokenizer_for_seq(seq_group).eos_token_id
+            target_output_tokens = seq_group_output.samples[0].output_token
+
+            output_tokens, has_eos = [], False
+            # Apply reject sampling when random sampling is used, otherwise
+            # compare if the draft and target tokens are the same.
+            #
+            # see also: https://github.com/huggingface/transformers/blob/45244940725ec1b3e4c390b74dbafe65b298acca/src/transformers/generation/utils.py#L4566-L4597
+            if seq_group.sampling_params.sampling_type == SamplingType.GREEDY:
+                for draft_token_id, token_id in zip(draft_token_ids[i],
+                                                    target_output_tokens):
+                    if draft_token_id != token_id:
+                        break
+                    output_tokens.append(token_id)
+                    if not ignore_eos and token_id == eos_token_id:
+                        has_eos = True
+                        break
+                if not has_eos:
+                    if len(output_tokens) == len(draft_token_ids[i]):
+                        output_tokens.append(target_output_tokens[-1])
+                    else:
+                        output_tokens.append(
+                            target_output_tokens[len(output_tokens)])
+            else:
+                for token_id in sampled_token_ids:
+                    if token_id == -1:
+                        break
+                    output_tokens.append(token_id)
+                    if not ignore_eos and token_id == eos_token_id:
+                        has_eos = True
+                        break
+            bonus = None if has_eos else output_tokens[-1]
+
+            # When all tokens from the draft model are accepted, there
+            # would be two tokens kv cache are missed from the draft
+            # model: the last draft's output and the bonus token.
+            #
+            # In such case we add the bonus token as the "candidate" token
+            # for draft model to run the next decoding pass for computing
+            # the kv cache.
+            if len(output_tokens) == len(
+                    target_output_tokens) and bonus is not None:
+                # set candidate token ids (there should be only one sequence in each sequence
+                # group if beam-search is not used).
+                for _, seq_data in seq_group_metadata.seq_data.items():
+                    seq_data.candidate_token_ids = [bonus]
+                    break
+                seq_group_metadata.parallel_decoding_lookahead = 2
+            else:
+                # clear the candidate token ids in the sequence data
+                for _, seq_data in seq_group_metadata.seq_data.items():
+                    seq_data.candidate_token_ids = []
+                    break
+                seq_group_metadata.parallel_decoding_lookahead = 1
+
+            num_batch_tokens += len(output_tokens)
+            seq_group_output.samples[0].output_token = output_tokens
+        scheduler_outputs.num_batched_tokens = num_batch_tokens
+
+    def reset_system_stats(self):
+        now = time.monotonic()
+        self.last_logging_time = now
 
     def do_log_stats(self) -> None:
         """Forced log when no requests active."""
         if self.log_stats:
             self.stat_logger.log(self._get_stats(scheduler_outputs=None))
 
-    def _get_stats(self,
-                   scheduler_outputs: Optional[SchedulerOutputs]) -> Stats:
+    def _get_stats(
+        self,
+        scheduler_outputs: Optional[SchedulerOutputs],
+    ) -> Stats:
         """Get Stats to be Logged to Prometheus."""
         now = time.monotonic()
 
@@ -888,11 +1225,27 @@ class LLMEngine:
             time_to_first_tokens = time_last_iters if prompt_run else []
             time_per_output_tokens = [] if prompt_run else time_last_iters
 
+        if self.reject_sampler is not None:
+            num_draft_tokens = self.reject_sampler.num_draft_tokens
+            num_bouns_tokens = num_draft_tokens // self.scheduler_config.parallel_decoding_lookahead
+            num_emitted_tokens = self.reject_sampler.num_emitted_tokens
+            reject_sampler_accept_rate = (
+                self.reject_sampler.num_accepted_tokens /
+                (self.reject_sampler.num_draft_tokens + num_bouns_tokens) *
+                100)
+        else:
+            num_draft_tokens = 0
+            num_emitted_tokens = 0
+            reject_sampler_accept_rate = 0
+
         return Stats(
             now=now,
             num_running=num_running,
             num_swapped=num_swapped,
             num_waiting=num_waiting,
+            num_draft_tokens=num_draft_tokens,
+            num_emitted_tokens=num_emitted_tokens,
+            reject_sampler_accept_rate=reject_sampler_accept_rate,
             gpu_cache_usage=gpu_cache_usage,
             cpu_cache_usage=cpu_cache_usage,
             num_prompt_tokens=num_prompt_tokens,
@@ -902,8 +1255,20 @@ class LLMEngine:
             time_e2e_requests=time_e2e_requests,
         )
 
-    def _decode_sequence(self, seq: Sequence, prms: SamplingParams) -> None:
+    def _decode_sequence(self,
+                         seq: Sequence,
+                         prms: SamplingParams,
+                         accepted: int = 1) -> None:
         """Decodes the new token for a sequence."""
+
+        # statsh current detokenization progress
+        seq.detokenize_progress = (
+            seq.prefix_offset,
+            seq.read_offset,
+            len(seq.tokens) if seq.tokens is not None else 0,
+            len(seq.output_text),
+        )
+
         (new_tokens, new_output_text, prefix_offset,
          read_offset) = detokenize_incrementally(
              self.get_tokenizer_for_seq(seq),
@@ -913,6 +1278,7 @@ class LLMEngine:
              read_offset=seq.read_offset,
              skip_special_tokens=prms.skip_special_tokens,
              spaces_between_special_tokens=prms.spaces_between_special_tokens,
+             parallel_decoding_accepted=accepted,
          )
         if seq.tokens is None:
             seq.tokens = new_tokens
@@ -938,12 +1304,13 @@ class LLMEngine:
             return
 
         # Check if the sequence has reached max_model_len.
-        if seq.get_len() > self.scheduler_config.max_model_len:
+        if seq.get_len() >= self.scheduler_config.max_model_len:
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
 
         # Check if the sequence has reached max_tokens.
-        if seq.get_output_len() == sampling_params.max_tokens:
+        if sampling_params.max_tokens and seq.get_output_len(
+        ) >= sampling_params.max_tokens:
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
 
@@ -985,10 +1352,19 @@ class LLMEngine:
         driver_args: Optional[List[Any]] = None,
         driver_kwargs: Optional[Dict[str, Any]] = None,
         max_concurrent_workers: Optional[int] = None,
+        # use `Ellipsis` as the default argument value as `None` will be
+        # treat as given worker (usually the draft worker) is not available.
+        driver_worker: List[Any] = Ellipsis,  # List[Worker]
+        workers: Any = Ellipsis,  # List[Worker]
         use_ray_compiled_dag: bool = False,
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers."""
+
+        if driver_worker is Ellipsis:
+            driver_worker = self.driver_worker
+        if workers is Ellipsis:
+            workers = self.workers
 
         if max_concurrent_workers:
             raise NotImplementedError(
@@ -1002,7 +1378,7 @@ class LLMEngine:
             # Start the ray workers first.
             ray_worker_outputs = [
                 worker.execute_method.remote(method, *args, **kwargs)
-                for worker in self.workers
+                for worker in workers
             ]
 
         if driver_args is None:
@@ -1011,11 +1387,15 @@ class LLMEngine:
             driver_kwargs = kwargs
 
         # Start the driver worker after all the ray workers.
-        driver_worker_output = getattr(self.driver_worker,
-                                       method)(*driver_args, **driver_kwargs)
+        if driver_worker is not None:
+            driver_worker_output = getattr(driver_worker,
+                                           method)(*driver_args,
+                                                   **driver_kwargs)
+        else:
+            driver_worker_output = None
 
         # Get the results of the ray workers.
-        if self.workers:
+        if workers:
             if use_ray_compiled_dag:
                 try:
                     ray_worker_outputs = [

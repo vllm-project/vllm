@@ -190,8 +190,9 @@ def detokenize_incrementally(
     read_offset: int = 0,
     skip_special_tokens: bool = False,
     spaces_between_special_tokens: bool = True,
+    parallel_decoding_accepted: int = 1,
 ) -> Tuple[List[str], str, int, int]:
-    new_token_id = all_input_ids[-1]
+    new_token_ids = all_input_ids[-parallel_decoding_accepted:]
     # This is the first iteration for this sequence
     if prev_tokens is None:
         new_tokens = tokenizer.convert_ids_to_tokens(
@@ -202,14 +203,15 @@ def detokenize_incrementally(
         # Subtract 1 extra to account for the generated token.
         prefix_offset = max(len(output_tokens) - 6, 0)
         # If the first new token is a special token, we can't skip 1 extra token
-        if skip_special_tokens and new_token_id in tokenizer.all_special_ids:
+        if skip_special_tokens and new_token_ids[
+                -1] in tokenizer.all_special_ids:
             read_offset = max(len(output_tokens), 0)
         else:
             read_offset = max(len(output_tokens) - 1, 0)
     else:
-        # Put new_token_id in a list so skip_special_tokens is respected
+        # Put new_token_ids in a list so skip_special_tokens is respected
         new_tokens = tokenizer.convert_ids_to_tokens(
-            [new_token_id], skip_special_tokens=skip_special_tokens)
+            new_token_ids, skip_special_tokens=skip_special_tokens)
         output_tokens = prev_tokens + new_tokens
 
     # The prefix text is necessary only to defeat cleanup algorithms in

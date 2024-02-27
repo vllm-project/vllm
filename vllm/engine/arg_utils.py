@@ -11,6 +11,7 @@ from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
 class EngineArgs:
     """Arguments for vLLM engine."""
     model: str
+    draft_model: Optional[str] = None
     tokenizer: Optional[str] = None
     tokenizer_mode: str = 'auto'
     trust_remote_code: bool = False
@@ -46,6 +47,7 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = None
     device: str = 'cuda'
     use_flash_attn: Optional[bool] = False
+    parallel_decoding_lookahead: Optional[int] = 1
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -65,6 +67,12 @@ class EngineArgs:
             type=str,
             default='facebook/opt-125m',
             help='name or path of the huggingface model to use')
+        parser.add_argument(
+            '--draft-model',
+            type=str,
+            default=None,
+            help='name or path of the huggingface model to use for draft '
+            'generation.')
         parser.add_argument(
             '--tokenizer',
             type=str,
@@ -276,6 +284,11 @@ class EngineArgs:
             '--use-flash-attn',
             action='store_true',
             help='Use flash attention (requires flash-attn >= 2.5.0).')
+        parser.add_argument(
+            '--parallel-decoding-lookahead',
+            type=int,
+            default=EngineArgs.parallel_decoding_lookahead,
+            help='Number of tokens to look ahead during speculative decoding')
         return parser
 
     @classmethod
@@ -289,7 +302,14 @@ class EngineArgs:
     def create_engine_configs(
         self,
     ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig,
-               DeviceConfig, Optional[LoRAConfig]]:
+               DeviceConfig, Optional[LoRAConfig], Optional[ModelConfig]]:
+
+        assert self.parallel_decoding_lookahead == 1 or self.draft_model is not None, \
+            'parallel_decoding_lookahead > 1 requires draft_model to be specified.'
+        # discard the draft model if parallel_decoding_lookahead == 1 \
+        # and draft model is not required
+        if self.parallel_decoding_lookahead == 1:
+            self.draft_model = None
 
         if self.use_flash_attn:
             # flash-attn's flash_attn_with_kvcache requires block size must be
@@ -317,7 +337,9 @@ class EngineArgs:
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
                                            model_config.max_model_len,
-                                           self.max_paddings)
+                                           self.max_paddings,
+                                           self.parallel_decoding_lookahead)
+
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,
@@ -325,8 +347,17 @@ class EngineArgs:
             lora_dtype=self.lora_dtype,
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
+
+        draft_model_config = ModelConfig(
+            self.draft_model, self.tokenizer, self.tokenizer_mode,
+            self.trust_remote_code, self.download_dir, self.load_format,
+            self.dtype, self.seed, self.revision, self.code_revision,
+            self.tokenizer_revision, self.max_model_len, self.quantization,
+            self.enforce_eager, self.max_context_len_to_capture,
+            self.use_flash_attn) if self.draft_model else None
+
         return (model_config, cache_config, parallel_config, scheduler_config,
-                device_config, lora_config)
+                device_config, lora_config, draft_model_config)
 
 
 @dataclass

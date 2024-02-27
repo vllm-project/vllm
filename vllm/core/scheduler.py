@@ -39,6 +39,7 @@ class SchedulerOutputs:
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
         ignored_seq_groups: List[SequenceGroup],
+        parallel_decoding_lookahead: Optional[int] = 1,
     ) -> None:
         self.scheduled_seq_groups = scheduled_seq_groups
         self.prompt_run = prompt_run
@@ -49,6 +50,7 @@ class SchedulerOutputs:
         # Swap in and swap out should never happen at the same time.
         assert not (blocks_to_swap_in and blocks_to_swap_out)
         self.ignored_seq_groups = ignored_seq_groups
+        self.parallel_decoding_lookahead = parallel_decoding_lookahead
 
         self.num_loras = len(self.lora_requests)
         if self.num_loras > 0:
@@ -68,6 +70,17 @@ class SchedulerOutputs:
     @property
     def lora_requests(self) -> Set[LoRARequest]:
         return {g.lora_request for g in self.scheduled_seq_groups}
+
+    def __str__(self) -> str:
+        return (
+            f"SchedulerOutputs(scheduled_seq_groups={self.scheduled_seq_groups}, "
+            f"prompt_run={self.prompt_run}, "
+            f"num_batched_tokens={self.num_batched_tokens}, "
+            f"blocks_to_swap_in={self.blocks_to_swap_in}, "
+            f"blocks_to_swap_out={self.blocks_to_swap_out}, "
+            f"blocks_to_copy={self.blocks_to_copy}, "
+            f"ignored_seq_groups={self.ignored_seq_groups}, "
+            f"parallel_decoding_lookahead={self.parallel_decoding_lookahead})")
 
 
 class Scheduler:
@@ -279,7 +292,9 @@ class Scheduler:
         preempted: List[SequenceGroup] = []
         while self.running:
             seq_group = self.running.popleft()
-            while not self.block_manager.can_append_slot(seq_group):
+            while not self.block_manager.can_append_slots(
+                    seq_group,
+                    reserve=self.scheduler_config.parallel_decoding_lookahead):
                 if self.running:
                     # Preempt the lowest-priority sequence groups.
                     victim_seq_group = self.running.pop()
@@ -293,6 +308,9 @@ class Scheduler:
                     break
             else:
                 # Append new slots to the sequence group.
+                self._reserve_logical_slots(seq_group,
+                                            lookahead=self.scheduler_config.
+                                            parallel_decoding_lookahead)
                 self._append_slot(seq_group, blocks_to_copy)
                 running.append(seq_group)
         self.running = running
@@ -336,6 +354,9 @@ class Scheduler:
                     curr_loras.add(lora_int_id)
                 self.swapped.popleft()
                 self._swap_in(seq_group, blocks_to_swap_in)
+                self._reserve_logical_slots(seq_group,
+                                            lookahead=self.scheduler_config.
+                                            parallel_decoding_lookahead)
                 self._append_slot(seq_group, blocks_to_copy)
                 num_curr_seqs += num_new_seqs
                 self.running.append(seq_group)
@@ -349,14 +370,29 @@ class Scheduler:
             seq_group.num_seqs(status=SequenceStatus.RUNNING)
             for seq_group in self.running)
 
+        lookahead = 1
+        for seq_group in self.running:
+            for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+                k = self.scheduler_config.parallel_decoding_lookahead
+                k = min(k, self.scheduler_config.max_model_len - seq.get_len())
+                if seq_group.sampling_params.max_tokens:
+                    k = min(
+                        k, seq_group.sampling_params.max_tokens -
+                        seq.get_output_len())
+                lookahead = max(lookahead, k)
+
+        if lookahead > 1:
+            num_batched_tokens *= lookahead
+
         scheduler_outputs = SchedulerOutputs(
-            scheduled_seq_groups=self.running,
+            scheduled_seq_groups=running,
             prompt_run=False,
             num_batched_tokens=num_batched_tokens,
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
             ignored_seq_groups=[],
+            parallel_decoding_lookahead=lookahead,
         )
         return scheduler_outputs
 
@@ -388,6 +424,8 @@ class Scheduler:
                 lora_request=seq_group.lora_request,
                 prefix=seq_group.prefix,
                 state=seq_group.state,
+                parallel_decoding_lookahead=scheduler_outputs.
+                parallel_decoding_lookahead,
             )
             seq_group_metadata_list.append(seq_group_metadata)
         return seq_group_metadata_list, scheduler_outputs
@@ -406,6 +444,12 @@ class Scheduler:
         self.block_manager.allocate(seq_group)
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             seq.status = SequenceStatus.RUNNING
+
+    def _reserve_logical_slots(self,
+                               seq_group: SequenceGroup,
+                               lookahead: int = 1) -> None:
+        for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+            seq.reserve_logical_blocks(lookahead - 1)
 
     def _append_slot(
         self,

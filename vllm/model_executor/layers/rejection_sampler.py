@@ -30,6 +30,14 @@ class RejectionSampler(nn.Module):
         # value in a variable for readability.
         self._num_bonus_tokens = 1
 
+        # NOTE: the `num_accepted_tokens` is not the tokens actually "accepted"
+        # from the outputs of the draft model, but is used to measure the quality
+        # of the draft model.
+        #
+        # For the top-level metric on how many tokens are emitted by speculative
+        # decoding, one should use `num_emitted_tokens`.
+        #
+        # See also: https://github.com/vllm-project/vllm/pull/2658
         self.num_accepted_tokens: Optional[torch.Tensor] = None
         self.num_emitted_tokens: Optional[torch.Tensor] = None
         self.num_draft_tokens: int = 0

@@ -26,6 +26,9 @@ class LLM:
 
     Args:
         model: The name or path of a HuggingFace Transformers model.
+        draft_model: The name or path of a HuggingFace Transformers model for
+            draft generation. If None, we use the same model for draft and
+            refine generations.
         tokenizer: The name or path of a HuggingFace Transformers tokenizer.
         tokenizer_mode: The tokenizer mode. "auto" will use the fast tokenizer
             if available, and "slow" will always use the slow tokenizer.
@@ -70,6 +73,7 @@ class LLM:
     def __init__(
         self,
         model: str,
+        draft_model: Optional[str] = None,
         tokenizer: Optional[str] = None,
         tokenizer_mode: str = "auto",
         trust_remote_code: bool = False,
@@ -90,6 +94,7 @@ class LLM:
             kwargs["disable_log_stats"] = True
         engine_args = EngineArgs(
             model=model,
+            draft_model=draft_model,
             tokenizer=tokenizer,
             tokenizer_mode=tokenizer_mode,
             trust_remote_code=trust_remote_code,

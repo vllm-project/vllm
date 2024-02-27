@@ -361,6 +361,9 @@ def _paged_attention(
     # length of the context whose kv-cache has been stored, i.e., the value of
     # `context_lens - seq_len` for decoding.
     #
+    # The `context_attention_fwd` kernel expects the same samatics as the
+    # `flash_attn_with_kvcache` kernel.
+    #
     # In the contrast, both `paged_attention_v1` and `paged_attention_v2` expects
     # the `context_lens` to be the length of the current attention context.
 
@@ -375,6 +378,22 @@ def _paged_attention(
             softmax_scale=scale,
             causal=True,
             alibi_slopes=alibi_slopes,
+        )
+    elif seq_len > 1:
+        # prefix-enabled attention
+        context_attention_fwd(
+            query,
+            key,
+            value,
+            output,
+            key_cache,
+            value_cache,
+            input_metadata.block_tables,  # [BS, max_block_per_request]
+            input_metadata.start_loc,
+            input_metadata.prompt_lens,
+            input_metadata.context_lens - seq_len,
+            input_metadata.max_seq_len,
+            alibi_slopes,
         )
     elif use_v1:
         # Run PagedAttention V1.

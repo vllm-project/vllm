@@ -170,6 +170,17 @@ class BlockSpaceManager:
         num_seqs = seq_group.num_seqs(status=SequenceStatus.RUNNING)
         return num_seqs <= num_free_gpu_blocks
 
+    def can_append_slots(self,
+                         seq_group: SequenceGroup,
+                         reserve: Optional[int] = 1) -> bool:
+        # Simple heuristic: as the maximum possible parallel decoding lookahead
+        # is 8 (less than block size), if there is at least one free block for
+        # each sequence, we can append.
+        assert reserve <= self.block_size, f"Expect reserve <= block_size, got {reserve} > {self.block_size}"
+        num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
+        num_seqs = seq_group.num_seqs(status=SequenceStatus.RUNNING)
+        return num_seqs <= num_free_gpu_blocks
+
     def append_slot(self, seq: Sequence) -> Optional[Tuple[int, int]]:
         """Allocate a physical slot for a new token."""
         logical_blocks = seq.logical_token_blocks

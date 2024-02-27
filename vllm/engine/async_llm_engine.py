@@ -12,6 +12,7 @@ from vllm.engine.ray_utils import initialize_cluster, ray
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
+from vllm.sequence import SamplerOutput
 
 logger = init_logger(__name__)
 
@@ -186,7 +187,42 @@ class _AsyncLLMEngine(LLMEngine):
 
         if not scheduler_outputs.is_empty():
             # Execute the model.
-            all_outputs = await self._run_workers_async(
+
+            # execute the draft model
+            if scheduler_outputs.prompt_run:
+                draft_step_func = 'execute_model'
+                kwargs = {}
+            else:
+                draft_step_func = 'execute_model_multi_step'
+                kwargs = {
+                    # speculative decoding: sampling (k-1) token from the draft model
+                    "num_steps":
+                    scheduler_outputs.parallel_decoding_lookahead - 1,
+                }
+            all_draft_outputs: List[
+                SamplerOutput] = await self._run_workers_async(
+                    draft_step_func,
+                    driver_kwargs={
+                        "seq_group_metadata_list": seq_group_metadata_list,
+                        "blocks_to_swap_in":
+                        scheduler_outputs.blocks_to_swap_in,
+                        "blocks_to_swap_out":
+                        scheduler_outputs.blocks_to_swap_out,
+                        # blocks copy won't happen to draft model: no prefix cache and no beam search
+                        "blocks_to_copy": {},
+                        **kwargs,
+                    },
+                    driver_worker=self.draft_driver_worker,
+                    workers=self.draft_workers)
+            draft_output = all_draft_outputs[0] if len(
+                all_draft_outputs) > 0 else None
+
+            # add possible draft tokens to the sequences
+            self._apply_draft_output(seq_group_metadata_list,
+                                     scheduler_outputs, draft_output)
+
+            # execute the target model
+            all_outputs: List[SamplerOutput] = await self._run_workers_async(
                 "execute_model",
                 driver_kwargs={
                     "seq_group_metadata_list": seq_group_metadata_list,
@@ -197,6 +233,11 @@ class _AsyncLLMEngine(LLMEngine):
 
             # Only the driver worker returns the sampling results.
             output = all_outputs[0]
+
+            # apply reject sampling
+            self._apply_reject_sampling(seq_group_metadata_list,
+                                        scheduler_outputs, draft_output,
+                                        output)
         else:
             output = []
 
@@ -254,10 +295,19 @@ class _AsyncLLMEngine(LLMEngine):
         *args,
         driver_args: Optional[List[Any]] = None,
         driver_kwargs: Optional[Dict[str, Any]] = None,
+        # use `Ellipsis` as the default argument value as `None` will be
+        # treat as given worker (usually the draft worker) is not available.
+        driver_worker: List[Any] = Ellipsis,  # List[Worker]
+        workers: Any = Ellipsis,  # List[Worker]
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers."""
         coros = []
+
+        if driver_worker is Ellipsis:
+            driver_worker = self.driver_worker
+        if workers is Ellipsis:
+            workers = self.workers
 
         if driver_args is None:
             driver_args = args
@@ -265,15 +315,19 @@ class _AsyncLLMEngine(LLMEngine):
             driver_kwargs = kwargs
 
         # Run the driver worker asynchronously.
-        driver_executor = getattr(self.driver_worker, method)
-        coros.append(asyncio.get_event_loop().run_in_executor(
-            None, partial(driver_executor, *driver_args, **driver_kwargs)))
+        if driver_worker is not None:
+            driver_executor = getattr(driver_worker, method)
+            coros.append(asyncio.get_event_loop().run_in_executor(
+                None, partial(driver_executor, *driver_args, **driver_kwargs)))
 
-        # Run the ray workers asynchronously.
-        for worker in self.workers:
-            coros.append(worker.execute_method.remote(method, *args, **kwargs))
+            # Run the ray workers asynchronously.
+            for worker in workers:
+                coros.append(
+                    worker.execute_method.remote(method, *args, **kwargs))
 
-        all_outputs = await asyncio.gather(*coros)
+            all_outputs = await asyncio.gather(*coros)
+        else:
+            all_outputs = [None]
         return all_outputs
 
 
