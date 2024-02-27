@@ -147,8 +147,8 @@ class CompletionRequest(BaseModel):
                     token_ids: List[int],
                     logits: torch.Tensor) -> torch.Tensor:
                 for token_id, bias in self.logit_bias.items():
-                    bias = min(100, max(
-                        -100, bias))  # Clamp the bias between -100 and 100
+                    # Clamp the bias between -100 and 100 per OpenAI API spec
+                    bias = min(100, max(-100, bias))
                     logits[int(token_id)] += bias
                 return logits
 
