@@ -126,8 +126,7 @@ function (define_gpu_extension_target MOD_NAME MOD_DEST MOD_GPU_LANG MOD_SRC
   target_compile_definitions(${MOD_NAME} PRIVATE
     "-DTORCH_EXTENSION_NAME=${MOD_NAME}")
 
-  target_include_directories(${MOD_NAME} PRIVATE
-    csrc PRIVATE ${MPI_CXX_INCLUDE_DIRS})
+  target_include_directories(${MOD_NAME} PRIVATE csrc)
 
   target_link_libraries(${MOD_NAME} PRIVATE ${TORCH_LIBRARIES})
 
