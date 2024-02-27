@@ -103,6 +103,7 @@ jobs:
                 Gi_per_thread: ${{ inputs.Gi_per_thread }}
                 python: ${{ inputs.python }}
                 venv: ${{ env.VENV_BASE }}
+                pypi: ${{ secrets.NM_PRIVATE_PYPI_LOCATION }}
 
             - name: build whl
               id: build_whl

@@ -100,6 +100,7 @@ jobs:
                 Gi_per_thread: ${{ inputs.Gi_per_thread }}
                 python: ${{ inputs.python }}
                 venv: TEST
+                pypi: ${{ secrets.NM_PRIVATE_PYPI_LOCATION }}
 
             - name: test
               id: test
@@ -109,6 +110,7 @@ jobs:
                 test_results: test-results
                 python: ${{ inputs.python }}
                 venv: TEST
+                pypi: ${{ secrets.NM_PRIVATE_PYPI_LOCATION }}
 
             - name: report test results
               id: report_test

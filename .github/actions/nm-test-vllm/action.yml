@@ -13,6 +13,9 @@ inputs:
   venv:
     description: 'name for python virtual environment'
     required: true
+  pypi:
+    description: 'ip address for pypi server'
+    required: true
 outputs:
   status:
     description: "final status from 'pytest tests/'"
@@ -25,7 +28,7 @@ runs:
       COMMIT=${{ github.sha }}
       VENV="${{ inputs.venv }}-${COMMIT:0:7}"
       source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
-      pip3 install --index-url http://192.168.201.226:8080/ --trusted-host 192.168.201.226 magic-wand
+      pip3 install --index-url http://${{ inputs.pypi }}:8080/ --trusted-host ${{ inputs.pypi }} magic-wand
       pip3 install -r requirements-dev.txt
       # run tests via runner script (serially)
       SUCCESS=0
