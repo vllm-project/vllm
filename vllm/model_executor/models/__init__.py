@@ -38,11 +38,13 @@ _MODELS = {
     "MPTForCausalLM": ("mpt", "MPTForCausalLM"),
     "OLMoForCausalLM": ("olmo", "OLMoForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
+    "OrionForCausalLM": ("orion", "OrionForCausalLM"),
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "RWForCausalLM": ("falcon", "FalconForCausalLM"),
     "StableLMEpochForCausalLM": ("stablelm", "StablelmForCausalLM"),
+    "StableLmForCausalLM": ("stablelm", "StablelmForCausalLM"),
 }
 
 # Models not supported by ROCm.
