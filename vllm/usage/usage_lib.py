@@ -87,7 +87,7 @@ class UsageContext(Enum):
 class UsageMessage:
 
     def __init__(self) -> None:
-        self.gpu: Optional[dict] = None
+        self.gpu_list: Optional[dict] = None
         self.provider: Optional[str] = None
         self.architecture: Optional[str] = None
         self.platform: Optional[str] = None
@@ -106,13 +106,12 @@ class UsageMessage:
 
     def _report_usage(self, model: str, context: UsageContext) -> None:
         self.context = context.value
-        self.gpu = dict()
+        self.gpu_list = []
         for i in range(torch.cuda.device_count()):
-            k = torch.cuda.get_device_properties(i).name
-            if k in self.gpu:
-                self.gpu[k] += 1
-            else:
-                self.gpu[k] = 1
+            device_property = torch.cuda.get_device_properties(i)
+            name = device_property.name
+            memory = device_property.total_memory
+            self.gpu_list.append((name, memory))
         self.provider = _detect_cloud_provider()
         self.architecture = platform.machine()
         self.platform = platform.platform()
@@ -123,7 +122,7 @@ class UsageMessage:
         self.cpu_type = cpuinfo.get_cpu_info()['brand_raw']
         self.total_memory = psutil.virtual_memory().total
         self._write_to_file()
-        headers = {'Content-type': 'application/json'}
+        headers = {'Content-type': 'application/x-ndjson'}
         payload = json.dumps(vars(self))
         try:
             requests.post(_USAGE_STATS_URL, data=payload, headers=headers)
