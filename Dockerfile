@@ -4,21 +4,8 @@
 #################### BASE BUILD IMAGE ####################
 FROM nvidia/cuda:12.1.0-devel-ubuntu22.04 AS dev
 
-# Set the DEBIAN_FRONTEND variable to noninteractive to avoid interactive prompts
-ENV DEBIAN_FRONTEND=noninteractive
-
-# Preconfigure tzdata for US Central Time (build running in us-central-1 but this really doesn't matter.)
-RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
-    && echo 'tzdata tzdata/Zones/America select Chicago' | debconf-set-selections
-
-# We install an older version of python here for testing to make sure vllm works with older versions of Python.
-# For the actual openai compatible server, we will use the latest version of Python.
 RUN apt-get update -y \
-    && apt-get install -y software-properties-common \
-    && add-apt-repository ppa:deadsnakes/ppa -y \
-    && apt-get update -y \
-    && apt-get install -y python3.8 python3.8-dev python3.8-venv python3-pip git \
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.8 1
+    && apt-get install -y python3-pip git
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
@@ -88,8 +75,10 @@ RUN --mount=type=cache,target=/root/.cache/pip VLLM_USE_PRECOMPILED=1 pip instal
 
 
 #################### RUNTIME BASE IMAGE ####################
-# use CUDA base as CUDA runtime dependencies are already installed via pip
-FROM nvidia/cuda:12.1.0-base-ubuntu22.04 AS vllm-base
+# We used base cuda image because pytorch installs its own cuda libraries.
+# However cupy depends on cuda libraries so we had to switch to the runtime image
+# In the future it would be nice to get a container with pytorch and cuda without duplicating cuda
+FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04 AS vllm-base
 
 # libnccl required for ray
 RUN apt-get update -y \

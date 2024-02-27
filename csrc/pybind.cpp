@@ -161,6 +161,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     &silu_and_mul_dispatch,
     "Activation function used in SwiGLU.");
   ops.def(
+    "gelu_and_mul",
+    &gelu_and_mul,
+    "Activation function used in GeGLU.");
+  ops.def(
     "gelu_new",
     &gelu_new_dispatch,
     "GELU implementation used in GPT-2.");
