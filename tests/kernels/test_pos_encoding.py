@@ -2,9 +2,13 @@ from typing import List, Optional
 
 import pytest
 import torch
+from vllm.utils import is_xpu
+
 from allclose_default import get_default_atol, get_default_rtol
 from itertools import accumulate
 from vllm.model_executor.layers.rotary_embedding import get_rope
+
+XPU_DEVICES = ["xpu"] if is_xpu() else []
 
 IS_NEOX_STYLE = [True, False]
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -16,7 +20,8 @@ SEQ_LENS = [11, 8192]  # Arbitrary values for testing
 SEEDS = [0]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-]
+] if torch.cuda.is_available() else []
+DEVICES = CUDA_DEVICES + XPU_DEVICES
 
 
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
@@ -27,7 +32,7 @@ CUDA_DEVICES = [
 @pytest.mark.parametrize("rotary_dim", ROTARY_DIMS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
 def test_rotary_embedding(
     is_neox_style: bool,
