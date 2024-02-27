@@ -38,7 +38,7 @@ async def generate(request: Request) -> Response:
 
     The request should be a JSON object with the following fields:
     - prompt: the prompt to use for the generation.
-    - adapter: name of the LoRA adapter to be used.
+    - adapter: name of the LoRA adapter to be used. 
     - stream: whether to stream the results or not.
     - other fields: the sampling parameters (See `SamplingParams` for details).
     """
@@ -122,7 +122,8 @@ if __name__ == "__main__":
             lora_name=lora.name,
             lora_int_id=i,
             lora_local_path=lora.local_path,
-        ) for i, lora in enumerate(args.lora_modules, start=1)
+        ) 
+        for i, lora in enumerate(args.lora_modules, start=1)
     } if args.enable_lora else {}
 
     app.root_path = args.root_path
