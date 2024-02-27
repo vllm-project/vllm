@@ -5,10 +5,9 @@ Run `pytest tests/distributed/test_basic_distributed_correctness.py --forked`.
 import pytest
 import torch
 
-# TODO: just picking one, need to update test runner to selectively use "--forked"
 MODELS = [
     "facebook/opt-125m",
-    # "meta-llama/Llama-2-7b-hf",
+    "meta-llama/Llama-2-7b-hf",
 ]
 
 
