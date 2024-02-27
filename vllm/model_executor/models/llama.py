@@ -386,12 +386,12 @@ class LlamaForCausalLM(nn.Module):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            if self.config.model_type in self.models_with_tied_embeddings:
+            if (self.config.model_type in self.models_with_tied_embeddings
+                    and "lm_head" in name):
                 # Skip loading the lm_head weights if the model uses tied
                 # embeddings.
                 # TODO(woosuk): Support LoRA for these models.
-                if "lm_head" in name:
-                    continue
+                continue
 
             if self.config.model_type == "gemma" and "norm.weight" in name:
                 # GemmaRMSNorm is different from Llama's in that it multiplies
