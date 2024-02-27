@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Logging configuration for vLLM."""
 import datetime
+import inspect
 import json
 import logging
 import os
@@ -19,7 +20,8 @@ from loguru import logger
 
 import vllm.envs as envs
 
-VLLM_CONFIGURE_LOGGING = envs.VLLM_CONFIGURE_LOGGING
+# Keep both environment configuration approaches for compatibility
+VLLM_CONFIGURE_LOGGING = int(os.getenv("VLLM_CONFIGURE_LOGGING", "1"))
 VLLM_LOGGING_CONFIG_PATH = envs.VLLM_LOGGING_CONFIG_PATH
 VLLM_LOGGING_LEVEL = envs.VLLM_LOGGING_LEVEL
 VLLM_LOGGING_PREFIX = envs.VLLM_LOGGING_PREFIX
@@ -108,14 +110,15 @@ class InterceptHandler(logging.Handler):
         except AttributeError:
             level = self.loglevel_mapping[record.levelno]
 
-        frame, depth = logging.currentframe(), 2
-        while frame.f_code.co_filename == logging.__file__:
+        # Use the improved frame detection from the newer code
+        frame, depth = inspect.currentframe(), 0
+        while frame and (depth == 0
+                         or frame.f_code.co_filename == logging.__file__):
             frame = frame.f_back
             depth += 1
 
-        log = logger.bind(name='app')
-        log.opt(depth=depth,
-                exception=record.exc_info).log(level, record.getMessage())
+        logger.opt(depth=depth,
+                   exception=record.exc_info).log(level, record.getMessage())
 
 
 class CustomizeLogger:
@@ -181,36 +184,52 @@ class CustomizeLogger:
             level=level.upper(),
             format=format,
         )
-        logger.add(
-            str(unstructured_filepath),
-            rotation=rotation,
-            retention=retention,
-            enqueue=True,
-            backtrace=True,
-            level=level.upper(),
-            serialize=False,
-            format=format,
-        )
-        logger.add(
-            str(structured_filepath),
-            rotation=rotation,
-            retention=retention,
-            enqueue=True,
-            backtrace=True,
-            level=level.upper(),
-            serialize=False,
-            format=cls.formatter,
-        )
-        logging.basicConfig(handlers=[InterceptHandler()], level=0)
-        logging.getLogger("uvicorn.access").handlers = [InterceptHandler()]
-        for _log in ['uvicorn', 'uvicorn.error', 'fastapi']:
-            _logger = logging.getLogger(_log)
-            _logger.handlers = [InterceptHandler()]
+
+        # File logging configuration with null checks
+        if unstructured_filepath:
+            # Unstructured file logging configuration
+            logger.add(
+                str(unstructured_filepath),
+                rotation=rotation,
+                retention=retention,
+                enqueue=True,
+                backtrace=True,
+                level=level.upper(),
+                serialize=False,
+                format=format,
+            )
+        if structured_filepath:
+            # Structured file logging configuration
+            logger.add(
+                str(structured_filepath),
+                rotation=rotation,
+                retention=retention,
+                enqueue=True,
+                backtrace=True,
+                level=level.upper(),
+                serialize=False,
+                format=cls.formatter,
+            )
+
+        # Basic configuration for intercepting standard logging messages
+        logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
+
+        for _log in ["uvicorn", "uvicorn.error"]:
+            logging.getLogger(_log).handlers = [InterceptHandler()]
+            logging.getLogger(_log).propagate = True
 
         return logger.bind(name="vllm")
 
     @classmethod
-    def load_logging_config(cls, config_path):
+    def load_logging_config(cls, config_path: Path):
+        """Load logging configuration from a JSON file.
+
+        Args:
+            config_path (Path): Path to the configuration file.
+
+        Returns:
+            dict: Loaded configuration.
+        """
         config = None
         with open(config_path) as config_file:
             config = json.load(config_file)
@@ -256,38 +275,47 @@ def _configure_vllm_root_logger() -> None:
 
 # Try to find the loguru config path
 dir_path = os.path.dirname(os.path.realpath(__file__))
-loguru_config_path = f"{dir_path}/logging_config.json"
-_loguru_logger = None
+default_config_path = f"{dir_path}/default_logging_config.json"
+config_path = Path(os.getenv("VLLM_LOGGING_CONFIG_PATH", default_config_path))
+_root_logger = None
 
-if os.path.exists(loguru_config_path):
-    _loguru_logger = CustomizeLogger.make_logger(loguru_config_path)
-
-# The root logger is initialized when the module is imported.
-# This is thread-safe as the module is only imported once,
-# guaranteed by the Python GIL.
-_configure_vllm_root_logger()
+# Initialize the logger based on configuration
+if VLLM_CONFIGURE_LOGGING:
+    if os.path.exists(config_path):
+        _root_logger = CustomizeLogger.make_logger(config_path)
+    else:
+        # If we're configured to use logging but config file is missing, 
+        # use standard logging configuration
+        _configure_vllm_root_logger()
+        _root_logger = None
+else:
+    _root_logger = logging.getLogger("vllm")
 
 
 def init_logger(name: str):
     """Initialize a logger for the given name.
     
-    This function supports both standard Python logging and loguru logging.
-    If a loguru configuration is found, it will use loguru; otherwise, it will
-    fall back to standard logging.
+    This function supports both standard Python logging and loguru logging
+    based on VLLM_CONFIGURE_LOGGING setting.
     
     Args:
         name: The name of the logger.
         
     Returns:
-        A logger instance (either a standard Logger with custom methods or a loguru logger).
+        A logger instance (either a loguru logger or standard Logger with custom methods).
     """
-    if _loguru_logger:
+    if VLLM_CONFIGURE_LOGGING and _root_logger:
         # Use loguru logger if configured
-        return _loguru_logger.bind(name=name)
+        return _root_logger.bind(name=name)
     
     # Otherwise use standard logging
     logger = logging.getLogger(name)
-
+    
+    if not VLLM_CONFIGURE_LOGGING:
+        # Set log level from environment when not using configuration
+        logger.setLevel(os.getenv("LOG_LEVEL", "DEBUG"))
+    
+    # Add convenience methods for traditional logging
     methods_to_patch = {
         "info_once": _print_info_once,
         "warning_once": _print_warning_once,
