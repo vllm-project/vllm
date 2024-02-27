@@ -218,7 +218,7 @@ class AQLMLinearMethod(LinearMethodBase):
         # out_shape = x.shape[:-1] + (qweight.shape[-1],)
         # reshaped_x = x.reshape(-1, x.shape[-1]) #
 
-        print("input shape is ", x)
+        print("input shape is ", x.shape)
 
         output = ops.aqlm_gemm(
             x,  # hmm, reshape?
@@ -227,8 +227,8 @@ class AQLMLinearMethod(LinearMethodBase):
             weights["scales"],
         )
 
-        print("output shape is ", output)
-        
+        print("output shape is ", output.shape)
+
         if bias is not None:
             output = output + bias
         return output  # .reshape(out_shape)  ???
