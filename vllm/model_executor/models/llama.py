@@ -28,7 +28,7 @@ from torch import nn
 from transformers import LlamaConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.activation import GeluAndMul, SiluAndMul
 from vllm.model_executor.layers.attention import PagedAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
@@ -68,10 +68,13 @@ class LlamaMLP(nn.Module):
                                            hidden_size,
                                            bias=False,
                                            linear_method=linear_method)
-        if hidden_act != "silu":
+        if hidden_act == "silu":
+            self.act_fn = SiluAndMul()
+        elif hidden_act == "gelu":
+            self.act_fn = GeluAndMul()
+        else:
             raise ValueError(f"Unsupported activation: {hidden_act}. "
-                             "Only silu is supported for now.")
-        self.act_fn = SiluAndMul()
+                             "Only silu and gelu are supported for now.")
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
@@ -87,6 +90,7 @@ class LlamaAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
+        head_dim: int,
         rope_theta: float = 10000,
         rope_scaling: Optional[Dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
@@ -110,7 +114,7 @@ class LlamaAttention(nn.Module):
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = hidden_size // self.total_num_heads
+        self.head_dim = head_dim
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -170,6 +174,7 @@ class LlamaDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
+        total_num_heads = config.num_attention_heads
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
@@ -177,9 +182,11 @@ class LlamaDecoderLayer(nn.Module):
         sliding_window = getattr(config, "sliding_window", None)
         self.self_attn = LlamaAttention(
             hidden_size=self.hidden_size,
-            num_heads=config.num_attention_heads,
+            num_heads=total_num_heads,
             num_kv_heads=getattr(config, "num_key_value_heads",
-                                 config.num_attention_heads),
+                                 total_num_heads),
+            head_dim=getattr(config, "head_dim",
+                             self.hidden_size // total_num_heads),
             rope_theta=rope_theta,
             rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
@@ -261,6 +268,10 @@ class LlamaModel(nn.Module):
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
+        if self.config.model_type == "gemma":
+            # Normalize the embedding by sqrt(hidden_size)
+            hidden_states *= self.config.hidden_size**0.5
+
         residual = None
         for i in range(len(self.layers)):
             layer = self.layers[i]
@@ -287,6 +298,8 @@ class LlamaForCausalLM(nn.Module):
             "up_proj",
         ],
     }
+
+    models_with_tied_embeddings = ["gemma"]
 
     # LoRA specific attributes
     supported_lora_modules = [
@@ -316,15 +329,18 @@ class LlamaForCausalLM(nn.Module):
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
-        self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
-            config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE
-            # We need bigger padding if using lora for kernel
-            # compatibility
-            if not lora_config else lora_config.lora_vocab_padding_size,
-        )
+        if config.model_type in self.models_with_tied_embeddings:
+            self.lm_head = self.model.embed_tokens
+        else:
+            self.lm_head = ParallelLMHead(
+                self.unpadded_vocab_size,
+                config.hidden_size,
+                org_num_embeddings=config.vocab_size,
+                padding_size=DEFAULT_VOCAB_PADDING_SIZE
+                # We need bigger padding if using lora for kernel
+                # compatibility
+                if not lora_config else lora_config.lora_vocab_padding_size,
+            )
         self.sampler = Sampler(self.unpadded_vocab_size, config.vocab_size)
 
     def forward(
@@ -370,6 +386,18 @@ class LlamaForCausalLM(nn.Module):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
+            if self.config.model_type in self.models_with_tied_embeddings:
+                # Skip loading the lm_head weights if the model uses tied
+                # embeddings.
+                # TODO(woosuk): Support LoRA for these models.
+                if "lm_head" in name:
+                    continue
+
+            if self.config.model_type == "gemma" and "norm.weight" in name:
+                # GemmaRMSNorm is different from Llama's in that it multiplies
+                # (1 + weight) to the output, instead of just weight.
+                loaded_weight += 1.0
+
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue

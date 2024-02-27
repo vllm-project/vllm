@@ -20,7 +20,7 @@ _MODELS = {
     "DeciLMForCausalLM": ("decilm", "DeciLMForCausalLM"),
     "DeepseekForCausalLM": ("deepseek", "DeepseekForCausalLM"),
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
-    "GemmaForCausalLM": ("gemma", "GemmaForCausalLM"),
+    "GemmaForCausalLM": ("llama", "LlamaForCausalLM"),
     "GPT2LMHeadModel": ("gpt2", "GPT2LMHeadModel"),
     "GPTBigCodeForCausalLM": ("gpt_bigcode", "GPTBigCodeForCausalLM"),
     "GPTJForCausalLM": ("gpt_j", "GPTJForCausalLM"),
