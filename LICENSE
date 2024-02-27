@@ -1,14 +1,31 @@
-Updated: November 16, 2022
+Updated: February 27, 2024
 
-NEURAL MAGIC DEEPSPARSE COMMUNITY LICENSE AGREEMENT
+NEURAL MAGIC COMMUNITY LICENSE AGREEMENT
 
-Please read this Neural Magic DeepSparse Community License Agreement (“Agreement”) 
+Source code in this repository is variously licensed under the Neural Magic Community License and the Apache License
+Version 2.0, an Apache-compatible license.
+
+All source code should have information at the beginning of its respective file
+which specifies its licensing information.
+
+* Within the "vllm" directory, source code in a given file is licensed
+  under the Apache License Version 2.0, unless otherwise noted (e.g., an
+  Apache-compatible license).
+
+* Outside the "vllm" folder, source code in a given file is licensed under the
+  Neural Magic Community License, unless otherwise noted.
+
+When built, separate shared object files are generated for the Apache-licensed
+source code and the Neural Magic-licensed source code. The shared object binaries
+that contain `-xxx` in their name are licensed under the Neural Magic Community License.
+
+Please read this Neural Magic Community License Agreement (“Agreement”) 
 carefully before using Software for the first time. By using the Software, you agree 
 to these terms. If you do not agree to the terms of this Agreement, the Software may 
 not be installed on your computer systems. 
 
-DeepSparse (“Software”) consists of a current version of: (a) machine 
-executable (object) code, (b) DeepSparse-branded components, and (c) any existing user guide and release notes. The 
+Neural Magic vLLM (“Software”) consists of a current version of: (a) machine 
+executable (object) code, (b) Neural Magic-branded components, and (c) any existing user guide and release notes. The 
 Software is copyrighted by Neuralmagic, Inc. (“Neural Magic”), a Delaware corporation 
 with offices at 55 Davis Square STE 3, Somerville, MA 02144 United States, and is licensed and not 
 sold. Licensing questions about this Software should be directed to 
