@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(vllm_extensions LANGUAGES CXX)
 
-include(utils.cmake)
+include(${CMAKE_SOURCE_DIR}/utils.cmake)
 
 #
 # Supported python versions.  These versions will be searched in order, the
