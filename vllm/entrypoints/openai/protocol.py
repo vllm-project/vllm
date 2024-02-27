@@ -104,7 +104,7 @@ class ChatCompletionRequest(BaseModel):
                 return logits
 
             logits_processors = [logit_bias_logits_processor]
- 
+
         return SamplingParams(
             n=self.n,
             presence_penalty=self.presence_penalty,
