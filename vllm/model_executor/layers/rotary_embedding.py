@@ -245,13 +245,11 @@ def _yarn_find_correction_range(low_rot: int,
 
 
 def _yarn_linear_ramp_mask(low: float, high: float, dim: int,
-                           dtype: torch.dtype,
-                           device: torch.device) -> torch.Tensor:
+                           dtype: torch.dtype) -> torch.Tensor:
     if low == high:
         high += 0.001  # Prevent singularity
 
-    linear_func = (torch.arange(dim, dtype=dtype, device=device) -
-                   low) / (high - low)
+    linear_func = (torch.arange(dim, dtype=dtype) - low) / (high - low)
     ramp_func = torch.clamp(linear_func, 0, 1)
     return ramp_func
 
@@ -356,7 +354,6 @@ def get_rope(
         elif scaling_type == "yarn":
             original_max_position = rope_scaling[
                 "original_max_position_embeddings"]
-            assert max_position == original_max_position * scaling_factor
             extra_kwargs = {
                 k: v
                 for k, v in rope_scaling.items()

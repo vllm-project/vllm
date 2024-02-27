@@ -33,7 +33,7 @@ class FCFS(Policy):
         now: float,
         seq_group: SequenceGroup,
     ) -> float:
-        return now - seq_group.arrival_time
+        return now - seq_group.metrics.arrival_time
 
 
 class PolicyFactory:
