@@ -40,6 +40,7 @@ COPY csrc csrc
 COPY setup.py setup.py
 COPY hipify.py hipify.py
 COPY CMakeLists.txt CMakeLists.txt
+COPY utils.cmake utils.cmake
 COPY requirements.txt requirements.txt
 COPY pyproject.toml pyproject.toml
 COPY vllm/__init__.py vllm/__init__.py
