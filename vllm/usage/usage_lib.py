@@ -53,17 +53,21 @@ def _detect_cloud_provider() -> str:
         '/sys/class/dmi/id/product_name',
         '/sys/class/dmi/id/chassis_asset_tag', '/sys/class/dmi/id/sys_vendor'
     ]
+    # Mapping of identifiable strings to cloud providers
+    cloud_identifiers = {
+        'amazon': "AWS",
+        'microsoft corporation': "AZURE",
+        'google': "GCP",
+        'oraclecloud': "OCI",
+    }
+    
     for vendor_file in vendor_files:
         path = Path(vendor_file)
         if path.is_file():
-            if 'amazon' in path.read_text().lower():
-                return "AWS"
-            elif 'Microsoft Corporation' in path.read_text():
-                return "AZURE"
-            elif 'Google' in path.read_text():
-                return "GCP"
-            elif 'OracleCloud' in path.read_text():
-                return "OCI"
+            file_content = path.read_text().lower()
+            for identifier, provider in cloud_identifiers.items():
+                if identifier in file_content:
+                    return provider
     return "UNKNOWN"
 
 
