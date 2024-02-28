@@ -126,6 +126,11 @@ def mixtral_lora_files():
     return snapshot_download(repo_id="terrysun/mixtral-lora-adapter")
 
 
+@pytest.fixture(scope="session")
+def gemma_lora_files():
+    return snapshot_download(repo_id="wskwon/gemma-7b-test-lora")
+
+
 @pytest.fixture
 def llama_2_7b_engine_extra_embeddings() -> nn.Module:
     cleanup()
