@@ -8,7 +8,11 @@ Note: Marlin internally uses locks to synchronize the threads. This can
 result in very slight nondeterminism for Marlin. As a result, we re-run the test
 up to 3 times to see if we pass.
 
-Run `pytest tests/models/test_marlin.py --forked`.
+Note: This test currently fails running with --forked with the following:
+    RuntimeError: Cannot re-initialize CUDA in forked subprocess. 
+    To use CUDA with multiprocessing, you must use the 'spawn' start method
+
+Run `pytest tests/models/test_marlin.py`.
 """
 
 import pytest
@@ -16,6 +20,8 @@ import torch
 from compare_utils import check_logprobs_close
 from dataclasses import dataclass
 from vllm.model_executor.layers.quantization import _QUANTIZATION_CONFIG_REGISTRY
+
+MAX_MODEL_LEN = 1024
 
 capability = torch.cuda.get_device_capability()
 capability = capability[0] * 10 + capability[1]
@@ -47,31 +53,31 @@ model_pairs = [
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [3])
 def test_models(
-    vllm_runner,
+    vllm_runner_nm,
     example_prompts,
     model_pair: ModelPair,
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    marlin_model = vllm_runner(model_pair.model_marlin, dtype=dtype)
+    marlin_model = vllm_runner_nm(model_pair.model_marlin,
+                                  dtype=dtype,
+                                  max_model_len=MAX_MODEL_LEN)
     marlin_outputs = marlin_model.generate_greedy_logprobs(
         example_prompts, max_tokens, num_logprobs)
 
-    # Note: not sure why, but deleting just the model on Ada Lovelace
-    #   does not free the GPU memory. On Ampere, deleting just the model
-    #   frees the memory.
+    # Note: deleting just the model does not always free the GPU memory, not sure why.
     del marlin_model.model.llm_engine.driver_worker
     del marlin_model
 
-    gptq_model = vllm_runner(model_pair.model_gptq, dtype=dtype)
+    gptq_model = vllm_runner_nm(model_pair.model_gptq,
+                                dtype=dtype,
+                                max_model_len=MAX_MODEL_LEN)
     gptq_outputs = gptq_model.generate_greedy_logprobs(example_prompts,
                                                        max_tokens,
                                                        num_logprobs)
 
-    # Note: not sure why, but deleting just the model on Ada Lovelace
-    #   does not free the GPU memory. On Ampere, deleting just the model
-    #   frees the memory.
+    # Note: deleting just the model does not always free the GPU memory, not sure why.
     del gptq_model.model.llm_engine.driver_worker
     del gptq_model
 
