@@ -4,7 +4,7 @@
 #endif
 #include <sycl/sycl.hpp>
 // clang-format on
-#include "xpu_types.hpp"
+#include "xpu_types.h"
 
 #include <torch/extension.h>
 #include "utils.h"

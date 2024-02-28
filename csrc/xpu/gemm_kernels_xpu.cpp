@@ -11,9 +11,9 @@ Shang and Dang, Xingyu and Han, Song}, journal={arXiv}, year={2023}
 #include <sycl/sycl.hpp>
 #include <torch/extension.h>
 //#include <c10/cuda/CUDAGuard.h>
-#include "dequantize.dp.hpp"
+#include "dequantize.h"
 #include "utils.h"
-#include "xpu_types.hpp"
+#include "xpu_types.h"
 
 void awq_dequantize_impl(
     int* __restrict__ input,

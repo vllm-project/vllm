@@ -10,10 +10,10 @@
 #include <torch/extension.h>
 #include <stdexcept>
 #include "utils.h"
-#include "xpu_types.hpp"
+#include "xpu_types.h"
 // #include "dtype_bfloat16.dp.hpp"
-#include "dtype_float16.dp.hpp"
-#include "dtype_float32.dp.hpp"
+#include "dtype_float16.h"
+#include "dtype_float32.h"
 
 #define WARP_SIZE 32
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
@@ -55,12 +55,9 @@ inline float qk_dot_(
   float qk = sum(qk_vec);
 #pragma unroll
   for (int mask = THREAD_GROUP_SIZE / 2; mask >= 1; mask /= 2) {
-    /*
-    DPCT1023:0: The SYCL sub-group does not support mask options for
-    dpct::permute_sub_group_by_xor.
-    */
-    qk += dpct::experimental::permute_sub_group_by_xor(
-        0xffffffff, item_ct1.get_sub_group(), qk, mask);
+    
+    qk += dpct::permute_sub_group_by_xor(
+        item_ct1.get_sub_group(), qk, mask);
   }
   return qk;
 }
@@ -88,10 +85,7 @@ inline float block_sum(
   // Compute the sum per warp.
 #pragma unroll
   for (int mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
-    /*
-    DPCT1023:2: The SYCL sub-group does not support mask options for
-    dpct::permute_sub_group_by_xor.
-    */
+    
     /*
     DPCT1096:42: The right-most dimension of the work-group used in the SYCL
     kernel that calls this function may be less than "32". The function
@@ -99,8 +93,8 @@ inline float block_sum(
     device. Modify the size of the work-group to ensure that the value of the
     right-most dimension is a multiple of "32".
     */
-    sum += dpct::experimental::permute_sub_group_by_xor(
-        0xffffffff, item_ct1.get_sub_group(), sum, mask);
+    sum += dpct::permute_sub_group_by_xor(
+        item_ct1.get_sub_group(), sum, mask);
   }
 
   // Warp leaders store the data to shared memory.
@@ -109,12 +103,8 @@ inline float block_sum(
   }
 
   // Make sure the data is in shared memory.
-  /*
-  DPCT1065:1: Consider replacing sycl::nd_item::barrier() with
-  sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
-  performance if there is no access to global memory.
-  */
-  item_ct1.barrier();
+  
+  item_ct1.barrier(sycl::access::fence_space::local_space);
 
   // The warps compute the final sums.
   if (lane < NUM_WARPS) {
@@ -124,10 +114,7 @@ inline float block_sum(
   // Parallel reduction inside the warp.
 #pragma unroll
   for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) {
-    /*
-    DPCT1023:3: The SYCL sub-group does not support mask options for
-    dpct::permute_sub_group_by_xor.
-    */
+    
     /*
     DPCT1096:43: The right-most dimension of the work-group used in the SYCL
     kernel that calls this function may be less than "32". The function
@@ -135,15 +122,12 @@ inline float block_sum(
     device. Modify the size of the work-group to ensure that the value of the
     right-most dimension is a multiple of "32".
     */
-    sum += dpct::experimental::permute_sub_group_by_xor(
-        0xffffffff, item_ct1.get_sub_group(), sum, mask);
+    sum += dpct::permute_sub_group_by_xor(
+        item_ct1.get_sub_group(), sum, mask);
   }
 
   // Broadcast to other threads.
-  /*
-  DPCT1023:4: The SYCL sub-group does not support mask options for
-  dpct::select_from_sub_group.
-  */
+  
   /*
   DPCT1096:44: The right-most dimension of the work-group used in the SYCL
   kernel that calls this function may be less than "32". The function
@@ -151,8 +135,8 @@ inline float block_sum(
   device. Modify the size of the work-group to ensure that the value of the
   right-most dimension is a multiple of "32".
   */
-  return dpct::experimental::select_from_sub_group(
-      0xffffffff, item_ct1.get_sub_group(), sum, 0);
+  return dpct::select_from_sub_group(
+        item_ct1.get_sub_group(), sum, 0);
 }
 
 template <
@@ -183,7 +167,7 @@ void paged_attention_kernel(
     const int kv_block_stride,
     const int kv_head_stride,
     const sycl::nd_item<3>& item_ct1,
-    uint8_t* dpct_local,
+    size_t* dpct_local,
     Q_Vec_t* q_vecs,
     float* red_smem) {
   const int seq_idx = item_ct1.get_group(1);
@@ -353,10 +337,7 @@ void paged_attention_kernel(
   // The 0-th thread of each thread group already has its max qk value.
 #pragma unroll
   for (int mask = WARP_SIZE / 2; mask >= THREAD_GROUP_SIZE; mask /= 2) {
-    /*
-    DPCT1023:9: The SYCL sub-group does not support mask options for
-    dpct::permute_sub_group_by_xor.
-    */
+  
     /*
     DPCT1096:38: The right-most dimension of the work-group used in the SYCL
     kernel that calls this function may be less than "32". The function
@@ -366,28 +347,21 @@ void paged_attention_kernel(
     */
     qk_max = sycl::fmax(
         qk_max,
-        dpct::experimental::permute_sub_group_by_xor(
-            0xffffffff, item_ct1.get_sub_group(), qk_max, mask));
+        dpct::permute_sub_group_by_xor(
+            item_ct1.get_sub_group(), qk_max, mask));
   }
   if (lane == 0) {
     red_smem[warp_idx] = qk_max;
   }
-  /*
-  DPCT1065:6: Consider replacing sycl::nd_item::barrier() with
-  sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
-  performance if there is no access to global memory.
-  */
-  item_ct1.barrier();
+  
+  item_ct1.barrier(sycl::access::fence_space::local_space);
 
   // TODO(woosuk): Refactor this part.
   // Get the max qk value for the sequence.
   qk_max = lane < NUM_WARPS ? red_smem[lane] : -FLT_MAX;
 #pragma unroll
   for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) {
-    /*
-    DPCT1023:10: The SYCL sub-group does not support mask options for
-    dpct::permute_sub_group_by_xor.
-    */
+    
     /*
     DPCT1096:39: The right-most dimension of the work-group used in the SYCL
     kernel that calls this function may be less than "32". The function
@@ -397,14 +371,11 @@ void paged_attention_kernel(
     */
     qk_max = sycl::fmax(
         qk_max,
-        dpct::experimental::permute_sub_group_by_xor(
-            0xffffffff, item_ct1.get_sub_group(), qk_max, mask));
+        dpct::permute_sub_group_by_xor(
+            item_ct1.get_sub_group(), qk_max, mask));
   }
   // Broadcast the max qk value to all threads.
-  /*
-  DPCT1023:11: The SYCL sub-group does not support mask options for
-  dpct::select_from_sub_group.
-  */
+  
   /*
   DPCT1096:40: The right-most dimension of the work-group used in the SYCL
   kernel that calls this function may be less than "32". The function
@@ -412,8 +383,8 @@ void paged_attention_kernel(
   device. Modify the size of the work-group to ensure that the value of the
   right-most dimension is a multiple of "32".
   */
-  qk_max = dpct::experimental::select_from_sub_group(
-      0xffffffff, item_ct1.get_sub_group(), qk_max, 0);
+  qk_max = dpct::select_from_sub_group(
+          item_ct1.get_sub_group(), qk_max, 0);
 
   // Get the sum of the exp values.
   float exp_sum = 0.f;
@@ -429,12 +400,8 @@ void paged_attention_kernel(
   for (int i = thread_idx; i < num_tokens; i += NUM_THREADS) {
     logits[i] *= inv_sum;
   }
-  /*
-  DPCT1065:7: Consider replacing sycl::nd_item::barrier() with
-  sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
-  performance if there is no access to global memory.
-  */
-  item_ct1.barrier();
+  
+  item_ct1.barrier(sycl::access::fence_space::local_space);
 
   // If partitioning is enabled, store the max logit and exp_sum.
   if (USE_PARTITIONING && thread_idx == 0) {
@@ -512,10 +479,7 @@ void paged_attention_kernel(
     float acc = accs[i];
 #pragma unroll
     for (int mask = NUM_V_VECS_PER_ROW / 2; mask >= 1; mask /= 2) {
-      /*
-      DPCT1023:12: The SYCL sub-group does not support mask options for
-      dpct::permute_sub_group_by_xor.
-      */
+     
       /*
       DPCT1096:41: The right-most dimension of the work-group used in the SYCL
       kernel that calls this function may be less than "32". The function
@@ -523,20 +487,16 @@ void paged_attention_kernel(
       CPU device. Modify the size of the work-group to ensure that the value of
       the right-most dimension is a multiple of "32".
       */
-      acc += dpct::experimental::permute_sub_group_by_xor(
-          0xffffffff, item_ct1.get_sub_group(), acc, mask);
+      acc += dpct::permute_sub_group_by_xor(
+          item_ct1.get_sub_group(), acc, mask);
     }
     accs[i] = acc;
   }
 
   // NOTE(woosuk): A barrier is required because the shared memory space for
   // logits is reused for the output.
-  /*
-  DPCT1065:8: Consider replacing sycl::nd_item::barrier() with
-  sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
-  performance if there is no access to global memory.
-  */
-  item_ct1.barrier();
+
+  item_ct1.barrier(sycl::access::fence_space::local_space);
 
   // Perform reduction across warps.
   float* out_smem = reinterpret_cast<float*>(shared_mem);
@@ -554,12 +514,8 @@ void paged_attention_kernel(
         }
       }
     }
-    /*
-    DPCT1065:13: Consider replacing sycl::nd_item::barrier() with
-    sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
-    performance if there is no access to global memory.
-    */
-    item_ct1.barrier();
+    
+    item_ct1.barrier(sycl::access::fence_space::local_space);
 
     // Lower warps update the output.
     if (warp_idx < mid) {
@@ -572,12 +528,8 @@ void paged_attention_kernel(
         }
       }
     }
-    /*
-    DPCT1065:14: Consider replacing sycl::nd_item::barrier() with
-    sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
-    performance if there is no access to global memory.
-    */
-    item_ct1.barrier();
+    
+    item_ct1.barrier(sycl::access::fence_space::local_space);
   }
 
   // Write the final output.
@@ -620,7 +572,7 @@ void paged_attention_v1_kernel(
     const int kv_block_stride,
     const int kv_head_stride,
     const sycl::nd_item<3>& item_ct1,
-    uint8_t* dpct_local,
+    size_t* dpct_local,
     Q_Vec_t* q_vecs,
     float* red_smem) {
   paged_attention_kernel<
@@ -672,7 +624,7 @@ void paged_attention_v1_kernel(
 
 #define LAUNCH_PAGED_ATTENTION_V1(HEAD_SIZE)                                \
   queue.submit([&](sycl::handler& cgh) {                                    \
-    sycl::local_accessor<uint8_t, 1> dpct_local_acc_ct1(                    \
+    sycl::local_accessor<size_t, 1> dpct_local_acc_ct1(                    \
         sycl::range<1>(shared_mem_size), cgh);                              \
     sycl::local_accessor<Q_Vec, 1> q_vecs_acc_ct1(                          \
         sycl::range<1>(THREAD_GROUP_SIZE * num_vecs_per_thread), cgh);      \
@@ -765,11 +717,7 @@ void paged_attention_xpu_v1_impl_launcher(
   constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
   int padded_max_context_len =
       DIVIDE_ROUND_UP(max_context_len, BLOCK_SIZE) * BLOCK_SIZE;
-  /*
-  DPCT1083:22: The size of local memory in the migrated code may be different
-  from the original code. Check that the allocated memory size in the migrated
-  code is correct.
-  */
+  
   int logits_size = padded_max_context_len * sizeof(float);
   int outputs_size = (NUM_WARPS / 2) * head_size * sizeof(float);
   // Python-side check in vllm.worker.worker._check_if_can_support_max_seq_len
@@ -852,7 +800,7 @@ void paged_attention_v2_reduce_kernel(
     const int* __restrict__ context_lens, // [num_seqs]
     const int max_num_partitions,
     const sycl::nd_item<3>& item_ct1,
-    uint8_t* dpct_local,
+    size_t* dpct_local,
     float* red_smem) {
   const int num_heads = item_ct1.get_group_range(2);
   const int head_idx = item_ct1.get_group(2);
@@ -893,21 +841,14 @@ void paged_attention_v2_reduce_kernel(
     shared_max_logits[i] = l;
     max_logit = sycl::fmax(max_logit, (float)l);
   }
-  /*
-  DPCT1065:15: Consider replacing sycl::nd_item::barrier() with
-  sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
-  performance if there is no access to global memory.
-  */
-  item_ct1.barrier();
+  
+  item_ct1.barrier(sycl::access::fence_space::local_space);
 
   // Get the global max logit.
   // Reduce within the warp.
 #pragma unroll
   for (int mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
-    /*
-    DPCT1023:18: The SYCL sub-group does not support mask options for
-    dpct::permute_sub_group_by_xor.
-    */
+    
     /*
     DPCT1096:45: The right-most dimension of the work-group used in the SYCL
     kernel that calls this function may be less than "32". The function
@@ -917,26 +858,19 @@ void paged_attention_v2_reduce_kernel(
     */
     max_logit = sycl::fmax(
         max_logit,
-        dpct::experimental::permute_sub_group_by_xor(
-            0xffffffff, item_ct1.get_sub_group(), max_logit, mask));
+        dpct::permute_sub_group_by_xor(
+            item_ct1.get_sub_group(), max_logit, mask));
   }
   if (lane == 0) {
     red_smem[warp_idx] = max_logit;
   }
-  /*
-  DPCT1065:16: Consider replacing sycl::nd_item::barrier() with
-  sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
-  performance if there is no access to global memory.
-  */
-  item_ct1.barrier();
+  
+  item_ct1.barrier(sycl::access::fence_space::local_space);
   // Reduce across warps.
   max_logit = lane < NUM_WARPS ? red_smem[lane] : -FLT_MAX;
 #pragma unroll
   for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) {
-    /*
-    DPCT1023:19: The SYCL sub-group does not support mask options for
-    dpct::permute_sub_group_by_xor.
-    */
+    
     /*
     DPCT1096:46: The right-most dimension of the work-group used in the SYCL
     kernel that calls this function may be less than "32". The function
@@ -946,14 +880,11 @@ void paged_attention_v2_reduce_kernel(
     */
     max_logit = sycl::fmax(
         max_logit,
-        dpct::experimental::permute_sub_group_by_xor(
-            0xffffffff, item_ct1.get_sub_group(), max_logit, mask));
+        dpct::permute_sub_group_by_xor(
+            item_ct1.get_sub_group(), max_logit, mask));
   }
   // Broadcast the max value to all threads.
-  /*
-  DPCT1023:20: The SYCL sub-group does not support mask options for
-  dpct::select_from_sub_group.
-  */
+  
   /*
   DPCT1096:47: The right-most dimension of the work-group used in the SYCL
   kernel that calls this function may be less than "32". The function
@@ -961,8 +892,8 @@ void paged_attention_v2_reduce_kernel(
   device. Modify the size of the work-group to ensure that the value of the
   right-most dimension is a multiple of "32".
   */
-  max_logit = dpct::experimental::select_from_sub_group(
-      0xffffffff, item_ct1.get_sub_group(), max_logit, 0);
+  max_logit = dpct::select_from_sub_group(
+      item_ct1.get_sub_group(), max_logit, 0);
 
   // Load rescaled exp sums to shared memory.
   float* shared_exp_sums =
@@ -977,12 +908,8 @@ void paged_attention_v2_reduce_kernel(
     global_exp_sum += rescaled_exp_sum;
     shared_exp_sums[i] = rescaled_exp_sum;
   }
-  /*
-  DPCT1065:17: Consider replacing sycl::nd_item::barrier() with
-  sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better
-  performance if there is no access to global memory.
-  */
-  item_ct1.barrier();
+  
+  item_ct1.barrier(sycl::access::fence_space::local_space);
   global_exp_sum =
       block_sum<NUM_WARPS>(&red_smem[NUM_WARPS], global_exp_sum, item_ct1);
   const float inv_global_exp_sum = 1.0f / (global_exp_sum + 1e-6f);
@@ -1033,7 +960,7 @@ void paged_attention_v2_kernel(
     const int kv_block_stride,
     const int kv_head_stride,
     const sycl::nd_item<3>& item_ct1,
-    uint8_t* dpct_local,
+    size_t* dpct_local,
     Q_Vec_t* q_vecs,
     float* red_smem) {
   paged_attention_kernel<
@@ -1067,7 +994,7 @@ void paged_attention_v2_kernel(
 
 #define LAUNCH_PAGED_ATTENTION_V2(HEAD_SIZE)                                \
   queue.submit([&](sycl::handler& cgh) {                                    \
-    sycl::local_accessor<uint8_t, 1> dpct_local_acc_ct1(                    \
+    sycl::local_accessor<size_t, 1> dpct_local_acc_ct1(                    \
         sycl::range<1>(shared_mem_size), cgh);                              \
     sycl::local_accessor<Q_Vec, 1> q_vecs_acc_ct1(                          \
         sycl::range<1>(THREAD_GROUP_SIZE * num_vecs_per_thread), cgh);      \
@@ -1122,7 +1049,7 @@ void paged_attention_v2_kernel(
         });                                                                 \
   });                                                                       \
   queue.submit([&](sycl::handler& cgh) {                                    \
-    sycl::local_accessor<uint8_t, 1> dpct_local_acc_ct1(                    \
+    sycl::local_accessor<size_t, 1> dpct_local_acc_ct1(                    \
         sycl::range<1>(reduce_shared_mem_size), cgh);                       \
     sycl::local_accessor<float, 1> red_smem_acc_ct1(                        \
         sycl::range<1>(2 * NUM_WARPS), cgh);                                \
@@ -1207,11 +1134,7 @@ void paged_attention_v2_launcher(
 
   constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
   int max_num_partitions = DIVIDE_ROUND_UP(max_context_len, PARTITION_SIZE);
-  /*
-  DPCT1083:26: The size of local memory in the migrated code may be different
-  from the original code. Check that the allocated memory size in the migrated
-  code is correct.
-  */
+  
   int logits_size = PARTITION_SIZE * sizeof(float);
   int outputs_size = (NUM_WARPS / 2) * head_size * sizeof(float);
 
@@ -1220,11 +1143,7 @@ void paged_attention_v2_launcher(
   int shared_mem_size = std::max(logits_size, outputs_size);
   // For paged attention v2 reduce kernel.
   sycl::range<3> reduce_grid(1, num_seqs, num_heads);
-  /*
-  DPCT1083:24: The size of local memory in the migrated code may be different
-  from the original code. Check that the allocated memory size in the migrated
-  code is correct.
-  */
+  
   int reduce_shared_mem_size = 2 * max_num_partitions * sizeof(float);
 
   sycl::range<3> block(1, 1, NUM_THREADS);
