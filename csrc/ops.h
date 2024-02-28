@@ -73,8 +73,8 @@ torch::Tensor code1x16_matmat(
   const torch::Tensor& input,
   const torch::Tensor& codes,
   const torch::Tensor& codebooks,
-  const torch::Tensor& scales
-  //const std::optional<torch::Tensor>& bias
+  const torch::Tensor& scales,
+  const std::optional<torch::Tensor>& bias
 );
 
 #ifndef USE_ROCM

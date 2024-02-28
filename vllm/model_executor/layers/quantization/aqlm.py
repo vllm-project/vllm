@@ -128,6 +128,9 @@ class AQLMLinearMethod(LinearMethodBase):
         output_size: int,
         params_dtype: torch.dtype,
     ) -> Dict[str, Any]:
+        #TEST
+        assert(output_size == output_size_per_partition)
+        assert(input_size == input_size_per_partition)
         del output_size  # Unused.
         del input_size  # Unused.
 
@@ -149,13 +152,15 @@ class AQLMLinearMethod(LinearMethodBase):
         # or does this need more dimensions and use the correct nbits_per_codebook as an int type.  Does that pack them?
         codes = Parameter(
             torch.empty(
-                output_size_per_partition,  # not entirely sure what to do with out groups, if we need this pack factor.
+                output_size_per_partition,  # not entirely sure what to do with num_out_groups, if we need this pack factor.
                 input_size_per_partition // self.quant_config.pack_factor,
-                1,
+                1, # probably should be num codebooks.
                 dtype=get_int_dtype(self.quant_config.nbits_per_codebook),
             ),
             requires_grad=False,
         )
+
+        print(codes.shape)
 
         set_weight_attrs(
             codes,
@@ -177,14 +182,12 @@ class AQLMLinearMethod(LinearMethodBase):
             ),
             requires_grad=False,
         )
-        # no attributes?  It's fixed size, no input or output dim, need the whole thing.
-        # looks like named attributes are for sharding so it knows how to split something up.
 
         scales = Parameter(
             torch.empty(
                 (
                     output_size_per_partition // self.quant_config.out_group_size,
-                    1,  # do we really need these other dimensions?  They don't count, or?
+                    1,
                     1,
                     1,
                 ),
@@ -218,15 +221,19 @@ class AQLMLinearMethod(LinearMethodBase):
 
         print("input shape is ", x.shape)
 
+        if (x.shape[1] == 5) : 
+            print("codes shape is ", weights["codes"].shape)
+            print("codebooks shape is ", weights["codebooks"].shape)
+            print("scales shape is ", weights["scales"].shape)
+            print("x is ", x)
+
         output = ops.aqlm_gemm(
             x,  # hmm, reshape?
             weights["codes"],
             weights["codebooks"],
             weights["scales"],
+            bias,
         )
 
         print("output shape is ", output.shape)
-
-        if bias is not None:
-            output = output + bias
-        return output  # .reshape(out_shape)  ???
+        return output

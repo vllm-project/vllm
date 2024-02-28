@@ -326,6 +326,12 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         if output_dim is not None:
             shard_offset = sum(self.output_sizes[:loaded_shard_id]) // tp_size
             shard_size = self.output_sizes[loaded_shard_id] // tp_size
+            #TEST
+            if loaded_shard_id > 0:
+                print("   loading a shard ", loaded_shard_id)
+                print("   param_data shape ", param_data.shape)
+                print("   loaded_weight shape ", loaded_weight.shape)
+
             # If quantized, we need to adjust the offset and size to account
             # for the packing.
             packed_dim = getattr(param, "packed_dim", None)
@@ -579,14 +585,19 @@ class RowParallelLinear(torch.nn.Module):
         param_data = param.data
 
         # TEST
-        print("param data shape is ", param_data.shape)
-        print("loaded_weight is ", loaded_weight.shape)
+        print("   param data shape is ", param_data.shape)
+        print("   loaded_weight is ", loaded_weight.shape)
 
         if input_dim is not None:
             shard_size = param_data.shape[input_dim]
             start_idx = tp_rank * shard_size
+            print("   loaded_weight dtype is ", loaded_weight.dtype)
+            print("   data_param dtype is ", param_data.dtype)
+            #TEST 
+            assert(start_idx == 0 and shard_size == loaded_weight.shape[input_dim])
+
             loaded_weight = loaded_weight.narrow(input_dim, start_idx, shard_size)
-            print("sharded loaded_weight is ", loaded_weight.shape)
+            print(   "sharded loaded_weight is ", loaded_weight.shape)
 
         assert param_data.shape == loaded_weight.shape
 

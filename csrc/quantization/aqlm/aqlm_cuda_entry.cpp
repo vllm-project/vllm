@@ -43,8 +43,8 @@ torch::Tensor code1x16_matmat(
   const torch::Tensor& input,
   const torch::Tensor& codes,
   const torch::Tensor& codebooks,
-  const torch::Tensor& scales
-  //const std::optional<torch::Tensor>& bias
+  const torch::Tensor& scales,
+  const std::optional<torch::Tensor>& bias
 ) {
   auto input_sizes = input.sizes();
   auto out_features = codes.size(0) * codebooks.size(2);
@@ -67,11 +67,9 @@ torch::Tensor code1x16_matmat(
   }
   flat_output *= scales.flatten().unsqueeze(0);
 
-/* not sure how to bridge this yet.  may not need to.
   if (bias.has_value()) {
     flat_output += bias->unsqueeze(0);
   }
-  */
 
   auto output_sizes = input_sizes.vec();
   output_sizes.pop_back();
