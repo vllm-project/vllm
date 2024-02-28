@@ -60,6 +60,7 @@ class ModelConfig:
         max_context_len_to_capture: Maximum context len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
             to eager mode.
+        flash_style: Enable flash style page attention.
     """
 
     def __init__(
@@ -79,6 +80,7 @@ class ModelConfig:
         quantization: Optional[str] = None,
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
+        flash_style: bool = False,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -93,6 +95,7 @@ class ModelConfig:
         self.quantization = quantization
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
+        self.flash_style = flash_style
 
         if os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true":
             # download model from ModelScope hub,
@@ -295,12 +298,14 @@ class CacheConfig:
         swap_space: int,
         cache_dtype: str,
         sliding_window: Optional[int] = None,
+        flash_style: bool = False,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
         self.swap_space_bytes = swap_space * _GB
         self.cache_dtype = cache_dtype
         self.sliding_window = sliding_window
+        self.flash_style = flash_style
         self._verify_args()
         self._verify_cache_dtype()
 
@@ -313,6 +318,15 @@ class CacheConfig:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
+
+        if self.flash_style:
+            logger.info("Flash attention enabled.")
+            if self.block_size < 256:
+                # Flash style attention only supports block size >=256 for now.
+                # https://github.com/Dao-AILab/flash-attention/pull/824 will fix it.
+                raise ValueError(
+                    "Flash style attention only supports block size >= 256. Got"
+                    f"{self.block_size }")
 
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":

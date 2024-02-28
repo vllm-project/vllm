@@ -294,7 +294,7 @@ def test_reshape_and_cache_flash(
     padded_key, padded_value = pad_key_value(key, value, padding)
     # Call the reshape_and_cache kernel.
     cache_ops.reshape_and_cache_flash(padded_key, padded_value, key_cache,
-                                      value_cache, slot_mapping, num_tokens)
+                                      value_cache, slot_mapping)
 
     # Run the reference implementation.
     block_indicies = torch.div(slot_mapping, block_size, rounding_mode='floor')

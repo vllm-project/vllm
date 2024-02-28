@@ -93,6 +93,7 @@ class LlamaAttention(nn.Module):
         linear_method: Optional[LinearMethodBase] = None,
         bias: bool = False,
         sliding_window: Optional[int] = None,
+        flash_style: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -143,7 +144,8 @@ class LlamaAttention(nn.Module):
                                    self.head_dim,
                                    self.scaling,
                                    num_kv_heads=self.num_kv_heads,
-                                   sliding_window=sliding_window)
+                                   sliding_window=sliding_window,
+                                   flash_style=flash_style)
 
     def forward(
         self,
@@ -151,6 +153,7 @@ class LlamaAttention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
+        flash_style: bool = False,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -167,6 +170,7 @@ class LlamaDecoderLayer(nn.Module):
         self,
         config: LlamaConfig,
         linear_method: Optional[LinearMethodBase] = None,
+        flash_style: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -186,6 +190,7 @@ class LlamaDecoderLayer(nn.Module):
             linear_method=linear_method,
             bias=getattr(config, "bias", False),
             sliding_window=sliding_window,
+            flash_style=flash_style,
         )
         self.mlp = LlamaMLP(
             hidden_size=self.hidden_size,
@@ -234,6 +239,7 @@ class LlamaModel(nn.Module):
         config: LlamaConfig,
         linear_method: Optional[LinearMethodBase] = None,
         lora_config: Optional[LoRAConfig] = None,
+        flash_style: bool = False,
     ) -> None:
         super().__init__()
         self.config = config
@@ -248,7 +254,7 @@ class LlamaModel(nn.Module):
             org_num_embeddings=config.vocab_size,
         )
         self.layers = nn.ModuleList([
-            LlamaDecoderLayer(config, linear_method)
+            LlamaDecoderLayer(config, linear_method, flash_style)
             for _ in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -308,11 +314,12 @@ class LlamaForCausalLM(nn.Module):
         config: LlamaConfig,
         linear_method: Optional[LinearMethodBase] = None,
         lora_config: Optional[LoRAConfig] = None,
+        flash_style: bool = False,
     ) -> None:
         super().__init__()
         self.config = config
         self.linear_method = linear_method
-        self.model = LlamaModel(config, linear_method, lora_config=lora_config)
+        self.model = LlamaModel(config, linear_method, lora_config=lora_config, flash_style=flash_style)
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size

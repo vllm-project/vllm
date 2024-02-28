@@ -221,7 +221,6 @@ def test_flash_paged_attention(
         scale,
         padded_block_table,
         padded_context_lens,
-        block_size,
         alibi_slopes,
     )
 

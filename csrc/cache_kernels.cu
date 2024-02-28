@@ -278,17 +278,12 @@ __global__ void reshape_and_cache_flash_kernel(
   scalar_t* __restrict__ key_cache,     // [num_blocks, block_size, num_heads, head_size]
   scalar_t* __restrict__ value_cache,   // [num_blocks, block_size, num_heads, head_size]
   const int64_t* __restrict__ slot_mapping, // [num_tokens]
-  const int64_t* __restrict__ num_tokens,   // [1]
   const int key_stride,
   const int value_stride,
   const int num_heads,
   const int head_size,
   const int block_size) {
-  const int64_t num_tokens_ = num_tokens[0];
   const int64_t token_idx = blockIdx.x;
-  if (token_idx >= num_tokens_) {
-    return;
-  }
   const int64_t slot_idx = slot_mapping[token_idx];
   const int64_t block_idx = slot_idx / block_size;
   const int64_t block_offset = slot_idx % block_size;
@@ -323,8 +318,7 @@ void reshape_and_cache_flash(
   torch::Tensor& value,         // [num_tokens, num_heads, head_size]
   torch::Tensor& key_cache,     // [num_blocks, block_size, num_heads, head_size]
   torch::Tensor& value_cache,   // [num_blocks, block_size, num_heads, head_size]
-  torch::Tensor& slot_mapping,  // [num_tokens]
-  torch::Tensor& num_tokens)    // [1]
+  torch::Tensor& slot_mapping)  // [num_tokens]
 {
   int num_tokens_padded = key.size(0);
   int num_heads = key.size(1);
@@ -347,7 +341,6 @@ void reshape_and_cache_flash(
         key_cache.data_ptr<scalar_t>(),
         value_cache.data_ptr<scalar_t>(),
         slot_mapping.data_ptr<int64_t>(),
-        num_tokens.data_ptr<int64_t>(),
         key_stride,
         value_stride,
         num_heads,

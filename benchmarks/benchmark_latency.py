@@ -10,6 +10,13 @@ from tqdm import tqdm
 
 from vllm import LLM, SamplingParams
 
+SAMPLE_PROMPTS = [
+    "The president of the United States is",
+    "Hello, my name is",
+    "The capital of France is",
+    "The future of AI is",
+]
+
 
 def main(args: argparse.Namespace):
     print(args)
@@ -57,10 +64,24 @@ def main(args: argparse.Namespace):
             print(p.key_averages())
         else:
             start_time = time.perf_counter()
-            llm.generate(prompt_token_ids=dummy_prompt_token_ids,
-                         sampling_params=sampling_params,
-                         use_tqdm=False)
+            if args.use_sample:
+                batch = (
+                    SAMPLE_PROMPTS *
+                    (args.batch_size // len(SAMPLE_PROMPTS) + 1))[:args.batch_size]
+                outputs = llm.generate(prompts=batch,
+                                    sampling_params=sampling_params,
+                                    use_tqdm=False)
+            else:
+                outputs = llm.generate(prompt_token_ids=dummy_prompt_token_ids,
+                                    sampling_params=sampling_params,
+                                    use_tqdm=False)
             end_time = time.perf_counter()
+            if args.verbose:
+                for output in outputs:
+                    prompt = output.prompt
+                    generated_text = output.outputs[0].text
+                    print(
+                        f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
             latency = end_time - start_time
             return latency
 
@@ -145,5 +166,18 @@ if __name__ == '__main__':
         default="cuda",
         choices=["cuda"],
         help='device type for vLLM execution, supporting CUDA only currently.')
+    parser.add_argument('--flash-style',
+                        action='store_true',
+                        help='enable flash attention')
+    parser.add_argument('--block-size',
+                        type=int,
+                        default=16,
+                        help='block size of key/value cache')
+    parser.add_argument('--use-sample',
+                        action='store_true',
+                        help='use sample input instead of dummy input')
+    parser.add_argument('--verbose',
+                        action='store_true',
+                        help='print generated text')
     args = parser.parse_args()
     main(args)

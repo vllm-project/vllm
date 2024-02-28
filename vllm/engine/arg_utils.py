@@ -45,6 +45,7 @@ class EngineArgs:
     lora_dtype = 'auto'
     max_cpu_loras: Optional[int] = None
     device: str = 'cuda'
+    flash_style: bool = False
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -271,6 +272,9 @@ class EngineArgs:
             choices=["cuda"],
             help=('Device type for vLLM execution. '
                   'Currently, only CUDA-compatible devices are supported.'))
+        parser.add_argument('--flash-style',
+                            action='store_true',
+                            help='use flash attention.')
         return parser
 
     @classmethod
@@ -291,11 +295,12 @@ class EngineArgs:
             self.trust_remote_code, self.download_dir, self.load_format,
             self.dtype, self.seed, self.revision, self.code_revision,
             self.tokenizer_revision, self.max_model_len, self.quantization,
-            self.enforce_eager, self.max_context_len_to_capture)
+            self.enforce_eager, self.max_context_len_to_capture, self.flash_style)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
-                                   model_config.get_sliding_window())
+                                   model_config.get_sliding_window(),
+                                   self.flash_style)
         parallel_config = ParallelConfig(self.pipeline_parallel_size,
                                          self.tensor_parallel_size,
                                          self.worker_use_ray,

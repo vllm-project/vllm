@@ -475,6 +475,7 @@ class ModelRunner:
             # NOTE: We assume that all sequences in the group are all prompts or
             # all decodes.
             is_prompt = seq_group_metadata_list[0].is_prompt
+            # SANG-TODO set num prompt tokens and generations?
             # Prepare input tensors.
             if is_prompt:
                 (input_tokens, input_positions, input_metadata, prompt_lens,

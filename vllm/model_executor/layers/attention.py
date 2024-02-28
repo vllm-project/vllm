@@ -14,6 +14,8 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.triton_kernel.prefix_prefill import (
     context_attention_fwd)
 from vllm.utils import is_hip
+from vllm.model_executor.layers.attention import (
+    flash_attn_with_kvcache_paged, )
 
 # TODO(sang): Support varlen API.
 try:
@@ -47,6 +49,7 @@ class PagedAttention(nn.Module):
         num_kv_heads: Optional[int] = None,
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
+        flash_style: bool = False,
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
@@ -57,6 +60,7 @@ class PagedAttention(nn.Module):
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.register_buffer("alibi_slopes", alibi_slopes, persistent=False)
+        self.flash_style = flash_style
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -133,14 +137,23 @@ class PagedAttention(nn.Module):
         # vectors will not be cached. This happens during the initial memory
         # profiling run.
         if key_cache is not None and value_cache is not None:
-            cache_ops.reshape_and_cache(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                input_metadata.slot_mapping.flatten(),
-                input_metadata.kv_cache_dtype,
-            )
+            if self.flash_style:
+                cache_ops.reshape_and_cache_flash(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    input_metadata.slot_mapping.flatten()
+                )
+            else:
+                cache_ops.reshape_and_cache(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    input_metadata.slot_mapping.flatten(),
+                    input_metadata.kv_cache_dtype,
+                )
 
         if input_metadata.is_prompt:
             # normal attention
@@ -215,32 +228,56 @@ class PagedAttention(nn.Module):
             else:
                 # prefix-enabled attention
                 output = torch.empty_like(query)
-                context_attention_fwd(
-                    query,
-                    key,
-                    value,
-                    output,
-                    key_cache,
-                    value_cache,
-                    input_metadata.block_tables,  # [BS, max_block_per_request]
-                    input_metadata.start_loc,
-                    input_metadata.prompt_lens,
-                    input_metadata.context_lens,
-                    input_metadata.max_seq_len,
-                    getattr(self, "alibi_slopes", None),
-                )
+                if self.flash_attention:
+                    query = query.view(batch_size, seq_len, self.num_heads, self.head_size)
+                    output = flash_attn_with_kvcache_paged(
+                        query
+                        key_cache: torch.Tensor,
+                        value_cache: torch.Tensor,
+                        self.scale
+                        input_metadata.block_tables,
+                        input_metadata.context_lens,
+                        self.alibi_slopes,
+                    )
+                else:
+                    context_attention_fwd(
+                        query,
+                        key,
+                        value,
+                        output,
+                        key_cache,
+                        value_cache,
+                        input_metadata.block_tables,  # [BS, max_block_per_request]
+                        input_metadata.start_loc,
+                        input_metadata.prompt_lens,
+                        input_metadata.context_lens,
+                        input_metadata.max_seq_len,
+                        getattr(self, "alibi_slopes", None),
+                    )
 
         else:
             # Decoding run.
-            output = _paged_attention(
-                query,
-                key_cache,
-                value_cache,
-                input_metadata,
-                self.num_kv_heads,
-                self.scale,
-                self.alibi_slopes,
-            )
+            if self.flash_style:
+                query = query.view(batch_size, seq_len, self.num_heads, self.head_size)
+                output = flash_attn_with_kvcache_paged(
+                    query,
+                    key_cache,
+                    value_cache,
+                    self.scale,
+                    input_metadata.block_tables,
+                    input_metadata.context_lens,
+                    self.alibi_slopes
+                )
+            else:
+                output = _paged_attention(
+                    query,
+                    key_cache,
+                    value_cache,
+                    input_metadata,
+                    self.num_kv_heads,
+                    self.scale,
+                    self.alibi_slopes,
+                )
 
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
@@ -305,6 +342,7 @@ def _paged_attention(
     # For context len > 8192, use V2 kernel to avoid shared memory shortage.
     use_v1 = input_metadata.max_context_len <= 8192 and (
         max_num_partitions == 1 or num_seqs * num_heads > 512)
+
     if use_v1:
         # Run PagedAttention V1.
         ops.paged_attention_v1(
@@ -356,14 +394,12 @@ def _paged_attention(
 
 
 def flash_attn_with_kvcache_paged(
-    output: Optional[torch.Tensor],
     query: torch.Tensor,
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
     scale: float,
     block_tables: torch.Tensor,
     context_lens: torch.Tensor,
-    block_size: int,
     alibi_slopes: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Similar to vLLM's page attention, calculates a single token's attention
@@ -403,7 +439,4 @@ def flash_attn_with_kvcache_paged(
         alibi_slopes=alibi_slopes,
         num_splits=0,
     )
-    if output is not None:
-        # in case that output is padded, only copy the valid part.
-        output[:num_tokens].copy_(out.view(num_tokens, num_heads, head_size))
     return out.view(num_tokens, num_heads, head_size)
