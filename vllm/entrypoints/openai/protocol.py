@@ -63,6 +63,8 @@ class ChatCompletionRequest(BaseModel):
     seed: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
+    logprobs: Optional[bool] = False
+    top_logprobs: Optional[int] = None
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
@@ -72,6 +74,7 @@ class ChatCompletionRequest(BaseModel):
     top_k: Optional[int] = -1
     ignore_eos: Optional[bool] = False
     use_beam_search: Optional[bool] = False
+    early_stopping: Optional[bool] = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     skip_special_tokens: Optional[bool] = True
     spaces_between_special_tokens: Optional[bool] = True
@@ -83,6 +86,8 @@ class ChatCompletionRequest(BaseModel):
     length_penalty: Optional[float] = 1.0
 
     def to_sampling_params(self) -> SamplingParams:
+        if self.logprobs and not self.top_logprobs:
+            raise ValueError("Top logprobs must be set when logprobs is.")
         return SamplingParams(
             n=self.n,
             presence_penalty=self.presence_penalty,
@@ -95,10 +100,13 @@ class ChatCompletionRequest(BaseModel):
             stop=self.stop,
             stop_token_ids=self.stop_token_ids,
             max_tokens=self.max_tokens,
+            logprobs=self.top_logprobs if self.logprobs else None,
+            prompt_logprobs=self.top_logprobs if self.echo else None,
             best_of=self.best_of,
             top_k=self.top_k,
             ignore_eos=self.ignore_eos,
             use_beam_search=self.use_beam_search,
+            early_stopping=self.early_stopping,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
@@ -129,6 +137,7 @@ class CompletionRequest(BaseModel):
     top_k: Optional[int] = -1
     ignore_eos: Optional[bool] = False
     use_beam_search: Optional[bool] = False
+    early_stopping: Optional[bool] = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     skip_special_tokens: Optional[bool] = True
     spaces_between_special_tokens: Optional[bool] = True
@@ -157,6 +166,7 @@ class CompletionRequest(BaseModel):
             max_tokens=self.max_tokens if not echo_without_generation else 1,
             logprobs=self.logprobs,
             use_beam_search=self.use_beam_search,
+            early_stopping=self.early_stopping,
             prompt_logprobs=self.logprobs if self.echo else None,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=(self.spaces_between_special_tokens),
@@ -212,6 +222,7 @@ class ChatMessage(BaseModel):
 class ChatCompletionResponseChoice(BaseModel):
     index: int
     message: ChatMessage
+    logprobs: Optional[LogProbs] = None
     finish_reason: Optional[Literal["stop", "length"]] = None
 
 
@@ -232,6 +243,7 @@ class DeltaMessage(BaseModel):
 class ChatCompletionResponseStreamChoice(BaseModel):
     index: int
     delta: DeltaMessage
+    logprobs: Optional[LogProbs] = None
     finish_reason: Optional[Literal["stop", "length"]] = None
 
 
