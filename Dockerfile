@@ -97,6 +97,7 @@ FROM vllm-base AS vllm-openai
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install accelerate
+    pip install hf_transfer
 
 COPY --from=build /workspace/vllm/*.so /workspace/vllm/
 COPY vllm vllm
