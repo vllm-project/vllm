@@ -55,7 +55,7 @@ class cmake_build_ext(build_ext):
     #
     def compute_num_jobs(self):
         try:
-            # os.sched_getaffinity() isn't univerally available, so fall back
+            # os.sched_getaffinity() isn't universally available, so fall back
             # to os.cpu_count() if we get an error here.
             num_jobs = len(os.sched_getaffinity(0))
         except AttributeError:
