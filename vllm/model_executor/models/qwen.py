@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
+from transformers import PretrainedConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -27,7 +28,6 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
-from vllm.transformers_utils.configs.qwen import QWenConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -127,7 +127,7 @@ class QWenBlock(nn.Module):
 
     def __init__(
         self,
-        config: QWenConfig,
+        config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
@@ -179,7 +179,7 @@ class QWenModel(nn.Module):
 
     def __init__(
         self,
-        config: QWenConfig,
+        config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
@@ -222,7 +222,7 @@ class QWenLMHeadModel(nn.Module):
 
     def __init__(
         self,
-        config: QWenConfig,
+        config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
