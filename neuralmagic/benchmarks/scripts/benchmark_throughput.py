@@ -13,8 +13,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 from transformers import AutoTokenizer
-from neuralmagic.benchmarks.scripts.common import get_bench_environment, generate_synthetic_requests, warmup_vllm_engine
+from neuralmagic.benchmarks.scripts.common import instantiate_benchmark_results_dict, generate_synthetic_requests, warmup_vllm_engine, num_available_gpus
 from neuralmagic.benchmarks.datasets_registry import get_dataset, DatasetArgs
+
+
+def get_tensor_parallel_size(args: argparse.Namespace) -> int:
+    tensor_parallel_size = num_available_gpus() \
+        if args.use_all_available_gpus_ else args.tensor_parallel_size_
+    assert tensor_parallel_size > 0 and \
+           tensor_parallel_size <= num_available_gpus()
+    return tensor_parallel_size
 
 
 def run_vllm(
@@ -98,7 +106,7 @@ def main(args: argparse.Namespace):
                             args.model,
                             args.tokenizer,
                             args.quantization,
-                            args.tensor_parallel_size,
+                            get_tensor_parallel_size(args),
                             args.seed,
                             args.n,
                             args.use_beam_search,
@@ -123,15 +131,19 @@ def main(args: argparse.Namespace):
     # Save config and results to json
     save_result = args.save_directory is not None
     if save_result:
-        result_json = {}
 
         # Setup
         current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
+        result_json = instantiate_benchmark_results_dict(
+            benchmarking_script_name=Path(__file__).name,
+            tensor_parallel_size=get_tensor_parallel_size(args),
+            model=args.model,
+            tokenizer=args.tokenizer,
+            dataset=args.dataset)
         result_json["date"] = current_dt
-        result_json["bench_env"] = get_bench_environment()
-        result_json.update(vars(args))
-        result_json["request_throughput (per second)"] = request_throughput
-        result_json["token_throughput (per second)"] = token_throughput
+        result_json["script_args"] = vars(args)
+        result_json["request_throughput"] = request_throughput
+        result_json["token_throughput"] = token_throughput
 
         model_id = args.model.replace('/', '_')
         # Save to file
@@ -168,7 +180,6 @@ if __name__ == "__main__":
                         '-q',
                         choices=['awq', 'gptq', 'squeezellm', None],
                         default=None)
-    parser.add_argument("--tensor-parallel-size", "-tp", type=int, default=1)
     parser.add_argument("--n",
                         type=int,
                         default=1,
@@ -204,6 +215,11 @@ if __name__ == "__main__":
                         type=str,
                         default=None,
                         help="Output directory to store result file")
+
+    tp_group = parser.add_mutually_exclusive_group(required=True)
+    tp_group.add_argument("--tensor-parallel-size_", type=int, default=None)
+    tp_group.add_argument("--use-all-available-gpus_", action="store_true")
+
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model

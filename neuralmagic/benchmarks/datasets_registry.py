@@ -38,6 +38,8 @@ def make_dataset_triples(prompts: List[str], completions: List[str],
 
         # Make into dataset tripe.
         dataset.append((prompt, prompt_len, output_len))
+        if (len(dataset) >= dataset_args.num_samples * 2):
+            break
 
     # Sample num_requests from the list.
     print(len(dataset))

@@ -33,7 +33,7 @@ import numpy as np
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from neuralmagic.benchmarks.scripts.common import get_bench_environment, generate_synthetic_requests, print_benchmark_io
+from neuralmagic.benchmarks.scripts.common import instantiate_benchmark_results_dict, generate_synthetic_requests, print_benchmark_io
 from neuralmagic.benchmarks.datasets_registry import get_dataset, DatasetArgs
 
 from neuralmagic.benchmarks.scripts.backend_request_func import (
@@ -271,21 +271,19 @@ def main(args: argparse.Namespace):
     # Save config and results to json
     save_result = args.save_directory is not None
     if save_result:
-        result_json = {}
 
-        # Setup
         current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
+        result_json = instantiate_benchmark_results_dict(
+            benchmarking_script_name=Path(__file__).name,
+            tensor_parallel_size=args.server_tensor_parallel_size,
+            model=args.model,
+            tokenizer=args.tokenizer,
+            dataset=args.dataset)
         result_json["date"] = current_dt
-        result_json["bench_env"] = get_bench_environment()
-        result_json["backend"] = backend
-        result_json["version"] = args.version
-        result_json["model_id"] = model_id
-        result_json["tokenizer_id"] = tokenizer_id
-        result_json["best_of"] = args.best_of
-        result_json["use_beam_search"] = args.use_beam_search
-        result_json["num_prompts"] = num_prompts
+        result_json["script_args"] = vars(args)
 
-        # Traffic
+        # Populate derived-args for convenience
+        result_json["num_prompts"] = num_prompts
         result_json["request_rate"] =  \
             request_rate if request_rate < float("inf") else "inf"
 
@@ -388,11 +386,13 @@ if __name__ == "__main__":
         action="store_true",
         help="Specify to disbale tqdm progress bar.",
     )
+
     parser.add_argument("--save-directory",
                         type=str,
                         default=None,
                         help="Output directory to store result file")
 
+    # Arguments defining num_prompts and qps
     parser.add_argument(
         "--num-prompts_",
         type=int,
@@ -418,6 +418,22 @@ if __name__ == "__main__":
                             """,
                         default=None)
 
+    # Server command args
+    parser.add_argument(
+        "--server-tensor-parallel-size",
+        type=int,
+        default=None,
+        help=
+        "tensor-parallel-size that the benchmarking script was invoked with. It is useful to log this information when storing benchmarking results"
+    )
+    parser.add_argument(
+        "--server-args",
+        type=str,
+        default=None,
+        help=
+        "When we are logging the output, it is useful to log the arguments passed to the server"
+    )
+
     def args_sanity_check(args):
         # Sanity check real-dataset vs synthetic-dataset usecase
         if args.dataset is None:
@@ -433,6 +449,9 @@ if __name__ == "__main__":
             assert args.num_prompts_ is not None and args.request_rate_ is not None
         else:
             assert args.num_prompts_ is None and args.request_rate_ is None
+        # Sanity check required logging args
+        if args.save_directory is not None:
+            assert args.server_tensor_parallel_size is not None
 
     args = parser.parse_args()
     args_sanity_check(args)

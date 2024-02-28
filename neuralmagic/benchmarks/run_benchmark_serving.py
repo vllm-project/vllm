@@ -9,10 +9,30 @@ from pathlib import Path
 
 from neuralmagic.tools.call_cmd import call_cmd
 from neuralmagic.benchmarks.common import download_model, max_model_length_from_model_id, script_args_to_cla, benchmark_configs
-from neuralmagic.benchmarks.scripts.common import warmup_server
+from neuralmagic.benchmarks.scripts.common import warmup_server, num_available_gpus
 
 BENCH_SERVER_HOST = "localhost"
 BENCH_SERVER_PORT = 9000
+
+
+def get_tensor_parallel_size(config: NamedTuple) -> int:
+
+    num_tp_directives = [
+        hasattr(config, 'tensor_parallel_size'),
+        hasattr(config, 'use_all_available_gpus')
+    ].count(True)
+    if num_tp_directives == 0:
+        # by default - use just one GPU
+        return 1
+
+    # must have exactly one directive
+    assert num_tp_directives == 1
+
+    tensor_parallel_size = config.tensor_parallel_size if hasattr(
+        config, 'tensor_parallel_size') else num_available_gpus()
+    assert tensor_parallel_size > 0 and \
+           tensor_parallel_size <= num_available_gpus()
+    return tensor_parallel_size
 
 
 def is_server_running(host: str, port: int, timeout=300) -> bool:
@@ -62,6 +82,8 @@ def run_benchmark_serving_script(config: NamedTuple,
             assert server_process is not None
             server_process.kill()
 
+    tensor_parallel_size = get_tensor_parallel_size(config)
+
     script_path = f"neuralmagic.benchmarks.scripts.{config.script_name}"
 
     sparsities = [None] if len(config.sparsity) == 0 else config.sparsity
@@ -84,10 +106,20 @@ def run_benchmark_serving_script(config: NamedTuple,
 
         for max_model_len in max_model_lens:
 
-            server_cmd = f"python3 -m vllm.entrypoints.api_server --model {model} --tokenizer {model} --max-model-len {max_model_len} --host {BENCH_SERVER_HOST} --port {BENCH_SERVER_PORT} --disable-log-requests"
-
+            server_args = {
+                "model": model,
+                "tokenizer": model,
+                "max-model-len": max_model_len,
+                "host": BENCH_SERVER_HOST,
+                "port": BENCH_SERVER_PORT,
+                "tensor-parallel-size": tensor_parallel_size,
+                "disable-log-requests": ""
+            }
             if sparsity:
-                server_cmd += f" --sparsity {sparsity} "
+                server_args["sparsity"] = sparsity
+
+            server_cmd = "python3 -m vllm.entrypoints.api_server " + \
+                            " ".join([f"--{k} {v}" for k, v in server_args.items()])
 
             for script_args in script_args_to_cla(config):
                 bench_cmd = (["python3", "-m"
@@ -98,9 +130,11 @@ def run_benchmark_serving_script(config: NamedTuple,
                              ["--host", f"{BENCH_SERVER_HOST}"])
 
                 if output_directory:
-                    bench_cmd = bench_cmd + [
-                        "--save-directory", f"{output_directory}"
-                    ]
+                    bench_cmd += (["--save-directory", f"{output_directory}"] +
+                                  ["--server-args", f"{server_args}"] + [
+                                      "--server-tensor-parallel-size",
+                                      f"{tensor_parallel_size}"
+                                  ])
 
                 run_bench(server_cmd, bench_cmd, model)
 

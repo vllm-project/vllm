@@ -20,9 +20,6 @@
 				"output-len": [
 					128
 				],
-				"tensor-parallel-size": [
-					1
-				],
 				"n": [
 					1
 				],
@@ -34,7 +31,8 @@
 				],
 				"dtype": [
 					"auto"
-				]
+				],
+				"use-all-available-gpus_" : []
 			}
 		},
 		{
@@ -64,9 +62,6 @@
 				"output-len": [
 					1
 				],
-				"tensor-parallel-size": [
-					1
-				],
 				"n": [
 					1
 				],
@@ -78,7 +73,8 @@
 				],
 				"dtype": [
 					"auto"
-				]
+				],
+				"use-all-available-gpus_" : []
 			}
 		},
 		{
@@ -101,9 +97,6 @@
 				"output-len": [
 					128
 				],
-				"tensor-parallel-size": [
-					1
-				],
 				"n": [
 					1
 				],
@@ -120,7 +113,8 @@
 				],
 				"dtype": [
 					"auto"
-				]
+				],
+				"use-all-available-gpus_" : []
 			}
 		}
 	]

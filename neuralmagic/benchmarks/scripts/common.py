@@ -4,7 +4,7 @@ Common functions used in all benchmarking scripts
 import json
 import random
 import asyncio
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from pathlib import Path
 from transformers import PreTrainedTokenizerBase
 
@@ -16,17 +16,31 @@ from neuralmagic.benchmarks.datasets_registry import SHAREGPT_PATH, SHAREGPT_DOW
 from neuralmagic.benchmarks.scripts.backend_request_func import RequestFuncInput, async_request_vllm
 
 
-def get_bench_environment() -> dict:
+def num_available_gpus() -> int:
+    import torch
+    return torch.cuda.device_count()
+
+
+def get_benchmarking_context() -> dict:
     """
     Return the current python version, pytorch version and CUDA version as a dict
     """
     import sys
     import torch
+
+    cuda_devices = [
+        torch.cuda.get_device_properties(dev_idx)
+        for dev_idx in range(torch.cuda.device_count())
+    ]
+
+    cuda_device_names = [cuda_device.name for cuda_device in cuda_devices]
+
     return {
         "python_version": f"{sys.version}",
         "torch_version": f"{torch.__version__}",
         "torch_cuda_version": f"{torch.version.cuda}",
-        "cuda_device(0)": f"{torch.cuda.get_device_properties(0)}"
+        "cuda_devices": f"{cuda_devices}",
+        "cuda_device_names": f"{cuda_device_names}"
     }
 
 
@@ -168,6 +182,26 @@ def warmup_server(server_host: int,
                                num_input_tokens=num_input_tokens,
                                num_output_tokens=num_output_tokens)
     asyncio.run(process_requests(requests))
+
+
+def instantiate_benchmark_results_dict(benchmarking_script_name: str,
+                                       tensor_parallel_size: int, model: str,
+                                       tokenizer: Optional[str],
+                                       dataset: Optional[str]) -> dict:
+    """
+    instantiate_benchmark_results_dict populates an empty dict with all the must-have
+    key-value pairs. These are the key-value pairs that the scripts that process
+    the benchmark results rely on.
+    """
+    result_dict = {}
+    result_dict['script_name'] = benchmarking_script_name
+    result_dict['benchmarking_context'] = get_benchmarking_context()
+    result_dict['tensor_parallel_size'] = tensor_parallel_size
+    result_dict['model'] = model
+    result_dict['tokenizer'] = tokenizer if tokenizer is not None else model
+    result_dict['dataset'] = dataset if dataset is not None else "synthetic"
+
+    return result_dict
 
 
 def print_benchmark_io(results: List[RequestOutput]) -> None:

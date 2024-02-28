@@ -8,6 +8,7 @@
 				"mistralai/Mistral-7B-Instruct-v0.2",
 				"NousResearch/Llama-2-7b-chat-hf"
 			],
+			"use_all_available_gpus" : "",
 			"max_model_lens": [
 				4096
 			],
@@ -19,36 +20,6 @@
 					"100,1",
 					"200,2",
 					"500,5"
-				],
-				"best-of": [
-					1
-				],
-				"dataset": [
-					"sharegpt"
-				]
-			}
-		},
-		{
-			"description": "Benchmark vllm serving",
-			"models": [
-				"facebook/opt-125m",
-				"TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-				"mistralai/Mistral-7B-Instruct-v0.2",
-				"NousResearch/Llama-2-7b-chat-hf"
-			],
-			"max_model_lens": [
-				4096
-			],
-			"sparsity": [],
-			"script_name": "benchmark_serving",
-			"script_args": {
-				"num-prompts_": [
-					50,
-					100
-				],
-				"request-rate_": [
-					0.5,
-					"inf"
 				],
 				"best-of": [
 					1
