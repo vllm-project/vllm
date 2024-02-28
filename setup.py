@@ -41,8 +41,8 @@ def remove_prefix(text, prefix):
 
 class CMakeExtension(Extension):
 
-    def __init__(self, name, cmake_lists_dir='.', **kwa):
-        Extension.__init__(self, name, sources=[], **kwa)
+    def __init__(self, name: str, cmake_lists_dir: str = '.', **kwa) -> None:
+        super().__init__(name, sources=[], **kwa)
         self.cmake_lists_dir = os.path.abspath(cmake_lists_dir)
 
 
@@ -71,7 +71,7 @@ class cmake_build_ext(build_ext):
     #
     # Perform cmake configuration for a single extension.
     #
-    def configure(self, ext):
+    def configure(self, ext: CMakeExtension) -> None:
         # If we've already configured using the CMakeLists.txt for
         # this extension, exit early.
         if ext.cmake_lists_dir in cmake_build_ext.did_config:
@@ -136,7 +136,7 @@ class cmake_build_ext(build_ext):
             ['cmake', ext.cmake_lists_dir, *build_tool, *cmake_args],
             cwd=self.build_temp)
 
-    def build_extensions(self):
+    def build_extensions(self) -> None:
         # Ensure that CMake is present and working
         try:
             subprocess.check_output(['cmake', '--version'])
