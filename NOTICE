@@ -4,13 +4,12 @@ Copyright 2024 - present / Neuralmagic, Inc. All Rights Reserved.
 This product includes software developed at Neuralmagic, Inc. (https://www.neuralmagic.com).
 
 Source code in the neuralmagic-vllm GitHub repository is variously licensed under the Apache License
-Version 2.0, an Apache-compatible license.
+Version 2.0, an Apache-compatible license or the Neural Magic Community License. Please see
+LICENSE for more information.
 
-* For a copy of the Apache License Version 2.0, please see LICENSE-APACHE.
+* For a copy of the Apache License Version 2.0, please see [Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0).
 
-Neural Magic vLLM Community (https://docs.neuralmagic.com/products/xxx) is free to use and licensed under the Neural Magic Community License (https://github.com/neuralmagic/neuralmagic-vllm/blob/main/LICENSE). Some source code, example files and scripts included in the neuralmagic-vllm GitHub repository or directory are licensed under the Apache License Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0) as noted.
-
-Neural Magic vLLm Enterprise (https://docs.neuralmagic.com/products/xxx) requires a Trial License or can be fully licensed (https://neuralmagic.com/legal/master-software-license-and-service-agreement/) for production, commercial applications.
+Neural Magic vLLM (https://github.com/neuralmagic/neuralmagic-vllm) is free to use and licensed under the Neural Magic Community License (https://github.com/neuralmagic/neuralmagic-vllm/blob/main/LICENSE). 
 
 * For a copy of all other Apache-compatible licenses and notices,
   they will be referenced below.
@@ -23,7 +22,5 @@ All implementations in this repository or directory are subject to Neural Magic'
 https://www.neuralmagic.com/legal
 
 Package dependencies are defined in the Python setup.py file in the top-level directory of the neuralmagic-vllm GitHub repository and have their own Apache-compatible licenses and terms.
-
-ONNX License https://github.com/onnx/onnx/blob/main/LICENSE
 
 Other external dependencies, if referenced in the various subdirectories, are subject to their associated licenses and terms.
