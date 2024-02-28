@@ -1,0 +1,16 @@
+Source code in this repository is variously licensed under the Apache License
+Version 2.0, an Apache compatible license, or the Timescale License.
+
+All source code should have information at the beginning of its respective file
+which specifies its licensing information.
+
+* Outside of the "tsl" directory, source code in a given file is licensed
+  under the Apache License Version 2.0, unless otherwise noted (e.g., an
+  Apache-compatible license).
+
+* Within the "tsl" folder, source code in a given file is licensed under the
+  Timescale License, unless otherwise noted.
+
+When built, separate shared object files are generated for the Apache-licensed
+source code and the Timescale-licensed source code. The shared object binaries
+that contain `-tsl` in their name are licensed under the Timescale License.
