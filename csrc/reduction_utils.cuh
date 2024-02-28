@@ -19,45 +19,51 @@
 
 #include "cuda_compat.h"
 
-namespace vllm {
+/* On ROCm, warpSize is a reserved keyword implemented as a macro.
+   On CUDA, warpSize is a reserved keyword but its value is read
+   from a special memory region at run time.
+   Thus, we have to define warpSize at compile time for CUDA.
+ */
+#ifndef USE_ROCM
+// On CUDA, limit our macro's scope as much as possible
+#pragma push_macro("warpSize")
+#undef warpSize
+#define warpSize 32
+#endif
 
-template<typename T>
+namespace vllm {
+template<typename T, int numLanes = warpSize>
 __inline__ __device__ T warpReduceSum(T val) {
-#pragma unroll
-  for (int mask = WARP_SIZE/2; mask > 0; mask >>= 1)
+  static_assert(numLanes > 0 && (numLanes & (numLanes - 1)) == 0,
+                "numLanes is not a positive power of 2!");
+  #pragma unroll
+  for (int mask = numLanes >> 1; mask > 0; mask >>= 1)
     val += VLLM_SHFL_XOR_SYNC(val, mask);
   return val;
 }
 
-__inline__ __device__ constexpr int _calculateLaneMask(int warp_size) {
-  return warp_size - 1;
-}
-
-__inline__ __device__ constexpr int _calculateWidShift(int warp_size) {
-  return 5 + (warp_size >> 6);
-}
-
 /* Calculate the sum of all elements in a block */
-template<typename T>
+template<typename T, int maxBlockSize = 1024>
 __inline__ __device__ T blockReduceSum(T val) {
-  static __shared__ T shared[WARP_SIZE];
-  constexpr auto LANE_MASK = _calculateLaneMask(WARP_SIZE);
-  constexpr auto WID_SHIFT = _calculateWidShift(WARP_SIZE);
-  int lane = threadIdx.x & LANE_MASK;
-  int wid = threadIdx.x >> WID_SHIFT;
-
   val = warpReduceSum<T>(val);
+  // If the block fits into a single warp, we are already done
+  if constexpr (maxBlockSize > warpSize) {
+    constexpr int maxActiveLanes = (maxBlockSize + warpSize - 1) / warpSize;
+    static __shared__ T shared[maxActiveLanes];
+    int lane = threadIdx.x % warpSize;
+    int wid = threadIdx.x / warpSize;
+    if (lane == 0)
+      shared[wid] = val;
 
-  if (lane == 0)
-    shared[wid] = val;
+    __syncthreads();
 
-  __syncthreads();
-
-  // Modify from blockDim.x << 5 to blockDim.x / 32. to prevent
-  // blockDim.x is not divided by 32
-  val = (threadIdx.x < (blockDim.x / (WARP_SIZE * 1.0f))) ? shared[lane] : (T)(0.0f);
-  val = warpReduceSum<T>(val);
+    val = (threadIdx.x < (blockDim.x / (float) warpSize)) ? shared[lane] : (T)(0.0f);
+    val = warpReduceSum<T, maxActiveLanes>(val);
+  }
   return val;
 }
 
 } // namespace vllm
+#ifndef USE_ROCM
+#pragma pop_macro("warpSize")
+#endif
