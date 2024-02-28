@@ -18,7 +18,6 @@
 namespace cg = cooperative_groups;
 
 #ifdef USE_ROCM
-
 template <size_t len>
 __host__ __device__
 inline void* memcpy_blocking(void *dst, const void *src) {
@@ -33,6 +32,8 @@ inline void* memcpy_blocking(void *dst, const void *src) {
   return dst;
 }
 #endif
+
+#ifndef USE_ROCM
 
 // nthrs = (32, 4)
 template <int feat_in, int feat_out, size_t vec_size, size_t X_copy_size,
@@ -60,7 +61,6 @@ bgmv_shrink_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
 
   size_t W_shared_offset[num_pipeline_stages] = {0U, 1U * tile_size};
   size_t X_shared_offset[num_pipeline_stages] = {0U, 1U * tile_size};
-#ifndef USE_ROCM
   auto pipe = cuda::make_pipeline();
 
   // pipeline load W/X and compute WX;
@@ -74,14 +74,6 @@ bgmv_shrink_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
                          (threadIdx.y * tx + threadIdx.x) * vec_size,
                      cuda::aligned_size_t<X_copy_size>(X_copy_size), pipe);
   pipe.producer_commit();
-#else
-  memcpy_blocking<W_copy_size>(W_shared + (threadIdx.y * tx + threadIdx.x) * vec_size,
-                                      W + (idx * feat_out + j) * feat_in +
-                                          (threadIdx.y * tx + threadIdx.x) * vec_size);
-  memcpy_blocking<X_copy_size>(X_shared + (threadIdx.y * tx + threadIdx.x) * vec_size,
-                                      X + (batch_idx * feat_in) +
-                                          (threadIdx.y * tx + threadIdx.x) * vec_size);
-#endif
   size_t copy_idx, compute_idx;
   float y = 0.f;
   vec_t<in_T, vec_size> x_vec;
@@ -93,7 +85,6 @@ bgmv_shrink_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
        ++tile_idx) {
     copy_idx = tile_idx % num_pipeline_stages;
     // pipeline stage: async copy W fragment
-#ifndef USE_ROCM
     pipe.producer_acquire();
     if (tile_idx * tile_size + threadIdx.y * tx * vec_size < feat_in) {
       cuda::memcpy_async(W_shared + W_shared_offset[copy_idx] +
@@ -109,25 +100,10 @@ bgmv_shrink_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
                          cuda::aligned_size_t<X_copy_size>(X_copy_size), pipe);
     }
     pipe.producer_commit();
-#else
-    if (tile_idx * tile_size + threadIdx.y * tx * vec_size < feat_in) {
-      memcpy_blocking<W_copy_size>(W_shared + W_shared_offset[copy_idx] +
-                                              (threadIdx.y * tx + threadIdx.x) * vec_size,
-                                          W + (idx * feat_out + j) * feat_in +
-                                              tile_idx * tile_size +
-                                              (threadIdx.y * tx + threadIdx.x) * vec_size);
-      memcpy_blocking<X_copy_size>(X_shared + X_shared_offset[copy_idx] +
-                                              (threadIdx.y * tx + threadIdx.x) * vec_size,
-                                          X + (batch_idx * feat_in) + tile_idx * tile_size +
-                                              (threadIdx.y * tx + threadIdx.x) * vec_size);
-    }
-#endif
 
     compute_idx = (tile_idx - 1) % num_pipeline_stages;
     // pipeline stage: compute WX
-#ifndef USE_ROCM
     pipe.consumer_wait();
-#endif
     block.sync();
     x_vec.load(X_shared + X_shared_offset[compute_idx] +
                (threadIdx.y * tx + threadIdx.x) * vec_size);
@@ -136,15 +112,11 @@ bgmv_shrink_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     float sum = 0.f;
 #pragma unroll
     for (size_t i = 0; i < vec_size; ++i) {
-#ifndef USE_ROCM
       sum += float(w_vec[i]) * float(x_vec[i]) * scale;
-#else
-      sum += convert_type<W_T, float>(w_vec[i]) * convert_type<in_T, float>(x_vec[i]) * scale;
-#endif
     }
 #pragma unroll
     for (size_t offset = tx / 2; offset > 0; offset /= 2) {
-      sum += VLLM_SHFL_DOWN_SYNC(sum, offset);
+      sum += __shfl_down_sync(0xffffffff, sum, offset);
     }
     y_warpwise[threadIdx.y] = sum;
     block.sync();
@@ -154,16 +126,12 @@ bgmv_shrink_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     }
 
     block.sync();
-#ifndef USE_ROCM
     pipe.consumer_release();
-#endif
   }
 
   compute_idx = (tile_idx - 1) % num_pipeline_stages;
   // final pipeline stage
-#ifndef USE_ROCM
   pipe.consumer_wait();
-#endif
   block.sync();
   x_vec.load(X_shared + X_shared_offset[compute_idx] +
              (threadIdx.y * tx + threadIdx.x) * vec_size);
@@ -172,15 +140,11 @@ bgmv_shrink_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
   float sum = 0.f;
 #pragma unroll
   for (size_t i = 0; i < vec_size; ++i) {
-#ifndef USE_ROCM
     sum += float(w_vec[i]) * float(x_vec[i]) * scale;
-#else
-    sum += convert_type<W_T, float>(w_vec[i]) * convert_type<in_T, float>(x_vec[i]) * scale;
-#endif
   }
 #pragma unroll
   for (size_t offset = tx / 2; offset > 0; offset /= 2) {
-    sum += VLLM_SHFL_DOWN_SYNC(sum, offset);
+    sum += __shfl_down_sync(0xffffffff, sum, offset);
   }
   y_warpwise[threadIdx.y] =
       ((tile_idx - 1) * tile_size + threadIdx.y * tx * vec_size < feat_in)
@@ -193,20 +157,84 @@ bgmv_shrink_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
   }
 
   block.sync();
-#ifndef USE_ROCM
   pipe.consumer_release();
-#endif
 
   // write Y;
   if (block.thread_rank() == 0) {
-#ifndef USE_ROCM
     Y[batch_idx * full_y_size + y_offset + j] += static_cast<out_T>(y);
-#else
-    size_t y_idx = batch_idx * full_y_size + y_offset + j;
-    Y[y_idx] = vllm_add<out_T>(Y[y_idx], convert_type<float, out_T>(y));
-#endif
   }
 }
+
+#else
+
+template <int feat_in, int feat_out, size_t vec_size, size_t X_copy_size,
+          size_t W_copy_size, int tx, int ty, int tz, typename in_T,
+          typename out_T, typename W_T>
+__global__ void
+bgmv_shrink_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
+                   const W_T *__restrict__ W,
+                   const int64_t *__restrict__ indicies, int64_t y_offset,
+                   int64_t full_y_size, int64_t num_layers, int64_t layer_idx,
+                   float scale) {
+  size_t batch_idx = blockIdx.y;
+  int64_t idx = indicies[batch_idx] * num_layers + layer_idx;
+  if (idx < 0) {
+    return;
+  }
+
+  size_t j = blockIdx.x;
+  constexpr size_t tile_size = tx * vec_size;
+  constexpr size_t num_tiles = (feat_in + tile_size - 1) / tile_size;
+  __shared__ W_T W_shared[tile_size];
+  __shared__ in_T X_shared[tile_size];
+
+  float y = 0;
+  vec_t<in_T, vec_size> x_vec;
+  vec_t<W_T, vec_size> w_vec;
+  size_t tile_idx;
+
+#pragma unroll
+  for (tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
+    if (tile_idx * tile_size + (threadIdx.x + 1) * vec_size - 1 < feat_in) {
+      memcpy_blocking<W_copy_size>(W_shared + (threadIdx.x) * vec_size,
+                                          W + (idx * feat_out + j) * feat_in +
+                                              tile_idx * tile_size +
+                                              (threadIdx.x) * vec_size);
+      memcpy_blocking<X_copy_size>(X_shared + (threadIdx.x) * vec_size,
+                                          X + (batch_idx * feat_in) +
+                                              tile_idx * tile_size +
+                                              (threadIdx.x) * vec_size);
+    }
+
+    __syncthreads();
+    x_vec.load(X_shared +
+               (threadIdx.x) * vec_size);
+    w_vec.load(W_shared +
+               (threadIdx.x) * vec_size);
+    float sum = 0.f;
+#pragma unroll
+    for (size_t i = 0; i < vec_size; ++i) {
+      sum += convert_type<W_T, float>(w_vec[i]) * convert_type<in_T, float>(x_vec[i]) * scale;
+    }
+#pragma unroll
+    for (size_t offset = tx / 2; offset > 0; offset /= 2) {
+      sum += VLLM_SHFL_DOWN_SYNC(sum, offset);
+    }
+    __syncthreads();
+
+    if (tile_idx * tile_size + (threadIdx.x + 1) * vec_size - 1 < feat_in) {
+      y += sum;
+    }
+  }
+
+  // write Y;
+  if (threadIdx.x == 0) {
+    size_t y_idx = batch_idx * full_y_size + y_offset + j;
+    Y[y_idx] = vllm_add<out_T>(Y[y_idx], convert_type<float, out_T>(y));
+  }
+}
+
+#endif
 
 // nthrs = (2, 16, 4)
 template <int feat_in, int feat_out, size_t vec_size, int tx, int ty, int tz,
@@ -314,6 +342,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
                                         scale);
     }
   } else {
+#ifndef USE_ROCM
     static_assert(feat_in % (vec_size * 32) == 0 ||
                   feat_in % (vec_size * 16) == 0 ||
                   feat_in % (vec_size * 8) == 0);
@@ -357,6 +386,68 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
                                         full_y_size, num_layers, layer_idx,
                                         scale);
     }
+#else
+    constexpr size_t rocm_warp_size = 64;
+    
+    static_assert(feat_in % (rocm_warp_size * 8) == 0 ||
+                  feat_in % (rocm_warp_size * 4) == 0 ||
+                  feat_in % (rocm_warp_size * 2) == 0 ||
+                  feat_in % (rocm_warp_size * 1) == 0);
+
+    if constexpr (feat_in % (rocm_warp_size * 8) == 0) {
+      constexpr size_t vec_size_shrink = 8;
+      constexpr int tx = rocm_warp_size;
+      constexpr int ty = 1;
+
+      dim3 nblks(feat_out, batch_size);
+      dim3 nthrs(tx);
+
+      bgmv_shrink_kernel<feat_in, feat_out, vec_size_shrink, vec_size_shrink * sizeof(in_T),
+                          vec_size_shrink * sizeof(W_T), tx, ty, tz>
+          <<<nblks, nthrs, 0, stream>>>(Y, X, W, indicies, y_offset,
+                                        full_y_size, num_layers, layer_idx,
+                                        scale);
+    } else if constexpr (feat_in % (rocm_warp_size * 4) == 0) {
+      constexpr size_t vec_size_shrink = 4;
+      constexpr int tx = rocm_warp_size;
+      constexpr int ty = 1;
+
+      dim3 nblks(feat_out, batch_size);
+      dim3 nthrs(tx);
+
+      bgmv_shrink_kernel<feat_in, feat_out, vec_size_shrink, vec_size_shrink * sizeof(in_T),
+                          vec_size_shrink * sizeof(W_T), tx, ty, tz>
+          <<<nblks, nthrs, 0, stream>>>(Y, X, W, indicies, y_offset,
+                                        full_y_size, num_layers, layer_idx,
+                                        scale);
+    } else if constexpr (feat_in % (rocm_warp_size * 2) == 0) {
+      constexpr size_t vec_size_shrink = 2;
+      constexpr int tx = rocm_warp_size;
+      constexpr int ty = 1;
+
+      dim3 nblks(feat_out, batch_size);
+      dim3 nthrs(tx);
+
+      bgmv_shrink_kernel<feat_in, feat_out, vec_size_shrink, vec_size_shrink * sizeof(in_T),
+                          vec_size_shrink * sizeof(W_T), tx, ty, tz>
+          <<<nblks, nthrs, 0, stream>>>(Y, X, W, indicies, y_offset,
+                                        full_y_size, num_layers, layer_idx,
+                                        scale);
+    } else if constexpr (feat_in % (rocm_warp_size * 1) == 0) {
+      constexpr size_t vec_size_shrink = 1;
+      constexpr int tx = rocm_warp_size;
+      constexpr int ty = 1;
+
+      dim3 nblks(feat_out, batch_size);
+      dim3 nthrs(tx);
+
+      bgmv_shrink_kernel<feat_in, feat_out, vec_size_shrink, vec_size_shrink * sizeof(in_T),
+                          vec_size_shrink * sizeof(W_T), tx, ty, tz>
+          <<<nblks, nthrs, 0, stream>>>(Y, X, W, indicies, y_offset,
+                                        full_y_size, num_layers, layer_idx,
+                                        scale);
+    }
+#endif
   }
 }
 
