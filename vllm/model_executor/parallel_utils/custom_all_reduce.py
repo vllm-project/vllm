@@ -29,17 +29,21 @@ def init_custom_ar() -> None:
         return
     rank = get_tensor_model_parallel_rank()
     world_size = get_tensor_model_parallel_world_size()
+    if world_size == 1:
+        # No need to initialize custom allreduce for single GPU case.
+        return
+
     if world_size not in _SUPPORTED_WORLD_SIZES:
         logger.warn(
             "Custom allreduce is disabled due to an unsupported world size: "
-            "%d. Supported world sizes: %s. To slience this warning, specify"
+            "%d. Supported world sizes: %s. To silence this warning, specify"
             "disable_custom_all_reduce=True explicitly.", world_size,
             str(_SUPPORTED_WORLD_SIZES))
         return
     if not _can_p2p(rank, world_size):
         logger.warn(
             "Custom allreduce is disabled because your platform lacks GPU P2P"
-            " capability. To slience this warning, specify"
+            " capability. To silence this warning, specify"
             "disable_custom_all_reduce=True explicitly.")
         return
     _CA_HANDLE = CustomAllreduce(rank, world_size)
@@ -61,6 +65,10 @@ def is_capturing() -> bool:
 
 def get_handle() -> Optional["CustomAllreduce"]:
     return _CA_HANDLE
+
+
+def is_initialized() -> bool:
+    return _CA_HANDLE is not None
 
 
 @contextmanager

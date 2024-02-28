@@ -3,8 +3,8 @@ import dataclasses
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, LoRAConfig)
+from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig, LoRAConfig)
 
 
 @dataclass
@@ -32,6 +32,7 @@ class EngineArgs:
     max_paddings: int = 256
     disable_log_stats: bool = False
     revision: Optional[str] = None
+    code_revision: Optional[str] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
     enforce_eager: bool = False
@@ -43,6 +44,7 @@ class EngineArgs:
     lora_extra_vocab_size: int = 256
     lora_dtype = 'auto'
     max_cpu_loras: Optional[int] = None
+    device: str = 'auto'
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -74,6 +76,13 @@ class EngineArgs:
             help='the specific model version to use. It can be a branch '
             'name, a tag name, or a commit id. If unspecified, will use '
             'the default version.')
+        parser.add_argument(
+            '--code-revision',
+            type=str,
+            default=None,
+            help='the specific revision to use for the model code on '
+            'Hugging Face Hub. It can be a branch name, a tag name, or a '
+            'commit id. If unspecified, will use the default version.')
         parser.add_argument(
             '--tokenizer-revision',
             type=str,
@@ -127,13 +136,13 @@ class EngineArgs:
             '--kv-cache-dtype',
             type=str,
             choices=['auto', 'fp8_e5m2'],
-            default='auto',
+            default=EngineArgs.kv_cache_dtype,
             help='Data type for kv cache storage. If "auto", will use model '
             'data type. Note FP8 is not supported when cuda version is '
             'lower than 11.8.')
         parser.add_argument('--max-model-len',
                             type=int,
-                            default=None,
+                            default=EngineArgs.max_model_len,
                             help='model context length. If unspecified, '
                             'will be automatically derived from the model.')
         # Parallel arguments
@@ -154,6 +163,7 @@ class EngineArgs:
         parser.add_argument(
             '--max-parallel-loading-workers',
             type=int,
+            default=EngineArgs.max_parallel_loading_workers,
             help='load model sequentially in multiple batches, '
             'to avoid RAM OOM when using tensor '
             'parallel and large models')
@@ -161,9 +171,8 @@ class EngineArgs:
         parser.add_argument('--block-size',
                             type=int,
                             default=EngineArgs.block_size,
-                            choices=[8, 16, 32],
+                            choices=[8, 16, 32, 128],
                             help='token block size')
-        # TODO(woosuk): Support fine-grained seeds (e.g., seed per request).
         parser.add_argument('--seed',
                             type=int,
                             default=EngineArgs.seed,
@@ -200,7 +209,7 @@ class EngineArgs:
                             '-q',
                             type=str,
                             choices=['awq', 'gptq', 'squeezellm', None],
-                            default=None,
+                            default=EngineArgs.quantization,
                             help='Method used to quantize the weights. If '
                             'None, we first check the `quantization_config` '
                             'attribute in the model config file. If that is '
@@ -255,6 +264,11 @@ class EngineArgs:
             help=('Maximum number of LoRAs to store in CPU memory. '
                   'Must be >= than max_num_seqs. '
                   'Defaults to max_num_seqs.'))
+        parser.add_argument("--device",
+                            type=str,
+                            default=EngineArgs.device,
+                            choices=["auto", "cuda", "neuron"],
+                            help='Device type for vLLM execution.')
         return parser
 
     @classmethod
@@ -268,14 +282,14 @@ class EngineArgs:
     def create_engine_configs(
         self,
     ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig,
-               Optional[LoRAConfig]]:
-        model_config = ModelConfig(self.model, self.tokenizer,
-                                   self.tokenizer_mode, self.trust_remote_code,
-                                   self.download_dir, self.load_format,
-                                   self.dtype, self.seed, self.revision,
-                                   self.tokenizer_revision, self.max_model_len,
-                                   self.quantization, self.enforce_eager,
-                                   self.max_context_len_to_capture)
+               DeviceConfig, Optional[LoRAConfig]]:
+        device_config = DeviceConfig(self.device)
+        model_config = ModelConfig(
+            self.model, self.tokenizer, self.tokenizer_mode,
+            self.trust_remote_code, self.download_dir, self.load_format,
+            self.dtype, self.seed, self.revision, self.code_revision,
+            self.tokenizer_revision, self.max_model_len, self.quantization,
+            self.enforce_eager, self.max_context_len_to_capture)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
@@ -296,7 +310,8 @@ class EngineArgs:
             lora_dtype=self.lora_dtype,
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
-        return model_config, cache_config, parallel_config, scheduler_config, lora_config
+        return (model_config, cache_config, parallel_config, scheduler_config,
+                device_config, lora_config)
 
 
 @dataclass

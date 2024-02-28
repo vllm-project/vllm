@@ -8,7 +8,7 @@ from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config
-from vllm.utils import get_cpu_memory, is_hip, get_nvcc_cuda_version
+from vllm.utils import get_cpu_memory, is_hip, is_neuron, get_nvcc_cuda_version
 
 logger = init_logger(__name__)
 
@@ -44,6 +44,9 @@ class ModelConfig:
         revision: The specific model version to use. It can be a branch name,
             a tag name, or a commit id. If unspecified, will use the default
             version.
+        code_revision: The specific revision to use for the model code on
+            Hugging Face Hub. It can be a branch name, a tag name, or a 
+            commit id. If unspecified, will use the default version.
         tokenizer_revision: The specific tokenizer version to use. It can be a
             branch name, a tag name, or a commit id. If unspecified, will use
             the default version.
@@ -70,6 +73,7 @@ class ModelConfig:
         dtype: Union[str, torch.dtype],
         seed: int,
         revision: Optional[str] = None,
+        code_revision: Optional[str] = None,
         tokenizer_revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
@@ -84,6 +88,7 @@ class ModelConfig:
         self.load_format = load_format
         self.seed = seed
         self.revision = revision
+        self.code_revision = code_revision
         self.tokenizer_revision = tokenizer_revision
         self.quantization = quantization
         self.enforce_eager = enforce_eager
@@ -93,14 +98,18 @@ class ModelConfig:
             # download model from ModelScope hub,
             # lazy import so that modelscope is not required for normal use.
             from modelscope.hub.snapshot_download import snapshot_download  # pylint: disable=C
-            model_path = snapshot_download(model_id=model,
-                                           cache_dir=download_dir,
-                                           revision=revision)
+            if not os.path.exists(model):
+                model_path = snapshot_download(model_id=model,
+                                               cache_dir=download_dir,
+                                               revision=revision)
+            else:
+                model_path = model
             self.model = model_path
             self.download_dir = model_path
             self.tokenizer = model_path
 
-        self.hf_config = get_config(self.model, trust_remote_code, revision)
+        self.hf_config = get_config(self.model, trust_remote_code, revision,
+                                    code_revision)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
         self.max_model_len = _get_and_verify_max_len(self.hf_config,
                                                      max_model_len)
@@ -310,7 +319,7 @@ class CacheConfig:
             pass
         elif self.cache_dtype == "fp8_e5m2":
             nvcc_cuda_version = get_nvcc_cuda_version()
-            if nvcc_cuda_version < Version("11.8"):
+            if nvcc_cuda_version and nvcc_cuda_version < Version("11.8"):
                 raise ValueError(
                     "FP8 is not supported when cuda version is lower than 11.8."
                 )
@@ -355,6 +364,9 @@ class ParallelConfig:
         worker_use_ray: Whether to use Ray for model workers. Will be set to
             True if either pipeline_parallel_size or tensor_parallel_size is
             greater than 1.
+        max_parallel_loading_workers: Maximum number of multiple batches
+            when load model sequentially. To avoid RAM OOM when using tensor
+            parallel and large models.
         disable_custom_all_reduce: Disable the custom all-reduce kernel and
             fall back to NCCL.
     """
@@ -368,13 +380,21 @@ class ParallelConfig:
         disable_custom_all_reduce: bool = False,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
-        self.tensor_parallel_size = tensor_parallel_size
+        if is_neuron():
+            # For Neuron device support, here we assign TP=1 to avoid sharding within vLLM directly.
+            # Transformer-neuronx would take neuron_tp_degree attribute, and distribute the workload
+            # to multiple NeuronCores.
+            self.tensor_parallel_size = 1
+            self.neuron_tp_degree = tensor_parallel_size
+        else:
+            self.tensor_parallel_size = tensor_parallel_size
         self.worker_use_ray = worker_use_ray
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
 
-        self.world_size = pipeline_parallel_size * tensor_parallel_size
-        if self.world_size > 1:
+        self.world_size = pipeline_parallel_size * self.tensor_parallel_size
+        # Ray worker is not supported for Neuron backend.
+        if self.world_size > 1 and not is_neuron():
             self.worker_use_ray = True
         self._verify_args()
 
@@ -382,16 +402,26 @@ class ParallelConfig:
         if self.pipeline_parallel_size > 1:
             raise NotImplementedError(
                 "Pipeline parallelism is not supported yet.")
-        if is_hip():
+        if not self.disable_custom_all_reduce and self.world_size > 1:
+            if is_hip():
+                self.disable_custom_all_reduce = True
+                logger.info(
+                    "Disabled the custom all-reduce kernel because it is not "
+                    "supported on AMD GPUs.")
+            elif self.pipeline_parallel_size > 1:
+                self.disable_custom_all_reduce = True
+                logger.info(
+                    "Disabled the custom all-reduce kernel because it is not "
+                    "supported with pipeline parallelism.")
+
+        # FIXME(woosuk): Fix the stability issues and re-enable the custom
+        # all-reduce kernel.
+        if not self.disable_custom_all_reduce and self.world_size > 1:
             self.disable_custom_all_reduce = True
             logger.info(
-                "Disabled the custom all-reduce kernel because it is not "
-                "supported on AMD GPUs.")
-        elif self.pipeline_parallel_size > 1:
-            self.disable_custom_all_reduce = True
-            logger.info(
-                "Disabled the custom all-reduce kernel because it is not "
-                "supported with pipeline parallelism.")
+                "Custom all-reduce kernels are temporarily disabled due to "
+                "stability issues. We will re-enable them once the issues are "
+                "resolved.")
 
 
 class SchedulerConfig:
@@ -441,6 +471,33 @@ class SchedulerConfig:
                 f"({self.max_num_seqs}).")
 
 
+class DeviceConfig:
+
+    def __init__(self, device: str = "auto") -> None:
+        if device == "auto":
+            # Automated device type detection
+            if torch.cuda.is_available():
+                self.device_type = "cuda"
+            elif is_neuron():
+                self.device_type = "neuron"
+            else:
+                raise RuntimeError("No supported device detected.")
+        else:
+            # Device type is assigned explicitly
+            self.device_type = device
+
+        # Some device types require processing inputs on CPU
+        if self.device_type in ["neuron"]:
+            self.device = torch.device("cpu")
+        else:
+            # Set device with device type
+            self.device = torch.device(self.device_type)
+
+    @property
+    def is_neuron(self):
+        return self.device_type == "neuron"
+
+
 @dataclass
 class LoRAConfig:
     max_lora_rank: int
@@ -470,7 +527,7 @@ class LoRAConfig:
         elif self.max_cpu_loras < self.max_loras:
             raise ValueError(
                 f"max_cpu_loras ({self.max_cpu_loras}) must be >= "
-                f"max_num_seqs ({self.max_loras})")
+                f"max_loras ({self.max_loras})")
 
     def verify_with_model_config(self, model_config: ModelConfig):
         if self.lora_dtype in (None, "auto"):

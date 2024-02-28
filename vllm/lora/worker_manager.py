@@ -1,10 +1,10 @@
 import logging
 from abc import ABC, abstractmethod, abstractproperty
-from typing import Any, List, Optional, Set, Type, Union
+from typing import Any, Dict, List, Optional, Set, Type
 
 import torch
 
-from vllm.lora.models import (TARGET_MODULES_QKV, LoRAModel, LoRAModelManager,
+from vllm.lora.models import (LoRAModel, LoRAModelManager,
                               LRUCacheLoRAModelManager, create_lora_manager)
 from vllm.lora.request import LoRARequest
 from vllm.lora.layers import LoRAMapping
@@ -13,7 +13,7 @@ from vllm.config import LoRAConfig
 logger = logging.getLogger(__name__)
 
 
-class WorkerLoRAManager(ABC):
+class AbstractWorkerLoRAManager(ABC):
     """Abstract class for managing LoRA models on the worker side."""
 
     def __init__(self, max_num_seqs: int, max_num_batched_tokens: int,
@@ -33,7 +33,6 @@ class WorkerLoRAManager(ABC):
     def create_lora_manager(
         self,
         model: torch.nn.Module,
-        target_modules: Union[str, List[str]] = TARGET_MODULES_QKV,
     ) -> Any:
         ...
 
@@ -63,7 +62,7 @@ class WorkerLoRAManager(ABC):
         ...
 
 
-class WorkerLoRAManager(WorkerLoRAManager):
+class WorkerLoRAManager(AbstractWorkerLoRAManager):
     """WorkerLoRAManager that manages LoRA models on the worker side.
 
     Every request, the requested LoRAs will be loaded (unless they are already
@@ -78,10 +77,14 @@ class WorkerLoRAManager(WorkerLoRAManager):
         vocab_size: int,
         lora_config: LoRAConfig,
         device: torch.device,
+        embedding_modules: Dict[str, str],
+        embedding_padding_modules: List[str],
         lora_model_cls: Type[LoRAModel] = LoRAModel,
     ):
         self._lora_manager: Optional[LoRAModelManager] = None
         self._lora_model_cls = lora_model_cls
+        self.embedding_modules = embedding_modules
+        self.embedding_padding_modules = embedding_padding_modules
         super().__init__(max_num_seqs, max_num_batched_tokens, vocab_size,
                          lora_config, device)
 
@@ -92,13 +95,11 @@ class WorkerLoRAManager(WorkerLoRAManager):
     def create_lora_manager(
         self,
         model: torch.nn.Module,
-        target_modules: Union[str, List[str]] = TARGET_MODULES_QKV,
     ) -> Any:
         lora_manager = create_lora_manager(
             model,
             max_num_seqs=self.max_num_seqs,
             max_num_batched_tokens=self.max_num_batched_tokens,
-            target_modules=target_modules,
             vocab_size=self.vocab_size,
             lora_config=self.lora_config,
             lora_manager_cls=self._lora_manager_cls,
@@ -142,6 +143,8 @@ class WorkerLoRAManager(WorkerLoRAManager):
                 dtype=self.lora_config.lora_dtype,
                 target_embedding_padding=self.vocab_size +
                 self.lora_config.lora_extra_vocab_size,
+                embedding_modules=self.embedding_modules,
+                embedding_padding_modules=self.embedding_padding_modules,
             )
         except Exception as e:
             raise RuntimeError(
@@ -162,7 +165,7 @@ class WorkerLoRAManager(WorkerLoRAManager):
             return False
         return self._lora_manager.add_lora(
             self._lora_manager.create_dummy_lora(lora_request.lora_int_id,
-                                                 rank))
+                                                 rank, self.embedding_modules))
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         if lora_request.lora_int_id in self.list_loras():
@@ -195,11 +198,9 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
     def create_lora_manager(
         self,
         model: torch.nn.Module,
-        target_modules: Union[str, List[str]] = TARGET_MODULES_QKV,
     ) -> Any:
         lora_manager = create_lora_manager(
             model,
-            target_modules=target_modules,
             lora_manager_cls=self._lora_manager_cls,
             max_num_seqs=self.max_num_seqs,
             vocab_size=self.vocab_size,

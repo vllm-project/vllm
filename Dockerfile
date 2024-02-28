@@ -7,6 +7,12 @@ FROM nvidia/cuda:12.1.0-devel-ubuntu22.04 AS dev
 RUN apt-get update -y \
     && apt-get install -y python3-pip git
 
+# Workaround for https://github.com/openai/triton/issues/2507 and
+# https://github.com/pytorch/pytorch/issues/107960 -- hopefully
+# this won't be needed for future versions of this docker image
+# or future versions of triton.
+RUN ldconfig /usr/local/cuda-12.1/compat/
+
 WORKDIR /workspace
 
 # install build and runtime dependencies
@@ -69,8 +75,10 @@ RUN --mount=type=cache,target=/root/.cache/pip VLLM_USE_PRECOMPILED=1 pip instal
 
 
 #################### RUNTIME BASE IMAGE ####################
-# use CUDA base as CUDA runtime dependencies are already installed via pip
-FROM nvidia/cuda:12.1.0-base-ubuntu22.04 AS vllm-base
+# We used base cuda image because pytorch installs its own cuda libraries.
+# However cupy depends on cuda libraries so we had to switch to the runtime image
+# In the future it would be nice to get a container with pytorch and cuda without duplicating cuda
+FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04 AS vllm-base
 
 # libnccl required for ray
 RUN apt-get update -y \
