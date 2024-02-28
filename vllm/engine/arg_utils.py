@@ -44,7 +44,7 @@ class EngineArgs:
     lora_extra_vocab_size: int = 256
     lora_dtype = 'auto'
     max_cpu_loras: Optional[int] = None
-    device: str = 'cuda'
+    device: str = 'auto'
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -171,7 +171,7 @@ class EngineArgs:
         parser.add_argument('--block-size',
                             type=int,
                             default=EngineArgs.block_size,
-                            choices=[8, 16, 32],
+                            choices=[8, 16, 32, 128],
                             help='token block size')
         parser.add_argument('--seed',
                             type=int,
@@ -264,13 +264,11 @@ class EngineArgs:
             help=('Maximum number of LoRAs to store in CPU memory. '
                   'Must be >= than max_num_seqs. '
                   'Defaults to max_num_seqs.'))
-        parser.add_argument(
-            "--device",
-            type=str,
-            default=EngineArgs.device,
-            choices=["cuda"],
-            help=('Device type for vLLM execution. '
-                  'Currently, only CUDA-compatible devices are supported.'))
+        parser.add_argument("--device",
+                            type=str,
+                            default=EngineArgs.device,
+                            choices=["auto", "cuda", "neuron"],
+                            help='Device type for vLLM execution.')
         return parser
 
     @classmethod

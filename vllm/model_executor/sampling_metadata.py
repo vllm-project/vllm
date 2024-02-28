@@ -5,7 +5,7 @@ import torch
 
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SequenceData
-from vllm.utils import in_wsl
+from vllm.utils import in_wsl, is_neuron
 
 _SAMPLING_EPS = 1e-5
 
@@ -155,7 +155,7 @@ class SamplingTensors:
                    dtype: torch.dtype) -> "SamplingTensors":
         # Note that the performance will be very bad without
         # pinned memory.
-        pin_memory = not in_wsl()
+        pin_memory = not in_wsl() and not is_neuron()
         prompt_max_len = max(len(tokens) for tokens in prompt_tokens)
         prompt_padded_tokens = [
             tokens + [vocab_size] * (prompt_max_len - len(tokens))

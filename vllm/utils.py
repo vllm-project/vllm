@@ -118,6 +118,14 @@ def is_hip() -> bool:
     return torch.version.hip is not None
 
 
+def is_neuron() -> bool:
+    try:
+        import transformers_neuronx
+    except ImportError:
+        transformers_neuronx = None
+    return transformers_neuronx is not None
+
+
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
     # NOTE: This import statement should be executed lazily since
