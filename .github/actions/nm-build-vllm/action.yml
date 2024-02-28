@@ -1,5 +1,5 @@
-name: build neuralmagic-vllm
-description: 'build neuralmagic-vllm'
+name: build nm-vllm
+description: 'build nm-vllm'
 inputs:
   Gi_per_thread:
     description: 'requested GiB to reserve per thread'

@@ -1,5 +1,5 @@
-name: build neuralmagic-vllm whl
-description: 'build whl file of neuralmagic-vllm'
+name: build nm-vllm whl
+description: 'build whl file of nm-vllm'
 inputs:
   python:
     description: 'python version, e.g. 3.10.12'

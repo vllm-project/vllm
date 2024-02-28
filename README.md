@@ -15,8 +15,8 @@ pip install nm-vllm
 
 You can also build and install `nm-vllm` from source (this will take ~10 minutes):
 ```bash
-git clone https://github.com/neuralmagic/neuralmagic-vllm.git
-cd neuralmagic-vllm
+git clone https://github.com/neuralmagic/nm-vllm.git
+cd nm-vllm
 pip install -e .
 ```
 

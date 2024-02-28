@@ -9,7 +9,7 @@ usage() {
     echo "  -r    - desired results base directory. xml results will mirror provided tests directory structure. (default 'test-results/')"
     echo "  -h    - this list of options"
     echo
-    echo "note: all paths are relative to 'neuralmagic-vllm' root"
+    echo "note: all paths are relative to 'nm-vllm' root"
     echo
     exit 1
 }

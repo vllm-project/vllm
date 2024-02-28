@@ -2,7 +2,7 @@
 
 usage() {
     echo``
-    echo "build 'neuralmagic-vllm' in specified python and venv"
+    echo "build 'nm-vllm' in specified python and venv"
     echo
     echo "usage: ${0} <options>"
     echo

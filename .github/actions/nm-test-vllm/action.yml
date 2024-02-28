@@ -1,8 +1,8 @@
-name: test neuralmagic-vllm
-description: "test neuralmagic-vllm via, 'pytest tests/'"
+name: test nm-vllm
+description: "test nm-vllm via, 'pytest tests/'"
 inputs:
   test_directory:
-    description: 'test directory, path is relative to neuralmagic-vllm'
+    description: 'test directory, path is relative to nm-vllm'
     required: true
   test_results:
     description: 'top-level directory for xml test results'
