@@ -15,6 +15,13 @@ from vllm.model_executor.layers.triton_kernel.prefix_prefill import (
     context_attention_fwd)
 from vllm.utils import is_hip
 
+try:
+    from flash_attn import (flash_attn_with_page_attention,
+                            flash_attn_varlen_with_page_attention)
+except Exception as e:
+    flash_attn_with_page_attention = e
+    flash_attn_varlen_with_page_attention = e
+
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
@@ -347,3 +354,141 @@ def _paged_attention(
             input_metadata.kv_cache_dtype,
         )
     return output
+
+
+def flash_single_query_cached_kv_attention(
+    output: Optional[torch.Tensor],
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    scale: float,
+    block_tables: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_size: int,
+    alibi_slopes: Optional[torch.Tensor],
+    actual_batch_size: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Similar to vLLM's page attention, caclulates a single token's attention
+    based on key/value caches. The main difference is this uses flash attention
+    sytle key-value caches.
+    Arguments:
+        output: [num_padded_tokens, num_heads, head_size], output tensor
+            to write. if None an new output tensor will be created.
+        query: [num_padded_tokens, num_heads, head_size], query tensor.
+        key_cache: [num_blocks, block_size, num_heads, head_size], key cache.
+        value_cache: [num_blocks, block_size, num_heads, head_size], value
+            cache.
+        scale: attention scale.
+        block_tables: [num_padded_tokens, max_context_len / block_size],
+            block tables.
+        context_lens: [num_padded_tokens], context lengths.
+        block_size: block size.
+        alibi_slopes: unused.
+        actual_batch_size: [1] actual batch size.
+    Returns:
+        output: [num_padded_tokens, num_heads, head_size]
+    """
+    block_size = value_cache.shape[1]
+    assert block_size == 32, "only support block_size 32 for flash attention"
+    # TODO: support alibi_slopes
+    assert alibi_slopes is None, "doesn't support alibi_slopes"
+    num_tokens, num_heads, head_size = query.shape
+    out = flash_attn_with_page_attention(
+        query.view(num_tokens, 1, num_heads, head_size),
+        key_cache,
+        value_cache,
+        block_tables,
+        None,  # key
+        None,  # value
+        None,  # cos
+        None,  # sin
+        context_lens,
+        None,  # cache_batch_idx
+        softmax_scale=scale,
+        causal=True,
+        window_size=(-1, -1),
+        rotary_interleaved=False,
+        num_splits=0,
+        actual_batch_size=actual_batch_size,
+    )
+    if output is not None:
+        # in case that output is padded, only copy the valid part.
+        output[:num_tokens].copy_(out.view(num_tokens, num_heads, head_size))
+    return out.view(num_tokens, num_heads, head_size)
+
+
+def flash_multi_query_cached_kv_attention_varlen(
+    output: Optional[torch.Tensor],
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    scale: float,
+    block_tables: torch.Tensor,
+    cum_seqlens_q: torch.Tensor,
+    cum_context_len: torch.Tensor,
+    block_size: int,
+    max_query_len: int,
+    max_context_len: int,
+    alibi_slopes: Optional[torch.Tensor],
+    actual_batch_size: Optional[torch.Tensor] = None,
+):
+    """Efficient multi-query paged attention based on flash attention.
+    It calculates attentions of list of sequences packed in a single batch,
+    indexed by cum_seqlens_q where the seq_i's index is
+    [cum_seqlens_q[i], cum_seqlensq[i+1]].
+    Similarlly, the length of context is stored in cum_seqlens_k with similar
+    fashions.
+    It also supports calculating attention incrementally, where context length
+    is longer than sequence length.
+    Arguments:
+        output: [num_padded_tokens, num_heads, head_size], output tensor to
+            write to. if None an new output tensor will be created.
+        query: [num_padded_tokens, num_heads, head_size], query tensor.
+        key_cache: [num_blocks, block_size, num_heads, head_size], key cache.
+        value_cache: [num_blocks, block_size, num_heads, head_size],
+            value cache.
+        scale: attention scale.
+        block_tables: [num_padded_tokens, max_context_len / block_size],
+            block tables.
+        cum_seqlens_q: [padded_batch_size + 1], cumulative sequence lengths
+            of query.
+        cum_context_len: [padded_batch_size + 1], cumulative lengths
+            of context.
+        block_size: block size.
+        max_query_len: max query length.
+        max_context_len: max context length.
+        alibi_slopes: unused.
+        actual_batch_size: [1] actual batch size.
+    Returns:
+        output: [num_padded_tokens, num_heads, head_size]
+    """
+    block_size = value_cache.shape[1]
+    assert block_size == 32, "only support block_size 32 for flash attention"
+    # TODO: support alibi_slopes
+    assert alibi_slopes is None, "doesn't support alibi_slopes"
+
+    num_tokens, _, _ = query.shape
+    out = flash_attn_varlen_with_page_attention(
+        query,
+        key_cache,
+        value_cache,
+        block_tables,
+        cum_seqlens_q,
+        cum_context_len,
+        max_query_len,
+        max_context_len,
+        None,  # key
+        None,  # value
+        None,  # cos_cache
+        None,  # sin_cache
+        None,  # cache_batch_idx
+        softmax_scale=scale,
+        causal=True,
+        window_size=(-1, -1),
+        rotary_interleaved=False,
+        num_splits=0,
+        actual_batch_size=actual_batch_size,
+    )
+    if output is not None:
+        output[:num_tokens].copy_(out)
+    return out
