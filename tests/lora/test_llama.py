@@ -1,5 +1,8 @@
+import gc
+
 import pytest
 import ray
+import torch
 
 import vllm
 from vllm.lora.request import LoRARequest
@@ -125,6 +128,8 @@ def test_llama_lora_warmup(sql_lora_files):
 
     @ray.remote(num_gpus=1)
     def get_num_gpu_blocks_lora():
+        gc.collect()
+        torch.cuda.empty_cache()
         llm = vllm.LLM(MODEL_PATH,
                        enable_lora=True,
                        max_num_seqs=16,
@@ -134,6 +139,8 @@ def test_llama_lora_warmup(sql_lora_files):
 
     @ray.remote(num_gpus=1)
     def get_num_gpu_blocks_no_lora():
+        gc.collect()
+        torch.cuda.empty_cache()
         llm = vllm.LLM(MODEL_PATH, max_num_seqs=16, max_model_len=1024)
         num_gpu_blocks_no_lora_warmup = llm.llm_engine.cache_config.num_gpu_blocks
         return num_gpu_blocks_no_lora_warmup
