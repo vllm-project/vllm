@@ -206,7 +206,7 @@ class Worker:
             if blocks_to_swap_out:
                 cache_engine.swap_out(blocks_to_swap_out)
                 issued_cache_op = True
-            if blocks_to_swap_out:
+            if blocks_to_copy:
                 cache_engine.copy(blocks_to_copy)
                 issued_cache_op = True
             return issued_cache_op
