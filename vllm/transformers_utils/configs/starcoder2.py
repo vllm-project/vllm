@@ -124,4 +124,3 @@ class Starcoder2Config(PretrainedConfig):
             architectures=['Starcoder2ForCausalLM'],
             **kwargs,
         )
-
