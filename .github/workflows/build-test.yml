@@ -79,6 +79,12 @@ jobs:
                 python: ${{ inputs.python }}
                 venv: TEST
 
+            - name: hf cache
+              id: hf_cache
+              uses: ./.github/actions/nm-hf-cache/
+              with:
+                fs_cache: ${{ secrets.HF_FS_CACHE }}
+
             # TODO: testmo source is currently hardcoded.
             - name: create testmo run
               id: create_testmo_run

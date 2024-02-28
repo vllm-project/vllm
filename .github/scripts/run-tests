@@ -59,9 +59,9 @@ do
     # this is a bit messy and brittle, but certain tests
     # need to be run with specific options
     if [[ "${TEST}" == *"kernels"* ]]; then
-        CUDA_VISIBLE_DEVICES=0 pytest --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
+        CUDA_VISIBLE_DEVICES=0,1 pytest --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
     elif [[ "${TEST}" == *"samplers"* ]]; then
-        CUDA_VISIBLE_DEVICES=0 pytest --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
+        CUDA_VISIBLE_DEVICES=0,1 pytest --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
     elif [[ "${TEST}" == *"distributed"* ]]; then
         pytest --forked --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
     else

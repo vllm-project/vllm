@@ -12,6 +12,7 @@ runs:
   steps:
   - run: |
       echo "HF_TOKEN=${HF_TOKEN_SECRET}" >> $GITHUB_ENV
+      echo "HF_HOME=/EFS/hf_home" >> $GITHUB_ENV
       NUM_THREADS=$(./.github/scripts/determine-threading -G ${{ inputs.Gi_per_thread }})
       echo "MAX_JOBS=${NUM_THREADS}" >> $GITHUB_ENV
       echo "VLLM_INSTALL_PUNICA_KERNELS=1" >> $GITHUB_ENV
