@@ -2,7 +2,7 @@ import enum
 from typing import Dict, List, Optional
 from abc import ABC, abstractmethod, abstractproperty
 
-from vllm.block import PhysicalTokenBlock, DEFAULT_LAST_ACCESSED_TIME
+from vllm.block import PhysicalTokenBlock
 
 
 class EvictionPolicy(enum.Enum):
@@ -70,7 +70,7 @@ class LRUEvictor(Evictor):
             raise ValueError("No usable cache memory left")
 
         # Find lowest timestamp
-        lowest_timestamp = DEFAULT_LAST_ACCESSED_TIME
+        lowest_timestamp = free_blocks[0].last_accessed
         for block in free_blocks:
             if block.last_accessed < lowest_timestamp:
                 lowest_timestamp = block.last_accessed
