@@ -130,7 +130,7 @@ endmacro()
 #
 macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
   set(GPU_SUPPORTED_ARCHES_LIST ${GPU_SUPPORTED_ARCHES} ${ARGN})
-  message(STATUS "${GPU_LANG} supprted arches: ${GPU_SUPPORTED_ARCHES_LIST}")
+  message(STATUS "${GPU_LANG} supported arches: ${GPU_SUPPORTED_ARCHES_LIST}")
 
   if (${GPU_LANG} STREQUAL "HIP")
     #
