@@ -199,7 +199,8 @@ class AQLMLinearMethod(LinearMethodBase):
             scales,
             {
                 "output_dim": 0,
-                # "pack_factor": self.quant_config.pack_factor,   I guess not really a pack factor, just smaller?
+                "packed_dim": 0,
+                "pack_factor": self.quant_config.out_group_size
             },
         )
 
