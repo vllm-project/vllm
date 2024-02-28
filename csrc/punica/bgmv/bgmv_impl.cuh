@@ -388,65 +388,38 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     }
 #else
     constexpr size_t rocm_warp_size = 64;
-    
-    static_assert(feat_in % (rocm_warp_size * 8) == 0 ||
-                  feat_in % (rocm_warp_size * 4) == 0 ||
-                  feat_in % (rocm_warp_size * 2) == 0 ||
-                  feat_in % (rocm_warp_size * 1) == 0);
 
-    if constexpr (feat_in % (rocm_warp_size * 8) == 0) {
-      constexpr size_t vec_size_shrink = 8;
-      constexpr int tx = rocm_warp_size;
-      constexpr int ty = 1;
+#define CHECK_INPUT_TILEABLE_WITH_VECTOR(vec_size_) \
+    feat_in % (rocm_warp_size * vec_size_) == 0
 
-      dim3 nblks(feat_out, batch_size);
-      dim3 nthrs(tx);
-
-      bgmv_shrink_kernel<feat_in, feat_out, vec_size_shrink, vec_size_shrink * sizeof(in_T),
-                          vec_size_shrink * sizeof(W_T), tx, ty, tz>
-          <<<nblks, nthrs, 0, stream>>>(Y, X, W, indicies, y_offset,
-                                        full_y_size, num_layers, layer_idx,
-                                        scale);
-    } else if constexpr (feat_in % (rocm_warp_size * 4) == 0) {
-      constexpr size_t vec_size_shrink = 4;
-      constexpr int tx = rocm_warp_size;
-      constexpr int ty = 1;
-
-      dim3 nblks(feat_out, batch_size);
-      dim3 nthrs(tx);
-
-      bgmv_shrink_kernel<feat_in, feat_out, vec_size_shrink, vec_size_shrink * sizeof(in_T),
-                          vec_size_shrink * sizeof(W_T), tx, ty, tz>
-          <<<nblks, nthrs, 0, stream>>>(Y, X, W, indicies, y_offset,
-                                        full_y_size, num_layers, layer_idx,
-                                        scale);
-    } else if constexpr (feat_in % (rocm_warp_size * 2) == 0) {
-      constexpr size_t vec_size_shrink = 2;
-      constexpr int tx = rocm_warp_size;
-      constexpr int ty = 1;
-
-      dim3 nblks(feat_out, batch_size);
-      dim3 nthrs(tx);
-
-      bgmv_shrink_kernel<feat_in, feat_out, vec_size_shrink, vec_size_shrink * sizeof(in_T),
-                          vec_size_shrink * sizeof(W_T), tx, ty, tz>
-          <<<nblks, nthrs, 0, stream>>>(Y, X, W, indicies, y_offset,
-                                        full_y_size, num_layers, layer_idx,
-                                        scale);
-    } else if constexpr (feat_in % (rocm_warp_size * 1) == 0) {
-      constexpr size_t vec_size_shrink = 1;
-      constexpr int tx = rocm_warp_size;
-      constexpr int ty = 1;
-
-      dim3 nblks(feat_out, batch_size);
-      dim3 nthrs(tx);
-
-      bgmv_shrink_kernel<feat_in, feat_out, vec_size_shrink, vec_size_shrink * sizeof(in_T),
-                          vec_size_shrink * sizeof(W_T), tx, ty, tz>
-          <<<nblks, nthrs, 0, stream>>>(Y, X, W, indicies, y_offset,
-                                        full_y_size, num_layers, layer_idx,
-                                        scale);
+#define LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR(vec_size_)              \
+    if constexpr (CHECK_INPUT_TILEABLE_WITH_VECTOR(vec_size_)) {           \
+      constexpr size_t vec_size_shrink = vec_size_;                         \
+      constexpr int tx = rocm_warp_size;                                    \
+      constexpr int ty = 1;                                                 \
+      dim3 nblks(feat_out, batch_size);                                     \
+      dim3 nthrs(tx);                                                       \
+      bgmv_shrink_kernel<feat_in, feat_out, vec_size_shrink,                \
+                          vec_size_shrink * sizeof(in_T),                   \
+                          vec_size_shrink * sizeof(W_T),                    \
+                          tx, ty, tz>                                       \
+          <<<nblks, nthrs, 0, stream>>>(Y, X, W, indicies, y_offset,        \
+                                        full_y_size, num_layers, layer_idx, \
+                                        scale);                             \
     }
+
+    static_assert(CHECK_INPUT_TILEABLE_WITH_VECTOR(8) ||
+                  CHECK_INPUT_TILEABLE_WITH_VECTOR(4) ||
+                  CHECK_INPUT_TILEABLE_WITH_VECTOR(2) ||
+                  CHECK_INPUT_TILEABLE_WITH_VECTOR(1));
+
+    LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR(8)
+    else
+    LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR(4)
+    else
+    LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR(2)
+    else
+    LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR(1)
 #endif
   }
 }
