@@ -109,9 +109,9 @@ class UsageMessage:
         self.gpu_list = []
         for i in range(torch.cuda.device_count()):
             device_property = torch.cuda.get_device_properties(i)
-            name = device_property.name
-            memory = device_property.total_memory
-            self.gpu_list.append((name, memory))
+            gpu_name = device_property.name
+            gpu_memory = device_property.total_memory
+            self.gpu_list.append({"name": gpu_name, "memory": gpu_memory})
         self.provider = _detect_cloud_provider()
         self.architecture = platform.machine()
         self.platform = platform.platform()
