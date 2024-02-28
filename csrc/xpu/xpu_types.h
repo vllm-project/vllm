@@ -1,6 +1,6 @@
 
-#ifndef XPU_TYPES_HPP
-#define XPU_TYPES_HPP
+#ifndef XPU_TYPES_H
+#define XPU_TYPES_H
 
 #include <torch/extension.h>
 
