@@ -1,5 +1,30 @@
 name: benchmark 
 on:
+  # makes workflow reusable
+  workflow_call:
+    inputs:
+      label:
+        description: "requested runner label (specifies instance)"
+        type: string
+        required: true
+      benchmark_config_list_file:
+        description: "path to a file containing a list of benchmark-configs to run benchmarks with. For reference look at .github/data/nm_benchmark_configs_list.txt"
+        type: string
+        required: true
+      timeout:
+        description: "maximum time runner will be up"
+        type: string
+        required: true
+      gitref:
+        description: "git commit hash or branch name"
+        type: string
+        required: true
+      python:
+        description: "python version, e.g. 3.10.12"
+        type: string
+        required: true
+
+  # makes workflow manually callable
   workflow_dispatch:
     inputs:
       label:
@@ -7,11 +32,11 @@ on:
         type: string
         required: true
       benchmark_config_list_file:
-        description: "Path to a file containing a list of benchmark-configs to run benchmarks with. For reference look at .github/data/nm_benchmark_configs_list.txt"
+        description: "path to a file containing a list of benchmark-configs to run benchmarks with. For reference look at .github/data/nm_benchmark_configs_list.txt"
         type: string
         required: true
       timeout:
-        description: "approximate number of minutes to keep instance up (should be at least 20)."
+        description: "maximum time runner will be up"
         type: string
         required: true
       gitref:
@@ -37,18 +62,12 @@ jobs:
           ref: ${{ inputs.gitref }}
           submodules: recursive
 
-      - name: workflow info
-        uses: ./.github/actions/nm-workflow-info/
-        with:
-          gitref: ${{ inputs.gitref }}
-          label: ${{ inputs.label }}
-          timeout: ${{ inputs.timeout }}
-
       - name: setenv
         id: setenv
         uses: ./.github/actions/nm-set-env/
         with:
-          hf_home: ${{ secrets.NM_HF_HOME }}
+          hf_token: ${{ secrets.NM_HF_TOKEN }}
+          Gi_per_thread: 4
 
       - name: set python
         id: set_python
@@ -57,13 +76,20 @@ jobs:
           python: ${{ inputs.python }}
           venv: TEST
 
+      - name: hf cache
+        id: hf_cache
+        uses: ./.github/actions/nm-hf-cache/
+        with:
+          fs_cache: ${{ secrets.HF_FS_CACHE }}
+
       - name: build
         id: build
         uses: ./.github/actions/nm-build-vllm/
         with:
-          Gi_per_thread: 1
+          Gi_per_thread: 4
           python: ${{ inputs.python }}
           venv: TEST
+          pypi: ${{ secrets.NM_PRIVATE_PYPI_LOCATION }}
 
       - name: run benchmarks
         uses: ./.github/actions/nm-benchmark/
@@ -79,21 +105,4 @@ jobs:
         with:
           name: ${{ github.run_id }}-${{ inputs.label }}
           path: benchmark-results
-          retention-days: 15
-
-      #######################################################
-      # TODO (Varun) : Remove pause once things are automated
-      - name: announce pause
-        if: success() || failure()
-        run: |
-          M=${{ inputs.timeout }}
-          R=$((M - 15))
-          S=$((R * 60))
-          echo "pausing for, ${R} minutes"
-
-      - name: pause workflow
-        run: |
-          M=${{ inputs.timeout }}
-          R=$((M - 15))
-          S=$((R * 60))
-          sleep $S
+          retention-days: 10

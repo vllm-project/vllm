@@ -1,0 +1,32 @@
+name: Nightly
+run-name: ${{ github.actor }} triggered nightly on ${{ github.ref }}
+on:
+    schedule:
+      # * is a special character in YAML so you have to quote this string
+      - cron: '0 0 * * *'
+
+    workflow_dispatch:
+
+jobs:
+
+    # multi-gpu
+    AWS-AVX2-192G-4-A10G-96G:
+        uses: ./.github/workflows/nm-benchmark.yml
+        with:
+            label: aws-avx2-192G-4-a10g-96G
+            benchmark_config_list_file:  ./.github/data/nm_benchmark_configs_list.txt
+            timeout: 240
+            gitref: '${{ github.ref }}'
+            python: "3.10.12"
+        secrets: inherit
+
+    # single gpu
+    AWS-AVX2-32G-A10G-24G:
+        uses: ./.github/workflows/nm-benchmark.yml
+        with:
+            label: aws-avx2-32G-a10g-24G
+            benchmark_config_list_file:  ./.github/data/nm_benchmark_configs_list.txt
+            timeout: 240
+            gitref: '${{ github.ref }}'
+            python: "3.10.12"
+        secrets: inherit
