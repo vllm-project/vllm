@@ -100,4 +100,4 @@ After the provisioning, you can interact with the model by using the OpenAI SDK:
 
 .. note::
 
-    dstack automatically handles authentication on the gateway using dstack's tokens. Meanwhile, if you don't want to configure a gateway, you can provison dstack `Task` instead of `Service`. The `Task` is for development purpose only. If you want to know more about hands-on materials how to serve vLLM using dstack, check out `this repository <https://github.com/dstackai/dstack-examples/tree/main/deployment/vllm>`__
+    dstack automatically handles authentication on the gateway using dstack's tokens. Meanwhile, if you don't want to configure a gateway, you can provision dstack `Task` instead of `Service`. The `Task` is for development purpose only. If you want to know more about hands-on materials how to serve vLLM using dstack, check out `this repository <https://github.com/dstackai/dstack-examples/tree/main/deployment/vllm>`__
