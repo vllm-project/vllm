@@ -121,10 +121,11 @@ class VLLMScheduler(BaseScheduler):
                     curr_loras.add(lora_int_id)
                 self.waiting.popleft()
                 self._allocate(seq_group)
-                self.running.append(seq_group)
                 num_curr_seqs += num_new_seqs
                 scheduled.append(seq_group)
                 prompt_chunk_lens.append(num_prompt_tokens)
+
+            self.running.extend(scheduled)
 
             if scheduled or ignored_seq_groups:
                 scheduler_outputs = SchedulerOutputs(
@@ -229,7 +230,7 @@ class VLLMScheduler(BaseScheduler):
         scheduler_outputs = SchedulerOutputs(
             id=self._iteration_id,
             scheduled_seq_groups=self.running,
-            prompt_chunk_lens=prompt_chunk_lens,
+            prompt_chunk_lens=[0] * len(scheduled),
             num_batched_tokens=num_batched_tokens,
             num_batched_prompt_tokens=0,
             num_batched_output_tokens=num_batched_tokens,

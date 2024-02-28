@@ -240,11 +240,11 @@ class ModelRunner:
             for seq_id in seq_ids:
                 seq_data = seq_group_metadata.seq_data[seq_id]
                 generation_token = seq_data.get_last_token_id()
-                input_tokens.append([generation_token])
+                input_tokens.append(generation_token)
 
                 seq_len = seq_data.get_len()
                 position = seq_len - 1
-                input_positions.append([position])
+                input_positions.append(position)
 
                 context_len = seq_len if self.sliding_window is None else min(
                     seq_len, self.sliding_window)
@@ -257,7 +257,7 @@ class ModelRunner:
                 block_number = block_table[position // self.block_size]
                 block_offset = position % self.block_size
                 slot = block_number * self.block_size + block_offset
-                current_tokens_slot_mapping.append([slot])
+                current_tokens_slot_mapping.append(slot)
                 lora_index_mapping.append([lora_id])
                 lora_prompt_mapping.append(lora_id)
 
@@ -293,9 +293,9 @@ class ModelRunner:
         context_lens = _make_tensor_with_pad_to_align(context_lens,
                                              multiple_of=1,
                                              pad=0,
-                                             dtype=torch.long,
+                                             dtype=torch.int,
                                              device=self.device)
-        # Prepare prefix block tables
+        # Prepare generation block tables
         generation_block_tables = _make_tensor_with_pad_to_max(
             generation_block_tables,
             max_len=max_num_blocks_per_seq,
@@ -418,9 +418,10 @@ class ModelRunner:
             lora_index_mapping, lora_prompt_mapping, lora_requests) = self._prepare_mixed_batch(seq_group_metadata_list)
             # Prompt lens that are passed to prepare_sample should be consistent with
             # prompt chunk sizes in this iteration
+            x = input_metadata.current_prompt_chunk_lens if len(input_metadata.current_prompt_chunk_lens) else None
             sampling_metadata = self._prepare_sample(seq_group_metadata_list,
                                                      input_metadata.current_prompt_chunk_lens,
-                                                     input_metadata.current_prompt_chunk_lens)
+                                                     x)
 
             if self.lora_config:
                 flat_lora_index_mapping = [

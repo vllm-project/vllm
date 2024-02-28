@@ -25,10 +25,6 @@ class SarathiScheduler(BaseScheduler):
         self.prompt_limit = self.scheduler_config.max_model_len
         self.chunk_size = self.scheduler_config.chunk_size
         self.enable_rolling_prefills = self.scheduler_config.enable_rolling_prefills
-        self.prefill_fitting_tolerance = self.scheduler_config.prefill_fitting_tolerance
-
-    # TODO(ravianupindi): override _update_num_running_batches_on_step_completed
-    # and add other pipeline parallel related methods
 
     def _get_max_num_running_seqs(self) -> int:
         return 1 + self.scheduler_config.max_pre_queue_batches

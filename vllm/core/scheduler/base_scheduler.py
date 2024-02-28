@@ -238,9 +238,7 @@ class BaseScheduler(ABC):
         self._update_num_running_batches_on_step_completed()
 
     def _update_num_running_batches_on_step_completed(self) -> None:
-        self.num_running_batches -= 1
-    
-    # TODO: ravianupindi, add pipeline parallel related methods
+        self.num_running_batches -= 1    
 
     def fork_seq(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         self.block_manager.fork(parent_seq, child_seq)

@@ -238,16 +238,22 @@ class PagedAttention(nn.Module):
                 kv_buffer,
             )
         if num_generation_tokens > 0:
-            output = _paged_attention(
-                output[num_current_prompt_tokens:num_valid_tokens],
-                query[num_current_prompt_tokens:num_valid_tokens],
-                key_cache,
-                value_cache,
-                input_metadata,
-                self.num_kv_heads,
-                self.scale,
-                self.alibi_slopes,
-            )
+            # Decoding run.
+            if key_cache is not None and value_cache is not None:
+                _paged_attention(
+                    output[num_current_prompt_tokens:num_valid_tokens],
+                    query[num_current_prompt_tokens:num_valid_tokens],
+                    key_cache,
+                    value_cache,
+                    input_metadata,
+                    self.num_kv_heads,
+                    self.scale,
+                    self.alibi_slopes,
+                )
+            else:
+                # This happens during the initial memory profiling run for
+                # CUDA graphs.
+                output = torch.zeros_like(query)
 
         # Reshape the output tensor.
         return output.view(-1, self.num_heads * self.head_size)
@@ -326,6 +332,7 @@ class PagedAttention(nn.Module):
                 key_cache,
                 value_cache,
                 slot_mapping,
+                input_metadata.kv_cache_dtype
             )
 
             # TODO: need to handle restarted and aborted sequences
