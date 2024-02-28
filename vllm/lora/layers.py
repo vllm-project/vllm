@@ -796,6 +796,10 @@ class SamplerWithLoRA(BaseLayerWithLoRA):
         self.device = device
 
     @property
+    def logits_as_hidden_states(self):
+        return self.base_layer.logits_as_hidden_states
+
+    @property
     def vocab_size(self):
         return self.base_layer.vocab_size
 
