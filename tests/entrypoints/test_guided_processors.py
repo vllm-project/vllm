@@ -1,13 +1,11 @@
-# This unit test should be moved to a new 
+# This unit test should be moved to a new
 # tests/test_guided_decoding directory.
 
 from transformers import AutoTokenizer
 import torch
 
-from vllm.model_executor.guided_logits_processors import (
-    RegexLogitsProcessor,
-    JSONLogitsProcessor
-)
+from vllm.model_executor.guided_logits_processors import (RegexLogitsProcessor,
+                                                          JSONLogitsProcessor)
 
 TEST_SCHEMA = {
     "type": "object",
@@ -41,19 +39,11 @@ TEST_SCHEMA = {
                         "type": "string"
                     }
                 },
-                "required": [
-                    "company",
-                    "position"
-                ]
+                "required": ["company", "position"]
             }
         }
     },
-    "required": [
-        "name",
-        "age",
-        "skills",
-        "work history"
-    ]
+    "required": ["name", "age", "skills", "work history"]
 }
 
 TEST_REGEX = r"((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.){3}" + \
@@ -74,7 +64,7 @@ def test_guided_logits_processors():
     regex_LP(token_ids, tensor)
     assert tensor.shape == original_tensor.shape
     assert not torch.allclose(tensor, original_tensor)
-    
+
     json_LP.init_state()
     token_ids = tokenizer.encode(
         f"Give an employee profile that fits this schema: {TEST_SCHEMA}")

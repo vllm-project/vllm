@@ -20,8 +20,7 @@ class GuidedDecodingMode(Enum):
 
 async def get_guided_decoding_logits_processor(
         request: Union[CompletionRequest, ChatCompletionRequest],
-        tokenizer
-    ) -> Union[JSONLogitsProcessor, RegexLogitsProcessor]:
+        tokenizer) -> Union[JSONLogitsProcessor, RegexLogitsProcessor]:
     """
     Given an OpenAI-compatible request, check for guided decoding parameters
     and get the necessary logits processor for the given guide.
@@ -31,31 +30,30 @@ async def get_guided_decoding_logits_processor(
     guide, mode = _get_guide_and_mode(request)
     if not guide:
         return None
-    
+
     global global_pool
     if 'global_pool' not in globals():
         global_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
     loop = asyncio.get_running_loop()
 
-    result = await loop.run_in_executor(
-        global_pool, _get_cached_logits_processor,
-        guide, tokenizer, mode
-    )
-    
+    result = await loop.run_in_executor(global_pool,
+                                        _get_cached_logits_processor, guide,
+                                        tokenizer, mode)
+
     logits_processor = copy(result)
     # reset logits processor's internal state
     logits_processor.init_state()
     return [logits_processor]
-    
+
 
 def _get_guide_and_mode(
-        request: Union[CompletionRequest, ChatCompletionRequest]
-    ) -> Tuple[str, GuidedDecodingMode]:
+    request: Union[CompletionRequest, ChatCompletionRequest]
+) -> Tuple[str, GuidedDecodingMode]:
 
     if request.guided_json:
         if not isinstance(request.guided_json, (str, dict, BaseModel)):
             raise TypeError("JSON schema must be str, dict, or BaseModel")
-            
+
         json = request.guided_json
         if isinstance(json, dict):
             # turn dict into hashable string
@@ -65,28 +63,30 @@ def _get_guide_and_mode(
             # with the same fields will get hashed the same
             json = str(json.__signature__)
         return json, GuidedDecodingMode.JSON
-        
+
     elif request.guided_regex:
         if not isinstance(request.guided_regex, str):
             raise TypeError("Regex must be string")
         return request.guided_regex, GuidedDecodingMode.REGEX
-    
+
     elif request.guided_choice:
         if not isinstance(request.guided_choice, list):
             raise TypeError("Choices must be a list")
-        
+
         # choice just uses regex
-        choices = [regex_escape(str(choice)) 
-                for choice in request.guided_choice]
+        choices = [
+            regex_escape(str(choice)) for choice in request.guided_choice
+        ]
         choices_regex = "(" + "|".join(choices) + ")"
         return choices_regex, GuidedDecodingMode.CHOICE
-    
+
     else:
         return None, None
 
 
 @lru_cache(maxsize=32)
-def _get_cached_logits_processor(guide: str, tokenizer, mode: GuidedDecodingMode):
+def _get_cached_logits_processor(guide: str, tokenizer,
+                                 mode: GuidedDecodingMode):
     if mode == GuidedDecodingMode.JSON:
         return JSONLogitsProcessor(guide, tokenizer)
     elif mode == GuidedDecodingMode.REGEX or mode == GuidedDecodingMode.CHOICE:

@@ -52,26 +52,20 @@ TEST_SCHEMA = {
                         "type": "string"
                     }
                 },
-                "required": [
-                    "company",
-                    "position"
-                ]
+                "required": ["company", "position"]
             }
         }
     },
-    "required": [
-        "name",
-        "age",
-        "skills",
-        "work history"
-    ]
+    "required": ["name", "age", "skills", "work history"]
 }
 
 TEST_REGEX = r"((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.){3}" + \
              r"(25[0-5]|(2[0-4]|1\d|[1-9]|)\d)"
 
-TEST_CHOICE = ["Python", "Java", "JavaScript", "C++", "C#", 
-               "PHP", "TypeScript", "Ruby", "Swift", "Kotlin"]
+TEST_CHOICE = [
+    "Python", "Java", "JavaScript", "C++", "C#", "PHP", "TypeScript", "Ruby",
+    "Swift", "Kotlin"
+]
 
 pytestmark = pytest.mark.asyncio
 
@@ -419,14 +413,12 @@ async def test_logits_bias(server, client: openai.AsyncOpenAI):
 async def test_guided_json_completion(server, client: openai.AsyncOpenAI):
     completion = await client.completions.create(
         model=MODEL_NAME,
-        prompt=f"Give an example JSON for an employee profile that fits this schema: {TEST_SCHEMA}",
+        prompt=
+        f"Give an example JSON for an employee profile that fits this schema: {TEST_SCHEMA}",
         n=3,
         temperature=1.0,
         max_tokens=500,
-        extra_body=dict(
-            guided_json=TEST_SCHEMA
-        )
-    )
+        extra_body=dict(guided_json=TEST_SCHEMA))
 
     assert completion.id is not None
     assert completion.choices is not None and len(completion.choices) == 3
@@ -449,10 +441,7 @@ async def test_guided_json_chat(server, client: openai.AsyncOpenAI):
         model=MODEL_NAME,
         messages=messages,
         max_tokens=500,
-        extra_body=dict(
-            guided_json=TEST_SCHEMA
-        )
-    )
+        extra_body=dict(guided_json=TEST_SCHEMA))
     message = chat_completion.choices[0].message
     assert message.content is not None
     json1 = json.loads(message.content)
@@ -460,17 +449,16 @@ async def test_guided_json_chat(server, client: openai.AsyncOpenAI):
 
     messages.append({"role": "assistant", "content": message.content})
     messages.append({
-        "role": "user",
-        "content": "Give me another one with a different name and age"
+        "role":
+        "user",
+        "content":
+        "Give me another one with a different name and age"
     })
     chat_completion = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
         max_tokens=500,
-        extra_body=dict(
-            guided_json=TEST_SCHEMA
-        )
-    )
+        extra_body=dict(guided_json=TEST_SCHEMA))
     message = chat_completion.choices[0].message
     assert message.content is not None
     json2 = json.loads(message.content)
@@ -486,10 +474,7 @@ async def test_guided_regex_completion(server, client: openai.AsyncOpenAI):
         n=3,
         temperature=1.0,
         max_tokens=20,
-        extra_body=dict(
-            guided_regex=TEST_REGEX
-        )
-    )
+        extra_body=dict(guided_regex=TEST_REGEX))
 
     assert completion.id is not None
     assert completion.choices is not None and len(completion.choices) == 3
@@ -503,34 +488,27 @@ async def test_guided_regex_chat(server, client: openai.AsyncOpenAI):
         "role": "system",
         "content": "you are a helpful assistant"
     }, {
-        "role": "user",
-        "content": f"Give an example IP address with this regex: {TEST_REGEX}"
+        "role":
+        "user",
+        "content":
+        f"Give an example IP address with this regex: {TEST_REGEX}"
     }]
     chat_completion = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
         max_tokens=20,
-        extra_body=dict(
-            guided_regex=TEST_REGEX
-        )
-    )
+        extra_body=dict(guided_regex=TEST_REGEX))
     ip1 = chat_completion.choices[0].message.content
     assert ip1 is not None
     assert re.fullmatch(TEST_REGEX, ip1) is not None
 
     messages.append({"role": "assistant", "content": ip1})
-    messages.append({
-        "role": "user",
-        "content": "Give me a different one"
-    })
+    messages.append({"role": "user", "content": "Give me a different one"})
     chat_completion = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
         max_tokens=20,
-        extra_body=dict(
-            guided_regex=TEST_REGEX
-        )
-    )
+        extra_body=dict(guided_regex=TEST_REGEX))
     ip2 = chat_completion.choices[0].message.content
     assert ip2 is not None
     assert re.fullmatch(TEST_REGEX, ip2) is not None
@@ -544,10 +522,7 @@ async def test_guided_choice_completion(server, client: openai.AsyncOpenAI):
         n=2,
         temperature=1.0,
         max_tokens=10,
-        extra_body=dict(
-            guided_choice=TEST_CHOICE
-        )
-    )
+        extra_body=dict(guided_choice=TEST_CHOICE))
 
     assert completion.id is not None
     assert completion.choices is not None and len(completion.choices) == 2
@@ -560,17 +535,16 @@ async def test_guided_choice_chat(server, client: openai.AsyncOpenAI):
         "role": "system",
         "content": "you are a helpful assistant"
     }, {
-        "role": "user",
-        "content": "The best language for type-safe systems programming is "
+        "role":
+        "user",
+        "content":
+        "The best language for type-safe systems programming is "
     }]
     chat_completion = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
         max_tokens=10,
-        extra_body=dict(
-            guided_choice=TEST_CHOICE
-        )
-    )
+        extra_body=dict(guided_choice=TEST_CHOICE))
     choice1 = chat_completion.choices[0].message.content
     assert choice1 in TEST_CHOICE
 
@@ -583,10 +557,7 @@ async def test_guided_choice_chat(server, client: openai.AsyncOpenAI):
         model=MODEL_NAME,
         messages=messages,
         max_tokens=10,
-        extra_body=dict(
-            guided_choice=TEST_CHOICE
-        )
-    )
+        extra_body=dict(guided_choice=TEST_CHOICE))
     choice2 = chat_completion.choices[0].message.content
     assert choice2 in TEST_CHOICE
     assert choice1 != choice2
@@ -597,36 +568,30 @@ async def test_guided_decoding_type_error(server, client: openai.AsyncOpenAI):
         _ = await client.completions.create(
             model=MODEL_NAME,
             prompt="Give an example JSON that fits this schema: 42",
-            extra_body=dict(
-                guided_json=42
-            )
-        )
+            extra_body=dict(guided_json=42))
 
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
     }, {
-        "role": "user",
-        "content": "The best language for type-safe systems programming is "
+        "role":
+        "user",
+        "content":
+        "The best language for type-safe systems programming is "
     }]
     with pytest.raises(openai.BadRequestError):
-        _ = await client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            extra_body=dict(
-                guided_regex={1: "Python", 2: "C++"}
-            )
-        )
+        _ = await client.chat.completions.create(model=MODEL_NAME,
+                                                 messages=messages,
+                                                 extra_body=dict(guided_regex={
+                                                     1: "Python",
+                                                     2: "C++"
+                                                 }))
 
     with pytest.raises(openai.BadRequestError):
         _ = await client.completions.create(
             model=MODEL_NAME,
             prompt="Give an example string that fits this regex",
-            extra_body=dict(
-                guided_regex=TEST_REGEX,
-                guided_json=TEST_SCHEMA
-            )
-        )
+            extra_body=dict(guided_regex=TEST_REGEX, guided_json=TEST_SCHEMA))
 
 
 if __name__ == "__main__":

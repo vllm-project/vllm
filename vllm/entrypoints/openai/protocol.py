@@ -133,7 +133,7 @@ class ChatCompletionRequest(BaseModel):
             length_penalty=self.length_penalty,
             logits_processors=logits_processors,
         )
-    
+
     @model_validator(mode="before")
     @classmethod
     def check_guided_decoding_count(cls, data):
@@ -145,8 +145,7 @@ class ChatCompletionRequest(BaseModel):
         if guide_count > 1:
             raise ValueError(
                 "You can only use one kind of guided decoding "
-                "('guided_json', 'guided_regex' or 'guided_choice')."
-            )
+                "('guided_json', 'guided_regex' or 'guided_choice').")
         return data
 
 
@@ -227,7 +226,7 @@ class CompletionRequest(BaseModel):
             length_penalty=self.length_penalty,
             logits_processors=logits_processors,
         )
-    
+
     @model_validator(mode="before")
     @classmethod
     def check_guided_decoding_count(cls, data):
@@ -239,8 +238,7 @@ class CompletionRequest(BaseModel):
         if guide_count > 1:
             raise ValueError(
                 "You can only use one kind of guided decoding "
-                "('guided_json', 'guided_regex' or 'guided_choice')."
-            )
+                "('guided_json', 'guided_regex' or 'guided_choice').")
         return data
 
 
