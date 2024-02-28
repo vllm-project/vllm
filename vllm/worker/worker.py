@@ -25,7 +25,7 @@ from vllm.utils import is_hip
 logger = init_logger(__name__)
 
 
-def get_memory_info(init_gpu_memory : int) -> Tuple[int, int]:
+def get_memory_info(init_gpu_memory: int) -> Tuple[int, int]:
     try:
         import pynvml
     except ImportError:
