@@ -298,8 +298,9 @@ def hf_model_weights_iterator(
         deserializer_args = tensorizer_args.deserializer_params
         credentials = tensorizer_args.credentials
         stream = open_stream(tensorizer_args.tensorizer_uri, **credentials)
-        with TensorDeserializer(stream, **deserializer_args) as state:
+        with TensorDeserializer(stream, **deserializer_args, device="cuda:0") as state:
             for name, param in state.items():
+                print("Yielding tensor ", name)
                 yield name, param
         del state
     elif use_safetensors:
