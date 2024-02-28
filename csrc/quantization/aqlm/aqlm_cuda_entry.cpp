@@ -67,7 +67,7 @@ torch::Tensor code1x16_matmat(
   }
   flat_output *= scales.flatten().unsqueeze(0);
 
-/* not sure how to bridge this yet.
+/* not sure how to bridge this yet.  may not need to.
   if (bias.has_value()) {
     flat_output += bias->unsqueeze(0);
   }
