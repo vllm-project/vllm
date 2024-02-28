@@ -1,8 +1,8 @@
 from collections import deque
 import time
-from typing import Deque, Dict, List, Type
+from typing import Deque, Dict, List, Optional, Type
 
-from vllm.config import CacheConfig, VLLMSchedulerConfig
+from vllm.config import CacheConfig, LoRAConfig, VLLMSchedulerConfig
 from vllm.logger import init_logger
 from vllm.sequence import SequenceGroup
 from vllm.sequence_status import SequenceStatus
@@ -19,8 +19,9 @@ class VLLMScheduler(BaseScheduler):
             self,
             scheduler_config: VLLMSchedulerConfig,
             cache_config: CacheConfig,
+            lora_config: Optional[LoRAConfig],
     ) -> None:
-        super().__init__(scheduler_config, cache_config)
+        super().__init__(scheduler_config, cache_config, lora_config)
 
         self.prompt_limit = min(self.scheduler_config.max_model_len,
                                 self.scheduler_config.max_num_batched_tokens)
@@ -129,7 +130,6 @@ class VLLMScheduler(BaseScheduler):
                 scheduler_outputs = SchedulerOutputs(
                     id=self._iteration_id,
                     scheduled_seq_groups=scheduled,
-                    prompt_run=True,
                     prompt_chunk_lens=prompt_chunk_lens,
                     num_batched_tokens=sum(seq_lens) if seq_lens else 0,
                     num_batched_prompt_tokens=sum(prompt_chunk_lens),
@@ -227,8 +227,9 @@ class VLLMScheduler(BaseScheduler):
             for seq_group in scheduled)
 
         scheduler_outputs = SchedulerOutputs(
+            id=self._iteration_id,
             scheduled_seq_groups=self.running,
-            prompt_run=False,
+            prompt_chunk_lens=prompt_chunk_lens,
             num_batched_tokens=num_batched_tokens,
             num_batched_prompt_tokens=0,
             num_batched_output_tokens=num_batched_tokens,

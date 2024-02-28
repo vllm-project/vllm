@@ -25,8 +25,6 @@ class InputMetadata:
     def __init__(
         self,
         input_type: InputType,
-        max_seq_len: Optional[int],
-        start_loc: Optional[torch.Tensor],
         prompt_seq_ids: List[int],
         processed_prompt_lens: List[int],
         current_prompt_chunk_lens: List[int],
@@ -38,10 +36,9 @@ class InputMetadata:
         block_tables: Optional[torch.Tensor],
         use_cuda_graph: bool,
         kv_cache_dtype: str,
+        is_profiling_iteration: bool = False,
     ) -> None:
         self.input_type = input_type
-        self.max_seq_len = max_seq_len
-        self.start_loc = start_loc
         self.prompt_seq_ids = prompt_seq_ids
         self.processed_prompt_lens = processed_prompt_lens
         self.current_prompt_chunk_lens = current_prompt_chunk_lens
@@ -53,6 +50,7 @@ class InputMetadata:
         self.block_tables = block_tables
         self.use_cuda_graph = use_cuda_graph
         self.kv_cache_dtype = kv_cache_dtype
+        self.is_profiling_iteration = is_profiling_iteration
 
         assert ([x > 0 for x in current_prompt_chunk_lens].count(False) == 0)
         self.num_prompts = len(
@@ -60,7 +58,6 @@ class InputMetadata:
         self.num_processed_prompt_tokens = sum(self.processed_prompt_lens)
         self.num_current_prompt_tokens = sum(self.current_prompt_chunk_lens)
         self.num_generation_tokens = self.context_lens.shape[0]
-        # Total number of tokens in the current iteration
         self.num_valid_tokens = current_tokens_slot_mapping.shape[0]
 
         # Set during the execution of the first attention op for each sequence.

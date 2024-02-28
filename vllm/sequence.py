@@ -154,8 +154,8 @@ class Sequence:
         prompt: str,
         prompt_token_ids: List[int],
         block_size: int,
-        lora_request: Optional[LoRARequest] = None,
         arrived_at: float,
+        lora_request: Optional[LoRARequest] = None,
     ) -> None:
         self.seq_id = seq_id
         self.prompt = prompt

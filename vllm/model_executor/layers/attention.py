@@ -138,11 +138,35 @@ class PagedAttention(nn.Module):
         # Preallocating the output tensor.
         output = torch.empty_like(query)
 
-        num_current_prompt_tokens = input_metadata.num_current_prompt_tokens
         num_valid_tokens = input_metadata.num_valid_tokens
-        num_decode_tokens = num_valid_tokens - num_current_prompt_tokens
+        num_current_prompt_tokens = input_metadata.num_current_prompt_tokens
+        num_generation_tokens = input_metadata.num_generation_tokens
+        # print(num_valid_tokens, num_current_prompt_tokens, num_generation_tokens)
 
         if num_current_prompt_tokens > 0:
+            # Set attention bias if not provided. This typically happens at the
+            # very attention layer of every iteration.
+            # FIXME(woosuk): This is a hack.
+            if len(input_metadata.attn_bias) == 0:
+                for seq_id, current_prompt_chunk_len, processed_prompt_len in zip(
+                        input_metadata.prompt_seq_ids,
+                        input_metadata.current_prompt_chunk_lens,
+                        input_metadata.processed_prompt_lens,
+                ):
+                    if self.alibi_slopes is None:
+                        kv_cache_len = current_prompt_chunk_len + processed_prompt_len
+                        attn_bias = BlockDiagonalCausalFromBottomRightMask.from_seqlens(
+                            [current_prompt_chunk_len], [kv_cache_len])
+                        if self.sliding_window is not None:
+                            processed_prompt_len = min(processed_prompt_len, self.sliding_window)
+                            attn_bias = attn_bias.make_local_attention_from_bottomright(self.sliding_window)
+                        input_metadata.attn_bias[seq_id] = attn_bias
+                    else:
+                        raise RuntimeError("ALiBi is not yet supported")
+                        input_metadata.attn_bias = _make_alibi_bias(
+                            self.alibi_slopes, self.num_kv_heads, batch_size,
+                            seq_len, query.dtype)
+
             # Compute attention op for prompts.
             kv_tensors = self.get_prefill_kv_tensors(
                 key[:num_current_prompt_tokens],
@@ -150,34 +174,6 @@ class PagedAttention(nn.Module):
                 input_metadata,
                 kv_buffer,
             )
-
-            # Set attention bias if not provided. This typically happens at the
-            # very attention layer of every iteration.
-            # FIXME(woosuk): This is a hack.
-            if not input_metadata.attn_bias:
-                for seq_id, current_prompt_chunk_len, processed_prompt_len in zip(
-                        input_metadata.prompt_seq_ids,
-                        input_metadata.current_prompt_chunk_lens,
-                        input_metadata.processed_prompt_lens,
-                ):
-                    if self.alibi_slopes is not None:
-                        # TODO(ravianupindi): get ALiBi working
-                        raise RuntimeError("ALiBi is not yet supported")
-                        input_metadata.attn_bias = _make_alibi_bias(
-                            self.alibi_slopes, self.num_kv_heads, batch_size,
-                            seq_len, query.dtype)
-
-                    if self.sliding_window is not None:
-                        processed_prompt_len = min(processed_prompt_len,
-                                                   self.sliding_window)
-                    kv_cache_len = current_prompt_chunk_len + processed_prompt_len
-                    attn_bias = BlockDiagonalCausalFromBottomRightMask.from_seqlens(
-                        [current_prompt_chunk_len], [kv_cache_len])
-
-                    if self.sliding_window is not None:
-                        attn_bias = attn_bias.make_local_attention_from_bottomright(
-                            self.sliding_window)
-                    input_metadata.attn_bias[seq_id] = attn_bias
 
             # we need to work with query[:num_current_prompt_tokens]
             offset = 0
@@ -198,14 +194,14 @@ class PagedAttention(nn.Module):
                     # heads.
                     # TODO(woosuk): Use MQA/GQA kernels for higher performance.
                     seq_query = seq_query.view(seq_query.shape[0],
-                                               self.num_kv_heads,
-                                               self.num_queries_per_kv,
-                                               seq_query.shape[-1])
+                                            self.num_kv_heads,
+                                            self.num_queries_per_kv,
+                                            seq_query.shape[-1])
                     seq_key = seq_key[:, :,
-                                      None, :].expand(seq_key.shape[0],
-                                                      self.num_kv_heads,
-                                                      self.num_queries_per_kv,
-                                                      seq_key.shape[-1])
+                                    None, :].expand(seq_key.shape[0],
+                                                    self.num_kv_heads,
+                                                    self.num_queries_per_kv,
+                                                    seq_key.shape[-1])
                     seq_value = seq_value[:, :, None, :].expand(
                         seq_value.shape[0], self.num_kv_heads,
                         self.num_queries_per_kv, seq_value.shape[-1])
@@ -217,7 +213,6 @@ class PagedAttention(nn.Module):
                     seq_key = seq_key.unsqueeze(0)
                     seq_value = seq_value.unsqueeze(0)
                 else:
-                    # TODO(ravianupindi): support AliBi
                     raise RuntimeError("ALiBi support not implemented")
                     query = query.unflatten(0, (batch_size, seq_len))
                     key = key.unflatten(0, (batch_size, seq_len))
@@ -242,45 +237,10 @@ class PagedAttention(nn.Module):
                 input_metadata,
                 kv_buffer,
             )
-
-        # Reshape the keys and values and store them in the cache.
-        # When key_cache and value_cache are not provided, the new key
-        # and value vectors will not be cached
-        if (num_decode_tokens > 0 and key_cache is not None
-                and value_cache is not None):
-            key_to_cache = key[num_current_prompt_tokens:num_valid_tokens]
-            value_to_cache = value[num_current_prompt_tokens:num_valid_tokens]
-            slot_mapping = input_metadata.current_tokens_slot_mapping[
-                num_current_prompt_tokens:num_valid_tokens]
-
-            cache_ops.reshape_and_cache(
-                key_to_cache,
-                value_to_cache,
-                key_cache,
-                value_cache,
-                slot_mapping,
-            )
-
-        if input_metadata.num_generation_tokens > 0:
-            # Decoding run.
-            if key_cache is not None and value_cache is not None:
-                _paged_attention(
-                    output[num_current_prompt_tokens:num_valid_tokens],
-                    query[num_current_prompt_tokens:num_valid_tokens],
-                    key_cache,
-                    value_cache,
-                    input_metadata.block_tables,  # [BS, max_block_per_request]
-                    input_metadata.start_loc,
-                    input_metadata.prompt_lens,
-                    input_metadata.context_lens,
-                    input_metadata.max_seq_len,
-                    getattr(self, "alibi_slopes", None),
-                )
-
-        else:
-            # Decoding run.
+        if num_generation_tokens > 0:
             output = _paged_attention(
-                query,
+                output[num_current_prompt_tokens:num_valid_tokens],
+                query[num_current_prompt_tokens:num_valid_tokens],
                 key_cache,
                 value_cache,
                 input_metadata,

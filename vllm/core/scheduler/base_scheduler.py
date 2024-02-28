@@ -2,7 +2,7 @@ from collections import deque
 import enum
 from abc import ABC, abstractmethod
 import time
-from typing import Deque, Dict, Iterable, List, Optional, Tuple, Union, Set
+from typing import Deque, Dict, Iterable, List, Optional, Tuple, Type, Union, Set
 
 from vllm.config import CacheConfig, LoRAConfig, BaseSchedulerConfig
 from vllm.core.policy import PolicyFactory

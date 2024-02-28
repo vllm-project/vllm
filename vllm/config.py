@@ -505,7 +505,7 @@ class LoRAConfig:
             raise ValueError(
                 "LoRA is not supported with quantized models yet.")
 
-    def verify_with_scheduler_config(self, scheduler_config: SchedulerConfig):
+    def verify_with_scheduler_config(self, scheduler_config: BaseSchedulerConfig):
         if scheduler_config.max_num_batched_tokens > 65528:
             raise ValueError(
                 "Due to limitations of the custom LoRA CUDA kernel, "
@@ -543,13 +543,11 @@ class SarathiSchedulerConfig(BaseSchedulerConfig):
 
     def __init__(self, max_num_seqs: int, max_model_len: int, chunk_size: int,
                  enable_rolling_prefills: bool,
-                 prefill_fitting_tolerance: float,
-                 max_pre_queue_batches: float) -> None:
+                 prefill_fitting_tolerance: float) -> None:
         super().__init__(max_num_seqs, max_model_len)
         self.chunk_size = chunk_size
         self.enable_rolling_prefills = enable_rolling_prefills
         self.prefill_fitting_tolerance = prefill_fitting_tolerance
-        self.max_pre_queue_batches = max_pre_queue_batches
 
     @property
     def max_num_batched_tokens(self) -> int:

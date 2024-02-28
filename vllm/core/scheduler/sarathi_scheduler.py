@@ -1,6 +1,6 @@
-from typing import List, Type
+from typing import List, Optional, Type
 
-from vllm.config import CacheConfig, SarathiSchedulerConfig
+from vllm.config import CacheConfig, LoRAConfig, SarathiSchedulerConfig
 from vllm.logger import init_logger
 from vllm.sequence import SequenceGroup, Sequence
 from vllm.sequence_status import SequenceStatus
@@ -17,8 +17,10 @@ class SarathiScheduler(BaseScheduler):
         self,
         scheduler_config: SarathiSchedulerConfig,
         cache_config: CacheConfig,
+        lora_config: Optional[LoRAConfig],
     ) -> None:
-        super().__init__(scheduler_config, cache_config)
+        assert lora_config is None, "LoRA is not supported in SarathiScheduler"
+        super().__init__(scheduler_config, cache_config, lora_config)
 
         self.prompt_limit = self.scheduler_config.max_model_len
         self.chunk_size = self.scheduler_config.chunk_size

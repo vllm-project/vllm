@@ -318,10 +318,9 @@ class EngineArgs:
             scheduler_config = DSarathiSchedulerConfig(
                 self.max_num_seqs,
                 model_config.max_model_len,
-                self.chunk_size,
+                self.max_num_batched_tokens,
                 self.enable_rolling_prefills,
                 self.prefill_fitting_tolerance,
-                self.max_pre_queue_batches,
             )
         else:
             raise ValueError(
@@ -335,22 +334,35 @@ class EngineArgs:
     ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, BaseSchedulerConfig,
                DeviceConfig, Optional[LoRAConfig]]:
         device_config = DeviceConfig(self.device)
-        model_config = ModelConfig(self.model, self.tokenizer,
-                                   self.tokenizer_mode, self.trust_remote_code,
-                                   self.download_dir, self.load_format,
-                                   self.dtype, self.seed, self.revision,
-                                   self.tokenizer_revision, self.max_model_len,
-                                   self.quantization, self.enforce_eager,
-                                   self.max_context_len_to_capture)
-        cache_config = CacheConfig(self.block_size,
-                                   self.gpu_memory_utilization,
-                                   self.swap_space, self.kv_cache_dtype,
-                                   model_config.get_sliding_window())
-        parallel_config = ParallelConfig(self.pipeline_parallel_size,
-                                         self.tensor_parallel_size,
-                                         self.worker_use_ray,
-                                         self.max_parallel_loading_workers,
-                                         self.disable_custom_all_reduce)
+        model_config = ModelConfig(
+            model=self.model,
+            tokenizer=self.tokenizer,
+            tokenizer_mode=self.tokenizer_mode,
+            trust_remote_code=self.trust_remote_code,
+            download_dir=self.download_dir,
+            load_format=self.load_format,
+            seed=self.seed,
+            dtype=self.dtype,
+            tokenizer_revision=self.tokenizer_revision,
+            max_model_len=self.max_model_len,
+            quantization=self.quantization,
+            enforce_eager=self.enforce_eager,
+            max_context_len_to_capture=self.max_context_len_to_capture,
+        )
+        cache_config = CacheConfig(
+            block_size=self.block_size,
+            gpu_memory_utilization=self.gpu_memory_utilization,
+            swap_space=self.swap_space,
+            cache_dtype=self.kv_cache_dtype,
+            sliding_window=model_config.get_sliding_window()
+        )
+        parallel_config = ParallelConfig(
+            pipeline_parallel_size=self.pipeline_parallel_size,
+            tensor_parallel_size=self.tensor_parallel_size,
+            worker_use_ray=self.worker_use_ray,
+            max_parallel_loading_workers=self.max_parallel_loading_workers,
+            disable_custom_all_reduce=self.disable_custom_all_reduce
+        )
         scheduler_config = self._get_scheduler_config(model_config)
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,

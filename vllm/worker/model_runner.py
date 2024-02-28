@@ -10,6 +10,7 @@ from vllm.config import (DeviceConfig, ModelConfig, LoRAConfig, ParallelConfig,
                          BaseSchedulerConfig)
 from vllm.logger import init_logger
 from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
+from vllm.model_executor.input_metadata import InputType
 from vllm.model_executor.parallel_utils import cupy_utils
 from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
@@ -114,7 +115,7 @@ class ModelRunner:
                     self.parallel_config),
                 head_size=self.model_config.get_head_size(),
                 dtype=self.model_config.dtype,
-                device=device,
+                device=self.device,
             ) for _ in range(
                 self.model_config.get_num_layers(self.parallel_config))
         ]
@@ -139,22 +140,19 @@ class ModelRunner:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
-        slot_mapping: List[List[int]] = []
+        prefix_plus_current_prompt_tokens_slot_mapping: List[int] = []
+        current_tokens_slot_mapping: List[int] = []
         lora_index_mapping: List[int] = []
         lora_prompt_mapping: List[int] = []
         lora_requests: Set[LoRARequest] = set()
-
-        prompt_lens: List[int] = []
-        context_lens: List[int] = []
-        subquery_lens: List[int] = []
-        prefix_block_tables: List[List[int]] = []
-        prefix_plus_current_prompt_tokens_slot_mapping: List[int] = []
-        current_tokens_slot_mapping: List[int] = []
-
         processed_prompt_lens: List[int] = []
         current_prompt_chunk_lens: List[int] = []
         total_prompt_lens: List[int] = []
         prompt_seq_ids: List[int] = []
+        context_lens: List[int] = []
+        generation_block_tables: List[List[int]] = []
+        max_num_blocks_per_seq = 0
+        max_context_len = 0
         is_profiling_iteration = False
 
         for seq_group_metadata in seq_group_metadata_list:
@@ -165,20 +163,6 @@ class ModelRunner:
             seq_id = seq_ids[0]
 
             seq_data = seq_group_metadata.seq_data[seq_id]
-            prompt_tokens = seq_data.get_token_ids()
-            prompt_len = len(prompt_tokens)
-            prompt_lens.append(prompt_len)
-            prefix_len = 0
-            prefix = seq_group_metadata.prefix
-            if prefix is not None and prefix.computed:
-                prefix_len = prefix.get_length()
-                prompt_tokens = prompt_tokens[prefix_len:]
-                prefix_block_tables.append(prefix.get_block_numbers())
-            else:
-                prefix_block_tables.append([])
-            # actual prompt lens
-            context_lens.append(prefix_len)
-            subquery_lens.append(prompt_len - prefix_len)
             prompt_chunk_size = seq_group_metadata.prompt_chunk_size
             current_prompt_chunk_tokens = seq_data.get_next_prompt_chunk_token_ids(
                 prompt_chunk_size)
@@ -189,26 +173,26 @@ class ModelRunner:
             total_prompt_len = seq_data.get_prompt_len()
             total_prompt_lens.append(total_prompt_len)
             prompt_seq_ids.append(seq_id)
-
+            
+            prefix = seq_group_metadata.prefix
+            assert(prefix is None or not prefix.computed)
+            
             input_tokens.extend(current_prompt_chunk_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
-            input_positions.append(
-                list(range(prefix_len, prefix_len + len(prompt_tokens))))
+            input_positions.extend(
+                list(range(processed_prompt_len, processed_prompt_len + current_prompt_chunk_len)))
 
             lora_id = seq_group_metadata.lora_int_id
 
             if lora_id > 0:
                 lora_requests.add(seq_group_metadata.lora_request)
 
-            lora_index_mapping.append([lora_id] * (prompt_len - prefix_len))
+            lora_index_mapping.append([lora_id] * current_prompt_chunk_len)
             lora_prompt_mapping.extend(
                 [lora_id] *
-                (prompt_len - prefix_len
+                (current_prompt_chunk_len
                  if seq_group_metadata.sampling_params.prompt_logprobs else 1))
-            input_positions.extend(
-                range(processed_prompt_len,
-                      processed_prompt_len + current_prompt_chunk_len))
 
             # ONLY used for profiling
             if seq_group_metadata.block_tables is None:
@@ -216,11 +200,9 @@ class ModelRunner:
                 # During memory profiling, the block tables are not initialized
                 # yet. In this case, we just use a dummy slot mapping.
                 prefix_plus_current_prompt_tokens_slot_mapping.extend(
-                    [0] * (processed_prompt_len + current_prompt_chunk_len))
-
-                current_tokens_slot_mapping.extend([0] *
+                    [_PAD_SLOT_ID] * (processed_prompt_len + current_prompt_chunk_len))
+                current_tokens_slot_mapping.extend([_PAD_SLOT_ID] *
                                                    current_prompt_chunk_len)
-
                 continue
 
             # Compute the slot mapping.
@@ -230,17 +212,6 @@ class ModelRunner:
             # For example, if the prompt len is 10, sliding window is 8, and
             # block size is 4, the first two tokens are masked and the slot
             # mapping will be [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
-            start_idx = 0
-            if self.sliding_window is not None:
-                assert prefix_len == 0, (
-                    "Prefix caching is currently not supported with "
-                    "sliding window attention")
-                start_idx = max(0, prompt_len - self.sliding_window)
-            for i in range(prefix_len, prompt_len):
-                if i < start_idx:
-                    slot_mapping[-1].append(_PAD_SLOT_ID)
-                    continue
-
             context_end = processed_prompt_len + current_prompt_chunk_len
             context_start = 0
             if self.sliding_window is not None:
@@ -249,67 +220,107 @@ class ModelRunner:
                 block_number = block_table[i // self.block_size]
                 block_offset = i % self.block_size
                 slot = block_number * self.block_size + block_offset
-                if i >= context_start:
+                if i < context_start:
+                    prefix_plus_current_prompt_tokens_slot_mapping.append(_PAD_SLOT_ID)
+                else:
                     prefix_plus_current_prompt_tokens_slot_mapping.append(slot)
-                if i >= processed_prompt_len:
-                    current_tokens_slot_mapping.append(slot)
+                    if i >= processed_prompt_len:
+                        current_tokens_slot_mapping.append(slot)
 
-        max_prompt_len = max(subquery_lens)
-        input_tokens = _make_tensor_with_pad(input_tokens,
-                                             max_prompt_len,
+        for seq_group_metadata in seq_group_metadata_list:
+            if seq_group_metadata.is_prompt:
+                continue
+
+            seq_ids = list(seq_group_metadata.seq_data.keys())
+            lora_id = seq_group_metadata.lora_int_id
+
+            if lora_id > 0:
+                lora_requests.add(seq_group_metadata.lora_request)
+
+            for seq_id in seq_ids:
+                seq_data = seq_group_metadata.seq_data[seq_id]
+                generation_token = seq_data.get_last_token_id()
+                input_tokens.append([generation_token])
+
+                seq_len = seq_data.get_len()
+                position = seq_len - 1
+                input_positions.append([position])
+
+                context_len = seq_len if self.sliding_window is None else min(
+                    seq_len, self.sliding_window)
+                max_context_len = max(max_context_len, context_len)
+                context_lens.append(context_len)
+
+                block_table = seq_group_metadata.block_tables[seq_id]
+                max_num_blocks_per_seq = max(max_num_blocks_per_seq,
+                                             len(block_table))
+                block_number = block_table[position // self.block_size]
+                block_offset = position % self.block_size
+                slot = block_number * self.block_size + block_offset
+                current_tokens_slot_mapping.append([slot])
+                lora_index_mapping.append([lora_id])
+                lora_prompt_mapping.append(lora_id)
+
+                if self.sliding_window is not None:
+                    sliding_window_blocks = (self.sliding_window //
+                                             self.block_size)
+                    block_table = block_table[-sliding_window_blocks:]
+                generation_block_tables.append(block_table)
+        
+        input_tokens = _make_tensor_with_pad_to_align(input_tokens,
+                                             multiple_of=8,
                                              pad=0,
                                              dtype=torch.long,
                                              device=self.device)
-        input_positions = _make_tensor_with_pad(input_positions,
-                                                max_prompt_len,
+        input_positions = _make_tensor_with_pad_to_align(input_positions,
+                                                multiple_of=8,
                                                 pad=0,
                                                 dtype=torch.long,
                                                 device=self.device)
-        slot_mapping = _make_tensor_with_pad(slot_mapping,
-                                             max_prompt_len,
+        prefix_plus_current_prompt_tokens_slot_mapping = _make_tensor_with_pad_to_align(
+            prefix_plus_current_prompt_tokens_slot_mapping,
+            multiple_of=1,
+            pad=_PAD_SLOT_ID,
+            dtype=torch.long,
+            device=self.device
+        )
+        current_tokens_slot_mapping = _make_tensor_with_pad_to_align(current_tokens_slot_mapping,
+                                             multiple_of=8,
                                              pad=_PAD_SLOT_ID,
                                              dtype=torch.long,
                                              device=self.device)
-        lora_index_mapping = [
-            _pad_to_max(mapping, max_prompt_len, pad=0)
-            for mapping in lora_index_mapping
-        ]
-        context_lens_tensor = torch.tensor(context_lens,
-                                           dtype=torch.int,
-                                           device=self.device)
+        # No change is done to `lora_index_mapping`
+        context_lens = _make_tensor_with_pad_to_align(context_lens,
+                                             multiple_of=1,
+                                             pad=0,
+                                             dtype=torch.long,
+                                             device=self.device)
         # Prepare prefix block tables
-        max_prompt_block_table_len = max(len(t) for t in prefix_block_tables)
-        block_tables = _make_tensor_with_pad(
-            prefix_block_tables,
-            max_len=max_prompt_block_table_len,
+        generation_block_tables = _make_tensor_with_pad_to_max(
+            generation_block_tables,
+            max_len=max_num_blocks_per_seq,
             pad=0,
             dtype=torch.int,
             device=self.device,
         )
-        start_loc_tensor = torch.arange(0,
-                                        len(prompt_lens) * max_prompt_len,
-                                        max_prompt_len,
-                                        dtype=torch.long,
-                                        device=self.device)
-        prompt_lens_tensor = torch.tensor(prompt_lens,
-                                          dtype=torch.long,
-                                          device=self.device)
 
         input_metadata = InputMetadata(
-            is_prompt=True,
-            slot_mapping=slot_mapping,
-            prompt_lens=prompt_lens_tensor,
-            max_seq_len=max_prompt_len,
-            start_loc=start_loc_tensor,
-            max_context_len=None,
-            context_lens=context_lens_tensor,
-            block_tables=block_tables,
-            use_cuda_graph=False,
-            kv_cache_dtype=self.kv_cache_dtype,
+            input_type=InputType.MIXED,
+            prompt_seq_ids = prompt_seq_ids,
+            processed_prompt_lens = processed_prompt_lens,
+            current_prompt_chunk_lens = current_prompt_chunk_lens,
+            total_prompt_lens = total_prompt_lens,
+            prefix_plus_current_prompt_tokens_slot_mapping = prefix_plus_current_prompt_tokens_slot_mapping,
+            current_tokens_slot_mapping = current_tokens_slot_mapping,
+            max_context_len = max_context_len,
+            context_lens = context_lens,
+            block_tables = generation_block_tables,
+            use_cuda_graph = False,
+            kv_cache_dtype = self.kv_cache_dtype,
+            is_profiling_iteration = is_profiling_iteration
         )
-        return (input_tokens, input_positions, input_metadata, prompt_lens,
-                subquery_lens, lora_index_mapping, lora_prompt_mapping,
-                lora_requests)
+        return (input_tokens, input_positions, input_metadata,
+                lora_index_mapping, lora_prompt_mapping, lora_requests)
 
 
     def _prepare_sample(
@@ -403,14 +414,13 @@ class ModelRunner:
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, SamplingMetadata,
                Set[int], LoRAMapping]:
         if self.is_driver_worker:
-            (input_tokens, input_positions, input_metadata, prompt_lens,
-            subquery_lens, lora_index_mapping, lora_prompt_mapping,
-            lora_requests) = self._prepare_mixed_batch(seq_group_metadata_list)
+            (input_tokens, input_positions, input_metadata,
+            lora_index_mapping, lora_prompt_mapping, lora_requests) = self._prepare_mixed_batch(seq_group_metadata_list)
             # Prompt lens that are passed to prepare_sample should be consistent with
             # prompt chunk sizes in this iteration
             sampling_metadata = self._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens,
-                                                     subquery_lens)
+                                                     input_metadata.current_prompt_chunk_lens,
+                                                     input_metadata.current_prompt_chunk_lens)
 
             if self.lora_config:
                 flat_lora_index_mapping = [
@@ -427,16 +437,19 @@ class ModelRunner:
             metadata_dict = {
                 "input_tokens": input_tokens,
                 "input_positions": input_positions,
-                "is_prompt": input_metadata.is_prompt,
-                "slot_mapping": input_metadata.slot_mapping,
-                "prompt_lens": input_metadata.prompt_lens,
-                "max_seq_len": input_metadata.max_seq_len,
-                "start_loc": input_metadata.start_loc,
+                "input_type": input_metadata.input_type,
+                "prompt_seq_ids": input_metadata.prompt_seq_ids,
+                "processed_prompt_lens": input_metadata.processed_prompt_lens,
+                "current_prompt_chunk_lens": input_metadata.current_prompt_chunk_lens,
+                "total_prompt_lens": input_metadata.total_prompt_lens,
+                "prefix_plus_current_prompt_tokens_slot_mapping": input_metadata.prefix_plus_current_prompt_tokens_slot_mapping,
+                "current_tokens_slot_mapping": input_metadata.current_tokens_slot_mapping,
                 "max_context_len": input_metadata.max_context_len,
                 "context_lens": input_metadata.context_lens,
                 "block_tables": input_metadata.block_tables,
                 "use_cuda_graph": input_metadata.use_cuda_graph,
                 "kv_cache_dtype": input_metadata.kv_cache_dtype,
+                "is_profiling_iteration": input_metadata.is_profiling_iteration,
                 "selected_token_indices":
                 sampling_metadata.selected_token_indices,
                 "lora_requests": lora_requests,
@@ -450,16 +463,19 @@ class ModelRunner:
             lora_mapping = metadata_dict["lora_mapping"]
             lora_requests = metadata_dict["lora_requests"]
             input_metadata = InputMetadata(
-                is_prompt=metadata_dict["is_prompt"],
-                slot_mapping=metadata_dict["slot_mapping"],
-                prompt_lens=metadata_dict["prompt_lens"],
-                max_seq_len=metadata_dict["max_seq_len"],
-                start_loc=metadata_dict["start_loc"],
+                input_type=metadata_dict["input_type"],
+                prompt_seq_ids=metadata_dict["prompt_seq_ids"],
+                processed_prompt_lens=metadata_dict["processed_prompt_lens"],
+                current_prompt_chunk_lens=metadata_dict["current_prompt_chunk_lens"],
+                total_prompt_lens=metadata_dict["total_prompt_lens"],
+                prefix_plus_current_prompt_tokens_slot_mapping=metadata_dict["prefix_plus_current_prompt_tokens_slot_mapping"],
+                current_tokens_slot_mapping=metadata_dict["current_tokens_slot_mapping"],
                 max_context_len=metadata_dict["max_context_len"],
                 context_lens=metadata_dict["context_lens"],
                 block_tables=metadata_dict["block_tables"],
                 use_cuda_graph=metadata_dict["use_cuda_graph"],
                 kv_cache_dtype=metadata_dict["kv_cache_dtype"],
+                is_profiling_iteration=metadata_dict["is_profiling_iteration"],
             )
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
@@ -801,21 +817,31 @@ def _maybe_cupy_nccl():
         yield
 
 
+def _pad_to_align(x: List[int], multiple_of: int, pad: int) -> List[int]:
+    return x + [pad] * ((-len(x)) % multiple_of)
+
 def _pad_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
-    assert len(x) <= max_len
     return x + [pad] * (max_len - len(x))
 
+def _make_tensor_with_pad_to_align(
+    x: List[int],
+    multiple_of: int,
+    pad: int,
+    dtype: torch.dtype,
+    device: Optional[Union[str, torch.device]],
+) -> List[int]:
+    padded_x = _pad_to_align(x, multiple_of, pad)
+    return torch.tensor(padded_x, dtype=dtype, device=device)
 
-def _make_tensor_with_pad(
-    x: List[List[int]],
+def _make_tensor_with_pad_to_max(
+    x: List[int],
     max_len: int,
     pad: int,
     dtype: torch.dtype,
     device: Optional[Union[str, torch.device]],
-) -> torch.Tensor:
-    padded_x = [_pad_to_max(x_i, max_len, pad) for x_i in x]
+) -> List[int]:
+    padded_x = _pad_to_max(x, max_len, pad)
     return torch.tensor(padded_x, dtype=dtype, device=device)
-
 
 def _get_graph_batch_size(batch_size: int) -> int:
     if batch_size <= 2:
