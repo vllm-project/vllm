@@ -18,6 +18,9 @@ class GuidedDecodingMode(Enum):
     CHOICE = "choice"
 
 
+global_thread_pool = None  # uesd for generating logits processor fsm
+
+
 async def get_guided_decoding_logits_processor(
         request: Union[CompletionRequest, ChatCompletionRequest],
         tokenizer) -> Union[JSONLogitsProcessor, RegexLogitsProcessor]:
@@ -27,16 +30,17 @@ async def get_guided_decoding_logits_processor(
     We cache logit processors by (guide, tokenizer), and on cache hit
     we make a shallow copy to reuse the same underlying FSM.
     """
+    global global_thread_pool
     guide, mode = _get_guide_and_mode(request)
     if not guide:
         return None
 
-    global global_pool
-    if 'global_pool' not in globals():
-        global_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    if global_thread_pool is None:
+        global_thread_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=2)
     loop = asyncio.get_running_loop()
 
-    result = await loop.run_in_executor(global_pool,
+    result = await loop.run_in_executor(global_thread_pool,
                                         _get_cached_logits_processor, guide,
                                         tokenizer, mode)
 
