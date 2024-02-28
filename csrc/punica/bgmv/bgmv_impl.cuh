@@ -284,8 +284,7 @@ bgmv_expand_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
   if (threadIdx.x == 0) {
 #ifndef USE_ROCM
     Y[batch_idx * full_y_size + y_offset + tile_idx * (tz * ty) +
-      threadIdx.z * ty + threadIdx.y] 
-      += static_cast<out_T>(sum);
+      threadIdx.z * ty + threadIdx.y] += static_cast<out_T>(sum);
 #else
     size_t y_idx = batch_idx * full_y_size + y_offset + tile_idx * (tz * ty) +
                    threadIdx.z * ty + threadIdx.y;
@@ -393,7 +392,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     feat_in % (rocm_warp_size * vec_size_) == 0
 
 #define LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR(vec_size_)              \
-    if constexpr (CHECK_INPUT_TILEABLE_WITH_VECTOR(vec_size_)) {           \
+    if constexpr (CHECK_INPUT_TILEABLE_WITH_VECTOR(vec_size_)) {            \
       constexpr size_t vec_size_shrink = vec_size_;                         \
       constexpr int tx = rocm_warp_size;                                    \
       constexpr int ty = 1;                                                 \
@@ -420,6 +419,9 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR(2)
     else
     LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR(1)
+
+#undef CHECK_INPUT_TILEABLE_WITH_VECTOR
+#undef LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR
 #endif
   }
 }
