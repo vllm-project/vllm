@@ -1,3 +1,4 @@
+# This file has been modified by Neural Magic
 """Utilities for downloading and initializing model weights."""
 import filelock
 import glob

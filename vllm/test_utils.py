@@ -1,3 +1,5 @@
+# This file has been modified by Neural Magic
+
 import ray
 
 from vllm.config import ParallelConfig

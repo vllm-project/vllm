@@ -1,3 +1,5 @@
+# This file has been modified by Neural Magic
+
 import copy
 from collections import defaultdict
 import os

@@ -1,3 +1,5 @@
+# This file has been modified by Neural Magic
+
 import argparse
 import dataclasses
 from dataclasses import dataclass

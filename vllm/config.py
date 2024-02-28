@@ -1,3 +1,5 @@
+# This file has been modified by Neural Magic
+
 from typing import Optional, Union, ClassVar
 from dataclasses import dataclass
 import os

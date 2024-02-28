@@ -1,3 +1,4 @@
+# This file has been modified by Neural Magic
 """Compare the outputs of HF and vLLM for Mistral models using greedy sampling.
 
 Run `pytest tests/models/test_mistral.py --forked`.

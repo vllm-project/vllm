@@ -1,3 +1,5 @@
+# This file has been modified by Neural Magic
+
 from typing import Type
 
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
