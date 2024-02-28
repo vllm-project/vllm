@@ -7,6 +7,7 @@ from typing import Tuple
 
 from vllm._C import cache_ops
 from vllm.utils import is_hip
+import torch.nn.functional as F
 
 COPYING_DIRECTION = [('cuda', 'cpu'), ('cuda', 'cuda'), ('cpu', 'cuda')]
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -25,6 +26,7 @@ CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ]
 KV_CACHE_DTYPE = ["auto", "fp8_e5m2"]
+PADDINGS = [8, 16, 0]
 
 
 @pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
@@ -224,3 +226,86 @@ def test_swap_blocks(
                               dist_key_caches[0][dst].cpu())
         assert torch.allclose(src_value_caches_clone[src].cpu(),
                               dist_value_caches[0][dst].cpu())
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("padding", PADDINGS)
+@torch.inference_mode()
+def test_reshape_and_cache_flash(
+    kv_cache_factory,
+    num_tokens: int,
+    num_heads: int,
+    head_size: int,
+    block_size: int,
+    num_blocks: int,
+    dtype: torch.dtype,
+    seed: int,
+    padding: int,
+) -> None:
+    random.seed(seed)
+    torch.random.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+
+    # Create a random slot mapping.
+    num_slots = block_size * num_blocks
+    slot_mapping = random.sample(range(num_slots), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device='cuda')
+
+    qkv = torch.randn(num_tokens,
+                      3,
+                      num_heads,
+                      head_size,
+                      dtype=dtype,
+                      device='cuda')
+    _, key, value = qkv.unbind(dim=1)
+
+    # Create the KV caches.
+    key_caches, value_caches = kv_cache_factory(num_blocks,
+                                                block_size,
+                                                1,
+                                                num_heads,
+                                                head_size,
+                                                dtype,
+                                                seed,
+                                                flash_style=True)
+    assert len(key_caches) == 1 and len(value_caches) == 0
+    key_cache, value_cache = key_caches[0], value_caches[0]
+
+    # Clone the KV caches.
+    cloned_key_cache = key_cache.clone()
+    cloned_value_cache = value_cache.clone()
+    num_tokens = torch.tensor([num_tokens], dtype=torch.long, device="cuda")
+
+    def pad_key_value(key: torch.Tensor, value: torch.Tensor,
+                      pad_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        if pad_size == 0:
+            return key, value
+        return F.pad(key, (0, 0, 0, 0, 0, pad_size)),\
+            F.pad(value, (0, 0, 0, 0, 0, pad_size))
+
+    # kv shapes: (num_blocks, block_size, num_heads, head_size)
+    # pad tokens.
+    padded_key, padded_value = pad_key_value(key, value, padding)
+    # Call the reshape_and_cache kernel.
+    cache_ops.reshape_and_cache_flash(padded_key, padded_value, key_cache,
+                                      value_cache, slot_mapping, num_tokens)
+
+    # Run the reference implementation.
+    block_indicies = torch.div(slot_mapping, block_size, rounding_mode='floor')
+    block_indicies = block_indicies.cpu().tolist()
+    block_offsets = slot_mapping % block_size
+    block_offsets = block_offsets.cpu().tolist()
+    for i in range(num_tokens):
+        block_idx = block_indicies[i]
+        block_offset = block_offsets[i]
+        cloned_key_cache[block_idx, block_offset, :, :] = key[i]
+        cloned_value_cache[block_idx, block_offset, :, :] = value[i]
+
+    assert torch.allclose(key_cache, cloned_key_cache)
+    assert torch.allclose(value_cache, cloned_value_cache)
