@@ -25,7 +25,7 @@ from vllm.utils import is_hip
 logger = init_logger(__name__)
 
 
-def get_memory_info() -> Tuple[int, int]:
+def get_memory_info(init_gpu_memory : int) -> Tuple[int, int]:
     try:
         import pynvml
     except ImportError:
@@ -34,7 +34,7 @@ def get_memory_info() -> Tuple[int, int]:
     if pynvml is None:
         # fallback is case pynvml is not available
         free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
-        peak_memory = total_gpu_memory - free_gpu_memory
+        peak_memory = init_gpu_memory - free_gpu_memory
         return peak_memory, total_gpu_memory
     else:
         try:
@@ -123,6 +123,7 @@ class Worker:
 
             _check_if_gpu_supports_dtype(self.model_config.dtype)
             torch.cuda.empty_cache()
+            self.init_gpu_memory = torch.cuda.mem_get_info()[0]
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
@@ -162,7 +163,7 @@ class Worker:
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
         torch.cuda.synchronize()
-        used_memory, total_gpu_memory = get_memory_info()
+        used_memory, total_gpu_memory = get_memory_info(self.init_gpu_memory)
 
         cache_block_size = CacheEngine.get_cache_block_size(
             block_size, cache_dtype, self.model_config, self.parallel_config)
