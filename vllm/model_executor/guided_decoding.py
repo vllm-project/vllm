@@ -18,7 +18,7 @@ class GuidedDecodingMode(Enum):
     CHOICE = "choice"
 
 
-global_thread_pool = None  # uesd for generating logits processor fsm
+global_thread_pool = None  # used for generating logits processor fsm
 
 
 async def get_guided_decoding_logits_processor(
