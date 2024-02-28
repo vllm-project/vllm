@@ -1,7 +1,3 @@
-import gc
-
-import torch
-
 import vllm
 from vllm.lora.request import LoRARequest
 
@@ -48,7 +44,3 @@ def test_gemma_lora(gemma_lora_files):
     output2 = do_sample(llm, gemma_lora_files, lora_id=2)
     for i in range(len(expected_lora_output)):
         assert output2[i].startswith(expected_lora_output[i])
-
-    del llm
-    gc.collect()
-    torch.cuda.empty_cache()
