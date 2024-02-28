@@ -57,9 +57,16 @@ append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
 #
 find_package(Torch REQUIRED)
 
-# For some reason torch does not add libtorch_python.so to the list of torch
-# libraries to link.  Find it by hand using `append_torchlib_if_found` from
+#
+# Normally `torch.utils.cpp_extension.CUDAExtension` would add
+# `libtorch_python.so` for linking against an extension. Torch's cmake
+# configuration does not include this library (presumably since the cmake
+# config is used for standalone C++ binaries that link against torch).
+# The `libtorch_python.so` library defines some of the glue code between
+# torch/python via pybind and is required by VLLM extensions for this
+# reason. So, add it by manually using `append_torchlib_if_found` from
 # torch's cmake setup.
+#
 append_torchlib_if_found(torch_python)
 
 #
