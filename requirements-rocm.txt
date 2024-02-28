@@ -10,4 +10,4 @@ transformers >= 4.38.0  # Required for Gemma.
 fastapi
 uvicorn[standard]
 pydantic >= 2.0  # Required for OpenAI server.
-prometheus_client
+prometheus_client >= 0.18.0

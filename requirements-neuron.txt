@@ -6,4 +6,4 @@ neuronx-cc
 fastapi
 uvicorn[standard]
 pydantic >= 2.0  # Required for OpenAI server.
-prometheus_client
+prometheus_client >= 0.18.0
