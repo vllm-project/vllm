@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.21)
 
 project(vllm_extensions LANGUAGES CXX)
 
+message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
+
 include(${CMAKE_CURRENT_LIST_DIR}/utils.cmake)
 
 #
