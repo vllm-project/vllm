@@ -8,16 +8,11 @@ Version 2.0, an Apache-compatible license.
 All source code should have information at the beginning of its respective file
 which specifies its licensing information.
 
-* Within the "vllm" directory, source code in a given file is licensed
-  under the Apache License Version 2.0, unless otherwise noted (e.g., an
-  Apache-compatible license).
-
-* Outside the "vllm" folder, source code in a given file is licensed under the
-  Neural Magic Community License, unless otherwise noted.
+Source code in a given file is licensed under the Apache License Version 2.0, unless otherwise noted (e.g., an
+Apache-compatible license) or the Neural Magic Community License, unless otherwise noted.
 
 When built, separate shared object files are generated for the Apache-licensed
-source code and the Neural Magic-licensed source code. The shared object binaries
-that contain `-xxx` in their name are licensed under the Neural Magic Community License.
+source code and the Neural Magic-licensed source code. 
 
 Please read this Neural Magic Community License Agreement (“Agreement”) 
 carefully before using Software for the first time. By using the Software, you agree 
