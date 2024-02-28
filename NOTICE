@@ -1,0 +1,26 @@
+Neural Magic vLLM
+Copyright 2024 - present / Neuralmagic, Inc. All Rights Reserved.
+
+This product includes software developed at Neuralmagic, Inc. (https://www.neuralmagic.com).
+
+Source code in the neuralmagic-vllm GitHub repository is variously licensed under the Apache License
+Version 2.0, an Apache-compatible license or the Neural Magic Community License. Please see
+https://github.com/neuralmagic/neuralmagic-vllm/blob/main/LICENSE for more information.
+
+* For a copy of the Apache License Version 2.0, please see [Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0).
+
+Neural Magic vLLM (https://github.com/neuralmagic/neuralmagic-vllm) is free to use per the Neural Magic Community License (https://github.com/neuralmagic/neuralmagic-vllm/blob/main/LICENSE). 
+
+* For a copy of all other Apache-compatible licenses and notices,
+  they will be referenced below.
+
+========================================================================
+NOTICES
+========================================================================
+
+All implementations in this repository or directory are subject to Neural Magic's Legal Policies
+https://www.neuralmagic.com/legal
+
+Package dependencies are defined in the Python setup.py file in the top-level directory of the neuralmagic-vllm GitHub repository and have their own Apache-compatible licenses and terms.
+
+Other external dependencies, if referenced in the various subdirectories, are subject to their associated licenses and terms.
