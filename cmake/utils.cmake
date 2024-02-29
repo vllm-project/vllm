@@ -9,12 +9,12 @@ macro (find_python_from_executable EXECUTABLE SUPPORTED_VERSIONS)
   if (NOT Python_FOUND)
     message(FATAL_ERROR "Unable to find python matching: ${EXECUTABLE}.")
   endif()
-  set(VER "${Python_VERSION_MAJOR}.${Python_VERSION_MINOR}")
-  set(SUPPORTED_VERSIONS_LIST ${SUPPORTED_VERSIONS} ${ARGN})
-  if (NOT VER IN_LIST SUPPORTED_VERSIONS_LIST)
+  set(_VER "${Python_VERSION_MAJOR}.${Python_VERSION_MINOR}")
+  set(_SUPPORTED_VERSIONS_LIST ${SUPPORTED_VERSIONS} ${ARGN})
+  if (NOT _VER IN_LIST _SUPPORTED_VERSIONS_LIST)
     message(FATAL_ERROR
-      "Python version (${VER}) is not one of the supported versions: "
-      "${SUPPORTED_VERSIONS}.")
+      "Python version (${_VER}) is not one of the supported versions: "
+      "${_SUPPORTED_VERSIONS_LIST}.")
   endif()
   message(STATUS "Found python matching: ${EXECUTABLE}.")
 endmacro()
@@ -42,9 +42,9 @@ endfunction()
 # Run `EXPR` in python after importing `PKG`. Use the result of this to extend
 # `CMAKE_PREFIX_PATH` so the torch cmake configuration can be imported.
 macro (append_cmake_prefix_path PKG EXPR)
-  run_python(PREFIX_PATH
+  run_python(_PREFIX_PATH
     "import ${PKG}; print(${EXPR})" "Failed to locate ${PKG} path")
-  list(APPEND CMAKE_PREFIX_PATH ${PREFIX_PATH})
+  list(APPEND CMAKE_PREFIX_PATH ${_PREFIX_PATH})
 endmacro()
 
 #
