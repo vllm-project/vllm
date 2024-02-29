@@ -229,14 +229,19 @@ if (${VLLM_GPU_LANG} STREQUAL "CUDA")
   message(STATUS "Punica target arches: ${VLLM_PUNICA_GPU_ARCHES}")
 endif()
 
-define_gpu_extension_target(
-  _punica_C
-  DESTINATION vllm
-  LANGUAGE ${VLLM_GPU_LANG}
-  SOURCES ${VLLM_PUNICA_EXT_SRC}
-  COMPILE_FLAGS ${VLLM_PUNICA_GPU_FLAGS}
-  ARCHITECTURES ${VLLM_PUNICA_GPU_ARCHES}
-  WITH_SOABI)
+if (VLLM_PUNICA_GPU_ARCHES)
+  define_gpu_extension_target(
+    _punica_C
+    DESTINATION vllm
+    LANGUAGE ${VLLM_GPU_LANG}
+    SOURCES ${VLLM_PUNICA_EXT_SRC}
+    COMPILE_FLAGS ${VLLM_PUNICA_GPU_FLAGS}
+    ARCHITECTURES ${VLLM_PUNICA_GPU_ARCHES}
+    WITH_SOABI)
+else()
+  message(WARNING "Unable to create _punica_C target because none of the "
+    "requested architectures (${VLLM_GPU_ARCHES}) are supported, i.e. >= 8.0")
+endif()
 
 #
 # Add the `default` target which detects which extensions should be
@@ -262,27 +267,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   message(STATUS "Enabling moe extension.")
   add_dependencies(default _moe_C)
 
-  set(ENABLE_PUNICA)
   # Enable punica if -DVLLM_INSTALL_PUNICA_KERNELS=ON or
-  # VLLM_INSTALL_PUNICA_KERNELS is set in the environment.
-  if (ENV{VLLM_INSTALL_PUNICA_KERNELS} OR VLLM_INSTALL_PUNICA_KERNELS)
-    set(ENABLE_PUNICA ON)
-    message(STATUS "arches: ${CMAKE_CUDA_ARCHITECTURES}")
-    message(STATUS "native arches: ${CMAKE_CUDA_ARCHITECTURES_NATIVE}")
-    foreach (ARCH ${CMAKE_CUDA_ARCHITECTURES_NATIVE})
-      string(REGEX MATCH "\([0-9]+\)" ARCH_VER_STR ${ARCH})
-      message(STATUS "ARCH_VER_STR: ${ARCH_VER_STR}")
-      string_to_ver(ARCH_VER ${ARCH_VER_STR})
-      if (ARCH_VER VERSION_LESS 8.0)
-        message(STATUS
-          "Unable to add punica extension due to device version ${ARCH_VER} < 8.0.")
-        set(ENABLE_PUNICA OFF)
-        break()
-      endif()
-    endforeach()
-  endif()
-
-  if (ENABLE_PUNICA)
+  # VLLM_INSTALL_PUNICA_KERNELS is set in the environment and
+  # there are supported target arches.
+  if (VLLM_PUNICA_GPU_ARCHES AND
+      (ENV{VLLM_INSTALL_PUNICA_KERNELS} OR VLLM_INSTALL_PUNICA_KERNELS))
     message(STATUS "Enabling punica extension.")
     add_dependencies(default _punica_C)
   endif()
