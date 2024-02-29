@@ -372,12 +372,10 @@ class QKVParallelLinear(ColumnParallelLinear):
         super().__init__(input_size, output_size, bias, False, skip_bias_add,
                          params_dtype, linear_method)
 
-    def weight_loader(
-        self,
-        param: Parameter,
-        loaded_weight: torch.Tensor,
-        loaded_shard_id: Optional[str] = None,
-    ):
+    def weight_loader(self,
+                      param: Parameter,
+                      loaded_weight: torch.Tensor,
+                      loaded_shard_id: Optional[str] = None):
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
         if loaded_shard_id is None:
@@ -389,17 +387,10 @@ class QKVParallelLinear(ColumnParallelLinear):
             shard_offsets = [
                 # (shard_id, shard_offset, shard_size)
                 ("q", 0, self.total_num_heads * self.head_size),
-                (
-                    "k",
-                    self.total_num_heads * self.head_size,
-                    self.total_num_kv_heads * self.head_size,
-                ),
-                (
-                    "v",
-                    (self.total_num_heads + self.total_num_kv_heads) *
-                    self.head_size,
-                    self.total_num_kv_heads * self.head_size,
-                ),
+                ("k", self.total_num_heads * self.head_size,
+                 self.total_num_kv_heads * self.head_size),
+                ("v", (self.total_num_heads + self.total_num_kv_heads) *
+                 self.head_size, self.total_num_kv_heads * self.head_size),
             ]
             packed_dim = getattr(param, "packed_dim", None)
             for shard_id, shard_offset, shard_size in shard_offsets:
@@ -507,12 +498,8 @@ class RowParallelLinear(torch.nn.Module):
             linear_method = UnquantizedLinearMethod()
         self.linear_method = linear_method
         self.linear_weights = self.linear_method.create_weights(
-            self.input_size_per_partition,
-            self.output_size,
-            self.input_size,
-            self.output_size,
-            self.params_dtype,
-        )
+            self.input_size_per_partition, self.output_size, self.input_size,
+            self.output_size, self.params_dtype)
         for name, weight in self.linear_weights.items():
             if isinstance(weight, torch.Tensor):
                 self.register_parameter(name, weight)
@@ -525,13 +512,10 @@ class RowParallelLinear(torch.nn.Module):
         if bias:
             self.bias = Parameter(
                 torch.empty(self.output_size, dtype=params_dtype))
-            set_weight_attrs(
-                self.bias,
-                {
-                    "output_dim": 0,
-                    "weight_loader": self.weight_loader,
-                },
-            )
+            set_weight_attrs(self.bias, {
+                "output_dim": 0,
+                "weight_loader": self.weight_loader,
+            })
         else:
             self.register_parameter("bias", None)
 
