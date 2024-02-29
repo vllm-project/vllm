@@ -3,7 +3,7 @@ import pytest
 import time
 
 import torch
-from vllm.vllm.model_executor.layers.attention_backends.prefix_prefill import (
+from vllm.model_executor.layers.attention_backends.prefix_prefill import (
     context_attention_fwd)
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalFromBottomRightMask
