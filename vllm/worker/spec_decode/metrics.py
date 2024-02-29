@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from typing import Optional
 from vllm.utils import in_wsl
+import time
 
 
 @dataclass
@@ -28,7 +29,7 @@ class AsyncMetricsCollector:
     def __init__(self, rejection_sampler: RejectionSampler):
         self.rejection_sampler = rejection_sampler
 
-        self.rank: Optional[int] = None
+        self._rank: Optional[int] = None
 
         # We don't have a device set yet.
         self._copy_stream: Optional[torch.cuda.Stream] = None
@@ -71,7 +72,7 @@ class AsyncMetricsCollector:
         """Return whether or not this iteration should print rejection sampling
         metrics.
         """
-        if self.rank != 0:
+        if self._rank != 0:
             return False
 
         if (now - self._last_metrics_collect_time <
