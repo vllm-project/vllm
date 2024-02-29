@@ -171,12 +171,8 @@ class ColumnParallelLinear(torch.nn.Module):
             linear_method = UnquantizedLinearMethod()
         self.linear_method = linear_method
         self.linear_weights = self.linear_method.create_weights(
-            self.input_size,
-            self.output_size_per_partition,
-            self.input_size,
-            self.output_size,
-            self.params_dtype,
-        )
+            self.input_size, self.output_size_per_partition, self.input_size,
+            self.output_size, self.params_dtype)
         for name, weight in self.linear_weights.items():
             if isinstance(weight, torch.Tensor):
                 self.register_parameter(name, weight)
@@ -253,22 +249,13 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         self.output_sizes = output_sizes
         tp_size = get_tensor_model_parallel_world_size()
         assert all(output_size % tp_size == 0 for output_size in output_sizes)
-        super().__init__(
-            input_size,
-            sum(output_sizes),
-            bias,
-            gather_output,
-            skip_bias_add,
-            params_dtype,
-            linear_method,
-        )
+        super().__init__(input_size, sum(output_sizes), bias, gather_output,
+                         skip_bias_add, params_dtype, linear_method)
 
-    def weight_loader(
-        self,
-        param: Parameter,
-        loaded_weight: torch.Tensor,
-        loaded_shard_id: Optional[int] = None,
-    ):
+    def weight_loader(self,
+                      param: Parameter,
+                      loaded_weight: torch.Tensor,
+                      loaded_shard_id: Optional[int] = None):
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
         if loaded_shard_id is None:
@@ -380,17 +367,10 @@ class QKVParallelLinear(ColumnParallelLinear):
             self.num_kv_heads = divide(self.total_num_kv_heads, tp_size)
             self.num_kv_head_replicas = 1
         input_size = self.hidden_size
-        output_size = ((self.num_heads + 2 * self.num_kv_heads) * tp_size *
-                       self.head_size)
-        super().__init__(
-            input_size,
-            output_size,
-            bias,
-            False,
-            skip_bias_add,
-            params_dtype,
-            linear_method,
-        )
+        output_size = (self.num_heads +
+                       2 * self.num_kv_heads) * tp_size * self.head_size
+        super().__init__(input_size, output_size, bias, False, skip_bias_add,
+                         params_dtype, linear_method)
 
     def weight_loader(
         self,
