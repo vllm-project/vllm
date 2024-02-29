@@ -131,7 +131,10 @@ class RandomEvictor(Evictor):
     def evict(self) -> PhysicalTokenBlock:
         if len(self.free_table) == 0:
             raise ValueError("No usable cache memory left")
-        return next(iter(self.free_table.values()))
+        evicted_block = next(iter(self.free_table.values()))
+        evicted_block.computed = False
+        del self.free_table[evicted_block.block_hash]
+        return evicted_block
 
     def add(self, block: PhysicalTokenBlock):
         self.free_table[block.block_hash] = block

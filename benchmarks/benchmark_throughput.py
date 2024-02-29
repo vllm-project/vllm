@@ -73,6 +73,7 @@ def run_vllm(
     enforce_eager: bool,
     kv_cache_dtype: str,
     device: str,
+    enable_prefix_caching: bool,
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(
@@ -87,6 +88,7 @@ def run_vllm(
         enforce_eager=enforce_eager,
         kv_cache_dtype=kv_cache_dtype,
         device=device,
+        enable_prefix_caching=enable_prefix_caching
     )
 
     # Add the requests to the engine.
@@ -211,7 +213,7 @@ def main(args: argparse.Namespace):
                                 args.seed, args.n, args.use_beam_search,
                                 args.trust_remote_code, args.dtype,
                                 args.max_model_len, args.enforce_eager,
-                                args.kv_cache_dtype, args.device)
+                                args.kv_cache_dtype, args.device, args.enable_prefix_caching)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -302,6 +304,10 @@ if __name__ == "__main__":
         default="cuda",
         choices=["cuda"],
         help='device type for vLLM execution, supporting CUDA only currently.')
+    parser.add_argument(
+        "--enable_prefix_caching",
+        action='store_true'
+    )
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model
