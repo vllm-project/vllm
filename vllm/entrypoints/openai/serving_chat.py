@@ -80,7 +80,7 @@ class OpenAIServingChat(OpenAIServing):
         if request.add_generation_prompt:
             return self.response_role
         else:
-            return request.messages[-1].role
+            return request.messages[-1]["role"]
 
     async def chat_completion_stream_generator(
             self, request: ChatCompletionRequest,
