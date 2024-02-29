@@ -13,7 +13,7 @@ import torch
 import random
 import pytest
 
-from vllm.worker.spec_decode.draft_target_worker import DraftTargetWorker
+from vllm.worker.spec_decode.draft_target_worker import DraftTargetWorker, calculate_gpu_blocks
 from vllm.worker.spec_decode.util import SpeculativeProposals
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SequenceGroupMetadata
@@ -589,3 +589,82 @@ def test_empty_input_batch(k: int, batch_size: int):
 
     assert draft_worker.execute_model.called_once_with(**execute_model_data.to_dict())
     assert target_worker.execute_model.called_once_with(**execute_model_data.to_dict())
+
+
+@torch.inference_mode()
+def test_init_model():
+    draft_worker = mock_worker()
+    target_worker = mock_worker()
+    rejection_sampler = MagicMock()
+    rejection_sampler.token_id_dtype = torch.int64
+    metrics_collector = MagicMock()
+
+    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler, metrics_collector)
+
+    worker.init_model()
+
+    assert draft_worker.init_model.called_once()
+    assert draft_worker.include_gpu_probs_tensors.called_once()
+
+    assert target_worker.init_model.called_once()
+    assert target_worker.include_gpu_probs_tensors.called_once()
+
+    assert metrics_collector.init_gpu_tensors.called_once()
+    assert rejection_sampler.init_gpu_tensors.called_once()
+
+@torch.inference_mode()
+def test_init_cache_engine():
+    draft_worker = mock_worker()
+    target_worker = mock_worker()
+    rejection_sampler = MagicMock()
+    rejection_sampler.token_id_dtype = torch.int64
+    metrics_collector = MagicMock()
+
+    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler, metrics_collector)
+
+    cache_config = MagicMock()
+
+    worker.init_cache_engine(cache_config)
+
+    assert draft_worker.init_cache_engine.called_once_with(cache_config)
+    assert target_worker.init_cache_engine.called_once_with(cache_config)
+
+
+@pytest.mark.parametrize('available_gpu_blocks', [1, 1024])
+@pytest.mark.parametrize('available_cpu_blocks', [500])
+@pytest.mark.parametrize('target_kv_size_bytes', [2 * 2 * 4096])
+@pytest.mark.parametrize('draft_kv_size_bytes', [0, 2 * 2 * 768, 2 * 2 * 4096])
+@torch.inference_mode()
+def test_profile_num_available_blocks(available_gpu_blocks: int, available_cpu_blocks: int, target_kv_size_bytes: int, draft_kv_size_bytes: int):
+    draft_worker = mock_worker()
+    target_worker = mock_worker()
+    rejection_sampler = MagicMock()
+    rejection_sampler.token_id_dtype = torch.int64
+    metrics_collector = MagicMock()
+
+    target_worker.profile_num_available_blocks.return_value = (available_gpu_blocks, available_cpu_blocks)
+    target_worker.get_kv_size_bytes.return_value = target_kv_size_bytes
+    draft_worker.get_kv_size_bytes.return_value = draft_kv_size_bytes
+
+    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler, metrics_collector)
+
+    # These values do not directly impact the adjusted block size calculation,
+    # so they can be fixed.
+    gpu_memory_utilization = 0.9
+    cpu_swap_space = 100
+    block_size = 16
+
+    num_gpu_blocks, num_cpu_blocks = worker.profile_num_available_blocks(block_size, gpu_memory_utilization, cpu_swap_space)
+
+    assert target_worker.profile_num_available_blocks.called_once_with(block_size, gpu_memory_utilization, cpu_swap_space)
+    assert num_cpu_blocks == available_cpu_blocks
+
+    assert num_gpu_blocks == calculate_gpu_blocks(target_kv_size_bytes, draft_kv_size_bytes, available_gpu_blocks)
+
+@pytest.mark.parametrize('available_gpu_blocks', list(range(20)) + [1024, 1024**2])
+@pytest.mark.parametrize('target_kv_size_bytes', [2 * 2 * 4096, 2 * 2 * 8192])
+@pytest.mark.parametrize('draft_kv_size_bytes', [0, 2 * 2 * 768, 2 * 2 * 4096])
+@torch.inference_mode()
+def test_calculate_gpu_blocks(available_gpu_blocks: int, target_kv_size_bytes: int, draft_kv_size_bytes: int):
+    num_blocks = calculate_gpu_blocks(target_kv_size_bytes, draft_kv_size_bytes, available_gpu_blocks)
+    assert (num_blocks * target_kv_size_bytes) + (num_blocks * draft_kv_size_bytes) <= (available_gpu_blocks * target_kv_size_bytes)

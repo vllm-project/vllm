@@ -67,15 +67,7 @@ class DraftTargetWorker:
 
         #self._profiler = TorchProfiler()
 
-    def _configure_samplers(self):
-        """Configure model samplers to return a probability tensor in the
-        SamplerOutput. This simplifies the data wrangling logic in speculative
-        decoding.
-        """
-        self.draft_worker.include_gpu_probs_tensor()
-        self.target_worker.include_gpu_probs_tensor()
-
-    def init_model(self):
+    def init_model(self) -> None:
         # Intitialize the target model before the draft model.
         # This allows the draft model to have a smaller TP degree than the
         # larger model without refactors to parallel_state.
@@ -88,6 +80,31 @@ class DraftTargetWorker:
 
         self._metrics.init_gpu_tensors(self.rank)
         self.rejection_sampler.init_gpu_tensors(self.rank)
+
+    def profile_num_available_blocks(self, block_size: int,
+                                     gpu_memory_utilization: float,
+                                     cpu_swap_space: int) -> Tuple[int, int]:
+        num_gpu_blocks, num_cpu_blocks = (
+            self.target_worker.profile_num_available_blocks(
+                block_size, gpu_memory_utilization, cpu_swap_space))
+
+        target_kv_size_bytes = self.target_worker.get_kv_size_bytes(block_size)
+        draft_kv_size_bytes = self.draft_worker.get_kv_size_bytes(block_size)
+
+        new_num_gpu_blocks = calculate_gpu_blocks(target_kv_size_bytes, draft_kv_size_bytes, num_gpu_blocks)
+        return new_num_gpu_blocks, num_cpu_blocks
+
+    def init_cache_engine(self, cache_config: CacheConfig):
+        self.target_worker.init_cache_engine(cache_config)
+        self.draft_worker.init_cache_engine(cache_config)
+
+    def _configure_samplers(self):
+        """Configure model samplers to return a probability tensor in the
+        SamplerOutput. This simplifies the data wrangling logic in speculative
+        decoding.
+        """
+        self.draft_worker.include_gpu_probs_tensor()
+        self.target_worker.include_gpu_probs_tensor()
 
     @torch.inference_mode()
     def execute_model(
@@ -575,6 +592,28 @@ class DraftTargetWorker:
     @property
     def rank(self):
         return self.target_worker.rank
+
+
+# TODO name
+def calculate_gpu_blocks(target_kv_size_bytes: int, draft_kv_size_bytes: int, 
+                          total_num_gpu_blocks: int) -> int:
+    """Given total_num_gpu_blocks, the number of GPU blocks that could be
+    allocate to the target model, this function calculates how many blocks
+    should be given to the draft and target model.
+
+    Note that usually the block size, in bytes, of each model is different,
+    as it's a function of number of KV/layer, number of heads, and hidden
+    dimension size.
+
+    Since the target and draft models allocate the same number of blocks, we
+    simply calculate the number of blocks where if allocated by both models,
+    the total memory usage from KV cache is no larger than the number of
+    blocks allocatable by the target model alone.
+    """
+    new_num_gpu_blocks = int(total_num_gpu_blocks * target_kv_size_bytes /
+                             (draft_kv_size_bytes + target_kv_size_bytes))
+
+    return new_num_gpu_blocks
 
 
 def sampler_output_to_torch(
