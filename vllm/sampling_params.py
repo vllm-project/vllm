@@ -238,8 +238,10 @@ class SamplingParams:
             return SamplingType.RANDOM_SEED
         return SamplingType.RANDOM
 
-    def copy(self) -> "SamplingParams":
-        """ Deep copy excluding LogitsProcessor objects"""
+    def clone(self) -> "SamplingParams":
+        """Deep copy excluding LogitsProcessor objects, which may contain an
+            arbitrary/nontrivial amount of data."""
+
         logit_processor_refs = None if self.logits_processors is None else {
             id(lp): lp
             for lp in self.logits_processors
