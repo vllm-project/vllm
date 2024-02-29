@@ -218,3 +218,9 @@ class LLM:
         # its previous requests.
         outputs = sorted(outputs, key=lambda x: int(x.request_id))
         return outputs
+
+    def __del__(self):
+        import gc
+        del llm_engine.driver_worker.model_runner
+        del llm_engine.driver_worker
+        gc.collect()
