@@ -24,11 +24,11 @@ endmacro()
 # has trailing whitespace stripped.  If an error is encountered when running
 # python, a fatal message `ERR_MSG` is issued.
 #
-macro (run_python OUT EXPR ERR_MSG)
+function (run_python OUT EXPR ERR_MSG)
   execute_process(
     COMMAND
     "${Python_EXECUTABLE}" "-c" "${EXPR}"
-    OUTPUT_VARIABLE ${OUT}
+    OUTPUT_VARIABLE PYTHON_OUT
     RESULT_VARIABLE PYTHON_ERROR_CODE
     ERROR_VARIABLE PYTHON_STDERR
     OUTPUT_STRIP_TRAILING_WHITESPACE)
@@ -36,7 +36,8 @@ macro (run_python OUT EXPR ERR_MSG)
   if(NOT PYTHON_ERROR_CODE EQUAL 0)
     message(FATAL_ERROR "${ERR_MSG}: ${PYTHON_STDERR}")
   endif()
-endmacro()
+  set(${OUT} ${PYTHON_OUT} PARENT_SCOPE)
+endfunction()
 
 # Run `EXPR` in python after importing `PKG`. Use the result of this to extend
 # `CMAKE_PREFIX_PATH` so the torch cmake configuration can be imported.
@@ -51,7 +52,7 @@ endmacro()
 # of CUDA source files. The names of the corresponding "hipified" sources are
 # stored in `OUT_SRCS`.
 #
-macro (hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
+function (hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
   #
   # Split into C++ and non-C++ (i.e. CUDA) sources.
   #
@@ -81,42 +82,43 @@ macro (hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
     COMMENT "Running hipify on ${NAME} extension source files.")
 
   # Swap out original extension sources with hipified sources.
-  set(${OUT_SRCS} ${HIP_SRCS})
-  list(APPEND ${OUT_SRCS} ${CXX_SRCS})
-endmacro()
+  list(APPEND HIP_SRCS ${CXX_SRCS})
+  set(${OUT_SRCS} ${HIP_SRCS} PARENT_SCOPE)
+endfunction()
 
 #
 # Get additional GPU compiler flags from torch.
 #
-macro(get_torch_gpu_compiler_flags GPU_FLAGS GPU_LANG)
+function (get_torch_gpu_compiler_flags OUT_GPU_FLAGS GPU_LANG)
   if (${GPU_LANG} STREQUAL "CUDA")
     #
     # Get common NVCC flags from torch.
     #
-    run_python(${GPU_FLAGS}
+    run_python(GPU_FLAGS
       "from torch.utils.cpp_extension import COMMON_NVCC_FLAGS; print(';'.join(COMMON_NVCC_FLAGS))"
       "Failed to determine torch nvcc compiler flags")
 
     if (CUDA_VERSION VERSION_GREATER_EQUAL 11.8)
-      list(APPEND ${GPU_FLAGS} "-DENABLE_FP8_E5M2")
+      list(APPEND GPU_FLAGS "-DENABLE_FP8_E5M2")
     endif()
 
   elseif(${GPU_LANG} STREQUAL "HIP")
     #
     # Get common HIP/HIPCC flags from torch.
     #
-    run_python(${GPU_FLAGS}
+    run_python(GPU_FLAGS
       "import torch.utils.cpp_extension as t; print(';'.join(t.COMMON_HIP_FLAGS + t.COMMON_HIPCC_FLAGS))"
       "Failed to determine torch nvcc compiler flags")
 
-    list(APPEND ${GPU_FLAGS}
+    list(APPEND GPU_FLAGS
       "-DUSE_ROCM"
       "-U__HIP_NO_HALF_CONVERSIONS__"
       "-U__HIP_NO_HALF_OPERATORS__"
       "-fno-gpu-rdc")
 
   endif()
-endmacro()
+  set(${OUT_GPU_FLAGS} ${GPU_FLAGS} PARENT_SCOPE)
+endfunction()
 
 # Macro for converting a `gencode` version number to a cmake version number.
 macro(string_to_ver OUT_VER IN_STR)
@@ -128,9 +130,8 @@ endmacro()
 # `GPU_SUPPORTED_ARCHES`. Sets the final set of architectures in
 # `GPU_ARCHES`.
 #
-macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
-  set(GPU_SUPPORTED_ARCHES_LIST ${GPU_SUPPORTED_ARCHES} ${ARGN})
-  message(STATUS "${GPU_LANG} supported arches: ${GPU_SUPPORTED_ARCHES_LIST}")
+function(override_gpu_arches OUT_GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
+  message(STATUS "${GPU_LANG} supported arches: ${GPU_SUPPORTED_ARCHES}")
 
   if (${GPU_LANG} STREQUAL "HIP")
     #
@@ -143,17 +144,17 @@ macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
     # Find the intersection of the supported + detected architectures to
     # set the module architecture flags.
     #
-    set(${GPU_ARCHES})
+    set(GPU_ARCHES)
     foreach (ARCH ${CMAKE_HIP_ARCHITECTURES})
-      if (ARCH IN_LIST GPU_SUPPORTED_ARCHES_LIST)
-        list(APPEND ${GPU_ARCHES} ${ARCH})
+      if (ARCH IN_LIST GPU_SUPPORTED_ARCHES)
+        list(APPEND GPU_ARCHES ${ARCH})
       endif()
     endforeach()
 
-    if(NOT ${GPU_ARCHES})
+    if(NOT GPU_ARCHES)
       message(FATAL_ERROR
         "None of the detected ROCm architectures: ${CMAKE_HIP_ARCHITECTURES} is"
-        " supported. Supported ROCm architectures are: ${GPU_SUPPORTED_ARCHES_LIST}.")
+        " supported. Supported ROCm architectures are: ${GPU_SUPPORTED_ARCHES}.")
     endif()
 
   elseif(${GPU_LANG} STREQUAL "CUDA")
@@ -199,7 +200,7 @@ macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
     message(DEBUG "arch flags: ${_CUDA_ARCH_FLAGS}")
 
     # Initialize the architecture lists to empty.
-    set(${GPU_ARCHES})
+    set(GPU_ARCHES)
 
     # Process each `gencode` flag.
     foreach(ARCH ${_CUDA_ARCH_FLAGS})
@@ -245,17 +246,18 @@ macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
 
       # Check if the current version is in the supported arch list.
       string_to_ver(CODE_VER ${CODE_ARCH})
-      if (NOT CODE_VER IN_LIST GPU_SUPPORTED_ARCHES_LIST)
+      if (NOT CODE_VER IN_LIST GPU_SUPPORTED_ARCHES)
         message(STATUS "discarding unsupported CUDA arch ${VER}.")
         continue()
       endif()
 
       # Add it to the arch list.
-      list(APPEND ${GPU_ARCHES} "${CODE_ARCH}${VIRT}")
+      list(APPEND GPU_ARCHES "${CODE_ARCH}${VIRT}")
     endforeach()
   endif()
-  message(STATUS "${GPU_LANG} target arches: ${${GPU_ARCHES}}")
-endmacro()
+  message(STATUS "${GPU_LANG} target arches: ${GPU_ARCHES}")
+  set(${OUT_GPU_ARCHES} ${GPU_ARCHES} PARENT_SCOPE)
+endfunction()
 
 #
 # Define a target named `GPU_MOD_NAME` for a single extension. The
