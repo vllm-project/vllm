@@ -52,6 +52,7 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class Starcoder2Attention(nn.Module):
+
     def __init__(self,
                  config: Starcoder2Config,
                  linear_method: Optional[LinearMethodBase] = None):
