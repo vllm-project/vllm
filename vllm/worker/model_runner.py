@@ -250,15 +250,6 @@ class ModelRunner:
         context_lens_tensor = torch.tensor(context_lens,
                                            dtype=torch.int,
                                            device=self.device)
-        # Prepare prefix block tables
-        max_prompt_block_table_len = max(len(t) for t in prefix_block_tables)
-        block_tables = _make_tensor_with_pad(
-            prefix_block_tables,
-            max_len=max_prompt_block_table_len,
-            pad=0,
-            dtype=torch.int,
-            device=self.device,
-        )
         if self.is_encoder_decoder:
             padded_block_tables = []
             # Pad the encoder block tables to the same length and then add a decoder block table in the end
@@ -271,8 +262,10 @@ class ModelRunner:
                 padded_block_tables,
                 max_len=max_block_table_len,
                 pad=0,
-                dtype=torch.int)
+                dtype=torch.int,
+                device = self.device)
         else:
+            # Prepare prefix block tables
             max_prompt_block_table_len = max(
                 len(t) for t in prefix_block_tables)
             block_tables_tensor = _make_tensor_with_pad(

@@ -358,16 +358,16 @@ class T5LayerSelfAttention(nn.Module):
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
         normed_hidden_states = self.layer_norm(hidden_states)
-        # print("self attention input shape: ", normed_hidden_states.shape)
-        # print("self_attention input: ", normed_hidden_states)
+        print("self attention input shape: ", normed_hidden_states.shape)
+        print("self_attention input: ", normed_hidden_states)
         attention_output = self.SelfAttention(
             hidden_states=normed_hidden_states,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
             encoder_hidden_states=None,
         )
-        # print("self attention output shape: ", attention_output.shape)
-        # print("self_attention output: ", attention_output)
+        print("self attention output shape: ", attention_output.shape)
+        print("self_attention output: ", attention_output)
         hidden_states = hidden_states + attention_output
         return hidden_states
 
@@ -395,16 +395,16 @@ class T5LayerCrossAttention(nn.Module):
         encoder_hidden_states: Optional[torch.Tensor],
     ) -> torch.Tensor:
         normed_hidden_states = self.layer_norm(hidden_states)
-        # print("cross attention input shape: ", normed_hidden_states.shape)
-        # print("cross_attention input: ", normed_hidden_states)
+        print("cross attention input shape: ", normed_hidden_states.shape)
+        print("cross_attention input: ", normed_hidden_states)
         attention_output = self.EncDecAttention(
             hidden_states=normed_hidden_states,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
             encoder_hidden_states=encoder_hidden_states,
         )
-        # print("cross attention output shape: ", attention_output.shape)
-        # print("cross_attention output: ", attention_output)
+        print("cross attention output shape: ", attention_output.shape)
+        print("cross_attention output: ", attention_output)
         hidden_states = hidden_states + attention_output
         return hidden_states
 
@@ -537,8 +537,8 @@ class T5Stack(nn.Module):
         #     hidden_states = torch.cat(
         #         [encoder_hidden_states, hidden_states], dim=1
         #     )
-        # print("final_hidden_states shape: ", hidden_states.shape)
-        # print("final_hidden_states: ", hidden_states)
+        print("final_hidden_states shape: ", hidden_states.shape)
+        print("final_hidden_states: ", hidden_states)
         return hidden_states
 
 

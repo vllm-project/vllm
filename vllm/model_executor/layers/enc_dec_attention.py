@@ -8,7 +8,6 @@ import torch.nn.functional as F
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (
     BlockDiagonalCausalMask,
-    LowerTriangularMaskWithTensorBias,
 )
 from vllm._C import cache_ops
 from vllm.model_executor.input_metadata import InputMetadata
@@ -16,8 +15,6 @@ from vllm.utils import is_hip
 from vllm.model_executor.layers.attention import paged_attention
 
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
-# Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
-_PARTITION_SIZE = 512
 
 
 class EncDecAttention(nn.Module):
@@ -167,7 +164,8 @@ class DecoderAttention(EncDecAttention):
                 value,
                 key_cache,
                 value_cache,
-                input_metadata.slot_mapping[:, -1].flatten().contiguous()
+                input_metadata.slot_mapping[:, -1].flatten().contiguous(),
+                input_metadata.kv_cache_dtype
             )
 
             # print("key_cache after: ", key_cache)
@@ -189,6 +187,7 @@ class DecoderAttention(EncDecAttention):
             scale=self.scale,
             alibi_slopes=None,
             custom_bias=input_metadata.attn_bias.to(torch.float32),
+            kv_cache_dtype=input_metadata.kv_cache_dtype,
         )
         return output.view(batch_size, seq_len, hidden_size)
 
@@ -253,6 +252,7 @@ class CrossAttention(EncDecAttention):
                 key_cache,
                 value_cache,
                 input_metadata.slot_mapping[:, :-1].flatten().contiguous(),
+                input_metadata.kv_cache_dtype,
             )
         
         # for slot in input_metadata.slot_mapping[:, :-1].flatten():
@@ -278,6 +278,7 @@ class CrossAttention(EncDecAttention):
             scale=self.scale,
             alibi_slopes=None,
             custom_bias=None,
+            kv_cache_dtype=input_metadata.kv_cache_dtype,
         )
 
         return output.view(batch_size, seq_len, hidden_size)

@@ -12,7 +12,7 @@ from vllm._C import ops
 from vllm._C import cache_ops
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.triton_kernel.prefix_prefill import (
-    context_attention_fwd, )
+    context_attention_fwd)
 from vllm.utils import is_hip
 
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
@@ -195,9 +195,9 @@ class PagedAttention(nn.Module):
                     key = key.unflatten(0, (batch_size, seq_len))
                     value = value.unflatten(0, (batch_size, seq_len))
 
-                print("query.shape: ", query.shape)
-                print("key.shape: ", key.shape)
-                print("value.shape: ", value.shape)
+                # print("query.shape: ", query.shape)
+                # print("key.shape: ", key.shape)
+                # print("value.shape: ", value.shape)
                 out = xops.memory_efficient_attention_forward(
                     query,
                     key,

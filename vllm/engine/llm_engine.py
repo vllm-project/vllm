@@ -143,6 +143,8 @@ class LLMEngine:
         if USE_RAY_COMPILED_DAG:
             self.forward_dag = self._compiled_ray_dag()
 
+        self.is_encoder_decoder = getattr(self.model_config.hf_config,
+                                                "is_encoder_decoder", False)
     def get_tokenizer_for_seq(self, sequence: Sequence):
         return self.tokenizer.get_lora_tokenizer(sequence.lora_request)
 
@@ -152,9 +154,6 @@ class LLMEngine:
         imported_worker = importlib.import_module(worker_module)
         Worker = imported_worker.Worker
         return Worker
-
-        self.is_encoder_decoder = getattr(self.model_config.hf_config,
-                                          "is_encoder_decoder", False)
 
     def _init_workers(self):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
