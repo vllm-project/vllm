@@ -63,3 +63,21 @@ class InputMetadata:
         # Set during the execution of the first attention op for each sequence.
         # FIXME(woosuk): This is a hack.
         self.attn_bias: Dict[str, torch.Tensor] = {}
+
+    def __repr__(self) -> str:
+        return (
+            "InputMetadata("
+            f"input_type={self.input_type}, "
+            f"prompt_seq_ids={self.prompt_seq_ids}, "
+            f"processed_prompt_lens={self.processed_prompt_lens}, "
+            f"current_prompt_chunk_lens={self.current_prompt_chunk_lens}, "
+            f"total_prompt_lens={self.total_prompt_lens}, "
+            f"prefix_plus_current_prompt_tokens_slot_mapping={self.prefix_plus_current_prompt_tokens_slot_mapping}, "
+            f"current_tokens_slot_mapping={self.current_tokens_slot_mapping}, "
+            f"max_context_len={self.max_context_len}, "
+            f"context_lens={self.context_lens}, "
+            f"block_tables={self.block_tables}, "
+            f"use_cuda_graph={self.use_cuda_graph}, "
+            f"kv_cache_dtype={self.kv_cache_dtype}, "
+            f"is_profiling_iteration={self.is_profiling_iteration})"
+        )

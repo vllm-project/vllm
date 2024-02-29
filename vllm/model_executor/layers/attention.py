@@ -141,7 +141,6 @@ class PagedAttention(nn.Module):
         num_valid_tokens = input_metadata.num_valid_tokens
         num_current_prompt_tokens = input_metadata.num_current_prompt_tokens
         num_generation_tokens = input_metadata.num_generation_tokens
-        # print(num_valid_tokens, num_current_prompt_tokens, num_generation_tokens)
 
         if num_current_prompt_tokens > 0:
             # Set attention bias if not provided. This typically happens at the
@@ -239,7 +238,25 @@ class PagedAttention(nn.Module):
             )
         if num_generation_tokens > 0:
             # Decoding run.
+            # Reshape the keys and values and store them in the cache.
+            # When key_cache and value_cache are not provided, the new key
+            # and value vectors will not be cached
             if key_cache is not None and value_cache is not None:
+                key_to_cache = key[num_current_prompt_tokens:num_valid_tokens]
+                value_to_cache = value[num_current_prompt_tokens:num_valid_tokens]
+                slot_mapping = input_metadata.current_tokens_slot_mapping[
+                    num_current_prompt_tokens:num_valid_tokens]
+
+                cache_ops.reshape_and_cache(
+                    key_to_cache,
+                    value_to_cache,
+                    key_cache,
+                    value_cache,
+                    slot_mapping,
+                    input_metadata.kv_cache_dtype
+                )
+                torch.cuda.synchronize()
+
                 _paged_attention(
                     output[num_current_prompt_tokens:num_valid_tokens],
                     query[num_current_prompt_tokens:num_valid_tokens],
@@ -250,9 +267,9 @@ class PagedAttention(nn.Module):
                     self.scale,
                     self.alibi_slopes,
                 )
+                torch.cuda.synchronize()
             else:
-                # This happens during the initial memory profiling run for
-                # CUDA graphs.
+                # This happens during the initial memory profiling run
                 output = torch.zeros_like(query)
 
         # Reshape the output tensor.

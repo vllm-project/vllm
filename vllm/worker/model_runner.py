@@ -248,12 +248,9 @@ class ModelRunner:
 
                 context_len = seq_len if self.sliding_window is None else min(
                     seq_len, self.sliding_window)
-                max_context_len = max(max_context_len, context_len)
                 context_lens.append(context_len)
 
                 block_table = seq_group_metadata.block_tables[seq_id]
-                max_num_blocks_per_seq = max(max_num_blocks_per_seq,
-                                             len(block_table))
                 block_number = block_table[position // self.block_size]
                 block_offset = position % self.block_size
                 slot = block_number * self.block_size + block_offset
@@ -267,6 +264,7 @@ class ModelRunner:
                     block_table = block_table[-sliding_window_blocks:]
                 generation_block_tables.append(block_table)
         
+        max_context_len = max(context_lens) if len(context_lens) > 0 else 0
         input_tokens = _make_tensor_with_pad_to_align(input_tokens,
                                              multiple_of=8,
                                              pad=0,
@@ -290,15 +288,14 @@ class ModelRunner:
                                              dtype=torch.long,
                                              device=self.device)
         # No change is done to `lora_index_mapping`
-        context_lens = _make_tensor_with_pad_to_align(context_lens,
-                                             multiple_of=1,
-                                             pad=0,
-                                             dtype=torch.int,
-                                             device=self.device)
+        context_lens = torch.tensor(context_lens,
+                                    dtype=torch.int,
+                                    device=self.device)
         # Prepare generation block tables
+        max_block_table_len = max(len(block_table) for block_table in generation_block_tables) if len(generation_block_tables) > 0 else 0
         generation_block_tables = _make_tensor_with_pad_to_max(
             generation_block_tables,
-            max_len=max_num_blocks_per_seq,
+            max_len=max_block_table_len,
             pad=0,
             dtype=torch.int,
             device=self.device,
