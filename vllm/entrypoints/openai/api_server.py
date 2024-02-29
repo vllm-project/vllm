@@ -251,7 +251,7 @@ if __name__ == "__main__":
     uvicorn.run(app,
                 host=args.host,
                 port=args.port,
-                log_level=args.log_level,
+                log_level=args.uvicorn_log_level,
                 timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
                 ssl_keyfile=args.ssl_keyfile,
                 ssl_certfile=args.ssl_certfile)
