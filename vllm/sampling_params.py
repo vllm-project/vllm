@@ -239,8 +239,12 @@ class SamplingParams:
         return SamplingType.RANDOM
 
     def clone(self) -> "SamplingParams":
-        """Deep copy excluding LogitsProcessor objects, which may contain an
-            arbitrary/nontrivial amount of data."""
+        """Deep copy excluding LogitsProcessor objects.
+
+        LogitsProcessor objects are excluded because they may contain an
+        arbitrary, nontrivial amount of data.
+        See https://github.com/vllm-project/vllm/issues/3087
+        """
 
         logit_processor_refs = None if self.logits_processors is None else {
             id(lp): lp
