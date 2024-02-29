@@ -6,13 +6,9 @@ import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.communication_op import (
-    tensor_model_parallel_all_reduce,
-    tensor_model_parallel_all_gather,
-)
+    tensor_model_parallel_all_reduce, tensor_model_parallel_all_gather)
 from vllm.model_executor.parallel_utils.utils import divide, split_tensor_along_last_dim
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.logger import init_logger
@@ -24,24 +20,18 @@ class LinearMethodBase(ABC):
     """Base class for different (maybe quantized) linear methods."""
 
     @abstractmethod
-    def create_weights(
-        self,
-        input_size_per_partition: int,
-        output_size_per_partition: int,
-        input_size: int,
-        output_size: int,
-        params_dtype: torch.dtype,
-    ) -> Dict[str, Any]:
+    def create_weights(self, input_size_per_partition: int,
+                       output_size_per_partition: int, input_size: int,
+                       output_size: int,
+                       params_dtype: torch.dtype) -> Dict[str, Any]:
         """Create weights for a linear layer."""
         raise NotImplementedError
 
     @abstractmethod
-    def apply_weights(
-        self,
-        weights: Dict[str, torch.Tensor],
-        x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    def apply_weights(self,
+                      weights: Dict[str, torch.Tensor],
+                      x: torch.Tensor,
+                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Apply the weights to the input tensor."""
         raise NotImplementedError
 
@@ -57,14 +47,10 @@ class UnquantizedLinearMethod(LinearMethodBase):
     def __init__(self, separate_bias_add: bool = False):
         self.separate_bias_add = separate_bias_add
 
-    def create_weights(
-        self,
-        input_size_per_partition: int,
-        output_size_per_partition: int,
-        input_size: int,
-        output_size: int,
-        params_dtype: torch.dtype,
-    ) -> Dict[str, Any]:
+    def create_weights(self, input_size_per_partition: int,
+                       output_size_per_partition: int, input_size: int,
+                       output_size: int,
+                       params_dtype: torch.dtype) -> Dict[str, Any]:
         weight = Parameter(
             torch.empty(output_size_per_partition,
                         input_size_per_partition,
