@@ -21,7 +21,6 @@
 from typing import List, Optional, Tuple
 
 import torch
-import torch.utils.checkpoint
 from torch import nn
 
 from vllm.model_executor.input_metadata import InputMetadata
