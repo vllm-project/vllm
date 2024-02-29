@@ -100,24 +100,6 @@ class DraftTargetWorker:
         self._metrics.init_gpu_tensors(self.rank)
         self.rejection_sampler.init_gpu_tensors(self.rank)
 
-    #@torch.inference_mode()
-    ##@nvtx_range("draft_target_worker.execute_model")
-    #def execute_model(
-    #    self,
-    #    execute_model_data: ExecuteModelData,
-    #    *,
-    #    return_python_output: bool = True  # pylint: disable=unused-argument
-    #) -> List[SamplerOutput]:
-    #    pass
-    #    #k = self._get_k_from_execute_model_data(execute_model_data)
-    #    #if k == 0:
-    #    #    return self._run_prefill(execute_model_data)
-
-    #    #if len(execute_model_data.seq_group_metadata_list) == 0:
-    #    #    return self._run_for_empty_input(execute_model_data)
-
-    #    #return self._run_speculative_decoding_step(execute_model_data, k)
-
     @torch.inference_mode()
     def execute_model(
         self,
@@ -130,11 +112,13 @@ class DraftTargetWorker:
 
         k = num_spec_tokens
 
-        if k == 0:
-            raise NotImplementedError
-
-        if len(seq_group_metadata_list) == 0:
-            raise NotImplementedError
+        if k == 0 or len(seq_group_metadata_list) == 0:
+            return self._run_no_spec(
+                seq_group_metadata_list,
+                blocks_to_swap_in,
+                blocks_to_swap_out,
+                blocks_to_copy,
+            )
 
         return self._run_speculative_decoding_step(
             seq_group_metadata_list,
@@ -143,6 +127,40 @@ class DraftTargetWorker:
             blocks_to_copy,
             k,
         )
+
+    #@nvtx_range("draft_target_worker._run_prefill")
+    def _run_no_spec(
+            self,
+            seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+            blocks_to_swap_in: Optional[Dict[int, int]],
+            blocks_to_swap_out: Optional[Dict[int, int]],
+            blocks_to_copy: Optional[Dict[int, List[int]]],
+            #execute_model_data: ExecuteModelData
+            ) -> List[SamplerOutput]:
+        """Run a prefill step, without any speculation. The input is sent to the
+        draft and target model so that prompt KV are stored in both caches.
+
+        TODO update
+        """
+
+        self.draft_worker.execute_model(
+                seq_group_metadata_list,
+                blocks_to_swap_in,
+                blocks_to_swap_out,
+                blocks_to_copy,
+                return_python_output=False)
+
+        sampler_output = self.target_worker.execute_model(
+            seq_group_metadata_list,
+            blocks_to_swap_in,
+            blocks_to_swap_out,
+            blocks_to_copy,
+        )
+
+        # Do not want PyTorch tensors transferred back.
+        sampler_output.probs = None
+        sampler_output.sampled_tokens = None
+        return [sampler_output]
 
     #@nvtx_range("draft_target_worker._run_speculative_decoding_step")
     def _run_speculative_decoding_step(
@@ -184,8 +202,6 @@ class DraftTargetWorker:
             blocks_to_swap_in,
             blocks_to_swap_out,
             blocks_to_copy, k, max_model_len)
-
-
 
         logger.debug("scoring draft tokens")
         (proposal_scores, bonus_token_ids,
@@ -299,66 +315,6 @@ class DraftTargetWorker:
         ])
         return token_ids_to_score
 
-    def _create_single_target_seq_group_metadata(
-        self,
-        seq_group_metadata: SequenceGroupMetadata,
-        seq_id: SeqId,
-        target_seq_id: TargetSeqId,
-        token_ids: List[TokenId],
-    ) -> SequenceGroupMetadata:
-        """Create a single target SequenceGroupMetadata.
-
-        Args:
-            seq_group_metadata: The metadata for the input sequence.
-            seq_id: The input sequence ID.
-            target_seq_id: The corresponding target sequence ID.
-            token_ids: The list of token ids that are to be appended to the
-                input sequence.
-        """
-        seq_data = seq_group_metadata.seq_data[seq_id]
-        prompt_token_ids = seq_data.prompt_token_ids
-        new_output_token_ids = [*seq_data.output_token_ids, *token_ids]
-
-        # The first scoring seqeuence will include the normal number of
-        # processed tokens. This allows it to write KV from the previous
-        # iteration.
-        #
-        # Subsequent scoring sequences only include a single unprocessed token;
-        # the token they score.
-        if len(token_ids) == 0:
-            num_processed_token_ids = seq_data.get_num_processed_token_ids()
-        else:
-            num_processed_token_ids = seq_data.get_len() + len(token_ids) - 1
-
-        return SequenceGroupMetadata(
-            request_id=seq_group_metadata.request_id,
-            is_prompt=seq_group_metadata.is_prompt,
-            #is_chunked_prefill=seq_group_metadata.is_chunked_prefill,
-            seq_data={
-                target_seq_id:
-                SequenceData.from_anyscale_sd(
-                    token_ids=prompt_token_ids + new_output_token_ids,
-                    num_prompt_tokens=len(prompt_token_ids),
-                    # Support for tracking cumulative logprob not yet
-                    # implemented.
-                    cumulative_logprob=0.0,
-                    num_processed_token_ids=num_processed_token_ids,
-                )
-                #SequenceData(
-                #    token_ids=prompt_token_ids + new_output_token_ids,
-                #    num_prompt_tokens=len(prompt_token_ids),
-                #    # Support for tracking cumulative logprob not yet
-                #    # implemented.
-                #    cumulative_logprob=0.0,
-                #    num_processed_token_ids=num_processed_token_ids,
-                #),
-            },
-            sampling_params=seq_group_metadata.sampling_params,
-            block_tables={
-                target_seq_id: seq_group_metadata.block_tables[seq_id],
-            },
-            lora_request=None,
-        )
 
     #@nvtx_range("draft_target_worker._score_proposals")
     def _score_proposals(

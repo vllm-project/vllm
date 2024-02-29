@@ -524,3 +524,68 @@ def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool):
     assert len(call_args_list) == 1
     args, kwargs = call_args_list[0]
     assert args[0] == k or kwargs.get('k', -1) == k
+
+@pytest.mark.parametrize('k', [0])
+@pytest.mark.parametrize('batch_size', [1, 2, 32])
+@torch.inference_mode()
+def test_k_equals_zero(k: int, batch_size: int):
+    """Verify that the DraftTargetWorker calls the draft and target workers
+    when k is zero. This happens during prefill.
+    """
+    draft_worker = mock_worker()
+    target_worker = mock_worker()
+    rejection_sampler = MagicMock()
+    rejection_sampler.token_id_dtype = torch.int64
+    metrics_collector = MagicMock()
+
+    draft_worker.device = 'cuda'
+    target_worker.device = 'cuda'
+
+    set_random_seed(1)
+
+    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler, metrics_collector)
+
+    execute_model_data, prompts, prev_output_tokens = create_batch(
+        batch_size, k, prev_output_token_len=0)
+
+    out = worker.execute_model(**execute_model_data.to_dict(), num_spec_tokens=k)
+
+    assert len(out) == 1, f"expected only one token output when {k=}"
+    assert out[0].probs == None, "expect gpu tensor references to be None"
+    assert out[0].sampled_tokens == None, "expect gpu tensor references to be None"
+
+    assert draft_worker.execute_model.called_once_with(**execute_model_data.to_dict())
+    assert target_worker.execute_model.called_once_with(**execute_model_data.to_dict())
+
+@pytest.mark.parametrize('k', [0, 5])
+@pytest.mark.parametrize('batch_size', [0])
+@torch.inference_mode()
+def test_empty_input_batch(k: int, batch_size: int):
+    """Verify that the DraftTargetWorker calls the draft and target workers
+    when the input batch is empty. This can happen if the engine communicates
+    to the workers information without scheduling a batch.
+    """
+    draft_worker = mock_worker()
+    target_worker = mock_worker()
+    rejection_sampler = MagicMock()
+    rejection_sampler.token_id_dtype = torch.int64
+    metrics_collector = MagicMock()
+
+    draft_worker.device = 'cuda'
+    target_worker.device = 'cuda'
+
+    set_random_seed(1)
+
+    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler, metrics_collector)
+
+    execute_model_data, prompts, prev_output_tokens = create_batch(
+        batch_size, k, prev_output_token_len=0)
+
+    out = worker.execute_model(**execute_model_data.to_dict(), num_spec_tokens=k)
+
+    assert len(out) == 1, f"expected only one token output when {k=}"
+    assert out[0].probs == None, "expect gpu tensor references to be None"
+    assert out[0].sampled_tokens == None, "expect gpu tensor references to be None"
+
+    assert draft_worker.execute_model.called_once_with(**execute_model_data.to_dict())
+    assert target_worker.execute_model.called_once_with(**execute_model_data.to_dict())
