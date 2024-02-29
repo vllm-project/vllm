@@ -144,7 +144,8 @@ class LLMEngine:
             self.forward_dag = self._compiled_ray_dag()
 
         self.is_encoder_decoder = getattr(self.model_config.hf_config,
-                                                "is_encoder_decoder", False)
+                                          "is_encoder_decoder", False)
+
     def get_tokenizer_for_seq(self, sequence: Sequence):
         return self.tokenizer.get_lora_tokenizer(sequence.lora_request)
 

@@ -40,8 +40,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_world_size,
-)
+    get_tensor_model_parallel_world_size, )
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (
     default_weight_loader,
@@ -53,6 +52,7 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class T5LayerNorm(nn.Module):
+
     def __init__(self, hidden_size, eps=1e-6):
         """
         Construct a layernorm module in the T5 style. No bias and no subtraction of mean.
@@ -67,8 +67,10 @@ class T5LayerNorm(nn.Module):
         # w/o mean and there is no bias. Additionally we want to make sure that the accumulation for
         # half-precision inputs is done in fp32
 
-        variance = hidden_states.to(torch.float32).pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        variance = hidden_states.to(torch.float32).pow(2).mean(-1,
+                                                               keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance +
+                                                    self.variance_epsilon)
 
         # convert into half-precision if necessary
         if self.weight.dtype in [torch.float16, torch.bfloat16]:
@@ -78,6 +80,7 @@ class T5LayerNorm(nn.Module):
 
 
 class T5DenseActDense(nn.Module):
+
     def __init__(self, config: T5Config):
         super().__init__()
         self.wi = ColumnParallelLinear(config.d_model, config.d_ff, bias=False)
@@ -92,10 +95,15 @@ class T5DenseActDense(nn.Module):
 
 
 class T5DenseGatedActDense(nn.Module):
+
     def __init__(self, config: T5Config):
         super().__init__()
-        self.wi_0 = ColumnParallelLinear(config.d_model, config.d_ff, bias=False)
-        self.wi_1 = ColumnParallelLinear(config.d_model, config.d_ff, bias=False)
+        self.wi_0 = ColumnParallelLinear(config.d_model,
+                                         config.d_ff,
+                                         bias=False)
+        self.wi_1 = ColumnParallelLinear(config.d_model,
+                                         config.d_ff,
+                                         bias=False)
         self.wo = RowParallelLinear(config.d_ff, config.d_model, bias=False)
         self.act = get_act_fn(config.dense_act_fn)
 
@@ -108,6 +116,7 @@ class T5DenseGatedActDense(nn.Module):
 
 
 class T5LayerFF(nn.Module):
+
     def __init__(self, config: T5Config):
         super().__init__()
         if config.is_gated_act:
@@ -115,7 +124,8 @@ class T5LayerFF(nn.Module):
         else:
             self.DenseReluDense = T5DenseActDense(config)
 
-        self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
+        self.layer_norm = T5LayerNorm(config.d_model,
+                                      eps=config.layer_norm_epsilon)
 
     def forward(self, hidden_states):
         forwarded_states = self.layer_norm(hidden_states)
@@ -125,6 +135,7 @@ class T5LayerFF(nn.Module):
 
 
 class T5Attention(nn.Module):
+
     def __init__(
         self,
         config: T5Config,
@@ -139,7 +150,8 @@ class T5Attention(nn.Module):
         self.d_model = config.d_model
         self.key_value_proj_dim = config.d_kv
         total_num_heads = config.num_heads
-        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size()
+        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size(
+        )
         assert total_num_heads % tensor_model_parallel_world_size == 0
         self.n_heads = total_num_heads // tensor_model_parallel_world_size
         self.inner_dim = self.n_heads * self.key_value_proj_dim
@@ -151,22 +163,25 @@ class T5Attention(nn.Module):
 
         if has_relative_attention_bias:
             self.relative_attention_bias = nn.Embedding(
-                self.relative_attention_num_buckets, self.n_heads
-            )
+                self.relative_attention_num_buckets, self.n_heads)
 
         self.is_cross = is_cross
         if self.is_decoder:
             if self.is_cross:
-                self.attn = CrossAttention(self.n_heads, self.key_value_proj_dim, 1)
+                self.attn = CrossAttention(self.n_heads,
+                                           self.key_value_proj_dim, 1)
             else:
-                self.attn = DecoderAttention(self.n_heads, self.key_value_proj_dim, 1)
+                self.attn = DecoderAttention(self.n_heads,
+                                             self.key_value_proj_dim, 1)
         else:
-            self.attn = EncoderAttention(self.n_heads, self.key_value_proj_dim, 1)
+            self.attn = EncoderAttention(self.n_heads, self.key_value_proj_dim,
+                                         1)
 
     @staticmethod
-    def _relative_position_bucket(
-        relative_position, bidirectional=True, num_buckets=32, max_distance=128
-    ):
+    def _relative_position_bucket(relative_position,
+                                  bidirectional=True,
+                                  num_buckets=32,
+                                  max_distance=128):
         """
         Adapted from Mesh Tensorflow:
         https://github.com/tensorflow/mesh/blob/0cb87fe07da627bf0b7e60475d59f95ed6b5be3d/mesh_tensorflow/transformer/transformer_layers.py#L593
@@ -190,12 +205,12 @@ class T5Attention(nn.Module):
         relative_buckets = 0
         if bidirectional:
             num_buckets //= 2
-            relative_buckets += (relative_position > 0).to(torch.long) * num_buckets
+            relative_buckets += (relative_position > 0).to(
+                torch.long) * num_buckets
             relative_position = torch.abs(relative_position)
         else:
-            relative_position = -torch.min(
-                relative_position, torch.zeros_like(relative_position)
-            )
+            relative_position = -torch.min(relative_position,
+                                           torch.zeros_like(relative_position))
         # now relative_position is in the range [0, inf)
 
         # half of the buckets are for exact increments in positions
@@ -204,31 +219,28 @@ class T5Attention(nn.Module):
 
         # The other half of the buckets are for logarithmically bigger bins in positions up to max_distance
         relative_position_if_large = max_exact + (
-            torch.log(relative_position.float() / max_exact)
-            / math.log(max_distance / max_exact)
-            * (num_buckets - max_exact)
-        ).to(torch.long)
+            torch.log(relative_position.float() / max_exact) /
+            math.log(max_distance / max_exact) *
+            (num_buckets - max_exact)).to(torch.long)
         relative_position_if_large = torch.min(
             relative_position_if_large,
             torch.full_like(relative_position_if_large, num_buckets - 1),
         )
 
-        relative_buckets += torch.where(
-            is_small, relative_position, relative_position_if_large
-        )
+        relative_buckets += torch.where(is_small, relative_position,
+                                        relative_position_if_large)
         return relative_buckets
 
     def compute_bias(self, query_length, key_length):
         """Compute binned relative position bias"""
-        context_position = torch.arange(query_length, dtype=torch.long, device="cuda")[
-            :, None
-        ]
-        memory_position = torch.arange(key_length, dtype=torch.long, device="cuda")[
-            None, :
-        ]
-        relative_position = (
-            memory_position - context_position
-        )  # shape (query_length, key_length)
+        context_position = torch.arange(query_length,
+                                        dtype=torch.long,
+                                        device="cuda")[:, None]
+        memory_position = torch.arange(key_length,
+                                       dtype=torch.long,
+                                       device="cuda")[None, :]
+        relative_position = (memory_position - context_position
+                             )  # shape (query_length, key_length)
         relative_position_bucket = self._relative_position_bucket(
             relative_position,  # shape (query_length, key_length)
             bidirectional=(not self.is_decoder),
@@ -273,19 +285,15 @@ class T5Attention(nn.Module):
             k, _ = self.k(hidden_states)
             v, _ = self.v(hidden_states)
 
-
-
             if input_metadata.attn_bias is None:
                 input_metadata.attn_bias = self.compute_bias(
-                    prompt_len, (prompt_len + block_size - 1) // block_size * block_size
-                ).repeat(batch_size, 1, 1, 1)
+                    prompt_len, (prompt_len + block_size - 1) // block_size *
+                    block_size).repeat(batch_size, 1, 1, 1)
                 for i in range(batch_size):
                     input_metadata.attn_bias[
-                        i,
-                        :,
-                        :,
-                        input_metadata.prompt_lens[i] :,
-                    ] = torch.finfo(input_metadata.attn_bias.dtype).min
+                        i, :, :,
+                        input_metadata.prompt_lens[i]:, ] = torch.finfo(
+                            input_metadata.attn_bias.dtype).min
 
                 # print("input_metadata.attn_bias shape", input_metadata.attn_bias.shape)
                 # print("input_metadata.attn_bias", input_metadata.attn_bias)
@@ -300,17 +308,20 @@ class T5Attention(nn.Module):
             if input_metadata.attn_bias is None:
                 position_bias = self.compute_bias(
                     1 if input_metadata.is_prompt else context_len,
-                    (context_len + block_size - 1) // block_size * block_size
-                ).repeat(batch_size, 1, 1, 1)
+                    (context_len + block_size - 1) // block_size *
+                    block_size).repeat(batch_size, 1, 1, 1)
                 # print("position_bias shape", position_bias.shape)
                 # print("position_bias", position_bias)
-                input_metadata.attn_bias = position_bias[:, :, -seq_len:, :].contiguous()
+                input_metadata.attn_bias = position_bias[:, :,
+                                                         -seq_len:, :].contiguous(
+                                                         )
                 # print("input_metadata.attn_bias shape", input_metadata.attn_bias.shape)
                 # print("input_metadata.attn_bias", input_metadata.attn_bias)
 
             key_cache, value_cache = kv_cache
 
-            attn_output = self.attn(q, k, v, key_cache, value_cache, input_metadata)
+            attn_output = self.attn(q, k, v, key_cache, value_cache,
+                                    input_metadata)
 
         else:
             # print("cross attention!")
@@ -324,18 +335,19 @@ class T5Attention(nn.Module):
                 # print("k shape", k.shape)
                 # for i in range(k.shape[0]):
                 #     for j in range(k.shape[1]):
-                        # print(f"key at batch {i} and pos {j}: ", k[i, j, :].reshape(1, 8, 64))
-                attn_output = self.attn(q, k, v, key_cache, value_cache, input_metadata)
+                # print(f"key at batch {i} and pos {j}: ", k[i, j, :].reshape(1, 8, 64))
+                attn_output = self.attn(q, k, v, key_cache, value_cache,
+                                        input_metadata)
             else:
-                attn_output = self.attn(
-                    q, None, None, key_cache, value_cache, input_metadata
-                )
+                attn_output = self.attn(q, None, None, key_cache, value_cache,
+                                        input_metadata)
 
         attn_output, _ = self.o(attn_output)
         return attn_output
 
 
 class T5LayerSelfAttention(nn.Module):
+
     def __init__(
         self,
         config,
@@ -349,7 +361,8 @@ class T5LayerSelfAttention(nn.Module):
             has_relative_attention_bias=has_relative_attention_bias,
             linear_method=linear_method,
         )
-        self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
+        self.layer_norm = T5LayerNorm(config.d_model,
+                                      eps=config.layer_norm_epsilon)
 
     def forward(
         self,
@@ -373,6 +386,7 @@ class T5LayerSelfAttention(nn.Module):
 
 
 class T5LayerCrossAttention(nn.Module):
+
     def __init__(
         self,
         config,
@@ -385,7 +399,8 @@ class T5LayerCrossAttention(nn.Module):
             has_relative_attention_bias=False,
             linear_method=linear_method,
         )
-        self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
+        self.layer_norm = T5LayerNorm(config.d_model,
+                                      eps=config.layer_norm_epsilon)
 
     def forward(
         self,
@@ -410,6 +425,7 @@ class T5LayerCrossAttention(nn.Module):
 
 
 class T5Block(nn.Module):
+
     def __init__(
         self,
         config,
@@ -424,12 +440,10 @@ class T5Block(nn.Module):
                 config,
                 has_relative_attention_bias=has_relative_attention_bias,
                 linear_method=linear_method,
-            )
-        )
+            ))
         if self.is_decoder:
             self.layer.append(
-                T5LayerCrossAttention(config, linear_method=linear_method)
-            )
+                T5LayerCrossAttention(config, linear_method=linear_method))
 
         self.layer.append(T5LayerFF(config))
 
@@ -452,9 +466,9 @@ class T5Block(nn.Module):
                 torch.finfo(hidden_states.dtype).max - 1000,
                 torch.finfo(hidden_states.dtype).max,
             )
-            hidden_states = torch.clamp(
-                hidden_states, min=-clamp_value, max=clamp_value
-            )
+            hidden_states = torch.clamp(hidden_states,
+                                        min=-clamp_value,
+                                        max=clamp_value)
 
         if self.is_decoder:
             hidden_states = self.layer[1](
@@ -469,9 +483,9 @@ class T5Block(nn.Module):
                     torch.finfo(hidden_states.dtype).max - 1000,
                     torch.finfo(hidden_states.dtype).max,
                 )
-                hidden_states = torch.clamp(
-                    hidden_states, min=-clamp_value, max=clamp_value
-                )
+                hidden_states = torch.clamp(hidden_states,
+                                            min=-clamp_value,
+                                            max=clamp_value)
 
         # Apply Feed Forward layer
         hidden_states = self.layer[-1](hidden_states)
@@ -480,6 +494,7 @@ class T5Block(nn.Module):
 
 
 class T5Stack(nn.Module):
+
     def __init__(
         self,
         config: T5Config,
@@ -490,20 +505,16 @@ class T5Stack(nn.Module):
         self.is_decoder = config.is_decoder
         self.embed_tokens = embed_tokens
 
-        self.block = nn.ModuleList(
-            [
-                T5Block(
-                    config,
-                    has_relative_attention_bias=(i == 0),
-                    linear_method=linear_method,
-                )
-                for i in range(config.num_layers)
-            ]
-        )
+        self.block = nn.ModuleList([
+            T5Block(
+                config,
+                has_relative_attention_bias=(i == 0),
+                linear_method=linear_method,
+            ) for i in range(config.num_layers)
+        ])
 
-        self.final_layer_norm = T5LayerNorm(
-            config.d_model, eps=config.layer_norm_epsilon
-        )
+        self.final_layer_norm = T5LayerNorm(config.d_model,
+                                            eps=config.layer_norm_epsilon)
 
     def forward(
         self,
@@ -531,8 +542,8 @@ class T5Stack(nn.Module):
 
         hidden_states = self.final_layer_norm(hidden_states)
         # if encoder_hidden_states is not None:
-            # print("hidden_states shape:" , hidden_states.shape)
-            # print("encoder_hidden_states shape:" , encoder_hidden_states.shape)
+        # print("hidden_states shape:" , hidden_states.shape)
+        # print("encoder_hidden_states shape:" , encoder_hidden_states.shape)
         #     # Attach encoder hidden states
         #     hidden_states = torch.cat(
         #         [encoder_hidden_states, hidden_states], dim=1
@@ -543,9 +554,10 @@ class T5Stack(nn.Module):
 
 
 class T5ForConditionalGeneration(nn.Module):
-    def __init__(
-        self, config: T5Config, linear_method: Optional[LinearMethodBase] = None
-    ):
+
+    def __init__(self,
+                 config: T5Config,
+                 linear_method: Optional[LinearMethodBase] = None):
         super().__init__()
         self.config = config
         self.model_dim = config.d_model
@@ -574,22 +586,20 @@ class T5ForConditionalGeneration(nn.Module):
         # print("input_metadata: ", input_metadata)
         if input_metadata.is_prompt:
             # prompt run, need to run encoder once
-            hidden_states = self.encoder(input_ids, kv_caches, input_metadata, None)
+            hidden_states = self.encoder(input_ids, kv_caches, input_metadata,
+                                         None)
             # Clear the attention bias
             input_metadata.attn_bias = None
             batch_size = input_ids.shape[0]
-            input_ids = (
-                torch.ones(batch_size, 1, dtype=torch.long)
-                * self.config.decoder_start_token_id
-            ).cuda()
+            input_ids = (torch.ones(batch_size, 1, dtype=torch.long) *
+                         self.config.decoder_start_token_id).cuda()
 
         else:
             hidden_states = None
 
         if kv_caches[0][0] is not None:  # Skip decoder for profiling run
-            hidden_states = self.decoder(
-                input_ids, kv_caches, input_metadata, hidden_states
-            )
+            hidden_states = self.decoder(input_ids, kv_caches, input_metadata,
+                                         hidden_states)
 
         if self.config.tie_word_embeddings:
             # Rescale output before projecting on vocab
@@ -598,9 +608,11 @@ class T5ForConditionalGeneration(nn.Module):
 
         return hidden_states
 
-    def sample(self, hidden_states: torch.Tensor, sampling_metadata: SamplingMetadata):
+    def sample(self, hidden_states: torch.Tensor,
+               sampling_metadata: SamplingMetadata):
         # logger.info(f"decoder_outputs: {decoder_outputs}")
-        next_tokens = self.sampler(self.shared.weight, hidden_states, sampling_metadata)
+        next_tokens = self.sampler(self.shared.weight, hidden_states,
+                                   sampling_metadata)
         # logger.info(f"next_tokens: {next_tokens}")
         return next_tokens
 
@@ -613,8 +625,7 @@ class T5ForConditionalGeneration(nn.Module):
     ):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in hf_model_weights_iterator(
-            model_name_or_path, cache_dir, load_format, revision
-        ):
+                model_name_or_path, cache_dir, load_format, revision):
             if "EncDecAttention.relative_attention_bias" in name:
                 continue
 
@@ -622,7 +633,7 @@ class T5ForConditionalGeneration(nn.Module):
             param = params_dict[name]
             assert param.shape == loaded_weight.shape, (
                 f"{name} shape mismatch between model and checkpoint: "
-                f"{param.shape} != {loaded_weight.shape}"
-            )
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                f"{param.shape} != {loaded_weight.shape}")
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
             weight_loader(param, loaded_weight)

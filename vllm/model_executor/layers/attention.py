@@ -230,18 +230,10 @@ class PagedAttention(nn.Module):
         else:
             # Decoding run.
             output = paged_attention(
-                query,
-                key_cache,
-                value_cache,
-                input_metadata.block_tables,
-                input_metadata.context_lens,
-                input_metadata.max_context_len,
-                self.num_kv_heads,
-                self.scale,
-                self.alibi_slopes,
-                None,
-                input_metadata.kv_cache_dtype
-            )
+                query, key_cache, value_cache, input_metadata.block_tables,
+                input_metadata.context_lens, input_metadata.max_context_len,
+                self.num_kv_heads, self.scale, self.alibi_slopes, None,
+                input_metadata.kv_cache_dtype)
 
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)

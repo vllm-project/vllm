@@ -7,8 +7,7 @@ import torch.nn.functional as F
 
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (
-    BlockDiagonalCausalMask,
-)
+    BlockDiagonalCausalMask, )
 from vllm._C import cache_ops
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.utils import is_hip
@@ -18,6 +17,7 @@ _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 
 
 class EncDecAttention(nn.Module):
+
     def __init__(
         self,
         num_heads: int,
@@ -30,13 +30,12 @@ class EncDecAttention(nn.Module):
         self.scale = float(scale)
 
         if self.head_size not in _SUPPORTED_HEAD_SIZES:
-            raise ValueError(
-                f"head_size ({self.head_size}) is not supported. "
-                f"Supported head sizes: {_SUPPORTED_HEAD_SIZES}."
-            )
+            raise ValueError(f"head_size ({self.head_size}) is not supported. "
+                             f"Supported head sizes: {_SUPPORTED_HEAD_SIZES}.")
 
 
 class EncoderAttention(EncDecAttention):
+
     def __init__(
         self,
         num_heads: int,
@@ -78,8 +77,7 @@ class EncoderAttention(EncDecAttention):
         # print("query shape: ", query.shape)
         if input_metadata.attn_bias is None:
             input_metadata.attn_bias = BlockDiagonalCausalMask.from_seqlens(
-                [seq_len] * batch_size
-            )
+                [seq_len] * batch_size)
         # When using custom attention bias, xformers requires the bias to
         # be sliced from a tensor whose length is a multiple of 8.
         # padded_len = (seq_len + 7) // 8 * 8
@@ -98,15 +96,15 @@ class EncoderAttention(EncDecAttention):
             attn_bias=input_metadata.attn_bias,
             p=0.0,
             scale=self.scale,
-            op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0]
-            if (is_hip())
-            else None,
+            op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if
+            (is_hip()) else None,
         )
         output = out.view(batch_size, seq_len, hidden_size)
         return output
 
 
 class DecoderAttention(EncDecAttention):
+
     def __init__(
         self,
         num_heads: int,
@@ -160,13 +158,9 @@ class DecoderAttention(EncDecAttention):
             # print("value_cache before: ", value_cache)
 
             cache_ops.reshape_and_cache(
-                key,
-                value,
-                key_cache,
-                value_cache,
+                key, value, key_cache, value_cache,
                 input_metadata.slot_mapping[:, -1].flatten().contiguous(),
-                input_metadata.kv_cache_dtype
-            )
+                input_metadata.kv_cache_dtype)
 
             # print("key_cache after: ", key_cache)
             # print("value_cache after: ", value_cache)
@@ -174,7 +168,9 @@ class DecoderAttention(EncDecAttention):
         max_prompt_len = input_metadata.prompt_lens.max().item()
         block_size = value_cache.shape[3]
         prompt_table_len = (max_prompt_len + block_size - 1) // block_size
-        block_tables = input_metadata.block_tables[:, prompt_table_len:].contiguous()
+        block_tables = input_metadata.block_tables[:,
+                                                   prompt_table_len:].contiguous(
+                                                   )
         # print("decoder self attention block_tables", block_tables)
         output = paged_attention(
             query=query,
@@ -193,6 +189,7 @@ class DecoderAttention(EncDecAttention):
 
 
 class CrossAttention(EncDecAttention):
+
     def __init__(
         self,
         num_heads: int,
@@ -240,11 +237,8 @@ class CrossAttention(EncDecAttention):
         # print("slot mapping: ", input_metadata.slot_mapping[:, :-1].flatten())
         # Reshape the keys and values and store them in the cache.
         # It only happens during the first pass.
-        if (
-            input_metadata.is_prompt
-            and key_cache is not None
-            and value_cache is not None
-        ):
+        if (input_metadata.is_prompt and key_cache is not None
+                and value_cache is not None):
             assert key is not None and value is not None
             cache_ops.reshape_and_cache(
                 key,
@@ -254,7 +248,7 @@ class CrossAttention(EncDecAttention):
                 input_metadata.slot_mapping[:, :-1].flatten().contiguous(),
                 input_metadata.kv_cache_dtype,
             )
-        
+
         # for slot in input_metadata.slot_mapping[:, :-1].flatten():
         #     if slot != -1:
         #         block_number = slot//16;
@@ -265,7 +259,9 @@ class CrossAttention(EncDecAttention):
         # print("max_prompt_len: ", max_prompt_len)
         block_size = value_cache.shape[3]
         prompt_table_len = (max_prompt_len + block_size - 1) // block_size
-        block_tables = input_metadata.block_tables[:, :prompt_table_len].contiguous()
+        block_tables = input_metadata.block_tables[:, :
+                                                   prompt_table_len].contiguous(
+                                                   )
 
         output = paged_attention(
             query=query,

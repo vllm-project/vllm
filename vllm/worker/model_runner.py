@@ -263,7 +263,7 @@ class ModelRunner:
                 max_len=max_block_table_len,
                 pad=0,
                 dtype=torch.int,
-                device = self.device)
+                device=self.device)
         else:
             # Prepare prefix block tables
             max_prompt_block_table_len = max(
@@ -354,7 +354,8 @@ class ModelRunner:
                 context_lens.append(context_len)
 
                 block_table = seq_group_metadata.block_tables[seq_id]
-                max_block_table_len = max(max_block_table_len, len(block_table))
+                max_block_table_len = max(max_block_table_len,
+                                          len(block_table))
                 block_number = block_table[position // self.block_size]
                 block_offset = position % self.block_size
                 slot = block_number * self.block_size + block_offset
@@ -415,7 +416,9 @@ class ModelRunner:
                                     dtype=torch.int,
                                     device=self.device)
 
-        prompt_lens = torch.tensor(prompt_lens, dtype=torch.int, device=self.device)
+        prompt_lens = torch.tensor(prompt_lens,
+                                   dtype=torch.int,
+                                   device=self.device)
         if use_captured_graph:
             # The shape of graph_block_tables is
             # [max batch size, max context len // block size].
