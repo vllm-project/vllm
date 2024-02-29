@@ -30,7 +30,7 @@ from unittest.mock import MagicMock
 def test_get_all_seq_ids():
     """Verify get_all_seq_ids extracts all seq ids.
     """
-    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock())
+    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock(), MagicMock())
 
     expected_seq_ids = list(range(10)) + list(range(100, 110))
 
@@ -58,7 +58,7 @@ def test_get_all_seq_ids():
 def test_create_target_seq_id_iterator(num_target_seq_ids: int):
     """Assert all target seq ids are greater than input seq ids.
     """
-    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock())
+    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock(), MagicMock())
 
     all_seq_ids = [
         [1, 3, 5, 7],
@@ -90,7 +90,7 @@ def test_get_token_ids_to_score(k: int):
     for i in range(proposal_token_ids.shape[0]):
         expected_output.append(proposal_token_ids[:i + 1].tolist())
 
-    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock())
+    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock(), MagicMock())
     actual_output = worker._get_token_ids_to_score(proposal_token_ids)  # pylint: disable=protected-access
 
     actual_output = [
@@ -123,7 +123,7 @@ def test_create_single_target_seq_group_metadata(k: int):
     input_seq_id = list(input_seq_group_metadata.seq_data.keys())[0]
     target_seq_id = 100
 
-    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock())
+    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock(), MagicMock())
     output = worker._create_single_target_seq_group_metadata(  # pylint: disable=protected-access
         input_seq_group_metadata,
         input_seq_id,
@@ -157,7 +157,8 @@ def test_correctly_calls_draft_model(k: int, batch_size: int):
     draft_worker = mock_worker(max_model_len=max_model_len)
     target_worker = mock_worker(max_model_len=max_model_len)
     rejection_sampler = MagicMock()
-    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler)
+    metrics_collector = MagicMock()
+    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler, metrics_collector)
 
     exception_secret = 'artifical stop'
     draft_worker.get_spec_proposals.side_effect = ValueError(exception_secret)
@@ -190,13 +191,14 @@ def test_correctly_calls_target_model(k: int, batch_size: int):
     target_worker = mock_worker()
     rejection_sampler = MagicMock()
     rejection_sampler.token_id_dtype = torch.int64
+    metrics_collector = MagicMock()
 
     draft_worker.device = 'cuda'
     target_worker.device = 'cuda'
 
     set_random_seed(1)
 
-    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler)
+    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler, metrics_collector)
 
     vocab_size = 32_000
 
@@ -272,12 +274,13 @@ def test_correctly_calls_rejection_sampler(k: int, batch_size: int):
     target_worker = mock_worker(vocab_size)
     rejection_sampler = MagicMock()
     rejection_sampler.token_id_dtype = torch.int64
+    metrics_collector = MagicMock()
     draft_worker.device = 'cuda'
     target_worker.device = 'cuda'
 
     set_random_seed(1)
 
-    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler)
+    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler, metrics_collector)
 
     proposal_token_ids = torch.randint(low=0,
                                        high=vocab_size,
@@ -348,12 +351,13 @@ def test_correctly_formats_output(k: int, batch_size: int):
     target_worker = mock_worker(vocab_size)
     rejection_sampler = MagicMock()
     rejection_sampler.token_id_dtype = torch.int64
+    metrics_collector = MagicMock()
     draft_worker.device = 'cuda'
     target_worker.device = 'cuda'
 
     set_random_seed(1)
 
-    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler)
+    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler, metrics_collector)
 
     proposal_token_ids = torch.randint(low=0,
                                        high=vocab_size,
@@ -397,7 +401,8 @@ def test_correctly_formats_output(k: int, batch_size: int):
                                              dtype=torch.int64,
                                              device='cuda')
     for i in range(batch_size):
-        rejection_sampler_output[i][-random.randint(0, k + 1):] = -1
+        minimum_accepted_tokens = 1
+        rejection_sampler_output[i][-random.randint(minimum_accepted_tokens, k + 1):] = -1
 
     rejection_sampler.return_value = rejection_sampler_output
 
@@ -439,3 +444,83 @@ def test_correctly_formats_output(k: int, batch_size: int):
             assert actual_by_step[i].output_token == expected_by_step[
                 i].output_token
             assert actual_by_step[i].logprobs == expected_by_step[i].logprobs
+
+@pytest.mark.parametrize('k', [1, 2])
+@pytest.mark.parametrize('batch_size', [1])
+@pytest.mark.parametrize('returns_metrics', [True, False])
+@torch.inference_mode()
+def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool):
+    """TODO
+    """
+    vocab_size = 32_000
+
+    draft_worker = mock_worker(vocab_size)
+    target_worker = mock_worker(vocab_size)
+    rejection_sampler = MagicMock()
+    rejection_sampler.token_id_dtype = torch.int64
+    metrics_collector = MagicMock()
+    draft_worker.device = 'cuda'
+    target_worker.device = 'cuda'
+
+    set_random_seed(1)
+
+    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler, metrics_collector)
+    worker.init_model()
+
+    proposal_token_ids = torch.randint(low=0,
+                                       high=vocab_size,
+                                       size=(batch_size, k),
+                                       dtype=torch.int64,
+                                       device='cuda')
+    proposal_probs = torch.rand(batch_size,
+                                k,
+                                vocab_size,
+                                dtype=torch.float32,
+                                device='cuda')
+
+    execute_model_data, _, _ = create_batch(batch_size, k)
+
+    draft_worker.get_spec_proposals.return_value = SpeculativeProposals(
+        spec_seqs=execute_model_data.seq_group_metadata_list,
+        non_spec_seqs=[],
+        all_seqs=execute_model_data.seq_group_metadata_list,
+        original_indices=torch.arange(batch_size),
+        proposal_token_ids=proposal_token_ids,
+        proposal_probs=proposal_probs)
+
+    target_token_ids = torch.randint(low=0,
+                                     high=vocab_size,
+                                     size=(1, batch_size * (k + 1)),
+                                     dtype=torch.int64,
+                                     device='cuda')
+    target_token_probs = torch.rand(1,
+                                    batch_size * (k + 1),
+                                    vocab_size,
+                                    dtype=torch.float32,
+                                    device='cuda')
+    target_output = create_sampler_output_list(target_token_ids,
+                                               target_token_probs)
+
+    target_worker.execute_model.return_value = target_output[0]
+
+    rejection_sampler_output = torch.randint(low=0,
+                                             high=vocab_size,
+                                             size=(batch_size, k + 1),
+                                             dtype=torch.int64,
+                                             device='cuda')
+    for i in range(batch_size):
+        minimum_accepted_tokens = 1
+        rejection_sampler_output[i][-random.randint(minimum_accepted_tokens, k + 1):] = -1
+
+    rejection_sampler.return_value = rejection_sampler_output
+    
+    mock_rejsample_metrics = "cade make this a dtw metrics" if returns_metrics else None
+    metrics_collector.maybe_collect_rejsample_metrics.return_value = mock_rejsample_metrics
+
+    output = worker.execute_model(**execute_model_data.to_dict(), num_spec_tokens=k)
+    assert output[0].draft_target_worker_metrics == mock_rejsample_metrics
+
+    call_args_list = metrics_collector.maybe_collect_rejsample_metrics.call_args_list
+    assert len(call_args_list) == 1
+    args, kwargs = call_args_list[0]
+    assert args[0] == k or kwargs.get('k', -1) == k

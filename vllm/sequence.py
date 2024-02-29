@@ -534,7 +534,7 @@ class SamplerOutput:
     # for the full sequence.
     #logits: Optional["torch.Tensor"] = None
 
-    #draft_target_worker_metrics: Optional["DraftTargetWorkerMetrics"] = None
+    draft_target_worker_metrics: Optional["DraftTargetWorkerMetrics"] = None
 
     def __getitem__(self, idx: int):
         return self.outputs[idx]

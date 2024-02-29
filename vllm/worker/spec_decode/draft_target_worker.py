@@ -19,6 +19,7 @@ import time
 import torch
 import traceback
 
+from vllm.worker.spec_decode.metrics import DraftTargetWorkerMetrics, AsyncMetricsCollector
 #from vllm.anyscale.shm.msgspec_shm import SharedMsgspecBufferWithEvent
 #from vllm.sequence import (SampleLogprob, SamplerOutput, SequenceGroupMetadata,
 #                           ExecuteModelData, SequenceOutputs, SequenceData,
@@ -52,6 +53,7 @@ class DraftTargetWorker:
         #                    PromptLookupWorker],
         target_worker: Worker,
         rejection_sampler: RejectionSampler,
+        metrics_collector: Optional["AsyncMetricsCollector"] = None,
     ):
         """
         Create a DraftTargetWorker.
@@ -69,24 +71,34 @@ class DraftTargetWorker:
         self.rejection_sampler = rejection_sampler
 
         self.device = None
-
-        # We don't have a device set yet.
-        self._copy_stream: Optional[torch.cuda.Stream] = None
+        self._metrics = AsyncMetricsCollector(rejection_sampler) if metrics_collector is None else metrics_collector
 
         self.probs_dtype = self.rejection_sampler.probs_dtype
         self.token_id_dtype = self.rejection_sampler.token_id_dtype
 
         #self._profiler = TorchProfiler()
 
-        pin_memory = not in_wsl()
-        self._aggregate_num_accepted_tokens = torch.tensor(
-            0, dtype=torch.long, device="cpu", pin_memory=pin_memory)
-        self._aggregate_num_emitted_tokens = torch.tensor(
-            0, dtype=torch.long, device="cpu", pin_memory=pin_memory)
-        self._aggregate_num_draft_tokens = 0
+    def _configure_samplers(self):
+        """Configure model samplers to return a probability tensor in the
+        SamplerOutput. This simplifies the data wrangling logic in speculative
+        decoding.
+        """
+        self.draft_worker.include_gpu_probs_tensor()
+        self.target_worker.include_gpu_probs_tensor()
 
-        self._rejsample_metrics_collect_interval_s = 5.0
-        self._last_metrics_collect_time = 0
+    def init_model(self):
+        # Intitialize the target model before the draft model.
+        # This allows the draft model to have a smaller TP degree than the
+        # larger model without refactors to parallel_state.
+        self.target_worker.init_model()
+        self.draft_worker.init_model()
+
+        self._configure_samplers()
+
+        self.device = self.target_worker.device
+
+        self._metrics.init_gpu_tensors(self.rank)
+        self.rejection_sampler.init_gpu_tensors(self.rank)
 
     #@torch.inference_mode()
     ##@nvtx_range("draft_target_worker.execute_model")
@@ -173,11 +185,6 @@ class DraftTargetWorker:
             blocks_to_swap_out,
             blocks_to_copy, k, max_model_len)
 
-        # TODO test
-        #should_collect_rejsample_metrics = (
-        #    self._should_collect_rejsample_metrics(time.time()))
-        #if should_collect_rejsample_metrics:
-        #    aggregate_metrics_ready = self._copy_rejsample_metrics_async()
 
 
         logger.debug("scoring draft tokens")
@@ -224,12 +231,10 @@ class DraftTargetWorker:
         seq_ids = self._get_all_seq_ids(proposals.all_seqs)
         sampler_output = self._create_output_sampler_list(
             seq_ids, accepted_token_ids)
-
-        #if should_collect_rejsample_metrics:
-        #    self._last_metrics_collect_time = time.time()
-        #    metrics = self._collect_rejsample_metrics(k,
-        #                                              aggregate_metrics_ready)
-        #    sampler_output[0].draft_target_worker_metrics = metrics
+        
+        maybe_rejsample_metrics = self._metrics.maybe_collect_rejsample_metrics(k)
+        if maybe_rejsample_metrics is not None:
+            sampler_output[0].draft_target_worker_metrics = maybe_rejsample_metrics
 
         return sampler_output
 
@@ -628,6 +633,128 @@ class DraftTargetWorker:
         assert all(vocab_sizes[0] == vocab_size for vocab_size in vocab_sizes)
         return vocab_sizes[0]
 
+    @property
+    def rank(self):
+        return self.target_worker.rank
+
+
+#class AsyncMetricsCollector:
+#    def __init__(self, rejection_sampler: RejectionSampler):
+#        self.rejection_sampler = rejection_sampler
+#
+#        self.rank: Optional[int] = None
+#
+#        # We don't have a device set yet.
+#        self._copy_stream: Optional[torch.cuda.Stream] = None
+#        
+#        self._in_flight_copy: Optional[torch.cuda.Event] = None
+#
+#        pin_memory = not in_wsl()
+#        self._aggregate_num_accepted_tokens = torch.tensor(
+#            0, dtype=torch.long, device="cpu", pin_memory=pin_memory)
+#        self._aggregate_num_emitted_tokens = torch.tensor(
+#            0, dtype=torch.long, device="cpu", pin_memory=pin_memory)
+#        self._aggregate_num_draft_tokens = 0
+#
+#        self._rejsample_metrics_collect_interval_s = 5.0
+#        self._last_metrics_collect_time = 0
+#
+#
+#    def init_gpu_tensors(self, rank: int) -> None:
+#        self._rank = rank
+#        self._copy_stream = torch.cuda.Stream()
+#
+#
+#    def maybe_collect_rejsample_metrics(self, k: int) -> Optional["DraftTargetWorkerMetrics"]:
+#
+#        # If a copy was initiated in the previous call, collect and return.
+#        if self._in_flight_copy is not None:
+#            ready_event = self._in_flight_copy
+#            self._in_flight_copy = None
+#            return self._collect_rejsample_metrics(k, ready_event)
+#        
+#        # Otherwise, check if we should start a new copy.
+#        if self._should_collect_rejsample_metrics(time.time()):
+#            assert self._in_flight_copy is None
+#            self._in_flight_copy = self._copy_rejsample_metrics_async()
+#        
+#        return None
+#        
+#
+#    def _should_collect_rejsample_metrics(self, now: float) -> bool:
+#        """Return whether or not this iteration should print rejection sampling
+#        metrics.
+#        """
+#        if self.rank != 0:
+#            return False
+#
+#        if (now - self._last_metrics_collect_time <
+#                self._rejsample_metrics_collect_interval_s):
+#            return False
+#        return True
+#
+#    def _copy_rejsample_metrics_async(self) -> torch.cuda.Event:
+#        """Copy rejection sampling metrics (number of accepted tokens, etc) to
+#        CPU asynchronously.
+#
+#        Returns a CUDA event recording when the copy is complete.
+#        """
+#        self._copy_stream.wait_stream(torch.cuda.current_stream())
+#
+#        with torch.cuda.stream(self._copy_stream):
+#            self._aggregate_num_accepted_tokens.copy_(
+#                self.rejection_sampler.num_accepted_tokens, non_blocking=True)
+#            self._aggregate_num_emitted_tokens.copy_(
+#                self.rejection_sampler.num_emitted_tokens, non_blocking=True)
+#            # Number of draft tokens is calculated on CPU, so no copy is
+#            # required.
+#            self._aggregate_num_draft_tokens = (
+#                self.rejection_sampler.num_draft_tokens)
+#
+#        aggregate_metrics_ready = torch.cuda.Event()
+#        aggregate_metrics_ready.record(self._copy_stream)
+#
+#        return aggregate_metrics_ready
+#
+#
+#    def _collect_rejsample_metrics(
+#            self, k: int,
+#            ready_event: torch.cuda.Event) -> "DraftTargetWorkerMetrics":
+#        """Create metrics object from statistics copied asynchronously.
+#
+#        Args:
+#            k: int. The number of speculative tokens; used to determine system
+#                efficiency.
+#            ready_event: torch.cuda.Event. The CUDA event recording when the
+#                async GPU->CPU copy is complete.
+#        """
+#
+#        ready_event.synchronize()
+#        accepted_tokens = self._aggregate_num_accepted_tokens.item()
+#        emitted_tokens = self._aggregate_num_emitted_tokens.item()
+#        draft_tokens = self._aggregate_num_draft_tokens
+#
+#        # Divide by k since batch size can be variable.
+#        num_possible_tokens = (draft_tokens / k) * (k + 1)
+#
+#        if draft_tokens > 0:
+#            draft_acceptance_rate = accepted_tokens / draft_tokens
+#        else:
+#            draft_acceptance_rate = float("nan")
+#
+#        if num_possible_tokens > 0:
+#            system_efficiency = emitted_tokens / num_possible_tokens
+#        else:
+#            system_efficiency = float("nan")
+#
+#        return DraftTargetWorkerMetrics(
+#            num_spec_tokens=k,
+#            draft_acceptance_rate=draft_acceptance_rate,
+#            system_efficiency=system_efficiency,
+#            accepted_tokens=accepted_tokens,
+#            draft_tokens=draft_tokens,
+#            emitted_tokens=emitted_tokens,
+#        )
 
 def sampler_output_to_torch(
     sampler_output_list: List[SamplerOutput],
