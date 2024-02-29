@@ -23,17 +23,17 @@ class BlockAllocator:
                  block_size: int,
                  num_blocks: int,
                  eviction_policy: EvictionPolicy = EvictionPolicy.LRU,
-                 disable_caching: bool = False) -> None:
+                 enable_caching: bool = False) -> None:
         self.device = device
         self.block_size = block_size
         self.num_blocks = num_blocks
-        self.disable_caching = disable_caching
+        self.enable_caching = enable_caching
 
         self.current_num_blocks = 0
-        self.table: Dict[int, PhysicalTokenBlock] = {}
+        self.cached_blocks: Dict[int, PhysicalTokenBlock] = {}
 
         # Switch over to FIFO eviction when caching is disabled
-        if self.disable_caching:
+        if not self.enable_caching:
             eviction_policy = EvictionPolicy.FIFO
         self.evictor: Evictor = make_evictor(eviction_policy)
 
@@ -58,7 +58,7 @@ class BlockAllocator:
                  block_hash: Optional[int] = None,
                  num_hashed_tokens: int = 0) -> PhysicalTokenBlock:
         # If caching is disabled, just allocate a new block and return it
-        if self.disable_caching:
+        if not self.enable_caching:
             block = self.allocate_block(next(self.default_hash_ctr),
                                         num_hashed_tokens)
             block.ref_count += 1
@@ -67,17 +67,17 @@ class BlockAllocator:
         if block_hash is None:
             block_hash = next(self.default_hash_ctr)
         if block_hash in self.evictor:
-            assert block_hash not in self.table
+            assert block_hash not in self.cached_blocks
             block = self.evictor.remove(block_hash)
             assert block.ref_count == 0
-            self.table[block_hash] = block
+            self.cached_blocks[block_hash] = block
             block.ref_count += 1
             assert block.block_hash == block_hash
             return block
-        if block_hash not in self.table:
-            self.table[block_hash] = self.allocate_block(
+        if block_hash not in self.cached_blocks:
+            self.cached_blocks[block_hash] = self.allocate_block(
                 block_hash, num_hashed_tokens)
-        block = self.table[block_hash]
+        block = self.cached_blocks[block_hash]
         assert block.block_hash == block_hash
         block.ref_count += 1
         return block
@@ -88,27 +88,27 @@ class BlockAllocator:
         block.ref_count -= 1
         if block.ref_count == 0:
             assert block.block_hash not in self.evictor
-            self.evictor.append(block)
+            self.evictor.add(block)
 
-            # If caching is enabled, remove the block from the table
-            if not self.disable_caching:
-                del self.table[block.block_hash]
+            # If caching is enabled, remove the block from the cached_blocks
+            if self.enable_caching:
+                del self.cached_blocks[block.block_hash]
 
     def get_num_free_blocks(self) -> int:
         return self.num_blocks - self.current_num_blocks + self.evictor.num_blocks
 
     def contains_block(self, block_hash: int) -> bool:
-        return block_hash in self.table or block_hash in self.evictor
+        return block_hash in self.cached_blocks or block_hash in self.evictor
 
     def update_hash(self, block_hash: int, block: PhysicalTokenBlock):
-        assert (not self.contains_block(block_hash))
+        assert not self.contains_block(block_hash)
         old_hash = block.block_hash
         block.block_hash = block_hash
 
-        # If caching is enabled, update the table
-        if not self.disable_caching:
-            del self.table[old_hash]
-            self.table[block_hash] = block
+        # If caching is enabled, update the cached_blocks
+        if self.enable_caching:
+            del self.cached_blocks[old_hash]
+            self.cached_blocks[block_hash] = block
 
 
 class AllocStatus(enum.Enum):
@@ -135,7 +135,7 @@ class BlockSpaceManager:
         num_cpu_blocks: int,
         watermark: float = 0.01,
         sliding_window: Optional[int] = None,
-        disable_caching: bool = False,
+        enable_caching: bool = False,
     ) -> None:
         self.block_size = block_size
         self.num_total_gpu_blocks = num_gpu_blocks
@@ -154,11 +154,11 @@ class BlockSpaceManager:
         self.gpu_allocator = BlockAllocator(Device.GPU,
                                             block_size,
                                             num_gpu_blocks,
-                                            disable_caching=disable_caching)
+                                            enable_caching=enable_caching)
         self.cpu_allocator = BlockAllocator(Device.CPU,
                                             block_size,
                                             num_cpu_blocks,
-                                            disable_caching=disable_caching)
+                                            enable_caching=enable_caching)
         # Mapping: seq_id -> BlockTable.
         self.block_tables: Dict[int, BlockTable] = {}
 
@@ -263,7 +263,7 @@ class BlockSpaceManager:
             len(seq.logical_token_blocks) - 1)
         new_block = self.gpu_allocator.allocate(block_hash, num_hashed_tokens)
         if block_hash is None:
-            assert (new_block.ref_count == 1)
+            assert new_block.ref_count == 1
         return new_block
 
     def append_slot(

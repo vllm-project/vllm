@@ -95,7 +95,7 @@ class Scheduler:
             num_gpu_blocks=self.cache_config.num_gpu_blocks,
             num_cpu_blocks=self.cache_config.num_cpu_blocks,
             sliding_window=self.cache_config.sliding_window,
-            disable_caching=self.cache_config.disable_prefix_caching)
+            enable_caching=self.cache_config.enable_prefix_caching)
 
         # Sequence groups in the WAITING state.
         self.waiting: Deque[SequenceGroup] = deque()
