@@ -39,7 +39,12 @@ from vllm.model_executor.parallel_utils.parallel_state import get_tensor_model_p
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
-from vllm.transformers_utils.configs import Starcoder2Config
+
+try:
+    from transformers import Starcoder2Config
+except ImportError as e:
+    raise ImportError(
+        "Please install transformers from source or use transformers>=4.39.0")
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -212,14 +217,11 @@ class Starcoder2Model(nn.Module):
         # TODO: consider padding_idx (currently removed)
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
                                                    config.hidden_size)
-        self.embedding_dropout = config.embedding_dropout
         self.layers = nn.ModuleList([
             Starcoder2DecoderLayer(config, linear_method=linear_method)
             for _ in range(config.num_hidden_layers)
         ])
-        self._attn_implementation = config._attn_implementation
         self.norm = nn.LayerNorm(config.hidden_size, eps=config.norm_epsilon)
-        self.gradient_checkpointing = False
 
     def forward(
         self,
@@ -238,8 +240,6 @@ class Starcoder2Model(nn.Module):
 
 
 class Starcoder2ForCausalLM(nn.Module):
-    # TODO: how to tie weights?
-    _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self,
                  config: Starcoder2Config,
