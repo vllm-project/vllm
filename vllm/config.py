@@ -308,6 +308,10 @@ class CacheConfig:
         self.num_gpu_blocks = None
         self.num_cpu_blocks = None
 
+    def metrics_info(self):
+        # convert cache_config to dict(key: str, value:str) for prometheus metrics info
+        return {attr: str(getattr(self, attr)) for attr in self.__dict__}
+
     def _verify_args(self) -> None:
         if self.gpu_memory_utilization > 1.0:
             raise ValueError(
