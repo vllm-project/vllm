@@ -378,8 +378,10 @@ class LlamaForCausalLM(nn.Module):
         ]
         params_dict = dict(self.named_parameters())
         with tensorizer_loader(params_dict):
+            loaded_weights = {}
             for name, loaded_weight in hf_model_weights_iterator(
                     model_name_or_path, cache_dir, load_format, revision):
+                original_name = name
                 if "rotary_emb.inv_freq" in name:
                     continue
                 if ("rotary_emb.cos_cached" in name
@@ -391,7 +393,6 @@ class LlamaForCausalLM(nn.Module):
                     if weight_name not in name:
                         continue
                     name = name.replace(weight_name, param_name)
-                    print("Name: ", name)
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
                         continue
@@ -408,5 +409,18 @@ class LlamaForCausalLM(nn.Module):
                                             tensorizer_weight_loader)
                     assert type(param) == nn.Parameter
                     weight_loader(param=param, loaded_weight=loaded_weight)
-            print("Weights loaded: ", params_dict)
+                loaded_weights[original_name] = loaded_weight
+            print("Param names and shapes:")
+            for name, param in params_dict.items():
+                print(f"{name} : {param.shape}")
+            print("\n\nLoaded weights names and shapes:")
+            for name, param in loaded_weights.items():
+                print(f"{name} : {param.shape}")
+
+            ## Check if same keys from loaded weights and model parameters have same shape
+            for name, param in params_dict.items():
+                if name in loaded_weights:
+                    if param.shape != loaded_weights[name].shape:
+                        print(f"Mismatch in shape for {name} : {param.shape} and {loaded_weights[name].shape}\n")
+
             print("Block")

@@ -14,17 +14,10 @@ from vllm.model_executor.layers.linear import ColumnParallelLinear, MergedColumn
     QKVParallelLinear
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.mixtral import MixtralMoE
+from vllm.logger import init_logger
 
-## All classes with `weight_loader` methods
-modules = (
-VocabParallelEmbedding,
-ColumnParallelLinear,
-MergedColumnParallelLinear,
-RowParallelLinear,
-QKVParallelLinear,
-ScaledActivation,
-MixtralMoE,
-)
+logger = init_logger(__name__)
+
 
 ## Monkey patch for Parameter to ensure `requires_grad=False`
 from torch.nn.parameter import Parameter
@@ -41,12 +34,44 @@ Parameter.__new__ = _new
 def tensorizer_loader(params_dict):
     return _TensorizerWeightsLoaderImpl(params_dict).context_manager()
 
+def qkv_weight_loader(self,
+                  param: Parameter,
+                  loaded_weight: torch.Tensor,
+                  loaded_shard_id: Optional[str] = None):
+    param_data = param.data
+    output_dim = getattr(param, "output_dim", None)
+    if output_dim is None:
+        assert param_data.shape == loaded_weight.shape
+        param_data.copy_(loaded_weight)
+        return
+
+    assert loaded_shard_id in ["q", "k", "v"]
+    if output_dim is not None:
+        if loaded_shard_id == "q":
+            shard_offset = 0
+            shard_size = self.total_num_heads * self.head_size
+        elif loaded_shard_id == "k":
+            shard_offset = self.total_num_heads * self.head_size
+            shard_size = self.total_num_kv_heads * self.head_size
+        elif loaded_shard_id == "v":
+            shard_offset = (self.total_num_heads +
+                            self.total_num_kv_heads) * self.head_size
+            shard_size = self.total_num_kv_heads * self.head_size
+
+    else:
+        ignore_warning = getattr(param, "ignore_warning", False)
+        if not ignore_warning:
+            logger.warning(
+                "Loading a weight without `output_dim` attribute in "
+                "QKVParallelLinear, assume the weight is the same "
+                "for all partitions.")
+    param_data[shard_offset: shard_offset + shard_size].copy_(loaded_weight)
+
 def tensorizer_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor, loaded_shard_id: Optional[int] = None):
-    print("Check")
     if param.nelement() == 0:
         param.set_(loaded_weight)
     else:
-        # This is unavoidable for QKVParallelLinear and certain buffers
+        # This is unavoidable for concatenating layers like QKVParallelLinear and certain buffers
         param.copy_(loaded_weight)
 
 class _TensorizerWeightsLoaderImpl:
@@ -54,12 +79,10 @@ class _TensorizerWeightsLoaderImpl:
 
     def __init__(self, params_dict):
         self.params_dict = params_dict
-        self._original_loader = []
+        self._original_loader = {}
         for param_name, param in self.params_dict.items():
             if hasattr(param, "weight_loader"):
-                self._original_loader.append(param.weight_loader)
-            else:
-                self._original_loader.append(None)
+                self._original_loader[param_name] = param.weight_loader
 
 
     @contextlib.contextmanager
@@ -69,18 +92,26 @@ class _TensorizerWeightsLoaderImpl:
             return
 
         for param_name, param in self.params_dict.items():
-            if hasattr(param, "weight_loader"):
-                param.weight_loader = tensorizer_weight_loader
+            if not hasattr(param, "weight_loader"):
+                continue
+            else:
+                layer_type = param.weight_loader.__self__
+                if not (isinstance(layer_type, QKVParallelLinear) | isinstance(layer_type, MergedColumnParallelLinear)):
+                    param.weight_loader = tensorizer_weight_loader
+                else:
+                    ## For QKVParallelLinear, and MergedColumnParallelLinear
+                    param.resize_(param.shape[:-1])
 
-        print(self.params_dict)
         reset_token = self.is_active.set(True)
 
         try:
             yield
         finally:
             self.is_active.reset(reset_token)
-            for param_no, param in enumerate(self.params_dict.values()):
-                param.weight_loader = self._original_loader[param_no]
+            for param_name, param in self.params_dict.items():
+                if hasattr(param, "weight_loader"):
+                    param.weight_loader = self._original_loader[param_name]
+
 
 
 @contextlib.contextmanager
@@ -104,7 +135,7 @@ def zero_length_init() -> typing.ContextManager:
             _active_count -= 1
             if _active_count == 0:
                 torch.empty = _torch_empty
-                torch.ones = _torch_empty
+                torch.ones = _torch_empty ## TODO: Fix this, as this likely will cause issues with non-persistent buffers
             _zero_length_init_active.reset(reset_token)
 
 
