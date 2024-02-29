@@ -12,6 +12,7 @@ from vllm.entrypoints.openai.protocol import (
     UsageInfo)
 from vllm.outputs import RequestOutput
 from vllm.entrypoints.openai.serving_engine import OpenAIServing, LoRA
+from vllm.model_executor.guided_decoding import get_guided_decoding_logits_processor
 
 logger = init_logger(__name__)
 
@@ -62,6 +63,14 @@ class OpenAIServingChat(OpenAIServing):
                                                            prompt=prompt)
             sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
+            guided_decode_logits_processor = (
+                await get_guided_decoding_logits_processor(
+                    request, self.engine.get_tokenizer()))
+            if guided_decode_logits_processor:
+                if sampling_params.logits_processors is None:
+                    sampling_params.logits_processors = []
+                sampling_params.logits_processors.append(
+                    guided_decode_logits_processor)
         except ValueError as e:
             return self.create_error_response(str(e))
 

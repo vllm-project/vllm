@@ -12,4 +12,5 @@ pydantic >= 2.0  # Required for OpenAI server.
 prometheus_client >= 0.18.0
 pynvml == 11.5.0
 triton >= 2.1.0
+outlines >= 0.0.27
 cupy-cuda12x == 12.1.0  # Required for CUDA graphs. CUDA 11.8 users should install cupy-cuda11x instead.
