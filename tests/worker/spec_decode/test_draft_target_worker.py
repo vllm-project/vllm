@@ -333,110 +333,109 @@ def test_correctly_calls_rejection_sampler(k: int, batch_size: int):
         target_token_probs.reshape(batch_size, k + 1, -1)[:, :-1])
     assert torch.equal(actual_proposal_token_ids, proposal_token_ids)
     assert torch.equal(actual_proposal_probs, proposal_probs)
-#
-#
-#@pytest.mark.parametrize('k', [1, 2, 6])
-#@pytest.mark.parametrize('batch_size', [1, 2, 32])
-#@torch.inference_mode()
-#def test_correctly_formats_output(k: int, batch_size: int):
-#    """Verify that the DraftTargetWorker formats rejection sampler output
-#    correctly. Everything else is mocked out.
-#    """
-#    vocab_size = 32_000
-#
-#    draft_worker = mock_worker(vocab_size)
-#    target_worker = mock_worker(vocab_size)
-#    rejection_sampler = MagicMock()
-#    rejection_sampler.token_id_dtype = torch.int64
-#    draft_worker.device = 'cuda'
-#    target_worker.device = 'cuda'
-#
-#    set_random_seed(1)
-#
-#    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler)
-#
-#    proposal_token_ids = torch.randint(low=0,
-#                                       high=vocab_size,
-#                                       size=(batch_size, k),
-#                                       dtype=torch.int64,
-#                                       device='cuda')
-#    proposal_probs = torch.rand(batch_size,
-#                                k,
-#                                vocab_size,
-#                                dtype=torch.float32,
-#                                device='cuda')
-#
-#    execute_model_data, _, _ = create_batch(batch_size, k)
-#
-#    draft_worker.get_spec_proposals.return_value = SpeculativeProposals(
-#        spec_seqs=execute_model_data.seq_group_metadata_list,
-#        non_spec_seqs=[],
-#        all_seqs=execute_model_data.seq_group_metadata_list,
-#        original_indices=torch.arange(batch_size),
-#        proposal_token_ids=proposal_token_ids,
-#        proposal_probs=proposal_probs)
-#
-#    target_token_ids = torch.randint(low=0,
-#                                     high=vocab_size,
-#                                     size=(1, batch_size * (k + 1)),
-#                                     dtype=torch.int64,
-#                                     device='cuda')
-#    target_token_probs = torch.rand(1,
-#                                    batch_size * (k + 1),
-#                                    vocab_size,
-#                                    dtype=torch.float32,
-#                                    device='cuda')
-#    target_output = create_sampler_output_list(target_token_ids,
-#                                               target_token_probs)
-#
-#    target_worker.execute_model.return_value = target_output[0]
-#
-#    rejection_sampler_output = torch.randint(low=0,
-#                                             high=vocab_size,
-#                                             size=(batch_size, k + 1),
-#                                             dtype=torch.int64,
-#                                             device='cuda')
-#    for i in range(batch_size):
-#        rejection_sampler_output[i][-random.randint(0, k + 1):] = -1
-#
-#    rejection_sampler.return_value = rejection_sampler_output
-#
-#    output = worker.execute_model(execute_model_data)
-#
-#    expected_output = create_sampler_output_list(
-#        rejection_sampler_output.transpose(0, 1), [None for _ in range(k + 1)])
-#
-#    seq_ids = [
-#        next(iter(seq_group_metadata.seq_data.keys()))
-#        for seq_group_metadata in execute_model_data.seq_group_metadata_list
-#    ]
-#    actual_output_by_seq = {seq_id: [] for seq_id in seq_ids}
-#    expected_output_by_seq = {seq_id: [] for seq_id in seq_ids}
-#
-#    for step in output:
-#        for seq_group in step:
-#            for sample in seq_group.samples:
-#                seq_id = sample.parent_seq_id
-#                actual_output_by_seq[seq_id].append(sample)
-#
-#    for step in expected_output:
-#        for seq_group in step:
-#            for sample in seq_group.samples:
-#                seq_id = sample.parent_seq_id
-#                expected_output_by_seq[seq_id].append(sample)
-#
-#    all_seen_seq_ids = set(
-#        list(actual_output_by_seq.keys()) +
-#        list(expected_output_by_seq.keys()))
-#    for seq_id in all_seen_seq_ids:
-#        actual_by_step = actual_output_by_seq[seq_id]
-#        expected_by_step = expected_output_by_seq[seq_id]
-#
-#        for i in range(k + 1):
-#            if i >= len(actual_by_step):
-#                assert expected_by_step[i].output_token == -1
-#                continue
-#            assert actual_by_step[i].output_token == expected_by_step[
-#                i].output_token
-#            assert (convert_sample_logprobs_to_dict(
-#                actual_by_step[i].logprobs) == expected_by_step[i].logprobs)
+
+
+@pytest.mark.parametrize('k', [1, 2, 6])
+@pytest.mark.parametrize('batch_size', [1, 2, 32])
+@torch.inference_mode()
+def test_correctly_formats_output(k: int, batch_size: int):
+    """Verify that the DraftTargetWorker formats rejection sampler output
+    correctly. Everything else is mocked out.
+    """
+    vocab_size = 32_000
+
+    draft_worker = mock_worker(vocab_size)
+    target_worker = mock_worker(vocab_size)
+    rejection_sampler = MagicMock()
+    rejection_sampler.token_id_dtype = torch.int64
+    draft_worker.device = 'cuda'
+    target_worker.device = 'cuda'
+
+    set_random_seed(1)
+
+    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler)
+
+    proposal_token_ids = torch.randint(low=0,
+                                       high=vocab_size,
+                                       size=(batch_size, k),
+                                       dtype=torch.int64,
+                                       device='cuda')
+    proposal_probs = torch.rand(batch_size,
+                                k,
+                                vocab_size,
+                                dtype=torch.float32,
+                                device='cuda')
+
+    execute_model_data, _, _ = create_batch(batch_size, k)
+
+    draft_worker.get_spec_proposals.return_value = SpeculativeProposals(
+        spec_seqs=execute_model_data.seq_group_metadata_list,
+        non_spec_seqs=[],
+        all_seqs=execute_model_data.seq_group_metadata_list,
+        original_indices=torch.arange(batch_size),
+        proposal_token_ids=proposal_token_ids,
+        proposal_probs=proposal_probs)
+
+    target_token_ids = torch.randint(low=0,
+                                     high=vocab_size,
+                                     size=(1, batch_size * (k + 1)),
+                                     dtype=torch.int64,
+                                     device='cuda')
+    target_token_probs = torch.rand(1,
+                                    batch_size * (k + 1),
+                                    vocab_size,
+                                    dtype=torch.float32,
+                                    device='cuda')
+    target_output = create_sampler_output_list(target_token_ids,
+                                               target_token_probs)
+
+    target_worker.execute_model.return_value = target_output[0]
+
+    rejection_sampler_output = torch.randint(low=0,
+                                             high=vocab_size,
+                                             size=(batch_size, k + 1),
+                                             dtype=torch.int64,
+                                             device='cuda')
+    for i in range(batch_size):
+        rejection_sampler_output[i][-random.randint(0, k + 1):] = -1
+
+    rejection_sampler.return_value = rejection_sampler_output
+
+    output = worker.execute_model(**execute_model_data.to_dict(), num_spec_tokens=k)
+
+    expected_output = create_sampler_output_list(
+        rejection_sampler_output.transpose(0, 1), [None for _ in range(k + 1)])
+
+    seq_ids = [
+        next(iter(seq_group_metadata.seq_data.keys()))
+        for seq_group_metadata in execute_model_data.seq_group_metadata_list
+    ]
+    actual_output_by_seq = {seq_id: [] for seq_id in seq_ids}
+    expected_output_by_seq = {seq_id: [] for seq_id in seq_ids}
+
+    for step in output:
+        for seq_group in step:
+            for sample in seq_group.samples:
+                seq_id = sample.parent_seq_id
+                actual_output_by_seq[seq_id].append(sample)
+
+    for step in expected_output:
+        for seq_group in step:
+            for sample in seq_group.samples:
+                seq_id = sample.parent_seq_id
+                expected_output_by_seq[seq_id].append(sample)
+
+    all_seen_seq_ids = set(
+        list(actual_output_by_seq.keys()) +
+        list(expected_output_by_seq.keys()))
+    for seq_id in all_seen_seq_ids:
+        actual_by_step = actual_output_by_seq[seq_id]
+        expected_by_step = expected_output_by_seq[seq_id]
+
+        for i in range(k + 1):
+            if i >= len(actual_by_step):
+                assert expected_by_step[i].output_token == -1
+                continue
+            assert actual_by_step[i].output_token == expected_by_step[
+                i].output_token
+            assert actual_by_step[i].logprobs == expected_by_step[i].logprobs

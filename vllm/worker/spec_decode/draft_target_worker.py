@@ -23,7 +23,7 @@ import traceback
 #from vllm.sequence import (SampleLogprob, SamplerOutput, SequenceGroupMetadata,
 #                           ExecuteModelData, SequenceOutputs, SequenceData,
 #                           SequenceGroupOutputs, DraftTargetWorkerMetrics)
-from vllm.sequence import (SamplerOutput, SequenceGroupMetadata, SequenceData)
+from vllm.sequence import (SamplerOutput, SequenceGroupMetadata, SequenceData, SequenceGroupOutput, SequenceOutput)
 from vllm.worker.worker import Worker
 from vllm.worker.spec_decode.multi_step_worker import MultiStepWorker
 #from vllm.worker.prompt_lookup_worker import PromptLookupWorker
@@ -207,7 +207,6 @@ class DraftTargetWorker:
             proposals.proposal_probs,
             proposals.proposal_token_ids,
         )
-        raise NotImplementedError
 
         # Append output tokens from non-speculative sequences to
         # the accepted token ids tensor.
@@ -226,11 +225,11 @@ class DraftTargetWorker:
         sampler_output = self._create_output_sampler_list(
             seq_ids, accepted_token_ids)
 
-        if should_collect_rejsample_metrics:
-            self._last_metrics_collect_time = time.time()
-            metrics = self._collect_rejsample_metrics(k,
-                                                      aggregate_metrics_ready)
-            sampler_output[0].draft_target_worker_metrics = metrics
+        #if should_collect_rejsample_metrics:
+        #    self._last_metrics_collect_time = time.time()
+        #    metrics = self._collect_rejsample_metrics(k,
+        #                                              aggregate_metrics_ready)
+        #    sampler_output[0].draft_target_worker_metrics = metrics
 
         return sampler_output
 
@@ -578,6 +577,44 @@ class DraftTargetWorker:
             [sampler_output])
 
         return target_token_ids, target_probs, non_spec_target_token_ids
+
+    def _create_output_sampler_list(
+        self,
+        seq_ids: List[SeqId],
+        accepted_token_ids: torch.Tensor  # shape: [batch_size, k+1]
+    ) -> List[SamplerOutput]:
+        """Given the accepted token ids, create a list of SamplerOutput.
+
+        The output is padded with -1 tokens such that each sequence has
+        the same number of outputs.
+        """
+        # shape: [k+1, batch_size]
+        accepted_token_ids_by_step = accepted_token_ids.transpose(0,
+                                                                  1).tolist()
+        sampler_output_list = []
+        for token_ids_by_step in accepted_token_ids_by_step:
+            if all(token_id == -1 for token_id in token_ids_by_step):
+                break
+
+            step_output_token_ids = []
+            for token_id, seq_id in zip(token_ids_by_step, seq_ids):
+                step_output_token_ids.append(
+                    SequenceGroupOutput(
+                        samples=[
+                            SequenceOutput(
+                                parent_seq_id=seq_id,
+                                output_token=token_id,
+                                # TODO currently rejection sampling does not
+                                # emit probs, so this value is meaningless.
+                                logprobs={token_id: 0.0},
+                            )
+                        ],
+                        prompt_logprobs=None,
+                    ))
+            sampler_output_list.append(
+                SamplerOutput(outputs=step_output_token_ids))
+
+        return sampler_output_list
 
     @cached_property
     def _vocab_size(self) -> int:
