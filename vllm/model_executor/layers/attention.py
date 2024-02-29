@@ -59,7 +59,7 @@ class PagedAttention(nn.Module):
         # quantized_value * scaling_factor ~= true_value
         # which is consistent with the practice of setting
         # scaling_factor = tensor_amax / FPtype_max
-        self.kv_cache_scaling_factor = None
+        self.kv_cache_scaling_factor = 1.0
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -109,6 +109,7 @@ class PagedAttention(nn.Module):
                 value_cache,
                 input_metadata.slot_mapping.flatten(),
                 input_metadata.kv_cache_dtype,
+                self.kv_cache_scaling_factor,
             )
 
         if input_metadata.is_prompt:
@@ -171,6 +172,7 @@ class PagedAttention(nn.Module):
                 output = out.view_as(query)
             else:
                 # prefix-enabled attention
+                # TODO(Hai) this triton kernel has regression issue with FP8 KVCache to handle mixed types
                 output = torch.empty_like(query)
                 context_attention_fwd(
                     query,
@@ -197,6 +199,7 @@ class PagedAttention(nn.Module):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
+                self.kv_cache_scaling_factor,
             )
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
@@ -244,6 +247,7 @@ def _paged_attention(
     num_kv_heads: int,
     scale: float,
     alibi_slopes: Optional[torch.Tensor],
+    kv_scale: float,
 ) -> torch.Tensor:
     output = torch.empty_like(query)
 
@@ -276,6 +280,7 @@ def _paged_attention(
             input_metadata.max_context_len,
             alibi_slopes,
             input_metadata.kv_cache_dtype,
+            kv_scale,
         )
     else:
         # Run PagedAttention V2.
@@ -307,5 +312,6 @@ def _paged_attention(
             input_metadata.max_context_len,
             alibi_slopes,
             input_metadata.kv_cache_dtype,
+            kv_scale,
         )
     return output

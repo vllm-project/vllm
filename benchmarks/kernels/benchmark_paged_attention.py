@@ -90,6 +90,9 @@ def main(
             torch.cuda.cudart().cudaProfilerStart()
         start_time = time.perf_counter()
 
+        # Using default kv_scale
+        kv_scale = 1.0
+
         for _ in range(num_iters):
             if version == "v1":
                 ops.paged_attention_v1(
@@ -105,6 +108,7 @@ def main(
                     max_context_len,
                     alibi_slopes,
                     kv_cache_dtype,
+                    kv_scale,
                 )
             elif version == "v2":
                 ops.paged_attention_v2(
@@ -123,6 +127,7 @@ def main(
                     max_context_len,
                     alibi_slopes,
                     kv_cache_dtype,
+                    kv_scale,
                 )
             else:
                 raise ValueError(f"Invalid version: {version}")
