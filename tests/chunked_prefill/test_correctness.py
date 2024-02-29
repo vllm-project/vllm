@@ -8,7 +8,7 @@ import torch
 from vllm.model_executor.parallel_utils.parallel_state import destroy_model_parallel
 
 MODELS = [
-    # "JackFram/llama-68m",
+    "JackFram/llama-68m",
     "facebook/opt-125m",
 ]
 
@@ -58,10 +58,10 @@ def test_models(
                                    dtype=dtype,
                                    flash_style=True,
                                    block_size=block_size)
-    flash_attn_output_by_batchs = []
+    flash_attn_output_by_batches = []
     for i in range(10):
         prompts = [TEST_PROMPTS[j % len(TEST_PROMPTS)] for j in range(i)]
-        flash_attn_output_by_batchs.append(
+        flash_attn_output_by_batches.append(
             flash_attn_model.generate_greedy(prompts, max_tokens))
 
     del flash_attn_model
@@ -70,7 +70,7 @@ def test_models(
     gc.collect()
     torch.cuda.empty_cache()
 
-    for flash_attn_outputs in flash_attn_output_by_batchs:
+    for flash_attn_outputs in flash_attn_output_by_batches:
         for i in range(len(flash_attn_outputs)):
             fa_output_ids, fa_output_str = flash_attn_outputs[i]
             vllm_output_ids, vllm_output_str = expected_outputs[

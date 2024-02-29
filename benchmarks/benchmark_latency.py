@@ -33,6 +33,8 @@ def main(args: argparse.Namespace):
         enforce_eager=args.enforce_eager,
         kv_cache_dtype=args.kv_cache_dtype,
         device=args.device,
+        block_size=args.block_size,
+        flash_style=args.flash_style,
     )
 
     sampling_params = SamplingParams(
