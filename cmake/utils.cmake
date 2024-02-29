@@ -132,7 +132,7 @@ endmacro()
 #
 # Note: this is defined as a macro since it updates `CMAKE_CUDA_FLAGS`.
 #
-macro(override_gpu_arches OUT_GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
+macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
   set(_GPU_SUPPORTED_ARCHES_LIST ${GPU_SUPPORTED_ARCHES} ${ARGN})
   message(STATUS "${GPU_LANG} supported arches: ${_GPU_SUPPORTED_ARCHES_LIST}")
 
@@ -259,7 +259,7 @@ macro(override_gpu_arches OUT_GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
     endforeach()
   endif()
   message(STATUS "${GPU_LANG} target arches: ${GPU_ARCHES}")
-endfunction()
+endmacro()
 
 #
 # Define a target named `GPU_MOD_NAME` for a single extension. The
