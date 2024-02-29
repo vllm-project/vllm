@@ -220,7 +220,7 @@ class LLM:
         return outputs
 
     def __del__(self):
+        del self.llm_engine.driver_worker.model_runner
+        del self.llm_engine.driver_worker
         import gc
-        del llm_engine.driver_worker.model_runner
-        del llm_engine.driver_worker
         gc.collect()
