@@ -63,7 +63,7 @@ def parse_args():
     parser.add_argument("--host", type=str, default=None, help="host name")
     parser.add_argument("--port", type=int, default=8000, help="port number")
     parser.add_argument(
-        "--log-level",
+        "--uvicorn-log-level",
         type=str,
         default="info",
         choices=['debug', 'info', 'warning', 'error', 'critical', 'trace'],
