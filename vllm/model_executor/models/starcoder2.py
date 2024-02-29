@@ -34,7 +34,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding, ParallelLMHead, DEFAULT_VOCAB_PADDING_SIZE)
 from vllm.model_executor.parallel_utils.parallel_state import get_tensor_model_parallel_world_size
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
@@ -250,7 +251,17 @@ class Starcoder2ForCausalLM(nn.Module):
         self.model = Starcoder2Model(config, linear_method=linear_method)
         self.vocab_size = config.vocab_size
         self.unpadded_vocab_size = config.vocab_size
-        self.lm_head_weight = self.model.embed_tokens.weight
+        if config.tie_word_embeddings:
+            self.lm_head_weight = self.model.embed_tokens.weight
+        else:
+            self.unpadded_vocab_size = config.vocab_size
+            self.lm_head = ParallelLMHead(
+                self.unpadded_vocab_size,
+                config.hidden_size,
+                org_num_embeddings=config.vocab_size,
+                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+            )
+            self.lm_head_weight = self.lm_head.weight
         self.sampler = Sampler(self.unpadded_vocab_size, config.vocab_size)
 
     def forward(
@@ -295,23 +306,13 @@ class Starcoder2ForCausalLM(nn.Module):
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                # if name.endswith(".bias") and name not in params_dict:
-                #     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                # Skip loading extra bias for GPTQ models.
-                # if name.endswith(".bias") and name not in params_dict:
-                #     continue
-                if "lm_head.weight" in name:
+                if self.config.tie_word_embeddings and "lm_head.weight" in name:
                     continue
-                # if ".attn.bias" in name:
-                #     # Skip attention mask.
-                #     # NOTE: "c_attn.bias" should not be skipped.
-                #     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
