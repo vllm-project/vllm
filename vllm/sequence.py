@@ -160,9 +160,11 @@ class Sequence:
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
+    # TODO The current hashing function is O(L^2). We should optimize this in
+    # the future.
     def hash_of_block(self, logical_idx: int) -> int:
         # Compute the number of tokens in the sequence
-        num_tokens = logical_idx * self.block_size + self.block_size
+        num_tokens = self.num_hashed_tokens_of_block(logical_idx)
         return hash(tuple(self.data.get_token_ids()[0:num_tokens]))
 
     def num_hashed_tokens_of_block(self, logical_idx: int):

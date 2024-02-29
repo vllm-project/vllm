@@ -32,7 +32,7 @@ class Evictor(ABC):
         pass
 
     @abstractmethod
-    def append(self, block: PhysicalTokenBlock):
+    def add(self, block: PhysicalTokenBlock):
         """Adds block to the evictor, making it a candidate for eviction"""
         pass
 
@@ -64,6 +64,7 @@ class LRUEvictor(Evictor):
     def __contains__(self, block_hash: int) -> bool:
         return block_hash in self.free_table
 
+    # TODO: The performance of this evict function can be optimized further.
     def evict(self) -> PhysicalTokenBlock:
         free_blocks: List[PhysicalTokenBlock] = list(self.free_table.values())
         if len(free_blocks) == 0:
@@ -102,7 +103,7 @@ class LRUEvictor(Evictor):
         evicted_block.computed = False
         return evicted_block
 
-    def append(self, block: PhysicalTokenBlock):
+    def add(self, block: PhysicalTokenBlock):
         self.free_table[block.block_hash] = block
 
     def remove(self, block_hash: int) -> PhysicalTokenBlock:
@@ -118,41 +119,43 @@ class LRUEvictor(Evictor):
         return len(self.free_table)
 
 
-class FIFOEvictor(Evictor):
+class RandomEvictor(Evictor):
     """Evicts in a first-in-first-out order"""
 
     def __init__(self):
-        self.free_list: List[PhysicalTokenBlock] = []
+        self.free_table: Dict[int, PhysicalTokenBlock] = {}
 
     def __contains__(self, block_hash: int) -> bool:
-        return any(block_hash == free_block.block_hash
-                   for free_block in self.free_list)
+        return block_hash in self.free_table
 
     def evict(self) -> PhysicalTokenBlock:
-        if len(self.free_list) == 0:
+        if len(self.free_table) == 0:
             raise ValueError("No usable cache memory left")
-        return self.free_list.popleft()
+        evicted_block = next(iter(self.free_table.values()))
+        evicted_block.computed = False
+        del self.free_table[evicted_block.block_hash]
+        return evicted_block
 
-    def append(self, block: PhysicalTokenBlock):
-        self.free_list.append(block)
+    def add(self, block: PhysicalTokenBlock):
+        self.free_table[block.block_hash] = block
 
     def remove(self, block_hash: int) -> PhysicalTokenBlock:
-        for free_block in self.free_list:
-            if block_hash == free_block.block_hash:
-                self.free_list.remove(free_block)
-                return free_block
-        raise ValueError(
-            "Attempting to remove block that's not in the evictor")
+        if block_hash not in self.free_table:
+            raise ValueError(
+                "Attempting to remove block that's not in the evictor")
+        block: PhysicalTokenBlock = self.free_table[block_hash]
+        del self.free_table[block_hash]
+        return block
 
     @property
     def num_blocks(self) -> int:
-        return len(self.free_list)
+        return len(self.free_table)
 
 
 def make_evictor(eviction_policy: EvictionPolicy) -> Evictor:
     if eviction_policy == EvictionPolicy.LRU:
         return LRUEvictor()
     elif eviction_policy == EvictionPolicy.FIFO:
-        return FIFOEvictor()
+        return RandomEvictor()
     else:
         raise ValueError(f"Unknown cache eviction policy: {eviction_policy}")
