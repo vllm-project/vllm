@@ -436,6 +436,16 @@ def get_requirements() -> List[str]:
     return requirements
 
 
+_sparsity_deps = ["magic_wand"]
+
+
+def get_extra_requirements() -> dict:
+    return {
+        "sparse": _sparsity_deps,
+        "sparsity": _sparsity_deps,
+    }
+
+
 package_data = {"vllm": ["py.typed"]}
 if os.environ.get("VLLM_USE_PRECOMPILED"):
     ext_modules = []
@@ -468,6 +478,7 @@ setuptools.setup(
                                                "examples", "tests")),
     python_requires=">=3.8",
     install_requires=get_requirements(),
+    extras_require=get_extra_requirements(),
     ext_modules=ext_modules,
     cmdclass={"build_ext": BuildExtension} if not _is_neuron() else {},
     package_data=package_data,

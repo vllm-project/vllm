@@ -8,9 +8,14 @@
 
 `nm-vllm` is a Python library that contained pre-compiled C++ and CUDA (12.1) binaries.
 
-Install it using pip (coming soon):
+Install it using pip:
 ```bash
 pip install nm-vllm
+```
+
+In order to use the weight-sparsity kernels, like through `sparsity="sparse_w16a16"`, install the extras using:
+```bash
+pip install nm-vllm[sparsity]
 ```
 
 You can also build and install `nm-vllm` from source (this will take ~10 minutes):
@@ -18,11 +23,6 @@ You can also build and install `nm-vllm` from source (this will take ~10 minutes
 git clone https://github.com/neuralmagic/nm-vllm.git
 cd nm-vllm
 pip install -e .
-```
-
-In order to use the weight-sparsity kernels, like through `sparsity="sparse_w16a16"`, you must also install `magic_wand`:
-```bash
-pip install magic_wand
 ```
 
 ## Quickstart
