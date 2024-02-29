@@ -2,12 +2,12 @@ Updated: February 28, 2024
 
 NEURAL MAGIC COMMUNITY LICENSE AGREEMENT
 
-Unless otherwise specified, all source code in this repository is variously licensed under the Apache License 
-Version 2.0, an Apache-compatible license, and the Neural Magic Community License. Licensing 
-information is specified at the beginning of its respective file.
+Unless otherwise specified, all source code in this repository is variously licensed under the 
+Apache License Version 2.0, an Apache-compatible license, and the Neural Magic Community License. 
+Licensing information is specified at the beginning of its respective file.
 
-The collective works, and packages based on it, is licensed under the Neural Magic Community License Agreement, 
-as described below.
+The collective works, and packages based on it, is licensed under the Neural Magic Community 
+License Agreement, as described below.
 
 Please read this Neural Magic Community License Agreement (“Agreement”) 
 carefully before using Software for the first time. By using the Software, you agree 
@@ -15,10 +15,10 @@ to these terms. If you do not agree to the terms of this Agreement, the Software
 not be installed on your computer systems. 
 
 Source code and object files (“Software”) consist of a current version of: (a) machine 
-executable (object) code, (b) Neural Magic-branded components, and (c) any existing user guide and release notes. The 
-Software is copyrighted by Neuralmagic, Inc. (“Neural Magic”), a Delaware corporation 
-with offices at 55 Davis Square STE 3, Somerville, MA 02144 United States, and is licensed and not 
-sold. Licensing questions about this Software should be directed to 
+executable (object) code, (b) Neural Magic-branded components, and (c) any existing user guide 
+and release notes. The Software is copyrighted by Neuralmagic, Inc. (“Neural Magic”), a Delaware 
+corporation with offices at 55 Davis Square STE 3, Somerville, MA 02144 United States, and is 
+licensed and not sold. Licensing questions about this Software should be directed to 
 license@neuralmagic.com.
 
     1. 	License. Subject to the terms of this Agreement, Neural Magic grants you a 

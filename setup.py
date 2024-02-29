@@ -446,7 +446,7 @@ setuptools.setup(
     version=get_vllm_version(),
     author="vLLM Team, Neural Magic",
     author_email="support@neuralmagic.com",
-    license="Custom",
+    license="Neural Magic Community License",
     description=("A high-throughput and memory-efficient inference and "
                  "serving engine for LLMs"),
     long_description=read_readme(),

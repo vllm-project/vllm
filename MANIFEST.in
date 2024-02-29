@@ -1,4 +1,5 @@
 include LICENSE
 include requirements.txt
 
+recursive-include licenses *
 recursive-include csrc *
