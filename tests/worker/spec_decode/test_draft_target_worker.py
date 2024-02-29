@@ -19,7 +19,7 @@ from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SequenceGroupMetadata
 
 
-from .utils import mock_worker, create_batch, ExecuteModelData
+from .utils import mock_worker, create_batch, ExecuteModelData, create_seq_group_metadata_from_prompts
 #from .utils import (mock_worker,
 #                    create_seq_group_metadata_from_prompts, create_batch,
 #                    create_sampler_output_list)
@@ -100,52 +100,52 @@ def test_get_token_ids_to_score(k: int):
     assert actual_output == expected_output
 
 
-#@pytest.mark.parametrize('k', [1, 2, 6])
-#def test_create_single_target_seq_group_metadata(k: int):
-#    """Verify correct creation of a target seq group metadata.
-#    """
-#
-#    prompt_tokens = [1, 2, 3]
-#    prev_output_tokens = [4, 5, 6]
-#
-#    token_ids = list(range(k))
-#
-#    num_tokens_processed = len(prompt_tokens) + len(prev_output_tokens) - 1
-#
-#    final_seq_len = len(prompt_tokens) + len(prev_output_tokens) + len(
-#        token_ids)
-#
-#    block_size = 32
-#    input_seq_group_metadata = create_seq_group_metadata_from_prompts(
-#        [prompt_tokens], 2048 // block_size, block_size, [final_seq_len],
-#        [prev_output_tokens], [num_tokens_processed])[0]
-#
-#    input_seq_id = list(input_seq_group_metadata.seq_data.keys())[0]
-#    target_seq_id = 100
-#
-#    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock())
-#    output = worker._create_single_target_seq_group_metadata(  # pylint: disable=protected-access
-#        input_seq_group_metadata,
-#        input_seq_id,
-#        target_seq_id,
-#        token_ids,
-#    )
-#
-#    assert output.request_id == input_seq_group_metadata.request_id
-#    assert len(output.seq_data) == 1
-#    assert output.seq_data[target_seq_id].get_prompt_token_ids(
-#    ) == prompt_tokens
-#    assert output.seq_data[target_seq_id].get_output_token_ids(
-#    ) == prev_output_tokens + token_ids
-#
-#    assert output.seq_data[target_seq_id].get_num_processed_token_ids(
-#    ) == num_tokens_processed + k
-#
-#    assert len(output.block_tables) == 1
-#    assert output.block_tables[
-#        target_seq_id] == input_seq_group_metadata.block_tables[input_seq_id]
-#
-#
+@pytest.mark.parametrize('k', [1, 2, 6])
+def test_create_single_target_seq_group_metadata(k: int):
+    """Verify correct creation of a target seq group metadata.
+    """
+
+    prompt_tokens = [1, 2, 3]
+    prev_output_tokens = [4, 5, 6]
+
+    token_ids = list(range(k))
+
+    num_tokens_processed = len(prompt_tokens) + len(prev_output_tokens) - 1
+
+    final_seq_len = len(prompt_tokens) + len(prev_output_tokens) + len(
+        token_ids)
+
+    block_size = 32
+    input_seq_group_metadata = create_seq_group_metadata_from_prompts(
+        [prompt_tokens], 2048 // block_size, block_size, [final_seq_len],
+        [prev_output_tokens], [num_tokens_processed])[0]
+
+    input_seq_id = list(input_seq_group_metadata.seq_data.keys())[0]
+    target_seq_id = 100
+
+    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock())
+    output = worker._create_single_target_seq_group_metadata(  # pylint: disable=protected-access
+        input_seq_group_metadata,
+        input_seq_id,
+        target_seq_id,
+        token_ids,
+    )
+
+    assert output.request_id == input_seq_group_metadata.request_id
+    assert len(output.seq_data) == 1
+    assert output.seq_data[target_seq_id].get_prompt_token_ids(
+    ) == prompt_tokens
+    assert output.seq_data[target_seq_id].get_output_token_ids(
+    ) == prev_output_tokens + token_ids
+
+    #assert output.seq_data[target_seq_id].get_num_processed_token_ids(
+    #) == num_tokens_processed + k
+
+    assert len(output.block_tables) == 1
+    assert output.block_tables[
+        target_seq_id] == input_seq_group_metadata.block_tables[input_seq_id]
+
+
 @pytest.mark.parametrize('k', [1, 2, 6])
 @pytest.mark.parametrize('batch_size', [1, 2, 32])
 @torch.inference_mode()

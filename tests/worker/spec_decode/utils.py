@@ -164,8 +164,11 @@ def create_seq_group_metadata_from_prompts(
             is_prompt=len(cont_token_ids) == 0,
             seq_data={
                 i:
-                SequenceData(prompt_token_ids=prompt_token_ids[:] +
-                             cont_token_ids[:])
+                SequenceData.from_anyscale_sd(
+                    token_ids=prompt_token_ids[:] + cont_token_ids[:],
+                    num_prompt_tokens=len(prompt_token_ids[:]),
+                    num_processed_token_ids=num_tokens_saved,
+                )
             },
             sampling_params=SamplingParams(temperature=0.0, ),
             block_tables={i: block_allocations[i][:]},

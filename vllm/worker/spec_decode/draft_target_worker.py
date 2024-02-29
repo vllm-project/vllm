@@ -15,7 +15,7 @@ from functools import cached_property
 import logging
 import time
 
-import msgspec
+#import msgspec
 import torch
 import traceback
 
@@ -279,6 +279,67 @@ class DraftTargetWorker:
             for i in range(len(full_spec_token_ids))
         ])
         return token_ids_to_score
+
+    def _create_single_target_seq_group_metadata(
+        self,
+        seq_group_metadata: SequenceGroupMetadata,
+        seq_id: SeqId,
+        target_seq_id: TargetSeqId,
+        token_ids: List[TokenId],
+    ) -> SequenceGroupMetadata:
+        """Create a single target SequenceGroupMetadata.
+
+        Args:
+            seq_group_metadata: The metadata for the input sequence.
+            seq_id: The input sequence ID.
+            target_seq_id: The corresponding target sequence ID.
+            token_ids: The list of token ids that are to be appended to the
+                input sequence.
+        """
+        seq_data = seq_group_metadata.seq_data[seq_id]
+        prompt_token_ids = seq_data.prompt_token_ids
+        new_output_token_ids = [*seq_data.output_token_ids, *token_ids]
+
+        # The first scoring seqeuence will include the normal number of
+        # processed tokens. This allows it to write KV from the previous
+        # iteration.
+        #
+        # Subsequent scoring sequences only include a single unprocessed token;
+        # the token they score.
+        if len(token_ids) == 0:
+            num_processed_token_ids = seq_data.get_num_processed_token_ids()
+        else:
+            num_processed_token_ids = seq_data.get_len() + len(token_ids) - 1
+
+        return SequenceGroupMetadata(
+            request_id=seq_group_metadata.request_id,
+            is_prompt=seq_group_metadata.is_prompt,
+            #is_chunked_prefill=seq_group_metadata.is_chunked_prefill,
+            seq_data={
+                target_seq_id:
+                SequenceData.from_anyscale_sd(
+                    token_ids=prompt_token_ids + new_output_token_ids,
+                    num_prompt_tokens=len(prompt_token_ids),
+                    # Support for tracking cumulative logprob not yet
+                    # implemented.
+                    cumulative_logprob=0.0,
+                    num_processed_token_ids=num_processed_token_ids,
+                )
+                #SequenceData(
+                #    token_ids=prompt_token_ids + new_output_token_ids,
+                #    num_prompt_tokens=len(prompt_token_ids),
+                #    # Support for tracking cumulative logprob not yet
+                #    # implemented.
+                #    cumulative_logprob=0.0,
+                #    num_processed_token_ids=num_processed_token_ids,
+                #),
+            },
+            sampling_params=seq_group_metadata.sampling_params,
+            block_tables={
+                target_seq_id: seq_group_metadata.block_tables[seq_id],
+            },
+            lora_request=None,
+        )
 
 #class DraftTargetWorker(Profilable, BaseWorker):
 #    """Worker which implements speculative decoding via a draft model for
