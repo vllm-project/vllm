@@ -70,12 +70,10 @@ NVCC_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
 
 def get_hipcc_rocm_version():
     # Run the hipcc --version command
-    result = subprocess.run(
-        ["hipcc", "--version"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
+    result = subprocess.run(['hipcc', '--version'],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True)
 
     # Check if the command was executed successfully
     if result.returncode != 0:
@@ -83,7 +81,7 @@ def get_hipcc_rocm_version():
         return None
 
     # Extract the version using a regular expression
-    match = re.search(r"HIP version: (\S+)", result.stdout)
+    match = re.search(r'HIP version: (\S+)', result.stdout)
     if match:
         # Return the version string
         return match.group(1)
@@ -99,7 +97,6 @@ def glob(pattern: str):
 
 def get_neuronxcc_version():
     import sysconfig
-
     site_dir = sysconfig.get_paths()["purelib"]
     version_file = os.path.join(site_dir, "neuronxcc", "version",
                                 "__init__.py")
@@ -145,8 +142,8 @@ def get_pytorch_rocm_arch() -> Set[str]:
     # If we don't have PYTORCH_ROCM_ARCH specified pull the list from rocm_agent_enumerator
     if env_arch_list is None:
         command = "rocm_agent_enumerator"
-        env_arch_list = (subprocess.check_output(
-            [command]).decode("utf-8").strip().replace("\n", ";"))
+        env_arch_list = subprocess.check_output([command]).decode('utf-8')\
+                        .strip().replace("\n", ";")
         arch_source_str = "rocm_agent_enumerator"
     else:
         arch_source_str = "PYTORCH_ROCM_ARCH env variable"
@@ -170,8 +167,7 @@ def get_pytorch_rocm_arch() -> Set[str]:
             f"excluded from the {arch_source_str} output "
             f"({env_arch_list}). Supported ROCM architectures are: "
             f"{ROCM_SUPPORTED_ARCHS}.",
-            stacklevel=2,
-        )
+            stacklevel=2)
     return arch_list
 
 
@@ -209,8 +205,7 @@ def get_torch_arch_list() -> Set[str]:
             "excluded from the `TORCH_CUDA_ARCH_LIST` env variable "
             f"({env_arch_list}). Supported CUDA architectures are: "
             f"{valid_archs}.",
-            stacklevel=2,
-        )
+            stacklevel=2)
     return arch_list
 
 
@@ -249,8 +244,8 @@ if _is_cuda():
     if nvcc_cuda_version < Version("11.0"):
         raise RuntimeError(
             "CUDA 11.0 or higher is required to build the package.")
-    if nvcc_cuda_version < Version("11.1") and any(
-            cc.startswith("8.6") for cc in compute_capabilities):
+    if (nvcc_cuda_version < Version("11.1")
+            and any(cc.startswith("8.6") for cc in compute_capabilities)):
         raise RuntimeError(
             "CUDA 11.1 or higher is required for compute capability 8.6.")
     if nvcc_cuda_version < Version("11.8"):
@@ -263,8 +258,7 @@ if _is_cuda():
             warnings.warn(
                 "CUDA 11.8 or higher is required for compute capability 8.9. "
                 "Targeting compute capability 8.0 instead.",
-                stacklevel=2,
-            )
+                stacklevel=2)
             compute_capabilities = set(cc for cc in compute_capabilities
                                        if not cc.startswith("8.9"))
             compute_capabilities.add("8.0+PTX")
@@ -288,8 +282,7 @@ if _is_cuda():
             ]
             if capability.endswith("+PTX"):
                 NVCC_FLAGS_PUNICA += [
-                    "-gencode",
-                    f"arch=compute_{num},code=compute_{num}",
+                    "-gencode", f"arch=compute_{num},code=compute_{num}"
                 ]
 
     # Use NVCC threads to parallelize the build.
@@ -304,10 +297,10 @@ if _is_cuda():
     # changes for punica kernels
     NVCC_FLAGS += torch_cpp_ext.COMMON_NVCC_FLAGS
     REMOVE_NVCC_FLAGS = [
-        "-D__CUDA_NO_HALF_OPERATORS__",
-        "-D__CUDA_NO_HALF_CONVERSIONS__",
-        "-D__CUDA_NO_BFLOAT16_CONVERSIONS__",
-        "-D__CUDA_NO_HALF2_OPERATORS__",
+        '-D__CUDA_NO_HALF_OPERATORS__',
+        '-D__CUDA_NO_HALF_CONVERSIONS__',
+        '-D__CUDA_NO_BFLOAT16_CONVERSIONS__',
+        '-D__CUDA_NO_HALF2_OPERATORS__',
     ]
     for flag in REMOVE_NVCC_FLAGS:
         with contextlib.suppress(ValueError):
@@ -348,8 +341,6 @@ vllm_extension_sources = [
 ]
 
 if _is_cuda():
-    vllm_extension_sources.append("csrc/quantization/aqlm/aqlm_cuda_entry.cpp")
-    vllm_extension_sources.append("csrc/quantization/aqlm/aqlm_cuda_kernel.cu")
     vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
     vllm_extension_sources.append("csrc/custom_all_reduce.cu")
 
