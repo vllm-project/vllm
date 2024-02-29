@@ -11,12 +11,7 @@ from packaging.version import parse, Version
 import setuptools
 import torch
 import torch.utils.cpp_extension as torch_cpp_ext
-from torch.utils.cpp_extension import (
-    BuildExtension,
-    CUDAExtension,
-    CUDA_HOME,
-    ROCM_HOME,
-)
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME, ROCM_HOME
 
 ROOT_DIR = os.path.dirname(__file__)
 
