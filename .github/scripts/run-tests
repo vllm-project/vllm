@@ -64,6 +64,8 @@ do
         CUDA_VISIBLE_DEVICES=0,1 pytest --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
     elif [[ "${TEST}" == *"distributed"* ]]; then
         pytest --forked --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
+    elif [[ "${TEST}" == *"models_logprobs"* ]]; then
+        pytest --forked --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
     else
         pytest --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
     fi
