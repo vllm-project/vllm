@@ -258,51 +258,68 @@ macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
 endmacro()
 
 #
-# Define a target named `MOD_NAME` for a single extension. The
+# Define a target named `GPU_MOD_NAME` for a single extension. The
 # arguments are:
 #
-# MOD_DEST            - module destination directory.
-# MOD_GPU_LANG        - the GPU language for this module, e.g CUDA, HIP, etc.
-# MOD_SRC             - the list of source files relative to CMakeLists.txt
-#                       directory.
-# MOD_EXTRA_GPU_FLAGS - extra compiler flags passed to NVCC/hip.
-# MOD_GPU_ARCHES      - a list of target GPU architectures in cmake format.
-#                       Refer to documentation on `CMAKE_CUDA_ARCHITECTURES`
-#                       and `CMAKE_HIP_ARCHITECTURES` for more info.
+# DESTINATION <dest>         - module destination directory.
+# LANGUAGE <lang>            - the GPU language for this module, e.g CUDA, HIP,
+#                              etc.
+# SOURCES <sources>          - list of source files relative to CMakeLists.txt
+#                              directory.
+# ARCHITECTURES <arches>     - a list of target GPU architectures in cmake
+#                              format.
+#                              Refer `CMAKE_CUDA_ARCHITECTURES` documentation
+#                              and `CMAKE_HIP_ARCHITECTURES` for more info.
+# COMPILE_FLAGS <flags>      - extra compiler flags passed to NVCC/hip.
+# INCLUDE_DIRECTORIES <dirs> - extra include directories.
+# LINK_LIBRARIES <libraries> - extra link libraries.
+# WITH_SOABI                 - generate library with python SOABI suffix name.
 #
 # Note: optimization level/debug info is set via cmake build type.
 #
-function (define_gpu_extension_target MOD_NAME MOD_DEST MOD_GPU_LANG MOD_SRC
-    MOD_EXTRA_GPU_FLAGS MOD_GPU_ARCHES)
+function (define_gpu_extension_target GPU_MOD_NAME)
+  cmake_parse_arguments(PARSE_ARGV 1
+    GPU
+    "WITH_SOABI"
+    "DESTINATION;LANGUAGE"
+    "SOURCES;ARCHITECTURES;COMPILE_FLAGS;INCLUDE_DIRECTORIES;LIBRARIES")
 
   # Add hipify preprocessing step when building with HIP/ROCm.
-  if (MOD_GPU_LANG STREQUAL "HIP")
-    hipify_sources_target(MOD_SRC ${MOD_NAME} "${MOD_SRC}")
+  if (GPU_LANGUAGE STREQUAL "HIP")
+    hipify_sources_target(GPU_SOURCES ${GPU_MOD_NAME} "${GPU_SOURCES}")
   endif()
 
-  Python_add_library(${MOD_NAME} MODULE ${MOD_SRC} WITH_SOABI)
+  if (GPU_WITH_SOABI)
+    set(GPU_WITH_SOABI WITH_SOABI)
+  else()
+    set(GPU_WITH_SOABI)
+  endif()
 
-  if (MOD_GPU_LANG STREQUAL "HIP")
+  Python_add_library(${GPU_MOD_NAME} MODULE "${GPU_SOURCES}" ${GPU_WITH_SOABI})
+
+  if (GPU_LANGUAGE STREQUAL "HIP")
     # Make this target dependent on the hipify preprocessor step.
-    add_dependencies(${MOD_NAME} hipify${MOD_NAME})
+    add_dependencies(${GPU_MOD_NAME} hipify${GPU_MOD_NAME})
   endif()
 
-  if (MOD_GPU_ARCHES)
-    set_target_properties(${MOD_NAME} PROPERTIES ${MOD_GPU_LANG}_ARCHITECTURES
-      "${MOD_GPU_ARCHES}")
+  if (GPU_ARCHITECTURES)
+    set_target_properties(${GPU_MOD_NAME} PROPERTIES
+      ${GPU_LANGUAGE}_ARCHITECTURES "${GPU_ARCHITECTURES}")
   endif()
 
-  set_property(TARGET ${MOD_NAME} PROPERTY CXX_STANDARD 17)
+  set_property(TARGET ${GPU_MOD_NAME} PROPERTY CXX_STANDARD 17)
 
-  target_compile_options(${MOD_NAME} PRIVATE
-    $<$<COMPILE_LANGUAGE:${MOD_GPU_LANG}>:${MOD_EXTRA_GPU_FLAGS}>)
+  target_compile_options(${GPU_MOD_NAME} PRIVATE
+    $<$<COMPILE_LANGUAGE:${GPU_LANGUAGE}>:${GPU_COMPILE_FLAGS}>)
 
-  target_compile_definitions(${MOD_NAME} PRIVATE
-    "-DTORCH_EXTENSION_NAME=${MOD_NAME}")
+  target_compile_definitions(${GPU_MOD_NAME} PRIVATE
+    "-DTORCH_EXTENSION_NAME=${GPU_MOD_NAME}")
 
-  target_include_directories(${MOD_NAME} PRIVATE csrc)
+  target_include_directories(${GPU_MOD_NAME} PRIVATE csrc
+    ${GPU_INCLUDE_DIRECTORIES})
 
-  target_link_libraries(${MOD_NAME} PRIVATE ${TORCH_LIBRARIES})
+  target_link_libraries(${GPU_MOD_NAME} PRIVATE ${TORCH_LIBRARIES}
+    ${GPU_LIBRARIES})
 
-  install(TARGETS ${MOD_NAME} LIBRARY DESTINATION ${MOD_DEST})
+  install(TARGETS ${GPU_MOD_NAME} LIBRARY DESTINATION ${GPU_DESTINATION})
 endfunction()

@@ -156,11 +156,12 @@ endif()
 
 define_gpu_extension_target(
   _C
-  vllm
-  "${VLLM_GPU_LANG}"
-  "${VLLM_EXT_SRC}"
-  "${VLLM_GPU_FLAGS}"
-  "${VLLM_GPU_ARCHES}")
+  DESTINATION vllm
+  LANGUAGE ${VLLM_GPU_LANG}
+  SOURCES ${VLLM_EXT_SRC}
+  COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+  ARCHITECTURES ${VLLM_GPU_ARCHES}
+  WITH_SOABI)
 
 #
 # _moe_C extension
@@ -172,11 +173,12 @@ set(VLLM_MOE_EXT_SRC
 
 define_gpu_extension_target(
   _moe_C
-  vllm
-  "${VLLM_GPU_LANG}"
-  "${VLLM_MOE_EXT_SRC}"
-  "${VLLM_GPU_FLAGS}"
-  "${VLLM_GPU_ARCHES}")
+  DESTINATION vllm
+  LANGUAGE ${VLLM_GPU_LANG}
+  SOURCES ${VLLM_MOE_EXT_SRC}
+  COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+  ARCHITECTURES ${VLLM_GPU_ARCHES}
+  WITH_SOABI)
 
 #
 # _punica_C extension
@@ -229,11 +231,12 @@ endif()
 
 define_gpu_extension_target(
   _punica_C
-  vllm
-  "${VLLM_GPU_LANG}"
-  "${VLLM_PUNICA_EXT_SRC}"
-  "${VLLM_PUNICA_GPU_FLAGS}"
-  "${VLLM_PUNICA_GPU_ARCHES}")
+  DESTINATION vllm
+  LANGUAGE ${VLLM_GPU_LANG}
+  SOURCES ${VLLM_PUNICA_EXT_SRC}
+  COMPILE_FLAGS ${VLLM_PUNICA_GPU_FLAGS}
+  ARCHITECTURES ${VLLM_PUNICA_GPU_ARCHES}
+  WITH_SOABI)
 
 #
 # Add the `default` target which detects which extensions should be
