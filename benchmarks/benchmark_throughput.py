@@ -76,20 +76,18 @@ def run_vllm(
     enable_prefix_caching: bool,
 ) -> float:
     from vllm import LLM, SamplingParams
-    llm = LLM(
-        model=model,
-        tokenizer=tokenizer,
-        quantization=quantization,
-        tensor_parallel_size=tensor_parallel_size,
-        seed=seed,
-        trust_remote_code=trust_remote_code,
-        dtype=dtype,
-        max_model_len=max_model_len,
-        enforce_eager=enforce_eager,
-        kv_cache_dtype=kv_cache_dtype,
-        device=device,
-        enable_prefix_caching=enable_prefix_caching
-    )
+    llm = LLM(model=model,
+              tokenizer=tokenizer,
+              quantization=quantization,
+              tensor_parallel_size=tensor_parallel_size,
+              seed=seed,
+              trust_remote_code=trust_remote_code,
+              dtype=dtype,
+              max_model_len=max_model_len,
+              enforce_eager=enforce_eager,
+              kv_cache_dtype=kv_cache_dtype,
+              device=device,
+              enable_prefix_caching=enable_prefix_caching)
 
     # Add the requests to the engine.
     for prompt, _, output_len in requests:
@@ -213,7 +211,8 @@ def main(args: argparse.Namespace):
                                 args.seed, args.n, args.use_beam_search,
                                 args.trust_remote_code, args.dtype,
                                 args.max_model_len, args.enforce_eager,
-                                args.kv_cache_dtype, args.device, args.enable_prefix_caching)
+                                args.kv_cache_dtype, args.device,
+                                args.enable_prefix_caching)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -304,10 +303,7 @@ if __name__ == "__main__":
         default="cuda",
         choices=["cuda"],
         help='device type for vLLM execution, supporting CUDA only currently.')
-    parser.add_argument(
-        "--enable_prefix_caching",
-        action='store_true'
-    )
+    parser.add_argument("--enable_prefix_caching", action='store_true')
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model
