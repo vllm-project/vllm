@@ -173,18 +173,27 @@ class DraftTargetWorker:
             blocks_to_swap_out,
             blocks_to_copy, k, max_model_len)
 
-        raise NotImplementedError
+        # TODO test
+        #should_collect_rejsample_metrics = (
+        #    self._should_collect_rejsample_metrics(time.time()))
+        #if should_collect_rejsample_metrics:
+        #    aggregate_metrics_ready = self._copy_rejsample_metrics_async()
 
-        should_collect_rejsample_metrics = (
-            self._should_collect_rejsample_metrics(time.time()))
-        if should_collect_rejsample_metrics:
-            aggregate_metrics_ready = self._copy_rejsample_metrics_async()
 
         logger.debug("scoring draft tokens")
         (proposal_scores, bonus_token_ids,
          non_spec_token_ids) = self._score_proposals(
-             execute_model_data, proposals.proposal_token_ids,
-             proposals.spec_seqs, proposals.non_spec_seqs)
+            seq_group_metadata_list,
+            blocks_to_swap_in,
+            blocks_to_swap_out,
+            blocks_to_copy,
+            k,
+            #execute_model_data, 
+            proposals.proposal_token_ids,
+            proposals.spec_seqs, proposals.non_spec_seqs
+        )
+
+        raise NotImplementedError
 
         with nvtx_range("draft_target_worker.rejection_sampler"):
             accepted_token_ids = self.rejection_sampler(
@@ -333,6 +342,198 @@ class DraftTargetWorker:
                 #    cumulative_logprob=0.0,
                 #    num_processed_token_ids=num_processed_token_ids,
                 #),
+            },
+            sampling_params=seq_group_metadata.sampling_params,
+            block_tables={
+                target_seq_id: seq_group_metadata.block_tables[seq_id],
+            },
+            lora_request=None,
+        )
+
+    #@nvtx_range("draft_target_worker._score_proposals")
+    def _score_proposals(
+        self,
+        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        blocks_to_swap_in: Optional[Dict[int, int]],
+        blocks_to_swap_out: Optional[Dict[int, int]],
+        blocks_to_copy: Optional[Dict[int, List[int]]],
+        k: int,
+
+        #execute_model_data: ExecuteModelData,
+
+        proposal_token_ids: torch.Tensor,  # shape: [batch_size, k]
+        spec_seqs: List[SequenceGroupMetadata],
+        non_spec_seqs: List[SequenceGroupMetadata],
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Score the proposed tokens via the target model.
+
+        This converts each input sequence to a set of k+1 target sequences. The
+        target sequences have the unique continuations to be scored and a
+        unique sequence ID that is different from all input sequence ids.
+
+        This adds overhead and should be removed. It is done because the sampler
+        currently operates on sequences instead of queries.
+        """
+        # Convert to target sequence ids.
+        target_seq_group_metadata_list = self._create_scoring_model_input(
+            spec_seqs, proposal_token_ids)
+
+        num_scoring_tokens = len(target_seq_group_metadata_list)
+        target_seq_group_metadata_list.extend(non_spec_seqs)
+
+        # Score proposal token ids.
+        target_sampler_output = self.target_worker.execute_model(
+            seq_group_metadata_list=target_seq_group_metadata_list,
+            blocks_to_swap_in=blocks_to_swap_in,
+            blocks_to_swap_out=blocks_to_swap_out,
+            blocks_to_copy=blocks_to_copy,
+            #ExecuteModelData(
+            #    target_seq_group_metadata_list,
+            #    execute_model_data.finished_request_ids_list,
+            #    execute_model_data.blocks_to_swap_in,
+            #    execute_model_data.blocks_to_swap_out,
+            #    execute_model_data.blocks_to_copy,
+            #    num_preallocated_slots=0,
+            #),
+            return_python_output=False)
+
+        (target_token_ids, target_probs,
+         non_spec_target_token_ids) = self._split_scoring_output(
+             target_sampler_output, num_scoring_tokens)
+
+        # Map distinct sequences used to score each token
+        # of shape [batch_size * k + 1] back to [batch_size, k + 1].
+        batch_size, k = proposal_token_ids.shape
+
+        target_token_ids = target_token_ids.squeeze().reshape(
+            batch_size, k + 1)
+        target_probs = target_probs.squeeze().reshape(batch_size, k + 1,
+                                                      self._vocab_size)
+
+        # shape: [batch_size, 1]
+        bonus_token_ids = target_token_ids[:, -1:]
+
+        # shape: [batch_size, k, vocab_size]
+        proposal_scores = target_probs[:, :-1]
+
+        return proposal_scores, bonus_token_ids, non_spec_target_token_ids
+
+    def _create_scoring_model_input(
+            self,
+            seq_group_metadata_list: List[SequenceGroupMetadata],
+            proposal_token_ids: torch.Tensor,  # shape: [batch_size, k]
+    ) -> List[SequenceGroupMetadata]:
+        """Given the original input sequences and proposed tokens from the draft
+        model, create a list of target sequences that can be used for scoring.
+        """
+
+        # TODO(cade) perform this on GPU to remove blocking call.
+        proposal_token_ids = proposal_token_ids.tolist()
+
+        if not seq_group_metadata_list:
+            return []
+
+        target_seq_ids_iter = self._create_target_seq_id_iterator(
+            self._get_all_seq_ids(seq_group_metadata_list))
+
+        target_seq_group_metadata = list(
+            chain.from_iterable(
+                self._create_target_seq_group_metadata(
+                    seq_group_metadata,
+                    proposal_token_ids,
+                    i,
+                    target_seq_ids_iter,
+                ) for i, seq_group_metadata in enumerate(
+                    seq_group_metadata_list)))
+
+        return target_seq_group_metadata
+
+    def _create_target_seq_group_metadata(
+        self,
+        input_seq_group_metadata: SequenceGroupMetadata,
+        proposal_token_ids: List[int],  # shape: [batch_size, k]
+        batch_index: int,
+        target_seq_ids_iter: Iterator[TargetSeqId],
+    ) -> List[SequenceGroupMetadata]:
+        """Given an input sequence group metadata and a list of draft tokens,
+        create a list of target SequenceGroupMetadata, one for each
+        token id that needs to be scored.
+
+        Naive speculative decoding requires K target model scores, one for each
+        draft model token. However one can add a bonus token such that if each
+        token is accepted, then a final token may be sampled from the model.
+        This function creates K+1 target SequenceGroupMetadata to take
+        advantage of the bonus token.
+        """
+        assert not input_seq_group_metadata.is_prompt, (
+            "Speculating on "
+            "prompts not yet supported")
+        assert len(input_seq_group_metadata.seq_data) == 1, (
+            "Beam search "
+            "not supported in speculative decoding")
+        input_seq_id = next(iter(input_seq_group_metadata.seq_data.keys()))
+
+        token_ids_to_score = self._get_token_ids_to_score(
+            proposal_token_ids[batch_index])
+
+        target_seq_group_metadata_list: List[SequenceGroupMetadata] = []
+        for token_ids in token_ids_to_score:
+            target_seq_group_metadata_list.append(
+                self._create_single_target_seq_group_metadata(
+                    input_seq_group_metadata,
+                    input_seq_id,
+                    next(target_seq_ids_iter),
+                    token_ids,
+                ))
+
+        return target_seq_group_metadata_list
+
+    def _create_single_target_seq_group_metadata(
+        self,
+        seq_group_metadata: SequenceGroupMetadata,
+        seq_id: SeqId,
+        target_seq_id: TargetSeqId,
+        token_ids: List[TokenId],
+    ) -> SequenceGroupMetadata:
+        """Create a single target SequenceGroupMetadata.
+
+        Args:
+            seq_group_metadata: The metadata for the input sequence.
+            seq_id: The input sequence ID.
+            target_seq_id: The corresponding target sequence ID.
+            token_ids: The list of token ids that are to be appended to the
+                input sequence.
+        """
+        seq_data = seq_group_metadata.seq_data[seq_id]
+        prompt_token_ids = seq_data.get_prompt_token_ids()
+        new_output_token_ids = [*seq_data.get_output_token_ids(), *token_ids]
+
+        # The first scoring seqeuence will include the normal number of
+        # processed tokens. This allows it to write KV from the previous
+        # iteration.
+        #
+        # Subsequent scoring sequences only include a single unprocessed token;
+        # the token they score.
+        #if len(token_ids) == 0:
+        #    num_processed_token_ids = seq_data.get_num_processed_token_ids()
+        #else:
+        #    num_processed_token_ids = seq_data.get_len() + len(token_ids) - 1
+        num_processed_token_ids = seq_data.get_len() + len(token_ids) - 1
+
+        return SequenceGroupMetadata(
+            request_id=seq_group_metadata.request_id,
+            is_prompt=seq_group_metadata.is_prompt,
+            #is_chunked_prefill=seq_group_metadata.is_chunked_prefill,
+            seq_data={
+                target_seq_id:
+                SequenceData.from_anyscale_sd(
+                    token_ids=prompt_token_ids + new_output_token_ids,
+                    num_prompt_tokens=len(prompt_token_ids),
+                    # Support for tracking cumulative logprob not yet
+                    # implemented.
+                    cumulative_logprob=0.0,
+                    num_processed_token_ids=num_processed_token_ids,
+                ),
             },
             sampling_params=seq_group_metadata.sampling_params,
             block_tables={

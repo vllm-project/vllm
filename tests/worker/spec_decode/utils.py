@@ -26,6 +26,12 @@ class ExecuteModelData:
         return dict(
             (field.name, getattr(self, field.name)) for field in fields(self))
 
+    @classmethod
+    def from_dict(cls, d):
+        cleaned = dict(
+            (field.name, d[field.name]) for field in fields(cls))
+        return cls(**cleaned)
+
 
 def round_up_to_next_block(seq_len: int, block_size: int) -> int:
     return (seq_len + block_size - 1) // block_size

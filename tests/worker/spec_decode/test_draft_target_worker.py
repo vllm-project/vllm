@@ -14,7 +14,7 @@ import random
 import pytest
 
 from vllm.worker.spec_decode.draft_target_worker import DraftTargetWorker
-#from vllm.worker.spec_decode.spec_util import SpeculativeProposals
+from vllm.worker.spec_decode.util import SpeculativeProposals
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SequenceGroupMetadata
 
@@ -177,83 +177,86 @@ def test_correctly_calls_draft_model(k: int, batch_size: int):
         assert actual_execute_model_data == execute_model_data
         assert actual_k == k
         assert actual_max_model_len == max_model_len
-#
-#
-#@pytest.mark.parametrize('k', [1, 2, 6])
-#@pytest.mark.parametrize('batch_size', [1, 2, 32])
-#@torch.inference_mode()
-#def test_correctly_calls_target_model(k: int, batch_size: int):
-#    """Verify that the DraftTargetWorker calls the target model with correct
-#    inputs. Everything else is mocked out.
-#    """
-#    draft_worker = mock_worker()
-#    target_worker = mock_worker()
-#    rejection_sampler = MagicMock()
-#    rejection_sampler.token_id_dtype = torch.int64
-#
-#    draft_worker.device = 'cuda'
-#    target_worker.device = 'cuda'
-#
-#    set_random_seed(1)
-#
-#    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler)
-#
-#    vocab_size = 32_000
-#
-#    proposal_token_ids = torch.randint(low=0,
-#                                       high=vocab_size,
-#                                       size=(batch_size, k),
-#                                       dtype=torch.int64,
-#                                       device='cuda')
-#    proposal_probs = torch.rand(batch_size,
-#                                k,
-#                                vocab_size,
-#                                dtype=torch.float32,
-#                                device='cuda')
-#
-#    execute_model_data, prompts, prev_output_tokens = create_batch(
-#        batch_size, k)
-#
-#    draft_worker.get_spec_proposals.return_value = SpeculativeProposals(
-#        spec_seqs=execute_model_data.seq_group_metadata_list,
-#        non_spec_seqs=[],
-#        all_seqs=execute_model_data.seq_group_metadata_list,
-#        original_indices=torch.arange(batch_size),
-#        proposal_token_ids=proposal_token_ids,
-#        proposal_probs=proposal_probs)
-#
-#    exception_secret = 'artifical stop'
-#    target_worker.execute_model.side_effect = ValueError(exception_secret)
-#
-#    with pytest.raises(ValueError, match=exception_secret):
-#        worker.execute_model(execute_model_data)
-#
-#    seen_contexts = []
-#
-#    call_args_list = target_worker.execute_model.call_args_list
-#    assert len(call_args_list) == 1
-#    for args, _ in call_args_list:
-#        (target_execute_model_data, ) = args
-#
-#        assert len(target_execute_model_data.seq_group_metadata_list) == (
-#            k + 1) * batch_size
-#        for seq_group_metadata in (
-#                target_execute_model_data.seq_group_metadata_list):
-#            for seq_data in seq_group_metadata.seq_data.values():
-#                seen_contexts.append(seq_data.get_token_ids())
-#
-#    expected_seen_contexts = []
-#
-#    for prompt, prev_generated, draft_tokens in zip(
-#            prompts, prev_output_tokens, proposal_token_ids.tolist()):
-#
-#        for i in range(len(draft_tokens) + 1):
-#            expected_seen_contexts.append(prompt + prev_generated +
-#                                          draft_tokens[:i])
-#
-#    seen_contexts.sort()
-#    expected_seen_contexts.sort()
-#    assert expected_seen_contexts == seen_contexts
+
+
+@pytest.mark.parametrize('k', [1, 2, 6])
+@pytest.mark.parametrize('batch_size', [1, 2, 32])
+@torch.inference_mode()
+def test_correctly_calls_target_model(k: int, batch_size: int):
+    """Verify that the DraftTargetWorker calls the target model with correct
+    inputs. Everything else is mocked out.
+    """
+    draft_worker = mock_worker()
+    target_worker = mock_worker()
+    rejection_sampler = MagicMock()
+    rejection_sampler.token_id_dtype = torch.int64
+
+    draft_worker.device = 'cuda'
+    target_worker.device = 'cuda'
+
+    set_random_seed(1)
+
+    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler)
+
+    vocab_size = 32_000
+
+    proposal_token_ids = torch.randint(low=0,
+                                       high=vocab_size,
+                                       size=(batch_size, k),
+                                       dtype=torch.int64,
+                                       device='cuda')
+    proposal_probs = torch.rand(batch_size,
+                                k,
+                                vocab_size,
+                                dtype=torch.float32,
+                                device='cuda')
+
+    execute_model_data, prompts, prev_output_tokens = create_batch(
+        batch_size, k)
+
+    draft_worker.get_spec_proposals.return_value = SpeculativeProposals(
+        spec_seqs=execute_model_data.seq_group_metadata_list,
+        non_spec_seqs=[],
+        all_seqs=execute_model_data.seq_group_metadata_list,
+        original_indices=torch.arange(batch_size),
+        proposal_token_ids=proposal_token_ids,
+        proposal_probs=proposal_probs)
+
+    exception_secret = 'artifical stop'
+    target_worker.execute_model.side_effect = ValueError(exception_secret)
+
+    with pytest.raises(ValueError, match=exception_secret):
+        worker.execute_model(**execute_model_data.to_dict(), num_spec_tokens=k)
+
+    seen_contexts = []
+
+    call_args_list = target_worker.execute_model.call_args_list
+    assert len(call_args_list) == 1
+    for args, kwargs in call_args_list:
+        #(target_execute_model_data, ) = args
+        #(seq_group_metadata_list, blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy, _) = args
+        #target_execute_model_data = ExecuteModelData(seq_group_metadata_list, blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
+        target_execute_model_data = ExecuteModelData.from_dict(kwargs)
+
+        assert len(target_execute_model_data.seq_group_metadata_list) == (
+            k + 1) * batch_size
+        for seq_group_metadata in (
+                target_execute_model_data.seq_group_metadata_list):
+            for seq_data in seq_group_metadata.seq_data.values():
+                seen_contexts.append(seq_data.get_token_ids())
+
+    expected_seen_contexts = []
+
+    for prompt, prev_generated, draft_tokens in zip(
+            prompts, prev_output_tokens, proposal_token_ids.tolist()):
+
+        for i in range(len(draft_tokens) + 1):
+            expected_seen_contexts.append(prompt + prev_generated +
+                                          draft_tokens[:i])
+
+    seen_contexts.sort()
+    expected_seen_contexts.sort()
+    assert expected_seen_contexts == seen_contexts
 #
 #
 #@pytest.mark.parametrize('k', [1, 2, 6])
