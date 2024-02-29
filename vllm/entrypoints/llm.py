@@ -106,6 +106,7 @@ class LLM:
             disable_custom_all_reduce=disable_custom_all_reduce,
             **kwargs,
         )
+        ## init LLMEngine from args passed in
         self.llm_engine = LLMEngine.from_engine_args(engine_args)
         self.request_counter = Counter()
 
@@ -205,6 +206,7 @@ class LLM:
         # Run the engine.
         outputs: List[RequestOutput] = []
         while self.llm_engine.has_unfinished_requests():
+            print("iteration")
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
                 if output.finished:

@@ -96,7 +96,7 @@ class LLMEngine:
             f"device_config={device_config.device}, "
             f"seed={model_config.seed})")
         # TODO(woosuk): Print more configs in debug mode.
-
+        print("MODEL config", model_config)
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
@@ -108,6 +108,8 @@ class LLMEngine:
 
         self._init_tokenizer()
         self.seq_counter = Counter()
+
+        print("INIT ENGINE ")
 
         # Create the parallel GPU workers.
         if self.parallel_config.worker_use_ray:
@@ -338,6 +340,7 @@ class LLMEngine:
                     f"# CPU blocks: {num_cpu_blocks}")
 
         if num_gpu_blocks <= 0:
+            
             raise ValueError("No available memory for the cache blocks. "
                              "Try increasing `gpu_memory_utilization` when "
                              "initializing the engine.")
@@ -442,6 +445,7 @@ class LLMEngine:
             >>> # continue the request processing
             >>> ...
         """
+        print("PROMPTS", prompt)
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
@@ -823,6 +827,8 @@ class LLMEngine:
             output = all_outputs[0]
         else:
             output = []
+        
+        print("outputt", output)
 
         return self._process_model_outputs(output, scheduler_outputs)
 
@@ -997,10 +1003,15 @@ class LLMEngine:
                 for worker in self.workers
             ]
 
+
         if driver_args is None:
             driver_args = args
         if driver_kwargs is None:
             driver_kwargs = kwargs
+
+
+        print("RUNNING A SINGLE STEP")
+        print("METHOD", method)
 
         # Start the driver worker after all the ray workers.
         driver_worker_output = getattr(self.driver_worker,
@@ -1020,7 +1031,8 @@ class LLMEngine:
                         chan.end_read()
             else:
                 ray_worker_outputs = ray.get(ray_worker_outputs)
-
+    
+        # print("OUTPUT", [driver_worker_output] + ray_worker_outputs)
         return [driver_worker_output] + ray_worker_outputs
 
     def _compiled_ray_dag(self):

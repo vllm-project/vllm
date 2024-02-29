@@ -1,6 +1,8 @@
 import time
 from typing import Dict, List, Optional, Tuple, Set, Union
 
+import inspect
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -76,8 +78,11 @@ class ModelRunner:
         self.kv_cache_dtype = kv_cache_dtype
 
     def load_model(self) -> None:
+        print("start loading model")
+        print("config", self.device_config)
         self.model = get_model(self.model_config, self.device_config,
                                self.lora_config)
+        print("MODEL", self.model)
 
         vocab_size = self.model.config.vocab_size
 
@@ -537,22 +542,34 @@ class ModelRunner:
         (input_tokens, input_positions, input_metadata, sampling_metadata,
          lora_requests,
          lora_mapping) = self.prepare_input_tensors(seq_group_metadata_list)
-
+        print("lmao")
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
 
+        print("token shape", input_tokens.shape[0])
+        print("use cuda", input_metadata.use_cuda_graph)
+        print("seq", seq_group_metadata_list[0])
         # Execute the model.
         if input_metadata.use_cuda_graph:
             graph_batch_size = input_tokens.shape[0]
             model_executable = self.graph_runners[graph_batch_size]
         else:
             model_executable = self.model
+
+        print("forward")
+        # This should be the foward loop
+        args_spec = inspect.getfullargspec(model_executable.forward)
+        print("Arguments:", args_spec.args)
+        # print("input meta", input_metadata)
         hidden_states = model_executable(
             input_ids=input_tokens,
             positions=input_positions,
             kv_caches=kv_caches,
             input_metadata=input_metadata,
         )
+        print("done")
+
+        # print("hidden states", hidden_states.shape)
 
         # Sample the next token.
         output = self.model.sample(

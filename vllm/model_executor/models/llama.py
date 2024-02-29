@@ -253,6 +253,7 @@ class LlamaModel(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
+        print("running")
         hidden_states = self.embed_tokens(input_ids)
         residual = None
         for i in range(len(self.layers)):

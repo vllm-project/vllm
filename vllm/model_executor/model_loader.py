@@ -41,7 +41,7 @@ def get_model(model_config: ModelConfig,
               device_config: DeviceConfig,
               lora_config: Optional[LoRAConfig] = None) -> nn.Module:
     model_class = _get_model_architecture(model_config)
-
+    print("model class", model_class)
     # Get the (maybe quantized) linear method.
     linear_method = None
     if model_config.quantization is not None:
@@ -76,13 +76,16 @@ def get_model(model_config: ModelConfig,
                     "be added in the future. If this is important to you, "
                     "please open an issue on github.")
             else:
+                print("before break")
                 model = model_class(model_config.hf_config, linear_method)
+                print("after break")
         if model_config.load_format == "dummy":
             # NOTE(woosuk): For accurate performance evaluation, we assign
             # random values to the weights.
             initialize_dummy_weights(model)
         else:
             # Load the weights from the cached or downloaded files.
+            print("ran this")
             model.load_weights(model_config.model, model_config.download_dir,
                                model_config.load_format, model_config.revision)
     return model.eval()
