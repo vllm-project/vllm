@@ -258,7 +258,7 @@ macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
       list(APPEND ${GPU_ARCHES} "${_CODE_ARCH}${_VIRT}")
     endforeach()
   endif()
-  message(STATUS "${GPU_LANG} target arches: ${GPU_ARCHES}")
+  message(STATUS "${GPU_LANG} target arches: ${${GPU_ARCHES}}")
 endmacro()
 
 #

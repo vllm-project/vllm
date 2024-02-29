@@ -263,17 +263,17 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   add_dependencies(default _moe_C)
 
   set(ENABLE_PUNICA)
-  # Enable punica if -DVLLM_INSTALL_PUNICA_KERNELS=1 or
+  # Enable punica if -DVLLM_INSTALL_PUNICA_KERNELS=ON or
   # VLLM_INSTALL_PUNICA_KERNELS is set in the environment.
-  if (DEFINED VLLM_INSTALL_PUNICA_KERNELS OR ENV{VLLM_INSTALL_PUNICA_KERNELS})
-    set(ENABLE_PUNICA true)
+  if (ENV{VLLM_INSTALL_PUNICA_KERNELS} OR VLLM_INSTALL_PUNICA_KERNELS)
+    set(ENABLE_PUNICA ON)
     foreach (ARCH ${CMAKE_CUDA_ARCHITECTURES_NATIVE})
       string(REGEX MATCH "\([0-9]+\)" ARCH_VER_STR ${ARCH})
       string_to_ver(ARCH_VER ${ARCH_VER_STR})
       if (ARCH_VER VERSION_LESS 8.0)
         message(STATUS
           "Unable to add punica extension due to device version ${ARCH_VER} < 8.0.")
-#        set(ENABLE_PUNICA false)
+        set(ENABLE_PUNICA OFF)
         break()
       endif()
     endforeach()
