@@ -15,7 +15,8 @@ from tqdm.auto import tqdm
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import (get_quantization_config, QuantizationConfig)
+from vllm.model_executor.layers.quantization import (get_quantization_config,
+                                                     QuantizationConfig)
 
 logger = init_logger(__name__)
 
@@ -91,13 +92,11 @@ def get_quant_config(model_config: ModelConfig) -> QuantizationConfig:
     if not is_local:
         # Download the config files.
         with get_lock(model_name_or_path, model_config.download_dir):
-            hf_folder = snapshot_download(
-                model_name_or_path,
-                revision=model_config.revision,
-                allow_patterns="*.json",
-                cache_dir=model_config.download_dir,
-                tqdm_class=Disabledtqdm,
-            )
+            hf_folder = snapshot_download(model_name_or_path,
+                                          revision=model_config.revision,
+                                          allow_patterns="*.json",
+                                          cache_dir=model_config.download_dir,
+                                          tqdm_class=Disabledtqdm)
     else:
         hf_folder = model_name_or_path
     config_files = glob.glob(os.path.join(hf_folder, "*.json"))
@@ -162,13 +161,11 @@ def prepare_hf_model_weights(
         # Use file lock to prevent multiple processes from
         # downloading the same model weights at the same time.
         with get_lock(model_name_or_path, cache_dir):
-            hf_folder = snapshot_download(
-                model_name_or_path,
-                allow_patterns=allow_patterns,
-                cache_dir=cache_dir,
-                tqdm_class=Disabledtqdm,
-                revision=revision,
-            )
+            hf_folder = snapshot_download(model_name_or_path,
+                                          allow_patterns=allow_patterns,
+                                          cache_dir=cache_dir,
+                                          tqdm_class=Disabledtqdm,
+                                          revision=revision)
     else:
         hf_folder = model_name_or_path
     hf_weights_files: List[str] = []
@@ -212,8 +209,7 @@ def hf_model_weights_iterator(
         cache_dir=cache_dir,
         load_format=load_format,
         fall_back_to_pt=fall_back_to_pt,
-        revision=revision,
-    )
+        revision=revision)
 
     if load_format == "npcache":
         # Currently np_cache only support *.bin checkpoints
