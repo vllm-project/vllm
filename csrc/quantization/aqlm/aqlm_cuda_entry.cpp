@@ -74,7 +74,7 @@ torch::Tensor code1x16_matmat(
   auto output_sizes = input_sizes.vec();
   output_sizes.pop_back();
   output_sizes.push_back(-1);
-  auto output = flat_output.reshape(output_sizes); // .clone();
+  auto output = flat_output.reshape(output_sizes);
   return output;
 }
 
@@ -131,6 +131,29 @@ torch::Tensor code2x8_matmat(
   auto output_sizes = input_sizes.vec();
   output_sizes.pop_back();
   output_sizes.push_back(-1);
-  auto output = flat_output.reshape(output_sizes).clone();
+  auto output = flat_output.reshape(output_sizes);
   return output;
+}
+
+torch::Tensor aqlm_gemm(
+  const torch::Tensor& input,
+  const torch::Tensor& codes,
+  const torch::Tensor& codebooks,
+  const torch::Tensor& scales,
+  const std::optional<torch::Tensor>& bias
+)
+{
+  int const nbooks = codebooks.size(0);
+  int const entries = codebooks.size(1);
+
+  if (nbooks == 1 && entries == (1 << 16))
+  {
+    return code1x16_matmat(input, codes, codebooks, scales, bias);
+  }
+  if (nbooks == 2 && entries == (1 << 8))
+  {
+    return code2x8_matmat(input, codes, codebooks, scales, bias);
+  }
+  // TODO error somehow.
+  return {};
 }

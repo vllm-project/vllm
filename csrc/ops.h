@@ -69,7 +69,7 @@ void gelu_fast(
   torch::Tensor& out,
   torch::Tensor& input);
 
-torch::Tensor code1x16_matmat(
+torch::Tensor aqlm_gemm(
   const torch::Tensor& input,
   const torch::Tensor& codes,
   const torch::Tensor& codebooks,
