@@ -1,6 +1,6 @@
 /*
  * Modified by Neural Magic
- * Copyright (C) Marlin.2024 Elias Frantar (elias.frantar@ist.ac.at)  # noqa
+ * Copyright (C) Marlin.2024 Elias Frantar
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
