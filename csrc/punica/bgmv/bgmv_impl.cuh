@@ -171,7 +171,7 @@ template <int feat_in, int feat_out, size_t vec_size, size_t X_copy_size,
           size_t W_copy_size, int tx, int ty, int tz, typename in_T,
           typename out_T, typename W_T>
 __global__ void
-bgmv_shrink_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
+bgmv_shrink_kernel_v1(out_T *__restrict__ Y, const in_T *__restrict__ X,
                    const W_T *__restrict__ W,
                    const int64_t *__restrict__ indicies, int64_t y_offset,
                    int64_t full_y_size, int64_t num_layers, int64_t layer_idx,
@@ -231,6 +231,86 @@ bgmv_shrink_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
   if (threadIdx.x == 0) {
     size_t y_idx = batch_idx * full_y_size + y_offset + j;
     Y[y_idx] = vllm_add<out_T>(Y[y_idx], convert_type<float, out_T>(y));
+  }
+}
+
+template <int feat_in, int feat_out, size_t vec_size, size_t X_copy_size,
+          size_t W_copy_size, int tx, int ty, int tz, typename in_T,
+          typename out_T, typename W_T>
+__global__ void
+bgmv_shrink_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
+                   const W_T *__restrict__ W,
+                   const int64_t *__restrict__ indicies, int64_t y_offset,
+                   int64_t full_y_size, int64_t num_layers, int64_t layer_idx,
+                   float scale) {
+  size_t batch_idx = blockIdx.y;
+  int64_t idx = indicies[batch_idx] * num_layers + layer_idx;
+  if (idx < 0) {
+    return;
+  }
+
+  size_t j = blockIdx.x;
+  constexpr size_t tile_size = tx * ty * vec_size;
+  constexpr size_t num_tiles = (feat_in + tile_size - 1) / tile_size;
+  __shared__ W_T W_shared[tile_size];
+  __shared__ in_T X_shared[tile_size];
+  __shared__ float y_warpwise[ty];
+
+  float y = 0;
+  vec_t<in_T, vec_size> x_vec;
+  vec_t<W_T, vec_size> w_vec;
+  size_t tile_idx;
+
+#pragma unroll
+  for (tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
+    if (tile_idx * tile_size + (threadIdx.y * tx + threadIdx.x + 1) * vec_size - 1 < feat_in) {
+      memcpy_blocking<W_copy_size>(W_shared + (threadIdx.y * tx + threadIdx.x) * vec_size,
+                                          W + (idx * feat_out + j) * feat_in +
+                                              tile_idx * tile_size +
+                                              (threadIdx.y * tx + threadIdx.x) * vec_size);
+      memcpy_blocking<X_copy_size>(X_shared + (threadIdx.y * tx + threadIdx.x) * vec_size,
+                                          X + (batch_idx * feat_in) +
+                                              tile_idx * tile_size +
+                                              (threadIdx.y * tx + threadIdx.x) * vec_size);
+    }
+
+    __syncthreads();
+    x_vec.load(X_shared +
+               (threadIdx.y * tx + threadIdx.x) * vec_size);
+    w_vec.load(W_shared +
+               (threadIdx.y * tx + threadIdx.x) * vec_size);
+    float sum = 0.f;
+#pragma unroll
+    for (size_t i = 0; i < vec_size; ++i) {
+      sum += convert_type<W_T, float>(w_vec[i]) * convert_type<in_T, float>(x_vec[i]) * scale;
+    }
+#pragma unroll
+    for (size_t offset = tx / 2; offset > 0; offset /= 2) {
+      sum += VLLM_SHFL_DOWN_SYNC(sum, offset);
+    }
+
+    __syncthreads();
+
+    if (tile_idx * tile_size + (threadIdx.y * tx + threadIdx.x + 1) * vec_size - 1 < feat_in) {
+      y += sum;
+    }
+  }
+
+  if (threadIdx.x == 0) {
+    y_warpwise[threadIdx.y] = y;
+  }
+  __syncthreads();
+
+  float y_write = 0.f;
+#pragma unroll
+  for (size_t i = 0; i < ty; ++i) {
+    y_write += y_warpwise[i];
+  }
+ 
+  // write Y;
+  if (threadIdx.x == 0 && threadIdx.y == 0) {
+    size_t y_idx = batch_idx * full_y_size + y_offset + j;
+    Y[y_idx] = vllm_add<out_T>(Y[y_idx], convert_type<float, out_T>(y_write));
   }
 }
 
@@ -391,13 +471,13 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
 #define CHECK_INPUT_TILEABLE_WITH_VECTOR(vec_size_) \
     feat_in % (rocm_warp_size * vec_size_) == 0
 
-#define LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR(vec_size_)              \
+#define LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR_V1(vec_size_, ty_)      \
     if constexpr (CHECK_INPUT_TILEABLE_WITH_VECTOR(vec_size_)) {            \
       constexpr size_t vec_size_shrink = vec_size_;                         \
       constexpr int tx = rocm_warp_size;                                    \
-      constexpr int ty = 1;                                                 \
+      constexpr int ty = ty_;                                               \
       dim3 nblks(feat_out, batch_size);                                     \
-      dim3 nthrs(tx);                                                       \
+      dim3 nthrs(tx, ty);                                                   \
       bgmv_shrink_kernel<feat_in, feat_out, vec_size_shrink,                \
                           vec_size_shrink * sizeof(in_T),                   \
                           vec_size_shrink * sizeof(W_T),                    \
@@ -407,20 +487,56 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
                                         scale);                             \
     }
 
-    static_assert(CHECK_INPUT_TILEABLE_WITH_VECTOR(8) ||
-                  CHECK_INPUT_TILEABLE_WITH_VECTOR(4) ||
-                  CHECK_INPUT_TILEABLE_WITH_VECTOR(2) ||
+#define LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR(factor_, vec_size_, tx_, ty_) \
+    if constexpr (CHECK_INPUT_TILEABLE_WITH_VECTOR(factor_)) {                    \
+      constexpr size_t vec_size_shrink = vec_size_;                               \
+      constexpr int tx = tx_;                                                     \
+      constexpr int ty = ty_;                                                     \
+      dim3 nblks(feat_out, batch_size);                                           \
+      dim3 nthrs(tx, ty);                                                         \
+      bgmv_shrink_kernel<feat_in, feat_out, vec_size_shrink,                      \
+                          vec_size_shrink * sizeof(in_T),                         \
+                          vec_size_shrink * sizeof(W_T),                          \
+                          tx, ty, tz>                                             \
+          <<<nblks, nthrs, 0, stream>>>(Y, X, W, indicies, y_offset,              \
+                                        full_y_size, num_layers, layer_idx,       \
+                                        scale);                                   \
+    }
+
+    static_assert(CHECK_INPUT_TILEABLE_WITH_VECTOR(64) ||
+                  CHECK_INPUT_TILEABLE_WITH_VECTOR(32) ||
+                  CHECK_INPUT_TILEABLE_WITH_VECTOR(16) ||
+                  CHECK_INPUT_TILEABLE_WITH_VECTOR(8)  ||
+                  CHECK_INPUT_TILEABLE_WITH_VECTOR(4)  ||
+                  CHECK_INPUT_TILEABLE_WITH_VECTOR(2)  ||
                   CHECK_INPUT_TILEABLE_WITH_VECTOR(1));
 
-    LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR(8)
+    // LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR_V1(32, 4)
+    // else
+    // LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR_V1(16, 2)
+    // else
+    // LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR_V1(8, 1)
+    // else
+    // LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR_V1(4, 1)
+    // else
+    // LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR_V1(2, 1)
+    // else
+    // LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR_V1(1, 1)
+
+    LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR(32, vec_size, rocm_warp_size, 32/vec_size)
     else
-    LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR(4)
+    LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR(16, vec_size, rocm_warp_size, 16/vec_size)
     else
-    LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR(2)
+    LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR( 8, vec_size, rocm_warp_size,  8/vec_size)
     else
-    LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR(1)
+    LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR( 4, vec_size, rocm_warp_size/(vec_size/4), vec_size/ 4)
+    else
+    LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR( 2, vec_size, rocm_warp_size/(vec_size/2), vec_size/ 2)
+    else
+    LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR( 1, vec_size, rocm_warp_size/(vec_size/1), vec_size/ 1)
 
 #undef CHECK_INPUT_TILEABLE_WITH_VECTOR
+#undef LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR_V1
 #undef LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR
 #endif
   }
