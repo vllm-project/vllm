@@ -1,5 +1,5 @@
 from vllm.logger import init_logger
-from prometheus_client import Counter, Gauge, Histogram, REGISTRY, disable_created_metrics
+from prometheus_client import Counter, Gauge, Histogram, Info, REGISTRY, disable_created_metrics
 
 import time
 import numpy as np
@@ -22,6 +22,10 @@ class Metrics:
         for collector in list(REGISTRY._collector_to_names):
             if hasattr(collector, "_name") and "vllm" in collector._name:
                 REGISTRY.unregister(collector)
+
+        self.info_cache_config = Info(
+            name='vllm:cache_config',
+            documentation='information of cache_config')
 
         # System stats
         self.gauge_scheduler_running = Gauge(
@@ -127,6 +131,10 @@ class StatLogger:
         # Prometheus metrics
         self.labels = labels
         self.metrics = Metrics(labelnames=list(labels.keys()))
+
+    def info(self, type: str, obj: object) -> None:
+        if type == "cache_config":
+            self.metrics.info_cache_config.info(obj.metrics_info())
 
     def _get_throughput(self, tracked_stats: List[int], now: float) -> float:
         return float(np.sum(tracked_stats) / (now - self.last_local_log))
