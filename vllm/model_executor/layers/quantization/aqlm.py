@@ -41,17 +41,14 @@ class AQLMConfig(QuantizationConfig):
         # I think pack factor is *probably* how many elements fit into one quantized tensor element.
         # though out group size makes it interesting, because really we are doing 2D blocks, potentially.
         # maybe this is vllms first 2D packing?  Arg.
-        self.pack_factor = (
-            self.in_group_size * self.out_group_size // self.num_codebooks
-        )
+        self.pack_factor = (self.in_group_size * self.out_group_size //
+                            self.num_codebooks)
 
     def __repr__(self) -> str:
-        return (
-            f"AQLMConfig(in_group_size={self.in_group_size}, "
-            f"nbits_per_codebook={self.nbits_per_codebook}, "
-            f"num_codebooks={self.num_codebooks}, "
-            f"out_group_size={self.out_group_size})"
-        )
+        return (f"AQLMConfig(in_group_size={self.in_group_size}, "
+                f"nbits_per_codebook={self.nbits_per_codebook}, "
+                f"num_codebooks={self.num_codebooks}, "
+                f"out_group_size={self.out_group_size})")
 
     @classmethod
     def get_name(cls) -> str:
@@ -101,7 +98,8 @@ class AQLMConfig(QuantizationConfig):
         num_code_books = cls.get_from_keys(config, ["num_codebooks"])
         out_group_size = cls.get_from_keys(config, ["out_group_size"])
         # TODO linear_weights_not_to_quantize ?
-        return cls(in_group_size, nbits_per_codebook, num_code_books, out_group_size)
+        return cls(in_group_size, nbits_per_codebook, num_code_books,
+                   out_group_size)
 
     def get_linear_method(self) -> "AQLMLinearMethod":
         return AQLMLinearMethod(self)
@@ -129,8 +127,8 @@ class AQLMLinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
     ) -> Dict[str, Any]:
         #TEST
-        assert(output_size == output_size_per_partition)
-        assert(input_size == input_size_per_partition)
+        assert (output_size == output_size_per_partition)
+        assert (input_size == input_size_per_partition)
         del output_size  # Unused.
         del input_size  # Unused.
 
@@ -140,21 +138,19 @@ class AQLMLinearMethod(LinearMethodBase):
             raise ValueError(
                 "The input size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
-                "tensor parallel size."
-            )
+                "tensor parallel size.")
         if output_size_per_partition % self.quant_config.out_group_size != 0:
             raise ValueError(
                 "The output size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
-                "tensor parallel size."
-            )
+                "tensor parallel size.")
 
         # or does this need more dimensions and use the correct nbits_per_codebook as an int type.  Does that pack them?
         codes = Parameter(
             torch.empty(
                 output_size_per_partition,  # not entirely sure what to do with num_out_groups, if we need this pack factor.
                 input_size_per_partition // self.quant_config.pack_factor,
-                1, # probably should be num codebooks.
+                1,  # probably should be num codebooks.
                 dtype=get_int_dtype(self.quant_config.nbits_per_codebook),
             ),
             requires_grad=False,
@@ -186,7 +182,8 @@ class AQLMLinearMethod(LinearMethodBase):
         scales = Parameter(
             torch.empty(
                 (
-                    output_size_per_partition // self.quant_config.out_group_size,
+                    output_size_per_partition //
+                    self.quant_config.out_group_size,
                     1,
                     1,
                     1,
@@ -222,7 +219,7 @@ class AQLMLinearMethod(LinearMethodBase):
 
         print("input shape is ", x.shape)
 
-        if (x.shape[1] == 5) : 
+        if (x.shape[1] == 5):
             print("codes shape is ", weights["codes"].shape)
             print("codebooks shape is ", weights["codebooks"].shape)
             print("scales shape is ", weights["scales"].shape)
