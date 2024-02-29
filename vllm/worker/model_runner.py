@@ -283,7 +283,7 @@ class ModelRunner:
             device=self.device
         )
         current_tokens_slot_mapping = _make_tensor_with_pad_to_align(current_tokens_slot_mapping,
-                                             multiple_of=8,
+                                             multiple_of=1,
                                              pad=_PAD_SLOT_ID,
                                              dtype=torch.long,
                                              device=self.device)
@@ -832,13 +832,13 @@ def _make_tensor_with_pad_to_align(
     return torch.tensor(padded_x, dtype=dtype, device=device)
 
 def _make_tensor_with_pad_to_max(
-    x: List[int],
+    x: List[List[int]],
     max_len: int,
     pad: int,
     dtype: torch.dtype,
     device: Optional[Union[str, torch.device]],
 ) -> List[int]:
-    padded_x = _pad_to_max(x, max_len, pad)
+    padded_x = [_pad_to_max(x_i, max_len, pad) for x_i in x]
     return torch.tensor(padded_x, dtype=dtype, device=device)
 
 def _get_graph_batch_size(batch_size: int) -> int:
