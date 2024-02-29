@@ -4,6 +4,7 @@ from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from typing import Optional
 from vllm.utils import in_wsl
 import time
+from typing import Callable
 
 
 @dataclass
@@ -15,10 +16,12 @@ class DraftTargetWorkerMetrics:
     draft_tokens: int
     emitted_tokens: int
 
+Timer = Callable[[], float]
 
 class AsyncMetricsCollector:
-    def __init__(self, rejection_sampler: RejectionSampler):
-        self.rejection_sampler = rejection_sampler
+    def __init__(self, rejection_sampler: RejectionSampler, timer: Optional[Timer] = None, collect_interval_s: float = 5.0):
+        self._rejection_sampler = rejection_sampler
+        self._timer = time.time if timer is None else timer
 
         self._rank: Optional[int] = None
 
@@ -34,8 +37,8 @@ class AsyncMetricsCollector:
             0, dtype=torch.long, device="cpu", pin_memory=pin_memory)
         self._aggregate_num_draft_tokens = 0
 
-        self._rejsample_metrics_collect_interval_s = 5.0
-        self._last_metrics_collect_time = 0
+        self._rejsample_metrics_collect_interval_s = collect_interval_s
+        self._last_metrics_collect_time = self._timer()
 
 
     def init_gpu_tensors(self, rank: int) -> None:
@@ -52,7 +55,7 @@ class AsyncMetricsCollector:
             return self._collect_rejsample_metrics(k, ready_event)
         
         # Otherwise, check if we should start a new copy.
-        if self._should_collect_rejsample_metrics(time.time()):
+        if self._should_collect_rejsample_metrics(self._timer()):
             assert self._in_flight_copy is None
             self._in_flight_copy = self._copy_rejsample_metrics_async()
         
@@ -81,13 +84,13 @@ class AsyncMetricsCollector:
 
         with torch.cuda.stream(self._copy_stream):
             self._aggregate_num_accepted_tokens.copy_(
-                self.rejection_sampler.num_accepted_tokens, non_blocking=True)
+                self._rejection_sampler.num_accepted_tokens, non_blocking=True)
             self._aggregate_num_emitted_tokens.copy_(
-                self.rejection_sampler.num_emitted_tokens, non_blocking=True)
+                self._rejection_sampler.num_emitted_tokens, non_blocking=True)
             # Number of draft tokens is calculated on CPU, so no copy is
             # required.
             self._aggregate_num_draft_tokens = (
-                self.rejection_sampler.num_draft_tokens)
+                self._rejection_sampler.num_draft_tokens)
 
         aggregate_metrics_ready = torch.cuda.Event()
         aggregate_metrics_ready.record(self._copy_stream)
@@ -112,8 +115,7 @@ class AsyncMetricsCollector:
         emitted_tokens = self._aggregate_num_emitted_tokens.item()
         draft_tokens = self._aggregate_num_draft_tokens
 
-        # Divide by k since batch size can be variable.
-        num_possible_tokens = (draft_tokens / k) * (k + 1)
+        num_possible_tokens = self.get_max_num_accepted_tokens(draft_tokens, k)
 
         if draft_tokens > 0:
             draft_acceptance_rate = accepted_tokens / draft_tokens
@@ -133,3 +135,10 @@ class AsyncMetricsCollector:
             draft_tokens=draft_tokens,
             emitted_tokens=emitted_tokens,
         )
+
+    @staticmethod
+    def get_max_num_accepted_tokens(draft_tokens: int, k: int) -> int:
+        # Divide by k since batch size can be variable.
+        total_num_spec_seqs = draft_tokens / k
+        num_accepted_per_seq_if_all_accepted = k + 1
+        return int(total_num_spec_seqs / num_accepted_per_seq_if_all_accepted)
