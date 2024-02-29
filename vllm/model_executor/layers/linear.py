@@ -263,6 +263,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
+        # shard_dim indicates fixed size concatenated at shard_id
         shard_dim = getattr(param, "shard_dim", None)
         if loaded_shard_id is None:
             # Loaded weight is already packed.
@@ -308,9 +309,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             shard_size = loaded_weight.shape[shard_dim]
             shard_offset = loaded_shard_id * shard_size
             param_data = param_data.narrow(shard_dim, shard_offset, shard_size)
-            # TODO what is up with this TP rank?
-            #start_idx = tp_rank * shard_size
-            #loaded_weight = loaded_weight.narrow(output_dim, start_idx,shard_size)
         else:
             ignore_warning = getattr(param, "ignore_warning", False)
             if not ignore_warning:
@@ -444,12 +442,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                                                  shard_size)
         elif shard_dim is not None:
             shard_size = loaded_weight.shape[shard_dim]
-            if loaded_shard_id == "q":
-                shard_index = 0
-            elif loaded_shard_id == "k":
-                shard_index = 1
-            elif loaded_shard_id == "v":
-                shard_index = 2
+            shard_index = ["q", "k", "v"].index(loaded_shard_id)
             param_data = param_data.narrow(shard_dim, shard_index * shard_size,
                                            shard_size)
         else:
