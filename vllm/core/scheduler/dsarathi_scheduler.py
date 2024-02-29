@@ -1,5 +1,6 @@
+from collections import deque
 import time
-from typing import List, Dict, Type
+from typing import Deque, List, Dict, Type
 
 from vllm.logger import init_logger
 from vllm.sequence import SequenceGroup
@@ -26,11 +27,11 @@ class DSarathiScheduler(SarathiScheduler):
         # Fix the current time
         now = time.monotonic()
 
-        running: List[SequenceGroup] = []
-        ignored_seq_groups: List[SequenceGroup] = []
-        preempted: List[SequenceGroup] = []
-        prefill_seq_groups: List[SequenceGroup] = []
-        decode_seq_groups: List[SequenceGroup] = []
+        running: Deque[SequenceGroup] = deque()
+        ignored_seq_groups: Deque[SequenceGroup] = []
+        preempted: Deque[SequenceGroup] = []
+        prefill_seq_groups: Deque[SequenceGroup] = []
+        decode_seq_groups: Deque[SequenceGroup] = []
         prefill_prompt_chunk_lens: List[int] = []
         decode_prompt_chunk_lens: List[int] = []  # just a list of zeros
         num_batched_tokens = 0

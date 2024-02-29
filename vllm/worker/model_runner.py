@@ -574,10 +574,9 @@ class ModelRunner:
                 prompt_chunk_size=chunk_size,
             )
             seqs.append(seq)
-            # We need to consider only dangling prefills (prefills which dont complete in one iteration)
-            # as they use KV buffers
-            # max_running_prefills = 1 + self.parallel_config.pipeline_parallel_size + self.scheduler_config.max_pre_queue_batches
-            max_running_prefills = 1 + self.scheduler_config.max_pre_queue_batches
+            # We need to consider only dangling prefills (prefills which don't complete in one iteration) as they use kv buffers
+            # For each pipeline parallel stage, it can have a dangling prefill. Only the first stage can start ingesting a new dangling prefill.
+            max_running_prefills = 1 + self.parallel_config.pipeline_parallel_size
 
             for i in range(1, max_running_prefills + 1):
                 for kv_buffer in self.kv_buffers:

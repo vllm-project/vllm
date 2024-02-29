@@ -26,9 +26,6 @@ class SarathiScheduler(BaseScheduler):
         self.chunk_size = self.scheduler_config.chunk_size
         self.enable_rolling_prefills = self.scheduler_config.enable_rolling_prefills
 
-    def _get_max_num_running_seqs(self) -> int:
-        return 1 + self.scheduler_config.max_pre_queue_batches
-
     def _get_block_space_manager_class(self) -> Type[BaseBlockSpaceManager]:
         return SarathiBlockSpaceManager
 

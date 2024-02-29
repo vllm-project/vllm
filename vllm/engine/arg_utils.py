@@ -51,7 +51,7 @@ class EngineArgs:
     max_num_batched_tokens: Optional[int] = None
     # sarathi scheduler parameters
     enable_rolling_prefills: bool = True
-    prefill_fitting_tolerance: float = 0.2
+    prefill_fitting_tolerance: float = 0.0
 
     def __post_init__(self):
         if self.tokenizer is None:
