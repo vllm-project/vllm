@@ -23,6 +23,7 @@ from vllm.device_utils import (device_empty_cache, device_synchronize,
                                mem_get_info, get_distribute_backend)
 
 
+
 class Worker:
     """A worker class that executes (a partition of) the model on a GPU.
 
