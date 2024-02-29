@@ -77,5 +77,5 @@ def test_models(
                 i % len(expected_outputs)]
             assert fa_output_ids == vllm_output_ids, (
                 f"Test{i}:\flash ids: {fa_output_ids}\nvLLM ids: {vllm_output_ids}"
-                f"Test{i}:\nflash ouput: {fa_output_str!r}\nvLLM output: {vllm_output_str!r}"
+                f"Test{i}:\nflash output: {fa_output_str!r}\nvLLM output: {vllm_output_str!r}"
             )

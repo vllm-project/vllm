@@ -55,6 +55,9 @@ class ModelRunner:
         # FIXME(woosuk): This is a hack to make the tests work. Refactor this.
         self.sliding_window = (model_config.get_sliding_window()
                                if model_config is not None else None)
+        self.flash_style = (self.model_config.flash_style
+                            if model_config is not None else False)
+
         self.device_config = (device_config
                               if device_config is not None else DeviceConfig())
         self.device = self.device_config.device
@@ -245,18 +248,17 @@ class ModelRunner:
                                           dtype=torch.long,
                                           device=self.device)
 
-        input_metadata = InputMetadata(
-            is_prompt=True,
-            slot_mapping=slot_mapping,
-            prompt_lens=prompt_lens_tensor,
-            max_seq_len=max_prompt_len,
-            start_loc=start_loc_tensor,
-            max_context_len=None,
-            context_lens=context_lens_tensor,
-            block_tables=block_tables,
-            use_cuda_graph=False,
-            kv_cache_dtype=self.kv_cache_dtype,
-            flash_style=self.model_config.flash_style)
+        input_metadata = InputMetadata(is_prompt=True,
+                                       slot_mapping=slot_mapping,
+                                       prompt_lens=prompt_lens_tensor,
+                                       max_seq_len=max_prompt_len,
+                                       start_loc=start_loc_tensor,
+                                       max_context_len=None,
+                                       context_lens=context_lens_tensor,
+                                       block_tables=block_tables,
+                                       use_cuda_graph=False,
+                                       kv_cache_dtype=self.kv_cache_dtype,
+                                       flash_style=self.flash_style)
         return (input_tokens, input_positions, input_metadata, prompt_lens,
                 subquery_lens, lora_index_mapping, lora_prompt_mapping,
                 lora_requests)
@@ -373,18 +375,17 @@ class ModelRunner:
             _pad_to_max(mapping, 1, pad=0) for mapping in lora_index_mapping
         ]
 
-        input_metadata = InputMetadata(
-            is_prompt=False,
-            slot_mapping=slot_mapping,
-            prompt_lens=None,
-            max_seq_len=None,
-            start_loc=None,
-            max_context_len=max_context_len,
-            context_lens=context_lens,
-            block_tables=block_tables,
-            use_cuda_graph=use_captured_graph,
-            kv_cache_dtype=self.kv_cache_dtype,
-            flash_style=self.model_config.flash_style)
+        input_metadata = InputMetadata(is_prompt=False,
+                                       slot_mapping=slot_mapping,
+                                       prompt_lens=None,
+                                       max_seq_len=None,
+                                       start_loc=None,
+                                       max_context_len=max_context_len,
+                                       context_lens=context_lens,
+                                       block_tables=block_tables,
+                                       use_cuda_graph=use_captured_graph,
+                                       kv_cache_dtype=self.kv_cache_dtype,
+                                       flash_style=self.flash_style)
         return (input_tokens, input_positions, input_metadata,
                 lora_index_mapping, lora_prompt_mapping, lora_requests)
 
@@ -547,7 +548,7 @@ class ModelRunner:
                 block_tables=metadata_dict["block_tables"],
                 use_cuda_graph=metadata_dict["use_cuda_graph"],
                 kv_cache_dtype=metadata_dict["kv_cache_dtype"],
-                flash_style=self.model_config.flash_style)
+                flash_style=self.flash_style)
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
                 seq_data=None,
@@ -731,7 +732,7 @@ class ModelRunner:
                     block_tables=block_tables[:batch_size],
                     use_cuda_graph=True,
                     kv_cache_dtype=self.kv_cache_dtype,
-                    flash_style=self.model_config.flash_style)
+                    flash_style=self.flash_style)
 
                 if self.lora_config:
                     lora_mapping = LoRAMapping(
