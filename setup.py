@@ -307,14 +307,14 @@ if _is_cuda():
     for flag in REMOVE_NVCC_FLAGS:
         with contextlib.suppress(ValueError):
             torch_cpp_ext.COMMON_NVCC_FLAGS.remove(flag)
-    
+
     device_count = torch.cuda.device_count()
     for i in range(device_count):
         major, minor = torch.cuda.get_device_capability(i)
         if major < 8:
             install_punica = False
             break
-            
+
 elif _is_hip():
     NVCC_FLAGS_PUNICA = NVCC_FLAGS.copy()
     NVCC_FLAGS_PUNICA += ["-mno-wavefrontsize64"]
@@ -343,15 +343,15 @@ if install_punica and not _is_neuron():
     ext_modules.append(
         CUDAExtension(
             name="vllm._punica_C",
-            sources=["csrc/punica/punica_ops.cu",
-                     "csrc/punica/punica_pybind.cpp"] +
-            glob("csrc/punica/bgmv/*.cu"),
+            sources=[
+                "csrc/punica/punica_ops.cu", "csrc/punica/punica_pybind.cpp"
+            ] + glob("csrc/punica/bgmv/*.cu"),
             extra_compile_args={
                 "cxx": CXX_FLAGS,
                 "nvcc": NVCC_FLAGS_PUNICA,
-                },
+            },
         ))
-    
+
 if _is_cuda():
     # Add MoE kernels.
     ext_modules.append(
