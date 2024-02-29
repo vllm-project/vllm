@@ -52,11 +52,6 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class Starcoder2Attention(nn.Module):
-    """
-    Multi-headed attention from 'Attention Is All You Need' paper. Modified to use sliding window attention: Longformer
-    and "Generating Long Sequences with Sparse Transformers".
-    """
-
     def __init__(self,
                  config: Starcoder2Config,
                  linear_method: Optional[LinearMethodBase] = None):
@@ -115,10 +110,6 @@ class Starcoder2Attention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             sliding_window=self.sliding_window,
         )
-
-        # TODO: check remaining variable
-        # self.num_key_value_groups = self.num_heads // self.num_key_value_heads
-        # self.is_causal = True
 
     def forward(
         self,
