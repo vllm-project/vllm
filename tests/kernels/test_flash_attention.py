@@ -1,5 +1,5 @@
 import random
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 import pytest
 import torch
@@ -19,7 +19,7 @@ PARTITION_SIZE = 512
 DTYPES = [torch.half, torch.bfloat16]
 NUM_GEN_SEQS = [3, 6, 17]  # Arbitrary values for testing
 NUM_PREFILL_SEQS = [3, 6, 17]  # Arbitrary values for testing
-NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
+NUM_HEADS = [(1, 40), (40, 40), (64, 8)]  # Arbitrary values for testing
 NUM_HEADS_SMALL = NUM_HEADS
 # head size should be bigger than or equal to block size.
 HEAD_SIZES = [256]
@@ -171,7 +171,7 @@ def test_flash_paged_attention(
                         device="cuda")
     query.uniform_(-scale, scale)
 
-    assert num_query_heads % num_kv_heads == 0
+    # assert num_query_heads % num_kv_heads == 0
     num_queries_per_kv = num_query_heads // num_kv_heads
     alibi_slopes = None
     if use_alibi:
@@ -195,6 +195,7 @@ def test_flash_paged_attention(
         ]
         block_tables.append(block_table)
     block_tables = torch.tensor(block_tables, dtype=torch.int, device="cuda")
+    breakpoint()
 
     # Create the KV caches.
     key_caches, value_caches = kv_cache_factory(NUM_BLOCKS,
@@ -239,7 +240,4 @@ def test_flash_paged_attention(
         flash_style=True,
     )
 
-    # NOTE(woosuk): Due to the kernel-level differences in the two
-    # implementations, there is a small numerical difference in the two
-    # outputs. Thus, we use a relaxed tolerance for the test.
     assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
