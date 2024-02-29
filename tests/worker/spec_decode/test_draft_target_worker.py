@@ -7,7 +7,6 @@ from vllm.worker.spec_decode.util import SpeculativeProposals
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SequenceGroupMetadata
 
-
 from .utils import mock_worker, create_batch, ExecuteModelData, create_seq_group_metadata_from_prompts, create_sampler_output_list
 #from .utils import (mock_worker,
 #                    create_seq_group_metadata_from_prompts, create_batch,
@@ -19,7 +18,8 @@ from unittest.mock import MagicMock
 def test_get_all_seq_ids():
     """Verify get_all_seq_ids extracts all seq ids.
     """
-    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock(), MagicMock())
+    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock(),
+                               MagicMock())
 
     expected_seq_ids = list(range(10)) + list(range(100, 110))
 
@@ -47,7 +47,8 @@ def test_get_all_seq_ids():
 def test_create_target_seq_id_iterator(num_target_seq_ids: int):
     """Assert all target seq ids are greater than input seq ids.
     """
-    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock(), MagicMock())
+    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock(),
+                               MagicMock())
 
     all_seq_ids = [
         [1, 3, 5, 7],
@@ -79,7 +80,8 @@ def test_get_token_ids_to_score(k: int):
     for i in range(proposal_token_ids.shape[0]):
         expected_output.append(proposal_token_ids[:i + 1].tolist())
 
-    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock(), MagicMock())
+    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock(),
+                               MagicMock())
     actual_output = worker._get_token_ids_to_score(proposal_token_ids)  # pylint: disable=protected-access
 
     actual_output = [
@@ -112,7 +114,8 @@ def test_create_single_target_seq_group_metadata(k: int):
     input_seq_id = list(input_seq_group_metadata.seq_data.keys())[0]
     target_seq_id = 100
 
-    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock(), MagicMock())
+    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock(),
+                               MagicMock())
     output = worker._create_single_target_seq_group_metadata(  # pylint: disable=protected-access
         input_seq_group_metadata,
         input_seq_id,
@@ -147,7 +150,8 @@ def test_correctly_calls_draft_model(k: int, batch_size: int):
     target_worker = mock_worker(max_model_len=max_model_len)
     rejection_sampler = MagicMock()
     metrics_collector = MagicMock()
-    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler, metrics_collector)
+    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
+                               metrics_collector)
 
     exception_secret = 'artifical stop'
     draft_worker.get_spec_proposals.side_effect = ValueError(exception_secret)
@@ -162,8 +166,12 @@ def test_correctly_calls_draft_model(k: int, batch_size: int):
 
     for args, _ in call_args_list:
         #(actual_execute_model_data, actual_k, actual_max_model_len) = args
-        (seq_group_metadata_list, blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy, actual_k, actual_max_model_len) = args
-        actual_execute_model_data = ExecuteModelData(seq_group_metadata_list, blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
+        (seq_group_metadata_list, blocks_to_swap_in, blocks_to_swap_out,
+         blocks_to_copy, actual_k, actual_max_model_len) = args
+        actual_execute_model_data = ExecuteModelData(seq_group_metadata_list,
+                                                     blocks_to_swap_in,
+                                                     blocks_to_swap_out,
+                                                     blocks_to_copy)
         assert actual_execute_model_data == execute_model_data
         assert actual_k == k
         assert actual_max_model_len == max_model_len
@@ -187,7 +195,8 @@ def test_correctly_calls_target_model(k: int, batch_size: int):
 
     set_random_seed(1)
 
-    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler, metrics_collector)
+    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
+                               metrics_collector)
 
     vocab_size = 32_000
 
@@ -269,7 +278,8 @@ def test_correctly_calls_rejection_sampler(k: int, batch_size: int):
 
     set_random_seed(1)
 
-    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler, metrics_collector)
+    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
+                               metrics_collector)
 
     proposal_token_ids = torch.randint(low=0,
                                        high=vocab_size,
@@ -346,7 +356,8 @@ def test_correctly_formats_output(k: int, batch_size: int):
 
     set_random_seed(1)
 
-    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler, metrics_collector)
+    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
+                               metrics_collector)
 
     proposal_token_ids = torch.randint(low=0,
                                        high=vocab_size,
@@ -391,11 +402,13 @@ def test_correctly_formats_output(k: int, batch_size: int):
                                              device='cuda')
     for i in range(batch_size):
         minimum_accepted_tokens = 1
-        rejection_sampler_output[i][-random.randint(minimum_accepted_tokens, k + 1):] = -1
+        rejection_sampler_output[i][
+            -random.randint(minimum_accepted_tokens, k + 1):] = -1
 
     rejection_sampler.return_value = rejection_sampler_output
 
-    output = worker.execute_model(**execute_model_data.to_dict(), num_spec_tokens=k)
+    output = worker.execute_model(**execute_model_data.to_dict(),
+                                  num_spec_tokens=k)
 
     expected_output = create_sampler_output_list(
         rejection_sampler_output.transpose(0, 1), [None for _ in range(k + 1)])
@@ -434,6 +447,7 @@ def test_correctly_formats_output(k: int, batch_size: int):
                 i].output_token
             assert actual_by_step[i].logprobs == expected_by_step[i].logprobs
 
+
 @pytest.mark.parametrize('k', [1, 2])
 @pytest.mark.parametrize('batch_size', [1])
 @pytest.mark.parametrize('returns_metrics', [True, False])
@@ -453,7 +467,8 @@ def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool):
 
     set_random_seed(1)
 
-    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler, metrics_collector)
+    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
+                               metrics_collector)
     worker.init_model()
 
     proposal_token_ids = torch.randint(low=0,
@@ -499,20 +514,23 @@ def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool):
                                              device='cuda')
     for i in range(batch_size):
         minimum_accepted_tokens = 1
-        rejection_sampler_output[i][-random.randint(minimum_accepted_tokens, k + 1):] = -1
+        rejection_sampler_output[i][
+            -random.randint(minimum_accepted_tokens, k + 1):] = -1
 
     rejection_sampler.return_value = rejection_sampler_output
-    
+
     mock_rejsample_metrics = "cade make this a dtw metrics" if returns_metrics else None
     metrics_collector.maybe_collect_rejsample_metrics.return_value = mock_rejsample_metrics
 
-    output = worker.execute_model(**execute_model_data.to_dict(), num_spec_tokens=k)
+    output = worker.execute_model(**execute_model_data.to_dict(),
+                                  num_spec_tokens=k)
     assert output[0].draft_target_worker_metrics == mock_rejsample_metrics
 
     call_args_list = metrics_collector.maybe_collect_rejsample_metrics.call_args_list
     assert len(call_args_list) == 1
     args, kwargs = call_args_list[0]
     assert args[0] == k or kwargs.get('k', -1) == k
+
 
 @pytest.mark.parametrize('k', [0])
 @pytest.mark.parametrize('batch_size', [1, 2, 32])
@@ -532,19 +550,25 @@ def test_k_equals_zero(k: int, batch_size: int):
 
     set_random_seed(1)
 
-    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler, metrics_collector)
+    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
+                               metrics_collector)
 
     execute_model_data, prompts, prev_output_tokens = create_batch(
         batch_size, k, prev_output_token_len=0)
 
-    out = worker.execute_model(**execute_model_data.to_dict(), num_spec_tokens=k)
+    out = worker.execute_model(**execute_model_data.to_dict(),
+                               num_spec_tokens=k)
 
     assert len(out) == 1, f"expected only one token output when {k=}"
     assert out[0].probs == None, "expect gpu tensor references to be None"
-    assert out[0].sampled_tokens == None, "expect gpu tensor references to be None"
+    assert out[
+        0].sampled_tokens == None, "expect gpu tensor references to be None"
 
-    assert draft_worker.execute_model.called_once_with(**execute_model_data.to_dict())
-    assert target_worker.execute_model.called_once_with(**execute_model_data.to_dict())
+    assert draft_worker.execute_model.called_once_with(
+        **execute_model_data.to_dict())
+    assert target_worker.execute_model.called_once_with(
+        **execute_model_data.to_dict())
+
 
 @pytest.mark.parametrize('k', [0, 5])
 @pytest.mark.parametrize('batch_size', [0])
@@ -565,19 +589,24 @@ def test_empty_input_batch(k: int, batch_size: int):
 
     set_random_seed(1)
 
-    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler, metrics_collector)
+    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
+                               metrics_collector)
 
     execute_model_data, prompts, prev_output_tokens = create_batch(
         batch_size, k, prev_output_token_len=0)
 
-    out = worker.execute_model(**execute_model_data.to_dict(), num_spec_tokens=k)
+    out = worker.execute_model(**execute_model_data.to_dict(),
+                               num_spec_tokens=k)
 
     assert len(out) == 1, f"expected only one token output when {k=}"
     assert out[0].probs == None, "expect gpu tensor references to be None"
-    assert out[0].sampled_tokens == None, "expect gpu tensor references to be None"
+    assert out[
+        0].sampled_tokens == None, "expect gpu tensor references to be None"
 
-    assert draft_worker.execute_model.called_once_with(**execute_model_data.to_dict())
-    assert target_worker.execute_model.called_once_with(**execute_model_data.to_dict())
+    assert draft_worker.execute_model.called_once_with(
+        **execute_model_data.to_dict())
+    assert target_worker.execute_model.called_once_with(
+        **execute_model_data.to_dict())
 
 
 @torch.inference_mode()
@@ -588,7 +617,8 @@ def test_init_model():
     rejection_sampler.token_id_dtype = torch.int64
     metrics_collector = MagicMock()
 
-    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler, metrics_collector)
+    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
+                               metrics_collector)
 
     worker.init_model()
 
@@ -601,6 +631,7 @@ def test_init_model():
     assert metrics_collector.init_gpu_tensors.called_once()
     assert rejection_sampler.init_gpu_tensors.called_once()
 
+
 @torch.inference_mode()
 def test_init_cache_engine():
     draft_worker = mock_worker()
@@ -609,7 +640,8 @@ def test_init_cache_engine():
     rejection_sampler.token_id_dtype = torch.int64
     metrics_collector = MagicMock()
 
-    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler, metrics_collector)
+    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
+                               metrics_collector)
 
     cache_config = MagicMock()
 
@@ -624,18 +656,23 @@ def test_init_cache_engine():
 @pytest.mark.parametrize('target_kv_size_bytes', [2 * 2 * 4096])
 @pytest.mark.parametrize('draft_kv_size_bytes', [0, 2 * 2 * 768, 2 * 2 * 4096])
 @torch.inference_mode()
-def test_profile_num_available_blocks(available_gpu_blocks: int, available_cpu_blocks: int, target_kv_size_bytes: int, draft_kv_size_bytes: int):
+def test_profile_num_available_blocks(available_gpu_blocks: int,
+                                      available_cpu_blocks: int,
+                                      target_kv_size_bytes: int,
+                                      draft_kv_size_bytes: int):
     draft_worker = mock_worker()
     target_worker = mock_worker()
     rejection_sampler = MagicMock()
     rejection_sampler.token_id_dtype = torch.int64
     metrics_collector = MagicMock()
 
-    target_worker.profile_num_available_blocks.return_value = (available_gpu_blocks, available_cpu_blocks)
+    target_worker.profile_num_available_blocks.return_value = (
+        available_gpu_blocks, available_cpu_blocks)
     target_worker.get_kv_size_bytes.return_value = target_kv_size_bytes
     draft_worker.get_kv_size_bytes.return_value = draft_kv_size_bytes
 
-    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler, metrics_collector)
+    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
+                               metrics_collector)
 
     # These values do not directly impact the adjusted block size calculation,
     # so they can be fixed.
@@ -643,17 +680,29 @@ def test_profile_num_available_blocks(available_gpu_blocks: int, available_cpu_b
     cpu_swap_space = 100
     block_size = 16
 
-    num_gpu_blocks, num_cpu_blocks = worker.profile_num_available_blocks(block_size, gpu_memory_utilization, cpu_swap_space)
+    num_gpu_blocks, num_cpu_blocks = worker.profile_num_available_blocks(
+        block_size, gpu_memory_utilization, cpu_swap_space)
 
-    assert target_worker.profile_num_available_blocks.called_once_with(block_size, gpu_memory_utilization, cpu_swap_space)
+    assert target_worker.profile_num_available_blocks.called_once_with(
+        block_size, gpu_memory_utilization, cpu_swap_space)
     assert num_cpu_blocks == available_cpu_blocks
 
-    assert num_gpu_blocks == calculate_gpu_blocks(target_kv_size_bytes, draft_kv_size_bytes, available_gpu_blocks)
+    assert num_gpu_blocks == calculate_gpu_blocks(target_kv_size_bytes,
+                                                  draft_kv_size_bytes,
+                                                  available_gpu_blocks)
 
-@pytest.mark.parametrize('available_gpu_blocks', list(range(20)) + [1024, 1024**2])
+
+@pytest.mark.parametrize('available_gpu_blocks',
+                         list(range(20)) + [1024, 1024**2])
 @pytest.mark.parametrize('target_kv_size_bytes', [2 * 2 * 4096, 2 * 2 * 8192])
 @pytest.mark.parametrize('draft_kv_size_bytes', [0, 2 * 2 * 768, 2 * 2 * 4096])
 @torch.inference_mode()
-def test_calculate_gpu_blocks(available_gpu_blocks: int, target_kv_size_bytes: int, draft_kv_size_bytes: int):
-    num_blocks = calculate_gpu_blocks(target_kv_size_bytes, draft_kv_size_bytes, available_gpu_blocks)
-    assert (num_blocks * target_kv_size_bytes) + (num_blocks * draft_kv_size_bytes) <= (available_gpu_blocks * target_kv_size_bytes)
+def test_calculate_gpu_blocks(available_gpu_blocks: int,
+                              target_kv_size_bytes: int,
+                              draft_kv_size_bytes: int):
+    num_blocks = calculate_gpu_blocks(target_kv_size_bytes,
+                                      draft_kv_size_bytes,
+                                      available_gpu_blocks)
+    assert (num_blocks * target_kv_size_bytes) + (
+        num_blocks * draft_kv_size_bytes) <= (available_gpu_blocks *
+                                              target_kv_size_bytes)

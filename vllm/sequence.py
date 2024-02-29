@@ -520,6 +520,7 @@ class SequenceGroupOutput:
 # each of which contains one possible candidate for the next token.
 #SamplerOutput = List[SequenceGroupOutput]
 
+
 @dataclass
 class SamplerOutput:
     outputs: List[SequenceGroupOutput]

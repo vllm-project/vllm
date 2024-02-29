@@ -13,7 +13,8 @@ from vllm.worker.spec_decode.metrics import DraftTargetWorkerMetrics, AsyncMetri
 #from vllm.sequence import (SampleLogprob, SamplerOutput, SequenceGroupMetadata,
 #                           ExecuteModelData, SequenceOutputs, SequenceData,
 #                           SequenceGroupOutputs, DraftTargetWorkerMetrics)
-from vllm.sequence import (SamplerOutput, SequenceGroupMetadata, SequenceData, SequenceGroupOutput, SequenceOutput)
+from vllm.sequence import (SamplerOutput, SequenceGroupMetadata, SequenceData,
+                           SequenceGroupOutput, SequenceOutput)
 from vllm.worker.worker import Worker
 from vllm.worker.spec_decode.multi_step_worker import MultiStepWorker
 #from vllm.worker.prompt_lookup_worker import PromptLookupWorker
@@ -35,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 class DraftTargetWorker:
+
     def __init__(
         self,
         draft_worker: MultiStepWorker,
@@ -60,7 +62,9 @@ class DraftTargetWorker:
         self.rejection_sampler = rejection_sampler
 
         self.device = None
-        self._metrics = AsyncMetricsCollector(rejection_sampler) if metrics_collector is None else metrics_collector
+        self._metrics = AsyncMetricsCollector(
+            rejection_sampler
+        ) if metrics_collector is None else metrics_collector
 
         self.probs_dtype = self.rejection_sampler.probs_dtype
         self.token_id_dtype = self.rejection_sampler.token_id_dtype
@@ -68,7 +72,7 @@ class DraftTargetWorker:
         #self._profiler = TorchProfiler()
 
     def init_model(self) -> None:
-        # Intitialize the target model before the draft model.
+        # Initialize the target model before the draft model.
         # This allows the draft model to have a smaller TP degree than the
         # larger model without refactors to parallel_state.
         self.target_worker.init_model()
@@ -91,7 +95,9 @@ class DraftTargetWorker:
         target_kv_size_bytes = self.target_worker.get_kv_size_bytes(block_size)
         draft_kv_size_bytes = self.draft_worker.get_kv_size_bytes(block_size)
 
-        new_num_gpu_blocks = calculate_gpu_blocks(target_kv_size_bytes, draft_kv_size_bytes, num_gpu_blocks)
+        new_num_gpu_blocks = calculate_gpu_blocks(target_kv_size_bytes,
+                                                  draft_kv_size_bytes,
+                                                  num_gpu_blocks)
         return new_num_gpu_blocks, num_cpu_blocks
 
     def init_cache_engine(self, cache_config: CacheConfig):
@@ -136,25 +142,24 @@ class DraftTargetWorker:
 
     @nvtx_range("draft_target_worker._run_no_spec")
     def _run_no_spec(
-            self,
-            seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-            blocks_to_swap_in: Optional[Dict[int, int]],
-            blocks_to_swap_out: Optional[Dict[int, int]],
-            blocks_to_copy: Optional[Dict[int, List[int]]],
-            #execute_model_data: ExecuteModelData
-            ) -> List[SamplerOutput]:
+        self,
+        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        blocks_to_swap_in: Optional[Dict[int, int]],
+        blocks_to_swap_out: Optional[Dict[int, int]],
+        blocks_to_copy: Optional[Dict[int, List[int]]],
+        #execute_model_data: ExecuteModelData
+    ) -> List[SamplerOutput]:
         """Run a prefill step, without any speculation. The input is sent to the
         draft and target model so that prompt KV are stored in both caches.
 
         TODO update
         """
 
-        self.draft_worker.execute_model(
-                seq_group_metadata_list,
-                blocks_to_swap_in,
-                blocks_to_swap_out,
-                blocks_to_copy,
-                return_python_output=False)
+        self.draft_worker.execute_model(seq_group_metadata_list,
+                                        blocks_to_swap_in,
+                                        blocks_to_swap_out,
+                                        blocks_to_copy,
+                                        return_python_output=False)
 
         sampler_output = self.target_worker.execute_model(
             seq_group_metadata_list,
@@ -204,24 +209,21 @@ class DraftTargetWorker:
 
         # Generate proposals using draft worker.
         proposals = self.draft_worker.get_spec_proposals(
-            seq_group_metadata_list,
-            blocks_to_swap_in,
-            blocks_to_swap_out,
+            seq_group_metadata_list, blocks_to_swap_in, blocks_to_swap_out,
             blocks_to_copy, k, max_model_len)
 
         logger.debug("scoring draft tokens")
         (proposal_scores, bonus_token_ids,
          non_spec_token_ids) = self._score_proposals(
-            seq_group_metadata_list,
-            blocks_to_swap_in,
-            blocks_to_swap_out,
-            blocks_to_copy,
-            k,
-            #execute_model_data, 
-            proposals.proposal_token_ids,
-            proposals.spec_seqs, proposals.non_spec_seqs
-        )
-
+             seq_group_metadata_list,
+             blocks_to_swap_in,
+             blocks_to_swap_out,
+             blocks_to_copy,
+             k,
+             #execute_model_data,
+             proposals.proposal_token_ids,
+             proposals.spec_seqs,
+             proposals.non_spec_seqs)
 
         with nvtx_range("draft_target_worker.rejection_sampler"):
             accepted_token_ids = self.rejection_sampler(
@@ -247,10 +249,12 @@ class DraftTargetWorker:
         seq_ids = self._get_all_seq_ids(proposals.all_seqs)
         sampler_output = self._create_output_sampler_list(
             seq_ids, accepted_token_ids)
-        
-        maybe_rejsample_metrics = self._metrics.maybe_collect_rejsample_metrics(k)
+
+        maybe_rejsample_metrics = self._metrics.maybe_collect_rejsample_metrics(
+            k)
         if maybe_rejsample_metrics is not None:
-            sampler_output[0].draft_target_worker_metrics = maybe_rejsample_metrics
+            sampler_output[
+                0].draft_target_worker_metrics = maybe_rejsample_metrics
 
         return sampler_output
 
@@ -262,7 +266,6 @@ class DraftTargetWorker:
         assert target_max_model_len is not None
 
         return draft_max_model_len, target_max_model_len
-
 
     def _get_all_seq_ids(
             self, seq_group_metadata_list: List[SequenceGroupMetadata]
@@ -315,7 +318,6 @@ class DraftTargetWorker:
         ])
         return token_ids_to_score
 
-
     @nvtx_range("draft_target_worker._score_proposals")
     def _score_proposals(
         self,
@@ -326,7 +328,6 @@ class DraftTargetWorker:
         k: int,
 
         #execute_model_data: ExecuteModelData,
-
         proposal_token_ids: torch.Tensor,  # shape: [batch_size, k]
         spec_seqs: List[SequenceGroupMetadata],
         non_spec_seqs: List[SequenceGroupMetadata],
@@ -474,7 +475,7 @@ class DraftTargetWorker:
         prompt_token_ids = seq_data.get_prompt_token_ids()
         new_output_token_ids = [*seq_data.get_output_token_ids(), *token_ids]
 
-        # The first scoring seqeuence will include the normal number of
+        # The first scoring sequence will include the normal number of
         # processed tokens. This allows it to write KV from the previous
         # iteration.
         #
@@ -595,8 +596,8 @@ class DraftTargetWorker:
 
 
 # TODO name
-def calculate_gpu_blocks(target_kv_size_bytes: int, draft_kv_size_bytes: int, 
-                          total_num_gpu_blocks: int) -> int:
+def calculate_gpu_blocks(target_kv_size_bytes: int, draft_kv_size_bytes: int,
+                         total_num_gpu_blocks: int) -> int:
     """Given total_num_gpu_blocks, the number of GPU blocks that could be
     allocate to the target model, this function calculates how many blocks
     should be given to the draft and target model.

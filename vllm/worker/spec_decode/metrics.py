@@ -16,10 +16,16 @@ class DraftTargetWorkerMetrics:
     draft_tokens: int
     emitted_tokens: int
 
+
 Timer = Callable[[], float]
 
+
 class AsyncMetricsCollector:
-    def __init__(self, rejection_sampler: RejectionSampler, timer: Optional[Timer] = None, collect_interval_s: float = 5.0):
+
+    def __init__(self,
+                 rejection_sampler: RejectionSampler,
+                 timer: Optional[Timer] = None,
+                 collect_interval_s: float = 5.0):
         self._rejection_sampler = rejection_sampler
         self._timer = time.time if timer is None else timer
 
@@ -27,7 +33,7 @@ class AsyncMetricsCollector:
 
         # We don't have a device set yet.
         self._copy_stream: Optional[torch.cuda.Stream] = None
-        
+
         self._in_flight_copy: Optional[torch.cuda.Event] = None
 
         pin_memory = not in_wsl()
@@ -40,27 +46,25 @@ class AsyncMetricsCollector:
         self._rejsample_metrics_collect_interval_s = collect_interval_s
         self._last_metrics_collect_time = self._timer()
 
-
     def init_gpu_tensors(self, rank: int) -> None:
         self._rank = rank
         self._copy_stream = torch.cuda.Stream()
 
-
-    def maybe_collect_rejsample_metrics(self, k: int) -> Optional[DraftTargetWorkerMetrics]:
+    def maybe_collect_rejsample_metrics(
+            self, k: int) -> Optional[DraftTargetWorkerMetrics]:
 
         # If a copy was initiated in the previous call, collect and return.
         if self._in_flight_copy is not None:
             ready_event = self._in_flight_copy
             self._in_flight_copy = None
             return self._collect_rejsample_metrics(k, ready_event)
-        
+
         # Otherwise, check if we should start a new copy.
         if self._should_collect_rejsample_metrics(self._timer()):
             assert self._in_flight_copy is None
             self._in_flight_copy = self._copy_rejsample_metrics_async()
-        
+
         return None
-        
 
     def _should_collect_rejsample_metrics(self, now: float) -> bool:
         """Return whether or not this iteration should print rejection sampling
@@ -96,7 +100,6 @@ class AsyncMetricsCollector:
         aggregate_metrics_ready.record(self._copy_stream)
 
         return aggregate_metrics_ready
-
 
     def _collect_rejsample_metrics(
             self, k: int,

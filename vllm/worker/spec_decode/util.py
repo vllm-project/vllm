@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from vllm.sequence import SequenceGroupMetadata
 from contextlib import contextmanager
 
+
 @dataclass
 class SpeculativeProposals:
     """Sequences valid for speculative decoding and their corresponding
@@ -29,6 +30,7 @@ class SpeculativeProposals:
                 f"original_indices={self.original_indices}, "
                 f"proposal_token_ids={self.proposal_token_ids.shape}, "
                 f"proposal_probs={self.proposal_probs.shape})")
+
 
 @contextmanager
 def nvtx_range(msg, *args, **kwargs):

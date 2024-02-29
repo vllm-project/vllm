@@ -5,7 +5,8 @@ from unittest.mock import MagicMock
 from vllm.worker.worker import Worker
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.engine.arg_utils import EngineArgs
-from vllm.sequence import (SequenceGroupMetadata, SequenceData, SamplerOutput, SequenceGroupOutput, SequenceOutput)
+from vllm.sequence import (SequenceGroupMetadata, SequenceData, SamplerOutput,
+                           SequenceGroupOutput, SequenceOutput)
 from vllm.sampling_params import SamplingParams
 from vllm.worker.cache_engine import CacheEngine
 from vllm.model_executor.utils import set_random_seed
@@ -28,8 +29,7 @@ class ExecuteModelData:
 
     @classmethod
     def from_dict(cls, d):
-        cleaned = dict(
-            (field.name, d[field.name]) for field in fields(cls))
+        cleaned = dict((field.name, d[field.name]) for field in fields(cls))
         return cls(**cleaned)
 
 
@@ -55,10 +55,12 @@ def create_execute_model_data(
         blocks_to_swap_in=blocks_to_swap_in,
         blocks_to_swap_out=blocks_to_swap_out,
         blocks_to_copy=blocks_to_copy,
-    ) 
+    )
+
 
 def mock_worker(vocab_size: int = 30_000,
-                max_model_len: int = 2048, rank: int =0) -> MagicMock:
+                max_model_len: int = 2048,
+                rank: int = 0) -> MagicMock:
     worker = MagicMock()
     worker.vocab_size = vocab_size
     worker.max_model_len = max_model_len
@@ -196,6 +198,7 @@ def assert_logprobs_dict_allclose(
             expected = torch.tensor(single_step_expected_logprobs[token_id])
             assert torch.allclose(actual, expected)
 
+
 def create_sampler_output_list(
         token_ids: torch.Tensor,
         probs: Iterable[Optional[torch.Tensor]],
@@ -224,6 +227,7 @@ def create_sampler_output_list(
         for step in range(num_steps)
     ]
 
+
 def create_batch(batch_size,
                  k,
                  prompt_len: int = 10,
@@ -244,7 +248,6 @@ def create_batch(batch_size,
     execute_model_data = create_execute_model_data(
         create_seq_group_metadata_from_prompts(prompts, num_gpu_blocks,
                                                block_size, final_seq_lens,
-                                               prev_output_tokens, seq_ids),
-        )
-        #num_preallocated_slots=k)
+                                               prev_output_tokens, seq_ids), )
+    #num_preallocated_slots=k)
     return execute_model_data, prompts, prev_output_tokens
