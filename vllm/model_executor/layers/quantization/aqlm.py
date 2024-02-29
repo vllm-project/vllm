@@ -118,15 +118,10 @@ class AQLMLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: AQLMConfig):
         self.quant_config = quant_config
 
-    def create_weights(
-        self,
-        input_size_per_partition: int,
-        output_size_per_partition: int,
-        input_size: int,
-        output_size: int,
-        params_dtype: torch.dtype,
-    ) -> Dict[str, Any]:
-        #TEST
+    def create_weights(self, input_size_per_partition: int,
+                       output_size_per_partition: int, input_size: int,
+                       output_size: int, params_dtype: torch.dtype,
+                       shards: int) -> Dict[str, Any]:
         assert (output_size == output_size_per_partition)
         assert (input_size == input_size_per_partition)
         del output_size  # Unused.
@@ -145,18 +140,15 @@ class AQLMLinearMethod(LinearMethodBase):
                 "weight shape. This can be caused by too large "
                 "tensor parallel size.")
 
-        # or does this need more dimensions and use the correct nbits_per_codebook as an int type.  Does that pack them?
         codes = Parameter(
             torch.empty(
                 output_size_per_partition,  # not entirely sure what to do with num_out_groups, if we need this pack factor.
                 input_size_per_partition // self.quant_config.pack_factor,
-                1,  # probably should be num codebooks.
+                1,  # probably should be num codebooks and change pack factor?
                 dtype=get_int_dtype(self.quant_config.nbits_per_codebook),
             ),
             requires_grad=False,
         )
-
-        print(codes.shape)
 
         set_weight_attrs(
             codes,
@@ -170,13 +162,20 @@ class AQLMLinearMethod(LinearMethodBase):
 
         codebooks = Parameter(
             torch.empty(
-                self.quant_config.num_codebooks,
+                self.quant_config.num_codebooks * shards,
                 2**self.quant_config.nbits_per_codebook,
                 self.quant_config.out_group_size,
                 self.quant_config.in_group_size,
                 dtype=params_dtype,
             ),
             requires_grad=False,
+        )
+        set_weight_attrs(
+            codebooks,
+            {
+                "shard_dim": 0,
+                "shards": shards
+            },
         )
 
         scales = Parameter(
@@ -213,25 +212,45 @@ class AQLMLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        # qweight = weights["qweight"] do I need the same flattening?
-        # out_shape = x.shape[:-1] + (qweight.shape[-1],)
-        # reshaped_x = x.reshape(-1, x.shape[-1]) #
 
-        print("input shape is ", x.shape)
+        codebooks = weights["codebooks"]
+        codes = weights["codes"]
+        scales = weights["scales"]
 
-        if (x.shape[1] == 5):
-            print("codes shape is ", weights["codes"].shape)
-            print("codebooks shape is ", weights["codebooks"].shape)
-            print("scales shape is ", weights["scales"].shape)
-            print("x is ", x)
+        shard_dim = getattr(codebooks, "shard_dim", None)
+        if shard_dim is not None:
+            output_shape = x.shape[:-1] + (scales.shape[0], )
+            output = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+            shards = getattr(codebooks, "shards", None)
+            # break the shards apart and combine them.
+            assert (shard_dim == 0)
+            num_codebooks = codebooks.shape[shard_dim] // shards
+
+            assert (scales.shape[0] == codes.shape[0])
+            assert (scales.shape[0] % shards == 0)
+            base_size = scales.shape[0] // shards
+
+            for shard_id in range(shards):
+                shard_output = ops.aqlm_gemm(
+                    x, codes.narrow(0, shard_id * base_size, base_size),
+                    codebooks.narrow(shard_dim, shard_id * num_codebooks,
+                                     num_codebooks),
+                    scales.narrow(0, shard_id * base_size, base_size),
+                    None if bias is None else bias.narrow(
+                        0, shard_id * base_size, base_size))
+
+                output_slice = output.narrow(-1, shard_id * base_size,
+                                             base_size)
+                assert (output_slice.shape == shard_output.shape)
+                output_slice.copy_(shard_output)
+            return output
 
         output = ops.aqlm_gemm(
-            x,  # hmm, reshape?
-            weights["codes"],
-            weights["codebooks"],
-            weights["scales"],
+            x,
+            codes,
+            codebooks,
+            scales,
             bias,
         )
 
-        print("output shape is ", output.shape)
         return output
