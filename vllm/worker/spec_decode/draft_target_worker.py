@@ -1,14 +1,3 @@
-# This library may only be used in the Anyscale Platform.
-# Notwithstanding the terms of any license or notice within this container,
-# you may not modify, copy or remove this file.
-# Your right to use this library is subject to the
-# Anyscale Terms of Service (anyscale.com/terms)
-# or other written agreement between you and Anyscale.
-
-# Copyright (2023 and onwards) Anyscale, Inc.
-# This Software includes software developed at Anyscale (anyscale.com/)
-# and its use is subject to the included LICENSE file.
-
 from typing import Iterator, List, Tuple, Optional, Union, Dict
 from itertools import chain, count
 from functools import cached_property
@@ -34,9 +23,9 @@ from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.model_executor.parallel_utils.parallel_state import get_tensor_model_parallel_group
 from vllm.config import CacheConfig
 #from vllm.worker.base_worker import BaseWorker
-#from vllm.anyscale.profiler_utils import TorchProfiler, nvtx_range, Profilable
 #from vllm.model_executor.layers.sampler import RawSamplerOutput
 from vllm.utils import in_wsl
+from vllm.worker.spec_decode.util import nvtx_range
 
 SeqId = int
 TargetSeqId = int
@@ -128,7 +117,7 @@ class DraftTargetWorker:
             k,
         )
 
-    #@nvtx_range("draft_target_worker._run_prefill")
+    @nvtx_range("draft_target_worker._run_no_spec")
     def _run_no_spec(
             self,
             seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
@@ -162,7 +151,7 @@ class DraftTargetWorker:
         sampler_output.sampled_tokens = None
         return [sampler_output]
 
-    #@nvtx_range("draft_target_worker._run_speculative_decoding_step")
+    @nvtx_range("draft_target_worker._run_speculative_decoding_step")
     def _run_speculative_decoding_step(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
@@ -217,19 +206,13 @@ class DraftTargetWorker:
         )
 
 
-        #with nvtx_range("draft_target_worker.rejection_sampler"):
-        #    accepted_token_ids = self.rejection_sampler(
-        #        proposal_scores,
-        #        bonus_token_ids,
-        #        proposals.proposal_probs,
-        #        proposals.proposal_token_ids,
-        #    )
-        accepted_token_ids = self.rejection_sampler(
-            proposal_scores,
-            bonus_token_ids,
-            proposals.proposal_probs,
-            proposals.proposal_token_ids,
-        )
+        with nvtx_range("draft_target_worker.rejection_sampler"):
+            accepted_token_ids = self.rejection_sampler(
+                proposal_scores,
+                bonus_token_ids,
+                proposals.proposal_probs,
+                proposals.proposal_token_ids,
+            )
 
         # Append output tokens from non-speculative sequences to
         # the accepted token ids tensor.
@@ -316,7 +299,7 @@ class DraftTargetWorker:
         return token_ids_to_score
 
 
-    #@nvtx_range("draft_target_worker._score_proposals")
+    @nvtx_range("draft_target_worker._score_proposals")
     def _score_proposals(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],

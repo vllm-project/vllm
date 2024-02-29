@@ -2,6 +2,7 @@ import torch
 from typing import List
 from dataclasses import dataclass
 from vllm.sequence import SequenceGroupMetadata
+from contextlib import contextmanager
 
 @dataclass
 class SpeculativeProposals:
@@ -28,3 +29,21 @@ class SpeculativeProposals:
                 f"original_indices={self.original_indices}, "
                 f"proposal_token_ids={self.proposal_token_ids.shape}, "
                 f"proposal_probs={self.proposal_probs.shape})")
+
+@contextmanager
+def nvtx_range(msg, *args, **kwargs):
+    """ 
+    Context manager / decorator that pushes an NVTX range at the beginning
+    of its scope, and pops it at the end. If extra arguments are given,
+    they are passed as arguments to msg.format().
+
+    If running with cuda graphs, you must enable nsys cuda graph profiling.
+
+    Arguments:
+        msg (string): message to associate with the range
+    """
+    torch.cuda.nvtx.range_push(msg.format(*args, **kwargs))
+    try:
+        yield
+    finally:
+        torch.cuda.nvtx.range_pop()
