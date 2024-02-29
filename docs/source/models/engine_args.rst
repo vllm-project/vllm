@@ -107,6 +107,10 @@ Below, you can find an explanation of every engine argument for vLLM:
 
     Maximum number of paddings in a batch.
 
+.. option:: --max-queue-length <size>
+
+    Maximum number of requests that can be present across all queues.
+
 .. option:: --disable-log-stats
 
     Disable logging statistics.
