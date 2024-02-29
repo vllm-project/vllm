@@ -322,8 +322,7 @@ class CacheConfig:
         if self.cache_dtype == "auto":
             pass
         elif self.cache_dtype == "fp8_e5m2":
-            device_name = torch.cuda.get_device_name()
-            if "AMD" in device_name:
+            if is_hip():
                 raise NotImplementedError(
                     "FP8_E5M2 KV Cache on AMD GPU has not been supported yet.")
             nvcc_cuda_version = get_nvcc_cuda_version()
