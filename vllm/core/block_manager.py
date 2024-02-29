@@ -101,12 +101,11 @@ class BlockAllocator:
         return block_hash in self.cached_blocks or block_hash in self.evictor
 
     def update_hash(self, block_hash: int, block: PhysicalTokenBlock):
-        assert not self.contains_block(block_hash)
-        old_hash = block.block_hash
-        block.block_hash = block_hash
-
-        # If caching is enabled, update the cached_blocks
+        # If caching is enabled, update the hash of block and the cached_blocks dictionary.
         if self.enable_caching:
+            assert not self.contains_block(block_hash)
+            old_hash = block.block_hash
+            block.block_hash = block_hash
             del self.cached_blocks[old_hash]
             self.cached_blocks[block_hash] = block
 
