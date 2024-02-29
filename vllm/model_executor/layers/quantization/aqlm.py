@@ -41,8 +41,7 @@ class AQLMConfig(QuantizationConfig):
         # I think pack factor is *probably* how many elements fit into one quantized tensor element.
         # though out group size makes it interesting, because really we are doing 2D blocks, potentially.
         # maybe this is vllms first 2D packing?  Arg.
-        self.pack_factor = (self.in_group_size * self.out_group_size //
-                            self.num_codebooks)
+        self.pack_factor = (self.in_group_size * self.out_group_size)
 
     def __repr__(self) -> str:
         return (f"AQLMConfig(in_group_size={self.in_group_size}, "
@@ -144,7 +143,7 @@ class AQLMLinearMethod(LinearMethodBase):
             torch.empty(
                 output_size_per_partition,  # not entirely sure what to do with num_out_groups, if we need this pack factor.
                 input_size_per_partition // self.quant_config.pack_factor,
-                1,  # probably should be num codebooks and change pack factor?
+                self.quant_config.num_codebooks,
                 dtype=get_int_dtype(self.quant_config.nbits_per_codebook),
             ),
             requires_grad=False,
@@ -212,7 +211,6 @@ class AQLMLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-
         codebooks = weights["codebooks"]
         codes = weights["codes"]
         scales = weights["scales"]
