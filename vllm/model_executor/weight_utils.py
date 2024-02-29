@@ -15,10 +15,7 @@ from tqdm.auto import tqdm
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import (
-    get_quantization_config,
-    QuantizationConfig,
-)
+from vllm.model_executor.layers.quantization import (get_quantization_config, QuantizationConfig)
 
 logger = init_logger(__name__)
 
