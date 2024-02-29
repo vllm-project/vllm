@@ -143,10 +143,9 @@ class ModelRunner:
             # NOTE: This only works for oooooooxxx style attention.
             computed_block_nums = seq_group_metadata.computed_block_nums
             if computed_block_nums is not None and len(
-                    computed_block_nums) > 0:
+                    computed_block_nums) > 0 and self.sliding_window is None:
                 # Prefix is not supported with sliding_window
-                if self.sliding_window is None:
-                    computed_len = len(computed_block_nums) * self.block_size
+                computed_len = len(computed_block_nums) * self.block_size
                 prompt_tokens = prompt_tokens[computed_len:]
                 prefix_block_tables.append(computed_block_nums)
             else:
