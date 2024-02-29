@@ -13,7 +13,7 @@ from vllm.model_executor.layers.attention_backends.paged_attn import (
 from vllm.utils import is_hip
 
 
-class Attention:
+class XFormersBackend:
 
     def __init__(
         self,
