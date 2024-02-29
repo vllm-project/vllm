@@ -62,13 +62,6 @@ _ROCM_PARTIALLY_SUPPORTED_MODELS = {
     "Sliding window attention is not yet supported in ROCm's flash attention",
 }
 
-# TODO(sang): We may not need this. I think it should work with everything.
-_MODEL_CLASSES_SUPPORT_FLASH_ATTN = {
-    arch_and_class[1]
-    for _, arch_and_class in _MODELS.items()
-    if arch_and_class[1] == "LlamaForCausalLM"
-}
-
 # Models not supported by Neuron.
 _NEURON_SUPPORTED_MODELS = {"LlamaForCausalLM": "neuron.llama"}
 
@@ -102,14 +95,6 @@ class ModelRegistry:
             f"vllm.model_executor.models.{module_name}")
         model_cls = getattr(module, model_cls_name, None)
 
-        if (model_config.flash_style
-                and model_cls_name not in _MODEL_CLASSES_SUPPORT_FLASH_ATTN):
-            raise ValueError(
-                f"{model_config.model} doesn't support "
-                "flash attention in vLLM, but "
-                "flash_style=True is given. Choose one of models, "
-                f"{_MODEL_CLASSES_SUPPORT_FLASH_ATTN} to use "
-                "flash_style=True.")
         return model_cls
 
     @staticmethod

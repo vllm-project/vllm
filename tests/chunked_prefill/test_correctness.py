@@ -8,7 +8,7 @@ import torch
 from vllm.model_executor.parallel_utils.parallel_state import destroy_model_parallel
 
 MODELS = [
-    "JackFram/llama-68m",
+    # "JackFram/llama-68m",
     "facebook/opt-125m",
 ]
 
