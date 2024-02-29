@@ -438,8 +438,6 @@ __inline__ __device__ float2 scaled_vec_conversion<float2, uint16_t>(const uint1
 #if defined(__HIP__MI300__) && defined(__HIP_FP8_EXPERIMENTAL_BULK_CONVERT__)
     float2 res;
     const auto& f2 = __builtin_amdgcn_cvt_pk_f32_fp8(a, 0);
-    //res.x = vec_conversion<float, uint8_t>(static_cast<uint8_t>(a));
-    //res.y = vec_conversion<float, uint8_t>(static_cast<uint8_t>(a >> 8U));
     res.x = f2[0] * scale;
     res.y = f2[1] * scale;
     return res;
