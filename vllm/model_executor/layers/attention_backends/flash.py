@@ -5,12 +5,11 @@ from flash_attn import flash_attn_func
 import torch
 
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.attention.base import Attention
-from vllm.model_executor.layers.attention.paged_attn import PagedAttentionImpl
-from vllm.model_executor.layers.attention.utils import expand_gqa
+from vllm.model_executor.layers.attention_backends.paged_attn import (
+    PagedAttentionImpl)
 
 
-class Attention(Attention):
+class FlashAttentionBackend:
 
     def __init__(
         self,
@@ -87,11 +86,6 @@ class Attention(Attention):
                 )
             else:
                 # prefix-enabled attention
-                if self.num_kv_heads != self.num_heads:
-                    # TODO(woosuk): Use MQA/GQA kernels for higher performance.
-                    query, key, value = expand_gqa(query, key, value,
-                                                   self.num_heads,
-                                                   self.num_kv_heads)
                 output = PagedAttentionImpl.forward_prefix(
                     query,
                     key,

@@ -8,13 +8,12 @@ from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
                                          LowerTriangularMaskWithTensorBias)
 
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.attention.base import Attention
-from vllm.model_executor.layers.attention.paged_attn import PagedAttentionImpl
-from vllm.model_executor.layers.attention.utils import expand_gqa
+from vllm.model_executor.layers.attention_backends.paged_attn import (
+    PagedAttentionImpl)
 from vllm.utils import is_hip
 
 
-class Attention(BaseAttention):
+class Attention:
 
     def __init__(
         self,
@@ -73,14 +72,26 @@ class Attention(BaseAttention):
 
         if input_metadata.is_prompt:
             # Prompt run.
-            if self.num_kv_heads != self.num_heads:
-                query, key, value = expand_gqa(query, key, value,
-                                               self.num_heads,
-                                               self.num_kv_heads)
-
             if (key_cache is None or value_cache is None
                     or input_metadata.block_tables.numel() == 0):
                 # normal attention
+                if self.num_kv_heads != self.num_heads:
+                    # As of Nov 2023, xformers only supports MHA. For MQA/GQA,
+                    # project the key and value tensors to the desired number of
+                    # heads.
+                    # TODO(woosuk): Use MQA/GQA kernels for higher performance.
+                    query = query.view(query.shape[0], self.num_kv_heads,
+                                       self.num_queries_per_kv,
+                                       query.shape[-1])
+                    key = key[:, :,
+                              None, :].expand(key.shape[0], self.num_kv_heads,
+                                              self.num_queries_per_kv,
+                                              key.shape[-1])
+                    value = value[:, :,
+                                  None, :].expand(value.shape[0],
+                                                  self.num_kv_heads,
+                                                  self.num_queries_per_kv,
+                                                  value.shape[-1])
 
                 # Set attention bias if not provided. This typically happens at
                 # the very attention layer of every iteration.
