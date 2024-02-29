@@ -461,9 +461,9 @@ setuptools.setup(
                  "serving engine for LLMs"),
     long_description=read_readme(),
     long_description_content_type="text/markdown",
-    url="https://github.com/neuralmagic",
+    url="https://github.com/neuralmagic/nm-vllm",
     project_urls={
-        "Homepage": "https://github.com/neuralmagic",
+        "Homepage": "https://github.com/neuralmagic/nm-vllm",
         "Documentation": "https://vllm.readthedocs.io/en/latest/",
     },
     classifiers=[
