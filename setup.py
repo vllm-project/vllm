@@ -343,7 +343,8 @@ vllm_extension_sources = [
 if _is_cuda():
     vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
     vllm_extension_sources.append("csrc/custom_all_reduce.cu")
-
+    vllm_extension_sources.append("csrc/quantization/aqlm/aqlm_cuda_entry.cpp")
+    vllm_extension_sources.append("csrc/quantization/aqlm/aqlm_cuda_kernel.cu")
     # Add MoE kernels.
     ext_modules.append(
         CUDAExtension(
