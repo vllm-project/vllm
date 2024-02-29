@@ -90,6 +90,7 @@ class LLMEngine:
             f"dtype={model_config.dtype}, "
             f"max_seq_len={model_config.max_model_len}, "
             f"download_dir={model_config.download_dir!r}, "
+            f"local_files_only={model_config.local_files_only}, "
             f"load_format={model_config.load_format}, "
             f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
             f"disable_custom_all_reduce="

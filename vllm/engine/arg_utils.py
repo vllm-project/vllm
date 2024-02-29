@@ -3,6 +3,7 @@ import dataclasses
 from dataclasses import dataclass
 from typing import Optional
 
+from huggingface_hub.constants import HF_HUB_OFFLINE
 from vllm.config import (CacheConfig, DeviceConfig, EngineConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          SpeculativeConfig, TokenizerPoolConfig,
@@ -18,6 +19,7 @@ class EngineArgs:
     tokenizer_mode: str = 'auto'
     trust_remote_code: bool = False
     download_dir: Optional[str] = None
+    local_files_only: bool = HF_HUB_OFFLINE  # checks TRANSFORMERS_OFFLINE too
     load_format: str = 'auto'
     dtype: str = 'auto'
     kv_cache_dtype: str = 'auto'
@@ -131,6 +133,11 @@ class EngineArgs:
                             help='directory to download and load the weights, '
                             'default to the default cache dir of '
                             'huggingface')
+        parser.add_argument(
+            '--local-files-only',
+            action='store_true',
+            default=EngineArgs.local_files_only,
+            help='disable downloads and only look at local files')
         parser.add_argument(
             '--load-format',
             type=str,
@@ -421,7 +428,8 @@ class EngineArgs:
             self.dtype, self.seed, self.revision, self.code_revision,
             self.tokenizer_revision, self.max_model_len, self.quantization,
             self.quantization_param_path, self.enforce_eager,
-            self.max_context_len_to_capture, self.max_logprobs)
+            self.max_context_len_to_capture, self.max_logprobs,
+            self.local_files_only)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,

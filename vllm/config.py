@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, ClassVar, Optional, Union
 import torch
 from packaging.version import Version
 from transformers import PretrainedConfig
+from huggingface_hub import try_to_load_from_cache
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config, get_hf_text_config
@@ -92,12 +93,14 @@ class ModelConfig:
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
         max_logprobs: int = 5,
+        local_files_only: bool = False,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
         self.trust_remote_code = trust_remote_code
         self.download_dir = download_dir
+        self.local_files_only = local_files_only
         self.load_format = load_format
         self.seed = seed
         self.revision = revision
@@ -116,6 +119,10 @@ class ModelConfig:
             from modelscope.hub.snapshot_download import snapshot_download
 
             if not os.path.exists(model):
+                if self.local_files_only:
+                    raise ValueError(
+                        f"Unable to find cached ModelScope model for {model}"
+                        f"with local_files_only==True")
                 model_path = snapshot_download(model_id=model,
                                                cache_dir=download_dir,
                                                revision=revision)
@@ -124,6 +131,46 @@ class ModelConfig:
             self.model = model_path
             self.download_dir = model_path
             self.tokenizer = model_path
+
+        elif self.local_files_only:
+            # when using local_files_only, accept a HF model name but resolve it to the
+            # full path within the local HF Hub cache
+            if not os.path.exists(model):
+                filepath = try_to_load_from_cache(
+                    repo_id=model,
+                    filename='config.json',
+                    cache_dir=download_dir,
+                    revision=revision,
+                )
+                if not isinstance(filepath, str):
+                    raise ValueError(
+                        f"Unable to find cached model for {model} "
+                        f"with local_files_only==True")
+                self.model = os.path.dirname(filepath)
+
+            if tokenizer == model:
+                self.tokenizer = self.model
+            elif not os.path.exists(tokenizer):
+                filepath = None
+                # tokenizer.json is for fast tokenizers
+                # tokenizer_config.json for "slow" tokenizers
+                tokenizer_files = ["tokenizer_config.json", "tokenizer.json"]
+                for file_to_check in tokenizer_files:
+                    try_load_result = try_to_load_from_cache(
+                        repo_id=tokenizer,
+                        filename=file_to_check,
+                        cache_dir=download_dir,
+                        revision=revision,
+                    )
+                    if isinstance(try_load_result, str):
+                        filepath = try_load_result
+                        break
+
+                if not filepath:
+                    raise ValueError(
+                        f"Unable to find cached tokenizer for {tokenizer}"
+                        f"with local_files_only==True")
+                self.tokenizer = os.path.dirname(filepath)
 
         self.hf_config = get_config(self.model, trust_remote_code, revision,
                                     code_revision)
