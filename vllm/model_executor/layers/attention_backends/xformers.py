@@ -35,12 +35,12 @@ class XFormersBackend:
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-
         suppored_head_sizes = PagedAttentionImpl.get_supported_head_sizes()
         if head_size not in suppored_head_sizes:
             raise ValueError(
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {suppored_head_sizes}.")
+
         self.use_ref_attention = _check_use_ref_attention()
 
     def forward(
