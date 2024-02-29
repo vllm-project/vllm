@@ -52,7 +52,7 @@ class XFormersBackend:
         value_cache: Optional[torch.Tensor],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
-        """PagedAttention forward pass.
+        """Forward pass with xFormers and PagedAttention.
 
         Args:
             query: shape = [batch_size, seq_len, num_heads * head_size]
