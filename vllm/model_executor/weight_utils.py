@@ -184,7 +184,7 @@ def prepare_hf_model_weights(
     if fall_back_to_pt:
         allow_patterns += ["*.pt"]
 
-    if not is_local:
+    if not is_local and load_format != "tensorizer":
         # Before we download we look at that is available:
         fs = HfFileSystem()
         file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
@@ -300,7 +300,6 @@ def hf_model_weights_iterator(
         stream = open_stream(tensorizer_args.tensorizer_uri, **credentials)
         with TensorDeserializer(stream, **deserializer_args, device="cuda:0") as state:
             for name, param in state.items():
-                print("Yielding tensor ", name)
                 yield name, param
         del state
     elif use_safetensors:
