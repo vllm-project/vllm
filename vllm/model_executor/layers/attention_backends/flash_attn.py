@@ -20,7 +20,6 @@ class FlashAttentionBackend:
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
     ) -> None:
-        super().__init__()
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -28,7 +27,7 @@ class FlashAttentionBackend:
         self.sliding_window = sliding_window
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
-        self.register_buffer("alibi_slopes", alibi_slopes, persistent=False)
+        self.alibi_slopes = alibi_slopes
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
