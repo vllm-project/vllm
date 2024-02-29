@@ -98,11 +98,13 @@ torch::Tensor gptq_gemm(
   torch::Tensor b_gptq_qzeros,
   torch::Tensor b_gptq_scales,
   torch::Tensor b_g_idx,
-  bool use_exllama);
+  bool use_exllama,
+  int bit);
 
 void gptq_shuffle(
   torch::Tensor q_weight,
-  torch::Tensor q_perm);
+  torch::Tensor q_perm,
+  int bit);
 
 void moe_align_block_size(
   torch::Tensor topk_ids,
