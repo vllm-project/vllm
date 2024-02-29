@@ -459,7 +459,7 @@ class SequenceOutput:
         self,
         parent_seq_id: int,
         output_token: int,
-        logprobs: Dict[int, float],
+        logprobs: Dict[int, Logprob],
     ) -> None:
         self.parent_seq_id = parent_seq_id
         self.output_token = output_token
@@ -475,10 +475,7 @@ class SequenceOutput:
             raise NotImplementedError()
         equal = (self.parent_seq_id == other.parent_seq_id
                  and self.output_token == other.output_token)
-        log_probs_equal = ((len(other.logprobs) == len(self.logprobs))
-                           and all(other_logprob == self_logprob
-                                   for other_logprob, self_logprob in zip(
-                                       other.logprobs, self.logprobs)))
+        log_probs_equal = other.logprobs == self.logprobs
         return equal and log_probs_equal
 
 
