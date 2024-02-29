@@ -9,7 +9,7 @@ from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config
-from vllm.utils import get_cpu_memory, is_hip, is_neuron, get_nvcc_cuda_version
+from vllm.utils import get_cpu_memory, is_hip, is_neuron, is_xpu, get_nvcc_cuda_version
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -581,6 +581,8 @@ class DeviceConfig:
                 self.device_type = "cuda"
             elif is_neuron():
                 self.device_type = "neuron"
+            elif is_xpu():
+                self.device_type = "xpu"
             else:
                 raise RuntimeError("No supported device detected.")
         else:

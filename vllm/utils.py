@@ -131,6 +131,14 @@ def is_neuron() -> bool:
     return transformers_neuronx is not None
 
 
+def is_xpu() -> bool:
+    try:
+        import intel_extension_for_pytorch
+    except ImportError:
+        return False
+    return hasattr(torch, "xpu") and torch.xpu.is_available()
+
+
 @cache
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""

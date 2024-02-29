@@ -89,6 +89,10 @@ class Worker:
             _check_if_gpu_supports_dtype(self.model_config.dtype)
             device_empty_cache(self.device_config)
             self.init_gpu_memory = mem_get_info(self.device_config)[0]
+        elif self.device_config.device.type == "xpu":
+            self.device = torch.device(f"xpu:{self.local_rank}")
+            device_empty_cache(self.device_config)
+            self.init_gpu_memory = mem_get_info(self.device_config)[0]            
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
