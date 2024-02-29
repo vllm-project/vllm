@@ -15,15 +15,6 @@ class DraftTargetWorkerMetrics:
     draft_tokens: int
     emitted_tokens: int
 
-    def __repr__(self) -> str:
-        return (
-            f"DraftTargetWorkerMetrics(num_spec_tokens={self.num_spec_tokens},"
-            f"draft_acceptance_rate={self.draft_acceptance_rate:.3f}, "
-            f"system_efficiency={self.system_efficiency:.3f}, "
-            f"accepted_tokens={self.accepted_tokens}, "
-            f"draft_tokens={self.draft_tokens}, "
-            f"emitted_tokens={self.emitted_tokens})")
-
 
 class AsyncMetricsCollector:
     def __init__(self, rejection_sampler: RejectionSampler):
