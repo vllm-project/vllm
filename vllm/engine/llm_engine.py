@@ -482,8 +482,6 @@ class LLMEngine:
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
-        assert prompt
-        assert prompt_token_ids
         seq = Sequence(seq_id, prompt, prompt_token_ids, block_size,
                        lora_request)
 
