@@ -518,4 +518,33 @@ class SequenceGroupOutput:
 
 # For each sequence group, we generate a list of SequenceOutput object,
 # each of which contains one possible candidate for the next token.
-SamplerOutput = List[SequenceGroupOutput]
+#SamplerOutput = List[SequenceGroupOutput]
+
+@dataclass
+class SamplerOutput:
+    outputs: List[SequenceGroupOutput]
+
+    # Used to store an on-GPU tensor containing the batch probabilities.
+    probs: Optional["torch.Tensor"] = None
+
+    # Used to store an on-GPU tensor containing the sampled token ids.
+    sampled_tokens: Optional["torch.Tensor"] = None
+
+    # Used to store an on-CPU tensor containing the batch logits
+    # for the full sequence.
+    #logits: Optional["torch.Tensor"] = None
+
+    #draft_target_worker_metrics: Optional["DraftTargetWorkerMetrics"] = None
+
+    def __getitem__(self, idx: int):
+        return self.outputs[idx]
+
+    def __setitem__(self, idx: int, value):
+        self.outputs[idx] = value
+
+    def __len__(self):
+        return len(self.outputs)
+
+    def __eq__(self, other: object):
+        return isinstance(other,
+                          self.__class__) and self.outputs == other.outputs

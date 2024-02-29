@@ -1,11 +1,11 @@
 import torch
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Iterable
 from unittest.mock import MagicMock
 
 from vllm.worker.worker import Worker
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.engine.arg_utils import EngineArgs
-from vllm.sequence import SequenceGroupMetadata, SequenceData
+from vllm.sequence import (SequenceGroupMetadata, SequenceData, SamplerOutput, SequenceGroupOutput, SequenceOutput)
 from vllm.sampling_params import SamplingParams
 from vllm.worker.cache_engine import CacheEngine
 from vllm.model_executor.utils import set_random_seed
@@ -194,6 +194,34 @@ def assert_logprobs_dict_allclose(
             actual = torch.tensor(single_step_actual_logprobs[token_id])
             expected = torch.tensor(single_step_expected_logprobs[token_id])
             assert torch.allclose(actual, expected)
+
+def create_sampler_output_list(
+        token_ids: torch.Tensor,
+        probs: Iterable[Optional[torch.Tensor]],
+        seq_ids: Optional[List[int]] = None) -> List[SamplerOutput]:
+    num_steps, batch_size = token_ids.shape
+    token_ids_by_step = token_ids.tolist()
+
+    if seq_ids is None:
+        seq_ids = list(range(batch_size))
+
+    return [
+        SamplerOutput(outputs=[
+            SequenceGroupOutput(
+                samples=[
+                    SequenceOutput(
+                        output_token=token_id,
+                        parent_seq_id=seq_ids[seq_index],
+                        logprobs={token_id: 0},
+                    )
+                ],
+                prompt_logprobs=None,
+            ) for seq_index, token_id in enumerate(token_ids_by_step[step])
+        ],
+                      probs=probs[step],
+                      sampled_tokens=token_ids[step])
+        for step in range(num_steps)
+    ]
 
 def create_batch(batch_size,
                  k,

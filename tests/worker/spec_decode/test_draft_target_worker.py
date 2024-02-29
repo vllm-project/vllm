@@ -19,7 +19,7 @@ from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SequenceGroupMetadata
 
 
-from .utils import mock_worker, create_batch, ExecuteModelData, create_seq_group_metadata_from_prompts
+from .utils import mock_worker, create_batch, ExecuteModelData, create_seq_group_metadata_from_prompts, create_sampler_output_list
 #from .utils import (mock_worker,
 #                    create_seq_group_metadata_from_prompts, create_batch,
 #                    create_sampler_output_list)
@@ -257,82 +257,82 @@ def test_correctly_calls_target_model(k: int, batch_size: int):
     seen_contexts.sort()
     expected_seen_contexts.sort()
     assert expected_seen_contexts == seen_contexts
-#
-#
-#@pytest.mark.parametrize('k', [1, 2, 6])
-#@pytest.mark.parametrize('batch_size', [1, 2, 32])
-#@torch.inference_mode()
-#def test_correctly_calls_rejection_sampler(k: int, batch_size: int):
-#    """Verify that the DraftTargetWorker calls the rejection sampler with
-#    correct inputs. Everything else is mocked out.
-#    """
-#    vocab_size = 32_000
-#
-#    draft_worker = mock_worker(vocab_size)
-#    target_worker = mock_worker(vocab_size)
-#    rejection_sampler = MagicMock()
-#    rejection_sampler.token_id_dtype = torch.int64
-#    draft_worker.device = 'cuda'
-#    target_worker.device = 'cuda'
-#
-#    set_random_seed(1)
-#
-#    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler)
-#
-#    proposal_token_ids = torch.randint(low=0,
-#                                       high=vocab_size,
-#                                       size=(batch_size, k),
-#                                       dtype=torch.int64,
-#                                       device='cuda')
-#    proposal_probs = torch.rand(batch_size,
-#                                k,
-#                                vocab_size,
-#                                dtype=torch.float32,
-#                                device='cuda')
-#
-#    execute_model_data, _, _ = create_batch(batch_size, k)
-#
-#    draft_worker.get_spec_proposals.return_value = SpeculativeProposals(
-#        spec_seqs=execute_model_data.seq_group_metadata_list,
-#        non_spec_seqs=[],
-#        all_seqs=execute_model_data.seq_group_metadata_list,
-#        original_indices=torch.arange(batch_size),
-#        proposal_token_ids=proposal_token_ids,
-#        proposal_probs=proposal_probs)
-#
-#    target_token_ids = torch.randint(low=0,
-#                                     high=vocab_size,
-#                                     size=(1, batch_size * (k + 1)),
-#                                     dtype=torch.int64,
-#                                     device='cuda')
-#    target_token_probs = torch.rand(1,
-#                                    batch_size * (k + 1),
-#                                    vocab_size,
-#                                    dtype=torch.float32,
-#                                    device='cuda')
-#    target_output = create_sampler_output_list(target_token_ids,
-#                                               target_token_probs)
-#
-#    target_worker.execute_model.return_value = target_output[0]
-#
-#    exception_secret = 'artifical stop'
-#    rejection_sampler.side_effect = ValueError(exception_secret)
-#
-#    with pytest.raises(ValueError, match=exception_secret):
-#        worker.execute_model(execute_model_data)
-#
-#    assert len(rejection_sampler.call_args_list) == 1
-#    args, _ = rejection_sampler.call_args_list[0]
-#    (actual_proposal_scores, actual_bonus_token_ids, actual_proposal_probs,
-#     actual_proposal_token_ids) = args
-#
-#    assert torch.equal(actual_bonus_token_ids,
-#                       target_token_ids.reshape(batch_size, k + 1)[:, -1:])
-#    assert torch.equal(
-#        actual_proposal_scores,
-#        target_token_probs.reshape(batch_size, k + 1, -1)[:, :-1])
-#    assert torch.equal(actual_proposal_token_ids, proposal_token_ids)
-#    assert torch.equal(actual_proposal_probs, proposal_probs)
+
+
+@pytest.mark.parametrize('k', [1, 2, 6])
+@pytest.mark.parametrize('batch_size', [1, 2, 32])
+@torch.inference_mode()
+def test_correctly_calls_rejection_sampler(k: int, batch_size: int):
+    """Verify that the DraftTargetWorker calls the rejection sampler with
+    correct inputs. Everything else is mocked out.
+    """
+    vocab_size = 32_000
+
+    draft_worker = mock_worker(vocab_size)
+    target_worker = mock_worker(vocab_size)
+    rejection_sampler = MagicMock()
+    rejection_sampler.token_id_dtype = torch.int64
+    draft_worker.device = 'cuda'
+    target_worker.device = 'cuda'
+
+    set_random_seed(1)
+
+    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler)
+
+    proposal_token_ids = torch.randint(low=0,
+                                       high=vocab_size,
+                                       size=(batch_size, k),
+                                       dtype=torch.int64,
+                                       device='cuda')
+    proposal_probs = torch.rand(batch_size,
+                                k,
+                                vocab_size,
+                                dtype=torch.float32,
+                                device='cuda')
+
+    execute_model_data, _, _ = create_batch(batch_size, k)
+
+    draft_worker.get_spec_proposals.return_value = SpeculativeProposals(
+        spec_seqs=execute_model_data.seq_group_metadata_list,
+        non_spec_seqs=[],
+        all_seqs=execute_model_data.seq_group_metadata_list,
+        original_indices=torch.arange(batch_size),
+        proposal_token_ids=proposal_token_ids,
+        proposal_probs=proposal_probs)
+
+    target_token_ids = torch.randint(low=0,
+                                     high=vocab_size,
+                                     size=(1, batch_size * (k + 1)),
+                                     dtype=torch.int64,
+                                     device='cuda')
+    target_token_probs = torch.rand(1,
+                                    batch_size * (k + 1),
+                                    vocab_size,
+                                    dtype=torch.float32,
+                                    device='cuda')
+    target_output = create_sampler_output_list(target_token_ids,
+                                               target_token_probs)
+
+    target_worker.execute_model.return_value = target_output[0]
+
+    exception_secret = 'artifical stop'
+    rejection_sampler.side_effect = ValueError(exception_secret)
+
+    with pytest.raises(ValueError, match=exception_secret):
+        worker.execute_model(**execute_model_data.to_dict(), num_spec_tokens=k)
+
+    assert len(rejection_sampler.call_args_list) == 1
+    args, _ = rejection_sampler.call_args_list[0]
+    (actual_proposal_scores, actual_bonus_token_ids, actual_proposal_probs,
+     actual_proposal_token_ids) = args
+
+    assert torch.equal(actual_bonus_token_ids,
+                       target_token_ids.reshape(batch_size, k + 1)[:, -1:])
+    assert torch.equal(
+        actual_proposal_scores,
+        target_token_probs.reshape(batch_size, k + 1, -1)[:, :-1])
+    assert torch.equal(actual_proposal_token_ids, proposal_token_ids)
+    assert torch.equal(actual_proposal_probs, proposal_probs)
 #
 #
 #@pytest.mark.parametrize('k', [1, 2, 6])

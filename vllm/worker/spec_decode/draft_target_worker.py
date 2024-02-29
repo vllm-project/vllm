@@ -193,15 +193,21 @@ class DraftTargetWorker:
             proposals.spec_seqs, proposals.non_spec_seqs
         )
 
-        raise NotImplementedError
 
-        with nvtx_range("draft_target_worker.rejection_sampler"):
-            accepted_token_ids = self.rejection_sampler(
-                proposal_scores,
-                bonus_token_ids,
-                proposals.proposal_probs,
-                proposals.proposal_token_ids,
-            )
+        #with nvtx_range("draft_target_worker.rejection_sampler"):
+        #    accepted_token_ids = self.rejection_sampler(
+        #        proposal_scores,
+        #        bonus_token_ids,
+        #        proposals.proposal_probs,
+        #        proposals.proposal_token_ids,
+        #    )
+        accepted_token_ids = self.rejection_sampler(
+            proposal_scores,
+            bonus_token_ids,
+            proposals.proposal_probs,
+            proposals.proposal_token_ids,
+        )
+        raise NotImplementedError
 
         # Append output tokens from non-speculative sequences to
         # the accepted token ids tensor.
@@ -541,6 +547,80 @@ class DraftTargetWorker:
             },
             lora_request=None,
         )
+
+    def _split_scoring_output(
+        self, sampler_output: SamplerOutput, num_scoring_tokens: int
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Split the target model output into speculative and non-speculative
+        output.
+        """
+
+        # First samples are from speculative scoring, latter samples are non-
+        # speculative samples.
+        split_sizes = [
+            num_scoring_tokens,
+            sampler_output.sampled_tokens.numel() - num_scoring_tokens
+        ]
+        (spec_probs, non_spec_probs) = sampler_output.probs.split(split_sizes)
+        (spec_sampled_tokens, non_spec_sampled_tokens
+         ) = sampler_output.sampled_tokens.flatten().split(split_sizes)
+
+        # Convert scores to tensors.
+        sampler_output.probs = spec_probs
+        sampler_output.sampled_tokens = spec_sampled_tokens
+        target_token_ids, target_probs = sampler_output_to_torch(
+            [sampler_output])
+
+        # Convert non-speculative output tokens to tensors.
+        sampler_output.probs = non_spec_probs
+        sampler_output.sampled_tokens = non_spec_sampled_tokens
+        non_spec_target_token_ids, _ = sampler_output_to_torch(
+            [sampler_output])
+
+        return target_token_ids, target_probs, non_spec_target_token_ids
+
+    @cached_property
+    def _vocab_size(self) -> int:
+        """Get the vocab size of the model and make sure it's consistent between
+        draft and target workers.
+        """
+        vocab_sizes = [
+            worker.vocab_size
+            for worker in [self.draft_worker, self.target_worker]
+        ]
+        assert all(vocab_sizes[0] == vocab_size for vocab_size in vocab_sizes)
+        return vocab_sizes[0]
+
+
+def sampler_output_to_torch(
+    sampler_output_list: List[SamplerOutput],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Utility function which converts a list of SamplerOutput to tensors.
+
+        Returns:
+            token_ids: torch.Tensor
+                shape: [batch_size, len(sampler_output_list)]
+
+            probs: torch.Tensor
+                shape: [batch_size, len(sampler_output_list), vocab_size]
+        """
+
+    # shape: [batch_size, num_sampler_output, vocab_size]
+    probs = torch.stack(
+        [sampler_output.probs for sampler_output in sampler_output_list],
+        dim=0,
+    ).transpose(0, 1)
+
+    # shape: [batch_size, num_sampler_output]
+    token_ids = torch.stack(
+        [
+            sampler_output.sampled_tokens.flatten()
+            for sampler_output in sampler_output_list
+        ],
+        dim=0,
+    ).transpose(0, 1)
+
+    return token_ids, probs
 
 #class DraftTargetWorker(Profilable, BaseWorker):
 #    """Worker which implements speculative decoding via a draft model for
