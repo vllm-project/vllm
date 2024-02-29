@@ -47,7 +47,6 @@ except ImportError:
     # NOTE: Please install transformers from source or use transformers>=4.39.0
     from transformers import PretrainedConfig as Starcoder2Config
 
-
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 

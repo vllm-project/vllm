@@ -121,6 +121,7 @@ class Starcoder2Config(PretrainedConfig):
         super().__init__(
             bos_token_id=bos_token_id,
             eos_token_id=eos_token_id,
-            architectures=['Starcoder2ForCausalLM'],
             **kwargs,
         )
+        if self.architectures is None:
+            self.architectures = ['Starcoder2ForCausalLM']
