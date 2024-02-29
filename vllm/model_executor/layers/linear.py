@@ -9,7 +9,8 @@ from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_reduce, tensor_model_parallel_all_gather)
-from vllm.model_executor.parallel_utils.utils import divide, split_tensor_along_last_dim
+from vllm.model_executor.parallel_utils.utils import (
+    divide, split_tensor_along_last_dim)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.logger import init_logger
 
@@ -51,21 +52,17 @@ class UnquantizedLinearMethod(LinearMethodBase):
                        output_size_per_partition: int, input_size: int,
                        output_size: int,
                        params_dtype: torch.dtype) -> Dict[str, Any]:
-        weight = Parameter(
-            torch.empty(output_size_per_partition,
-                        input_size_per_partition,
-                        dtype=params_dtype),
-            requires_grad=False,
-        )
+        weight = Parameter(torch.empty(output_size_per_partition,
+                                       input_size_per_partition,
+                                       dtype=params_dtype),
+                           requires_grad=False)
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
         return {"weight": weight}
 
-    def apply_weights(
-        self,
-        weights: Dict[str, torch.Tensor],
-        x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    def apply_weights(self,
+                      weights: Dict[str, torch.Tensor],
+                      x: torch.Tensor,
+                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         weight = weights["weight"]
         if self.separate_bias_add:
             if bias:
@@ -108,12 +105,8 @@ class ReplicatedLinear(torch.nn.Module):
             linear_method = UnquantizedLinearMethod()
         self.linear_method = linear_method
         self.linear_weights = self.linear_method.create_weights(
-            self.input_size,
-            self.output_size,
-            self.input_size,
-            self.output_size,
-            self.params_dtype,
-        )
+            self.input_size, self.output_size, self.input_size,
+            self.output_size, self.params_dtype)
         for name, weight in self.linear_weights.items():
             if isinstance(weight, torch.Tensor):
                 self.register_parameter(name, weight)
@@ -192,13 +185,10 @@ class ColumnParallelLinear(torch.nn.Module):
             self.bias = Parameter(
                 torch.empty(self.output_size_per_partition,
                             dtype=params_dtype))
-            set_weight_attrs(
-                self.bias,
-                {
-                    "output_dim": 0,
-                    "weight_loader": self.weight_loader,
-                },
-            )
+            set_weight_attrs(self.bias, {
+                "output_dim": 0,
+                "weight_loader": self.weight_loader,
+            })
         else:
             self.register_parameter("bias", None)
 
