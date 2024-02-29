@@ -11,7 +11,6 @@ MODELS = [
     "JackFram/llama-68m",
 ]
 
-# SANG-TODO Read it from example.txt
 TEST_PROMPTS = [
     # pylint: disable=line-too-long
     "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs.",
@@ -30,11 +29,13 @@ TEST_PROMPTS = [
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("block_size", [256])
 def test_models(
     vllm_runner,
     model: str,
     dtype: str,
     max_tokens: int,
+    block_size: int,
 ) -> None:
     """ verify the flash attention has the same output
     as page attention """
@@ -52,12 +53,10 @@ def test_models(
     gc.collect()
     torch.cuda.empty_cache()
 
-    flash_attn_model = vllm_runner(
-        model,
-        dtype=dtype,
-        enable_cuda_graph=False,
-        flash_style=True,
-    )
+    flash_attn_model = vllm_runner(model,
+                                   dtype=dtype,
+                                   flash_style=True,
+                                   block_size=block_size)
     flash_attn_output_by_batchs = []
     for i in range(10):
         prompts = [TEST_PROMPTS[j % len(TEST_PROMPTS)] for j in range(i)]
@@ -75,7 +74,6 @@ def test_models(
             fa_output_ids, fa_output_str = flash_attn_outputs[i]
             vllm_output_ids, vllm_output_str = expected_outputs[
                 i % len(expected_outputs)]
-            print()
             assert fa_output_ids == vllm_output_ids, (
                 f"Test{i}:\flash ids: {fa_output_ids}\nvLLM ids: {vllm_output_ids}"
                 f"Test{i}:\nflash ouput: {fa_output_str!r}\nvLLM output: {vllm_output_str!r}"

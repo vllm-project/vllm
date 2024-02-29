@@ -26,7 +26,6 @@ CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ]
 KV_CACHE_DTYPE = ["auto", "fp8_e5m2"]
-PADDINGS = [8, 16, 0]
 
 
 @pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
@@ -235,7 +234,6 @@ def test_swap_blocks(
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("padding", PADDINGS)
 @torch.inference_mode()
 def test_reshape_and_cache_flash(
     kv_cache_factory,
@@ -246,7 +244,6 @@ def test_reshape_and_cache_flash(
     num_blocks: int,
     dtype: torch.dtype,
     seed: int,
-    padding: int,
 ) -> None:
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -274,27 +271,16 @@ def test_reshape_and_cache_flash(
                                                 dtype,
                                                 seed,
                                                 flash_style=True)
-    assert len(key_caches) == 1 and len(value_caches) == 0
+    assert len(key_caches) == 1 and len(value_caches) == 1
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Clone the KV caches.
     cloned_key_cache = key_cache.clone()
     cloned_value_cache = value_cache.clone()
-    num_tokens = torch.tensor([num_tokens], dtype=torch.long, device="cuda")
 
-    def pad_key_value(key: torch.Tensor, value: torch.Tensor,
-                      pad_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        if pad_size == 0:
-            return key, value
-        return F.pad(key, (0, 0, 0, 0, 0, pad_size)),\
-            F.pad(value, (0, 0, 0, 0, 0, pad_size))
-
-    # kv shapes: (num_blocks, block_size, num_heads, head_size)
-    # pad tokens.
-    padded_key, padded_value = pad_key_value(key, value, padding)
     # Call the reshape_and_cache kernel.
-    cache_ops.reshape_and_cache_flash(padded_key, padded_value, key_cache,
-                                      value_cache, slot_mapping)
+    cache_ops.reshape_and_cache_flash(key, value, key_cache, value_cache,
+                                      slot_mapping)
 
     # Run the reference implementation.
     block_indicies = torch.div(slot_mapping, block_size, rounding_mode='floor')

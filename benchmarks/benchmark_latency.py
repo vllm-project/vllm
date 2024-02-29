@@ -65,23 +65,24 @@ def main(args: argparse.Namespace):
         else:
             start_time = time.perf_counter()
             if args.use_sample:
-                batch = (
-                    SAMPLE_PROMPTS *
-                    (args.batch_size // len(SAMPLE_PROMPTS) + 1))[:args.batch_size]
+                batch = (SAMPLE_PROMPTS *
+                         (args.batch_size // len(SAMPLE_PROMPTS) +
+                          1))[:args.batch_size]
                 outputs = llm.generate(prompts=batch,
-                                    sampling_params=sampling_params,
-                                    use_tqdm=False)
+                                       sampling_params=sampling_params,
+                                       use_tqdm=False)
             else:
                 outputs = llm.generate(prompt_token_ids=dummy_prompt_token_ids,
-                                    sampling_params=sampling_params,
-                                    use_tqdm=False)
+                                       sampling_params=sampling_params,
+                                       use_tqdm=False)
             end_time = time.perf_counter()
             if args.verbose:
                 for output in outputs:
                     prompt = output.prompt
                     generated_text = output.outputs[0].text
                     print(
-                        f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+                        f"Prompt: {prompt!r}, Generated text: {generated_text!r}"
+                    )
             latency = end_time - start_time
             return latency
 

@@ -14,10 +14,7 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.triton_kernel.prefix_prefill import (
     context_attention_fwd)
 from vllm.utils import is_hip
-from vllm.model_executor.layers.attention import (
-    flash_attn_with_kvcache_paged, )
 
-# TODO(sang): Support varlen API.
 try:
     from flash_attn import flash_attn_with_kvcache
 except ImportError:
@@ -49,7 +46,6 @@ class PagedAttention(nn.Module):
         num_kv_heads: Optional[int] = None,
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
-        flash_style: bool = False,
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
@@ -60,7 +56,6 @@ class PagedAttention(nn.Module):
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.register_buffer("alibi_slopes", alibi_slopes, persistent=False)
-        self.flash_style = flash_style
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -137,14 +132,10 @@ class PagedAttention(nn.Module):
         # vectors will not be cached. This happens during the initial memory
         # profiling run.
         if key_cache is not None and value_cache is not None:
-            if self.flash_style:
+            if input_metadata.flash_style:
                 cache_ops.reshape_and_cache_flash(
-                    key,
-                    value,
-                    key_cache,
-                    value_cache,
-                    input_metadata.slot_mapping.flatten()
-                )
+                    key, value, key_cache, value_cache,
+                    input_metadata.slot_mapping.flatten())
             else:
                 cache_ops.reshape_and_cache(
                     key,
@@ -226,20 +217,20 @@ class PagedAttention(nn.Module):
                 )
                 output = out.view_as(query)
             else:
-                # prefix-enabled attention
-                output = torch.empty_like(query)
-                if self.flash_attention:
-                    query = query.view(batch_size, seq_len, self.num_heads, self.head_size)
+                if input_metadata.flash_style:
                     output = flash_attn_with_kvcache_paged(
-                        query
-                        key_cache: torch.Tensor,
-                        value_cache: torch.Tensor,
-                        self.scale
+                        query.view(batch_size, seq_len, self.num_heads,
+                                   self.head_size),
+                        key_cache,
+                        value_cache,
+                        self.scale,
                         input_metadata.block_tables,
                         input_metadata.context_lens,
                         self.alibi_slopes,
                     )
                 else:
+                    # prefix-enabled attention
+                    output = torch.empty_like(query)
                     context_attention_fwd(
                         query,
                         key,
@@ -247,7 +238,8 @@ class PagedAttention(nn.Module):
                         output,
                         key_cache,
                         value_cache,
-                        input_metadata.block_tables,  # [BS, max_block_per_request]
+                        input_metadata.
+                        block_tables,  # [BS, max_block_per_request]
                         input_metadata.start_loc,
                         input_metadata.prompt_lens,
                         input_metadata.context_lens,
@@ -257,17 +249,12 @@ class PagedAttention(nn.Module):
 
         else:
             # Decoding run.
-            if self.flash_style:
-                query = query.view(batch_size, seq_len, self.num_heads, self.head_size)
+            if input_metadata.flash_style:
                 output = flash_attn_with_kvcache_paged(
-                    query,
-                    key_cache,
-                    value_cache,
-                    self.scale,
-                    input_metadata.block_tables,
-                    input_metadata.context_lens,
-                    self.alibi_slopes
-                )
+                    query.view(batch_size, seq_len, self.num_heads,
+                               self.head_size), key_cache, value_cache,
+                    self.scale, input_metadata.block_tables,
+                    input_metadata.context_lens, self.alibi_slopes)
             else:
                 output = _paged_attention(
                     query,
@@ -407,19 +394,17 @@ def flash_attn_with_kvcache_paged(
     style key-value caches.
 
     Arguments:
-        output: [num_padded_tokens, num_heads, head_size], output tensor
-            to write. if None an new output tensor will be created.
         See https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/flash_attn_interface.py
         for other arguments.
 
     Returns:
-        output: [num_padded_tokens, num_heads, head_size]
+        output: [num_tokens, num_heads, head_size]
     """
     block_size = value_cache.shape[1]
     assert block_size % 256 == 0, "only support block_size divisible by 256."
-    num_tokens, num_heads, head_size = query.shape
+    _, _, num_heads, head_size = query.shape
     out = flash_attn_with_kvcache(
-        query.view(num_tokens, 1, num_heads, head_size),
+        query,
         key_cache,
         value_cache,
         # Inplace update is slow. We don't use it.
@@ -439,4 +424,6 @@ def flash_attn_with_kvcache_paged(
         alibi_slopes=alibi_slopes,
         num_splits=0,
     )
-    return out.view(num_tokens, num_heads, head_size)
+
+    # num_tokens == batch_size * seqlen
+    return out.view(-1, num_heads, head_size)

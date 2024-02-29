@@ -28,8 +28,7 @@ void reshape_and_cache_flash(
   torch::Tensor& value,
   torch::Tensor& key_cache,
   torch::Tensor& value_cache,
-  torch::Tensor& slot_mapping,
-  torch::Tensor& num_tokens);
+  torch::Tensor& slot_mapping);
 
 // Just for unittest
 void convert_fp8_e5m2(
