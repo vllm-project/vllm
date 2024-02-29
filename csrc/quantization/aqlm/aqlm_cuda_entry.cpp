@@ -74,7 +74,7 @@ torch::Tensor code1x16_matmat(
   auto output_sizes = input_sizes.vec();
   output_sizes.pop_back();
   output_sizes.push_back(-1);
-  auto output = flat_output.reshape(output_sizes).clone();
+  auto output = flat_output.reshape(output_sizes); // .clone();
   return output;
 }
 
