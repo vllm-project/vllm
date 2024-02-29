@@ -47,7 +47,7 @@ async def get_guided_decoding_logits_processor(
     logits_processor = copy(result)
     # reset logits processor's internal state
     logits_processor.init_state()
-    return [logits_processor]
+    return logits_processor
 
 
 def _get_guide_and_mode(

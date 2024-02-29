@@ -377,6 +377,7 @@ async def test_logits_bias(server, client: openai.AsyncOpenAI):
         max_tokens=max_tokens,
         temperature=0.0,
         logit_bias={str(token_id): 100},
+        seed=42,
     )
     assert completion.choices[0].text is not None and len(
         completion.choices[0].text) >= 5
