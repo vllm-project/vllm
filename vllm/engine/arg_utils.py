@@ -175,9 +175,9 @@ class EngineArgs:
                             choices=[8, 16, 32],
                             help='token block size')
 
-        parser.add_argument('--disable-prefix-caching',
+        parser.add_argument('--enable-prefix-caching',
                             action='store_true',
-                            help='Disables automatic prefix caching')
+                            help='Enables automatic prefix caching')
 
         parser.add_argument('--seed',
                             type=int,
