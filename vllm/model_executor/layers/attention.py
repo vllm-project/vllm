@@ -229,6 +229,7 @@ class PagedAttention(nn.Module):
                         self.alibi_slopes,
                     )
                 else:
+                    breakpoint()
                     # prefix-enabled attention
                     output = torch.empty_like(query)
                     context_attention_fwd(
@@ -360,6 +361,7 @@ def _paged_attention(
             device=output.device,
         )
         max_logits = torch.empty_like(exp_sums)
+        breakpoint()
         ops.paged_attention_v2(
             output,
             exp_sums,

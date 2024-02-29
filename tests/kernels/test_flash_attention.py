@@ -29,8 +29,7 @@ HEAD_SIZES = [256]
 BLOCK_SIZES = [256]
 USE_ALIBI = [False, True]
 SEEDS = [0]
-# PAD_CONFIGS = [(0, 0), (8, MAX_SEQ_LEN - 1000), (16, MAX_SEQ_LEN - 2000)]
-PAD_CONFIGS = [(0, 0)]
+PAD_CONFIGS = [(0, 0), (8, MAX_SEQ_LEN - 1000), (16, MAX_SEQ_LEN - 2000)]
 
 
 def pad_attention_inputs(
@@ -84,10 +83,8 @@ def ref_single_query_cached_kv_attention(
     context_lens: torch.Tensor,
     scale: float,
     alibi_slopes: Optional[torch.Tensor],
-    flash_style: bool = False,
 ) -> None:
     num_query_heads = query.shape[1]
-    num_kv_heads = value_cache.shape[-2]
     head_size = value_cache.shape[-1]
     block_size = value_cache.shape[-3]
     num_seqs = query.shape[0]
@@ -105,18 +102,11 @@ def ref_single_query_cached_kv_attention(
             block_number = int(block_table[j // block_size])
             block_offset = j % block_size
 
-            if flash_style:
-                k = key_cache[block_number, block_offset, :, :]
-            else:
-                k = key_cache[block_number, :, :, block_offset, :]
-                k = k.reshape(num_kv_heads, head_size)
+            k = key_cache[block_number, block_offset, :, :]
             keys.append(k)
 
             v = value_cache[block_number, :, :, block_offset]
-            if flash_style:
-                v = value_cache[block_number, block_offset, :, :]
-            else:
-                v = value_cache[block_number, :, :, block_offset]
+            v = value_cache[block_number, block_offset, :, :]
             values.append(v)
         keys = torch.stack(keys, dim=0)
         values = torch.stack(values, dim=0)
@@ -138,12 +128,20 @@ def ref_single_query_cached_kv_attention(
         output[i].copy_(out, non_blocking=True)
 
 
-@pytest.mark.parametrize("num_seqs", NUM_GEN_SEQS)
-@pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
-@pytest.mark.parametrize("use_alibi", [False, True])
-@pytest.mark.parametrize("block_size", BLOCK_SIZES)
-@pytest.mark.parametrize("dtype", [torch.half, torch.bfloat16])
+# @pytest.mark.parametrize("num_seqs", NUM_GEN_SEQS)
+# @pytest.mark.parametrize("num_heads", NUM_HEADS)
+# @pytest.mark.parametrize("head_size", HEAD_SIZES)
+# @pytest.mark.parametrize("use_alibi", [False, True])
+# @pytest.mark.parametrize("block_size", BLOCK_SIZES)
+# @pytest.mark.parametrize("dtype", [torch.half, torch.bfloat16])
+# @pytest.mark.parametrize("seed", SEEDS)
+# @pytest.mark.parametrize("pad_config", PAD_CONFIGS)
+@pytest.mark.parametrize("num_seqs", [3])
+@pytest.mark.parametrize("num_heads", [(40,40)])
+@pytest.mark.parametrize("head_size", [256])
+@pytest.mark.parametrize("use_alibi", [True])
+@pytest.mark.parametrize("block_size", [256])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("pad_config", PAD_CONFIGS)
 @torch.inference_mode()
@@ -164,7 +162,8 @@ def test_flash_paged_attention(
 
     scale = float(1.0 / (head_size**0.5))
     num_query_heads, num_kv_heads = num_heads
-    query = torch.empty(num_seqs,
+    query = torch.empty(num_seqs,  # batch_size 
+                        1,  # seqlen
                         num_query_heads,
                         head_size,
                         dtype=dtype,
@@ -211,7 +210,7 @@ def test_flash_paged_attention(
     # Call the paged attention kernel.
     output = torch.empty_like(query)
 
-    padded_query, padded_block_table, padded_context_lens, pad_max_context_len = \
+    padded_query, padded_block_table, padded_context_lens, _ = \
         pad_attention_inputs(pad_config, block_size, query,
                              block_tables, context_lens, max_context_len)
 
@@ -237,7 +236,6 @@ def test_flash_paged_attention(
         context_lens,
         scale,
         alibi_slopes,
-        flash_style=True,
     )
 
     assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)

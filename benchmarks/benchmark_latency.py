@@ -33,6 +33,7 @@ def main(args: argparse.Namespace):
         enforce_eager=args.enforce_eager,
         kv_cache_dtype=args.kv_cache_dtype,
         device=args.device,
+        block_size=args.block_size,
         flash_style=args.flash_style,
         max_chunked_prefill_len=args.max_chunked_prefill_len,
         max_num_prompt_seqs=args.max_num_prompt_seqs,
