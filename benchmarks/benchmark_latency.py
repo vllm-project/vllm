@@ -33,6 +33,9 @@ def main(args: argparse.Namespace):
         enforce_eager=args.enforce_eager,
         kv_cache_dtype=args.kv_cache_dtype,
         device=args.device,
+        flash_style=args.flash_style,
+        max_chunked_prefill_len=args.max_chunked_prefill_len,
+        max_num_prompt_seqs=args.max_num_prompt_seqs,
     )
 
     sampling_params = SamplingParams(
@@ -180,5 +183,7 @@ if __name__ == '__main__':
     parser.add_argument('--verbose',
                         action='store_true',
                         help='print generated text')
+    parser.add_argument('--max-chunked-prefill-len', type=int, default=-1)
+    parser.add_argument('--max-num-prompt-seqs', type=int, default=1000)
     args = parser.parse_args()
     main(args)
