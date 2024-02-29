@@ -191,7 +191,7 @@ def _install_punica() -> bool:
     for i in range(device_count):
         major, minor = torch.cuda.get_device_capability(i)
         if major < 8:
-            install_punica = False
+#            install_punica = False
             break
     return install_punica
 

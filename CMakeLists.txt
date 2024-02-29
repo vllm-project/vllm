@@ -273,7 +273,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       if (ARCH_VER VERSION_LESS 8.0)
         message(STATUS
           "Unable to add punica extension due to device version ${ARCH_VER} < 8.0.")
-        set(ENABLE_PUNICA false)
+#        set(ENABLE_PUNICA false)
         break()
       endif()
     endforeach()

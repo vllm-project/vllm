@@ -130,8 +130,11 @@ endmacro()
 # `GPU_SUPPORTED_ARCHES`. Sets the final set of architectures in
 # `GPU_ARCHES`.
 #
-function(override_gpu_arches OUT_GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
-  message(STATUS "${GPU_LANG} supported arches: ${GPU_SUPPORTED_ARCHES}")
+# Note: this is defined as a macro since it updates `CMAKE_CUDA_FLAGS`.
+#
+macro(override_gpu_arches OUT_GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
+  set(_GPU_SUPPORTED_ARCHES_LIST ${GPU_SUPPORTED_ARCHES} ${ARGN})
+  message(STATUS "${GPU_LANG} supported arches: ${_GPU_SUPPORTED_ARCHES_LIST}")
 
   if (${GPU_LANG} STREQUAL "HIP")
     #
@@ -144,17 +147,17 @@ function(override_gpu_arches OUT_GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
     # Find the intersection of the supported + detected architectures to
     # set the module architecture flags.
     #
-    set(GPU_ARCHES)
-    foreach (ARCH ${CMAKE_HIP_ARCHITECTURES})
-      if (ARCH IN_LIST GPU_SUPPORTED_ARCHES)
-        list(APPEND GPU_ARCHES ${ARCH})
+    set(${GPU_ARCHES})
+    foreach (_ARCH ${CMAKE_HIP_ARCHITECTURES})
+      if (_ARCH IN_LIST _GPU_SUPPORTED_ARCHES_LIST)
+        list(APPEND ${GPU_ARCHES} ${_ARCH})
       endif()
     endforeach()
 
-    if(NOT GPU_ARCHES)
+    if(NOT ${GPU_ARCHES})
       message(FATAL_ERROR
         "None of the detected ROCm architectures: ${CMAKE_HIP_ARCHITECTURES} is"
-        " supported. Supported ROCm architectures are: ${GPU_SUPPORTED_ARCHES}.")
+        " supported. Supported ROCm architectures are: ${_GPU_SUPPORTED_ARCHES_LIST}.")
     endif()
 
   elseif(${GPU_LANG} STREQUAL "CUDA")
@@ -200,63 +203,62 @@ function(override_gpu_arches OUT_GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
     message(DEBUG "arch flags: ${_CUDA_ARCH_FLAGS}")
 
     # Initialize the architecture lists to empty.
-    set(GPU_ARCHES)
+    set(${GPU_ARCHES})
 
     # Process each `gencode` flag.
-    foreach(ARCH ${_CUDA_ARCH_FLAGS})
+    foreach(_ARCH ${_CUDA_ARCH_FLAGS})
       # For each flag, extract the version number and whether it refers to PTX
       # or native code.
       # Note: if a regex matches then `CMAKE_MATCH_1` holds the binding
       # for that match.
 
-      string(REGEX MATCH "arch=compute_\([0-9]+a?\)" COMPUTE ${ARCH})
-      if (COMPUTE)
-        set(COMPUTE ${CMAKE_MATCH_1})
+      string(REGEX MATCH "arch=compute_\([0-9]+a?\)" _COMPUTE ${_ARCH})
+      if (_COMPUTE)
+        set(_COMPUTE ${CMAKE_MATCH_1})
       endif()
 
-      string(REGEX MATCH "code=sm_\([0-9]+a?\)" SM ${ARCH})
-      if (SM)
-        set(SM ${CMAKE_MATCH_1})
+      string(REGEX MATCH "code=sm_\([0-9]+a?\)" _SM ${_ARCH})
+      if (_SM)
+        set(_SM ${CMAKE_MATCH_1})
       endif()
 
-      string(REGEX MATCH "code=compute_\([0-9]+a?\)" CODE ${ARCH})
-      if (CODE)
-        set(CODE ${CMAKE_MATCH_1})
+      string(REGEX MATCH "code=compute_\([0-9]+a?\)" _CODE ${_ARCH})
+      if (_CODE)
+        set(_CODE ${CMAKE_MATCH_1})
       endif()
 
       # Make sure the virtual architecture can be matched.
-      if (NOT COMPUTE)
+      if (NOT _COMPUTE)
         message(FATAL_ERROR
-          "Could not determine virtual architecture from: ${ARCH}.")
+          "Could not determine virtual architecture from: ${_ARCH}.")
       endif()
 
       # One of sm_ or compute_ must exist.
-      if ((NOT SM) AND (NOT CODE))
+      if ((NOT _SM) AND (NOT _CODE))
         message(FATAL_ERROR
-          "Could not determine a codegen architecture from: ${ARCH}.")
+          "Could not determine a codegen architecture from: ${_ARCH}.")
       endif()
 
-      if (SM)
-        set(VIRT "")
-        set(CODE_ARCH ${SM})
+      if (_SM)
+        set(_VIRT "")
+        set(_CODE_ARCH ${_SM})
       else()
-        set(VIRT "-virtual")
-        set(CODE_ARCH ${CODE})
+        set(_VIRT "-virtual")
+        set(_CODE_ARCH ${_CODE})
       endif()
 
       # Check if the current version is in the supported arch list.
-      string_to_ver(CODE_VER ${CODE_ARCH})
-      if (NOT CODE_VER IN_LIST GPU_SUPPORTED_ARCHES)
-        message(STATUS "discarding unsupported CUDA arch ${VER}.")
+      string_to_ver(_CODE_VER ${_CODE_ARCH})
+      if (NOT _CODE_VER IN_LIST _GPU_SUPPORTED_ARCHES_LIST)
+        message(STATUS "discarding unsupported CUDA arch ${_VER}.")
         continue()
       endif()
 
       # Add it to the arch list.
-      list(APPEND GPU_ARCHES "${CODE_ARCH}${VIRT}")
+      list(APPEND ${GPU_ARCHES} "${_CODE_ARCH}${_VIRT}")
     endforeach()
   endif()
   message(STATUS "${GPU_LANG} target arches: ${GPU_ARCHES}")
-  set(${OUT_GPU_ARCHES} ${GPU_ARCHES} PARENT_SCOPE)
 endfunction()
 
 #
