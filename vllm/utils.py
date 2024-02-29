@@ -3,6 +3,7 @@ import os
 import socket
 import subprocess
 import uuid
+import gc
 from platform import uname
 from typing import List, Tuple, Union
 from packaging.version import parse, Version
@@ -287,3 +288,27 @@ def create_kv_caches_with_random(
                 f"Does not support value cache of type {cache_dtype}")
         value_caches.append(value_cache)
     return key_caches, value_caches
+
+
+class measure_cuda_memory:
+
+    def __init__(self, device=None):
+        self.device = device
+
+    def memory_usage(self) -> float:
+        # Return the memory usage in MB.
+        mem = torch.cuda.max_memory_allocated(self.device) / float(2**20)
+        return mem
+
+    def __enter__(self):
+        torch.cuda.reset_peak_memory_stats(self.device)
+        self.initial_memory = self.memory_usage()
+        # This allows us to call methods of the context manager if needed
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.final_memory = self.memory_usage()
+        self.consumed_memory = self.final_memory - self.initial_memory
+
+        # Force garbage collection
+        gc.collect()

@@ -21,7 +21,7 @@ from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
-from vllm.utils import in_wsl
+from vllm.utils import in_wsl, measure_cuda_memory
 
 logger = init_logger(__name__)
 
@@ -81,8 +81,13 @@ class ModelRunner:
         self.kv_cache_dtype = kv_cache_dtype
 
     def load_model(self) -> None:
-        self.model = get_model(self.model_config, self.device_config,
-                               self.lora_config)
+        with measure_cuda_memory() as m:
+            self.model = get_model(self.model_config, self.device_config,
+                                   self.lora_config)
+
+        self.model_memory_usage = m.consumed_memory
+        logger.info(
+            f"Loading model weights took {self.model_memory_usage:.2f} MB")
 
         vocab_size = self.model.config.vocab_size
 
