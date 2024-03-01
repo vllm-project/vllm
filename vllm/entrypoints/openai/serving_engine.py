@@ -62,7 +62,8 @@ class OpenAIServing:
         self.tokenizer = get_tokenizer(
             engine_model_config.tokenizer,
             tokenizer_mode=engine_model_config.tokenizer_mode,
-            trust_remote_code=engine_model_config.trust_remote_code)
+            trust_remote_code=engine_model_config.trust_remote_code,
+            truncation_side="left")
 
     async def show_available_models(self) -> ModelList:
         """Show available models. Right now we only have one model."""
@@ -147,15 +148,26 @@ class OpenAIServing:
             self,
             request: Union[ChatCompletionRequest, CompletionRequest],
             prompt: Optional[str] = None,
-            prompt_ids: Optional[List[int]] = None) -> List[int]:
+            prompt_ids: Optional[List[int]] = None,
+            truncate_input_tokens: Optional[int] = None) -> List[int]:
         if not (prompt or prompt_ids):
             raise ValueError("Either prompt or prompt_ids should be provided.")
         if (prompt and prompt_ids):
             raise ValueError(
                 "Only one of prompt or prompt_ids should be provided.")
 
-        input_ids = prompt_ids if prompt_ids is not None else self.tokenizer(
-            prompt).input_ids
+        if prompt_ids is None:
+            tokenizer_kwargs = {}
+            if truncate_input_tokens is not None:
+                tokenizer_kwargs["truncation"] = True
+                tokenizer_kwargs["max_length"] = truncate_input_tokens
+            input_ids = self.tokenizer(prompt, **tokenizer_kwargs).input_ids
+        else:
+            if truncate_input_tokens is not None:
+                input_ids = prompt_ids[-truncate_input_tokens:]
+            else:
+                input_ids = prompt_ids
+
         token_num = len(input_ids)
 
         if request.max_tokens is None:
