@@ -23,6 +23,7 @@ from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
+from transformers import PretrainedConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -42,7 +43,6 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
-from vllm.transformers_utils.configs.baichuan import BaiChuanConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -186,7 +186,7 @@ class BaiChuanAttention(nn.Module):
 class BaiChuanDecoderLayer(nn.Module):
 
     def __init__(self,
-                 config: BaiChuanConfig,
+                 config: PretrainedConfig,
                  position_embedding: str,
                  linear_method: Optional[LinearMethodBase] = None):
         super().__init__()
@@ -245,7 +245,7 @@ class BaiChuanDecoderLayer(nn.Module):
 class BaiChuanModel(nn.Module):
 
     def __init__(self,
-                 config: BaiChuanConfig,
+                 config: PretrainedConfig,
                  position_embedding: str,
                  linear_method: Optional[LinearMethodBase] = None):
         super().__init__()

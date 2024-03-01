@@ -12,6 +12,7 @@ from vllm.entrypoints.openai.protocol import (
     UsageInfo)
 from vllm.outputs import RequestOutput
 from vllm.entrypoints.openai.serving_engine import OpenAIServing, LoRA
+from vllm.model_executor.guided_decoding import get_guided_decoding_logits_processor
 
 logger = init_logger(__name__)
 
@@ -39,18 +40,12 @@ class OpenAIServingChat(OpenAIServing):
         See  https://platform.openai.com/docs/api-reference/chat/create
         for the API specification. This API mimics the OpenAI ChatCompletion API.
 
-        NOTE: Currently we do not support the following features:
+        NOTE: Currently we do not support the following feature:
             - function_call (Users should implement this by themselves)
-            - logit_bias (to be supported by vLLM engine)
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
-
-        if request.logit_bias is not None and len(request.logit_bias) > 0:
-            # TODO: support logit_bias in vLLM engine.
-            return self.create_error_response(
-                "logit_bias is not currently supported")
 
         try:
             prompt = self.tokenizer.apply_chat_template(
@@ -68,6 +63,14 @@ class OpenAIServingChat(OpenAIServing):
                                                            prompt=prompt)
             sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
+            guided_decode_logits_processor = (
+                await get_guided_decoding_logits_processor(
+                    request, self.engine.get_tokenizer()))
+            if guided_decode_logits_processor:
+                if sampling_params.logits_processors is None:
+                    sampling_params.logits_processors = []
+                sampling_params.logits_processors.append(
+                    guided_decode_logits_processor)
         except ValueError as e:
             return self.create_error_response(str(e))
 
@@ -86,7 +89,7 @@ class OpenAIServingChat(OpenAIServing):
         if request.add_generation_prompt:
             return self.response_role
         else:
-            return request.messages[-1].role
+            return request.messages[-1]["role"]
 
     async def chat_completion_stream_generator(
             self, request: ChatCompletionRequest,
