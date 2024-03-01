@@ -151,10 +151,13 @@ class ModelRunner:
                 prefix_len = prefix.get_length()
                 prompt_tokens = prompt_tokens[prefix_len:]
                 prefix_block_tables.append(prefix.get_block_numbers())
+                context_len = prefix_len
             else:
                 prefix_block_tables.append([])
+                context_len = prompt_len
+
             # actual prompt lens
-            context_lens.append(prefix_len)
+            context_lens.append(context_len)
             subquery_lens.append(prompt_len - prefix_len)
 
             input_tokens.append(prompt_tokens)
