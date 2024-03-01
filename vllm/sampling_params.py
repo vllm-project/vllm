@@ -202,7 +202,9 @@ class SamplingParams:
             raise ValueError(f"prompt_logprobs must be non-negative, got "
                              f"{self.prompt_logprobs}.")
         if self.truncate_input_tokens is not None and self.truncate_input_tokens < 1:
-            raise ValueError(f"truncate_input_tokens must be >= 1, got {self.truncate_input_tokens}")
+            raise ValueError(
+                f"truncate_input_tokens must be >= 1, got {self.truncate_input_tokens}"
+            )
 
     def _verify_beam_search(self) -> None:
         if self.best_of == 1:
