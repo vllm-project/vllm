@@ -15,7 +15,10 @@ def test_block_allocator(
     num_blocks: int,
 ):
     block_hash = 1
-    block_allocator = BlockAllocator(Device.CPU, block_size, num_blocks, enable_caching=True)
+    block_allocator = BlockAllocator(Device.CPU,
+                                     block_size,
+                                     num_blocks,
+                                     enable_caching=True)
 
     # Allocate two PysicalTokenBlocks with the same hash and check that they are the same PhysicalTokenBlock
     first_block = block_allocator.allocate(block_hash, 0)
@@ -39,7 +42,10 @@ def test_block_allocator(
 @pytest.mark.parametrize("num_blocks", [16])
 def test_eviction(num_blocks: int, ):
     block_size = 16
-    block_allocator = BlockAllocator(Device.CPU, block_size, num_blocks, enable_caching=True)
+    block_allocator = BlockAllocator(Device.CPU,
+                                     block_size,
+                                     num_blocks,
+                                     enable_caching=True)
     blocks = []
 
     for i in range(num_blocks):
