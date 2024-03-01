@@ -40,9 +40,8 @@ class AQLMConfig(QuantizationConfig):
         self.num_codebooks = num_codebooks
         self.out_group_size = out_group_size
 
-        # I think pack factor is *probably* how many elements fit into one quantized tensor element.
-        # though out group size makes it interesting, because really we are doing 2D blocks, potentially.
-        # maybe this is vllms first 2D packing?  Arg.
+        # out_group_size > 1 is untested, and probably won't work as-is.
+        assert(self.out_group_size == 1)
         self.pack_factor = (self.in_group_size * self.out_group_size)
 
     def __repr__(self) -> str:
@@ -116,7 +115,11 @@ class AQLMLinearMethod(LinearMethodBase):
 
         codes = Parameter(
             torch.empty(
-                output_size_per_partition,  # not entirely sure what to do with num_out_groups, if we need this pack factor.
+                # There could actually be two pack factors, one along input and one along output,
+                # but we don't currently support out_group_size,
+                # and only the one along output needs to be marked with "packed_dim".
+                # in order for QKVLinear to work.
+                output_size_per_partition,
                 input_size_per_partition // self.quant_config.pack_factor,
                 self.quant_config.num_codebooks,
                 dtype=get_int_dtype(self.quant_config.nbits_per_codebook),
