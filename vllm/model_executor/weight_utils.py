@@ -85,8 +85,11 @@ def convert_bin_to_safetensor_file(
 # TODO(woosuk): Move this to other place.
 def get_quant_config(model_config: ModelConfig) -> QuantizationConfig:
     quant_cls = get_quantization_config(model_config.quantization)
-    if model_config.hf_quant_config is not None:
-        return quant_cls.from_config(model_config.hf_quant_config)
+    # Read the quantization config from the HF model config, if available.
+    hf_quant_config = getattr(model_config.hf_config, "quantization_config",
+                              None)
+    if hf_quant_config is not None:
+        return quant_cls.from_config(hf_quant_config)
     model_name_or_path = model_config.model
     is_local = os.path.isdir(model_name_or_path)
     if not is_local:

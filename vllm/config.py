@@ -165,21 +165,14 @@ class ModelConfig:
         hf_quant_config = getattr(self.hf_config, "quantization_config", None)
         if hf_quant_config is not None:
             hf_quant_method = str(hf_quant_config["quant_method"]).lower()
-        else:
-            # HF models such as https://huggingface.co/BlackSamorez/Llama-2-70b-AQLM-4Bit-2x16-hf/blob/main/config.json
-            # only have  an aqlm block, no quantization_config block.
-            hf_quant_config = getattr(self.hf_config, "aqlm", None)
-            if hf_quant_config is not None:
-                hf_quant_method = "aqlm"
-
-        if hf_quant_method is not None and self.quantization is None:
-            self.quantization = hf_quant_method
-        elif self.quantization != hf_quant_method:
-            raise ValueError(
-                "Quantization method specified in the model config "
-                f"({hf_quant_method}) does not match the quantization "
-                f"method specified in the `quantization` argument "
-                f"({self.quantization}).")
+            if self.quantization is None:
+                    self.quantization = hf_quant_method
+            elif self.quantization != hf_quant_method:
+                raise ValueError(
+                    "Quantization method specified in the model config "
+                    f"({hf_quant_method}) does not match the quantization "
+                    f"method specified in the `quantization` argument "
+                    f"({self.quantization}).")
 
         if self.quantization is not None:
             if self.quantization not in supported_quantization:
