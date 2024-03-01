@@ -45,7 +45,7 @@ class ModelConfig:
             a tag name, or a commit id. If unspecified, will use the default
             version.
         code_revision: The specific revision to use for the model code on
-            Hugging Face Hub. It can be a branch name, a tag name, or a
+            Hugging Face Hub. It can be a branch name, a tag name, or a 
             commit id. If unspecified, will use the default version.
         tokenizer_revision: The specific tokenizer version to use. It can be a
             branch name, a tag name, or a commit id. If unspecified, will use
@@ -166,7 +166,7 @@ class ModelConfig:
         if hf_quant_config is not None:
             hf_quant_method = str(hf_quant_config["quant_method"]).lower()
             if self.quantization is None:
-                    self.quantization = hf_quant_method
+                self.quantization = hf_quant_method
             elif self.quantization != hf_quant_method:
                 raise ValueError(
                     "Quantization method specified in the model config "
