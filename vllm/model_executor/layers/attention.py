@@ -122,6 +122,7 @@ class PagedAttention(nn.Module):
             shape = [batch_size, seq_len, num_heads * head_size]
         """
         batch_size, seq_len, hidden_size = query.shape
+        print("SANG-TODO query size: ", query.size())
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
@@ -133,10 +134,12 @@ class PagedAttention(nn.Module):
         # profiling run.
         if key_cache is not None and value_cache is not None:
             if input_metadata.flash_style:
+                print("SANG-TODO reshape cache flash.")
                 cache_ops.reshape_and_cache_flash(
                     key, value, key_cache, value_cache,
                     input_metadata.slot_mapping.flatten())
             else:
+                print("SANG-TODO reshape cache.")
                 cache_ops.reshape_and_cache(
                     key,
                     value,
@@ -150,6 +153,33 @@ class PagedAttention(nn.Module):
             # normal attention
             if (key_cache is None or value_cache is None
                     or input_metadata.block_tables.numel() == 0):
+                print("SANG-TODO flash attn is used.")
+                print(
+                    "SANG-TODO query size: ",
+                    query.view(batch_size, seq_len, self.num_heads,
+                               self.head_size).size())
+                # if key_cache is not None and value_cache is not None:
+                #     output2 = flash_attn_with_kvcache_paged(
+                #         query.view(batch_size, seq_len, self.num_heads,
+                #                     self.head_size),
+                #         key_cache,
+                #         value_cache,
+                #         self.scale,
+                #         input_metadata.block_tables,
+                #         input_metadata.context_lens + seq_len,
+                #         self.alibi_slopes,
+                #     )
+                #     from flash_attn import flash_attn_func
+                #     breakpoint()
+                #     output3 = flash_attn_func(
+                #         q=query.view(batch_size, seq_len, self.num_heads,
+                #                     self.head_size),
+                #         k=key.view(batch_size, seq_len, self.num_kv_heads, self.head_size),
+                #         v=value.view(batch_size, seq_len, self.num_kv_heads, self.head_size),
+                #         softmax_scale=self.scale,
+                #         causal=True,
+                #         alibi_slopes=self.alibi_slopes,
+                #     )
                 if self.num_kv_heads != self.num_heads:
                     # As of Nov 2023, xformers only supports MHA. For MQA/GQA,
                     # project the key and value tensors to the desired number of
@@ -217,6 +247,7 @@ class PagedAttention(nn.Module):
                 )
                 output = out.view_as(query)
             else:
+                # prefix-enabled attention
                 if input_metadata.flash_style:
                     output = flash_attn_with_kvcache_paged(
                         query.view(batch_size, seq_len, self.num_heads,
@@ -229,7 +260,6 @@ class PagedAttention(nn.Module):
                         self.alibi_slopes,
                     )
                 else:
-                    # prefix-enabled attention
                     output = torch.empty_like(query)
                     context_attention_fwd(
                         query,

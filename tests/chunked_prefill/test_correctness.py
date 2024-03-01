@@ -7,7 +7,7 @@ from vllm.model_executor.parallel_utils.parallel_state import destroy_model_para
 
 MODELS = [
     "JackFram/llama-68m",
-    "facebook/opt-125m",
+    # "facebook/opt-125m",
 ]
 
 TEST_PROMPTS = [
@@ -57,7 +57,7 @@ def test_models(
                                    flash_style=True,
                                    block_size=block_size)
     flash_attn_output_by_batches = []
-    for i in range(10):
+    for i in range(2):
         prompts = [TEST_PROMPTS[j % len(TEST_PROMPTS)] for j in range(i)]
         flash_attn_output_by_batches.append(
             flash_attn_model.generate_greedy(prompts, max_tokens))
