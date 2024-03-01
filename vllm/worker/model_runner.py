@@ -138,8 +138,8 @@ class ModelRunner:
         context_lens: List[int] = []
         subquery_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
-        print("SANG-TODO # of requests (seq_group_metadata_list): ",
-              len(seq_group_metadata_list))
+        # print("SANG-TODO # of requests (seq_group_metadata_list): ",
+        #       len(seq_group_metadata_list))
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -152,7 +152,7 @@ class ModelRunner:
             prompt_lens.append(prompt_len)
             prefix_len = 0
             prefix = seq_group_metadata.prefix
-            print("SANG-TODO prefix, ", prefix)
+            # print("SANG-TODO prefix, ", prefix)
             if prefix is not None and prefix.computed:
                 prefix_len = prefix.get_length()
                 prompt_tokens = prompt_tokens[prefix_len:]
@@ -500,12 +500,12 @@ class ModelRunner:
             # SANG-TODO set num prompt tokens and generations?
             # Prepare input tensors.
             if is_prompt:
-                print("SANG-TODO execute model prompt.")
+                # print("SANG-TODO execute model prompt.")
                 (input_tokens, input_positions, input_metadata, prompt_lens,
                  subquery_lens, lora_index_mapping, lora_prompt_mapping,
                  lora_requests) = self._prepare_prompt(seq_group_metadata_list)
             else:
-                print("SANG-TODO execute model decode.")
+                # print("SANG-TODO execute model decode.")
                 (input_tokens, input_positions, input_metadata,
                  lora_index_mapping, lora_prompt_mapping,
                  lora_requests) = self._prepare_decode(seq_group_metadata_list)
