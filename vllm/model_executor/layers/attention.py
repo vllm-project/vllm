@@ -152,7 +152,8 @@ class PagedAttention(nn.Module):
         if input_metadata.is_prompt:
             # normal attention
             if (key_cache is None or value_cache is None
-                    or input_metadata.block_tables.numel() == 0):
+                    # or input_metadata.block_tables.numel() == 0):
+                    or not input_metadata.prefix_enabled):
                 print("SANG-TODO flash attn is used.")
                 print(
                     "SANG-TODO query size: ",
@@ -256,7 +257,8 @@ class PagedAttention(nn.Module):
                         value_cache,
                         self.scale,
                         input_metadata.block_tables,
-                        input_metadata.context_lens,
+                        # input_metadata.context_lens,
+                        # seq_len,
                         self.alibi_slopes,
                     )
                 else:

@@ -159,6 +159,7 @@ class ModelRunner:
                 prefix_block_tables.append(prefix.get_block_numbers())
                 context_len = prefix_len
             else:
+                prefix_block_tables.append([])
                 if seq_group_metadata.block_tables is None:
                     prefix_block_tables.append([])
                 else:
@@ -267,7 +268,9 @@ class ModelRunner:
                                        block_tables=block_tables,
                                        use_cuda_graph=False,
                                        kv_cache_dtype=self.kv_cache_dtype,
-                                       flash_style=self.flash_style)
+                                       flash_style=self.flash_style,
+                                       prefix_enabled=prefix is not None
+                                       and prefix.computed)
         return (input_tokens, input_positions, input_metadata, prompt_lens,
                 subquery_lens, lora_index_mapping, lora_prompt_mapping,
                 lora_requests)
@@ -394,7 +397,8 @@ class ModelRunner:
                                        block_tables=block_tables,
                                        use_cuda_graph=use_captured_graph,
                                        kv_cache_dtype=self.kv_cache_dtype,
-                                       flash_style=self.flash_style)
+                                       flash_style=self.flash_style,
+                                       prefix_enabled=False)
         return (input_tokens, input_positions, input_metadata,
                 lora_index_mapping, lora_prompt_mapping, lora_requests)
 
@@ -540,6 +544,7 @@ class ModelRunner:
                 sampling_metadata.selected_token_indices,
                 "lora_requests": lora_requests,
                 "lora_mapping": lora_mapping,
+                "prefix_enabled": input_metadata.prefix_enabled
             }
             broadcast_tensor_dict(metadata_dict, src=0)
         else:
@@ -559,7 +564,8 @@ class ModelRunner:
                 block_tables=metadata_dict["block_tables"],
                 use_cuda_graph=metadata_dict["use_cuda_graph"],
                 kv_cache_dtype=metadata_dict["kv_cache_dtype"],
-                flash_style=self.flash_style)
+                flash_style=self.flash_style,
+                prefix_enabled=metadata_dict["prefix_enabled"])
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
                 seq_data=None,
@@ -743,7 +749,8 @@ class ModelRunner:
                     block_tables=block_tables[:batch_size],
                     use_cuda_graph=True,
                     kv_cache_dtype=self.kv_cache_dtype,
-                    flash_style=self.flash_style)
+                    flash_style=self.flash_style,
+                    prefix_enabled=False)
 
                 if self.lora_config:
                     lora_mapping = LoRAMapping(
