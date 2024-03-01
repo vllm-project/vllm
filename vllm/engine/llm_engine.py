@@ -980,7 +980,10 @@ class LLMEngine:
     def _finalize_sequence(self, seq: Sequence,
                            sampling_params: SamplingParams,
                            stop_string: str) -> None:
-        if not sampling_params.include_stop_str_in_output and stop_string:
+        if sampling_params.include_stop_str_in_output:
+            return
+
+        if stop_string and seq.output_text.endswith(stop_string):
             # Truncate the output text so that the stop string is
             # not included in the output.
             seq.output_text = seq.output_text[:-len(stop_string)]
