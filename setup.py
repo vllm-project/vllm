@@ -317,7 +317,6 @@ if _is_cuda():
 
 elif _is_hip():
     NVCC_FLAGS_PUNICA = NVCC_FLAGS.copy()
-    NVCC_FLAGS_PUNICA += ["-mno-wavefrontsize64"]
 
 elif _is_neuron():
     neuronxcc_version = get_neuronxcc_version()

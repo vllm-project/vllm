@@ -399,49 +399,48 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
                                         scale);
     }
 #else
-    constexpr size_t rocm_warp_size = 64;
+    constexpr size_t rocm_warp_size = warpSize;
 
-#define CHECK_INPUT_TILEABLE_WITH_VECTOR(vec_size_) \
+#define CHECK_INPUT_TILEABLE_BY(vec_size_) \
     feat_in % (rocm_warp_size * vec_size_) == 0
 
-#define LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR(factor_, vec_size_, tx_, ty_) \
-    if constexpr (CHECK_INPUT_TILEABLE_WITH_VECTOR(factor_)) {                    \
-      constexpr size_t vec_size_shrink = vec_size_;                               \
-      constexpr int tx = tx_;                                                     \
-      constexpr int ty = ty_;                                                     \
-      dim3 nblks(feat_out, batch_size);                                           \
-      dim3 nthrs(tx, ty);                                                         \
-      bgmv_shrink_kernel<feat_in, feat_out, vec_size_shrink,                      \
-                          vec_size_shrink * sizeof(in_T),                         \
-                          vec_size_shrink * sizeof(W_T),                          \
-                          tx, ty, tz>                                             \
-          <<<nblks, nthrs, 0, stream>>>(Y, X, W, indicies, y_offset,              \
-                                        full_y_size, num_layers, layer_idx,       \
-                                        scale);                                   \
+#define LAUNCH_BGMV_SHRINK_KERNELS_ROCM(factor_, vec_size_, tx_, ty_)       \
+    if constexpr (CHECK_INPUT_TILEABLE_BY(factor_)) {                       \
+      constexpr size_t vec_size_shrink = vec_size_;                         \
+      constexpr int tx = tx_;                                               \
+      constexpr int ty = ty_;                                               \
+      dim3 nblks(feat_out, batch_size);                                     \
+      dim3 nthrs(tx, ty);                                                   \
+      bgmv_shrink_kernel<feat_in, feat_out, vec_size_shrink,                \
+                          vec_size_shrink * sizeof(in_T),                   \
+                          vec_size_shrink * sizeof(W_T),                    \
+                          tx, ty, tz>                                       \
+          <<<nblks, nthrs, 0, stream>>>(Y, X, W, indicies, y_offset,        \
+                                        full_y_size, num_layers, layer_idx, \
+                                        scale);                             \
     }
 
-    static_assert(CHECK_INPUT_TILEABLE_WITH_VECTOR(64) ||
-                  CHECK_INPUT_TILEABLE_WITH_VECTOR(32) ||
-                  CHECK_INPUT_TILEABLE_WITH_VECTOR(16) ||
-                  CHECK_INPUT_TILEABLE_WITH_VECTOR(8)  ||
-                  CHECK_INPUT_TILEABLE_WITH_VECTOR(4)  ||
-                  CHECK_INPUT_TILEABLE_WITH_VECTOR(2)  ||
-                  CHECK_INPUT_TILEABLE_WITH_VECTOR(1));
+    static_assert(CHECK_INPUT_TILEABLE_BY(32) ||
+                  CHECK_INPUT_TILEABLE_BY(16) ||
+                  CHECK_INPUT_TILEABLE_BY( 8) ||
+                  CHECK_INPUT_TILEABLE_BY( 4) ||
+                  CHECK_INPUT_TILEABLE_BY( 2) ||
+                  CHECK_INPUT_TILEABLE_BY( 1));
+    
+    LAUNCH_BGMV_SHRINK_KERNELS_ROCM(32, vec_size, rocm_warp_size, 32/vec_size)
+    else
+    LAUNCH_BGMV_SHRINK_KERNELS_ROCM(16, vec_size, rocm_warp_size, 16/vec_size)
+    else
+    LAUNCH_BGMV_SHRINK_KERNELS_ROCM( 8, vec_size, rocm_warp_size,  8/vec_size)
+    else
+    LAUNCH_BGMV_SHRINK_KERNELS_ROCM( 4, vec_size, rocm_warp_size/(vec_size/4), vec_size/4)
+    else
+    LAUNCH_BGMV_SHRINK_KERNELS_ROCM( 2, vec_size, rocm_warp_size/(vec_size/2), vec_size/2)
+    else
+    LAUNCH_BGMV_SHRINK_KERNELS_ROCM( 1, vec_size, rocm_warp_size/(vec_size/1), vec_size/1)
 
-    LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR(32, vec_size, rocm_warp_size, 32/vec_size)
-    else
-    LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR(16, vec_size, rocm_warp_size, 16/vec_size)
-    else
-    LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR( 8, vec_size, rocm_warp_size,  8/vec_size)
-    else
-    LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR( 4, vec_size, rocm_warp_size/(vec_size/4), vec_size/ 4)
-    else
-    LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR( 2, vec_size, rocm_warp_size/(vec_size/2), vec_size/ 2)
-    else
-    LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR( 1, vec_size, rocm_warp_size/(vec_size/1), vec_size/ 1)
-
-#undef CHECK_INPUT_TILEABLE_WITH_VECTOR
-#undef LAUNCH_BGMV_SHRINK_KERNELS_WS64_WITH_VECTOR
+#undef CHECK_INPUT_TILEABLE_BY
+#undef LAUNCH_BGMV_SHRINK_KERNELS_ROCM
 #endif
   }
 }
