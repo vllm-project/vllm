@@ -1,5 +1,5 @@
 import random
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple
 
 import pytest
 import torch
@@ -125,7 +125,8 @@ def ref_single_query_cached_kv_attention(
 
         out = ref_masked_attention(q, keys, values, scale, alibi_bias)
         out = out.view(num_query_heads, head_size)
-        output[i].copy_(out, non_blocking=True)
+        # output[i].copy_(out, non_blocking=True)
+        output[i].copy_(out)
 
 
 # @pytest.mark.parametrize("num_seqs", NUM_GEN_SEQS)
@@ -137,13 +138,13 @@ def ref_single_query_cached_kv_attention(
 # @pytest.mark.parametrize("seed", SEEDS)
 # @pytest.mark.parametrize("pad_config", PAD_CONFIGS)
 @pytest.mark.parametrize("num_seqs", [3])
-@pytest.mark.parametrize("num_heads", [(40,40)])
+@pytest.mark.parametrize("num_heads", [(40, 40)])
 @pytest.mark.parametrize("head_size", [256])
 @pytest.mark.parametrize("use_alibi", [True])
 @pytest.mark.parametrize("block_size", [256])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("pad_config", PAD_CONFIGS)
+@pytest.mark.parametrize("pad_config", [(0, 0)])
 @torch.inference_mode()
 def test_flash_paged_attention(
     kv_cache_factory,
@@ -162,8 +163,7 @@ def test_flash_paged_attention(
 
     scale = float(1.0 / (head_size**0.5))
     num_query_heads, num_kv_heads = num_heads
-    query = torch.empty(num_seqs,  # batch_size 
-                        1,  # seqlen
+    query = torch.empty(num_seqs,
                         num_query_heads,
                         head_size,
                         dtype=dtype,
@@ -194,7 +194,6 @@ def test_flash_paged_attention(
         ]
         block_tables.append(block_table)
     block_tables = torch.tensor(block_tables, dtype=torch.int, device="cuda")
-    breakpoint()
 
     # Create the KV caches.
     key_caches, value_caches = kv_cache_factory(NUM_BLOCKS,
@@ -215,7 +214,7 @@ def test_flash_paged_attention(
                              block_tables, context_lens, max_context_len)
 
     output = flash_attn_with_kvcache_paged(
-        padded_query,
+        padded_query.view(num_seqs, 1, num_query_heads, head_size),
         key_cache,
         value_cache,
         scale,

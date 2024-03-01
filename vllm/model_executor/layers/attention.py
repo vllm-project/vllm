@@ -409,7 +409,8 @@ def flash_attn_with_kvcache_paged(
         output: [num_tokens, num_heads, head_size]
     """
     block_size = value_cache.shape[1]
-    assert block_size % 256 == 0, "only support block_size divisible by 256."
+    assert block_size % 256 == 0, ("only support block_size divisible by 256. "
+                                   f"Current block size: {block_size}")
     _, _, num_heads, head_size = query.shape
     out = flash_attn_with_kvcache(
         query,

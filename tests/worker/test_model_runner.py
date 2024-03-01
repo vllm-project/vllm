@@ -3,8 +3,6 @@ import torch
 
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.worker.model_runner import ModelRunner
-from vllm.config import (ModelConfig, ParallelConfig, SchedulerConfig,
-                         DeviceConfig)
 
 
 def test_prepare_prompt():

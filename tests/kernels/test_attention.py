@@ -280,7 +280,6 @@ def ref_multi_query_kv_attention(
     num_seqs = len(cu_seq_lens) - 1
     ref_outputs = []
     for i in range(num_seqs):
-        breakpoint()
         start_idx = cu_seq_lens[i]
         end_idx = cu_seq_lens[i + 1]
         seq_len = end_idx - start_idx
@@ -300,7 +299,6 @@ def ref_multi_query_kv_attention(
         )
         ref_outputs.append(ref_output)
     ref_output = torch.cat(ref_outputs, dim=0)
-    breakpoint()
     return ref_output
 
 
