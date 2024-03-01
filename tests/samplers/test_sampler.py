@@ -11,6 +11,7 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.worker.model_runner import ModelRunner
+from vllm.config import DeviceConfig
 
 
 class MockLogitsSampler(Sampler):
@@ -29,7 +30,7 @@ class MockLogitsSampler(Sampler):
 
 
 def _prepare_test(
-    batch_size: int
+    batch_size: int, device: str
 ) -> Tuple[torch.Tensor, torch.Tensor, MockLogitsSampler, ModelRunner]:
     vocab_size = 32000
     input_tensor = torch.rand((batch_size, 1024), dtype=torch.float16)
@@ -37,7 +38,8 @@ def _prepare_test(
                              1e-2,
                              dtype=input_tensor.dtype)
     sampler = MockLogitsSampler(32000, fake_logits)
-    model_runner = ModelRunner(None, None, None, None, None)
+    model_runner = ModelRunner(None, None, None, DeviceConfig(device=device),
+                               None)
     return input_tensor, fake_logits, sampler, model_runner
 
 
@@ -82,7 +84,7 @@ def test_sampler_all_greedy(seed: int, device: str):
     torch.set_default_device(device)
     batch_size = random.randint(1, 256)
     input_tensor, fake_logits, sampler, model_runner = _prepare_test(
-        batch_size)
+        batch_size, device)
 
     sampling_params = SamplingParams(temperature=0)
     sampler_output = _do_sample(batch_size, input_tensor, sampler,
@@ -102,7 +104,7 @@ def test_sampler_all_random(seed: int, device: str):
     torch.set_default_device(device)
     batch_size = random.randint(1, 256)
     input_tensor, fake_logits, sampler, model_runner = _prepare_test(
-        batch_size)
+        batch_size, device)
 
     for i in range(batch_size):
         fake_logits[i, i] = 1e2
@@ -128,7 +130,7 @@ def test_sampler_all_random_seed(seed: int, device: str):
     torch.set_default_device(device)
     batch_size = random.randint(1, 256)
     input_tensor, fake_logits, sampler, model_runner = _prepare_test(
-        batch_size)
+        batch_size, device)
 
     for i in range(batch_size):
         fake_logits[i, i] = 1e2
@@ -155,7 +157,7 @@ def test_sampler_all_random_seed_deterministic(seed: int, device: str):
     torch.set_default_device(device)
     batch_size = random.randint(1, 256)
     input_tensor, fake_logits, sampler, model_runner = _prepare_test(
-        batch_size)
+        batch_size, device)
 
     sampling_params = SamplingParams(
         temperature=1.0,
@@ -179,7 +181,7 @@ def test_sampler_all_beam(seed: int, device: str):
     set_random_seed(seed)
     torch.set_default_device(device)
     batch_size = random.randint(1, 256)
-    input_tensor, _, sampler, model_runner = _prepare_test(batch_size)
+    input_tensor, _, sampler, model_runner = _prepare_test(batch_size, device)
 
     sampling_params = SamplingParams(
         temperature=0,
@@ -202,7 +204,7 @@ def test_sampler_mixed(seed: int, device: str):
     torch.set_default_device(device)
     batch_size = random.randint(1, 256)
     input_tensor, fake_logits, sampler, model_runner = _prepare_test(
-        batch_size)
+        batch_size, device)
 
     seq_group_metadata_list = []
     expected_tokens: List[Optional[List[int]]] = []
@@ -297,7 +299,7 @@ def test_sampler_logits_processors(seed: int, device: str):
     set_random_seed(seed)
     torch.set_default_device(device)
     batch_size = random.randint(1, 256)
-    input_tensor, _, sampler, model_runner = _prepare_test(batch_size)
+    input_tensor, _, sampler, model_runner = _prepare_test(batch_size, device)
 
     # This sample logits processor gives infinite score to the i-th token,
     # where i is the length of the input sequence.

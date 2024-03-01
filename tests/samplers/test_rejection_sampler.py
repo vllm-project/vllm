@@ -14,8 +14,8 @@ CUDA_DEVICES = [
 ]
 
 
-def mock_causal_accepted_tensor(
-        k: int, last_accepted_indices: torch.Tensor) -> torch.Tensor:
+def mock_causal_accepted_tensor(k: int, last_accepted_indices: torch.Tensor,
+                                device: str) -> torch.Tensor:
     """Generate an "accepted" tensor which should yield causally-accepted tokens
     up to last accepted indices.
 
@@ -26,7 +26,7 @@ def mock_causal_accepted_tensor(
 
     accepted = (torch.arange(k).expand(batch_size, k) <=
                 last_accepted_indices.unsqueeze(-1).broadcast_to(
-                    batch_size, k)).to(device="cuda")
+                    batch_size, k)).to(device=device)
 
     # Sprinkle accepted values after the contiguous initial accepted values.
     # This replicates the behavior of rejection sampling, which may "accept"
@@ -34,7 +34,7 @@ def mock_causal_accepted_tensor(
     sprinkle_candidates = (
         torch.arange(k).expand(batch_size, k) >
         last_accepted_indices.unsqueeze(-1).broadcast_to(batch_size, k) + 1)
-    sprinkle = torch.rand(batch_size, k, device="cuda") > 0.5
+    sprinkle = torch.rand(batch_size, k, device=device) > 0.5
     accepted[sprinkle_candidates] = sprinkle[sprinkle_candidates]
     return accepted
 
@@ -58,15 +58,19 @@ def test_correct_output_format(which_tokens_accepted: str, seed: int,
 
     if which_tokens_accepted == "all_tokens_accepted":
         accepted = mock_causal_accepted_tensor(
-            k, -1 + k * torch.ones((batch_size, ), dtype=torch.long))
+            k,
+            -1 + k * torch.ones((batch_size, ), dtype=torch.long),
+            device=device)
     elif which_tokens_accepted == "no_tokens_accepted":
         accepted = mock_causal_accepted_tensor(
-            k, -torch.ones((batch_size, ), dtype=torch.long))
+            k, -torch.ones((batch_size, ), dtype=torch.long), device=device)
     elif which_tokens_accepted == "some_tokens_accepted":
         last_accepted_indices = torch.randint(low=-1,
                                               high=k,
                                               size=(batch_size, ))
-        accepted = mock_causal_accepted_tensor(k, last_accepted_indices)
+        accepted = mock_causal_accepted_tensor(k,
+                                               last_accepted_indices,
+                                               device=device)
     else:
         raise AssertionError()
 
@@ -84,7 +88,8 @@ def test_correct_output_format(which_tokens_accepted: str, seed: int,
                                     dtype=torch.int64)
 
     rejection_sampler = RejectionSampler()
-    rejection_sampler.init_gpu_tensors(rank=0)
+    device_rank = int(device[-1])
+    rejection_sampler.init_gpu_tensors(rank=device_rank)
     output_token_ids = rejection_sampler._create_output(  # pylint: disable=protected-access
         accepted,
         recovered_token_ids,
@@ -130,7 +135,8 @@ def test_no_crash_with_varying_dims(k: int, vocab_size: int, batch_size: int,
                                     device: str):
     torch.set_default_device(device)
     rejection_sampler = RejectionSampler()
-    rejection_sampler.init_gpu_tensors(rank=0)
+    device_rank = int(device[-1])
+    rejection_sampler.init_gpu_tensors(rank=device_rank)
 
     draft_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
     target_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
@@ -160,7 +166,8 @@ def test_raises_when_vocab_oob(above_or_below_vocab_range: str,
     torch.set_default_device(device)
 
     rejection_sampler = RejectionSampler(strict_mode=True)
-    rejection_sampler.init_gpu_tensors(rank=0)
+    device_rank = int(device[-1])
+    rejection_sampler.init_gpu_tensors(rank=device_rank)
 
     draft_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
     target_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
@@ -287,7 +294,6 @@ class _CorrectnessTestHelper:
         self.rejection_sampler = rejection_sampler
         self.vocab_size = vocab_size
         self.vocab_range = (0, vocab_size)
-
         self.rejection_sampler.init_gpu_tensors(rank=0)
 
         # Keep test simple, use k=1
