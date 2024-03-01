@@ -66,7 +66,10 @@ class OpenAIServing:
         self.tokenizer = get_tokenizer(
             engine_model_config.tokenizer,
             tokenizer_mode=engine_model_config.tokenizer_mode,
-            trust_remote_code=engine_model_config.trust_remote_code)
+            trust_remote_code=engine_model_config.trust_remote_code,
+            local_files_only=engine_model_config.local_files_only,
+            cache_dir=engine_model_config.download_dir,
+        )
 
         if len(self.tokenizer) != engine_model_config.get_vocab_size():
             logger.warning(
