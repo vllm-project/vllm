@@ -6,12 +6,12 @@ from vllm import LLM, SamplingParams
 
 model = LLM("BlackSamorez/TinyLlama-1_1B-Chat-v1_0-AQLM-2Bit-1x16-hf", enforce_eager=True, tensor_parallel_size=2)
 
-# this has the codes 0 and 1 transposed.
+# this has the dimensions 0 and 1 transposed for the codes, and we don't currently support 8x8 anyway.
 #model = LLM("BlackSamorez/Llama-2-7b-AQLM-2Bit-8x8-hf", enforce_eager=True)
-# this model hangs
+# this model hangs, need to investigate.
 #model = LLM("BlackSamorez/Mixtral-8x7B-Instruct-v0_1-AQLM-2Bit-1x16-hf", enforce_eager=True)
 
-# These have custom code and the old format, and puzzling and conflicting stats, which probably I shouldn't even try to support.
+# These have custom code and no quantization_config block.
 #model = LLM("BlackSamorez/Llama-2-13b-AQLM-2Bit-1x16-hf", enforce_eager=True, trust_remote_code=True)
 #model = LLM("BlackSamorez/Mixtral-8x7b-AQLM-2Bit-1x16-hf", enforce_eager=True)
 
