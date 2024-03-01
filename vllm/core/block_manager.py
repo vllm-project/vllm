@@ -1,6 +1,6 @@
 """A block manager that manages token blocks."""
 import enum
-from itertools import takewhile, count
+from itertools import count
 from os.path import commonprefix
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -148,6 +148,8 @@ class BlockSpaceManager:
 
         self.watermark = watermark
         assert watermark >= 0.0
+
+        self.enable_caching = enable_caching
 
         self.watermark_blocks = int(watermark * num_gpu_blocks)
         self.gpu_allocator = BlockAllocator(Device.GPU,
@@ -431,39 +433,39 @@ class BlockSpaceManager:
         for block in block_table:
             block.last_accessed = access_time
 
-    def compute_all_blocks_in_seq(self, seq: Sequence):
+    def compute_last_full_block_in_seq(self, seq: Sequence):
         if seq.seq_id not in self.block_tables:
             return
+        max_full_block = seq.get_len() // seq.block_size - 1
         block_table = self.block_tables[seq.seq_id]
-        counter = 0
-        max_computed_blocks = seq.get_len() // seq.block_size
-        for block in block_table:
-            if counter >= max_computed_blocks:
-                return
-            block.computed = True
-            counter += 1
+        if max_full_block == -1:
+            return
+        block_table[max_full_block].computed = True
 
-    def get_all_computed_block_ids_seq(self, seq: Sequence) -> List[int]:
+    def get_all_block_ids_till_computed(self, seq: Sequence) -> List[int]:
         if seq.seq_id not in self.block_tables:
             return []
         block_table = self.block_tables[seq.seq_id]
-        last_block = block_table[-1]
-        # We want to get the first n contiguous completed blocks
-        # We exclude the last block because it's most likely not cached yet
-        return [
-            block.block_number for block in takewhile(
-                lambda block: block.computed and block != last_block,
-                block_table)
-        ]
+        for block_idx in reversed(range(len(block_table))):
+            if block_table[block_idx].computed:
+                return [b.block_number for b in block_table[:block_idx + 1]]
+        return []
 
+    # Can return non-empty result only with prefix caching enabled.
     def get_common_computed_block_ids(self,
                                       seq_group: SequenceGroup) -> List[int]:
+        if not self.enable_caching:
+            return []
+
         ids_list = [
-            self.get_all_computed_block_ids_seq(seq)
+            self.get_all_block_ids_till_computed(seq)
             for seq in iter(seq_group.seqs_dict.values())
         ]
         return commonprefix([ids for ids in ids_list if ids != []])
 
+    # We only mark the last full block because with prefix caching,
+    # all blocks until the marked one are guaranteed to be computed.
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
-        for seq in seq_group.seqs_dict.values():
-            self.compute_all_blocks_in_seq(seq)
+        if self.enable_caching:
+            for seq in seq_group.seqs_dict.values():
+                self.compute_last_full_block_in_seq(seq)
