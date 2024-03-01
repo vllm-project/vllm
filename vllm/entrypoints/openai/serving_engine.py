@@ -69,7 +69,10 @@ class OpenAIServing:
             engine_model_config.tokenizer,
             tokenizer_mode=engine_model_config.tokenizer_mode,
             trust_remote_code=engine_model_config.trust_remote_code,
-            truncation_side="left")
+            local_files_only=engine_model_config.local_files_only,
+            cache_dir=engine_model_config.download_dir,
+            truncation_side="left",
+        )
 
     async def show_available_models(self) -> ModelList:
         """Show available models. Right now we only have one model."""

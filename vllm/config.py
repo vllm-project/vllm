@@ -172,8 +172,12 @@ class ModelConfig:
                         f"with local_files_only==True")
                 self.tokenizer = os.path.dirname(filepath)
 
-        self.hf_config = get_config(self.model, trust_remote_code, revision,
-                                    code_revision)
+        self.hf_config = get_config(self.model,
+                                    trust_remote_code=trust_remote_code,
+                                    local_files_only=local_files_only,
+                                    cache_dir=download_dir,
+                                    revision=revision,
+                                    code_revision=code_revision)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.max_model_len = _get_and_verify_max_len(self.hf_text_config,

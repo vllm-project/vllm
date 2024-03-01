@@ -257,6 +257,8 @@ class LLMEngine:
             max_input_length=None,
             tokenizer_mode=self.model_config.tokenizer_mode,
             trust_remote_code=self.model_config.trust_remote_code,
+            local_files_only=self.model_config.local_files_only,
+            cache_dir=self.model_config.download_dir,
             revision=self.model_config.tokenizer_revision)
         init_kwargs.update(tokenizer_init_kwargs)
         self.tokenizer: BaseTokenizerGroup = get_tokenizer_group(
