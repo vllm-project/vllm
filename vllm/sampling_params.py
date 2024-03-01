@@ -91,7 +91,7 @@ class SamplingParams:
             tokens in the output.  Defaults to True.
         logits_processors: List of functions that modify logits based on
             previously generated tokens.
-        truncate_input_tokens: If set to an integer k, will use only the last k
+        truncate_prompt_tokens: If set to an integer k, will use only the last k
             tokens from the prompt. Defaults to None (no truncation).
     """
 
@@ -120,7 +120,7 @@ class SamplingParams:
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
         logits_processors: Optional[List[LogitsProcessor]] = None,
-        truncate_input_tokens: Optional[int] = None,
+        truncate_prompt_tokens: Optional[int] = None,
     ) -> None:
         self.n = n
         self.best_of = best_of if best_of is not None else n
@@ -153,7 +153,7 @@ class SamplingParams:
         self.spaces_between_special_tokens = spaces_between_special_tokens
         self.logits_processors = logits_processors
         self.include_stop_str_in_output = include_stop_str_in_output
-        self.truncate_input_tokens = truncate_input_tokens
+        self.truncate_prompt_tokens = truncate_prompt_tokens
         self._verify_args()
         if self.use_beam_search:
             self._verify_beam_search()
@@ -201,9 +201,9 @@ class SamplingParams:
         if self.prompt_logprobs is not None and self.prompt_logprobs < 0:
             raise ValueError(f"prompt_logprobs must be non-negative, got "
                              f"{self.prompt_logprobs}.")
-        if self.truncate_input_tokens is not None and self.truncate_input_tokens < 1:
+        if self.truncate_prompt_tokens is not None and self.truncate_prompt_tokens < 1:
             raise ValueError(
-                f"truncate_input_tokens must be >= 1, got {self.truncate_input_tokens}"
+                f"truncate_prompt_tokens must be >= 1, got {self.truncate_prompt_tokens}"
             )
 
     def _verify_beam_search(self) -> None:
@@ -285,4 +285,4 @@ class SamplingParams:
             f"skip_special_tokens={self.skip_special_tokens}, "
             "spaces_between_special_tokens="
             f"{self.spaces_between_special_tokens}, "
-            f"truncate_input_tokens={self.truncate_input_tokens})")
+            f"truncate_prompt_tokens={self.truncate_prompt_tokens})")

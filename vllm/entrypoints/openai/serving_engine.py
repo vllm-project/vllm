@@ -149,7 +149,7 @@ class OpenAIServing:
             request: Union[ChatCompletionRequest, CompletionRequest],
             prompt: Optional[str] = None,
             prompt_ids: Optional[List[int]] = None,
-            truncate_input_tokens: Optional[int] = None) -> List[int]:
+            truncate_prompt_tokens: Optional[int] = None) -> List[int]:
         if not (prompt or prompt_ids):
             raise ValueError("Either prompt or prompt_ids should be provided.")
         if (prompt and prompt_ids):
@@ -157,15 +157,15 @@ class OpenAIServing:
                 "Only one of prompt or prompt_ids should be provided.")
 
         if prompt_ids is None:
-            tokenizer_kwargs = {} if truncate_input_tokens is not None else {
-                "truncation": True, "max_length": truncate_input_tokens,
+            tokenizer_kwargs = {} if truncate_prompt_tokens is not None else {
+                "truncation": True,
+                "max_length": truncate_prompt_tokens,
             }
             input_ids = self.tokenizer(prompt, **tokenizer_kwargs).input_ids
+        elif truncate_prompt_tokens is not None:
+            input_ids = prompt_ids[-truncate_prompt_tokens:]
         else:
-            if truncate_input_tokens is not None:
-                input_ids = prompt_ids[-truncate_input_tokens:]
-            else:
-                input_ids = prompt_ids
+            input_ids = prompt_ids
 
         token_num = len(input_ids)
 

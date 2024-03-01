@@ -183,7 +183,7 @@ class CompletionRequest(BaseModel):
     guided_json: Optional[Union[str, dict, BaseModel]] = None
     guided_regex: Optional[str] = None
     guided_choice: Optional[List[str]] = None
-    truncate_input_tokens: Optional[int] = None
+    truncate_prompt_tokens: Optional[int] = None
 
     def to_sampling_params(self):
         echo_without_generation = self.echo and self.max_tokens == 0
@@ -226,7 +226,7 @@ class CompletionRequest(BaseModel):
             include_stop_str_in_output=self.include_stop_str_in_output,
             length_penalty=self.length_penalty,
             logits_processors=logits_processors,
-            truncate_input_tokens=self.truncate_input_tokens,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
         )
 
     @model_validator(mode="before")

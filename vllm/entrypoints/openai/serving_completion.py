@@ -302,14 +302,14 @@ class OpenAIServingCompletion(OpenAIServing):
                     input_ids = self._validate_prompt_and_tokenize(
                         request,
                         prompt_ids=prompt,
-                        truncate_input_tokens=sampling_params.
-                        truncate_input_tokens)
+                        truncate_prompt_tokens=sampling_params.
+                        truncate_prompt_tokens)
                 else:
                     input_ids = self._validate_prompt_and_tokenize(
                         request,
                         prompt=prompt,
-                        truncate_input_tokens=sampling_params.
-                        truncate_input_tokens)
+                        truncate_prompt_tokens=sampling_params.
+                        truncate_prompt_tokens)
 
                 generators.append(
                     self.engine.generate(None,
