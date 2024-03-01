@@ -96,7 +96,7 @@ async def completion_stream_generator(
                         logprobs=logprobs,
                         finish_reason=finish_reason,
                     )
-                ]).model_dump_json(exclude_unset=True)
+                ]).model_dump_json()
             yield f"data: {response_json}\n\n"
 
             if output.finish_reason is not None:  # return final usage
@@ -121,7 +121,7 @@ async def completion_stream_generator(
                         )
                     ],
                     usage=final_usage,
-                ).model_dump_json(exclude_unset=True)
+                ).model_dump_json()
                 yield f"data: {response_json}\n\n"
 
     yield "data: [DONE]\n\n"
@@ -306,7 +306,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         request, prompt=prompt)
 
                 generators.append(
-                    self.engine.generate(None,
+                    self.engine.generate(prompt,
                                          sampling_params,
                                          f"{request_id}-{i}",
                                          prompt_token_ids=input_ids,
