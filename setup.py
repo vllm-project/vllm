@@ -436,7 +436,7 @@ def get_requirements() -> List[str]:
     return requirements
 
 
-_sparsity_deps = ["magic_wand"]
+_sparsity_deps = ["nm-magic-wand"]
 
 
 def get_extra_requirements() -> dict:

@@ -5,7 +5,7 @@ is_magic_wand_available = importlib.util.find_spec("magic_wand") is not None
 if not is_magic_wand_available:
     raise ValueError(
         "magic_wand is not available and required for sparsity "
-        "support. Please install it with `pip install magic_wand`")
+        "support. Please install it with `pip install nm-magic-wand`")
 
 from vllm.model_executor.layers.sparsity.base_config import SparsityConfig  # noqa: E402
 from vllm.model_executor.layers.sparsity.sparse_w16a16 import SparseW16A16Config  # noqa: E402
