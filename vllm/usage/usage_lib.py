@@ -100,7 +100,7 @@ class UsageMessage:
         self.num_cpu: Optional[int] = None
         self.cpu_type: Optional[str] = None
         self.total_memory: Optional[int] = None
-        self.source: Optional[str] = None;
+        self.source: Optional[str] = None
 
     def report_usage(self, model: str, context: UsageContext) -> None:
         t = Thread(target=usage_message._report_usage, args=(model, context))
