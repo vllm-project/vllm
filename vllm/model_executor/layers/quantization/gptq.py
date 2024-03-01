@@ -90,7 +90,7 @@ class GPTQLinearMethod(LinearMethodBase):
     def create_weights(self, input_size_per_partition: int,
                        output_size_per_partition: int, input_size: int,
                        output_size: int, params_dtype: torch.dtype,
-                       shards: int) -> Dict[str, Any]:
+                       output_sizes: List[int]) -> Dict[str, Any]:
         del output_size  # Unused.
         if input_size_per_partition % self.quant_config.group_size != 0:
             raise ValueError(
