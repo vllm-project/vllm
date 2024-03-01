@@ -773,7 +773,6 @@ class ModelRunner:
         slot_mapping = torch.empty(max_batch_size, 1, dtype=torch.long).cuda()
         slot_mapping.fill_(_PAD_SLOT_ID)
         context_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
-        prompt_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
         block_tables = torch.from_numpy(self.graph_block_tables).cuda()
 
         graph_batch_size = _get_graph_batch_size(

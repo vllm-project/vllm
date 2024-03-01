@@ -18,7 +18,8 @@
 """ PyTorch T5 model."""
 from typing import List, Optional, Tuple
 
-import math, copy
+import math
+import copy
 
 import torch
 from torch import nn
@@ -34,11 +35,9 @@ from vllm.model_executor.layers.enc_dec_attention import (
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     LinearMethodBase,
-    QKVParallelLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_world_size, )
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -46,7 +45,6 @@ from vllm.model_executor.weight_utils import (
     default_weight_loader,
     hf_model_weights_iterator,
 )
-from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -63,7 +61,7 @@ class T5LayerNorm(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # T5 uses a layer_norm which only scales and doesn't shift, which is also known as Root Mean
-        # Square Layer Normalization https://arxiv.org/abs/1910.07467 thus varience is calculated
+        # Square Layer Normalization https://arxiv.org/abs/1910.07467 thus variance is calculated
         # w/o mean and there is no bias. Additionally we want to make sure that the accumulation for
         # half-precision inputs is done in fp32
 
