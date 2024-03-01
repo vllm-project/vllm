@@ -157,7 +157,7 @@ class OpenAIServing:
                 "Only one of prompt or prompt_ids should be provided.")
 
         if prompt_ids is None:
-            tokenizer_kwargs = {} if truncate_prompt_tokens is not None else {
+            tokenizer_kwargs = {} if truncate_prompt_tokens is None else {
                 "truncation": True,
                 "max_length": truncate_prompt_tokens,
             }
