@@ -229,7 +229,6 @@ class PagedAttention(nn.Module):
                         self.alibi_slopes,
                     )
                 else:
-                    breakpoint()
                     # prefix-enabled attention
                     output = torch.empty_like(query)
                     context_attention_fwd(
@@ -361,7 +360,6 @@ def _paged_attention(
             device=output.device,
         )
         max_logits = torch.empty_like(exp_sums)
-        breakpoint()
         ops.paged_attention_v2(
             output,
             exp_sums,
@@ -403,7 +401,8 @@ def flash_attn_with_kvcache_paged(
         output: [num_tokens, num_heads, head_size]
     """
     block_size = value_cache.shape[1]
-    assert block_size % 256 == 0, "only support block_size divisible by 256."
+    assert block_size % 256 == 0, ("only support block_size divisible by 256. "
+                                   f"Current block size: {block_size}")
     _, _, num_heads, head_size = query.shape
     out = flash_attn_with_kvcache(
         query,
