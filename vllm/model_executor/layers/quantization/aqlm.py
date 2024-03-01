@@ -62,30 +62,6 @@ class AQLMConfig(QuantizationConfig):
     def get_min_capability(cls) -> int:
         return 60
 
-    # such as.  (This one looks correct)
-    # https://huggingface.co/BlackSamorez/Llama-2-7b-AQLM-2Bit-1x16-hf/blob/main/config.json
-    #
-    # "quantization_config": {
-    #   "in_group_size": 8,
-    #   "nbits_per_codebook": 16,
-    #   "num_codebooks": 1,
-    #   "out_group_size": 1,
-    #   "quant_method": "aqlm"
-    #   "linear_weights_not_to_quantize": [ <--- hmmm ????
-    #       "model.embed_tokens.weight",
-    #       "lm_head.weight"
-    # },
-
-    # https://huggingface.co/meta-llama/Llama-2-7b-hf <- can't see it, locked behind meta.
-
-    # this is no-standard, has no "quantization_config", just an "aqlm" block.
-    # https://huggingface.co/BlackSamorez/Llama-2-70b-AQLM-4Bit-2x16-hf/blob/main/config.json
-    # "aqlm": {
-    #    "in_group_size": 8,
-    #    "nbits_per_codebook": 16,
-    #    "num_codebooks": 2,
-    #    "out_group_size": 1
-
     @classmethod
     def get_config_filenames(cls) -> List[str]:
         return []  # no extra configs.
@@ -96,7 +72,6 @@ class AQLMConfig(QuantizationConfig):
         nbits_per_codebook = cls.get_from_keys(config, ["nbits_per_codebook"])
         num_code_books = cls.get_from_keys(config, ["num_codebooks"])
         out_group_size = cls.get_from_keys(config, ["out_group_size"])
-        # TODO linear_weights_not_to_quantize ?
         return cls(in_group_size, nbits_per_codebook, num_code_books,
                    out_group_size)
 
