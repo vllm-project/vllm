@@ -87,10 +87,15 @@ class GPTQLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: GPTQConfig):
         self.quant_config = quant_config
 
-    def create_weights(self, input_size_per_partition: int,
-                       output_size_per_partition: int, input_size: int,
-                       output_size: int, params_dtype: torch.dtype,
-                       output_partition_sizes: List[int]) -> Dict[str, Any]:
+    def create_weights(
+        self,
+        input_size_per_partition: int,
+        output_size_per_partition: int,
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        output_partition_sizes: List[int],
+    ) -> Dict[str, Any]:
         del output_size  # Unused.
         if input_size_per_partition % self.quant_config.group_size != 0:
             raise ValueError(
