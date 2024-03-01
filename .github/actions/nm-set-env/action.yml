@@ -11,6 +11,7 @@ runs:
   using: composite
   steps:
   - run: |
+      echo "TORCH_CUDA_ARCH_LIST=7.0 7.5 8.0 8.6 8.9 9.0+PTX" >> $GITHUB_ENV
       echo "HF_TOKEN=${HF_TOKEN_SECRET}" >> $GITHUB_ENV
       echo "HF_HOME=/EFS/hf_home" >> $GITHUB_ENV
       NUM_THREADS=$(./.github/scripts/determine-threading -G ${{ inputs.Gi_per_thread }})

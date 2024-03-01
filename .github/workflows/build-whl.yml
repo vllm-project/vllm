@@ -49,7 +49,8 @@ on:
         required: true
 
 env:
-    VENV_BASE: "WHL-TEST"
+    VENV_BUILD_BASE: "BUILD"
+    VENV_WHL_BASE: "WHL-TEST"
     WHL_TEST_RESULTS: "whl-test-results"
 
 jobs:
@@ -81,7 +82,7 @@ jobs:
               uses: ./.github/actions/nm-set-python/
               with:
                 python: ${{ inputs.python }}
-                venv: ${{ env.VENV_BASE }}
+                venv: ${{ env.VENV_BUILD_BASE }}
 
             - name: create testmo run
               id: create_testmo_run
@@ -102,7 +103,7 @@ jobs:
               with:
                 Gi_per_thread: ${{ inputs.Gi_per_thread }}
                 python: ${{ inputs.python }}
-                venv: ${{ env.VENV_BASE }}
+                venv: ${{ env.VENV_BUILD_BASE }}
                 pypi: ${{ secrets.NM_PRIVATE_PYPI_LOCATION }}
 
             - name: build whl
@@ -110,6 +111,7 @@ jobs:
               uses: ./.github/actions/nm-build-vllm-whl/
               with:
                 python: ${{ inputs.python }}
+                venv: ${{ env.VENV_BUILD_BASE }}
 
             - name: upload whl
               uses: actions/upload-artifact@v4
@@ -119,8 +121,17 @@ jobs:
                 path: dist/${{ steps.build_whl.outputs.whl }}
                 retention-days: 15
 
+            - name: summary
+              uses: ./.github/actions/nm-whl-summary/
+              with:
+                label: ${{ inputs.build_label }}
+                gitref: ${{ inputs.gitref }}
+                testmo_run_url: https://neuralmagic.testmo.net/automation/runs/view/${{ steps.create_testmo_run.outputs.id }}
+                python: ${{ inputs.python }}
+                whl: ${{ steps.build_whl.outputs.whl }}
+
             - name: complete testmo run
-              uses: ./.github/actions/testmo-run-complete/
+              uses: ./.github/actions/nm-testmo-run-complete/
               if: success() || failure()
               with:
                 testmo_url: https://neuralmagic.testmo.net

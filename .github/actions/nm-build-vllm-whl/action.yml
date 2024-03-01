@@ -13,7 +13,7 @@ outputs:
     value: ${{ steps.whl.outputs.status }}
   whl:
     description: 'basename for generated whl'
-    value: ${{ steps.build_whl.outputs.whl }}
+    value: ${{ steps.whl.outputs.whl }}
 runs:
   using: composite
   steps:
@@ -25,6 +25,7 @@ runs:
       SUCCESS=0
       pip3 wheel --no-deps -w dist . || SUCCESS=$?
       echo "status=${SUCCESS}" >> "$GITHUB_OUTPUT"
+      ls -alh dist/
       BASE=$(./.github/scripts/convert-version ${{ inputs.python }})
       WHL_FILEPATH=$(find dist -iname "*nm_vllm*${BASE}*.whl")
       WHL=$(basename ${WHL_FILEPATH})
