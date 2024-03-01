@@ -229,7 +229,6 @@ class PagedAttention(nn.Module):
                         self.alibi_slopes,
                     )
                 else:
-                    breakpoint()
                     # prefix-enabled attention
                     output = torch.empty_like(query)
                     context_attention_fwd(
@@ -269,7 +268,6 @@ class PagedAttention(nn.Module):
 
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
-
 
 def _make_alibi_bias(
     alibi_slopes: torch.Tensor,
@@ -361,7 +359,6 @@ def _paged_attention(
             device=output.device,
         )
         max_logits = torch.empty_like(exp_sums)
-        breakpoint()
         ops.paged_attention_v2(
             output,
             exp_sums,
@@ -394,6 +391,15 @@ def flash_attn_with_kvcache_paged(
     """Similar to vLLM's page attention, calculates a single token's attention
     based on key/value caches. The main difference is this uses flash attention
     style key-value caches.
+
+    CHEN:
+    - input queries are flattened.
+    - First portion is N decoding tokens.
+    - Second portion is a single (or multiple) prefill token.
+    - Still needs to separate out (it doens't improve performance).
+    - oss flash kernel for prefill doesn't support varlen.
+    - 
+
 
     Arguments:
         See https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/flash_attn_interface.py
