@@ -160,7 +160,7 @@ torch::Tensor aqlm_gemm(
     return code2x8_matmat(input, codes, codebooks, scales, bias);
   }
 
-  std::cerr << "AQLM does not support " << nbooks << " codebooks with " << entries << " entries";
+  std::cerr << "AQLM with " << nbooks << " codebooks and " << entries << " entries is not currently supported.";
   std::abort();
   return {};
 }
