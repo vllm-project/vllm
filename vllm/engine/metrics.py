@@ -23,6 +23,7 @@ class Metrics:
             if hasattr(collector, "_name") and "vllm" in collector._name:
                 REGISTRY.unregister(collector)
 
+        # Config Information
         self.info_cache_config = Info(
             name='vllm:cache_config',
             documentation='information of cache_config')

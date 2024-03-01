@@ -317,7 +317,7 @@ class CacheConfig:
         self.num_cpu_blocks = None
 
     def metrics_info(self):
-        # convert cache_config to dict(key: str, value:str) for prometheus metrics info
+        # convert cache_config to dict(key: str, value: str) for prometheus metrics info
         return {key: str(value) for key, value in self.__dict__.items()}
 
     def _verify_args(self) -> None:

@@ -62,6 +62,12 @@ def parse_args():
         description="vLLM OpenAI-Compatible RESTful API server.")
     parser.add_argument("--host", type=str, default=None, help="host name")
     parser.add_argument("--port", type=int, default=8000, help="port number")
+    parser.add_argument(
+        "--uvicorn-log-level",
+        type=str,
+        default="info",
+        choices=['debug', 'info', 'warning', 'error', 'critical', 'trace'],
+        help="log level for uvicorn")
     parser.add_argument("--allow-credentials",
                         action="store_true",
                         help="allow credentials")
@@ -245,7 +251,7 @@ if __name__ == "__main__":
     uvicorn.run(app,
                 host=args.host,
                 port=args.port,
-                log_level="info",
+                log_level=args.uvicorn_log_level,
                 timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
                 ssl_keyfile=args.ssl_keyfile,
                 ssl_certfile=args.ssl_certfile)
