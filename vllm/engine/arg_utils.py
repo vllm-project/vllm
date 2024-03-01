@@ -46,6 +46,8 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = None
     flash_style: bool = False
     device: str = 'auto'
+    max_chunked_prefill_len: int = -1
+    max_num_prompt_seqs: int = 256
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -273,6 +275,17 @@ class EngineArgs:
         parser.add_argument('--flash-style',
                             action='store_true',
                             help='use flash attention.')
+        parser.add_argument(
+            '--max-chunked-prefill-len',
+            type=int,
+            default=-1,
+            help='max number of prefill tokens allowed in chunked prefill'
+            ', -1 means no limit')
+        parser.add_argument(
+            '--max-num-prompt-seqs',
+            type=int,
+            default=1024,
+            help='max number of prompt sequences allowed in prefill')
         return parser
 
     @classmethod
@@ -305,10 +318,14 @@ class EngineArgs:
                                          self.worker_use_ray,
                                          self.max_parallel_loading_workers,
                                          self.disable_custom_all_reduce)
-        scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
-                                           self.max_num_seqs,
-                                           model_config.max_model_len,
-                                           self.max_paddings)
+        scheduler_config = SchedulerConfig(
+            self.max_num_batched_tokens,
+            self.max_num_seqs,
+            model_config.max_model_len,
+            self.max_paddings,
+            max_chunked_prefill_len=self.max_chunked_prefill_len,
+            max_num_prompt_seqs=self.max_num_prompt_seqs,
+            flash_style=self.flash_style,)
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,

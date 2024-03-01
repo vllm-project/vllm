@@ -117,6 +117,7 @@ class Worker:
             gpu_memory_utilization: The fraction of the total GPU memory to use.
             cpu_swap_space: The size of the CPU swap space in bytes.
         """
+        breakpoint()
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
         torch.cuda.empty_cache()
@@ -231,6 +232,7 @@ class Worker:
         if num_seq_groups == 0:
             return {}
 
+        breakpoint()
         output = self.model_runner.execute_model(seq_group_metadata_list,
                                                  self.gpu_cache)
         return output

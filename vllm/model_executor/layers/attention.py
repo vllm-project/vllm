@@ -36,6 +36,22 @@ class PagedAttention(nn.Module):
     2. Perform (multi-head/multi-query/grouped-query) attention using either
         xformers or the PagedAttention custom op.
     3. Return the output tensor.
+
+    Chunked Prefill support:
+
+    If chunked prefill is enabled, the input will include both prompt tokens
+    and generation tokens. The layout is as follows:
+    |<---------------------- num_valid_tokens -------------------------->|
+    |<--------- num_prompt_tokens ----->|<--- num_generation_tokens----->|
+    |<-prompt_0->|<-prompt_1->|...|<pad>|<-gen_0->|<-gen_1->|......|<pad>|
+
+    Notice that both num_prompt_tokens and num_generation_tokens
+    include padding.
+
+    The actual prompt length and offeset are stored in cum_prompt_context_lens.
+    The actual num generation tokens are stored in num_generation_tokens_tensor.
+    To support chunked prefill, where the prompt and context might have different
+    length, we stored the context's length in cum_prompt_context_lens.
     """
 
     def __init__(
@@ -98,6 +114,9 @@ class PagedAttention(nn.Module):
         out = torch.einsum("hqk,khd->qhd", attn_weights, value)
         return out
 
+    # def _update_cache(self):
+
+
     def forward(
         self,
         query: torch.Tensor,
@@ -114,9 +133,9 @@ class PagedAttention(nn.Module):
             key: shape = [batch_size, seq_len, num_kv_heads * head_size]
             value: shape = [batch_size, seq_len, num_kv_heads * head_size]
             key_cache: shape = [num_blocks, num_kv_heads, head_size/x,
-                block_size, x]
+                block_size, x]. None if it is a profiling run.
             value_cache: shape = [num_blocks, num_kv_heads, head_size,
-                block_size]
+                block_size]. None if it is a profiling run.
             input_metadata: metadata for the inputs.
         Returns:
             shape = [batch_size, seq_len, num_heads * head_size]
