@@ -26,7 +26,8 @@ class InputMetadata:
                  max_context_len: Optional[int],
                  context_lens: Optional[torch.Tensor],
                  block_tables: Optional[torch.Tensor], use_cuda_graph: bool,
-                 kv_cache_dtype: str, flash_style: bool) -> None:
+                 kv_cache_dtype: str, flash_style: bool,
+                 prefix_enabled: bool) -> None:
         self.is_prompt = is_prompt
         self.prompt_lens = prompt_lens
         self.max_seq_len = max_seq_len
@@ -38,6 +39,7 @@ class InputMetadata:
         self.use_cuda_graph = use_cuda_graph
         self.kv_cache_dtype = kv_cache_dtype
         self.flash_style = flash_style
+        self.prefix_enabled = prefix_enabled
 
         # Set during the execution of the first attention op.
         # FIXME(woosuk): This is a hack.

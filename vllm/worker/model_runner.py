@@ -138,6 +138,8 @@ class ModelRunner:
         context_lens: List[int] = []
         subquery_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
+        print("SANG-TODO # of requests (seq_group_metadata_list): ",
+              len(seq_group_metadata_list))
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -150,14 +152,22 @@ class ModelRunner:
             prompt_lens.append(prompt_len)
             prefix_len = 0
             prefix = seq_group_metadata.prefix
+            print("SANG-TODO prefix, ", prefix)
             if prefix is not None and prefix.computed:
                 prefix_len = prefix.get_length()
                 prompt_tokens = prompt_tokens[prefix_len:]
                 prefix_block_tables.append(prefix.get_block_numbers())
+                context_len = prefix_len
             else:
                 prefix_block_tables.append([])
+                if seq_group_metadata.block_tables is None:
+                    prefix_block_tables.append([])
+                else:
+                    prefix_block_tables.append(
+                        seq_group_metadata.block_tables[seq_id])
+                context_len = prompt_len
             # actual prompt lens
-            context_lens.append(prefix_len)
+            context_lens.append(context_len)
             subquery_lens.append(prompt_len - prefix_len)
 
             input_tokens.append(prompt_tokens)
@@ -258,7 +268,9 @@ class ModelRunner:
                                        block_tables=block_tables,
                                        use_cuda_graph=False,
                                        kv_cache_dtype=self.kv_cache_dtype,
-                                       flash_style=self.flash_style)
+                                       flash_style=self.flash_style,
+                                       prefix_enabled=prefix is not None
+                                       and prefix.computed)
         return (input_tokens, input_positions, input_metadata, prompt_lens,
                 subquery_lens, lora_index_mapping, lora_prompt_mapping,
                 lora_requests)
@@ -385,7 +397,8 @@ class ModelRunner:
                                        block_tables=block_tables,
                                        use_cuda_graph=use_captured_graph,
                                        kv_cache_dtype=self.kv_cache_dtype,
-                                       flash_style=self.flash_style)
+                                       flash_style=self.flash_style,
+                                       prefix_enabled=False)
         return (input_tokens, input_positions, input_metadata,
                 lora_index_mapping, lora_prompt_mapping, lora_requests)
 
@@ -487,10 +500,12 @@ class ModelRunner:
             # SANG-TODO set num prompt tokens and generations?
             # Prepare input tensors.
             if is_prompt:
+                print("SANG-TODO execute model prompt.")
                 (input_tokens, input_positions, input_metadata, prompt_lens,
                  subquery_lens, lora_index_mapping, lora_prompt_mapping,
                  lora_requests) = self._prepare_prompt(seq_group_metadata_list)
             else:
+                print("SANG-TODO execute model decode.")
                 (input_tokens, input_positions, input_metadata,
                  lora_index_mapping, lora_prompt_mapping,
                  lora_requests) = self._prepare_decode(seq_group_metadata_list)
@@ -529,6 +544,7 @@ class ModelRunner:
                 sampling_metadata.selected_token_indices,
                 "lora_requests": lora_requests,
                 "lora_mapping": lora_mapping,
+                "prefix_enabled": input_metadata.prefix_enabled
             }
             broadcast_tensor_dict(metadata_dict, src=0)
         else:
@@ -548,7 +564,8 @@ class ModelRunner:
                 block_tables=metadata_dict["block_tables"],
                 use_cuda_graph=metadata_dict["use_cuda_graph"],
                 kv_cache_dtype=metadata_dict["kv_cache_dtype"],
-                flash_style=self.flash_style)
+                flash_style=self.flash_style,
+                prefix_enabled=metadata_dict["prefix_enabled"])
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
                 seq_data=None,
@@ -732,7 +749,8 @@ class ModelRunner:
                     block_tables=block_tables[:batch_size],
                     use_cuda_graph=True,
                     kv_cache_dtype=self.kv_cache_dtype,
-                    flash_style=self.flash_style)
+                    flash_style=self.flash_style,
+                    prefix_enabled=False)
 
                 if self.lora_config:
                     lora_mapping = LoRAMapping(

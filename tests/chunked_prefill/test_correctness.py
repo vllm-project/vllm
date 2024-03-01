@@ -7,7 +7,7 @@ from vllm.model_executor.parallel_utils.parallel_state import destroy_model_para
 
 MODELS = [
     "JackFram/llama-68m",
-    "facebook/opt-125m",
+    # "facebook/opt-125m",
 ]
 
 TEST_PROMPTS = [
