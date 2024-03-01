@@ -5,7 +5,7 @@ from typing import AsyncGenerator, AsyncIterator, Callable, List, Optional, Dict
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from .protocol import (
+from vllm.entrypoints.openai.protocol import (
     CompletionRequest,
     CompletionResponse,
     CompletionResponseChoice,
