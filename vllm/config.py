@@ -115,7 +115,7 @@ class ModelConfig:
                                                      max_model_len)
         self._verify_load_format()
         self._verify_tokenizer_mode()
-        self.hf_quant_config = self._get_and_verify_quantization()
+        self._verify_quantization()
         self._verify_cuda_graph()
 
     def _verify_load_format(self) -> None:
@@ -154,14 +154,13 @@ class ModelConfig:
                 "either 'auto' or 'slow'.")
         self.tokenizer_mode = tokenizer_mode
 
-    def _get_and_verify_quantization(self) -> Any | None:
+    def _verify_quantization(self) -> None:
         supported_quantization = ["aqlm", "awq", "gptq", "squeezellm"]
         rocm_not_supported_quantization = ["awq"]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
 
         # Parse quantization method from the HF model config, if available.
-        hf_quant_method = None
         hf_quant_config = getattr(self.hf_config, "quantization_config", None)
         if hf_quant_config is not None:
             hf_quant_method = str(hf_quant_config["quant_method"]).lower()
@@ -187,8 +186,6 @@ class ModelConfig:
             logger.warning(f"{self.quantization} quantization is not fully "
                            "optimized yet. The speed can be slower than "
                            "non-quantized models.")
-
-        return hf_quant_config
 
     def _verify_cuda_graph(self) -> None:
         if self.max_context_len_to_capture is None:
