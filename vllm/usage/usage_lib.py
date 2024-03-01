@@ -16,13 +16,14 @@ _xdg_config_home = os.getenv('XDG_CONFIG_HOME',
                              os.path.expanduser('~/.config'))
 _vllm_internal_path = 'vllm/usage_stats.json'
 
+os.environ["VLLM_USAGE_SOURCE"] = "production"
+
 _USAGE_STATS_FILE = os.path.join(
     _xdg_config_home,
     _vllm_internal_path)  #File path to store usage data locally
 _USAGE_STATS_ENABLED = None
 _USAGE_STATS_SERVER = os.environ.get('VLLM_USAGE_STATS_SERVER',
                                      'https://stats.vllm.ai')
-_USAGE_STATS_URL = "https://vector-dev-server-uzyrqjjayq-uc.a.run.app"  #Placeholder for sending usage data to vector.dev http server
 
 
 def is_usage_stats_enabled():
@@ -99,6 +100,7 @@ class UsageMessage:
         self.num_cpu: Optional[int] = None
         self.cpu_type: Optional[str] = None
         self.total_memory: Optional[int] = None
+        self.source: Optional[str] = None;
 
     def report_usage(self, model: str, context: UsageContext) -> None:
         t = Thread(target=usage_message._report_usage, args=(model, context))
@@ -121,11 +123,12 @@ class UsageMessage:
         self.num_cpu = os.cpu_count()
         self.cpu_type = cpuinfo.get_cpu_info()['brand_raw']
         self.total_memory = psutil.virtual_memory().total
+        self.source = os.environ["VLLM_USAGE_SOURCE"]
         self._write_to_file()
         headers = {'Content-type': 'application/x-ndjson'}
         payload = json.dumps(vars(self))
         try:
-            requests.post(_USAGE_STATS_URL, data=payload, headers=headers)
+            requests.post(_USAGE_STATS_SERVER, data=payload, headers=headers)
         except requests.exceptions.RequestException:
             print("Usage Log Request Failed")
 
