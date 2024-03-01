@@ -539,17 +539,12 @@ class RowParallelLinear(torch.nn.Module):
         tp_rank = get_tensor_model_parallel_rank()
         input_dim = getattr(param, "input_dim", None)
         param_data = param.data
-
         if input_dim is not None:
             shard_size = param_data.shape[input_dim]
             start_idx = tp_rank * shard_size
-            assert (start_idx == 0
-                    and shard_size == loaded_weight.shape[input_dim])
-
             loaded_weight = loaded_weight.narrow(input_dim, start_idx,
                                                  shard_size)
         assert param_data.shape == loaded_weight.shape
-
         param_data.copy_(loaded_weight)
 
     def forward(self, input_):
