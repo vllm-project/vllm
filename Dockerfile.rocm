@@ -91,7 +91,7 @@ RUN if [ "$BUILD_CUPY" = "1" ]; then \
     && export CUPY_INSTALL_USE_HIP=1 \
     && export ROCM_HOME=/opt/rocm \
     && export HCC_AMDGPU_TARGET="gfx90a,gfx942,gfx1100" \
-    && pip install -e . --no-cache-dir -vvvv \
+    && pip install . \
     && cd ..; \
     fi
 
