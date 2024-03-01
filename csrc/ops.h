@@ -137,6 +137,7 @@ torch::Tensor dequant_gptq(
     torch::Tensor b_gptq_qzeros,
     torch::Tensor b_gptq_scales,
     torch::Tensor b_g_idx,
+    int bits,
     bool use_exllama
 );
 

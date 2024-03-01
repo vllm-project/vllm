@@ -1649,6 +1649,33 @@ void reconstruct_gptq
 }
 
 
+void dequant_gptq_cuda
+(
+    const uint32_t* b_q_weight,
+    const uint32_t* b_gptq_qzeros,
+    const half* b_gptq_scales,
+    const int* b_g_idx,
+    half* temp_dq,
+    int size_k,
+    int size_n,
+    int groups,
+    int num_experts,
+    int bits,
+    bool use_exllama
+)
+{
+    if (use_exllama) {
+        reconstruct_exllama(b_q_weight, b_gptq_qzeros, b_gptq_scales, b_g_idx, temp_dq,
+                            size_k, size_n, groups, num_experts, bits);
+    }
+    else
+    {
+        reconstruct_gptq(b_q_weight, b_gptq_qzeros, b_gptq_scales, b_g_idx,
+                         temp_dq, size_k, size_n, groups, num_experts, bits);
+    }
+}
+
+
 void gemm_half_q_half_cuda
 (
     cublasHandle_t cublas_handle,
@@ -1676,15 +1703,8 @@ void gemm_half_q_half_cuda
     }
     if (use_reconstruct) {
         // Reconstruct FP16 matrix, then cuBLAS
-        if (use_exllama) {
-            reconstruct_exllama(b_q_weight, b_gptq_qzeros, b_gptq_scales, b_g_idx, temp_dq,
-                                size_k, size_n, groups, 1, bit);
-        }
-        else
-        {
-            reconstruct_gptq(b_q_weight, b_gptq_qzeros, b_gptq_scales, b_g_idx,
-                             temp_dq, size_k, size_n, groups, 1, bit);
-        }
+        dequant_gptq_cuda(b_q_weight, b_gptq_qzeros, b_gptq_scales, b_g_idx, temp_dq,
+                          size_k, size_n, groups, 1, bit, use_exllama);
 
         const half alpha = __float2half(1.0f);
         const half beta = __float2half(0.0f);
@@ -1833,6 +1853,11 @@ __global__ void make_sequential_2bit_kernel
     const int w_width
 )
 {
+    if (blockIdx.z > 0){
+        w = w + blockIdx.z * w_height * w_width;
+        w_new = w_new + blockIdx.z * w_height * w_width;
+        q_perm = q_perm + blockIdx.z * w_height * 16;
+    }
     const uint64_t* w2 = (uint64_t*) w;
     uint64_t* w_new2 = (uint64_t*) w_new;
     int w2_stride = w_width >> 1;
@@ -1870,6 +1895,11 @@ __global__ void make_sequential_3bit_kernel
     const int w_width
 )
 {
+    if (blockIdx.z > 0){
+        w = w + blockIdx.z * w_height * w_width;
+        w_new = w_new + blockIdx.z * w_height * w_width;
+        q_perm = q_perm + blockIdx.z * w_height * 32 / 3;
+    }
     int w_column = THREADS_X * blockIdx.x + threadIdx.x;
     if (w_column >= w_width) return;
     int w_new_row = blockIdx.y * 3;
@@ -1957,6 +1987,11 @@ __global__ void make_sequential_8bit_kernel
     const int w_width
 )
 {
+    if (blockIdx.z > 0){
+        w = w + blockIdx.z * w_height * w_width;
+        w_new = w_new + blockIdx.z * w_height * w_width;
+        q_perm = q_perm + blockIdx.z * w_height * 4;
+    }
     const uint64_t* w2 = (uint64_t*) w;
     uint64_t* w_new2 = (uint64_t*) w_new;
     int w2_stride = w_width >> 1;
@@ -1985,8 +2020,7 @@ __global__ void make_sequential_8bit_kernel
     w_new2[w_new2_row * w2_stride + w2_column] = dst;
 }
 
-// Only 4-bit support MoE
-// todo: extend support to other bits
+
 void shuffle_exllama_weight
 (
     uint32_t* q_weight,
@@ -2218,7 +2252,7 @@ __global__ void group_gemm_half_q_half_gptq_kernel
     }
 }
 
-void group_gemm_half_q_half_cuda
+void group_gemm_half_q_half
 (
     const half* a,
     const uint32_t* b_q_weight,
@@ -2465,7 +2499,7 @@ void group_gemm_half_q_half_cuda
     bool use_exllama
 ) {
     if (use_exllama) {
-        group_gemm_half_q_half_cuda(
+        group_gemm_half_q_half(
             a, b_q_weight, b_gptq_qzeros, b_gptq_scales, b_g_idx, c,
             topk_weights, sorted_token_ids_ptr, expert_ids_ptr,
             num_tokens_post_padded, num_valid_tokens,
@@ -2478,31 +2512,6 @@ void group_gemm_half_q_half_cuda
             num_tokens_post_padded, num_valid_tokens,
             top_k, size_m, size_n, size_k, pad_size_m, groups
         );
-    }
-}
-
-void dequant_gptq_cuda
-(
-    const uint32_t* b_q_weight,
-    const uint32_t* b_gptq_qzeros,
-    const half* b_gptq_scales,
-    const int* b_g_idx,
-    half* temp_dq,
-    int size_k,
-    int size_n,
-    int groups,
-    int num_experts,
-    bool use_exllama
-)
-{
-    if (use_exllama) {
-        reconstruct_exllama(b_q_weight, b_gptq_qzeros, b_gptq_scales, b_g_idx, temp_dq,
-                            size_k, size_n, groups, num_experts, 4);
-    }
-    else
-    {
-        reconstruct_gptq(b_q_weight, b_gptq_qzeros, b_gptq_scales, b_g_idx,
-                         temp_dq, size_k, size_n, groups, num_experts, 4);
     }
 }
 
@@ -2614,14 +2623,14 @@ torch::Tensor group_gptq_gemm
     return c;
 }
 
-// Only support 4-bit
-// todo: extend support to other bits
+
 torch::Tensor dequant_gptq
 (
     torch::Tensor b_q_weight,
     torch::Tensor b_gptq_qzeros,
     torch::Tensor b_gptq_scales,
     torch::Tensor b_g_idx,
+    int bits,
     bool use_exllama
 ) {
     const at::cuda::OptionalCUDAGuard device_guard(device_of(b_gptq_scales));
@@ -2634,16 +2643,16 @@ torch::Tensor dequant_gptq
     int groups;
     // moe
     if (b_q_weight.dim() == 3) {
-        temp_dq = torch::empty({b_q_weight.size(0), b_q_weight.size(1) * 8, b_q_weight.size(2)}, options);
+        temp_dq = torch::empty({b_q_weight.size(0), b_q_weight.size(1) * 32 / bits, b_q_weight.size(2)}, options);
         num_experts = b_q_weight.size(0);
-        size_k = b_q_weight.size(1) * 8;
+        size_k = b_q_weight.size(1) * 32 / bits;
         size_n = b_q_weight.size(2);
         groups = b_gptq_scales.size(1);
     } else
     {
-        temp_dq = torch::empty({b_q_weight.size(0) * 8, b_q_weight.size(1)}, options);
+        temp_dq = torch::empty({b_q_weight.size(0) * 32 / bits, b_q_weight.size(1)}, options);
         num_experts = 1;
-        size_k = b_q_weight.size(0) * 8;
+        size_k = b_q_weight.size(0) * 32 / bits;
        	size_n = b_q_weight.size(1);
         groups = b_gptq_scales.size(0);
     }
@@ -2654,6 +2663,6 @@ torch::Tensor dequant_gptq
         b_g_idx.device().is_meta() ? NULL : (const int*) b_g_idx.data_ptr(),
         (half*) temp_dq.data_ptr(),
         size_k, size_n, groups,
-        num_experts, use_exllama);
+        num_experts, bits, use_exllama);
     return temp_dq;
 }
