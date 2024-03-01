@@ -1,9 +1,12 @@
 """Utilities for downloading and initializing model weights."""
+import contextlib
+import filelock
 import fnmatch
 import glob
 import hashlib
 import json
 import os
+import requests
 from collections import defaultdict
 from typing import Any, Iterable, Iterator, List, Optional, Tuple
 
@@ -11,7 +14,10 @@ import filelock
 import huggingface_hub.constants
 import numpy as np
 import torch
+
 from huggingface_hub import HfFileSystem, snapshot_download
+from huggingface_hub.constants import HF_HUB_OFFLINE
+from huggingface_hub.utils import OfflineModeIsEnabled, RevisionNotFoundError
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
 
@@ -160,14 +166,11 @@ def prepare_hf_model_weights(
     fall_back_to_pt: bool = True,
     revision: Optional[str] = None,
 ) -> Tuple[str, List[str], bool]:
-    # Download model weights from huggingface.
-    is_local = os.path.isdir(model_name_or_path)
-    use_safetensors = False
+    # Determine the format of weights to load
     # Some quantized models use .pt files for storing the weights.
     if load_format == "auto":
         allow_patterns = ["*.safetensors", "*.bin"]
     elif load_format == "safetensors":
-        use_safetensors = True
         allow_patterns = ["*.safetensors"]
     elif load_format == "pt":
         allow_patterns = ["*.pt"]
@@ -179,29 +182,65 @@ def prepare_hf_model_weights(
     if fall_back_to_pt:
         allow_patterns += ["*.pt"]
 
-    if not is_local:
-        # Before we download we look at that is available:
-        fs = HfFileSystem()
-        file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
+    # Find the model weights to load:
+    # - check if pointing at a local directory
+    # - download weights from HuggingFace Hub (including a newer revision if it exists)
+    # - discover weights in the local HuggingFace Hub cache (fallback to this if download fails)
+    if os.path.isdir(model_name_or_path):
+        hf_folder = model_name_or_path
+    else:
+        # If there is an error downloading from the HF API, we'll fallback to loading from
+        # the local cache
+        local_files_only = False
+        if HF_HUB_OFFLINE:
+            local_files_only = True
+        else:
+            try:
+                # Before we download we check the available files
+                fs = HfFileSystem()
+                file_list = fs.ls(model_name_or_path,
+                                  detail=False,
+                                  revision=revision)
 
-        # depending on what is available we download different things
-        for pattern in allow_patterns:
-            matching = fnmatch.filter(file_list, pattern)
-            if len(matching) > 0:
-                allow_patterns = [pattern]
-                break
+                # Depending on what is available we download different things
+                for pattern in allow_patterns:
+                    matching = fnmatch.filter(file_list, pattern)
+                    if len(matching) > 0:
+                        allow_patterns = [pattern]
+                        break
 
-        logger.info(f"Using model weights format {allow_patterns}")
+                logger.info(f"Using model weights format {allow_patterns}")
+            except (
+                    requests.exceptions.SSLError,
+                    requests.exceptions.ProxyError,
+                    requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout,
+                    OfflineModeIsEnabled,
+                    RevisionNotFoundError,
+                    FileNotFoundError,
+                    requests.HTTPError,
+            ) as error:
+                # If querying the repo fails (eg. Network is down / HF Hub is down /
+                # HF Hub returns access error / or HF_HUB_OFFLINE=1), see if we can
+                # fallback to load from locally cached files instead of crashing
+                logger.warning(f"Error in call to HF Hub: {error}. "
+                               f"Attempting to load from local cache instead.")
+                local_files_only = True
+
         # Use file lock to prevent multiple processes from
         # downloading the same model weights at the same time.
-        with get_lock(model_name_or_path, cache_dir):
+        # If we fallback to local files only, we don't need the lock, but we still use
+        # snapshot_download to resolve the path to the model files in the cache
+        with get_lock(model_name_or_path, cache_dir
+                      ) if not local_files_only else contextlib.nullcontext():
             hf_folder = snapshot_download(model_name_or_path,
                                           allow_patterns=allow_patterns,
                                           cache_dir=cache_dir,
+                                          local_files_only=local_files_only,
                                           tqdm_class=Disabledtqdm,
                                           revision=revision)
-    else:
-        hf_folder = model_name_or_path
+
+    use_safetensors = False
     hf_weights_files: List[str] = []
     for pattern in allow_patterns:
         hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
