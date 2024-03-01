@@ -161,9 +161,9 @@ class LoRAModel:
                             if pin_memory:
                                 lora_embeddings_tensor = (
                                     lora_embeddings_tensor.pin_memory())
-                    loras[module_name] = LoRALayerWeights(module_name, rank,
-                                                          lora_alpha, None, None,
-                                                          lora_embeddings_tensor)
+                    loras[module_name] = LoRALayerWeights(
+                        module_name, rank, lora_alpha, None, None,
+                        lora_embeddings_tensor)
                 if is_lora_a:
                     loras[module_name].lora_a = tensor.to(device=device,
                                                           dtype=dtype).t()
