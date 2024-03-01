@@ -98,8 +98,6 @@ class AQLMLinearMethod(LinearMethodBase):
                        output_size_per_partition: int, input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        output_sizes: List[int]) -> Dict[str, Any]:
-        assert (output_size == output_size_per_partition)
-        assert (input_size == input_size_per_partition)
         del output_size  # Unused.
         del input_size  # Unused.
 
@@ -202,13 +200,13 @@ class AQLMLinearMethod(LinearMethodBase):
             # break the shards apart and combine them.
             assert (shard_dim == 0)
             num_codebooks = codebooks.shape[shard_dim] // outputs
-
             assert (scales.shape[0] == codes.shape[0])
-            assert (scales.shape[0] == sum(output_sizes))
-
+            assert (sum(output_sizes) % scales.shape[0] == 0) 
+            out_tp = sum(output_sizes) // scales.shape[0]
             output_offset = 0
             codebooks_offset = 0
             for output_size in output_sizes:
+                output_size //= out_tp
                 shard_output = ops.aqlm_gemm(
                     x, codes.narrow(0, output_offset, output_size),
                     codebooks.narrow(shard_dim, codebooks_offset,
