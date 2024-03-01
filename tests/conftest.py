@@ -199,6 +199,24 @@ class VllmRunner:
             outputs.append((req_sample_output_ids, req_sample_output_strs))
         return outputs
 
+    def generate_w_logprobs(
+        self,
+        prompts: List[str],
+        sampling_params: SamplingParams,
+    ) -> List[Tuple[List[int], str]]:
+        assert sampling_params.logprobs is not None
+
+        req_outputs = self.model.generate(prompts,
+                                          sampling_params=sampling_params)
+        outputs = []
+        for req_output in req_outputs:
+            for sample in req_output.outputs:
+                output_str = sample.text
+                output_ids = sample.token_ids
+                output_logprobs = sample.logprobs
+            outputs.append((output_ids, output_str, output_logprobs))
+        return outputs
+
     def generate_greedy(
         self,
         prompts: List[str],
@@ -208,6 +226,20 @@ class VllmRunner:
         outputs = self.generate(prompts, greedy_params)
         return [(output_ids[0], output_str[0])
                 for output_ids, output_str in outputs]
+
+    def generate_greedy_logprobs(
+        self,
+        prompts: List[str],
+        max_tokens: int,
+        num_logprobs: int,
+    ) -> List[Tuple[List[int], str]]:
+        greedy_logprobs_params = SamplingParams(temperature=0.0,
+                                                max_tokens=max_tokens,
+                                                logprobs=num_logprobs)
+        outputs = self.generate_w_logprobs(prompts, greedy_logprobs_params)
+
+        return [(output_ids, output_str, output_logprobs)
+                for output_ids, output_str, output_logprobs in outputs]
 
     def generate_beam_search(
         self,
