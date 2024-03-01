@@ -328,8 +328,6 @@ elif _is_neuron():
     neuronxcc_version = get_neuronxcc_version()
 
 vllm_extension_sources = [
-    "csrc/cache_kernels.cu",
-    "csrc/attention/attention_kernels.cu",
     "csrc/pos_encoding_kernels.cu",
     "csrc/activation_kernels.cu",
     "csrc/layernorm_kernels.cu",
@@ -341,8 +339,12 @@ vllm_extension_sources = [
 ]
 
 if _is_cuda():
-    vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
-    vllm_extension_sources.append("csrc/custom_all_reduce.cu")
+    vllm_extension_sources.extend([
+        "csrc/cache_kernels.cu",
+        "csrc/attention/attention_kernels.cu",
+        "csrc/quantization/awq/gemm_kernels.cu",
+        "csrc/custom_all_reduce.cu",
+    ])
 
     # Add MoE kernels.
     ext_modules.append(
@@ -354,6 +356,14 @@ if _is_cuda():
                 "nvcc": NVCC_FLAGS,
             },
         ))
+if _is_hip():
+    with open("csrc/attention/attention_and_cache_kernels_hip.cu", "w") as f:
+        f.write(open("csrc/attention/attention_kernels.cu").read())
+        f.write("\n")
+        f.write(open("csrc/cache_kernels.cu").read())
+    vllm_extension_sources.extend([
+        "csrc/attention/attention_and_cache_kernels_hip.cu",
+    ])
 
 if not _is_neuron():
     vllm_extension = CUDAExtension(
@@ -363,6 +373,9 @@ if not _is_neuron():
             "cxx": CXX_FLAGS,
             "nvcc": NVCC_FLAGS,
         },
+        include_dirs=[
+            os.path.join(os.path.dirname(os.path.realpath(__file__)), "csrc"),
+        ],
         libraries=["cuda"] if _is_cuda() else [],
     )
     ext_modules.append(vllm_extension)
