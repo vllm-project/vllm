@@ -377,50 +377,33 @@ class LlamaForCausalLM(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        with tensorizer_loader(params_dict):
-            loaded_weights = {}
-            for name, loaded_weight in hf_model_weights_iterator(
-                    model_name_or_path, cache_dir, load_format, revision):
-                original_name = name
-                if "rotary_emb.inv_freq" in name:
+        for name, loaded_weight in hf_model_weights_iterator(
+                model_name_or_path, cache_dir, load_format, revision):
+            original_name = name
+            if "rotary_emb.inv_freq" in name:
+                continue
+            if ("rotary_emb.cos_cached" in name
+                    or "rotary_emb.sin_cached" in name):
+                # Models trained using ColossalAI may include these tensors in
+                # the checkpoint. Skip them.
+                continue
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in name:
                     continue
-                if ("rotary_emb.cos_cached" in name
-                        or "rotary_emb.sin_cached" in name):
-                    # Models trained using ColossalAI may include these tensors in
-                    # the checkpoint. Skip them.
-                    continue
-                for (param_name, weight_name, shard_id) in stacked_params_mapping:
-                    if weight_name not in name:
-                        continue
-                    name = name.replace(weight_name, param_name)
-                    # Skip loading extra bias for GPTQ models.
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(param, loaded_weight, shard_id)
-                    break
-                else:
+                name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-                    param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            tensorizer_weight_loader)
-                    assert type(param) == nn.Parameter
-                    weight_loader(param=param, loaded_weight=loaded_weight)
-                loaded_weights[original_name] = loaded_weight
-            print("Param names and shapes:")
-            for name, param in params_dict.items():
-                print(f"{name} : {param.shape}")
-            print("\n\nLoaded weights names and shapes:")
-            for name, param in loaded_weights.items():
-                print(f"{name} : {param.shape}")
-
-            ## Check if same keys from loaded weights and model parameters have same shape
-            for name, param in params_dict.items():
-                if name in loaded_weights:
-                    if param.shape != loaded_weights[name].shape:
-                        print(f"Mismatch in shape for {name} : {param.shape} and {loaded_weights[name].shape}\n")
-
-            print("Block")
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+            # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        tensorizer_weight_loader)
+                assert type(param) == nn.Parameter
+                weight_loader(param, weight_loader)
