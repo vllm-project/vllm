@@ -82,7 +82,7 @@ RUN if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1" 
 RUN if [ "$BUILD_CUPY" = "1" ]; then \
     mkdir -p libs \
     && cd libs \
-    && git clone --recursive https://github.com/ROCm/cupy.git \
+    && git clone -b hipgraph_enablement --recursive https://github.com/ROCm/cupy.git \
     && cd cupy \
     && pip install mpi4py-mpich \
     && pip install scipy==1.9.3 \
