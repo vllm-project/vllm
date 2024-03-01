@@ -138,6 +138,7 @@ class LLMEngine:
             self.stat_logger = StatLogger(
                 local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
                 labels=dict(model_name=model_config.model))
+            self.stat_logger.info("cache_config", self.cache_config)
 
         self.forward_dag = None
         if USE_RAY_COMPILED_DAG:
@@ -486,8 +487,9 @@ class LLMEngine:
             prompt_token_ids[:prefix_pos], lora_request.lora_int_id
             if lora_request else 0) if prefix_pos is not None else None
 
-        # Defensive copy of SamplingParams, which are used by the sampler
-        sampling_params = copy.deepcopy(sampling_params)
+        # Defensive copy of SamplingParams, which are used by the sampler,
+        # this doesn't deep-copy LogitsProcessor objects
+        sampling_params = sampling_params.clone()
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,
@@ -981,7 +983,10 @@ class LLMEngine:
     def _finalize_sequence(self, seq: Sequence,
                            sampling_params: SamplingParams,
                            stop_string: str) -> None:
-        if not sampling_params.include_stop_str_in_output and stop_string:
+        if sampling_params.include_stop_str_in_output:
+            return
+
+        if stop_string and seq.output_text.endswith(stop_string):
             # Truncate the output text so that the stop string is
             # not included in the output.
             seq.output_text = seq.output_text[:-len(stop_string)]

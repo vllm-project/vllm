@@ -19,6 +19,7 @@ MODELS = [
     "microsoft/phi-2",
     "stabilityai/stablelm-3b-4e1t",
     "allenai/OLMo-1B",
+    "bigcode/starcoder2-3b",
 ]
 
 
