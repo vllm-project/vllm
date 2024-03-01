@@ -4,6 +4,9 @@
 #include <torch/python.h>
 #include <c10/cuda/CUDAGuard.h>
 
+#include <iostream>
+#include <cstdlib>
+
 void code1x16_matvec_cuda(
   const void* A,
   const void* B,
@@ -156,6 +159,8 @@ torch::Tensor aqlm_gemm(
   {
     return code2x8_matmat(input, codes, codebooks, scales, bias);
   }
-  // TODO error somehow.
+
+  std::cerr << "AQLM does not support " << nbooks << " codebooks with " << entries << " entries";
+  std::abort();
   return {};
 }
