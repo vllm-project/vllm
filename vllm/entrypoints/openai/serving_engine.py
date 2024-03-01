@@ -157,10 +157,9 @@ class OpenAIServing:
                 "Only one of prompt or prompt_ids should be provided.")
 
         if prompt_ids is None:
-            tokenizer_kwargs = {}
-            if truncate_input_tokens is not None:
-                tokenizer_kwargs["truncation"] = True
-                tokenizer_kwargs["max_length"] = truncate_input_tokens
+            tokenizer_kwargs = {} if truncate_input_tokens is not None else {
+                "truncation": True, "max_length": truncate_input_tokens,
+            }
             input_ids = self.tokenizer(prompt, **tokenizer_kwargs).input_ids
         else:
             if truncate_input_tokens is not None:
