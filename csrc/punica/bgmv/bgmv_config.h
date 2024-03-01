@@ -10,7 +10,8 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
 
 // clang-format off
 
-#define FOR_BGMV_WIDE_exc128(f, in_T, out_T, W_T, narrow) \
+#define FOR_BGMV_WIDE(f, in_T, out_T, W_T, narrow) \
+    f(in_T, out_T, W_T, narrow, 128) \
     f(in_T, out_T, W_T, narrow, 256) \
     f(in_T, out_T, W_T, narrow, 512) \
     f(in_T, out_T, W_T, narrow, 1024) \
@@ -50,17 +51,11 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, narrow, 49152) \
 // Keep above in sync with vllm/lora/layers::SamplerWithLoRA
 
-#define FOR_BGMV_WIDE(f, in_T, out_T, W_T, narrow) \
-    f(in_T, out_T, W_T, narrow, 128) \
-    FOR_BGMV_WIDE_exc128(f, in_T, out_T, W_T, narrow) \
-// Keep above in sync with vllm/lora/layers::SamplerWithLoRA
-
 // Keep this in sync with vllm/config::LoRAConfig
 #define FOR_BGMV_WIDE_NARROW(f, in_T, out_T, W_T) \
     FOR_BGMV_WIDE(f, in_T, out_T, W_T, 8)  \
     FOR_BGMV_WIDE(f, in_T, out_T, W_T, 16) \
     FOR_BGMV_WIDE(f, in_T, out_T, W_T, 32) \
-    FOR_BGMV_WIDE(f, in_T, out_T, W_T, 64) \
-    FOR_BGMV_WIDE_exc128(f, in_T, out_T, W_T, 128)
+    FOR_BGMV_WIDE(f, in_T, out_T, W_T, 64)
 
 // clang-format on
