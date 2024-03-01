@@ -1,3 +1,5 @@
+// Adapted from https://github.com/Vahe1994/AQLM
+
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>

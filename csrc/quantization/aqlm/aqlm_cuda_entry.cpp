@@ -1,3 +1,5 @@
+// Adapted from https://github.com/Vahe1994/AQLM
+
 #include <torch/all.h>
 #include <torch/python.h>
 #include <c10/cuda/CUDAGuard.h>
