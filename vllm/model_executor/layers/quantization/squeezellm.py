@@ -70,7 +70,7 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
     def create_weights(self, input_size_per_partition: int,
                        output_size_per_partition: int, input_size: int,
                        output_size: int, params_dtype: torch.dtype,
-                       output_sizes: List[int]) -> Dict[str, Any]:
+                       output_partition_sizes: List[int]) -> Dict[str, Any]:
         if input_size_per_partition % self.quant_config.pack_factor != 0:
             raise ValueError(
                 "The input size is not aligned with the quantized "

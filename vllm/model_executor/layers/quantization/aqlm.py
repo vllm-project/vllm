@@ -97,7 +97,7 @@ class AQLMLinearMethod(LinearMethodBase):
     def create_weights(self, input_size_per_partition: int,
                        output_size_per_partition: int, input_size: int,
                        output_size: int, params_dtype: torch.dtype,
-                       output_sizes: List[int]) -> Dict[str, Any]:
+                       output_partition_sizes: List[int]) -> Dict[str, Any]:
         del output_size  # Unused.
         del input_size  # Unused.
 
@@ -131,13 +131,13 @@ class AQLMLinearMethod(LinearMethodBase):
                 "output_dim": 0,
                 "packed_dim": 1,
                 "pack_factor": self.quant_config.pack_factor,
-                "output_sizes": output_sizes
+                "output_partition_sizes": output_partition_sizes
             },
         )
 
         codebooks = Parameter(
             torch.empty(
-                self.quant_config.num_codebooks * len(output_sizes),
+                self.quant_config.num_codebooks * len(output_partition_sizes),
                 2**self.quant_config.nbits_per_codebook,
                 self.quant_config.out_group_size,
                 self.quant_config.in_group_size,
@@ -194,19 +194,18 @@ class AQLMLinearMethod(LinearMethodBase):
         if shard_dim is not None:
             output_shape = x.shape[:-1] + (scales.shape[0], )
             output = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-            output_sizes = getattr(codes, "output_sizes", None)
-            outputs = len(output_sizes)
+            output_partition_sizes = getattr(codes, "output_partition_sizes",
+                                             None)
+            num_outputs = len(output_partition_sizes)
 
-            # break the shards apart and combine them.
+            # break the inputs and codebooks apart then combine the outputs.
             assert (shard_dim == 0)
-            num_codebooks = codebooks.shape[shard_dim] // outputs
+            num_codebooks = codebooks.shape[shard_dim] // num_outputs
             assert (scales.shape[0] == codes.shape[0])
-            assert (sum(output_sizes) % scales.shape[0] == 0) 
-            out_tp = sum(output_sizes) // scales.shape[0]
+            assert (sum(output_partition_sizes) == scales.shape[0])
             output_offset = 0
             codebooks_offset = 0
-            for output_size in output_sizes:
-                output_size //= out_tp
+            for output_size in output_partition_sizes:
                 shard_output = ops.aqlm_gemm(
                     x, codes.narrow(0, output_offset, output_size),
                     codebooks.narrow(shard_dim, codebooks_offset,
