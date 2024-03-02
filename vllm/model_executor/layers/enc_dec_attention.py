@@ -3,7 +3,6 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (
