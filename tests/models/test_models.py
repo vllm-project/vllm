@@ -33,7 +33,7 @@ def test_models(
     dtype: str,
     max_tokens: int,
 ) -> None:
-    hf_model = hf_runner(model, dtype=dtype)
+    hf_model = hf_runner(model)
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
     del hf_model
 
