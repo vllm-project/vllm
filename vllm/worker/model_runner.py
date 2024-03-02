@@ -80,9 +80,16 @@ class ModelRunner:
         self.in_wsl = in_wsl()
         self.kv_cache_dtype = kv_cache_dtype
 
+        # Set enforce_eager to True for Neuron backend, to avoid capturing graph
+        if self.device_config.is_neuron:
+            self.model_config.enforce_eager = True
+
     def load_model(self) -> None:
-        self.model = get_model(self.model_config, self.device_config,
-                               self.lora_config)
+        self.model = get_model(self.model_config,
+                               self.device_config,
+                               lora_config=self.lora_config,
+                               parallel_config=self.parallel_config,
+                               scheduler_config=self.scheduler_config)
 
         vocab_size = self.model.config.vocab_size
 
@@ -389,9 +396,11 @@ class ModelRunner:
     ) -> SamplingMetadata:
         seq_groups: List[Tuple[List[int], SamplingParams]] = []
         selected_token_indices: List[int] = []
+        generators: List[torch.Generator] = []
         selected_token_start_idx = 0
         categorized_sample_indices = {t: [] for t in SamplingType}
         categorized_sample_indices_start_idx = 0
+        pin_memory = not self.in_wsl and not self.device_config.is_neuron
 
         max_subquery_len = max(subquery_lens) if subquery_lens else 1
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
@@ -419,6 +428,10 @@ class ModelRunner:
                 selected_token_indices.append(selected_token_start_idx +
                                               subquery_len - 1)
                 selected_token_start_idx += max_subquery_len
+
+                if sampling_params.seed is not None:
+                    seq_group_metadata.state.generator = torch.Generator(
+                        device="cuda").manual_seed(sampling_params.seed)
             else:
                 num_seqs = len(seq_ids)
                 selected_token_indices.extend(
@@ -432,15 +445,18 @@ class ModelRunner:
                               categorized_sample_indices_start_idx + num_seqs))
                 categorized_sample_indices_start_idx += num_seqs
 
+            if sampling_params.seed is not None:
+                generators.append(seq_group_metadata.state.generator)
+
         selected_token_indices = _async_h2d(selected_token_indices,
                                             dtype=torch.long,
                                             target_device=self.device,
-                                            pin_memory=not self.in_wsl)
+                                            pin_memory=pin_memory)
         categorized_sample_indices = {
             t: _async_h2d(seq_ids,
                           dtype=torch.int,
                           target_device=self.device,
-                          pin_memory=not self.in_wsl)
+                          pin_memory=pin_memory)
             for t, seq_ids in categorized_sample_indices.items()
         }
 
@@ -454,6 +470,7 @@ class ModelRunner:
             prompt_lens=prompt_lens,
             selected_token_indices=selected_token_indices,
             categorized_sample_indices=categorized_sample_indices,
+            generators=generators,
         )
         return sampling_metadata
 
@@ -536,6 +553,7 @@ class ModelRunner:
                 prompt_lens=None,
                 selected_token_indices=metadata_dict["selected_token_indices"],
                 categorized_sample_indices=None,
+                generators=None,
                 perform_sampling=False,
             )
 

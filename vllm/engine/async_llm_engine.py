@@ -333,6 +333,9 @@ class AsyncLLMEngine:
         return (self.background_loop is not None
                 and not self.background_loop.done())
 
+    def get_tokenizer(self):
+        return self.engine.tokenizer.tokenizer
+
     def start_background_loop(self) -> None:
         """Start the background loop."""
         if self.is_running:

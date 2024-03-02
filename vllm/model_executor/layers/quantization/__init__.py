@@ -5,12 +5,14 @@ from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.layers.quantization.squeezellm import SqueezeLLMConfig
 from vllm.model_executor.layers.quantization.auto_quant import AutoQuantConfig
+from vllm.model_executor.layers.quantization.marlin import MarlinConfig
 
 _QUANTIZATION_CONFIG_REGISTRY = {
     "awq": AWQConfig,
     "gptq": GPTQConfig,
     "squeezellm": SqueezeLLMConfig,
     "autoquant": AutoQuantConfig,
+    "marlin": MarlinConfig,
 }
 
 
