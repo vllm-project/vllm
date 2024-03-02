@@ -29,7 +29,7 @@ class LazyCompressedParameter(torch.Tensor):
         if not is_magic_wand_available:
             raise ValueError(
                 "magic_wand is not available and required for sparsity "
-                "support. Please install it with `pip install magic_wand`")
+                "support. Please install it with `pip install nm-magic-wand`")
 
         self = torch.Tensor._make_wrapper_subclass(
             cls,
