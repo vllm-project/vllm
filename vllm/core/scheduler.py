@@ -10,7 +10,6 @@ from vllm.lora.request import LoRARequest
 from vllm.logger import init_logger
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceStatus)
-from vllm.prefix import PrefixPool
 
 logger = init_logger(__name__)
 
@@ -95,10 +94,8 @@ class Scheduler:
             block_size=self.cache_config.block_size,
             num_gpu_blocks=self.cache_config.num_gpu_blocks,
             num_cpu_blocks=self.cache_config.num_cpu_blocks,
-            sliding_window=self.cache_config.sliding_window)
-
-        # Create the prefix pool to cache the prefixes.
-        self.prefix_pool = PrefixPool(self.cache_config.block_size)
+            sliding_window=self.cache_config.sliding_window,
+            enable_caching=self.cache_config.enable_prefix_caching)
 
         # Sequence groups in the WAITING state.
         self.waiting: Deque[SequenceGroup] = deque()
@@ -374,10 +371,12 @@ class Scheduler:
 
             seq_data: Dict[int, SequenceData] = {}
             block_tables: Dict[int, List[int]] = {}
+
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
+                self.block_manager.access_all_blocks_in_seq(seq, now)
 
             seq_group_metadata = SequenceGroupMetadata(
                 request_id=seq_group.request_id,
@@ -386,7 +385,8 @@ class Scheduler:
                 sampling_params=seq_group.sampling_params,
                 block_tables=block_tables,
                 lora_request=seq_group.lora_request,
-                prefix=seq_group.prefix,
+                computed_block_nums=self.block_manager.
+                get_common_computed_block_ids(seq_group),
                 state=seq_group.state,
             )
             seq_group_metadata_list.append(seq_group_metadata)
@@ -496,3 +496,6 @@ class Scheduler:
         blocks_to_swap_out.update(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             seq.status = SequenceStatus.SWAPPED
+
+    def mark_blocks_as_computed(self, seq_group: SequenceGroup):
+        self.block_manager.mark_blocks_as_computed(seq_group)
