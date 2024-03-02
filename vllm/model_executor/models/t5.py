@@ -258,26 +258,17 @@ class T5Attention(nn.Module):
         input_metadata: InputMetadata,
         encoder_hidden_states: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        # print("hidden_states shape", hidden_states.shape)
-        # print("hidden_states", hidden_states)
         q, _ = self.q(hidden_states)
 
-        # print("q shape", q.shape)
-        # print("q", q)
         batch_size = hidden_states.shape[0]
         seq_len = hidden_states.shape[1]
         prompt_len = input_metadata.prompt_lens.max().item()
         context_len = input_metadata.context_lens.max().item()
         context_len = max(context_len, 1)
-        # print("batch_size", batch_size)
-        # print("seq_len", seq_len)
-        # print("prompt_len", prompt_len)
-        # print("context_len", context_len)
 
         block_size = 16
 
         if not self.is_decoder:
-            # print("encoder self attention!")
             assert kv_cache is None
             # Encoder self attention, no cache operations
             k, _ = self.k(hidden_states)
@@ -293,12 +284,9 @@ class T5Attention(nn.Module):
                         input_metadata.prompt_lens[i]:, ] = torch.finfo(
                             input_metadata.attn_bias.dtype).min
 
-                # print("input_metadata.attn_bias shape", input_metadata.attn_bias.shape)
-                # print("input_metadata.attn_bias", input_metadata.attn_bias)
             attn_output = self.attn(q, k, v, input_metadata)
 
         elif not self.is_cross:
-            # print("decoder self attention!")
             # Decoder self attention
             k, _ = self.k(hidden_states)
             v, _ = self.v(hidden_states)
@@ -308,13 +296,9 @@ class T5Attention(nn.Module):
                     1 if input_metadata.is_prompt else context_len,
                     (context_len + block_size - 1) // block_size *
                     block_size).repeat(batch_size, 1, 1, 1)
-                # print("position_bias shape", position_bias.shape)
-                # print("position_bias", position_bias)
                 input_metadata.attn_bias = position_bias[:, :,
                                                          -seq_len:, :].contiguous(
                                                          )
-                # print("input_metadata.attn_bias shape", input_metadata.attn_bias.shape)
-                # print("input_metadata.attn_bias", input_metadata.attn_bias)
 
             key_cache, value_cache = kv_cache
 
@@ -322,7 +306,6 @@ class T5Attention(nn.Module):
                                     input_metadata)
 
         else:
-            # print("cross attention!")
             # Cross attention
 
             key_cache, value_cache = kv_cache
@@ -330,10 +313,6 @@ class T5Attention(nn.Module):
                 assert encoder_hidden_states is not None
                 k, _ = self.k(encoder_hidden_states)
                 v, _ = self.v(encoder_hidden_states)
-                # print("k shape", k.shape)
-                # for i in range(k.shape[0]):
-                #     for j in range(k.shape[1]):
-                # print(f"key at batch {i} and pos {j}: ", k[i, j, :].reshape(1, 8, 64))
                 attn_output = self.attn(q, k, v, key_cache, value_cache,
                                         input_metadata)
             else:
@@ -369,16 +348,12 @@ class T5LayerSelfAttention(nn.Module):
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
         normed_hidden_states = self.layer_norm(hidden_states)
-        print("self attention input shape: ", normed_hidden_states.shape)
-        print("self_attention input: ", normed_hidden_states)
         attention_output = self.SelfAttention(
             hidden_states=normed_hidden_states,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
             encoder_hidden_states=None,
         )
-        print("self attention output shape: ", attention_output.shape)
-        print("self_attention output: ", attention_output)
         hidden_states = hidden_states + attention_output
         return hidden_states
 
@@ -408,16 +383,12 @@ class T5LayerCrossAttention(nn.Module):
         encoder_hidden_states: Optional[torch.Tensor],
     ) -> torch.Tensor:
         normed_hidden_states = self.layer_norm(hidden_states)
-        print("cross attention input shape: ", normed_hidden_states.shape)
-        print("cross_attention input: ", normed_hidden_states)
         attention_output = self.EncDecAttention(
             hidden_states=normed_hidden_states,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
             encoder_hidden_states=encoder_hidden_states,
         )
-        print("cross attention output shape: ", attention_output.shape)
-        print("cross_attention output: ", attention_output)
         hidden_states = hidden_states + attention_output
         return hidden_states
 
@@ -521,11 +492,8 @@ class T5Stack(nn.Module):
         input_metadata: InputMetadata,
         encoder_hidden_states: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        # print("input_ids: ", input_ids)
         hidden_states = self.embed_tokens(input_ids)
 
-        # print("hidden_states shape: ", hidden_states.shape)
-        # print("hidden_states: ", hidden_states)
         for i, layer_module in enumerate(self.block):
             kv_cache = kv_caches[i] if self.is_decoder else None
 
@@ -539,15 +507,6 @@ class T5Stack(nn.Module):
             hidden_states = layer_outputs
 
         hidden_states = self.final_layer_norm(hidden_states)
-        # if encoder_hidden_states is not None:
-        # print("hidden_states shape:" , hidden_states.shape)
-        # print("encoder_hidden_states shape:" , encoder_hidden_states.shape)
-        #     # Attach encoder hidden states
-        #     hidden_states = torch.cat(
-        #         [encoder_hidden_states, hidden_states], dim=1
-        #     )
-        print("final_hidden_states shape: ", hidden_states.shape)
-        print("final_hidden_states: ", hidden_states)
         return hidden_states
 
 
@@ -579,9 +538,6 @@ class T5ForConditionalGeneration(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
-        # print("input_ids shape: ", input_ids.shape)
-        # print("input_ids: ", input_ids)
-        # print("input_metadata: ", input_metadata)
         if input_metadata.is_prompt:
             # prompt run, need to run encoder once
             hidden_states = self.encoder(input_ids, kv_caches, input_metadata,

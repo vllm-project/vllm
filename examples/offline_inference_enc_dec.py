@@ -8,10 +8,14 @@ Scenarios:
 
 Output: for several prompts, compare native PyTorch & vLLM prompt completions
 '''
-
+import warnings
 import torch
 from vllm import LLM, SamplingParams
 from transformers import T5Tokenizer, T5ForConditionalGeneration
+
+warnings.filterwarnings("ignore",
+                        category=UserWarning,
+                        module="transformers.generation.utils.*")
 
 hf_model_id = "t5-small"
 dtype = "bfloat16"
@@ -27,7 +31,7 @@ dtype_obj = getattr(torch, dtype)
 # Native PyTorch test
 
 # - Model and tokenizer initialization
-tokenizer = T5Tokenizer.from_pretrained(hf_model_id)
+tokenizer = T5Tokenizer.from_pretrained(hf_model_id, legacy=False)
 model = T5ForConditionalGeneration.from_pretrained(hf_model_id).to(
     dtype=dtype_obj)
 
