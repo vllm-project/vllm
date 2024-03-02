@@ -85,6 +85,16 @@ class MarlinLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: MarlinConfig):
         self.quant_config = quant_config
 
+    def create_linear_kernel(
+        self,
+        input_size_per_partition: int,
+        output_size_per_partition: int,
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype
+    ) -> LinearKernelBase:
+        return None
+
     def create_weights(
         self,
         input_size_per_partition: int,
@@ -188,6 +198,7 @@ class MarlinLinearMethod(LinearMethodBase):
         weights: Dict[str, Any],
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
+        linear_kernel: Optional[LinearKernelBase] = None,
     ) -> torch.Tensor:
         qweight = weights["B"]
         scales = weights["s"]

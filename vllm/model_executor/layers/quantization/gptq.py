@@ -1,16 +1,16 @@
+# pylint: disable=missing-module-docstring
+# pylint: disable=missing-class-docstring
+# pylint: disable=missing-function-docstring
 import enum
 from enum import Enum
 from typing import Any, Dict, List, Optional
-from fractions import Fraction
 
 import torch
 from torch.nn.parameter import Parameter
 
 from vllm._C import ops
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               set_weight_attrs)
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.linear import LinearMethodBase, LinearKernelBase, set_weight_attrs
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
 
 class GPTQConfig(QuantizationConfig):
@@ -19,25 +19,23 @@ class GPTQConfig(QuantizationConfig):
     Reference: https://arxiv.org/abs/2210.17323
     """
 
-    def __init__(
-        self,
-        weight_bits: int,
-        group_size: int,
-        desc_act: bool,
-    ) -> None:
+    def __init__(self, weight_bits: int, group_size: int, desc_act: bool) -> None:
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.desc_act = desc_act
-        self.pack_factor = Fraction(32, self.weight_bits)
-        if self.weight_bits not in [2, 3, 4, 8]:
+        self.pack_factor = 32 // self.weight_bits
+        # exllama kernel v1 only supports 4 bit
+        if self.weight_bits != 4:
             raise ValueError(
-                "Currently, only 2/3/4/8-bit weight quantization is supported for "
-                f"GPTQ, but got {self.weight_bits} bits.")
+                "Currently, only 4-bit weight quantization is supported for " f"GPTQ, but got {self.weight_bits} bits."
+            )
 
     def __repr__(self) -> str:
-        return (f"GPTQConfig(weight_bits={self.weight_bits}, "
-                f"group_size={self.group_size}, "
-                f"desc_act={self.desc_act})")
+        return (
+            f"GPTQConfig(weight_bits={self.weight_bits}, "
+            f"group_size={self.group_size}, "
+            f"desc_act={self.desc_act})"
+        )
 
     @classmethod
     def get_name(cls) -> str:
@@ -87,6 +85,16 @@ class GPTQLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: GPTQConfig):
         self.quant_config = quant_config
 
+    def create_linear_kernel(
+        self,
+        input_size_per_partition: int,
+        output_size_per_partition: int,
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype
+    ) -> LinearKernelBase:
+        return None
+
     def create_weights(
         self,
         input_size_per_partition: int,
@@ -100,12 +108,14 @@ class GPTQLinearMethod(LinearMethodBase):
             raise ValueError(
                 "The input size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
-                "tensor parallel size.")
-        if output_size_per_partition % self.quant_config.pack_factor.numerator != 0:
+                "tensor parallel size."
+            )
+        if output_size_per_partition % self.quant_config.pack_factor != 0:
             raise ValueError(
                 "The output size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
-                "tensor parallel size.")
+                "tensor parallel size."
+            )
 
         if self.quant_config.group_size != -1:
             group_size = self.quant_config.group_size
@@ -127,23 +137,18 @@ class GPTQLinearMethod(LinearMethodBase):
             torch.empty(
                 input_size_per_partition // self.quant_config.pack_factor,
                 output_size_per_partition,
+                device="cuda",
                 dtype=torch.int32,
             ),
             requires_grad=False,
         )
         set_weight_attrs(
-            qweight, {
-                "input_dim": 0,
-                "output_dim": 1,
-                "packed_dim": 0,
-                "pack_factor": self.quant_config.pack_factor,
-            })
+            qweight, {"input_dim": 0, "output_dim": 1, "packed_dim": 0, "pack_factor": self.quant_config.pack_factor}
+        )
         g_idx = Parameter(
             torch.tensor(
-                [
-                    i // self.quant_config.group_size
-                    for i in range(input_size_per_partition)
-                ],
+                [i // self.quant_config.group_size for i in range(input_size_per_partition)],
+                device="cuda",
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -154,60 +159,60 @@ class GPTQLinearMethod(LinearMethodBase):
             torch.empty(
                 scale_and_zero_size,
                 output_size_per_partition // self.quant_config.pack_factor,
+                device="cuda",
                 dtype=torch.int32,
             ),
             requires_grad=False,
         )
         set_weight_attrs(
-            qzeros, {
+            qzeros,
+            {
                 "input_dim": scale_and_zero_input_dim,
                 "output_dim": 1,
                 "packed_dim": 1,
                 "pack_factor": self.quant_config.pack_factor,
-            })
+            },
+        )
         scales = Parameter(
-            torch.empty(
-                scale_and_zero_size,
-                output_size_per_partition,
-                dtype=params_dtype,
-            ),
+            torch.empty(scale_and_zero_size, output_size_per_partition, device="cuda", dtype=params_dtype),
             requires_grad=False,
         )
-        set_weight_attrs(scales, {
-            "input_dim": scale_and_zero_input_dim,
-            "output_dim": 1,
-        })
-        return {
-            "qweight": qweight,
-            "g_idx": g_idx,
-            "qzeros": qzeros,
-            "scales": scales,
-            "exllama_state": exllama_state,
-        }
+        set_weight_attrs(scales, {"input_dim": scale_and_zero_input_dim, "output_dim": 1})
+        return {"qweight": qweight, "g_idx": g_idx, "qzeros": qzeros, "scales": scales, "exllama_state": exllama_state}
 
-    def apply_weights(self,
-                      weights: Dict[str, Any],
-                      x: torch.Tensor,
-                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def apply_weights(
+        self, weights: Dict[str, Any], x: torch.Tensor, bias: Optional[torch.Tensor] = None
+        linear_kernel: Optional[LinearKernelBase] = None,
+    ) -> torch.Tensor:
         qweight = weights["qweight"]
-        out_shape = x.shape[:-1] + (qweight.shape[-1], )
+        out_shape = x.shape[:-1] + (qweight.shape[-1],)
         reshaped_x = x.reshape(-1, x.shape[-1])
         # exllama needs to shuffle the weight after the weight is loaded
         # here we do the shuffle on first forward pass
         if weights["exllama_state"] == ExllamaState.UNINITIALIZED:
             if self.quant_config.desc_act:
-                weights["g_idx"] = torch.argsort(weights["g_idx"]).to(
-                    torch.int)
+                weights["g_idx"] = torch.argsort(weights["g_idx"]).to(torch.int)
             else:
                 weights["g_idx"] = torch.empty((1, 1), device="meta")
             weights["exllama_state"] = ExllamaState.READY
-            ops.gptq_shuffle(weights["qweight"], weights["g_idx"],
-                             self.quant_config.weight_bits)
-        output = ops.gptq_gemm(reshaped_x, weights["qweight"],
-                               weights["qzeros"], weights["scales"],
-                               weights["g_idx"],
-                               weights["exllama_state"] == ExllamaState.READY,
-                               self.quant_config.weight_bits)
+            ops.gptq_shuffle(weights["qweight"], weights["g_idx"])
+        if linear_kernel is not None:
+            output = linear_kernel.apply_tensors(
+                reshaped_x,
+                weights["qweight"],
+                weights["qzeros"],
+                weights["scales"],
+                weights["g_idx"],
+            )
+        else:
+            output = ops.gptq_gemm(
+                reshaped_x,
+                weights["qweight"],
+                weights["qzeros"],
+                weights["scales"],
+                weights["g_idx"],
+                weights["exllama_state"] == ExllamaState.READY,
+            )
         if bias is not None:
             output = output + bias
         return output.reshape(out_shape)
