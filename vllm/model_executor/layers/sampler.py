@@ -1,4 +1,5 @@
 """A layer that samples the next tokens from the model's outputs."""
+import itertools
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -73,6 +74,8 @@ class Sampler(nn.Module):
         # Apply logits processors (if any).
         logits = _apply_logits_processors(logits, sampling_metadata)
 
+        logits = _apply_min_tokens_penalty(logits, sampling_metadata)
+
         # Prepare sampling tensors with pinned memory to avoid blocking.
         (sampling_tensors, do_penalties, do_top_p_top_k,
          do_min_p) = SamplingTensors.from_sampling_metadata(
@@ -137,6 +140,35 @@ def _get_bin_counts_and_mask(
     mask = bin_counts > 0
 
     return bin_counts, mask
+
+
+def _apply_min_tokens_penalty(
+    logits: torch.Tensor,
+    sampling_metadata: SamplingMetadata,
+) -> torch.Tensor:
+    seq_indices_to_penalize = []
+    start_idx = 0
+    for seq_ids, sampling_params in sampling_metadata.seq_groups:
+        if sampling_params.min_tokens > 1:
+            seq_indices_to_penalize += [start_idx + i for i, seq_id in enumerate(seq_ids) \
+                                if len(sampling_metadata.seq_data[seq_id].output_token_ids) < sampling_params.min_tokens]
+        start_idx += len(seq_ids)
+
+    if seq_indices_to_penalize:
+        if sampling_params.stop_token_ids:
+            token_ids_to_penalize = [sampling_params.eos_token_id
+                                     ] + sampling_params.stop_token_ids
+            # itertools.product paris up each seq index with every token id
+            # use zip to split pairs into a tuple of sequences, one for each dimension, for indexing
+            logits[tuple(
+                zip(*itertools.product(seq_indices_to_penalize,
+                                       token_ids_to_penalize)))] = -torch.inf
+        else:
+            # simpler for common case of just the eos token
+            logits[seq_indices_to_penalize,
+                   sampling_params.eos_token_id] = -torch.inf
+
+    return logits
 
 
 def _apply_logits_processors(
