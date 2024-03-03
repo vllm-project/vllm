@@ -84,6 +84,8 @@ class ChatCompletionRequest(BaseModel):
     echo: Optional[bool] = False
     repetition_penalty: Optional[float] = 1.0
     min_p: Optional[float] = 0.0
+    smoothing_factor: Optional[float] = 0.0
+    smoothing_curve: Optional[float] = 1.0
     include_stop_str_in_output: Optional[bool] = False
     length_penalty: Optional[float] = 1.0
     guided_json: Optional[Union[str, dict, BaseModel]] = None
@@ -116,6 +118,8 @@ class ChatCompletionRequest(BaseModel):
             temperature=self.temperature,
             top_p=self.top_p,
             min_p=self.min_p,
+            smoothing_factor=self.smoothing_factor,
+            smoothing_curve=self.smoothing_curve,
             seed=self.seed,
             stop=self.stop,
             stop_token_ids=self.stop_token_ids,
@@ -178,6 +182,8 @@ class CompletionRequest(BaseModel):
     spaces_between_special_tokens: Optional[bool] = True
     repetition_penalty: Optional[float] = 1.0
     min_p: Optional[float] = 0.0
+    smoothing_factor: Optional[float] = 0.0
+    smoothing_curve: Optional[float] = 1.0
     include_stop_str_in_output: Optional[bool] = False
     length_penalty: Optional[float] = 1.0
     guided_json: Optional[Union[str, dict, BaseModel]] = None
@@ -211,6 +217,8 @@ class CompletionRequest(BaseModel):
             top_p=self.top_p,
             top_k=self.top_k,
             min_p=self.min_p,
+            smoothing_factor=self.smoothing_factor,
+            smoothing_curve=self.smoothing_curve,
             seed=self.seed,
             stop=self.stop,
             stop_token_ids=self.stop_token_ids,
