@@ -152,7 +152,7 @@ class ModelRunner:
             if seq_group_metadata.is_chunked_prefill:
                 num_chunked_prefill += 1
                 # TODO(sang): Support it.
-                if prefix is not None:
+                if computed_block_nums is not None:
                     raise RuntimeError(
                         "chunked prefill cannot be used with prefix caching now."
                     )
@@ -176,11 +176,12 @@ class ModelRunner:
                 context_len = computed_len
                 prefix_enabled = True
             else:
-                if seq_group_metadata.block_tables is None:
-                    prefix_block_tables.append([])
-                else:
-                    prefix_block_tables.append(
-                        seq_group_metadata.block_tables[seq_id])
+                prefix_block_tables.append([])
+                # if seq_group_metadata.block_tables is None:
+                #     prefix_block_tables.append([])
+                # else:
+                #     prefix_block_tables.append(
+                #         seq_group_metadata.block_tables[seq_id])
                 context_len = prompt_len
 
             context_lens.append(context_len)
@@ -227,11 +228,11 @@ class ModelRunner:
                     "sliding window attention")
                 start_idx = max(0, prompt_len - self.sliding_window)
 
-            # If chunked prefill is enabled, prefix_len is always 0.
+            # If chunked prefill is enabled, computed_len is always 0.
             # TODO(sang) This is hack. We should clean it up when
             # supporting prefix cache + chunked prefill.
-            if prefix_len == 0:
-                prefix_len = prefill_start
+            if computed_len == 0:
+                computed_len = prefill_start
 
             for i in range(computed_len, prefill_end):
                 if i < start_idx:

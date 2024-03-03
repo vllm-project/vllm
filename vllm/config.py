@@ -512,10 +512,10 @@ class SchedulerConfig:
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) must "
                 "be greater than or equal to max_num_seqs "
                 f"({self.max_num_seqs}).")
-        if self.chunked_prefill_enabled and not self.flash_style:
-            # SANG-TODO It is probably fixable.
-            raise ValueError(
-                "chunked prefill is only supported for flash style")
+        # if self.chunked_prefill_enabled and not self.flash_style:
+        #     # SANG-TODO It is probably fixable.
+        #     raise ValueError(
+        #         "chunked prefill is only supported for flash style")
 
 
 class DeviceConfig:

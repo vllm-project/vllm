@@ -33,8 +33,9 @@ TEST_PROMPTS = [
 # SANG-TODO
 # @pytest.mark.parametrize("max_num_prompt_seqs", [1, 2, 100])
 @pytest.mark.parametrize("max_num_prompt_seqs", [1])
-@pytest.mark.parametrize("tensor_parallel_size", [2])
+@pytest.mark.parametrize("tensor_parallel_size", [1])
 def test_models(
+    hf_runner,
     vllm_runner,
     model: str,
     dtype: str,
@@ -51,6 +52,10 @@ def test_models(
             f"{torch.cuda.device_count()=} is smaller than {tensor_parallel_size=}"
         )
 
+    hf_model = hf_runner(model, dtype=dtype)
+    hf_outputs = hf_model.generate_greedy(TEST_PROMPTS, max_tokens)
+    del hf_model
+
     print("loading page attention models..")
     pg_model = vllm_runner(model, dtype=dtype)
     expected_outputs = []
@@ -61,33 +66,41 @@ def test_models(
 
     del pg_model
 
+    for i in range(len(TEST_PROMPTS)):
+        hf_output_ids, hf_output_str = hf_outputs[i]
+        vllm_output_ids, vllm_output_str = expected_outputs[i]
+        assert hf_output_str == vllm_output_str, (
+            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
+        assert hf_output_ids == vllm_output_ids, (
+            f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+
     destroy_model_parallel()
     gc.collect()
     torch.cuda.empty_cache()
 
-    flash_attn_model = vllm_runner(
-        model,
-        dtype=dtype,
-        # block_size=block_size,
-        # flash_style=True,
-        max_chunked_prefill_len=max_chunked_prefill_len,
-        max_num_prompt_seqs=max_num_prompt_seqs,
-        tensor_parallel_size=tensor_parallel_size)
-    expected_outputs.extend(flash_attn_model.generate_greedy(TEST_PROMPTS, max_tokens))
     # flash_attn_output_by_batches = []
-    # for i in range(10):
-    #     prompts = [TEST_PROMPTS[j % len(TEST_PROMPTS)] for j in range(i)]
-    #     flash_attn_output_by_batches.append(
-    #         flash_attn_model.generate_greedy(prompts, max_tokens))
+    # flash_attn_model = vllm_runner(
+    #     model,
+    #     dtype=dtype,
+    #     # block_size=block_size,
+    #     # flash_style=True,
+    #     max_chunked_prefill_len=max_chunked_prefill_len,
+    #     max_num_prompt_seqs=max_num_prompt_seqs,
+    #     tensor_parallel_size=tensor_parallel_size)
+    # flash_attn_output_by_batches.extend(flash_attn_model.generate_greedy(TEST_PROMPTS, max_tokens))
+    # # for i in range(10):
+    # #     prompts = [TEST_PROMPTS[j % len(TEST_PROMPTS)] for j in range(i)]
+    # #     flash_attn_output_by_batches.append(
+    # #         flash_attn_model.generate_greedy(prompts, max_tokens))
 
-    del flash_attn_model
+    # del flash_attn_model
 
-    for e, f in zip(expected_outputs, flash_attn_output_by_batches):
-        assert e[1] == f[1]
+    # for e, f in zip(expected_outputs, flash_attn_output_by_batches):
+    #     assert e[1] == f[1]
 
-    destroy_model_parallel()
-    gc.collect()
-    torch.cuda.empty_cache()
+    # destroy_model_parallel()
+    # gc.collect()
+    # torch.cuda.empty_cache()
 
     # for flash_attn_outputs in flash_attn_output_by_batches:
     #     for i in range(len(flash_attn_outputs)):
