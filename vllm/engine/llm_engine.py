@@ -7,6 +7,7 @@ import importlib
 from typing import (TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple,
                     Union)
 
+import vllm
 from vllm.lora.request import LoRARequest
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, LoRAConfig)
@@ -85,7 +86,7 @@ class LLMEngine:
         log_stats: bool,
     ) -> None:
         logger.info(
-            "Initializing an LLM engine with config: "
+            f"Initializing an LLM engine (v{vllm.__version__}) with config: "
             f"model={model_config.model!r}, "
             f"tokenizer={model_config.tokenizer!r}, "
             f"tokenizer_mode={model_config.tokenizer_mode}, "
