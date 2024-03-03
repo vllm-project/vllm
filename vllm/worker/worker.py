@@ -117,7 +117,7 @@ class Worker:
             gpu_memory_utilization: The fraction of the total GPU memory to use.
             cpu_swap_space: The size of the CPU swap space in bytes.
         """
-        # print("SANG-TODO profile_num_available_blocks")
+        print("SANG-TODO profile_num_available_blocks")
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
         torch.cuda.empty_cache()
@@ -154,7 +154,7 @@ class Worker:
                                  MAX_INT_32 // cache_block_size)
             num_cpu_blocks = min(num_cpu_blocks,
                                  MAX_INT_32 // cache_block_size)
-        # print("SANG-TODO profile_num_available_blocks done")
+        print("SANG-TODO profile_num_available_blocks done")
 
         return num_gpu_blocks, num_cpu_blocks
 

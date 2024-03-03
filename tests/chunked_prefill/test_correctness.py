@@ -53,9 +53,9 @@ def test_models(
     torch.cuda.empty_cache()
 
     flash_attn_model = vllm_runner(model,
-                                   dtype=dtype,
-                                   flash_style=True,
-                                   block_size=block_size)
+                                   dtype=dtype,)
+                                #    flash_style=True,
+                                #    block_size=block_size)
     flash_attn_output_by_batches = []
     for i in range(10):
         prompts = [TEST_PROMPTS[j % len(TEST_PROMPTS)] for j in range(i)]

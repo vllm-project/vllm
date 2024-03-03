@@ -153,6 +153,7 @@ class PagedAttention(nn.Module):
             # normal attention
             if (key_cache is None or value_cache is None
                     or input_metadata.block_tables.numel() == 0):
+                    # or not input_metadata.prefix_enabled):
                 # print("SANG-TODO flash attn is used.")
                 # print(
                 #     "SANG-TODO query size: ",
@@ -212,7 +213,6 @@ class PagedAttention(nn.Module):
                     query = query.unflatten(0, (batch_size, seq_len))
                     key = key.unflatten(0, (batch_size, seq_len))
                     value = value.unflatten(0, (batch_size, seq_len))
-
                 out = xops.memory_efficient_attention_forward(
                     query,
                     key,
@@ -224,6 +224,19 @@ class PagedAttention(nn.Module):
                     (is_hip()) else None,
                 )
                 output = out.view_as(query)
+                # if key_cache is not None and value_cache is not None:
+                #     breakpoint()
+                #     output2 = flash_attn_with_kvcache_paged(
+                #         query.view(batch_size, seq_len, self.num_heads,
+                #                     self.head_size),
+                #         key_cache,
+                #         value_cache,
+                #         self.scale,
+                #         input_metadata.block_tables,
+                #         input_metadata.context_lens,
+                #         self.alibi_slopes,
+                #     )
+                #     breakpoint()
             else:
                 if input_metadata.flash_style:
                     output = flash_attn_with_kvcache_paged(
@@ -237,6 +250,8 @@ class PagedAttention(nn.Module):
                         self.alibi_slopes,
                     )
                 else:
+                    print("SANG-TODO context attention")
+                    breakpoint()
                     # prefix-enabled attention
                     output = torch.empty_like(query)
                     context_attention_fwd(
@@ -257,6 +272,8 @@ class PagedAttention(nn.Module):
 
         else:
             # Decoding run.
+            # breakpoint()
+            print("SANG-TODO decoding")
             if input_metadata.flash_style:
                 output = flash_attn_with_kvcache_paged(
                     query.view(batch_size, seq_len, self.num_heads,
@@ -419,17 +436,12 @@ def flash_attn_with_kvcache_paged(
         # Inplace update is slow. We don't use it.
         # We assume kvcache is already updated before
         # calling this API.
-        None,
-        None,
-        rotary_cos=None,
-        rotary_sin=None,
+        None,  # key
+        None,  # value
         cache_seqlens=context_lens,
-        cache_batch_idx=None,
         block_table=block_tables,
         softmax_scale=scale,
         causal=True,
-        window_size=(-1, -1),
-        rotary_interleaved=False,
         alibi_slopes=alibi_slopes,
         num_splits=0,
     )

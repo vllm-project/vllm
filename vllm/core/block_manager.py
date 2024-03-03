@@ -200,6 +200,8 @@ class BlockSpaceManager:
                 block = self.gpu_allocator.allocate(
                     seq.hash_of_block(logical_idx),
                     seq.num_hashed_tokens_of_block(logical_idx))
+            print("allcate a new block for seq_group", seq_group)
+            print("block", block)
             block_table.append(block)
 
         # Assign the block table for each sequence.
