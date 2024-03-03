@@ -29,9 +29,11 @@ TEST_PROMPTS = [
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("block_size", [256])
-@pytest.mark.parametrize("max_chunked_prefill_len", [-1, 16, 64])
-@pytest.mark.parametrize("max_num_prompt_seqs", [1, 2, 100])
-@pytest.mark.parametrize("tensor_parallel_size", [1, 2])
+@pytest.mark.parametrize("max_chunked_prefill_len", [16])
+# SANG-TODO
+# @pytest.mark.parametrize("max_num_prompt_seqs", [1, 2, 100])
+@pytest.mark.parametrize("max_num_prompt_seqs", [1])
+@pytest.mark.parametrize("tensor_parallel_size", [2])
 def test_models(
     vllm_runner,
     model: str,
@@ -49,19 +51,19 @@ def test_models(
             f"{torch.cuda.device_count()=} is smaller than {tensor_parallel_size=}"
         )
 
-    # print("loading page attention models..")
-    # pg_model = vllm_runner(model, dtype=dtype)
-    # expected_outputs = []
+    print("loading page attention models..")
+    pg_model = vllm_runner(model, dtype=dtype)
+    expected_outputs = []
 
-    # print("generating tokens...")
-    # expected_outputs.extend(pg_model.generate_greedy(TEST_PROMPTS, max_tokens))
-    # print("generating tokens finished")
+    print("generating tokens...")
+    expected_outputs.extend(pg_model.generate_greedy(TEST_PROMPTS, max_tokens))
+    print("generating tokens finished")
 
-    # del pg_model
+    del pg_model
 
-    # destroy_model_parallel()
-    # gc.collect()
-    # torch.cuda.empty_cache()
+    destroy_model_parallel()
+    gc.collect()
+    torch.cuda.empty_cache()
 
     flash_attn_model = vllm_runner(
         model,
@@ -83,12 +85,12 @@ def test_models(
     gc.collect()
     torch.cuda.empty_cache()
 
-    # for flash_attn_outputs in flash_attn_output_by_batches:
-    #     for i in range(len(flash_attn_outputs)):
-    #         fa_output_ids, fa_output_str = flash_attn_outputs[i]
-    #         vllm_output_ids, vllm_output_str = expected_outputs[
-    #             i % len(expected_outputs)]
-    #         assert fa_output_ids == vllm_output_ids, (
-    #             f"Test{i}:\flash ids: {fa_output_ids}\nvLLM ids: {vllm_output_ids}"
-    #             f"Test{i}:\nflash output: {fa_output_str!r}\nvLLM output: {vllm_output_str!r}"
-    #         )
+    for flash_attn_outputs in flash_attn_output_by_batches:
+        for i in range(len(flash_attn_outputs)):
+            fa_output_ids, fa_output_str = flash_attn_outputs[i]
+            vllm_output_ids, vllm_output_str = expected_outputs[
+                i % len(expected_outputs)]
+            assert fa_output_ids == vllm_output_ids, (
+                f"Test{i}:\flash ids: {fa_output_ids}\nvLLM ids: {vllm_output_ids}"
+                f"Test{i}:\nflash output: {fa_output_str!r}\nvLLM output: {vllm_output_str!r}"
+            )

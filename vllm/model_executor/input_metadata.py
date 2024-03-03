@@ -8,6 +8,8 @@ class InputMetadata:
 
     Args:
         prompt_lens: Lengths of prompts.
+        num_chunked_prefill: Number of chunked prefill requests across
+            sequences.
         slot_mapping: The address to write the new KV to of each token.
             index: token_id, value: address within kv_cache.
         max_context_len: The maximum context length.
@@ -21,7 +23,7 @@ class InputMetadata:
     """
 
     def __init__(self, is_prompt: bool, slot_mapping: torch.Tensor,
-                 prompt_lens: Optional[torch.Tensor],
+                 prompt_lens: Optional[torch.Tensor], num_chunked_prefill: int,
                  max_seq_len: Optional[int], start_loc: Optional[torch.Tensor],
                  max_context_len: Optional[int],
                  context_lens: Optional[torch.Tensor],
@@ -30,6 +32,7 @@ class InputMetadata:
                  prefix_enabled: bool) -> None:
         self.is_prompt = is_prompt
         self.prompt_lens = prompt_lens
+        self.num_chunked_prefill = num_chunked_prefill
         self.max_seq_len = max_seq_len
         self.start_loc = start_loc
         self.max_context_len = max_context_len
@@ -72,17 +75,23 @@ class InputMetadata:
         #              dim=0,
         #              dtype=self.cum_prompt_query_lens.dtype,
         #              out=self.cum_prompt_query_lens[1:])
+        # torch.cumsum(self.context_lens[:self.num_prompts],
+        #              dim=0,
+        #              dtype=self.cum_prompt_context_lens.dtype,
+        #              out=self.cum_prompt_context_lens[1:])
 
         # # TODO: this will be different once we support chunked prefills.
         # self.cum_prompt_context_lens = self.cum_prompt_query_lens
-        # self.max_context_len = max(self.max_context_len, self.max_prompt_len)
+        # self.max_context_len = max_context_len
 
         # # Generation related metadata
         # # This value might include padding if CudaGraph is enabled.
         # self.num_generation_tokens = num_generation_tokens
         # # This is the source of truth for the number of generation tokens.
-        # self.num_generation_tokens_tensor = torch.cuda.IntTensor(
-        #     [num_generation_tokens])
+        # self.num_generation_tokens_tensor = torch.tensor(
+        #     [self.num_generation_tokens],
+        #     dtype=torch.int32 if self.flash_style else torch.long,
+        #     device='cuda')
 
     def __repr__(self) -> str:
         return ("InputMetadata("

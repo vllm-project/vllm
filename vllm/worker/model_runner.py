@@ -138,6 +138,7 @@ class ModelRunner:
         context_lens: List[int] = []
         subquery_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
+        num_chunked_prefill = 0
         # print("SANG-TODO # of requests (seq_group_metadata_list): ",
         #       len(seq_group_metadata_list))
         for seq_group_metadata in seq_group_metadata_list:
@@ -146,8 +147,17 @@ class ModelRunner:
             assert len(seq_ids) == 1
             seq_id = seq_ids[0]
 
+            if seq_group_metadata.is_chunked_prefill:
+                num_chunked_prefill += 1
+                # TODO(sang): Support it.
+                if prefix is not None:
+                    raise RuntimeError(
+                        "chunked prefill cannot be used with prefix caching now."
+                    )
+
             seq_data = seq_group_metadata.seq_data[seq_id]
-            prompt_tokens = seq_data.get_token_ids()
+            prefill_start, prefill_end = seq_data.get_prefill_range()
+            prompt_tokens = seq_data.get_token_ids()[prefill_start:prefill_end]
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
             prefix_len = 0
@@ -173,8 +183,11 @@ class ModelRunner:
             input_tokens.append(prompt_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
+            # NOTE(sang): prefill_end is always # of prompts if chunked
+            # prefill is not enabled. Prefix caching is not working with
+            # chunked prefill now.
             input_positions.append(
-                list(range(prefix_len, prefix_len + len(prompt_tokens))))
+                list(range(prefix_len, prefix_len + prefill_end)))
 
             lora_id = seq_group_metadata.lora_int_id
 
@@ -207,7 +220,14 @@ class ModelRunner:
                     "Prefix caching is currently not supported with "
                     "sliding window attention")
                 start_idx = max(0, prompt_len - self.sliding_window)
-            for i in range(prefix_len, prompt_len):
+
+            # If chunked prefill is enabled, prefix_len is always 0.
+            # TODO(sang) This is hack. We should clean it up when
+            # supporting prefix cache + chunked prefill.
+            if prefix_len == 0:
+                prefix_len = prefill_start
+
+            for i in range(prefix_len, prefill_end):
                 if i < start_idx:
                     slot_mapping[-1].append(_PAD_SLOT_ID)
                     continue
@@ -261,6 +281,7 @@ class ModelRunner:
         input_metadata = InputMetadata(is_prompt=True,
                                        slot_mapping=slot_mapping,
                                        prompt_lens=prompt_lens_tensor,
+                                       num_chunked_prefill=num_chunked_prefill,
                                        max_seq_len=max_prompt_len,
                                        start_loc=start_loc_tensor,
                                        max_context_len=None,
@@ -390,6 +411,7 @@ class ModelRunner:
         input_metadata = InputMetadata(is_prompt=False,
                                        slot_mapping=slot_mapping,
                                        prompt_lens=None,
+                                       num_chunked_prefill=0,
                                        max_seq_len=None,
                                        start_loc=None,
                                        max_context_len=max_context_len,
@@ -533,6 +555,7 @@ class ModelRunner:
                 "is_prompt": input_metadata.is_prompt,
                 "slot_mapping": input_metadata.slot_mapping,
                 "prompt_lens": input_metadata.prompt_lens,
+                "num_chunked_prefill": input_metadata.num_chunked_prefill,
                 "max_seq_len": input_metadata.max_seq_len,
                 "start_loc": input_metadata.start_loc,
                 "max_context_len": input_metadata.max_context_len,
@@ -557,6 +580,7 @@ class ModelRunner:
                 is_prompt=metadata_dict["is_prompt"],
                 slot_mapping=metadata_dict["slot_mapping"],
                 prompt_lens=metadata_dict["prompt_lens"],
+                num_chunked_prefill=metadata_dict["num_chunked_prefill"],
                 max_seq_len=metadata_dict["max_seq_len"],
                 start_loc=metadata_dict["start_loc"],
                 max_context_len=metadata_dict["max_context_len"],
@@ -649,6 +673,7 @@ class ModelRunner:
             seq_len = (max_num_batched_tokens // max_num_seqs +
                        (group_id < max_num_batched_tokens % max_num_seqs))
             seq_data = SequenceData([0] * seq_len)
+            seq_data.advance_prefill_range(seq_len)
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,
@@ -743,6 +768,7 @@ class ModelRunner:
                     is_prompt=False,
                     slot_mapping=slot_mapping[:batch_size],
                     prompt_lens=None,
+                    num_chunked_prefill=0,
                     max_seq_len=None,
                     start_loc=None,
                     max_context_len=self.max_context_len_to_capture,

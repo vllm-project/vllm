@@ -249,6 +249,7 @@ class Scheduler:
                     curr_loras.add(lora_int_id)
                 self.waiting.popleft()
                 self._allocate(seq_group)
+                seq_group.advance_prefill_range(num_prompt_tokens)
                 self.running.append(seq_group)
                 num_curr_seqs += num_new_seqs
                 scheduled.append(seq_group)
@@ -383,6 +384,7 @@ class Scheduler:
             seq_group_metadata = SequenceGroupMetadata(
                 request_id=seq_group.request_id,
                 is_prompt=scheduler_outputs.prompt_run,
+                is_chunked_prefill=False,
                 seq_data=seq_data,
                 sampling_params=seq_group.sampling_params,
                 block_tables=block_tables,
