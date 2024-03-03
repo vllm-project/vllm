@@ -64,9 +64,8 @@ def patch_execute_model_with_seeds(worker: Worker, rand_seeds: List[int]):
 
 def zero_kv_cache(cache_engine: CacheEngine):
     assert cache_engine.gpu_cache
-    for key_blocks, value_blocks in cache_engine.gpu_cache:
-        key_blocks.zero_()
-        value_blocks.zero_()
+    for kv_cache in cache_engine.gpu_cache:
+        kv_cache.zero_()
 
 
 def create_worker(cls: type,

@@ -25,3 +25,10 @@ class KVCache(Mapping):
 
     def __getitem__(self, name):
         return getattr(self, name)
+
+    def zero_(self):
+        """Set all key and value_cache buffers to zero"""
+        if self.key_cache is not None:
+            self.key_cache.zero_()
+        if self.value_cache is not None:
+            self.value_cache.zero_()
