@@ -12,6 +12,7 @@ from vllm.sequence import (PromptLogprobs, SampleLogprobs, SamplerOutput,
                            SequenceData, SequenceGroupOutput, SequenceOutput)
 from vllm.utils import is_neuron
 
+_SAMPLING_EPS = 1e-6
 
 class Sampler(nn.Module):
     """Samples the next tokens from the model's outputs.
@@ -240,6 +241,28 @@ def _apply_min_p(
     logits = logits.masked_fill_(tokens_to_remove, -float("inf"))
 
     return logits
+
+
+def _apply_quadratic_sampling(
+    logits: torch.Tensor,
+    smoothing_factors: torch.Tensor,
+) -> torch.Tensor:
+    """Applies a quadratic transformation to the logits based on the
+    provided smoothing factor. The transformation is centered around
+    the maximum logit value in the batch.
+    Credits: @kalomaze
+    """
+    diff = logits - max_logits
+
+    smoothing_curve = smoothing_curves + _SAMPLING_EPS
+    k = (3 - smoothing_curve) / 2
+    s = (smoothing_curve - 1) / 2
+
+    quadratic_term = -(k * smoothing_factors * diff**2)
+    cubic_term = s * smoothing_factors * diff**3
+
+    transformed_logits = quadratic_term + cubic_term + max_logits
+    return transformed_logits
 
 
 def _greedy_sample(

@@ -58,6 +58,11 @@ class SamplingParams:
         min_p: Float that represents the minimum probability for a token to be
             considered, relative to the probability of the most likely token.
             Must be in [0, 1]. Set to 0 to disable this.
+        smoothing_factor: Smoothing factor (float) to use in Quadratic
+            Sampling. Applies a quadratic transformation to the logits.
+            Must be in [0, inf). Set to 0 to disable.
+        smoothing_curve: Smoothing curve (float) to use for Cubic sampling.
+            Must be in [0, inf). Set to 1.0 to disable. 
         seed: Random seed to use for the generation.
         use_beam_search: Whether to use beam search instead of sampling.
         length_penalty: Float that penalizes sequences based on their length.
@@ -104,6 +109,8 @@ class SamplingParams:
         top_p: float = 1.0,
         top_k: int = -1,
         min_p: float = 0.0,
+        smoothing_factor: float = 0.0,
+        smoothing_curve: float = 1.0,
         seed: Optional[int] = None,
         use_beam_search: bool = False,
         length_penalty: float = 1.0,
@@ -128,6 +135,8 @@ class SamplingParams:
         self.top_p = top_p
         self.top_k = top_k
         self.min_p = min_p
+        self.smoothing_factor = smoothing_factor
+        self.smoothing_curve = smoothing_curve
         self.seed = seed
         self.use_beam_search = use_beam_search
         self.length_penalty = length_penalty
@@ -188,6 +197,12 @@ class SamplingParams:
         if not 0.0 <= self.min_p <= 1.0:
             raise ValueError("min_p must be in [0, 1], got "
                              f"{self.min_p}.")
+        if not self.smoothing_factor >= 0:
+            raise ValueError(f"smoothing_factor must be non negative, got "
+                             f"{self.smoothing_factor}.")
+        if not self.smoothing_factor >= 0:
+            raise ValueError(f"smoothing_curve must be non negative, got "
+                             f"{self.smoothing_curve}.")
         if self.max_tokens is not None and self.max_tokens < 1:
             raise ValueError(
                 f"max_tokens must be at least 1, got {self.max_tokens}.")

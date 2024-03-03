@@ -64,6 +64,8 @@ class SamplingTensors:
     top_ps: torch.Tensor
     top_ks: torch.Tensor
     min_ps: torch.Tensor
+    smoothing_factors: torch.Tensor
+    smoothing_curves: torch.Tensor
     presence_penalties: torch.Tensor
     frequency_penalties: torch.Tensor
     repetition_penalties: torch.Tensor
@@ -81,12 +83,15 @@ class SamplingTensors:
         temperatures: List[float] = []
         top_ps: List[float] = []
         min_ps: List[float] = []
+        smoothing_factors: List[float] = []
+        smoothing_curves: List[float] = []
         presence_penalties: List[float] = []
         frequency_penalties: List[float] = []
         repetition_penalties: List[float] = []
         do_penalties = False
         do_top_p_top_k = False
         do_min_p = False
+        do_quadratic = False
         for i, seq_group in enumerate(sampling_metadata.seq_groups):
             seq_ids, sampling_params = seq_group
             temperature = sampling_params.temperature
@@ -95,6 +100,8 @@ class SamplingTensors:
             r = sampling_params.repetition_penalty
             top_p = sampling_params.top_p
             min_p = sampling_params.min_p
+            smoothing_factor = sampling_params.smoothing_factor
+            smoothing_curve = sampling_params.smoothing_curve
             # k should not be greater than the vocab size.
             top_k = min(sampling_params.top_k, vocab_size)
             top_k = vocab_size if top_k == -1 else top_k
@@ -108,6 +115,8 @@ class SamplingTensors:
                 do_top_p_top_k = True
             if not do_min_p and min_p > _SAMPLING_EPS:
                 do_min_p = True
+            if do_quadratic is False and (smoothing_factor > _SAMPLING_EPS
+                                          or smoothing_curve > _SAMPLING_EPS):
             if not do_penalties and (abs(p) >= _SAMPLING_EPS
                                      or abs(f) >= _SAMPLING_EPS
                                      or abs(r - 1.0) >= _SAMPLING_EPS):
@@ -120,6 +129,8 @@ class SamplingTensors:
                 top_ps += [top_p] * (prompt_len - 1)
                 top_ks += [top_k] * (prompt_len - 1)
                 min_ps += [min_p] * (prompt_len - 1)
+                smoothing_factors += [smoothing_factor] * (prompt_len - 1)
+                smoothing_curves += [smoothing_curve] * (prompt_len - 1)
                 presence_penalties += [0] * (prompt_len - 1)
                 frequency_penalties += [0] * (prompt_len - 1)
                 repetition_penalties += [1] * (prompt_len - 1)
@@ -133,19 +144,25 @@ class SamplingTensors:
             top_ps += [top_p] * len(seq_ids)
             top_ks += [top_k] * len(seq_ids)
             min_ps += [min_p] * len(seq_ids)
+            smoothing_factors += [smoothing_factor] * len(seq_ids)
+            smoothing_curves += [smoothing_curve] * len(seq_ids)
             presence_penalties += [p] * len(seq_ids)
             frequency_penalties += [f] * len(seq_ids)
             repetition_penalties += [r] * len(seq_ids)
 
         sampling_tensors = SamplingTensors.from_lists(
-            temperatures, top_ps, top_ks, min_ps, presence_penalties,
-            frequency_penalties, repetition_penalties, prompt_tokens,
-            output_tokens, vocab_size, device, dtype)
-        return (sampling_tensors, do_penalties, do_top_p_top_k, do_min_p)
+            temperatures, top_ps, top_ks, min_ps, smoothing_factors,
+            smoothing_curves, presence_penalties, frequency_penalties,
+            repetition_penalties, prompt_tokens, output_tokens, vocab_size,
+            device, dtype)
+        return (sampling_tensors, do_penalties, do_top_p_top_k,
+                do_min_p, do_quadratic)
 
     @classmethod
     def from_lists(cls, temperatures: List[float], top_ps: List[float],
                    top_ks: List[int], min_ps: List[float],
+                   smoothing_factors: List[float],
+                   smoothing_curves: List[float],
                    presence_penalties: List[float],
                    frequency_penalties: List[float],
                    repetition_penalties: List[float],
@@ -185,6 +202,16 @@ class SamplingTensors:
             dtype=dtype,
             pin_memory=pin_memory,
         )
+        smoothing_factors_t = torch.tensor(
+            smoothing_factors,
+            device="cpu",
+            dtype=dtype,
+            pin_memory=pin_memory)
+        smoothing_curves_t = torch.tensor(
+            smoothing_curves,
+            device="cpu",
+            dtype=dtype,
+            pin_memory=pin_memory)
         presence_penalties_t = torch.tensor(
             presence_penalties,
             device="cpu",
@@ -228,6 +255,10 @@ class SamplingTensors:
             top_ps=top_ps_t.to(device=device, non_blocking=True),
             top_ks=top_ks_t.to(device=device, non_blocking=True),
             min_ps=min_ps_t.to(device=device, non_blocking=True),
+            smoothing_factors=smoothing_factors_t.to(device=device,
+                                                     non_blocking=True),
+            smoothing_curve=smoothing_curves_t.to(device=device,
+                                                    non_blocking=True),
             presence_penalties=presence_penalties_t.to(device=device,
                                                        non_blocking=True),
             frequency_penalties=frequency_penalties_t.to(device=device,
