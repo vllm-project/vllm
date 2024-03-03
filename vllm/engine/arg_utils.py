@@ -170,9 +170,8 @@ class EngineArgs:
             'to avoid RAM OOM when using tensor '
             'parallel and large models')
         parser.add_argument('--ray-workers-use-nsight',
-                            type=bool,
-                            default=False,
-                            help='use nsight to profile ray workers')
+                            action='store_true',
+                            help='If specified, use nsight to profile ray workers')
         # KV cache arguments
         parser.add_argument('--block-size',
                             type=int,
