@@ -139,6 +139,8 @@ class ModelRunner:
         subquery_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
         num_chunked_prefill = 0
+        # Whether or not if any seq_group has prefix cached.
+        prefix_enabled = False
         # print("SANG-TODO # of requests (seq_group_metadata_list): ",
         #       len(seq_group_metadata_list))
         for seq_group_metadata in seq_group_metadata_list:
@@ -160,25 +162,29 @@ class ModelRunner:
             prompt_tokens = seq_data.get_token_ids()[prefill_start:prefill_end]
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
-            prefix_len = 0
-            prefix = seq_group_metadata.prefix
-            # print("SANG-TODO prefix, ", prefix)
-            if prefix is not None and prefix.computed:
-                prefix_len = prefix.get_length()
-                prompt_tokens = prompt_tokens[prefix_len:]
-                prefix_block_tables.append(prefix.get_block_numbers())
-                context_len = prefix_len
+
+            computed_len = 0
+
+            # NOTE: This only works for oooooooxxx style attention.
+            computed_block_nums = seq_group_metadata.computed_block_nums
+            if computed_block_nums is not None and len(
+                    computed_block_nums) > 0 and self.sliding_window is None:
+                # Prefix is not supported with sliding_window
+                computed_len = len(computed_block_nums) * self.block_size
+                prompt_tokens = prompt_tokens[computed_len:]
+                prefix_block_tables.append(computed_block_nums)
+                context_len = computed_len
+                prefix_enabled = True
             else:
-                prefix_block_tables.append([])
                 if seq_group_metadata.block_tables is None:
                     prefix_block_tables.append([])
                 else:
                     prefix_block_tables.append(
                         seq_group_metadata.block_tables[seq_id])
                 context_len = prompt_len
-            # actual prompt lens
+
             context_lens.append(context_len)
-            subquery_lens.append(prompt_len - prefix_len)
+            subquery_lens.append(prompt_len - computed_len)
 
             input_tokens.append(prompt_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt
@@ -187,17 +193,17 @@ class ModelRunner:
             # prefill is not enabled. Prefix caching is not working with
             # chunked prefill now.
             input_positions.append(
-                list(range(prefix_len, prefix_len + prefill_end)))
+                list(range(computed_len, computed_len + prefill_end)))
 
             lora_id = seq_group_metadata.lora_int_id
 
             if lora_id > 0:
                 lora_requests.add(seq_group_metadata.lora_request)
 
-            lora_index_mapping.append([lora_id] * (prompt_len - prefix_len))
+            lora_index_mapping.append([lora_id] * (prompt_len - computed_len))
             lora_prompt_mapping.extend(
                 [lora_id] *
-                (prompt_len - prefix_len
+                (prompt_len - computed_len
                  if seq_group_metadata.sampling_params.prompt_logprobs else 1))
 
             if seq_group_metadata.block_tables is None:
@@ -216,7 +222,7 @@ class ModelRunner:
             # mapping will be [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
             start_idx = 0
             if self.sliding_window is not None:
-                assert prefix_len == 0, (
+                assert computed_len == 0, (
                     "Prefix caching is currently not supported with "
                     "sliding window attention")
                 start_idx = max(0, prompt_len - self.sliding_window)
@@ -227,7 +233,7 @@ class ModelRunner:
             if prefix_len == 0:
                 prefix_len = prefill_start
 
-            for i in range(prefix_len, prefill_end):
+            for i in range(computed_len, prefill_end):
                 if i < start_idx:
                     slot_mapping[-1].append(_PAD_SLOT_ID)
                     continue
@@ -290,8 +296,7 @@ class ModelRunner:
                                        use_cuda_graph=False,
                                        kv_cache_dtype=self.kv_cache_dtype,
                                        flash_style=self.flash_style,
-                                       prefix_enabled=prefix is not None
-                                       and prefix.computed)
+                                       prefix_enabled=prefix_enabled)
         return (input_tokens, input_positions, input_metadata, prompt_lens,
                 subquery_lens, lora_index_mapping, lora_prompt_mapping,
                 lora_requests)

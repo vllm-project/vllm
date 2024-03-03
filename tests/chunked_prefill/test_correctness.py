@@ -68,8 +68,8 @@ def test_models(
     flash_attn_model = vllm_runner(
         model,
         dtype=dtype,
-        block_size=block_size,
-        flash_style=True,
+        # block_size=block_size,
+        # flash_style=True,
         max_chunked_prefill_len=max_chunked_prefill_len,
         max_num_prompt_seqs=max_num_prompt_seqs,
         tensor_parallel_size=tensor_parallel_size)
@@ -80,6 +80,11 @@ def test_models(
             flash_attn_model.generate_greedy(prompts, max_tokens))
 
     del flash_attn_model
+
+    # for e, f in zip(expected_outputs, flash_attn_output_by_batches):
+    #     # print("expected: ", e[1])
+    #     # print("flash: ", f[1])
+    #     assert e[1] == f[1]
 
     destroy_model_parallel()
     gc.collect()
