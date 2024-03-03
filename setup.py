@@ -36,7 +36,7 @@ def _is_neuron() -> bool:
     torch_neuronx_installed = True
     try:
         subprocess.run(["neuron-ls"], capture_output=True, check=True)
-    except FileNotFoundError:
+    except (FileNotFoundError, PermissionError):
         torch_neuronx_installed = False
     return torch_neuronx_installed
 
@@ -343,6 +343,7 @@ if _is_cuda():
         "csrc/cache_kernels.cu",
         "csrc/attention/attention_kernels.cu",
         "csrc/quantization/awq/gemm_kernels.cu",
+        "csrc/quantization/marlin/marlin_cuda_kernel.cu",
         "csrc/custom_all_reduce.cu",
     ])
 
