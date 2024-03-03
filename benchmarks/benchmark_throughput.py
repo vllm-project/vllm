@@ -303,7 +303,10 @@ if __name__ == "__main__":
         default="cuda",
         choices=["cuda"],
         help='device type for vLLM execution, supporting CUDA only currently.')
-    parser.add_argument("--enable_prefix_caching", action='store_true')
+    parser.add_argument(
+        "--enable-prefix-caching",
+        action='store_true',
+        help="enable automatic prefix caching for vLLM backend.")
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model
