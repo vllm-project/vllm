@@ -325,7 +325,8 @@ class EngineArgs:
             self.max_paddings,
             max_chunked_prefill_len=self.max_chunked_prefill_len,
             max_num_prompt_seqs=self.max_num_prompt_seqs,
-            flash_style=self.flash_style,)
+            flash_style=self.flash_style,
+        )
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,

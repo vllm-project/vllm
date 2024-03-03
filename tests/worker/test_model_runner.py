@@ -21,6 +21,7 @@ def test_prepare_prompt():
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=True,
+                is_chunked_prefill=False,
                 seq_data={0: SequenceData(seq_data)},
                 sampling_params=SamplingParams(temperature=0),
                 block_tables={0: [1]},
@@ -48,3 +49,6 @@ def test_prepare_prompt():
                             device=actual.device,
                             dtype=actual.dtype)
     torch.testing.assert_close(actual, expected)
+
+
+# TODO(sang) Test chunked prefill prompt.

@@ -652,6 +652,7 @@ class ModelRunner:
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,
+                is_chunked_prefill=False,
                 seq_data={group_id: seq_data},
                 sampling_params=sampling_params,
                 block_tables=None,

@@ -234,7 +234,6 @@ class Worker:
         if num_seq_groups == 0:
             return {}
 
-        breakpoint()
         output = self.model_runner.execute_model(seq_group_metadata_list,
                                                  self.gpu_cache)
         return output

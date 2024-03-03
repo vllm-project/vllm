@@ -116,7 +116,6 @@ class PagedAttention(nn.Module):
 
     # def _update_cache(self):
 
-
     def forward(
         self,
         query: torch.Tensor,
@@ -297,6 +296,7 @@ class PagedAttention(nn.Module):
 
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
+
 
 def _make_alibi_bias(
     alibi_slopes: torch.Tensor,

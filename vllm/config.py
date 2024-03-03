@@ -509,7 +509,6 @@ class SchedulerConfig:
                 "chunked prefill is only supported for flash style")
 
 
-
 class DeviceConfig:
 
     def __init__(self, device: str = "auto") -> None:

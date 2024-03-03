@@ -17,10 +17,7 @@ def create_dummy_prompt(
     # and prompt "0 ... block_size".
     prompt_tokens = list(range(prompt_length))
     prompt_str = " ".join([str(t) for t in prompt_tokens])
-    prompt = Sequence(int(request_id),
-                      prompt_str,
-                      prompt_tokens,
-                      block_size)
+    prompt = Sequence(int(request_id), prompt_str, prompt_tokens, block_size)
     seq_group = SequenceGroup(request_id, [prompt], SamplingParams(),
                               time.time(), time.perf_counter())
 
