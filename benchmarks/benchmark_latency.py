@@ -149,7 +149,7 @@ if __name__ == '__main__':
     parser.add_argument(
         "--ray-workers-use-nsight",
         action='store_true',
-        help="use nsight to profile ray workers",
+        help="If specified, use nsight to profile ray workers",
     )
     args = parser.parse_args()
     main(args)
