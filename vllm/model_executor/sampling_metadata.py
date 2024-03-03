@@ -117,6 +117,7 @@ class SamplingTensors:
                 do_min_p = True
             if do_quadratic is False and (smoothing_factor > _SAMPLING_EPS
                                           or smoothing_curve > _SAMPLING_EPS):
+                do_quadratic = True
             if not do_penalties and (abs(p) >= _SAMPLING_EPS
                                      or abs(f) >= _SAMPLING_EPS
                                      or abs(r - 1.0) >= _SAMPLING_EPS):
@@ -155,8 +156,8 @@ class SamplingTensors:
             smoothing_curves, presence_penalties, frequency_penalties,
             repetition_penalties, prompt_tokens, output_tokens, vocab_size,
             device, dtype)
-        return (sampling_tensors, do_penalties, do_top_p_top_k,
-                do_min_p, do_quadratic)
+        return (sampling_tensors, do_penalties, do_top_p_top_k, do_min_p,
+                do_quadratic)
 
     @classmethod
     def from_lists(cls, temperatures: List[float], top_ps: List[float],
@@ -202,16 +203,14 @@ class SamplingTensors:
             dtype=dtype,
             pin_memory=pin_memory,
         )
-        smoothing_factors_t = torch.tensor(
-            smoothing_factors,
-            device="cpu",
-            dtype=dtype,
-            pin_memory=pin_memory)
-        smoothing_curves_t = torch.tensor(
-            smoothing_curves,
-            device="cpu",
-            dtype=dtype,
-            pin_memory=pin_memory)
+        smoothing_factors_t = torch.tensor(smoothing_factors,
+                                           device="cpu",
+                                           dtype=dtype,
+                                           pin_memory=pin_memory)
+        smoothing_curves_t = torch.tensor(smoothing_curves,
+                                          device="cpu",
+                                          dtype=dtype,
+                                          pin_memory=pin_memory)
         presence_penalties_t = torch.tensor(
             presence_penalties,
             device="cpu",
@@ -258,7 +257,7 @@ class SamplingTensors:
             smoothing_factors=smoothing_factors_t.to(device=device,
                                                      non_blocking=True),
             smoothing_curve=smoothing_curves_t.to(device=device,
-                                                    non_blocking=True),
+                                                  non_blocking=True),
             presence_penalties=presence_penalties_t.to(device=device,
                                                        non_blocking=True),
             frequency_penalties=frequency_penalties_t.to(device=device,

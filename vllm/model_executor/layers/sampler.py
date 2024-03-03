@@ -14,6 +14,7 @@ from vllm.utils import is_neuron
 
 _SAMPLING_EPS = 1e-6
 
+
 class Sampler(nn.Module):
     """Samples the next tokens from the model's outputs.
 
@@ -246,12 +247,14 @@ def _apply_min_p(
 def _apply_quadratic_sampling(
     logits: torch.Tensor,
     smoothing_factors: torch.Tensor,
+    smoothing_curves: torch.Tensor,
 ) -> torch.Tensor:
     """Applies a quadratic transformation to the logits based on the
     provided smoothing factor. The transformation is centered around
     the maximum logit value in the batch.
     Credits: @kalomaze
     """
+    max_logits = logits.max(dim=-1, keepdim=True).values
     diff = logits - max_logits
 
     smoothing_curve = smoothing_curves + _SAMPLING_EPS
