@@ -127,13 +127,15 @@ class LLMEngine:
             additional_ray_args = {}
             if self.parallel_config.ray_workers_use_nsight:
                 logger.info("Configuring Ray workers to use nsight.")
-                additional_ray_args = {"runtime_env": {
-                    "nsight": {
-                        "t": "cuda,cudnn,cublas",
-                        "o": "'worker_process_%p'",
-                        "cuda-graph-trace": "node",
+                additional_ray_args = {
+                    "runtime_env": {
+                        "nsight": {
+                            "t": "cuda,cudnn,cublas",
+                            "o": "'worker_process_%p'",
+                            "cuda-graph-trace": "node",
+                        }
                     }
-                }}
+                }
             self._init_workers_ray(placement_group, **additional_ray_args)
         else:
             self._init_workers()
