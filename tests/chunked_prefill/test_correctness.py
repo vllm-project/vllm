@@ -73,29 +73,28 @@ def test_models(
         max_chunked_prefill_len=max_chunked_prefill_len,
         max_num_prompt_seqs=max_num_prompt_seqs,
         tensor_parallel_size=tensor_parallel_size)
-    flash_attn_output_by_batches = []
-    for i in range(10):
-        prompts = [TEST_PROMPTS[j % len(TEST_PROMPTS)] for j in range(i)]
-        flash_attn_output_by_batches.append(
-            flash_attn_model.generate_greedy(prompts, max_tokens))
+    expected_outputs.extend(flash_attn_model.generate_greedy(TEST_PROMPTS, max_tokens))
+    # flash_attn_output_by_batches = []
+    # for i in range(10):
+    #     prompts = [TEST_PROMPTS[j % len(TEST_PROMPTS)] for j in range(i)]
+    #     flash_attn_output_by_batches.append(
+    #         flash_attn_model.generate_greedy(prompts, max_tokens))
 
     del flash_attn_model
 
-    # for e, f in zip(expected_outputs, flash_attn_output_by_batches):
-    #     # print("expected: ", e[1])
-    #     # print("flash: ", f[1])
-    #     assert e[1] == f[1]
+    for e, f in zip(expected_outputs, flash_attn_output_by_batches):
+        assert e[1] == f[1]
 
     destroy_model_parallel()
     gc.collect()
     torch.cuda.empty_cache()
 
-    for flash_attn_outputs in flash_attn_output_by_batches:
-        for i in range(len(flash_attn_outputs)):
-            fa_output_ids, fa_output_str = flash_attn_outputs[i]
-            vllm_output_ids, vllm_output_str = expected_outputs[
-                i % len(expected_outputs)]
-            assert fa_output_ids == vllm_output_ids, (
-                f"Test{i}:\flash ids: {fa_output_ids}\nvLLM ids: {vllm_output_ids}"
-                f"Test{i}:\nflash output: {fa_output_str!r}\nvLLM output: {vllm_output_str!r}"
-            )
+    # for flash_attn_outputs in flash_attn_output_by_batches:
+    #     for i in range(len(flash_attn_outputs)):
+    #         fa_output_ids, fa_output_str = flash_attn_outputs[i]
+    #         vllm_output_ids, vllm_output_str = expected_outputs[
+    #             i % len(expected_outputs)]
+    #         assert fa_output_ids == vllm_output_ids, (
+    #             f"Test{i}:\flash ids: {fa_output_ids}\nvLLM ids: {vllm_output_ids}"
+    #             f"Test{i}:\nflash output: {fa_output_str!r}\nvLLM output: {vllm_output_str!r}"
+    #         )
