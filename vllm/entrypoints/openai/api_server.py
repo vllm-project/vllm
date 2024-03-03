@@ -15,6 +15,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 
+import vllm
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest, ErrorResponse
@@ -168,6 +169,12 @@ async def show_available_models():
     return JSONResponse(content=models.model_dump())
 
 
+@app.get("/version")
+async def show_version():
+    ver = {"version": vllm.__version__}
+    return JSONResponse(content=ver)
+
+
 @app.post("/v1/chat/completions")
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
@@ -231,6 +238,7 @@ if __name__ == "__main__":
                 f"Invalid middleware {middleware}. Must be a function or a class."
             )
 
+    logger.info(f"vLLM API server version {vllm.__version__}")
     logger.info(f"args: {args}")
 
     if args.served_model_name is not None:
