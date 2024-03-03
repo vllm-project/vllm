@@ -18,7 +18,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """ PyTorch Starcoder2 model."""
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import torch
 from torch import nn
@@ -39,6 +39,7 @@ from vllm.model_executor.parallel_utils.parallel_state import get_tensor_model_p
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
+from vllm.kv_cache import KVCache
 
 try:
     from transformers import Starcoder2Config
@@ -46,8 +47,6 @@ except ImportError:
     # fallback to PretrainedConfig
     # NOTE: Please install transformers from source or use transformers>=4.39.0
     from transformers import PretrainedConfig as Starcoder2Config
-
-KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class Starcoder2Attention(nn.Module):
@@ -121,8 +120,7 @@ class Starcoder2Attention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
+        attn_output = self.attn(q, k, v, input_metadata, **kv_cache)
         output, _ = self.o_proj(attn_output)
         return output
 

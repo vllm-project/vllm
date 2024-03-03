@@ -1,6 +1,6 @@
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 import os
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import torch
 from torch import nn
@@ -10,8 +10,7 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
-
-KVCache = Tuple[torch.Tensor, torch.Tensor]
+from vllm.kv_cache import KVCache
 
 
 class LlamaForCausalLM(nn.Module):

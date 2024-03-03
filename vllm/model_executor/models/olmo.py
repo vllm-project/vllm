@@ -61,11 +61,10 @@ from vllm.model_executor.weight_utils import (
     hf_model_weights_iterator,
 )
 from vllm.sequence import SamplerOutput
+from vllm.kv_cache import KVCache
 
 # this model must need this dependency
 from hf_olmo import OLMoConfig
-
-KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class SwiGLU(nn.Module):
@@ -150,8 +149,7 @@ class OlmoAttention(nn.Module):
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         if self.config.rope:
             q, k = self.rotary_emb(positions, q, k)
-        k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
+        attn_output = self.attn(q, k, v, input_metadata, **kv_cache)
         output, _ = self.attn_out(attn_output)
         return output
 
