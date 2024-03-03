@@ -25,6 +25,7 @@ class EngineArgs:
     tensor_parallel_size: int = 1
     max_parallel_loading_workers: Optional[int] = None
     block_size: int = 16
+    enable_prefix_caching: bool = False
     swap_space: int = 4  # GiB
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
@@ -173,6 +174,11 @@ class EngineArgs:
                             default=EngineArgs.block_size,
                             choices=[8, 16, 32, 128],
                             help='token block size')
+
+        parser.add_argument('--enable-prefix-caching',
+                            action='store_true',
+                            help='Enables automatic prefix caching')
+
         parser.add_argument('--seed',
                             type=int,
                             default=EngineArgs.seed,
@@ -293,7 +299,8 @@ class EngineArgs:
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
-                                   model_config.get_sliding_window())
+                                   model_config.get_sliding_window(),
+                                   self.enable_prefix_caching)
         parallel_config = ParallelConfig(self.pipeline_parallel_size,
                                          self.tensor_parallel_size,
                                          self.worker_use_ray,
