@@ -169,9 +169,10 @@ class EngineArgs:
             help='load model sequentially in multiple batches, '
             'to avoid RAM OOM when using tensor '
             'parallel and large models')
-        parser.add_argument('--ray-workers-use-nsight',
-                            action='store_true',
-                            help='If specified, use nsight to profile ray workers')
+        parser.add_argument(
+            '--ray-workers-use-nsight',
+            action='store_true',
+            help='If specified, use nsight to profile ray workers')
         # KV cache arguments
         parser.add_argument('--block-size',
                             type=int,
