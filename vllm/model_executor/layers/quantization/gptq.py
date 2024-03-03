@@ -71,6 +71,10 @@ class GPTQConfig(QuantizationConfig):
     def get_scaled_act_names(self) -> List[str]:
         return []
 
+    def support_fused_moe(self) -> bool:
+        # Fused MoE only supports 4-bit so far.
+        return self.weight_bits == 4
+
 
 class ExllamaState(Enum):
 
@@ -88,8 +92,6 @@ class GPTQLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: GPTQConfig):
         self.quant_config = quant_config
-        # Fused MoE only supports 4-bit so far.
-        self.support_fused_moe = (self.quant_config.weight_bits == 4)
 
     def create_weights(
         self,

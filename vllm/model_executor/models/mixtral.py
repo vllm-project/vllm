@@ -125,7 +125,9 @@ class MixtralMoE(nn.Module):
                                      bias=False,
                                      linear_method=None)
 
-        if not self.linear_method.support_fused_moe:
+        if not isinstance(
+                self.linear_method, UnquantizedLinearMethod
+        ) and not self.linear_method.quant_config.support_fused_moe():
             if self.tp_size > self.num_total_experts:
                 raise ValueError(
                     f"Tensor parallel size {self.tp_size} is greater than "
@@ -164,7 +166,9 @@ class MixtralMoE(nn.Module):
         # router_logits: (batch * sequence_length, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
-        if not self.linear_method.support_fused_moe:
+        if not isinstance(
+                self.linear_method, UnquantizedLinearMethod
+        ) and not self.linear_method.quant_config.support_fused_moe():
             routing_weights, selected_experts = fused_topk(router_logits,
                                                            self.top_k,
                                                            renormalize=True)
@@ -462,15 +466,12 @@ class MixtralForCausalLM(nn.Module):
 
         expert_params_mapping = [
             # (param_name, weight_name, shard_id, expert_id)
-            (
-                "ws" if weight_name in ["w1", "w3"] else "w2s",
-                 f"experts.{expert_id}.{weight_name}",
-                 shard_id,
-                 expert_id
-            )
+            ("ws" if weight_name in ["w1", "w3"] else "w2s",
+             f"experts.{expert_id}.{weight_name}", shard_id, expert_id)
             for expert_id in range(self.config.num_local_experts)
             for weight_name, shard_id in [("w1", 0), ("w3", 1), ("w2", None)]
-        ] if self.linear_method is None or self.linear_method.support_fused_moe else []
+        ] if self.linear_method is None or (
+            self.linear_method.quant_config.support_fused_moe()) else []
 
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(

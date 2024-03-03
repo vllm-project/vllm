@@ -68,6 +68,9 @@ class AWQConfig(QuantizationConfig):
     def get_scaled_act_names(self) -> List[str]:
         return ["gelu", "gelu_fast", "gelu_new", "gelu_pytorch_tanh"]
 
+    def support_fused_moe(self) -> bool:
+        return True
+
 
 class AWQLinearMethod(LinearMethodBase):
     """Linear method for AWQ.
@@ -78,7 +81,6 @@ class AWQLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: AWQConfig):
         self.quant_config = quant_config
-        self.support_fused_moe = True
 
     def create_weights(self, input_size_per_partition: int,
                        output_size_per_partition: int, input_size: int,

@@ -56,6 +56,9 @@ class SqueezeLLMConfig(QuantizationConfig):
     def get_scaled_act_names(self) -> List[str]:
         return []
 
+    def support_fused_moe(self) -> bool:
+        return False
+
 
 class SqueezeLLMLinearMethod(LinearMethodBase):
     """Linear method for SqueezeLLM.
@@ -66,7 +69,6 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: SqueezeLLMConfig):
         self.quant_config = quant_config
-        self.support_fused_moe = False
 
     def create_weights(self, input_size_per_partition: int,
                        output_size_per_partition: int, input_size: int,

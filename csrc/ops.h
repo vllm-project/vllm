@@ -96,6 +96,15 @@ torch::Tensor awq_group_gemm(
     torch::Tensor _num_tokens_post_padded,
     bool mul_weights,
     int split_k_iters);
+
+torch::Tensor marlin_gemm(
+    torch::Tensor& a,
+    torch::Tensor& b_q_weight,
+    torch::Tensor& b_scales,
+    torch::Tensor& workspace,
+    int64_t size_m,
+    int64_t size_n,
+    int64_t size_k);
 #endif
 
 void squeezellm_gemm(

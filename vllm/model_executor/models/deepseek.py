@@ -134,7 +134,9 @@ class DeepseekMoE(nn.Module):
         if self.linear_method is None:
             self.linear_method = UnquantizedLinearMethod()
 
-        if not self.linear_method.support_fused_moe:
+        if not isinstance(
+                self.linear_method, UnquantizedLinearMethod
+        ) and not self.linear_method.quant_config.support_fused_moe():
             if self.tp_size > self.n_routed_experts:
                 raise ValueError(
                     f"Tensor parallel size {self.tp_size} is greater than "
@@ -190,7 +192,9 @@ class DeepseekMoE(nn.Module):
         # router_logits: (batch * sequence_length, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
-        if not self.linear_method.support_fused_moe:
+        if not isinstance(
+                self.linear_method, UnquantizedLinearMethod
+        ) and not self.linear_method.quant_config.support_fused_moe():
             routing_weights, selected_experts = fused_topk(
                 router_logits,
                 self.top_k,
@@ -466,16 +470,14 @@ class DeepseekForCausalLM(nn.Module):
 
         expert_params_mapping = [
             # (param_name, weight_name, shard_id, expert_id)
-            (
-                "w1" if weight_name in ["gate_proj", "up_proj"] else "w2",
-                 f"experts.{expert_id}.{weight_name}",
-                 shard_id,
-                 expert_id
-            )
+            ("w1" if weight_name in ["gate_proj", "up_proj"] else "w2",
+             f"experts.{expert_id}.{weight_name}", shard_id, expert_id)
             for expert_id in range(self.config.n_routed_experts)
-            for weight_name, shard_id in [
-                ("gate_proj", 0), ("up_proj", 1), ("down_proj", None)]
-        ] if self.linear_method is None or self.linear_method.support_fused_moe else []
+            for weight_name, shard_id in [("gate_proj",
+                                           0), ("up_proj",
+                                                1), ("down_proj", None)]
+        ] if self.linear_method is None or (
+            self.linear_method.quant_config.support_fused_moe()) else []
 
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
