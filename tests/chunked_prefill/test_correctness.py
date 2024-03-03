@@ -53,9 +53,11 @@ def test_models(
     torch.cuda.empty_cache()
 
     flash_attn_model = vllm_runner(model,
-                                   dtype=dtype,)
+                                   dtype=dtype)
                                 #    flash_style=True,
                                 #    block_size=block_size)
+    flash_attn_output_by_batches = []
+    # flash_attn_output_by_batches.extend(flash_attn_model.generate_greedy(TEST_PROMPTS, max_tokens))
     flash_attn_output_by_batches = []
     for i in range(10):
         prompts = [TEST_PROMPTS[j % len(TEST_PROMPTS)] for j in range(i)]
@@ -63,6 +65,11 @@ def test_models(
             flash_attn_model.generate_greedy(prompts, max_tokens))
 
     del flash_attn_model
+
+    # for e, f in zip(expected_outputs, flash_attn_output_by_batches):
+    #     # print("expected: ", e[1])
+    #     # print("flash: ", f[1])
+    #     assert e[1] == f[1]
 
     destroy_model_parallel()
     gc.collect()
