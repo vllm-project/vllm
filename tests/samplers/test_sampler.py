@@ -7,7 +7,7 @@ import torch
 from transformers import GenerationConfig, GenerationMixin
 from typing import Optional
 
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, _apply_quadratic_sampling
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.worker.model_runner import ModelRunner
@@ -397,3 +397,51 @@ def test_sampler_top_k_top_p(seed: int, device: str):
     assert torch.equal(hf_probs.eq(0), sample_probs.eq(0))
 
     del model_runner
+
+
+@pytest.mark.parametrize("seed", RANDOM_SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_apply_quadratic_sampling(seed: int, device: str):
+    set_random_seed(seed)
+    torch.set_default_device(device)
+    batch_size = random.randint(1, 256)
+    logits = torch.randn((batch_size, 10), device=device)
+    smoothing_factors = torch.rand((batch_size,), device=device)
+    smoothing_curves = torch.rand((batch_size,), device=device)
+
+    transformed_logits = _apply_quadratic_sampling(logits, smoothing_factors, smoothing_curves)
+
+    assert transformed_logits.shape == logits.shape
+    assert torch.all(transformed_logits <= logits)
+
+@pytest.mark.parametrize("seed", RANDOM_SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_apply_quadratic_sampling_with_inf(seed: int, device: str):
+    set_random_seed(seed)
+    torch.set_default_device(device)
+    batch_size = random.randint(1, 256)
+    logits = torch.randn((batch_size, 10), device=device)
+    logits[:, 0] = float('-inf')
+    smoothing_factors = torch.rand((batch_size,), device=device)
+    smoothing_curves = torch.rand((batch_size,), device=device)
+
+    transformed_logits = _apply_quadratic_sampling(logits, smoothing_factors, smoothing_curves)
+
+    assert transformed_logits.shape == logits.shape
+    assert torch.all(transformed_logits[:, 1:] <= logits[:, 1:])
+    assert torch.all(transformed_logits[:, 0] == logits[:, 0])
+
+@pytest.mark.parametrize("seed", RANDOM_SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_apply_quadratic_sampling_with_zero_smoothing(seed: int, device: str):
+    set_random_seed(seed)
+    torch.set_default_device(device)
+    batch_size = random.randint(1, 256)
+    logits = torch.randn((batch_size, 10), device=device)
+    smoothing_factors = torch.zeros((batch_size,), device=device)
+    smoothing_curves = torch.zeros((batch_size,), device=device)
+
+    transformed_logits = _apply_quadratic_sampling(logits, smoothing_factors, smoothing_curves)
+
+    assert transformed_logits.shape == logits.shape
+    assert torch.all(transformed_logits == logits)
