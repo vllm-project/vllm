@@ -12,11 +12,22 @@ __global__ void Code1x16MatVec(
   const int4* __restrict__ B,
         int4* __restrict__ C,
   const int4* __restrict__ codebook,
-  int prob_m,
-  int prob_k
+  const int prob_m,
+  const int prob_k,
+  const int codebook_a_sizes[4],  // cumulative sizes of A spanning each codebook, at most 3 long.
+  const int codebook_stride // as int4.
 ) {
   int a_gl_stride = prob_k / 8 / 8;
   int a_gl_rd = (blockDim.x / 32) * blockIdx.x + (threadIdx.x / 32);
+
+  // advance to the codebook we are in, this easy because we only multiply one column of the codebook.
+  int codebook_index = 0;
+  while (a_gl_rd >= codebook_a_sizes[codebook_index])
+  {
+      codebook += codebook_stride; 
+      ++codebook_index;
+  }
+
   bool pred = a_gl_rd < prob_m;
   int b_gl_rd = 0;
   int c_gl_wr = a_gl_rd;
@@ -156,7 +167,9 @@ void  code1x16_matvec_cuda(
         void* __restrict__ C,
   const void* __restrict__ codebook,
   int prob_m,
-  int prob_k
+  int prob_k,
+  const int codebook_a_sizes[4],
+  const int codebook_stride
 ) {
   int sms;
   cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, 0);
@@ -176,7 +189,9 @@ void  code1x16_matvec_cuda(
     (int4*) C,
     (const int4*) codebook,
     prob_m,
-    prob_k
+    prob_k,
+    codebook_a_sizes,
+    codebook_stride
   );
 }
 

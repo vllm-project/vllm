@@ -13,7 +13,9 @@ void code1x16_matvec_cuda(
         void* C,
   const void* codebook,
   int prob_m,
-  int prob_k
+  int prob_k,
+  const int codebook_a_sizes[4],  // cumulative sizes of A spanning each codebook, at most 3 long.
+  const int codebook_stride // as int4.
 );
 
 void code2x8_matvec_cuda(
@@ -29,8 +31,19 @@ void code1x16_matvec(
   const torch::Tensor& A,
   const torch::Tensor& B,
         torch::Tensor& C,
-  const torch::Tensor& codebook
+  const torch::Tensor& codebook,
+  const int codebook_a_sizes[4]  // cumulative sizes of A spanning each codebook, at most 3 long.
 ) {
+
+  // @TEST
+  int stride = codebook.stride(0) * codebook.element_size() / sizeof(int4);
+  printf("codebook rank is %ld: %ld %ld %ld %ld", codebook.dim(),codebook.size(0),codebook.size(1),codebook.size(2),codebook.size(3));
+  std::cout << "codebook element size is " << codebook.element_size() << "\n";
+  std::cout << "sizeof int4 is " << sizeof(int4) << "\n";
+  std::cout << "stride is " << stride << "\n";
+  //std::cout << "codebook dtype is " << codebook.dtype << "\n";
+  assert(false);
+
   const at::cuda::OptionalCUDAGuard device_guard(device_of(A));
   int prob_m = C.size(0);
   int prob_k = B.size(0);
@@ -40,7 +53,9 @@ void code1x16_matvec(
     C.data_ptr(),
     codebook.data_ptr(),
     prob_m,
-    prob_k
+    prob_k,
+    codebook_a_sizes,
+    codebook.stride(0) * codebook.element_size() / sizeof(int4)
   );
 }
 
@@ -49,8 +64,8 @@ torch::Tensor code1x16_matmat(
   const torch::Tensor& codes,
   const torch::Tensor& codebooks,
   const torch::Tensor& scales,
-  const std::optional<torch::Tensor>& bias
-) {
+  const int codebook_a_sizes[4],
+  const std::optional<torch::Tensor>& bias) {
   auto input_sizes = input.sizes();
   auto out_features = codes.size(0) * codebooks.size(2);
   auto flat_input = input.reshape({-1, input.size(-1)});
@@ -67,7 +82,8 @@ torch::Tensor code1x16_matmat(
       codes.squeeze(2),
       input_vec,
       output_vec,
-      codebooks
+      codebooks,
+      codebook_a_sizes
     );
   }
   flat_output *= scales.flatten().unsqueeze(0);
@@ -145,6 +161,7 @@ torch::Tensor aqlm_gemm(
   const torch::Tensor& codes,
   const torch::Tensor& codebooks,
   const torch::Tensor& scales,
+  const torch::Tensor& codebook_partition_sizes,
   const std::optional<torch::Tensor>& bias
 )
 {
@@ -153,7 +170,23 @@ torch::Tensor aqlm_gemm(
 
   if (nbooks == 1 && entries == (1 << 16))
   {
-    return code1x16_matmat(input, codes, codebooks, scales, bias);
+    int cumulative_sizes[4];
+    int i =0;
+    int last = 0;
+    for (; i <  codebook_partition_sizes.size(0); ++i)
+    {
+      cumulative_sizes[i] = codebook_partition_sizes[i] + last;
+      printf("cum size %d is %d", i, cumulative_sizes[i]);
+      last = cumulative_sizes[i];
+    }
+    // just fill in the rest with unreachable.
+    for (; i < 4; ++i)
+    {
+      cumulative_sizes[i] = last*10;
+      printf("cum size %d is %d", i, cumulative_sizes[i]);
+    }
+
+    return code1x16_matmat(input, codes, codebooks, scales, cumulative_sizes, bias);
   }
   if (nbooks == 2 && entries == (1 << 8))
   {
