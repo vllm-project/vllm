@@ -185,8 +185,6 @@ bgmv_shrink_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
   size_t j = blockIdx.x;
   constexpr size_t tile_size = tx * ty * vec_size;
   constexpr size_t num_tiles = (feat_in + tile_size - 1) / tile_size;
-  __shared__ W_T W_shared[tile_size];
-  __shared__ in_T X_shared[tile_size];
   __shared__ float y_warpwise[ty];
 
   float y = 0;
@@ -197,21 +195,14 @@ bgmv_shrink_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
 #pragma unroll
   for (tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
     if (tile_idx * tile_size + (threadIdx.y * tx + threadIdx.x + 1) * vec_size - 1 < feat_in) {
-      memcpy_blocking<W_copy_size>(W_shared + (threadIdx.y * tx + threadIdx.x) * vec_size,
-                                          W + (idx * feat_out + j) * feat_in +
-                                              tile_idx * tile_size +
-                                              (threadIdx.y * tx + threadIdx.x) * vec_size);
-      memcpy_blocking<X_copy_size>(X_shared + (threadIdx.y * tx + threadIdx.x) * vec_size,
-                                          X + (batch_idx * feat_in) +
-                                              tile_idx * tile_size +
-                                              (threadIdx.y * tx + threadIdx.x) * vec_size);
+      x_vec.load(X + (batch_idx * feat_in) +
+                     tile_idx * tile_size +
+                     (threadIdx.y * tx + threadIdx.x) * vec_size);
+      w_vec.load(W + (idx * feat_out + j) * feat_in +
+                     tile_idx * tile_size +
+                     (threadIdx.y * tx + threadIdx.x) * vec_size);
     }
 
-    __syncthreads();
-    x_vec.load(X_shared +
-               (threadIdx.y * tx + threadIdx.x) * vec_size);
-    w_vec.load(W_shared +
-               (threadIdx.y * tx + threadIdx.x) * vec_size);
     float sum = 0.f;
 #pragma unroll
     for (size_t i = 0; i < vec_size; ++i) {
