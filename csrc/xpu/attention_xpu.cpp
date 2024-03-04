@@ -167,7 +167,7 @@ void paged_attention_kernel(
     const int kv_block_stride,
     const int kv_head_stride,
     const sycl::nd_item<3>& item_ct1,
-    size_t* dpct_local,
+    uint8_t* dpct_local,
     Q_Vec_t* q_vecs,
     float* red_smem) {
   const int seq_idx = item_ct1.get_group(1);
@@ -572,7 +572,7 @@ void paged_attention_v1_kernel(
     const int kv_block_stride,
     const int kv_head_stride,
     const sycl::nd_item<3>& item_ct1,
-    size_t* dpct_local,
+    uint8_t* dpct_local,
     Q_Vec_t* q_vecs,
     float* red_smem) {
   paged_attention_kernel<
@@ -624,7 +624,7 @@ void paged_attention_v1_kernel(
 
 #define LAUNCH_PAGED_ATTENTION_V1(HEAD_SIZE)                                \
   queue.submit([&](sycl::handler& cgh) {                                    \
-    sycl::local_accessor<size_t, 1> dpct_local_acc_ct1(                    \
+    sycl::local_accessor<uint8_t, 1> dpct_local_acc_ct1(                    \
         sycl::range<1>(shared_mem_size), cgh);                              \
     sycl::local_accessor<Q_Vec, 1> q_vecs_acc_ct1(                          \
         sycl::range<1>(THREAD_GROUP_SIZE * num_vecs_per_thread), cgh);      \
@@ -800,7 +800,7 @@ void paged_attention_v2_reduce_kernel(
     const int* __restrict__ context_lens, // [num_seqs]
     const int max_num_partitions,
     const sycl::nd_item<3>& item_ct1,
-    size_t* dpct_local,
+    uint8_t* dpct_local,
     float* red_smem) {
   const int num_heads = item_ct1.get_group_range(2);
   const int head_idx = item_ct1.get_group(2);
@@ -960,7 +960,7 @@ void paged_attention_v2_kernel(
     const int kv_block_stride,
     const int kv_head_stride,
     const sycl::nd_item<3>& item_ct1,
-    size_t* dpct_local,
+    uint8_t* dpct_local,
     Q_Vec_t* q_vecs,
     float* red_smem) {
   paged_attention_kernel<
@@ -994,7 +994,7 @@ void paged_attention_v2_kernel(
 
 #define LAUNCH_PAGED_ATTENTION_V2(HEAD_SIZE)                                \
   queue.submit([&](sycl::handler& cgh) {                                    \
-    sycl::local_accessor<size_t, 1> dpct_local_acc_ct1(                    \
+    sycl::local_accessor<uint8_t, 1> dpct_local_acc_ct1(                    \
         sycl::range<1>(shared_mem_size), cgh);                              \
     sycl::local_accessor<Q_Vec, 1> q_vecs_acc_ct1(                          \
         sycl::range<1>(THREAD_GROUP_SIZE * num_vecs_per_thread), cgh);      \
@@ -1049,7 +1049,7 @@ void paged_attention_v2_kernel(
         });                                                                 \
   });                                                                       \
   queue.submit([&](sycl::handler& cgh) {                                    \
-    sycl::local_accessor<size_t, 1> dpct_local_acc_ct1(                    \
+    sycl::local_accessor<uint8_t, 1> dpct_local_acc_ct1(                    \
         sycl::range<1>(reduce_shared_mem_size), cgh);                       \
     sycl::local_accessor<float, 1> red_smem_acc_ct1(                        \
         sycl::range<1>(2 * NUM_WARPS), cgh);                                \

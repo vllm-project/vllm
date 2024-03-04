@@ -83,16 +83,6 @@ void call_rms_norm_kernel(
   });
 }
 
-void rms_norm(
-    torch::Tensor& out,
-    torch::Tensor& input,
-    torch::Tensor& weight,
-    float epsilon) {
-  VLLM_XPU_DISPATCH_FLOATING_TYPES(
-      input.scalar_type(), "call_rms_norm_kernel", [&] {
-        call_rms_norm_kernel<scalar_t>(out, input, weight, epsilon);
-      });
-}
 
 template <typename scalar_t>
 void fused_add_rms_norm_kernel(
@@ -165,6 +155,19 @@ void call_fused_add_rms_norm_kernel(
   });
 }
 
+} // namespace vllm
+
+void rms_norm(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    torch::Tensor& weight,
+    float epsilon) {
+  VLLM_XPU_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "call_rms_norm_kernel", [&] {
+        vllm::call_rms_norm_kernel<scalar_t>(out, input, weight, epsilon);
+      });
+}
+
 void fused_add_rms_norm(
     torch::Tensor& input,
     torch::Tensor& residual,
@@ -175,7 +178,7 @@ void fused_add_rms_norm(
 
   VLLM_XPU_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "call_fused_add_rms_norm_kernel", [&] {
-        call_fused_add_rms_norm_kernel<scalar_t>(
+        vllm::call_fused_add_rms_norm_kernel<scalar_t>(
             input,
             residual,
             weight,
@@ -183,4 +186,3 @@ void fused_add_rms_norm(
       });
 }
 
-} // namespace vllm
