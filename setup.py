@@ -13,7 +13,7 @@ import torch
 from torch.utils.cpp_extension import CUDA_HOME
 
 
-BUILD_XPU_OPS = os.getenv('VLLM_BUILD_XPU_OPS', "0") == "1"
+BUILD_XPU_OPS = os.getenv('VLLM_BUILD_XPU_OPS', "1") == "1"
 
 
 def _is_xpu() -> bool:
