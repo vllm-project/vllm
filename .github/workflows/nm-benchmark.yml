@@ -19,6 +19,10 @@ on:
         description: "git commit hash or branch name"
         type: string
         required: true
+      Gi_per_thread:
+        description: 'requested GiB to reserve per thread'
+        type: string
+        required: true
       python:
         description: "python version, e.g. 3.10.12"
         type: string
@@ -41,6 +45,10 @@ on:
         required: true
       gitref:
         description: "git commit hash or branch name"
+        type: string
+        required: true
+      Gi_per_thread:
+        description: 'requested GiB to reserve per thread'
         type: string
         required: true
       python:
@@ -67,7 +75,7 @@ jobs:
         uses: ./.github/actions/nm-set-env/
         with:
           hf_token: ${{ secrets.NM_HF_TOKEN }}
-          Gi_per_thread: 4
+          Gi_per_thread: ${{ inputs.Gi_per_thread }}
 
       - name: set python
         id: set_python
@@ -86,7 +94,7 @@ jobs:
         id: build
         uses: ./.github/actions/nm-build-vllm/
         with:
-          Gi_per_thread: 4
+          Gi_per_thread: ${{ inputs.Gi_per_thread }}
           python: ${{ inputs.python }}
           venv: TEST
           pypi: ${{ secrets.NM_PRIVATE_PYPI_LOCATION }}

@@ -17,6 +17,7 @@ jobs:
             benchmark_config_list_file:  ./.github/data/nm_benchmark_configs_list.txt
             timeout: 240
             gitref: '${{ github.ref }}'
+            Gi_per_thread: 4
             python: "3.10.12"
         secrets: inherit
 
@@ -28,5 +29,6 @@ jobs:
             benchmark_config_list_file:  ./.github/data/nm_benchmark_configs_list.txt
             timeout: 240
             gitref: '${{ github.ref }}'
+            Gi_per_thread: 12
             python: "3.10.12"
         secrets: inherit
