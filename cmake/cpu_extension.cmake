@@ -1,3 +1,7 @@
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+include_directories("${CMAKE_SOURCE_DIR}/csrc")
+
 #
 # Check the compile flags
 #
@@ -45,7 +49,6 @@ endif()
 
 message(STATUS "CPU extension compile flags: ${CXX_COMPILE_FLAGS}")
 
-message(FATAL_ERROR "vLLM CPU backend is unavailable")
 
 #
 # Define extension targets
@@ -60,7 +63,7 @@ set(VLLM_EXT_SRC
     "csrc/cpu/cache.cpp"
     "csrc/cpu/layernorm.cpp"
     "csrc/cpu/pos_encoding.cpp"
-    "csrc/pybind.cpp")
+    "csrc/cpu/pybind.cpp")
 
 define_gpu_extension_target(
     _C
