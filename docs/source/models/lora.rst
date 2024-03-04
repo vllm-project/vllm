@@ -58,7 +58,7 @@ LoRA adapted models can also be served with the Open-AI compatible vLLM server. 
 
 .. code-block:: bash
 
-    python -m vllm.entrypoints.api_server \
+    python -m vllm.entrypoints.openai.api_server \
         --model meta-llama/Llama-2-7b-hf \
         --enable-lora \
         --lora-modules sql-lora=~/.cache/huggingface/hub/models--yard1--llama-2-7b-sql-lora-test/
@@ -89,3 +89,15 @@ with its base model:
 Requests can specify the LoRA adapter as if it were any other model via the ``model`` request parameter. The requests will be
 processed according to the server-wide LoRA configuration (i.e. in parallel with base model requests, and potentially other
 LoRA adapter requests if they were provided and ``max_loras`` is set high enough).
+
+The following is an example request 
+
+.. code-block::bash 
+    curl http://localhost:8000/v1/completions \
+        -H "Content-Type: application/json" \
+        -d '{
+            "model": "sql-lora",
+            "prompt": "San Francisco is a",
+            "max_tokens": 7,
+            "temperature": 0
+        }' | jq
