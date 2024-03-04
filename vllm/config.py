@@ -382,6 +382,8 @@ class ParallelConfig:
             parallel and large models.
         disable_custom_all_reduce: Disable the custom all-reduce kernel and
             fall back to NCCL.
+        ray_workers_use_nsight: Whether to profile Ray workers with nsight, see
+            https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler.
     """
 
     def __init__(
@@ -391,6 +393,7 @@ class ParallelConfig:
         worker_use_ray: bool,
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
+        ray_workers_use_nsight: bool = False,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         if is_neuron():
@@ -404,6 +407,7 @@ class ParallelConfig:
         self.worker_use_ray = worker_use_ray
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
+        self.ray_workers_use_nsight = ray_workers_use_nsight
 
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
         # Ray worker is not supported for Neuron backend.
@@ -426,6 +430,9 @@ class ParallelConfig:
                 logger.info(
                     "Disabled the custom all-reduce kernel because it is not "
                     "supported with pipeline parallelism.")
+        if self.ray_workers_use_nsight and not self.worker_use_ray:
+            raise ValueError("Unable to use nsight profiling unless workers "
+                             "run with Ray.")
 
         # FIXME(woosuk): Fix the stability issues and re-enable the custom
         # all-reduce kernel.
