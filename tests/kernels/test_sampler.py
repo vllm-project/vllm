@@ -3,9 +3,8 @@ import pytest
 import triton
 import triton.language as tl
 
-from vllm.model_executor.layers.triton_kernel.sample import (sample,
-                                            get_num_triton_sampler_splits,
-                                            MAX_TRITON_N_COLS)
+from vllm.model_executor.layers.triton_kernel.sample import (
+    sample, get_num_triton_sampler_splits, MAX_TRITON_N_COLS)
 from vllm.model_executor.utils import set_random_seed
 from vllm.model_executor.sampling_metadata import SamplingTensors
 
@@ -15,7 +14,7 @@ SINGLE_SPLIT_VOCAB_SIZE = 32000  # llama/mistral/mixtral vocab size
 MULTI_SPLIT_VOCAB_SIZE = (MAX_TRITON_N_COLS * 2) - 100
 
 
-# same code as in vllm/triton_aot/kernels/sample_triton.py
+# same code as in vllm/model_executor/layers/triton_kernel/rand.py
 # TODO(yard1): figure out how to keep in sync...
 @triton.jit
 def _uniform_to_exponential(uniform_noise):
@@ -188,8 +187,10 @@ def test_get_sequence_seeds(seed):
     seq_seed = None
     extra_entropy = 1
     for i in range(512):
-        new_seq_seed = SamplingTensors._get_sequence_seeds(
-            starting_seed, i, seeds_to_generate=1, is_greedy=False)[0]
+        new_seq_seed = SamplingTensors._get_sequence_seeds(starting_seed,
+                                                           i,
+                                                           seeds_to_generate=1,
+                                                           is_greedy=False)[0]
         new_seq_seed_extra_entropy = SamplingTensors._get_sequence_seeds(
             starting_seed,
             i,
