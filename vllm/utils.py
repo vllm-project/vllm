@@ -178,13 +178,13 @@ def get_ip() -> str:
         logger.info(f"Reached {address=} using IPv4")
     except OSError:
         logger.info(f"Failed to reach {address=} using IPv4")
-    try:
-        # try ipv6
-        s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
-        s.connect(address)  # Doesn't need to be reachable
-        logger.info(f"Reached {address=} using IPv6")
-    except OSError:
-        logger.info(f"Failed to reach {address=} using IPv6")
+        try:
+            # try ipv6
+            s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+            s.connect(address)  # Doesn't need to be reachable
+            logger.info(f"Reached {address=} using IPv6")
+        except OSError:
+            logger.info(f"Failed to reach {address=} using IPv6")
     return s.getsockname()[0]
 
 
