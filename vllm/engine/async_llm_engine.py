@@ -16,7 +16,7 @@ from vllm.sampling_params import SamplingParams
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = int(
-    os.environ.get("VLLM_ENGINE_ITERATION_TIMEOUT_S", str(60)))
+    os.environ.get("VLLM_ENGINE_ITERATION_TIMEOUT_S", "60"))
 
 
 class AsyncEngineDeadError(RuntimeError):
