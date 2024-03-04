@@ -256,7 +256,7 @@ class SamplingTensors:
             min_ps=min_ps_t.to(device=device, non_blocking=True),
             smoothing_factors=smoothing_factors_t.to(device=device,
                                                      non_blocking=True),
-            smoothing_curve=smoothing_curves_t.to(device=device,
+            smoothing_curves=smoothing_curves_t.to(device=device,
                                                   non_blocking=True),
             presence_penalties=presence_penalties_t.to(device=device,
                                                        non_blocking=True),

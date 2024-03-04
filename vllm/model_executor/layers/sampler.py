@@ -244,6 +244,8 @@ def _apply_min_p(
     return logits
 
 
+# torch.jit will fuse pointwise ops for better performance
+@torch.jit.script
 def _apply_quadratic_sampling(
     logits: torch.Tensor,
     smoothing_factors: torch.Tensor,
