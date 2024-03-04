@@ -350,7 +350,7 @@ def _sample_triton(
                                 mask=col_offsets < n_cols,
                                 other=0.5)
 
-        # NEEDS TO BE MANUALLY KEPT IN SYNC WITH vllm/tests/ops/test_sampler.py
+        # NEEDS TO BE MANUALLY KEPT IN SYNC WITH tests/kernels/test_rand.py
         # tl.rand returns values in [0, 1), so we clamp lower bound
         # to _EPS to avoid log(0) and thus division by nan later
         lb = tl.full(uniform_noise.shape, _EPS, uniform_noise.dtype)
