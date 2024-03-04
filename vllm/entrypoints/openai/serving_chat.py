@@ -12,6 +12,7 @@ from vllm.entrypoints.openai.protocol import (
     UsageInfo)
 from vllm.outputs import RequestOutput
 from vllm.entrypoints.openai.serving_engine import OpenAIServing, LoRA
+from vllm.model_executor.guided_decoding import get_guided_decoding_logits_processor
 
 logger = init_logger(__name__)
 
@@ -39,18 +40,12 @@ class OpenAIServingChat(OpenAIServing):
         See  https://platform.openai.com/docs/api-reference/chat/create
         for the API specification. This API mimics the OpenAI ChatCompletion API.
 
-        NOTE: Currently we do not support the following features:
+        NOTE: Currently we do not support the following feature:
             - function_call (Users should implement this by themselves)
-            - logit_bias (to be supported by vLLM engine)
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
-
-        if request.logit_bias is not None and len(request.logit_bias) > 0:
-            # TODO: support logit_bias in vLLM engine.
-            return self.create_error_response(
-                "logit_bias is not currently supported")
 
         try:
             prompt = self.tokenizer.apply_chat_template(
@@ -68,6 +63,14 @@ class OpenAIServingChat(OpenAIServing):
                                                            prompt=prompt)
             sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
+            guided_decode_logits_processor = (
+                await get_guided_decoding_logits_processor(
+                    request, self.engine.get_tokenizer()))
+            if guided_decode_logits_processor:
+                if sampling_params.logits_processors is None:
+                    sampling_params.logits_processors = []
+                sampling_params.logits_processors.append(
+                    guided_decode_logits_processor)
         except ValueError as e:
             return self.create_error_response(str(e))
 
@@ -86,7 +89,7 @@ class OpenAIServingChat(OpenAIServing):
         if request.add_generation_prompt:
             return self.response_role
         else:
-            return request.messages[-1].role
+            return request.messages[-1]["role"]
 
     async def chat_completion_stream_generator(
             self, request: ChatCompletionRequest,
@@ -101,7 +104,10 @@ class OpenAIServingChat(OpenAIServing):
         role = self.get_chat_request_role(request)
         for i in range(request.n):
             choice_data = ChatCompletionResponseStreamChoice(
-                index=i, delta=DeltaMessage(role=role), finish_reason=None)
+                index=i,
+                delta=DeltaMessage(role=role),
+                logprobs=None,
+                finish_reason=None)
             chunk = ChatCompletionStreamResponse(id=request_id,
                                                  object=chunk_object_type,
                                                  created=created_time,
@@ -118,6 +124,7 @@ class OpenAIServingChat(OpenAIServing):
                         "content") and request.messages[-1].get(
                             "role") == role:
                 last_msg_content = request.messages[-1]["content"]
+
             if last_msg_content:
                 for i in range(request.n):
                     choice_data = ChatCompletionResponseStreamChoice(
@@ -129,6 +136,7 @@ class OpenAIServingChat(OpenAIServing):
                         object=chunk_object_type,
                         created=created_time,
                         choices=[choice_data],
+                        logprobs=None,
                         model=model_name)
                     data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
@@ -145,15 +153,29 @@ class OpenAIServingChat(OpenAIServing):
                 if finish_reason_sent[i]:
                     continue
 
+                delta_token_ids = output.token_ids[previous_num_tokens[i]:]
+                top_logprobs = output.logprobs[
+                    previous_num_tokens[i]:] if output.logprobs else None
+
+                if request.logprobs:
+                    logprobs = self._create_logprobs(
+                        token_ids=delta_token_ids,
+                        top_logprobs=top_logprobs,
+                        num_output_top_logprobs=request.logprobs,
+                        initial_text_offset=len(previous_texts[i]),
+                    )
+                else:
+                    logprobs = None
+
                 delta_text = output.text[len(previous_texts[i]):]
                 previous_texts[i] = output.text
                 previous_num_tokens[i] = len(output.token_ids)
-
                 if output.finish_reason is None:
                     # Send token-by-token response for each request.n
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=i,
                         delta=DeltaMessage(content=delta_text),
+                        logprobs=logprobs,
                         finish_reason=None)
                     chunk = ChatCompletionStreamResponse(
                         id=request_id,
@@ -174,6 +196,7 @@ class OpenAIServingChat(OpenAIServing):
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=i,
                         delta=DeltaMessage(content=delta_text),
+                        logprobs=logprobs,
                         finish_reason=output.finish_reason)
                     chunk = ChatCompletionStreamResponse(
                         id=request_id,
@@ -208,11 +231,25 @@ class OpenAIServingChat(OpenAIServing):
         assert final_res is not None
 
         choices = []
+
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
+            token_ids = output.token_ids
+            top_logprobs = output.logprobs
+
+            if request.logprobs:
+                logprobs = self._create_logprobs(
+                    token_ids=token_ids,
+                    top_logprobs=top_logprobs,
+                    num_output_top_logprobs=request.logprobs,
+                )
+            else:
+                logprobs = None
+
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
                 message=ChatMessage(role=role, content=output.text),
+                logprobs=logprobs,
                 finish_reason=output.finish_reason,
             )
             choices.append(choice_data)
