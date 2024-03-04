@@ -25,9 +25,7 @@ def test_get_prompt_logprobs(
     )
     del hf_model
 
-    vllm_model = vllm_runner(model,
-                             dtype=dtype,
-                             max_logprobs=num_top_logprobs)
+    vllm_model = vllm_runner(model, dtype=dtype, max_logprobs=num_top_logprobs)
     vllm_sampling_params = SamplingParams(max_tokens=max_tokens,
                                           logprobs=num_top_logprobs,
                                           prompt_logprobs=5,
