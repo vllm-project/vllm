@@ -24,7 +24,6 @@ from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
-from torch.nn import LayerNorm
 from vllm.transformers_utils.configs import JAISConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
@@ -54,6 +53,7 @@ class SwiGLUActivation(nn.Module):
 
 
 def _get_alibi_slopes(n):
+    
     def get_slopes_power_of_2(n):
         start = 2**(-(2**-(math.log2(n) - 3)))
         ratio = start
