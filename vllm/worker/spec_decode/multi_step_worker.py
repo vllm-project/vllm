@@ -77,7 +77,7 @@ class MultiStepWorker(Worker):
                 token_id = seq_output.output_token
                 token_logprob = seq_output.logprobs[token_id]
 
-                seq.append_token_id(token_id, token_logprob)
+                seq.append_token_id(token_id, token_logprob.logprob)
 
     def _shallow_copy_inputs(
         self, seq_group_metadata_list: List[SequenceGroupMetadata]

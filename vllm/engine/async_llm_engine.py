@@ -47,7 +47,7 @@ class AsyncStream:
         self._queue = asyncio.Queue()
         self._finished = False
 
-    def put(self, item: RequestOutput) -> None:
+    def put(self, item: Union[RequestOutput, Exception]) -> None:
         if self._finished:
             return
         self._queue.put_nowait(item)
@@ -109,6 +109,17 @@ class RequestTracker:
             if verbose:
                 logger.info(f"Finished request {request_id}.")
             self.abort_request(request_id)
+
+    def process_exception(self,
+                          request_id: str,
+                          exception: Exception,
+                          *,
+                          verbose: bool = False) -> None:
+        """Propagate an exception from the engine."""
+        self._request_streams[request_id].put(exception)
+        if verbose:
+            logger.info(f"Finished request {request_id}.")
+        self.abort_request(request_id)
 
     def add_request(self, request_id: str,
                     **engine_add_request_kwargs) -> AsyncStream:
@@ -377,10 +388,18 @@ class AsyncLLMEngine:
         for new_request in new_requests:
             # Add the request into the vLLM engine's waiting queue.
             # TODO: Maybe add add_request_batch to reduce Ray overhead
-            if self.engine_use_ray:
-                await self.engine.add_request.remote(**new_request)
-            else:
-                await self.engine.add_request_async(**new_request)
+            try:
+                if self.engine_use_ray:
+                    await self.engine.add_request.remote(**new_request)
+                else:
+                    await self.engine.add_request_async(**new_request)
+            except ValueError as e:
+                # TODO: use a vLLM specific error for failed validation
+                self._request_tracker.process_exception(
+                    new_request["request_id"],
+                    e,
+                    verbose=self.log_requests,
+                )
 
         if finished_requests:
             await self._engine_abort(finished_requests)

@@ -82,8 +82,12 @@ class OpenAIServingChat(OpenAIServing):
             return self.chat_completion_stream_generator(
                 request, result_generator, request_id)
         else:
-            return await self.chat_completion_full_generator(
-                request, raw_request, result_generator, request_id)
+            try:
+                return await self.chat_completion_full_generator(
+                    request, raw_request, result_generator, request_id)
+            except ValueError as e:
+                # TODO: Use a vllm-specific Validation Error
+                return self.create_error_response(str(e))
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
         if request.add_generation_prompt:
@@ -99,117 +103,133 @@ class OpenAIServingChat(OpenAIServing):
         model_name = request.model
         created_time = int(time.monotonic())
         chunk_object_type = "chat.completion.chunk"
-
-        # Send first response for each request.n (index) with the role
-        role = self.get_chat_request_role(request)
-        for i in range(request.n):
-            choice_data = ChatCompletionResponseStreamChoice(
-                index=i,
-                delta=DeltaMessage(role=role),
-                logprobs=None,
-                finish_reason=None)
-            chunk = ChatCompletionStreamResponse(id=request_id,
-                                                 object=chunk_object_type,
-                                                 created=created_time,
-                                                 choices=[choice_data],
-                                                 model=model_name)
-            data = chunk.model_dump_json(exclude_unset=True)
-            yield f"data: {data}\n\n"
-
-        # Send response to echo the input portion of the last message
-        if request.echo:
-            last_msg_content = ""
-            if request.messages and isinstance(
-                    request.messages, list) and request.messages[-1].get(
-                        "content") and request.messages[-1].get(
-                            "role") == role:
-                last_msg_content = request.messages[-1]["content"]
-
-            if last_msg_content:
-                for i in range(request.n):
-                    choice_data = ChatCompletionResponseStreamChoice(
-                        index=i,
-                        delta=DeltaMessage(content=last_msg_content),
-                        finish_reason=None)
-                    chunk = ChatCompletionStreamResponse(
-                        id=request_id,
-                        object=chunk_object_type,
-                        created=created_time,
-                        choices=[choice_data],
-                        logprobs=None,
-                        model=model_name)
-                    data = chunk.model_dump_json(exclude_unset=True)
-                    yield f"data: {data}\n\n"
+        first_iteration = True
 
         # Send response for each token for each request.n (index)
         previous_texts = [""] * request.n
         previous_num_tokens = [0] * request.n
         finish_reason_sent = [False] * request.n
-        async for res in result_generator:
-            res: RequestOutput
-            for output in res.outputs:
-                i = output.index
+        try:
+            async for res in result_generator:
+                res: RequestOutput
+                # We need to do it here, because if there are exceptions in
+                # the result_generator, it needs to be sent as the FIRST
+                # response (by the try...catch).
+                if first_iteration:
+                    # Send first response for each request.n (index) with the role
+                    role = self.get_chat_request_role(request)
+                    for i in range(request.n):
+                        choice_data = ChatCompletionResponseStreamChoice(
+                            index=i,
+                            delta=DeltaMessage(role=role),
+                            logprobs=None,
+                            finish_reason=None)
+                        chunk = ChatCompletionStreamResponse(
+                            id=request_id,
+                            object=chunk_object_type,
+                            created=created_time,
+                            choices=[choice_data],
+                            model=model_name)
+                        data = chunk.model_dump_json(exclude_unset=True)
+                        yield f"data: {data}\n\n"
 
-                if finish_reason_sent[i]:
-                    continue
+                    # Send response to echo the input portion of the last message
+                    if request.echo:
+                        last_msg_content = ""
+                        if request.messages and isinstance(
+                                request.messages,
+                                list) and request.messages[-1].get(
+                                    "content") and request.messages[-1].get(
+                                        "role") == role:
+                            last_msg_content = request.messages[-1]["content"]
 
-                delta_token_ids = output.token_ids[previous_num_tokens[i]:]
-                top_logprobs = output.logprobs[
-                    previous_num_tokens[i]:] if output.logprobs else None
+                        if last_msg_content:
+                            for i in range(request.n):
+                                choice_data = ChatCompletionResponseStreamChoice(
+                                    index=i,
+                                    delta=DeltaMessage(
+                                        content=last_msg_content),
+                                    finish_reason=None)
+                                chunk = ChatCompletionStreamResponse(
+                                    id=request_id,
+                                    object=chunk_object_type,
+                                    created=created_time,
+                                    choices=[choice_data],
+                                    logprobs=None,
+                                    model=model_name)
+                                data = chunk.model_dump_json(
+                                    exclude_unset=True)
+                                yield f"data: {data}\n\n"
+                    first_iteration = False
 
-                if request.logprobs:
-                    logprobs = self._create_logprobs(
-                        token_ids=delta_token_ids,
-                        top_logprobs=top_logprobs,
-                        num_output_top_logprobs=request.logprobs,
-                        initial_text_offset=len(previous_texts[i]),
-                    )
-                else:
-                    logprobs = None
+                for output in res.outputs:
+                    i = output.index
 
-                delta_text = output.text[len(previous_texts[i]):]
-                previous_texts[i] = output.text
-                previous_num_tokens[i] = len(output.token_ids)
-                if output.finish_reason is None:
-                    # Send token-by-token response for each request.n
-                    choice_data = ChatCompletionResponseStreamChoice(
-                        index=i,
-                        delta=DeltaMessage(content=delta_text),
-                        logprobs=logprobs,
-                        finish_reason=None)
-                    chunk = ChatCompletionStreamResponse(
-                        id=request_id,
-                        object=chunk_object_type,
-                        created=created_time,
-                        choices=[choice_data],
-                        model=model_name)
-                    data = chunk.model_dump_json(exclude_unset=True)
-                    yield f"data: {data}\n\n"
-                else:
-                    # Send the finish response for each request.n only once
-                    prompt_tokens = len(res.prompt_token_ids)
-                    final_usage = UsageInfo(
-                        prompt_tokens=prompt_tokens,
-                        completion_tokens=previous_num_tokens[i],
-                        total_tokens=prompt_tokens + previous_num_tokens[i],
-                    )
-                    choice_data = ChatCompletionResponseStreamChoice(
-                        index=i,
-                        delta=DeltaMessage(content=delta_text),
-                        logprobs=logprobs,
-                        finish_reason=output.finish_reason)
-                    chunk = ChatCompletionStreamResponse(
-                        id=request_id,
-                        object=chunk_object_type,
-                        created=created_time,
-                        choices=[choice_data],
-                        model=model_name)
-                    if final_usage is not None:
-                        chunk.usage = final_usage
-                    data = chunk.model_dump_json(exclude_unset=True,
-                                                 exclude_none=True)
-                    yield f"data: {data}\n\n"
-                    finish_reason_sent[i] = True
+                    if finish_reason_sent[i]:
+                        continue
+
+                    delta_token_ids = output.token_ids[previous_num_tokens[i]:]
+                    top_logprobs = output.logprobs[
+                        previous_num_tokens[i]:] if output.logprobs else None
+
+                    if request.logprobs:
+                        logprobs = self._create_logprobs(
+                            token_ids=delta_token_ids,
+                            top_logprobs=top_logprobs,
+                            num_output_top_logprobs=request.logprobs,
+                            initial_text_offset=len(previous_texts[i]),
+                        )
+                    else:
+                        logprobs = None
+
+                    delta_text = output.text[len(previous_texts[i]):]
+                    previous_texts[i] = output.text
+                    previous_num_tokens[i] = len(output.token_ids)
+                    if output.finish_reason is None:
+                        # Send token-by-token response for each request.n
+                        choice_data = ChatCompletionResponseStreamChoice(
+                            index=i,
+                            delta=DeltaMessage(content=delta_text),
+                            logprobs=logprobs,
+                            finish_reason=None)
+                        chunk = ChatCompletionStreamResponse(
+                            id=request_id,
+                            object=chunk_object_type,
+                            created=created_time,
+                            choices=[choice_data],
+                            model=model_name)
+                        data = chunk.model_dump_json(exclude_unset=True)
+                        yield f"data: {data}\n\n"
+                    else:
+                        # Send the finish response for each request.n only once
+                        prompt_tokens = len(res.prompt_token_ids)
+                        final_usage = UsageInfo(
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=previous_num_tokens[i],
+                            total_tokens=prompt_tokens +
+                            previous_num_tokens[i],
+                        )
+                        choice_data = ChatCompletionResponseStreamChoice(
+                            index=i,
+                            delta=DeltaMessage(content=delta_text),
+                            logprobs=logprobs,
+                            finish_reason=output.finish_reason)
+                        chunk = ChatCompletionStreamResponse(
+                            id=request_id,
+                            object=chunk_object_type,
+                            created=created_time,
+                            choices=[choice_data],
+                            model=model_name)
+                        if final_usage is not None:
+                            chunk.usage = final_usage
+                        data = chunk.model_dump_json(exclude_unset=True,
+                                                     exclude_none=True)
+                        yield f"data: {data}\n\n"
+                        finish_reason_sent[i] = True
+        except ValueError as e:
+            # TODO: Use a vllm-specific Validation Error
+            data = self.create_streaming_error_response(str(e))
+            yield f"data: {data}\n\n"
         # Send the final done message after all response.n are finished
         yield "data: [DONE]\n\n"
 
