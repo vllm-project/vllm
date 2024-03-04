@@ -72,7 +72,7 @@ html_theme_options = {
 
 # Mock out external dependencies here.
 autodoc_mock_imports = [
-    "torch", "transformers", "psutil", "aioprometheus", "sentencepiece",
+    "torch", "transformers", "psutil", "prometheus_client", "sentencepiece",
     "vllm.cuda_utils", "vllm._C"
 ]
 
@@ -94,3 +94,5 @@ class MockedClassDocumenter(autodoc.ClassDocumenter):
 
 
 autodoc.ClassDocumenter = MockedClassDocumenter
+
+navigation_with_keys = False

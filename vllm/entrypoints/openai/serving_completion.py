@@ -1,11 +1,11 @@
 import asyncio
 import time
 from fastapi import Request
-from typing import AsyncGenerator, AsyncIterator, Callable, List, Optional
+from typing import AsyncGenerator, AsyncIterator, Callable, List, Optional, Dict, Tuple
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from .protocol import (
+from vllm.entrypoints.openai.protocol import (
     CompletionRequest,
     CompletionResponse,
     CompletionResponseChoice,
@@ -15,12 +15,13 @@ from .protocol import (
     UsageInfo,
 )
 from vllm.outputs import RequestOutput
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_engine import OpenAIServing, LoRA
+from vllm.model_executor.guided_decoding import get_guided_decoding_logits_processor
 
 logger = init_logger(__name__)
 
-TypeTokenIDs = list[int]
-TypeTopLogProbs = List[Optional[dict[int, float]]]
+TypeTokenIDs = List[int]
+TypeTopLogProbs = List[Optional[Dict[int, float]]]
 TypeCreateLogProbsFn = Callable[
     [TypeTokenIDs, TypeTopLogProbs, Optional[int], int], LogProbs]
 
@@ -29,7 +30,7 @@ async def completion_stream_generator(
     request: CompletionRequest,
     raw_request: Request,
     on_abort,
-    result_generator: AsyncIterator[tuple[int, RequestOutput]],
+    result_generator: AsyncIterator[Tuple[int, RequestOutput]],
     create_logprobs_fn: TypeCreateLogProbsFn,
     request_id: str,
     created_time: int,
@@ -95,7 +96,7 @@ async def completion_stream_generator(
                         logprobs=logprobs,
                         finish_reason=finish_reason,
                     )
-                ]).model_dump_json(exclude_unset=True)
+                ]).model_dump_json()
             yield f"data: {response_json}\n\n"
 
             if output.finish_reason is not None:  # return final usage
@@ -120,13 +121,13 @@ async def completion_stream_generator(
                         )
                     ],
                     usage=final_usage,
-                ).model_dump_json(exclude_unset=True)
+                ).model_dump_json()
                 yield f"data: {response_json}\n\n"
 
     yield "data: [DONE]\n\n"
 
 
-def parse_prompt_format(prompt) -> tuple[bool, list]:
+def parse_prompt_format(prompt) -> Tuple[bool, list]:
     # get the prompt, openai supports the following
     # "a string, array of strings, array of tokens, or array of token arrays."
     prompt_is_tokens = False
@@ -151,7 +152,7 @@ def parse_prompt_format(prompt) -> tuple[bool, list]:
 
 
 def request_output_to_completion_response(
-    final_res_batch: list[RequestOutput],
+    final_res_batch: List[RequestOutput],
     request: CompletionRequest,
     create_logprobs_fn: TypeCreateLogProbsFn,
     request_id: str,
@@ -249,8 +250,13 @@ def merge_async_iterators(*iterators):
 
 class OpenAIServingCompletion(OpenAIServing):
 
-    def __init__(self, engine: AsyncLLMEngine, served_model: str):
-        super().__init__(engine=engine, served_model=served_model)
+    def __init__(self,
+                 engine: AsyncLLMEngine,
+                 served_model: str,
+                 lora_modules: Optional[List[LoRA]] = None):
+        super().__init__(engine=engine,
+                         served_model=served_model,
+                         lora_modules=lora_modules)
 
     async def create_completion(self, request: CompletionRequest,
                                 raw_request: Request):
@@ -259,10 +265,9 @@ class OpenAIServingCompletion(OpenAIServing):
         See https://platform.openai.com/docs/api-reference/completions/create
         for the API specification. This API mimics the OpenAI Completion API.
 
-        NOTE: Currently we do not support the following features:
+        NOTE: Currently we do not support the following feature:
             - suffix (the language models we currently support do not support
             suffix)
-            - logit_bias (to be supported by vLLM engine)
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -272,9 +277,6 @@ class OpenAIServingCompletion(OpenAIServing):
         if request.suffix is not None:
             return self.create_error_response(
                 "suffix is not currently supported")
-        if request.logit_bias is not None and len(request.logit_bias) > 0:
-            return self.create_error_response(
-                "logit_bias is not currently supported")
 
         model_name = request.model
         request_id = f"cmpl-{random_uuid()}"
@@ -284,6 +286,15 @@ class OpenAIServingCompletion(OpenAIServing):
         generators = []
         try:
             sampling_params = request.to_sampling_params()
+            lora_request = self._maybe_get_lora(request)
+            guided_decode_logit_processor = (
+                await get_guided_decoding_logits_processor(
+                    request, self.engine.get_tokenizer()))
+            if guided_decode_logit_processor is not None:
+                if sampling_params.logits_processors is None:
+                    sampling_params.logits_processors = []
+                sampling_params.logits_processors.append(
+                    guided_decode_logit_processor)
             prompt_is_tokens, prompts = parse_prompt_format(request.prompt)
 
             for i, prompt in enumerate(prompts):
@@ -295,14 +306,15 @@ class OpenAIServingCompletion(OpenAIServing):
                         request, prompt=prompt)
 
                 generators.append(
-                    self.engine.generate(None,
+                    self.engine.generate(prompt,
                                          sampling_params,
                                          f"{request_id}-{i}",
-                                         prompt_token_ids=input_ids))
+                                         prompt_token_ids=input_ids,
+                                         lora_request=lora_request))
         except ValueError as e:
             return self.create_error_response(str(e))
 
-        result_generator: AsyncIterator[tuple[
+        result_generator: AsyncIterator[Tuple[
             int, RequestOutput]] = merge_async_iterators(*generators)
 
         # Similar to the OpenAI API, when n != best_of, we do not stream the
