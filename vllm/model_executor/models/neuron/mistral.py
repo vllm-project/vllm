@@ -71,8 +71,6 @@ class MistralForCausalLM(nn.Module):
             
             logits = self.model(input_ids, cache_ids=positions, start_ids=seq_ids)
         return logits
-        #     next_tokens = self.sampler(logits, input_metadata)
-        # return next_tokens
     
     def sample(
         self,
