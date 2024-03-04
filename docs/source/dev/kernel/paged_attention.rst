@@ -14,9 +14,9 @@ vLLM Paged Attention
    read data from global memory to shared memory. The purpose of this
    document is to provide a high-level explanation of the kernel
    implementation step by step, aiding those who wish to learn about the
-   vLLM multi-head query attention kernel. Reading the actual code
-   implementation after going through this document will likely have a
-   better understanding.
+   vLLM multi-head query attention kernel. After going through this 
+   document, users will likely have a better understanding and feel easier
+   to follow the actual implementation.
 -  Please note that this document may not cover all details, such as how
    to calculate the correct index for the corresponding data or the dot
    multiplication implementation. However, after reading this document
@@ -77,7 +77,10 @@ Concepts
 -  **Sequence**: A sequence represents a client request. For example,
    the data pointed to by ``q`` has a shape of
    ``[num_seqs, num_heads, head_size]``. That represents there are total
-   ``num_seqs`` of query sequence data are pointed by ``q``.
+   ``num_seqs`` of query sequence data are pointed by ``q``. Since this 
+   kernel is a single query attention kernel, each sequence only has one
+   query token. Hence, the ``num_seqs`` equals the total number of tokens 
+   that are processed in the batch.
 -  **Context**: The context consists of the generated tokens from the
    sequence. For instance, ``["What", "is", "your"]`` are the context
    tokens, and the input query token is ``"name"``. The model might
@@ -88,8 +91,8 @@ Concepts
    calculate 16 bytes of data at a time. For value data, the vec size
    (``V_VEC_SIZE``) is determined so that each thread can fetch and
    calculate 16 bytes of data at a time. For example, if the
-   ``scalar_t`` is FP16 (2 bytes), the ``VEC_SIZE`` will be 4, while the
-   ``V_VEC_SIZE`` will be 8.
+   ``scalar_t`` is FP16 (2 bytes) and ``THREAD_GROUP_SIZE`` is 2, the 
+   ``VEC_SIZE`` will be 4, while the ``V_VEC_SIZE`` will be 8.
 -  **Thread group**: The thread group is a small group of
    threads(\ ``THREAD_GROUP_SIZE``) that fetches and calculates one
    query token and one key token at a time. Each thread handles only a
@@ -320,7 +323,7 @@ Softmax
       }
 
       if (lane == 0) {
-      red_smem[warp_idx] = qk_max;
+         red_smem[warp_idx] = qk_max;
       }
 
 -  Then we need to get the reduced ``qk_max`` across each warp. The main
@@ -336,7 +339,7 @@ Softmax
 
 -  Finally, we can get the reduced ``qk_max`` from whole thread block by
    compare the ``qk_max`` from all warps in this thread block. Then we
-   need to board cast the final result to each thread.
+   need to broadcast the final result to each thread.
 
 ``exp_sum``
 ~~~~~~~~~~~
@@ -364,7 +367,7 @@ Softmax
 
       const float inv_sum = __fdividef(1.f, exp_sum + 1e-6f);
       for (int i = thread_idx; i < num_tokens; i += NUM_THREADS) {
-      logits[i] *= inv_sum;
+         logits[i] *= inv_sum;
       }
 
 -  Finally, with the reduced ``qk_max`` and ``exp_sum``, we can obtain
