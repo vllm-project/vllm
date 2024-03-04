@@ -27,7 +27,7 @@ def test_get_prompt_logprobs(
 
     vllm_model = vllm_runner(model,
                              dtype=dtype,
-                             max_log_probs=num_top_logprobs)
+                             max_logprobs=num_top_logprobs)
     vllm_sampling_params = SamplingParams(max_tokens=max_tokens,
                                           logprobs=num_top_logprobs,
                                           prompt_logprobs=5,
@@ -77,8 +77,8 @@ def test_get_prompt_logprobs(
                     " to the user.")
 
 
-def test_max_log_probs():
-    runner = VllmRunner("facebook/opt-125m", max_log_probs=1)
+def test_max_logprobs():
+    runner = VllmRunner("facebook/opt-125m", max_logprobs=1)
     vllm_sampling_params = SamplingParams(logprobs=1)
     # should pass
     runner.generate(["Hello world"], sampling_params=vllm_sampling_params)
