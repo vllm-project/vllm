@@ -756,7 +756,7 @@ class SchedulerConfig:
                 "be greater than or equal to max_num_seqs "
                 f"({self.max_num_seqs}).")
         # TODO: verify max_queue_length
-    
+
     def get_max_queue_length(self) -> int:
         return self.max_queue_length
 

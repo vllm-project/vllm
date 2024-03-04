@@ -568,9 +568,10 @@ class LLMEngine:
         """
         curr_queue_len = len(self.scheduler.waiting)
         max_queue_len = self.scheduler.scheduler_config.get_max_queue_length()
-        if  max_queue_len > -1 and curr_queue_len >= max_queue_len:
-            raise ValueError(f"Request {request_id} would exceed the indicated maximum "
-                            f"queue length of {max_queue_len}")
+        if max_queue_len > -1 and curr_queue_len >= max_queue_len:
+            raise ValueError(
+                f"Request {request_id} would exceed the indicated maximum "
+                f"queue length of {max_queue_len}")
 
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "

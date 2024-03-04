@@ -10,22 +10,31 @@ max_wait_q_len = 3
 
 logger = init_logger(__name__)
 
+
 class QueueOverflowError(Exception):
     pass
+
 
 def create_test_prompts() -> List[Tuple[str, SamplingParams]]:
     """Create a list of test prompts with their sampling parameters."""
     return [
         ("A robot may not injure a human being",
-         SamplingParams(temperature=0.0, logprobs=1, prompt_logprobs=1, ignore_eos=True)),
+         SamplingParams(temperature=0.0,
+                        logprobs=1,
+                        prompt_logprobs=1,
+                        ignore_eos=True)),
         ("To be or not to be,",
-         SamplingParams(temperature=0.8, top_k=5, presence_penalty=0.2, ignore_eos=True)),
+         SamplingParams(temperature=0.8,
+                        top_k=5,
+                        presence_penalty=0.2,
+                        ignore_eos=True)),
         ("What is the meaning of life?",
          SamplingParams(n=2,
                         best_of=5,
                         temperature=0.8,
                         top_p=0.95,
-                        frequency_penalty=0.1, ignore_eos=True)),
+                        frequency_penalty=0.1,
+                        ignore_eos=True)),
         ("It is only with the heart that one can see rightly",
          SamplingParams(n=3, best_of=3, use_beam_search=True,
                         temperature=0.0)),
@@ -47,9 +56,9 @@ def process_requests(engine: LLMEngine,
                 logger.info(f"{e}")
                 for i in range(request_id):
                     engine.abort_request(str(i))
-                raise QueueOverflowError(f"Queue exceeded max length: {e}")
+                raise QueueOverflowError(
+                    f"Queue exceeded max length: {e}") from e
             request_id += 1
-
 
         request_outputs: List[RequestOutput] = engine.step()
 
@@ -68,14 +77,19 @@ def main(args: argparse.Namespace):
     """Main function that sets up and runs the prompt processing."""
     engine = initialize_engine(args)
     test_prompts = create_test_prompts()
-    with pytest.raises(QueueOverflowError, match="Queue exceeded max length: .*"):
+    with pytest.raises(QueueOverflowError,
+                       match="Queue exceeded max length: .*"):
         process_requests(engine, test_prompts)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-    description='Demo on using the LLMEngine class directly')
+        description='Demo on using the LLMEngine class directly')
     parser = EngineArgs.add_cli_args(parser)
-    args_to_test = ['--max-num-seqs', str(1), '--max-queue-length', str(max_wait_q_len)]
+    args_to_test = [
+        '--max-num-seqs',
+        str(1), '--max-queue-length',
+        str(max_wait_q_len)
+    ]
     args = parser.parse_args(args_to_test)
     main(args)
