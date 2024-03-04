@@ -170,10 +170,10 @@ def make_async(func: Callable[..., T]) -> Callable[..., Awaitable[T]]:
 
 
 def get_ip() -> str:
-    address = ("dns.google", 80)
     try:
         # try ipv4
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        address = ("8.8.8.8", 80)
         s.connect(address)  # Doesn't need to be reachable
         logger.info(f"Reached {address=} using IPv4")
     except OSError:
@@ -181,6 +181,7 @@ def get_ip() -> str:
         try:
             # try ipv6
             s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+            address = ("dns.google", 80)
             s.connect(address)  # Doesn't need to be reachable
             logger.info(f"Reached {address=} using IPv6")
         except OSError:
