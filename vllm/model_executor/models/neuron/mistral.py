@@ -35,8 +35,6 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.sequence import SamplerOutput
 import os
 
-import pdb
-
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
