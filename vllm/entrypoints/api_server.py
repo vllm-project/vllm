@@ -10,6 +10,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
+from vllm.engine.metrics import counter_inference_request_success, counter_inference_request_aborted
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
 app = FastAPI()
@@ -43,15 +44,21 @@ async def generate(request: Request) -> Response:
                                         request_id,
                                         prefix_pos=prefix_pos)
 
+    label = {"endpoint": "/generate"}
+
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
         async for request_output in results_generator:
-            prompt = request_output.prompt
-            text_outputs = [
-                prompt + output.text for output in request_output.outputs
-            ]
-            ret = {"text": text_outputs}
-            yield (json.dumps(ret) + "\0").encode("utf-8")
+            if request_output.finished:
+                counter_inference_request_success.inc(label)
+                prompt = request_output.prompt
+                text_outputs = [
+                    prompt + output.text for output in request_output.outputs
+                ]
+                ret = {"text": text_outputs}
+                yield (json.dumps(ret) + "\0").encode("utf-8")
+            else:
+                counter_inference_request_aborted.inc(label)
 
     if stream:
         return StreamingResponse(stream_results())

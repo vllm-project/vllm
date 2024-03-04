@@ -1,12 +1,15 @@
 """Sequence and its related classes."""
 import copy
 import enum
+import time
+
 from typing import Dict, List, Optional, Union
 
 from vllm.block import LogicalTokenBlock
 from vllm.prefix import Prefix
 from vllm.sampling_params import SamplingParams
 from vllm.lora.request import LoRARequest
+from vllm.engine.metrics import histogram_infernce_queue_duration, histogram_infernce_compute_duration
 
 PromptLogprobs = List[Optional[Dict[int, float]]]
 SampleLogprobs = List[Dict[int, float]]
@@ -129,13 +132,33 @@ class Sequence:
         self.logical_token_blocks: List[LogicalTokenBlock] = []
         # Initialize the logical token blocks with the prompt token ids.
         self._append_tokens_to_blocks(prompt_token_ids)
-        self.status = SequenceStatus.WAITING
+        self._status = SequenceStatus.WAITING
 
         # Used for incremental detokenization
         self.prefix_offset = 0
         self.read_offset = 0
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
+        self.start_time = time.monotonic()
+        breakpoint()
+        
+    @property
+    def status(self):
+        return self._status
+    
+    @status.setter
+    def status(self, new_status: SequenceStatus) -> None:
+        """Set the status of the sequence."""
+        dwell_time = time.perf_counter() - self.start_time
+        labels = {"from": self._status, "to": new_status}
+        if new_status == SequenceStatus.RUNNING:
+            histogram_infernce_queue_duration.observe(labels, dwell_time)
+        
+        if self._status == SequenceStatus.RUNNING:
+            histogram_infernce_compute_duration.observe(labels, dwell_time)
+
+        self._status = new_status
+        
 
     @property
     def lora_int_id(self) -> int:
@@ -215,7 +238,7 @@ class Sequence:
         return self.get_cumulative_logprob() / (seq_len**length_penalty)
 
     def is_finished(self) -> bool:
-        return SequenceStatus.is_finished(self.status)
+        return SequenceStatus.is_finished(self._status)
 
     def fork(self, new_seq_id: int) -> "Sequence":
         new_seq = copy.deepcopy(self)
@@ -224,7 +247,7 @@ class Sequence:
 
     def __repr__(self) -> str:
         return (f"Sequence(seq_id={self.seq_id}, "
-                f"status={self.status.name}, "
+                f"status={self._status.name}, "
                 f"num_blocks={len(self.logical_token_blocks)})")
 
 
@@ -305,7 +328,7 @@ class SequenceGroup:
             return list(self.seqs_dict.values())
         else:
             return [
-                seq for seq in self.seqs_dict.values() if seq.status == status
+                seq for seq in self.seqs_dict.values() if seq._status == status
             ]
 
     def get_unfinished_seqs(self) -> List[Sequence]:
