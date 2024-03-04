@@ -13,7 +13,6 @@ from vllm.sequence import (PromptLogprobs, SampleLogprobs, SamplerOutput,
 from vllm.utils import is_neuron
 
 
-
 class Sampler(nn.Module):
     """Samples the next tokens from the model's outputs.
 
@@ -82,8 +81,8 @@ class Sampler(nn.Module):
         logits = _apply_logits_processors(logits, sampling_metadata)
 
         # Prepare sampling tensors with pinned memory to avoid blocking.
-        (sampling_tensors, do_penalties, do_top_p_top_k,
-         do_min_p, do_quadratic) = SamplingTensors.from_sampling_metadata(
+        (sampling_tensors, do_penalties, do_top_p_top_k, do_min_p,
+         do_quadratic) = SamplingTensors.from_sampling_metadata(
              sampling_metadata, vocab_size, logits.device, logits.dtype)
 
         # Apply presence and frequency penalties.
@@ -104,7 +103,7 @@ class Sampler(nn.Module):
 
         if do_min_p:
             logits = _apply_min_p(logits, sampling_tensors.min_ps)
-        
+
         if do_quadratic:
             logits = _apply_quadratic_sampling(
                 logits, sampling_tensors.smoothing_factors,
@@ -274,7 +273,7 @@ def _apply_quadratic_sampling(
 
     mask = smoothing_factors > 0
     mask = mask.flatten()
-    
+
     # only transform logits when they're not -inf, otherwise
     # fails at smoothing_curves==3
     transformed_logits = torch.where(

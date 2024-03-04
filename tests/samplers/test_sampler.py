@@ -406,13 +406,15 @@ def test_apply_quadratic_sampling(seed: int, device: str):
     torch.set_default_device(device)
     batch_size = random.randint(1, 256)
     logits = torch.randn((batch_size, 10), device=device)
-    smoothing_factors = torch.rand((batch_size,), device=device)
-    smoothing_curves = torch.rand((batch_size,), device=device)
+    smoothing_factors = torch.rand((batch_size, ), device=device)
+    smoothing_curves = torch.rand((batch_size, ), device=device)
 
-    transformed_logits = _apply_quadratic_sampling(logits, smoothing_factors, smoothing_curves)
+    transformed_logits = _apply_quadratic_sampling(logits, smoothing_factors,
+                                                   smoothing_curves)
 
     assert transformed_logits.shape == logits.shape
     assert torch.all(transformed_logits <= logits)
+
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
@@ -422,14 +424,16 @@ def test_apply_quadratic_sampling_with_inf(seed: int, device: str):
     batch_size = random.randint(1, 256)
     logits = torch.randn((batch_size, 10), device=device)
     logits[:, 0] = float('-inf')
-    smoothing_factors = torch.rand((batch_size,), device=device)
-    smoothing_curves = torch.rand((batch_size,), device=device)
+    smoothing_factors = torch.rand((batch_size, ), device=device)
+    smoothing_curves = torch.rand((batch_size, ), device=device)
 
-    transformed_logits = _apply_quadratic_sampling(logits, smoothing_factors, smoothing_curves)
+    transformed_logits = _apply_quadratic_sampling(logits, smoothing_factors,
+                                                   smoothing_curves)
 
     assert transformed_logits.shape == logits.shape
     assert torch.all(transformed_logits[:, 1:] <= logits[:, 1:])
     assert torch.all(transformed_logits[:, 0] == logits[:, 0])
+
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
@@ -438,10 +442,11 @@ def test_apply_quadratic_sampling_with_zero_smoothing(seed: int, device: str):
     torch.set_default_device(device)
     batch_size = random.randint(1, 256)
     logits = torch.randn((batch_size, 10), device=device)
-    smoothing_factors = torch.zeros((batch_size,), device=device)
-    smoothing_curves = torch.zeros((batch_size,), device=device)
+    smoothing_factors = torch.zeros((batch_size, ), device=device)
+    smoothing_curves = torch.zeros((batch_size, ), device=device)
 
-    transformed_logits = _apply_quadratic_sampling(logits, smoothing_factors, smoothing_curves)
+    transformed_logits = _apply_quadratic_sampling(logits, smoothing_factors,
+                                                   smoothing_curves)
 
     assert transformed_logits.shape == logits.shape
     assert torch.all(transformed_logits == logits)
