@@ -37,6 +37,7 @@ def main(args: argparse.Namespace):
         flash_style=args.flash_style,
         max_chunked_prefill_len=args.max_chunked_prefill_len,
         max_num_prompt_seqs=args.max_num_prompt_seqs,
+        ray_workers_use_nsight=args.ray_workers_use_nsight,
     )
 
     sampling_params = SamplingParams(
@@ -186,5 +187,10 @@ if __name__ == '__main__':
                         help='print generated text')
     parser.add_argument('--max-chunked-prefill-len', type=int, default=-1)
     parser.add_argument('--max-num-prompt-seqs', type=int, default=1000)
+    parser.add_argument(
+        "--ray-workers-use-nsight",
+        action='store_true',
+        help="If specified, use nsight to profile ray workers",
+    )
     args = parser.parse_args()
     main(args)

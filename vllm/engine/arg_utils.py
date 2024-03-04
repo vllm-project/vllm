@@ -47,8 +47,12 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = None
     flash_style: bool = False
     device: str = 'auto'
+<<<<<<< HEAD
     max_chunked_prefill_len: int = -1
     max_num_prompt_seqs: int = 256
+=======
+    ray_workers_use_nsight: bool = False
+>>>>>>> chunked-prefill-3
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -171,6 +175,10 @@ class EngineArgs:
             help='load model sequentially in multiple batches, '
             'to avoid RAM OOM when using tensor '
             'parallel and large models')
+        parser.add_argument(
+            '--ray-workers-use-nsight',
+            action='store_true',
+            help='If specified, use nsight to profile ray workers')
         # KV cache arguments
         parser.add_argument('--block-size',
                             type=int,
@@ -324,6 +332,7 @@ class EngineArgs:
                                          self.tensor_parallel_size,
                                          self.worker_use_ray,
                                          self.max_parallel_loading_workers,
+<<<<<<< HEAD
                                          self.disable_custom_all_reduce)
         scheduler_config = SchedulerConfig(
             self.max_num_batched_tokens,
@@ -334,6 +343,14 @@ class EngineArgs:
             max_num_prompt_seqs=self.max_num_prompt_seqs,
             flash_style=self.flash_style,
         )
+=======
+                                         self.disable_custom_all_reduce,
+                                         self.ray_workers_use_nsight)
+        scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
+                                           self.max_num_seqs,
+                                           model_config.max_model_len,
+                                           self.max_paddings)
+>>>>>>> chunked-prefill-3
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,
