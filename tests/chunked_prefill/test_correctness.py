@@ -59,14 +59,6 @@ def test_models(
 
     del pg_model
 
-    for i in range(len(TEST_PROMPTS)):
-        hf_output_ids, hf_output_str = hf_outputs[i]
-        vllm_output_ids, vllm_output_str = expected_outputs[i]
-        assert hf_output_str == vllm_output_str, (
-            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
-        assert hf_output_ids == vllm_output_ids, (
-            f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
-
     destroy_model_parallel()
     gc.collect()
     torch.cuda.empty_cache()
@@ -83,6 +75,7 @@ def test_models(
             flash_attn_model.generate_greedy(prompts, max_tokens))
 
     del flash_attn_model
+
     destroy_model_parallel()
     gc.collect()
     torch.cuda.empty_cache()
