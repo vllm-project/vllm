@@ -5,7 +5,7 @@ from typing import AsyncGenerator, AsyncIterator, Callable, List, Optional, Dict
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from .protocol import (
+from vllm.entrypoints.openai.protocol import (
     CompletionRequest,
     CompletionResponse,
     CompletionResponseChoice,
@@ -16,6 +16,7 @@ from .protocol import (
 )
 from vllm.outputs import RequestOutput
 from vllm.entrypoints.openai.serving_engine import OpenAIServing, LoRA
+from vllm.model_executor.guided_decoding import get_guided_decoding_logits_processor
 
 logger = init_logger(__name__)
 
@@ -123,6 +124,14 @@ class OpenAIServingCompletion(OpenAIServing):
         try:
             sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
+            guided_decode_logit_processor = (
+                await get_guided_decoding_logits_processor(
+                    request, self.engine.get_tokenizer()))
+            if guided_decode_logit_processor is not None:
+                if sampling_params.logits_processors is None:
+                    sampling_params.logits_processors = []
+                sampling_params.logits_processors.append(
+                    guided_decode_logit_processor)
             prompt_is_tokens, prompts = parse_prompt_format(request.prompt)
 
             for i, prompt in enumerate(prompts):
@@ -263,7 +272,7 @@ class OpenAIServingCompletion(OpenAIServing):
                                 logprobs=logprobs,
                                 finish_reason=finish_reason,
                             )
-                        ]).model_dump_json(exclude_unset=True)
+                        ]).model_dump_json()
                     yield f"data: {response_json}\n\n"
 
                     if output.finish_reason is not None:  # return final usage
@@ -289,7 +298,7 @@ class OpenAIServingCompletion(OpenAIServing):
                                 )
                             ],
                             usage=final_usage,
-                        ).model_dump_json(exclude_unset=True)
+                        ).model_dump_json()
                         yield f"data: {response_json}\n\n"
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
