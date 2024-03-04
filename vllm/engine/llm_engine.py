@@ -823,8 +823,8 @@ class LLMEngine:
             >>>         break
         """
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
-        # print("SANG-TODO step seq_group_metadata_list length: ",
-        #       len(seq_group_metadata_list))
+        print("SANG-TODO step seq_group_metadata_list length: ",
+              len(seq_group_metadata_list))
 
         if not scheduler_outputs.is_empty():
             # Execute the model.

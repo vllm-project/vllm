@@ -335,11 +335,11 @@ class CacheConfig:
 
         if self.flash_style:
             logger.info("Flash attention enabled.")
-            if self.block_size < 256:
+            if self.block_size > 32:
                 # Flash style attention only supports block size >=256 for now.
                 # https://github.com/Dao-AILab/flash-attention/pull/824 will fix it.
                 raise ValueError(
-                    "Flash style attention only supports block size >= 256. Got"
+                    "Flash style attention only supports block size <= 32. Got"
                     f"{self.block_size }")
 
     def _verify_cache_dtype(self) -> None:
