@@ -32,6 +32,9 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`FalconForCausalLM`
     - Falcon
     - :code:`tiiuae/falcon-7b`, :code:`tiiuae/falcon-40b`, :code:`tiiuae/falcon-rw-7b`, etc.
+  * - :code:`GemmaForCausalLM`
+    - Gemma
+    - :code:`google/gemma-2b`, :code:`google/gemma-7b`, etc.
   * - :code:`GPT2LMHeadModel`
     - GPT-2
     - :code:`gpt2`, :code:`gpt2-xl`, etc.
@@ -68,6 +71,9 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`OPTForCausalLM`
     - OPT, OPT-IML
     - :code:`facebook/opt-66b`, :code:`facebook/opt-iml-max-30b`, etc.
+  * - :code:`OrionForCausalLM`
+    - Orion
+    - :code:`OrionStarAI/Orion-14B-Base`, :code:`OrionStarAI/Orion-14B-Chat`, etc.
   * - :code:`PhiForCausalLM`
     - Phi
     - :code:`microsoft/phi-1_5`, :code:`microsoft/phi-2`, etc.
@@ -77,7 +83,7 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`Qwen2ForCausalLM`
     - Qwen2
     - :code:`Qwen/Qwen2-beta-7B`, :code:`Qwen/Qwen2-beta-7B-Chat`, etc.
-  * - :code:`StableLMEpochForCausalLM`
+  * - :code:`StableLmForCausalLM`
     - StableLM
     - :code:`stabilityai/stablelm-3b-4e1t/` , :code:`stabilityai/stablelm-base-alpha-7b-v2`, etc.
 
