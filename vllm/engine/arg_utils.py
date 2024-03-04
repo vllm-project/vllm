@@ -151,7 +151,7 @@ class EngineArgs:
         # Parallel arguments
         parser.add_argument(
             '--worker-use-ray',
-            action='store_true',
+            action=argparse.BooleanOptionalAction,
             default=None,
             help='use Ray for distributed serving, will default '
             'to true when ray is installed and more than 1 GPU is used')
