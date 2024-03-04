@@ -317,7 +317,7 @@ def test_sampler_top_k_top_p(seed: int):
 
 
 DTYPE = [torch.float16, torch.float32]
-VOCAB_SIZE = [640, 1280, 5120]
+VOCAB_SIZE = [32000, 64000]
 
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
@@ -326,7 +326,7 @@ VOCAB_SIZE = [640, 1280, 5120]
 def test_optimized_cumsum(seed: int, vocab_size: int, dtype: torch.dtype):
     set_random_seed(seed)
     batch_size = random.randint(1, 256)
-    matmul_size = random.randint(1, 1024)
+    matmul_size = random.randint(1, 2048)
     fake_logits = torch.randn(batch_size,
                               vocab_size,
                               device="cuda",
@@ -335,4 +335,8 @@ def test_optimized_cumsum(seed: int, vocab_size: int, dtype: torch.dtype):
     probs, _ = probs.sort(dim=-1, descending=True)
     probs1 = torch.cumsum(probs, dim=-1, dtype=dtype)
     probs2 = _cal_probs_sum(probs, matmul_size=matmul_size)
-    assert torch.allclose(probs1, probs2, atol=1e-2)
+    # We relax the tolerance for fp16 as fp16 has more overflows than fp32.
+    if dtype == torch.float16:
+        assert torch.allclose(probs1, probs2, atol=1e-1)
+    if dtype == torch.float32:
+        assert torch.allclose(probs1, probs2, atol=1e-5)
