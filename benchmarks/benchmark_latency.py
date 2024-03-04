@@ -35,6 +35,7 @@ def main(args: argparse.Namespace):
         device=args.device,
         block_size=args.block_size,
         flash_style=args.flash_style,
+        ray_workers_use_nsight=args.ray_workers_use_nsight,
     )
 
     sampling_params = SamplingParams(
@@ -182,5 +183,10 @@ if __name__ == '__main__':
     parser.add_argument('--verbose',
                         action='store_true',
                         help='print generated text')
+    parser.add_argument(
+        "--ray-workers-use-nsight",
+        action='store_true',
+        help="If specified, use nsight to profile ray workers",
+    )
     args = parser.parse_args()
     main(args)

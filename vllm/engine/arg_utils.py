@@ -47,6 +47,7 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = None
     flash_style: bool = False
     device: str = 'auto'
+    ray_workers_use_nsight: bool = False
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -169,6 +170,10 @@ class EngineArgs:
             help='load model sequentially in multiple batches, '
             'to avoid RAM OOM when using tensor '
             'parallel and large models')
+        parser.add_argument(
+            '--ray-workers-use-nsight',
+            action='store_true',
+            help='If specified, use nsight to profile ray workers')
         # KV cache arguments
         parser.add_argument('--block-size',
                             type=int,
@@ -311,7 +316,8 @@ class EngineArgs:
                                          self.tensor_parallel_size,
                                          self.worker_use_ray,
                                          self.max_parallel_loading_workers,
-                                         self.disable_custom_all_reduce)
+                                         self.disable_custom_all_reduce,
+                                         self.ray_workers_use_nsight)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
                                            model_config.max_model_len,

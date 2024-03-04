@@ -238,13 +238,6 @@ class BlockSpaceManager:
         token_ids_len = len(seq.data.get_token_ids())
         return token_ids_len > 0 and token_ids_len % seq.block_size == 0
 
-    def _is_last_block(
-        self,
-        seq: Sequence,
-        index: int,
-    ) -> bool:
-        return index == len(seq.logical_token_blocks) - 1
-
     def _maybe_promote_last_block(
         self,
         seq: Sequence,
@@ -438,7 +431,7 @@ class BlockSpaceManager:
     def compute_last_full_block_in_seq(self, seq: Sequence):
         if seq.seq_id not in self.block_tables:
             return
-        max_full_block = seq.get_len() // seq.block_size - 1
+        max_full_block = seq.get_len() // self.block_size - 1
         block_table = self.block_tables[seq.seq_id]
         if max_full_block == -1:
             return
@@ -453,9 +446,9 @@ class BlockSpaceManager:
                 return [b.block_number for b in block_table[:block_idx + 1]]
         return []
 
-    # Can return non-empty result only with prefix caching enabled.
     def get_common_computed_block_ids(self,
                                       seq_group: SequenceGroup) -> List[int]:
+        # Can return non-empty result only with prefix caching enabled.
         if not self.enable_caching:
             return []
 
@@ -465,9 +458,9 @@ class BlockSpaceManager:
         ]
         return commonprefix([ids for ids in ids_list if ids != []])
 
-    # We only mark the last full block because with prefix caching,
-    # all blocks until the marked one are guaranteed to be computed.
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
+        # NOTE: We only mark the last full block because with prefix caching,
+        # all blocks until the marked one are guaranteed to be computed.
         if self.enable_caching:
             for seq in seq_group.seqs_dict.values():
                 self.compute_last_full_block_in_seq(seq)
