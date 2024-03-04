@@ -259,3 +259,7 @@ def test_same_output_for_multi_step():
             multi_step_output_logprobs, single_step_output_logprobs):
         assert_logprobs_dict_allclose(multi_step_logprobs,
                                       single_step_logprobs)
+
+
+def test_get_proposals():
+    pass
