@@ -171,11 +171,10 @@ class RequestTracker:
 
         return new_requests, finished_requests
 
-    async def wait_for_new_requests(self, clear: bool):
+    async def wait_for_new_requests(self):
         if not self.has_new_requests():
             await self.new_requests_event.wait()
-        if clear:
-            self.new_requests_event.clear()
+        self.new_requests_event.clear()
 
     def has_new_requests(self):
         return not self._new_requests.empty()
@@ -445,7 +444,7 @@ class AsyncLLMEngine:
         while True:
             if not has_requests_in_progress:
                 logger.debug("Waiting for new requests...")
-                await self._request_tracker.wait_for_new_requests(clear=True)
+                await self._request_tracker.wait_for_new_requests()
                 logger.debug("Got new requests!")
 
             # Abort if iteration takes too long due to unrecoverable errors
