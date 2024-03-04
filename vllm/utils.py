@@ -171,21 +171,28 @@ def make_async(func: Callable[..., T]) -> Callable[..., Awaitable[T]]:
 
 def get_ip() -> str:
     address = ("dns.google", 80)
+    socket_ipv4 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    socket_ipv6 = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+
+    # try ipv4
     try:
-        # try ipv4
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(address)  # Doesn't need to be reachable
+        socket_ipv4.connect(address)  # Doesn't need to be reachable
         logger.info(f"Reached {address=} using IPv4")
+        return socket_ipv4.getsockname()[0]
     except OSError:
         logger.info(f"Failed to reach {address=} using IPv4")
-        try:
-            # try ipv6
-            s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
-            s.connect(address)  # Doesn't need to be reachable
-            logger.info(f"Reached {address=} using IPv6")
-        except OSError:
-            logger.info(f"Failed to reach {address=} using IPv6")
-    return s.getsockname()[0]
+
+    # try ipv6
+    try:
+        socket_ipv6.connect(address)  # Doesn't need to be reachable
+        logger.info(f"Reached {address=} using IPv6")
+        return socket_ipv6.getsockname()[0]
+    except OSError:
+        logger.info(f"Failed to reach {address=} using IPv6")
+
+    # handle no internet
+    logger.info("Assuming vLLM is in an internet denied IPv4 environment")
+    return socket_ipv4.getsockname()[0]
 
 
 def get_distributed_init_method(ip: str, port: int) -> str:
