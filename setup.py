@@ -15,7 +15,7 @@ from torch.utils.cpp_extension import CUDA_HOME
 
 ROOT_DIR = os.path.dirname(__file__)
 logger = logging.getLogger(__name__)
-# Target device of vLLM, supporting [cuda (by default), rocm, neuron]
+# Target device of vLLM, supporting [cuda (by default), rocm, neuron, cpu]
 VLLM_TARGET_DEVICE = os.getenv("VLLM_TARGET_DEVICE", "cuda")
 
 # vLLM only supports Linux platform
@@ -333,7 +333,8 @@ def get_requirements() -> List[str]:
         with open(get_path("requirements-neuron.txt")) as f:
             requirements = f.read().strip().split("\n")
     elif _is_cpu():
-        requirements = []
+        with open(get_path("requirements-cpu.txt")) as f:
+            requirements = f.read().strip().split("\n")
     else:
         raise ValueError(
             "Unsupported platform, please use CUDA, ROCM or Neuron.")
