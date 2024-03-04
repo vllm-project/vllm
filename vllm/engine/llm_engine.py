@@ -96,7 +96,6 @@ class LLMEngine:
             f"device_config={device_config.device}, "
             f"seed={model_config.seed})")
         # TODO(woosuk): Print more configs in debug mode.
-        print("MODEL config", model_config)
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
@@ -108,8 +107,6 @@ class LLMEngine:
 
         self._init_tokenizer()
         self.seq_counter = Counter()
-
-        print("INIT ENGINE ")
 
         # Create the parallel GPU workers.
         if self.parallel_config.worker_use_ray:
@@ -445,7 +442,6 @@ class LLMEngine:
             >>> # continue the request processing
             >>> ...
         """
-        print("PROMPTS", prompt)
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
@@ -570,6 +566,7 @@ class LLMEngine:
             parent_seq.seq_id: []
             for parent_seq in parent_seqs
         }
+
         for sample in samples:
             parent_child_dict[sample.parent_seq_id].append(sample)
         # List of (child, parent)
@@ -731,12 +728,20 @@ class LLMEngine:
             scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
         # Update the scheduled sequence groups with the model outputs.
         scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
-        for seq_group, outputs in zip(scheduled_seq_groups, output):
-            self._process_sequence_group_outputs(seq_group, outputs)
+
+        if self.embedded_model : 
+            for i, seq_group in enumerate(scheduled_seq_groups):
+                for seq in seq_group.get_seqs():
+                    seq.status = SequenceStatus.FINISHED_STOPPED
+                seq_group.embed = output[i]
+        else:
+            for seq_group, outputs in zip(scheduled_seq_groups, output):
+                self._process_sequence_group_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.
         self.scheduler.free_finished_seq_groups()
 
+        request_outputs: List[RequestOutput] = []
         # Create the outputs.
         request_outputs: List[RequestOutput] = []
         for seq_group in scheduled_seq_groups:
@@ -755,7 +760,7 @@ class LLMEngine:
         # Log stats.
         if self.log_stats:
             self.stat_logger.log(self._get_stats(scheduler_outputs))
-
+    
         return request_outputs
 
     def step(self) -> List[RequestOutput]:
@@ -828,8 +833,6 @@ class LLMEngine:
         else:
             output = []
         
-        print("outputt", output)
-
         return self._process_model_outputs(output, scheduler_outputs)
 
     def do_log_stats(self) -> None:
@@ -1008,10 +1011,6 @@ class LLMEngine:
             driver_args = args
         if driver_kwargs is None:
             driver_kwargs = kwargs
-
-
-        print("RUNNING A SINGLE STEP")
-        print("METHOD", method)
 
         # Start the driver worker after all the ray workers.
         driver_worker_output = getattr(self.driver_worker,

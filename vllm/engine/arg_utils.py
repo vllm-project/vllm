@@ -44,6 +44,7 @@ class EngineArgs:
     lora_dtype = 'auto'
     max_cpu_loras: Optional[int] = None
     device: str = 'cuda'
+    embedded_model : bool = False
 
     def __post_init__(self):
         if self.tokenizer is None:

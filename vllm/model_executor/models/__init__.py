@@ -43,7 +43,7 @@ _MODELS = {
     "StableLMEpochForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "YiForCausalLM": ("yi", "YiForCausalLM"),
     # embedded model
-    "XLMRobertaModel": ("embedded_model", "BGEM3FlagModel")
+    "XLMRobertaModel": ("bgem3", "BGEM3FlagForCausalLM")
 }
 
 # Models not supported by ROCm.

@@ -248,6 +248,7 @@ class SequenceGroup:
         arrival_time: float,
         lora_request: Optional[LoRARequest] = None,
         prefix: Optional[Prefix] = None,
+        embed = None, 
     ) -> None:
         self.request_id = request_id
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
@@ -257,6 +258,7 @@ class SequenceGroup:
         self.lora_request = lora_request
         self.prefix: Optional[Prefix] = prefix
         self.prompt_logprobs: Optional[PromptLogprobs] = None
+        self.embed = embed
 
     @property
     def prompt(self) -> str:
@@ -370,11 +372,13 @@ class SequenceGroupMetadata:
         seq_data: Dict[int, SequenceData],
         sampling_params: SamplingParams,
         block_tables: Dict[int, List[int]],
+        prompt_dict: Dict[int, str] = None, 
         lora_request: Optional[LoRARequest] = None,
         prefix: Optional[Prefix] = None,
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
+        self.prompt_dict = prompt_dict
         self.seq_data = seq_data
         self.sampling_params = sampling_params
         self.block_tables = block_tables

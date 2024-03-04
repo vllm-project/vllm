@@ -80,10 +80,19 @@ class BGEM3Model(nn.Module):
                  ):
         super().__init__()
         self.config = config
-        self.linear_method = linear_method
+        self.padding_idx = config.pad_token_id
+        lora_vocab = (lora_config.lora_extra_vocab_size *
+                      (lora_config.max_loras or 1)) if lora_config else 0
+        self.vocab_size = config.vocab_size + lora_vocab
+        self.org_vocab_size = config.vocab_size
+
+        self.embed_tokens = VocabParallelEmbedding(
+            self.vocab_size,
+            config.hidden_size,
+            org_num_embeddings=config.vocab_size,
+        )
 
         self.load_model(model_name, colbert_dim=colbert_dim)
-        print("loading")
         self.vocab_size = self.model.config.vocab_size
         self.cross_entropy = nn.CrossEntropyLoss(reduction='mean')
         self.unified_finetuning = unified_finetuning
@@ -112,7 +121,6 @@ class BGEM3Model(nn.Module):
             self.world_size = dist.get_world_size()
 
     def load_model(self, model_name, colbert_dim: int = -1):
-        print(model_name)
         if not os.path.exists(model_name):
             cache_folder = os.getenv('HF_HUB_CACHE')
             model_name = snapshot_download(repo_id=model_name,
@@ -134,8 +142,6 @@ class BGEM3Model(nn.Module):
             print(
                 'The parameters of colbert_linear and sparse linear is new initialize. Make sure the model is loaded for training, not inferencing')
 
-    def gradient_checkpointing_enable(self, **kwargs):
-        self.model.gradient_checkpointing_enable(**kwargs)
 
     def dense_embedding(self, hidden_state, mask):
         if self.sentence_pooling_method == 'cls':
@@ -251,112 +257,101 @@ class BGEM3Model(nn.Module):
                                  value=torch.finfo(student_scores.dtype).min)
         return loss
 
+    def forward(self, query: Dict[str, Tensor] = None, passage: Dict[str, Tensor] = None, teacher_scores: Tensor = None,
+                bi_directions=None):
+        if self.enable_sub_batch:
+            q_dense_vecs, q_sparse_vecs, q_colbert_vecs = self.encode(query,
+                                                                      sub_batch_size=self.compute_sub_batch_size(query))
+            p_dense_vecs, p_sparse_vecs, p_colbert_vecs = self.encode(passage,
+                                                                      sub_batch_size=self.compute_sub_batch_size(
+                                                                          passage))
+        else:
+            q_dense_vecs, q_sparse_vecs, q_colbert_vecs = self.encode(query)
+            p_dense_vecs, p_sparse_vecs, p_colbert_vecs = self.encode(passage)
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[KVCache],
-        input_metadata: InputMetadata,
-    ) -> torch.Tensor:
-        print("return some tensor lmaooo")
-        return self.encode()
+        if self.training:
+            if teacher_scores is not None:
+                # print("Use soft-label distillation...")
+                teacher_targets = F.softmax(teacher_scores, dim=-1)  # B N
+                group_size = p_sparse_vecs.size(0) // q_sparse_vecs.size(0)
 
-    # def forward(self, query: Dict[str, Tensor] = None, passage: Dict[str, Tensor] = None, teacher_scores: Tensor = None,
-    #             bi_directions=None):
-    #     if self.enable_sub_batch:
-    #         q_dense_vecs, q_sparse_vecs, q_colbert_vecs = self.encode(query,
-    #                                                                   sub_batch_size=self.compute_sub_batch_size(query))
-    #         p_dense_vecs, p_sparse_vecs, p_colbert_vecs = self.encode(passage,
-    #                                                                   sub_batch_size=self.compute_sub_batch_size(
-    #                                                                       passage))
-    #     else:
-    #         q_dense_vecs, q_sparse_vecs, q_colbert_vecs = self.encode(query)
-    #         p_dense_vecs, p_sparse_vecs, p_colbert_vecs = self.encode(passage)
+                # dense loss
+                dense_scores = self.dense_score(q_dense_vecs, p_dense_vecs)  # B, B * N
+                if self.negatives_cross_device:
+                    cross_q_dense_vecs = self._dist_gather_tensor(q_dense_vecs)
+                    cross_p_dense_vecs = self._dist_gather_tensor(p_dense_vecs)
+                    cross_teacher_targets = self._dist_gather_tensor(teacher_targets)
+                    cross_dense_scores = self.dense_score(cross_q_dense_vecs, cross_p_dense_vecs)
 
-    #     if self.training:
-    #         if teacher_scores is not None:
-    #             # print("Use soft-label distillation...")
-    #             teacher_targets = F.softmax(teacher_scores, dim=-1)  # B N
-    #             group_size = p_sparse_vecs.size(0) // q_sparse_vecs.size(0)
+                    loss = self.distill_loss(cross_teacher_targets, cross_dense_scores, group_size=group_size)
+                else:
+                    loss = self.distill_loss(teacher_targets, dense_scores, group_size=group_size)
 
-    #             # dense loss
-    #             dense_scores = self.dense_score(q_dense_vecs, p_dense_vecs)  # B, B * N
-    #             if self.negatives_cross_device:
-    #                 cross_q_dense_vecs = self._dist_gather_tensor(q_dense_vecs)
-    #                 cross_p_dense_vecs = self._dist_gather_tensor(p_dense_vecs)
-    #                 cross_teacher_targets = self._dist_gather_tensor(teacher_targets)
-    #                 cross_dense_scores = self.dense_score(cross_q_dense_vecs, cross_p_dense_vecs)
+                if self.unified_finetuning:
+                    # sparse and colbert loss
+                    sparse_scores = self.sparse_score(q_sparse_vecs, p_sparse_vecs)  # B, B * N
+                    sparse_loss = self.distill_loss(teacher_targets, sparse_scores, group_size=group_size)
 
-    #                 loss = self.distill_loss(cross_teacher_targets, cross_dense_scores, group_size=group_size)
-    #             else:
-    #                 loss = self.distill_loss(teacher_targets, dense_scores, group_size=group_size)
+                    colbert_scores = self.colbert_score(q_colbert_vecs, p_colbert_vecs,
+                                                        q_mask=query['attention_mask'])  # B, B * N
+                    colbert_loss = self.distill_loss(teacher_targets, colbert_scores, group_size=group_size)
 
-    #             if self.unified_finetuning:
-    #                 # sparse and colbert loss
-    #                 sparse_scores = self.sparse_score(q_sparse_vecs, p_sparse_vecs)  # B, B * N
-    #                 sparse_loss = self.distill_loss(teacher_targets, sparse_scores, group_size=group_size)
-
-    #                 colbert_scores = self.colbert_score(q_colbert_vecs, p_colbert_vecs,
-    #                                                     q_mask=query['attention_mask'])  # B, B * N
-    #                 colbert_loss = self.distill_loss(teacher_targets, colbert_scores, group_size=group_size)
-
-    #                 ensemble_loss = self.distill_loss(teacher_targets,
-    #                                                   dense_scores + 0.3 * sparse_scores + colbert_scores,
-    #                                                   group_size=group_size)
-    #                 loss = (loss + ensemble_loss + 0.1 * sparse_loss + colbert_loss) / 4
+                    ensemble_loss = self.distill_loss(teacher_targets,
+                                                      dense_scores + 0.3 * sparse_scores + colbert_scores,
+                                                      group_size=group_size)
+                    loss = (loss + ensemble_loss + 0.1 * sparse_loss + colbert_loss) / 4
 
 
-    #         else:
-    #             idxs = torch.arange(q_dense_vecs.size(0), device=q_dense_vecs.device, dtype=torch.long)
+            else:
+                idxs = torch.arange(q_dense_vecs.size(0), device=q_dense_vecs.device, dtype=torch.long)
 
-    #             # dense loss
-    #             dense_scores = self.dense_score(q_dense_vecs, p_dense_vecs)  # B, B * N
-    #             if self.negatives_cross_device:
-    #                 cross_q_dense_vecs = self._dist_gather_tensor(q_dense_vecs)
-    #                 cross_p_dense_vecs = self._dist_gather_tensor(p_dense_vecs)
+                # dense loss
+                dense_scores = self.dense_score(q_dense_vecs, p_dense_vecs)  # B, B * N
+                if self.negatives_cross_device:
+                    cross_q_dense_vecs = self._dist_gather_tensor(q_dense_vecs)
+                    cross_p_dense_vecs = self._dist_gather_tensor(p_dense_vecs)
 
-    #                 idxs = torch.arange(cross_q_dense_vecs.size(0), device=cross_q_dense_vecs.device, dtype=torch.long)
+                    idxs = torch.arange(cross_q_dense_vecs.size(0), device=cross_q_dense_vecs.device, dtype=torch.long)
 
-    #                 cross_targets = idxs * (cross_p_dense_vecs.size(0) // cross_q_dense_vecs.size(0))
-    #                 cross_dense_scores = self.dense_score(cross_q_dense_vecs, cross_p_dense_vecs)
+                    cross_targets = idxs * (cross_p_dense_vecs.size(0) // cross_q_dense_vecs.size(0))
+                    cross_dense_scores = self.dense_score(cross_q_dense_vecs, cross_p_dense_vecs)
 
-    #                 loss = self.compute_loss(cross_dense_scores, cross_targets)
-    #             else:
-    #                 loss = self.compute_loss(dense_scores, targets)
+                    loss = self.compute_loss(cross_dense_scores, cross_targets)
+                else:
+                    loss = self.compute_loss(dense_scores, targets)
 
-    #             if self.unified_finetuning:
-    #                 # sparse and colbert loss
-    #                 targets = idxs * (p_sparse_vecs.size(0) // q_sparse_vecs.size(0))
+                if self.unified_finetuning:
+                    # sparse and colbert loss
+                    targets = idxs * (p_sparse_vecs.size(0) // q_sparse_vecs.size(0))
 
-    #                 sparse_scores = self.sparse_score(q_sparse_vecs, p_sparse_vecs)  # B, B * N
-    #                 sparse_loss = self.compute_loss(sparse_scores, targets)
+                    sparse_scores = self.sparse_score(q_sparse_vecs, p_sparse_vecs)  # B, B * N
+                    sparse_loss = self.compute_loss(sparse_scores, targets)
 
-    #                 colbert_scores = self.colbert_score(q_colbert_vecs, p_colbert_vecs,
-    #                                                     q_mask=query['attention_mask'])  # B, B * N
-    #                 colbert_loss = self.compute_loss(colbert_scores, targets)
+                    colbert_scores = self.colbert_score(q_colbert_vecs, p_colbert_vecs,
+                                                        q_mask=query['attention_mask'])  # B, B * N
+                    colbert_loss = self.compute_loss(colbert_scores, targets)
 
-    #                 ensemble_loss = self.compute_loss(dense_scores + 0.3 * sparse_scores + colbert_scores, targets)
-    #                 loss = (loss + ensemble_loss + 0.1 * sparse_loss + colbert_loss) / 4
+                    ensemble_loss = self.compute_loss(dense_scores + 0.3 * sparse_scores + colbert_scores, targets)
+                    loss = (loss + ensemble_loss + 0.1 * sparse_loss + colbert_loss) / 4
 
-    #         if self.use_self_distill and self.step > self.ensemble_distill_start_step and self.unified_finetuning:
-    #             ensemble_scores = dense_scores + 0.3 * sparse_scores + colbert_scores
-    #             teacher_targets = torch.softmax(ensemble_scores.detach(), dim=-1)
-    #             ensemble_distill_dense_loss = - torch.mean(
-    #                 torch.sum(torch.log_softmax(dense_scores, dim=-1) * teacher_targets, dim=-1))
-    #             ensemble_distill_sparse_loss = - torch.mean(
-    #                 torch.sum(torch.log_softmax(sparse_scores, dim=-1) * teacher_targets, dim=-1))
-    #             ensemble_distill_colbert_loss = - torch.mean(
-    #                 torch.sum(torch.log_softmax(colbert_scores, dim=-1) * teacher_targets, dim=-1))
-    #             loss += (
-    #                                 ensemble_distill_dense_loss + 0.1 * ensemble_distill_sparse_loss + ensemble_distill_colbert_loss) / 3
-    #             loss = loss / 2
-    #         self.step += 1
-    #     else:
-    #         loss = None
-    #     return EncoderOutput(
-    #         loss=loss,
-    #     )
+            if self.use_self_distill and self.step > self.ensemble_distill_start_step and self.unified_finetuning:
+                ensemble_scores = dense_scores + 0.3 * sparse_scores + colbert_scores
+                teacher_targets = torch.softmax(ensemble_scores.detach(), dim=-1)
+                ensemble_distill_dense_loss = - torch.mean(
+                    torch.sum(torch.log_softmax(dense_scores, dim=-1) * teacher_targets, dim=-1))
+                ensemble_distill_sparse_loss = - torch.mean(
+                    torch.sum(torch.log_softmax(sparse_scores, dim=-1) * teacher_targets, dim=-1))
+                ensemble_distill_colbert_loss = - torch.mean(
+                    torch.sum(torch.log_softmax(colbert_scores, dim=-1) * teacher_targets, dim=-1))
+                loss += (
+                                    ensemble_distill_dense_loss + 0.1 * ensemble_distill_sparse_loss + ensemble_distill_colbert_loss) / 3
+                loss = loss / 2
+            self.step += 1
+        else:
+            loss = None
+        return EncoderOutput(
+            loss=loss,
+        )
 
     def compute_loss(self, scores, target):
         return self.cross_entropy(scores, target)
@@ -396,35 +391,33 @@ class BGEM3Model(nn.Module):
 
 class BGEM3ForInference(BGEM3Model):
 
-    # def forward(self,
-    #             text_input: Dict[str, Tensor] = None,
-    #             return_dense: bool = True,
-    #             return_sparse: bool = False,
-    #             return_colbert: bool = False,
-    #             return_sparse_embedding: bool = False):
-    #     assert return_dense or return_sparse or return_colbert, 'Must choose one or more from `return_colbert`, `return_sparse`, `return_dense` to set `True`!'
-    #     print("called inference\n\n")
-    #     last_hidden_state = self.model(**text_input, return_dict=True).last_hidden_state
+    def forward2(self,
+                text_input: Dict[str, Tensor] = None,
+                return_dense: bool = True,
+                return_sparse: bool = False,
+                return_colbert: bool = False,
+                return_sparse_embedding: bool = False):
+                assert return_dense or return_sparse or return_colbert, 'Must choose one or more from `return_colbert`, `return_sparse`, `return_dense` to set `True`!'
+                last_hidden_state = self.model(**text_input, return_dict=True).last_hidden_state
+                output = {}
+                if return_dense:
+                    dense_vecs = self.dense_embedding(last_hidden_state, text_input['attention_mask'])
+                    output['dense_vecs'] = dense_vecs
+                if return_sparse:
+                    sparse_vecs = self.sparse_embedding(last_hidden_state, text_input['input_ids'],
+                                                        return_embedding=return_sparse_embedding)
+                    output['sparse_vecs'] = sparse_vecs
+                if return_colbert:
+                    colbert_vecs = self.colbert_embedding(last_hidden_state, text_input['attention_mask'])
+                    output['colbert_vecs'] = colbert_vecs
 
-    #     output = {}
-    #     if return_dense:
-    #         dense_vecs = self.dense_embedding(last_hidden_state, text_input['attention_mask'])
-    #         output['dense_vecs'] = dense_vecs
-    #     if return_sparse:
-    #         sparse_vecs = self.sparse_embedding(last_hidden_state, text_input['input_ids'],
-    #                                             return_embedding=return_sparse_embedding)
-    #         output['sparse_vecs'] = sparse_vecs
-    #     if return_colbert:
-    #         colbert_vecs = self.colbert_embedding(last_hidden_state, text_input['attention_mask'])
-    #         output['colbert_vecs'] = colbert_vecs
+                if self.normlized:
+                    if 'dense_vecs' in output:
+                        output['dense_vecs'] = torch.nn.functional.normalize(output['dense_vecs'], dim=-1)
+                    if 'colbert_vecs' in output:
+                        output['colbert_vecs'] = torch.nn.functional.normalize(output['colbert_vecs'], dim=-1)
 
-    #     if self.normlized:
-    #         if 'dense_vecs' in output:
-    #             output['dense_vecs'] = torch.nn.functional.normalize(output['dense_vecs'], dim=-1)
-    #         if 'colbert_vecs' in output:
-    #             output['colbert_vecs'] = torch.nn.functional.normalize(output['colbert_vecs'], dim=-1)
-
-    #     return output
+                return output
 
     def forward(
         self,
@@ -432,17 +425,42 @@ class BGEM3ForInference(BGEM3Model):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
+        batch_size: int = 12,
+        max_length: int = 8192,
+        return_dense: bool = True,
+        return_sparse: bool = False,
+        return_colbert_vecs: bool = False,
     ) -> torch.Tensor:
-        # print("input meta", input_metadata)
+        sentences = []
+        for i in input_metadata.prompt_dict.keys():
+            sentences.append(input_metadata.prompt_dict[i])
+        if(len(sentences)==0) :
+            return -1
 
-        return None
+        tensor_list = []
+        for start_index in tqdm(range(0, len(sentences), batch_size), desc="Inference Embeddings",
+                                    disable=len(sentences) < 256):
+                sentences_batch = sentences[start_index:start_index + batch_size]
+                batch_data = self.tokenizer(
+                    sentences_batch,
+                    padding=True,
+                    truncation=True,
+                    return_tensors='pt',
+                    max_length=max_length,
+                ).to(self.device)
+                output = self.forward2(batch_data,
+                                return_dense=return_dense,
+                                return_sparse=return_sparse,
+                                return_colbert=return_colbert_vecs)
+                tensor_list.append(output['dense_vecs'])
+        return torch.cat(tensor_list, dim=0)
 
     def sample(
         self,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        return None
+        return hidden_states
 
 
 def _transform_func(examples: Dict[str, List],
@@ -458,7 +476,7 @@ def _transform_func(examples: Dict[str, List],
     return inputs
 
 
-class BGEM3FlagModel:
+class BGEM3FlagForCausalLM:
 
 
     def __init__(
@@ -472,8 +490,6 @@ class BGEM3FlagModel:
             use_fp16: bool = True,
             device: str = None
     ) -> None:
-        print("start")
-        ##need to init self, and other thing
         self.model = BGEM3ForInference(
             config = config,
             linear_method = linear_method,
@@ -484,7 +500,7 @@ class BGEM3FlagModel:
         )
         self.config = config
         self.linear_method = linear_method
-        print("done")
+        
         self.tokenizer = self.model.tokenizer
         if device:
             self.device = torch.device(device)
@@ -496,9 +512,9 @@ class BGEM3FlagModel:
             else:
                 self.device = torch.device("cpu")
                 use_fp16 = False
-        print("here?")
         if use_fp16: self.model.half()
         self.model = self.model.to(self.device)
+        self.model.device = self.device
 
         if device is None:
             self.num_gpus = torch.cuda.device_count()
@@ -510,15 +526,6 @@ class BGEM3FlagModel:
 
         self.model.eval()
 
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        kv_cache: KVCache,
-        input_metadata: InputMetadata,
-        residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        return -1
 
     def load_weights(self,
                      model_name_or_path: str,
@@ -527,28 +534,6 @@ class BGEM3FlagModel:
                      revision: Optional[str] = None,
                      colbert_dim: int = -1):
             return
-        # print(model_name_or_path)
-        # print("done done")
-        # if not os.path.exists(model_name_or_path):
-        #     cache_folder = os.getenv('HF_HUB_CACHE')
-        #     model_name_or_path = snapshot_download(repo_id=model_name_or_path,
-        #                                    cache_dir=cache_folder,
-        #                                    ignore_patterns=['flax_model.msgpack', 'rust_model.ot', 'tf_model.h5'])
-
-        # self.model = AutoModel.from_pretrained(model_name_or_path)
-        # self.tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
-
-        # self.colbert_linear = torch.nn.Linear(in_features=self.model.config.hidden_size,
-        #                                       out_features=self.model.config.hidden_size if colbert_dim == -1 else colbert_dim)
-        # self.sparse_linear = torch.nn.Linear(in_features=self.model.config.hidden_size, out_features=1)
-
-        # if os.path.exists(os.path.join(model_name_or_path, 'colbert_linear.pt')) and os.path.exists(
-        #         os.path.join(model_name_or_path, 'sparse_linear.pt')):
-        #     print('loading existing colbert_linear and sparse_linear---------')
-        #     self.load_pooler(model_dir=model_name_or_path)
-        # else:
-        #     print(
-        #         'The parameters of colbert_linear and sparse linear is new initialize. Make sure the model is loaded for training, not inferencing')
 
     def load_pooler(self, model_dir):
         colbert_state_dict = torch.load(os.path.join(model_dir, 'colbert_linear.pt'), map_location='cpu')
@@ -597,7 +582,6 @@ class BGEM3FlagModel:
                return_dense: bool = True,
                return_sparse: bool = False,
                return_colbert_vecs: bool = False) -> Dict:
-        print("flag model encode")
         if self.num_gpus > 1:
             batch_size *= self.num_gpus
         self.model.eval()
