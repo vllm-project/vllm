@@ -3,6 +3,7 @@ from itertools import chain, count
 from functools import cached_property
 import logging
 import time
+from dataclasses import dataclass
 
 #import msgspec
 import torch
@@ -34,6 +35,100 @@ TokenId = int
 
 logger = logging.getLogger(__name__)
 
+"""
+Run spec step (ExecuteModelData -> AcceptedTokens)
+- get proposals (ExecuteModelData -> Top1Proposals)
+- score proposals ((ExecuteModelData, Top1Proposals) -> Top1Scores)
+- verify proposals ((ExecuteModelData, Top1Proposals, Top1Scores) -> AcceptedTokens)
+
+Missing pieces:
+- get_proposals in DraftTargetWorker --> currently all mocked
+- Tests cover vertical functionality.
+
+I can start by writing get_proposals without batch expansion, write tests.
+Then abstract out score proposals batch expansion. Move tests over to batch expander.
+Then abstract out Top1Scores and rejection sampler interface. Fix tests.
+
+
+"""
+
+@dataclass
+class Top1Proposals:
+    proposal_token_ids: torch.Tensor
+    proposal_token_probs: torch.Tensor
+
+    # not sure
+    proposal_lens: torch.Tensor
+
+@dataclass
+class Top1Scores:
+    # TODO: how to represent bonus token ?
+    # current thinking ->
+    #   always have bonus token such that num_scored_tokens == k+1.
+    token_probs: torch.Tensor
+
+@dataclass
+class AcceptedTokens:
+    accepted_tokens: torch.Tensor
+    logprobs: torch.Tensor
+
+class Top1ProposerWorker:
+
+    def init_model(self):
+        pass
+        # etc.
+
+    def get_proposals(
+        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        blocks_to_swap_in: Optional[Dict[int, int]],
+        blocks_to_swap_out: Optional[Dict[int, int]],
+        blocks_to_copy: Optional[Dict[int, List[int]]],
+        num_spec_tokens: int,
+    ) -> Top1Proposals:
+        """
+        - determine k
+        - drop k=0
+        - fwd pass
+        - create output
+        """
+        pass
+
+class Top1ScorerWorker:
+    def init_model(self):
+        pass
+        # etc.
+
+    def score_proposals(
+        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        blocks_to_swap_in: Optional[Dict[int, int]],
+        blocks_to_swap_out: Optional[Dict[int, int]],
+        blocks_to_copy: Optional[Dict[int, List[int]]],
+        num_spec_tokens: int,
+        proposals: Top1Proposals,
+    ) -> Top1Scores:
+        """
+        - extract k=0
+        - batch expand k>0
+        - combine
+        - fwd pass
+        - batch contract
+        """
+        pass
+
+class Top1Verifier:
+    def init_gpu_tensors(self):
+        pass
+
+    def verify_proposals(
+        #seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        #blocks_to_swap_in: Optional[Dict[int, int]],
+        #blocks_to_swap_out: Optional[Dict[int, int]],
+        #blocks_to_copy: Optional[Dict[int, List[int]]],
+        #num_spec_tokens: int,
+        proposals: Top1Proposals,
+        scores: Top1Scores,
+    ) -> AcceptedTokens:
+        pass
 
 class DraftTargetWorker:
 
