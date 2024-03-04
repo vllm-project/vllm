@@ -248,7 +248,8 @@ def hf_model_weights_iterator(
             yield name, torch.from_numpy(param)
     elif use_safetensors:
         for st_file in hf_weights_files:
-            with safe_open(st_file, framework="pt") as f:
+            device_type = "cuda" if torch.cuda.is_available() else "cpu"
+            with safe_open(st_file, framework="pt", device=device_type) as f:
                 for name in f.keys():  # noqa: SIM118
                     param = f.get_tensor(name)
                     yield name, param
