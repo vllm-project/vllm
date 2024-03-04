@@ -980,158 +980,157 @@ def test_multi_query_kv_attention(
     assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
 
 
-@pytest.mark.parametrize("num_heads", [40])
-@pytest.mark.parametrize("head_size", [64])
-@pytest.mark.parametrize("block_size", [32])
-@pytest.mark.parametrize("num_blocks", [128])
-@pytest.mark.parametrize("dtype", [torch.half])
-@pytest.mark.parametrize("seed", SEEDS)
-@torch.inference_mode()
-def test_e2e(
-    kv_cache_factory,
-    num_heads: int,
-    head_size: int,
-    block_size: int,
-    num_blocks: int,
-    dtype: torch.dtype,
-    seed: int,
-) -> None:
-    from vllm._C import cache_ops
-    batch_size = 2
-    seqlen = 29
-    num_tokens = batch_size * seqlen
-    random.seed(seed)
-    torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+# @pytest.mark.parametrize("num_heads", [40])
+# @pytest.mark.parametrize("head_size", [64])
+# @pytest.mark.parametrize("block_size", [32])
+# @pytest.mark.parametrize("num_blocks", [128])
+# @pytest.mark.parametrize("dtype", [torch.half])
+# @pytest.mark.parametrize("seed", SEEDS)
+# @torch.inference_mode()
+# def test_e2e(
+#     kv_cache_factory,
+#     num_heads: int,
+#     head_size: int,
+#     block_size: int,
+#     num_blocks: int,
+#     dtype: torch.dtype,
+#     seed: int,
+# ) -> None:
+#     from vllm._C import cache_ops
+#     batch_size = 2
+#     seqlen = 29
+#     num_tokens = batch_size * seqlen
+#     random.seed(seed)
+#     torch.random.manual_seed(seed)
+#     torch.cuda.manual_seed(seed)
 
-    block_tables = []
-    for _ in range(batch_size):
-        block_table = [
-            random.randint(0, NUM_BLOCKS - 1)
-        ]
-        block_tables.append(block_table)
-    block_tables = torch.tensor(block_tables, dtype=torch.int, device="cuda")
-    # Create a random slot mapping.
-    slot_mapping = []
-    for i in range(0, 29):
-        block_number = int(block_tables[i // block_size])
-        block_offset = i % block_size
-        slot = block_number * block_size + block_offset
-        slot_mapping.append(slot)
-    # for _ in range(23, 29):
-    #     slot_mapping.append(-1)
-    for i in range(0, 29):
-        block_number = int(block_tables[1])
-        block_offset = i % block_size
-        slot = block_number * block_size + block_offset
-        slot_mapping.append(slot)
-    # slot_mapping = random.sample(range(num_slots), num_tokens)
-    slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device='cuda')
+#     block_tables = []
+#     for _ in range(batch_size):
+#         block_table = [
+#             random.randint(0, NUM_BLOCKS - 1)
+#         ]
+#         block_tables.append(block_table)
+#     block_tables = torch.tensor(block_tables, dtype=torch.int, device="cuda")
+#     # Create a random slot mapping.
+#     slot_mapping = []
+#     for i in range(0, 29):
+#         block_number = int(block_tables[i // block_size])
+#         block_offset = i % block_size
+#         slot = block_number * block_size + block_offset
+#         slot_mapping.append(slot)
+#     # for _ in range(23, 29):
+#     #     slot_mapping.append(-1)
+#     for i in range(0, 29):
+#         block_number = int(block_tables[1])
+#         block_offset = i % block_size
+#         slot = block_number * block_size + block_offset
+#         slot_mapping.append(slot)
+#     # slot_mapping = random.sample(range(num_slots), num_tokens)
+#     slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device='cuda')
 
-    qkv = torch.randn(num_tokens,
-                      3,
-                      num_heads,
-                      head_size,
-                      dtype=dtype,
-                      device='cuda')
-    query, key, value = qkv.unbind(dim=1)
-    # query[23:29] = 0
-    # key[23:29] = 0
-    # value[23:29] = 0
-    # Create the KV caches.
+#     qkv = torch.randn(num_tokens,
+#                       3,
+#                       num_heads,
+#                       head_size,
+#                       dtype=dtype,
+#                       device='cuda')
+#     query, key, value = qkv.unbind(dim=1)
+#     # query[23:29] = 0
+#     # key[23:29] = 0
+#     # value[23:29] = 0
+#     # Create the KV caches.
 
-    key_caches, value_caches = kv_cache_factory(num_blocks,
-                                                block_size,
-                                                1,
-                                                num_heads,
-                                                head_size,
-                                                dtype,
-                                                seed,
-                                                flash_style=True)
-    assert len(key_caches) == 1 and len(value_caches) == 1
-    key_cache, value_cache = key_caches[0], value_caches[0]
-    # Call the reshape_and_cache kernel.
-    cache_ops.reshape_and_cache_flash(key, value, key_cache, value_cache,
-                                      slot_mapping)
+#     key_caches, value_caches = kv_cache_factory(num_blocks,
+#                                                 block_size,
+#                                                 1,
+#                                                 num_heads,
+#                                                 head_size,
+#                                                 dtype,
+#                                                 seed,
+#                                                 flash_style=True)
+#     assert len(key_caches) == 1 and len(value_caches) == 1
+#     key_cache, value_cache = key_caches[0], value_caches[0]
+#     # Call the reshape_and_cache kernel.
+#     cache_ops.reshape_and_cache_flash(key, value, key_cache, value_cache,
+#                                       slot_mapping)
     
-    cloned_key_cache = key_cache.clone()
-    cloned_value_cache = value_cache.clone()
+#     cloned_key_cache = key_cache.clone()
+#     cloned_value_cache = value_cache.clone()
 
-    # Run the reference implementation.
-    block_indicies = torch.div(slot_mapping, block_size, rounding_mode='floor')
-    block_indicies = block_indicies.cpu().tolist()
-    block_offsets = slot_mapping % block_size
-    block_offsets = block_offsets.cpu().tolist()
-    for i in range(num_tokens):
-        block_idx = block_indicies[i]
-        block_offset = block_offsets[i]
-        print("block_idx", block_idx)
-        print("block_offset", block_offset)
-        if block_idx != -1:
-            cloned_key_cache[block_idx, block_offset, :, :] = key[i]
-            cloned_value_cache[block_idx, block_offset, :, :] = value[i]
-    assert torch.allclose(key_cache, cloned_key_cache)
-    assert torch.allclose(value_cache, cloned_value_cache)
+#     # Run the reference implementation.
+#     block_indicies = torch.div(slot_mapping, block_size, rounding_mode='floor')
+#     block_indicies = block_indicies.cpu().tolist()
+#     block_offsets = slot_mapping % block_size
+#     block_offsets = block_offsets.cpu().tolist()
+#     for i in range(num_tokens):
+#         block_idx = block_indicies[i]
+#         block_offset = block_offsets[i]
+#         print("block_idx", block_idx)
+#         print("block_offset", block_offset)
+#         if block_idx != -1:
+#             cloned_key_cache[block_idx, block_offset, :, :] = key[i]
+#             cloned_value_cache[block_idx, block_offset, :, :] = value[i]
+#     assert torch.allclose(key_cache, cloned_key_cache)
+#     assert torch.allclose(value_cache, cloned_value_cache)
 
-    for i in range(58):
-        print(i)
-        block_idx = block_indicies[i]
-        block_offset = block_offsets[i]
-        torch.allclose(key[i], key_cache[block_idx][block_offset])
+#     for i in range(58):
+#         print(i)
+#         block_idx = block_indicies[i]
+#         block_offset = block_offsets[i]
+#         torch.allclose(key[i], key_cache[block_idx][block_offset])
 
-    from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
-    from xformers import ops as xops
-    seqlen = query.shape[1]
-    attn_bias = BlockDiagonalCausalMask.from_seqlens(
-                                [seqlen] * batch_size)
-    scale = float(1.0 / (head_size**0.5))
-    output = xops.memory_efficient_attention_forward(
-        query.unsqueeze(0),
-        key.unsqueeze(0),
-        value.unsqueeze(0),
-        attn_bias=None,
-        p=0.0,
-        scale=scale,
-    )
+#     from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
+#     from xformers import ops as xops
+#     seqlen = query.shape[1]
+#     attn_bias = BlockDiagonalCausalMask.from_seqlens(
+#                                 [seqlen] * batch_size)
+#     scale = float(1.0 / (head_size**0.5))
+#     output = xops.memory_efficient_attention_forward(
+#         query.unsqueeze(0),
+#         key.unsqueeze(0),
+#         value.unsqueeze(0),
+#         attn_bias=None,
+#         p=0.0,
+#         scale=scale,
+#     )
 
-    num_tokens, num_heads, head_size = query.shape
-    from flash_attn import flash_attn_func
-    output1 = flash_single_query_cached_kv_attention(
-        None,
-        query.view(batch_size, num_tokens // batch_size, num_heads, head_size),
-        key_cache,
-        value_cache,
-        scale,
-        block_tables,
-        torch.tensor([23, 29], dtype=torch.int, device='cuda'),
-        alibi_slopes=None,
-    )
-    output2 = flash_attn_func(
-        # query.view(batch_size, num_tokens // batch_size, num_heads, head_size),
-        # key.view(batch_size, num_tokens // batch_size, num_heads, head_size),
-        # value.view(batch_size, num_tokens // batch_size, num_heads, head_size),
-        query.unsqueeze(0),
-        key.unsqueeze(0),
-        value.unsqueeze(0),
-        # key_cache,
-        # value_cache,
-        softmax_scale=scale,
-        # block_tables,
-        # torch.tensor([23, 29], dtype=torch.int, device='cuda'),
-        # alibi_slopes=None,
-        causal=True,
-    )
-    output3 = flash_attn_func(
-        query.view(batch_size, num_tokens // batch_size, num_heads, head_size),
-        key.view(batch_size, num_tokens // batch_size, num_heads, head_size),
-        value.view(batch_size, num_tokens // batch_size, num_heads, head_size),
-        # key_cache,
-        # value_cache,
-        softmax_scale=scale,
-        # block_tables,
-        # torch.tensor([23, 29], dtype=torch.int, device='cuda'),
-        # alibi_slopes=None,
-        causal=True,
-    )
+#     num_tokens, num_heads, head_size = query.shape
+#     from flash_attn import flash_attn_func
+#     output1 = flash_single_query_cached_kv_attention(
+#         None,
+#         query.view(batch_size, num_tokens // batch_size, num_heads, head_size),
+#         key_cache,
+#         value_cache,
+#         scale,
+#         block_tables,
+#         torch.tensor([23, 29], dtype=torch.int, device='cuda'),
+#         alibi_slopes=None,
+#     )
+#     output2 = flash_attn_func(
+#         # query.view(batch_size, num_tokens // batch_size, num_heads, head_size),
+#         # key.view(batch_size, num_tokens // batch_size, num_heads, head_size),
+#         # value.view(batch_size, num_tokens // batch_size, num_heads, head_size),
+#         query.unsqueeze(0),
+#         key.unsqueeze(0),
+#         value.unsqueeze(0),
+#         # key_cache,
+#         # value_cache,
+#         softmax_scale=scale,
+#         # block_tables,
+#         # torch.tensor([23, 29], dtype=torch.int, device='cuda'),
+#         # alibi_slopes=None,
+#         causal=True,
+#     )
+#     output3 = flash_attn_func(
+#         query.view(batch_size, num_tokens // batch_size, num_heads, head_size),
+#         key.view(batch_size, num_tokens // batch_size, num_heads, head_size),
+#         value.view(batch_size, num_tokens // batch_size, num_heads, head_size),
+#         # key_cache,
+#         # value_cache,
+#         softmax_scale=scale,
+#         # block_tables,
+#         # torch.tensor([23, 29], dtype=torch.int, device='cuda'),
+#         # alibi_slopes=None,
+#         causal=True,
+#     )
 
-    breakpoint()

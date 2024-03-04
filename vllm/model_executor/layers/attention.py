@@ -231,34 +231,32 @@ class PagedAttention(nn.Module):
                     (is_hip()) else None,
                 )
                 output = out.view_as(query)
-                if key_cache is not None and value_cache is not None:
-                    output2 = flash_single_query_cached_kv_attention(
-                        None,
-                        query.view(batch_size, seq_len, self.num_heads, self.head_size),
-                        key_cache,
-                        value_cache,
-                        self.scale,
-                        input_metadata.block_tables,
-                        input_metadata.context_lens,
-                        alibi_slopes=self.alibi_slopes,
-                    )
-                output3 = flash_attn_func(
-                        query.view(batch_size, seq_len, self.num_heads, self.head_size),
-                        key.view(batch_size, seq_len, self.num_heads, self.head_size),
-                        value.view(batch_size, seq_len, self.num_heads, self.head_size),
-                        softmax_scale=self.scale,
-                        causal=True,
-                    ).view_as(query)
-                output4 = flash_attn_func(
-                        query,
-                        key,
-                        value,
-                        softmax_scale=self.scale,
-                        causal=True,
-                    ).view_as(query)
-                breakpoint()
+                # if key_cache is not None and value_cache is not None:
+                #     output2 = flash_single_query_cached_kv_attention(
+                #         None,
+                #         query.view(batch_size, seq_len, self.num_heads, self.head_size),
+                #         key_cache,
+                #         value_cache,
+                #         self.scale,
+                #         input_metadata.block_tables,
+                #         input_metadata.context_lens,
+                #         alibi_slopes=self.alibi_slopes,
+                #     )
+                # output3 = flash_attn_func(
+                #         query.view(batch_size, seq_len, self.num_heads, self.head_size),
+                #         key.view(batch_size, seq_len, self.num_heads, self.head_size),
+                #         value.view(batch_size, seq_len, self.num_heads, self.head_size),
+                #         softmax_scale=self.scale,
+                #         causal=True,
+                #     ).view_as(query)
+                # output4 = flash_attn_func(
+                #         query,
+                #         key,
+                #         value,
+                #         softmax_scale=self.scale,
+                #         causal=True,
+                #     ).view_as(query)
             # if key_cache is not None and value_cache is not None:
-            #     breakpoint()
             #     output2 = flash_attn_with_kvcache_paged(
             #         query.view(batch_size, seq_len, self.num_heads,
             #                     self.head_size),
@@ -269,7 +267,6 @@ class PagedAttention(nn.Module):
             #         input_metadata.context_lens,
             #         self.alibi_slopes,
             #     )
-            #     breakpoint()
             else:
                 if input_metadata.flash_style:
                     print("SANG-TODO flash prefill")
@@ -317,7 +314,6 @@ class PagedAttention(nn.Module):
 
         else:
             # Decoding run.
-            # breakpoint()
             if input_metadata.flash_style:
                 # output = flash_attn_with_kvcache_paged(
                 #     query.view(batch_size, seq_len, self.num_heads,
