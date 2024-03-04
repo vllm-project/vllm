@@ -116,7 +116,7 @@ class SamplingTensors:
             if not do_min_p and min_p > _SAMPLING_EPS:
                 do_min_p = True
             if do_quadratic is False and (smoothing_factor > _SAMPLING_EPS
-                                          or smoothing_curve > _SAMPLING_EPS):
+                                          or smoothing_curve > 1.0):
                 do_quadratic = True
             if not do_penalties and (abs(p) >= _SAMPLING_EPS
                                      or abs(f) >= _SAMPLING_EPS

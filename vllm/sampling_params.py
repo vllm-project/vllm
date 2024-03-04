@@ -200,8 +200,8 @@ class SamplingParams:
         if not self.smoothing_factor >= 0:
             raise ValueError(f"smoothing_factor must be non negative, got "
                              f"{self.smoothing_factor}.")
-        if not self.smoothing_factor >= 0:
-            raise ValueError(f"smoothing_curve must be non negative, got "
+        if not self.smoothing_curve >= 1.0:
+            raise ValueError(f"smoothing_curve must be greater than 1, got "
                              f"{self.smoothing_curve}.")
         if self.max_tokens is not None and self.max_tokens < 1:
             raise ValueError(
