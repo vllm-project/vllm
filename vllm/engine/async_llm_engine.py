@@ -32,16 +32,14 @@ def _raise_exception_on_finish(
     exception = None
     try:
         task.result()
-        # NOTE: This will be thrown is task exits normally (which it should not)
+        # NOTE: This will be thrown if task exits normally (which it should not)
         raise AsyncEngineDeadError(msg)
     except Exception as e:
         exception = e
         logger.error("Engine background task failed", exc_info=e)
+        error_callback(exception)
         raise AsyncEngineDeadError(
             msg + " See stack trace above for the actual cause.") from e
-    finally:
-        if exception:
-            error_callback(exception)
 
 
 class AsyncStream:
