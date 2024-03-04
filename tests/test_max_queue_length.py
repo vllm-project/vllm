@@ -1,10 +1,14 @@
 import pytest
 import argparse
 from typing import List, Tuple
+from vllm.logger import init_logger
 
 from vllm import EngineArgs, LLMEngine, SamplingParams, RequestOutput
 
+# init variables
 max_wait_q_len = 3
+
+logger = init_logger(__name__)
 
 class QueueOverflowError(Exception):
     pass
@@ -39,8 +43,9 @@ def process_requests(engine: LLMEngine,
             try:
                 engine.add_request(str(request_id), prompt, sampling_params)
             except ValueError as e:
-                # Clean up requests
-                for i in range(max_wait_q_len):
+                # Log error, cleanup, end test
+                logger.info(f"{e}")
+                for i in range(request_id):
                     engine.abort_request(str(i))
                 raise QueueOverflowError(f"Queue exceeded max length: {e}")
             request_id += 1
