@@ -335,7 +335,11 @@ class SamplingTensors:
         # TODO(yard1): make sure sequences in the same group with
         # best_of > 1 have different seeds (not trivial...)
         if not is_greedy:
-            generator = random.Random(str((seed, ) + extra_entropy))
+            if seed is None:
+                randint_fn = random.randint
+            else:
+                generator = random.Random(str((seed, ) + extra_entropy))
+                randint_fn = generator.randint
             lo, hi = torch.iinfo(torch.long).min, torch.iinfo(torch.long).max
             # If the user/random sets seed = 0 but request should
             # have sampling, we need to change it to something
@@ -344,7 +348,7 @@ class SamplingTensors:
             # matrix in the sampling kernel, which reduces CPU
             # overhead and latency.
             seq_seeds = [
-                generator.randint(lo, hi) or _SEED_0_REPLACEMENT
+                randint_fn(lo, hi) or _SEED_0_REPLACEMENT
                 for _ in range(seeds_to_generate)
             ]
         else:

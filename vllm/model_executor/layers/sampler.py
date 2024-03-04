@@ -114,9 +114,8 @@ class Sampler(nn.Module):
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
 
         # Sample the next tokens.
-        sample_results = _sample_with_triton_kernel(probs, logprobs,
-                                                    sampling_metadata,
-                                                    sampling_tensors)
+        sample_results = _sample(probs, logprobs, sampling_metadata,
+                                 sampling_tensors)
         # Get the logprobs query results.
         prompt_logprobs, sample_logprobs = _get_logprobs(
             logprobs, sampling_metadata, sample_results)
@@ -377,7 +376,7 @@ def _multinomial(
     return probs.div_(q).argmax(dim=1).view(-1, num_samples)
 
 
-def _sample(
+def _sample_old(
     probs: torch.Tensor,
     logprobs: torch.Tensor,
     sampling_metadata: SamplingMetadata,
@@ -527,6 +526,16 @@ def _sample_with_triton_kernel(
         for i in range(len(sampling_metadata.seq_groups))
     ]
     return sample_results
+
+
+def _sample(
+    probs: torch.Tensor,
+    logprobs: torch.Tensor,
+    sampling_metadata: SamplingMetadata,
+    sampling_tensors: SamplingTensors,
+) -> List[Tuple[List[int], List[int]]]:
+    return _sample_with_triton_kernel(probs, logprobs, sampling_metadata,
+                                      sampling_tensors)
 
 
 def _get_logprobs(
