@@ -160,10 +160,10 @@ class Sequence:
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
-    # TODO The current hashing function is O(L^2). We should optimize this in
-    # the future.
     def hash_of_block(self, logical_idx: int) -> int:
         # Compute the number of tokens in the sequence
+        # TODO: The current hashing function is O(L^2). We should optimize
+        # this in the future.
         num_tokens = self.num_hashed_tokens_of_block(logical_idx)
         return hash(tuple(self.data.get_token_ids()[0:num_tokens]))
 
@@ -307,10 +307,6 @@ class SequenceGroup:
         # All sequences in the group should have the same prompt.
         # We use the prompt of an arbitrary sequence.
         return next(iter(self.seqs_dict.values())).data.prompt_token_ids
-
-    @property
-    def block_size(self) -> int:
-        return next(iter(self.seqs_dict.values())).block_size
 
     @property
     def lora_int_id(self) -> int:
