@@ -1,36 +1,18 @@
 # coding=utf-8
 # Adapted from
-# https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
-# Copyright 2023 The vLLM team.
-# Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
-#
-# This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
-# and OPT implementations in this library. It has been modified from its
-# original forms to accommodate minor architectural differences compared
-# to GPT-NeoX and OPT used by the Meta AI team that trained the model.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""Inference-only Yi model (https://01.ai) compatible with HuggingFace weights."""
+# https://huggingface.co/OrionStarAI/Orion-14B-Base/blob/main/modeling_orion.py
+# Copyright (c) OrionStar Inc.
+# LICENSE: https://huggingface.co/OrionStarAI/Orion-14B-Base/blob/main/LICENSE
+"""Inference-only Orion-14B model compatible with HuggingFace weights."""
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
-from vllm.transformers_utils.configs.yi import YiConfig
+from transformers import PretrainedConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import PagedAttention
-from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -49,7 +31,7 @@ from vllm.sequence import SamplerOutput
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
-class YiMLP(nn.Module):
+class OrionMLP(nn.Module):
 
     def __init__(
         self,
@@ -79,7 +61,7 @@ class YiMLP(nn.Module):
         return x
 
 
-class YiAttention(nn.Module):
+class OrionAttention(nn.Module):
 
     def __init__(
         self,
@@ -128,11 +110,12 @@ class YiAttention(nn.Module):
             bias=False,
             linear_method=linear_method,
         )
+
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
-            base=self.rope_theta,
+            base=rope_theta,
             rope_scaling=rope_scaling,
         )
         self.attn = PagedAttention(self.num_heads,
@@ -156,11 +139,11 @@ class YiAttention(nn.Module):
         return output
 
 
-class YiDecoderLayer(nn.Module):
+class OrionDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: YiConfig,
+        config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
@@ -169,7 +152,7 @@ class YiDecoderLayer(nn.Module):
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
-        self.self_attn = YiAttention(
+        self.self_attn = OrionAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
@@ -178,14 +161,17 @@ class YiDecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             linear_method=linear_method,
         )
-        self.mlp = YiMLP(
+        self.mlp = OrionMLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
             linear_method=linear_method,
         )
-        self.ln1 = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.ln2 = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+        self.input_layernorm = nn.LayerNorm(config.hidden_size,
+                                            eps=config.rms_norm_eps)
+        self.post_attention_layernorm = nn.LayerNorm(config.hidden_size,
+                                                     eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -196,11 +182,8 @@ class YiDecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.ln1(hidden_states)
-        else:
-            hidden_states, residual = self.ln1(hidden_states, residual)
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -208,17 +191,21 @@ class YiDecoderLayer(nn.Module):
             input_metadata=input_metadata,
         )
 
+        hidden_states = residual + hidden_states
+
         # Fully Connected
-        hidden_states, residual = self.ln2(hidden_states, residual)
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        return hidden_states, residual
+        hidden_states = residual + hidden_states
+        return hidden_states, None
 
 
-class YiModel(nn.Module):
+class OrionModel(nn.Module):
 
     def __init__(
         self,
-        config: YiConfig,
+        config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
@@ -230,10 +217,10 @@ class YiModel(nn.Module):
             config.hidden_size,
         )
         self.layers = nn.ModuleList([
-            YiDecoderLayer(config, linear_method)
+            OrionDecoderLayer(config, linear_method)
             for _ in range(config.num_hidden_layers)
         ])
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -253,21 +240,21 @@ class YiModel(nn.Module):
                 input_metadata,
                 residual,
             )
-        hidden_states, _ = self.norm(hidden_states, residual)
+        hidden_states = self.norm(hidden_states)
         return hidden_states
 
 
-class YiForCausalLM(nn.Module):
+class OrionForCausalLM(nn.Module):
 
     def __init__(
         self,
-        config: YiConfig,
+        config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
         self.config = config
         self.linear_method = linear_method
-        self.model = YiModel(config, linear_method)
+        self.model = OrionModel(config, linear_method)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         self.sampler = Sampler(config.vocab_size)
 
@@ -308,6 +295,11 @@ class YiForCausalLM(nn.Module):
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
+                continue
+            if ("rotary_emb.cos_cached" in name
+                    or "rotary_emb.sin_cached" in name):
+                # Models trained using ColossalAI may include these tensors in
+                # the checkpoint. Skip them.
                 continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
