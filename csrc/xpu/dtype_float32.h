@@ -20,7 +20,7 @@
 
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
-#include "attention_generic.dp.hpp"
+#include "attention_generic.h"
 
 #include <stdint.h>
 

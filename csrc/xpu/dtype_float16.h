@@ -22,8 +22,8 @@
 
 #include <dpct/dpct.hpp>
 #include <sycl/sycl.hpp>
-#include "attention_generic.dp.hpp"
-#include "dtype_float32.dp.hpp"
+#include "attention_generic.h"
+#include "dtype_float32.h"
 #include "utils.h"
 
 #include <stdint.h>
