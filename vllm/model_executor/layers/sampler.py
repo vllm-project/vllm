@@ -12,7 +12,6 @@ from vllm.sequence import (PromptLogprobs, SampleLogprobs, SamplerOutput,
                            SequenceData, SequenceGroupOutput, SequenceOutput)
 from vllm.utils import is_neuron
 
-_SAMPLING_EPS = 1e-6
 
 
 class Sampler(nn.Module):
@@ -251,23 +250,34 @@ def _apply_quadratic_sampling(
     smoothing_factors: torch.Tensor,
     smoothing_curves: torch.Tensor,
 ) -> torch.Tensor:
-    """Applies a quadratic transformation to the logits based on the
-    provided smoothing factor. The transformation is centered around
-    the maximum logit value in the batch.
+    """
+    Applies quadratic and cubic transformation to the logits based
+    on the provided smoothing factors and curves. The transformation
+    is centered around the maximum logit value in the batch.
+
     Credits: @kalomaze
+    Adapted from
+    https://github.com/PygmalionAI/aphrodite-engine/blob/13d850334e2ad2cb00aba251bf91f8d20f495d98/aphrodite/modeling/layers/sampler.py#L435-L476
     """
     max_logits = logits.max(dim=-1, keepdim=True).values
     diff = logits - max_logits
+    smoothing_factors.unsqueeze_(dim=1)
+    smoothing_curves.unsqueeze_(dim=1)
 
-    smoothing_curve = smoothing_curves + _SAMPLING_EPS
-    k = (3 - smoothing_curve) / 2
-    s = (smoothing_curve - 1) / 2
+    k = (3 - smoothing_curves) / 2
+    s = (smoothing_curves - 1) / 2
 
-    quadratic_term = -(k * smoothing_factors * diff**2)
-    cubic_term = s * smoothing_factors * diff**3
+    mask = smoothing_factors > 0
+    mask = mask.flatten()
+    
+    # only transform logits when they're not -inf, otherwise
+    # fails at smoothing_curves==3
+    transformed_logits = torch.where(
+        logits != float('-inf'), -(k * smoothing_factors * diff**2) +
+        (s * smoothing_factors * diff**3) + max_logits, logits)
+    logits[mask, :] = transformed_logits[mask, :]
 
-    transformed_logits = quadratic_term + cubic_term + max_logits
-    return transformed_logits
+    return logits
 
 
 def _greedy_sample(
