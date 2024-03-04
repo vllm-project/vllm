@@ -1,5 +1,4 @@
 import asyncio
-import os
 import traceback
 import threading
 import multiprocessing as mp
@@ -164,6 +163,10 @@ class LocalWorkerVllm(mp.Process):
         self.kill()
 
     def run(self) -> None:
+        # Re-init logger in forked process, to include worker-specific prefix
+        global logger
+        logger = init_logger(__name__)
+
         del self.tasks  # Not used in forked process
         from vllm.worker.worker import Worker
         self.worker = Worker(*self.worker_args, **self.worker_kwargs)
@@ -172,24 +175,26 @@ class LocalWorkerVllm(mp.Process):
 
         # Accept tasks from the engine in task_queue
         # and return task output in result_queue
-        logger.info(
-            f"Worker {mp.current_process().name} pid {os.getpid()} ready; "
-            "awaiting tasks")
-        for items in iter(self._task_queue.get, _TERMINATE):
-            output = None
-            exception = None
-            task_id, method, args, kwargs = items
-            try:
-                executor = getattr(self.worker, method)
-                output = executor(*args, **kwargs)
-            except BaseException as e:
-                tb = traceback.format_exc()
-                logger.error(
-                    f"Exception in worker {mp.current_process().name} "
-                    f"while processing method {method}: {e}, {tb}")
-                exception = e
-            self.result_queue.put(
-                Result(task_id=task_id, value=output, exception=exception))
+        logger.info("Worker ready; awaiting tasks")
+        try:
+            for items in iter(self._task_queue.get, _TERMINATE):
+                output = None
+                exception = None
+                task_id, method, args, kwargs = items
+                try:
+                    executor = getattr(self.worker, method)
+                    output = executor(*args, **kwargs)
+                except BaseException as e:
+                    tb = traceback.format_exc()
+                    logger.error(
+                        f"Exception in worker {mp.current_process().name} "
+                        f"while processing method {method}: {e}, {tb}")
+                    exception = e
+                self.result_queue.put(
+                    Result(task_id=task_id, value=output, exception=exception))
+        except KeyboardInterrupt:
+            pass
+        except Exception:
+            logger.exception("Worker failed")
 
-        logger.info(
-            f"Worker {mp.current_process().name} pid {os.getpid()} exiting")
+        logger.info("Worker exiting")
