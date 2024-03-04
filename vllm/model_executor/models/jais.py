@@ -20,7 +20,7 @@
 """ Inference-only Jais model compatible with HuggingFace weights."""
 
 import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -39,8 +39,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank)
-from vllm.model_executor.parallel_utils.communication_op import (
-    tensor_model_parallel_all_reduce)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
@@ -50,24 +48,23 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class SwiGLUActivation(nn.Module):
+    
     def forward(self, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
         return x1 * nn.functional.silu(x2)
 
 
 def _get_alibi_slopes(n):
     def get_slopes_power_of_2(n):
-        start = 2 ** (-(2 ** -(math.log2(n) - 3)))
+        start = 2**(-(2**-(math.log2(n) - 3)))
         ratio = start
         return [start * ratio**i for i in range(n)]
 
     if math.log2(n).is_integer():
         return get_slopes_power_of_2(n)
     else:
-        closest_power_of_2 = 2 ** math.floor(math.log2(n))
-        return (
-            get_slopes_power_of_2(closest_power_of_2)
-            + _get_alibi_slopes(2 * closest_power_of_2)[0::2][: n - closest_power_of_2]
-        )
+        closest_power_of_2 = 2**math.floor(math.log2(n))
+        return (get_slopes_power_of_2(closest_power_of_2) + _get_alibi_slopes(
+            2 * closest_power_of_2)[0::2][:n - closest_power_of_2])
 
 
 class JAISAttention(nn.Module):
@@ -86,7 +83,7 @@ class JAISAttention(nn.Module):
         self.num_heads = total_num_heads // tensor_model_parallel_world_size
         self.head_dim = self.hidden_size // total_num_heads
         self.attn_scale_power = 1.0 if config.mup_scale_qk_dot_by_d else 0.5
-        self.scale = self.head_dim**-attn_scale_power
+        self.scale = self.head_dim**-self.attn_scale_power
 
         self.c_attn = QKVParallelLinear(
             self.hidden_size,
@@ -158,16 +155,19 @@ class JAISMLP(nn.Module):
         )
         quant_config = getattr(linear_method, "quant_config", None)
         self.act_gpt2 = get_act_fn(config.activation_function, quant_config,
-                              intermediate_size)
+                                   intermediate_size)
         self.act = SwiGLUActivation() if self.swiglu else self.act_gpt2
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self.swiglu:
             hidden_states2, _ = self.c_fc2(hidden_states)
         hidden_states, _ = self.c_fc(hidden_states)
-        hidden_states = self.act(hidden_states, hidden_states2) if self.swiglu else self.act(hidden_states)
+        hidden_states = self.act(
+            hidden_states,
+            hidden_states2) if self.swiglu else self.act(hidden_states)
         hidden_states, _ = self.c_proj(hidden_states)
         return hidden_states
+
 
 class JAISBlock(nn.Module):
 
@@ -224,7 +224,9 @@ class JAISModel(nn.Module):
         assert not config.reorder_and_upcast_attn
         self.embed_dim = config.hidden_size
         self.wte = VocabParallelEmbedding(config.vocab_size, self.embed_dim)
-        self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim) if config.position_embedding_type != "alibi" else None
+        self.wpe = nn.Embedding(
+            config.max_position_embeddings, self.embed_dim
+        ) if config.position_embedding_type != "alibi" else None
         self.embeddings_scale = config.mup_embeddings_scale
         self.h = nn.ModuleList([
             JAISBlock(config, linear_method)
@@ -252,6 +254,7 @@ class JAISModel(nn.Module):
 
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
+
 
 class JAISLMHeadModel(nn.Module):
 
