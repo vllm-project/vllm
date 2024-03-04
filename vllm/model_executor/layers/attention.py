@@ -172,17 +172,17 @@ class PagedAttention(nn.Module):
                     # heads.
                     # TODO(woosuk): Use MQA/GQA kernels for higher performance.
                     query = query.view(query.shape[0], self.num_kv_heads,
-                                    self.num_queries_per_kv,
-                                    query.shape[-1])
+                                       self.num_queries_per_kv,
+                                       query.shape[-1])
                     key = key[:, :,
-                            None, :].expand(key.shape[0], self.num_kv_heads,
-                                            self.num_queries_per_kv,
-                                            key.shape[-1])
+                              None, :].expand(key.shape[0], self.num_kv_heads,
+                                              self.num_queries_per_kv,
+                                              key.shape[-1])
                     value = value[:, :,
-                                None, :].expand(value.shape[0],
-                                                self.num_kv_heads,
-                                                self.num_queries_per_kv,
-                                                value.shape[-1])
+                                  None, :].expand(value.shape[0],
+                                                  self.num_kv_heads,
+                                                  self.num_queries_per_kv,
+                                                  value.shape[-1])
 
                 # Set attention bias if not provided. This typically happens at
                 # the very attention layer of every iteration.
@@ -269,10 +269,10 @@ class PagedAttention(nn.Module):
             #     )
             else:
                 if input_metadata.flash_style:
-                    print("SANG-TODO flash prefill")
                     output = flash_single_query_cached_kv_attention(
                         None,
-                        query.view(batch_size, seq_len, self.num_heads, self.head_size),
+                        query.view(batch_size, seq_len, self.num_heads,
+                                   self.head_size),
                         key_cache,
                         value_cache,
                         self.scale,
@@ -294,7 +294,7 @@ class PagedAttention(nn.Module):
                     #     alibi_slopes=self.alibi_slopes,
                     # )
                 else:
-                    print("SANG-TODO context attention")
+                    # print("SANG-TODO context attention")
                     # prefix-enabled attention
                     output = torch.empty_like(query)
                     context_attention_fwd(
@@ -304,7 +304,8 @@ class PagedAttention(nn.Module):
                         output,
                         key_cache,
                         value_cache,
-                        input_metadata.block_tables,  # [BS, max_block_per_request]
+                        input_metadata.
+                        block_tables,  # [BS, max_block_per_request]
                         input_metadata.start_loc,
                         input_metadata.prompt_lens,
                         input_metadata.context_lens,
@@ -455,6 +456,7 @@ def _paged_attention(
     return output
 
 
+# OSS version.
 # def flash_attn_with_kvcache_paged(
 #     query: torch.Tensor,
 #     key_cache: torch.Tensor,
@@ -501,7 +503,7 @@ def _paged_attention(
 
 
 def flash_single_query_cached_kv_attention(
-    output: Optional[torch.Tensor],
+    output: torch.Tensor,
     query: torch.Tensor,
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
@@ -511,9 +513,9 @@ def flash_single_query_cached_kv_attention(
     alibi_slopes: Optional[torch.Tensor],
     actual_batch_size: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Similar to vLLM's page attention, caclulates a single token's attention
+    """Similar to vLLM's page attention, calculates a single token's attention
     based on key/value caches. The main difference is this uses flash attention
-    sytle key-value caches.
+    style key-value caches.
 
     Arguments:
         output: [num_padded_tokens, num_heads, head_size], output tensor
@@ -538,6 +540,8 @@ def flash_single_query_cached_kv_attention(
     # TODO: support alibi_slopes
     assert alibi_slopes is None, "doesn't support alibi_slopes"
     batch_size, seqlen, num_heads, head_size = query.shape
+    assert seqlen == 1, (
+        "Single query attention can be only used for decoding phase.")
     num_tokens = batch_size * seqlen
     out = flash_attn_with_page_attention(
         query,
@@ -557,11 +561,10 @@ def flash_single_query_cached_kv_attention(
         num_splits=0,
         actual_batch_size=actual_batch_size,
     )
-    return out
-    # if output is not None:
-    #     # in case that output is padded, only copy the valid part.
-    #     output[:num_tokens].copy_(out.view(num_tokens, num_heads, head_size))
-    # return out.view(num_tokens, num_heads, head_size)
+    if output is not None:
+        # in case that output is padded, only copy the valid part.
+        output[:num_tokens].copy_(out.view(num_tokens, num_heads, head_size))
+    return out.view(num_tokens, num_heads, head_size)
 
 
 def flash_multi_query_cached_kv_attention_varlen(

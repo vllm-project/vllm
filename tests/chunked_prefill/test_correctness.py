@@ -29,7 +29,6 @@ TEST_PROMPTS = [
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("block_size", [32])
-@pytest.mark.parametrize("max_num_prompt_seqs", [1])
 @pytest.mark.parametrize("tensor_parallel_size", [1])
 def test_models(
     vllm_runner,
@@ -37,7 +36,6 @@ def test_models(
     dtype: str,
     max_tokens: int,
     block_size: int,
-    max_num_prompt_seqs: int,
     tensor_parallel_size: int,
 ) -> None:
     """ verify the flash attention has the same output
@@ -46,27 +44,26 @@ def test_models(
         pytest.skip(
             f"{torch.cuda.device_count()=} is smaller than {tensor_parallel_size=}"
         )
-    # print("loading page attention models..")
-    # pg_model = vllm_runner(model, dtype=dtype)
-    # expected_outputs = []
+    print("loading page attention models..")
+    pg_model = vllm_runner(model, dtype=dtype)
+    expected_outputs = []
 
-    # print("generating tokens...")
-    # expected_outputs.extend(pg_model.generate_greedy(TEST_PROMPTS, max_tokens))
-    # print("generating tokens finished")
+    print("generating tokens...")
+    expected_outputs.extend(pg_model.generate_greedy(TEST_PROMPTS, max_tokens))
+    print("generating tokens finished")
 
-    # del pg_model
+    del pg_model
 
-    # destroy_model_parallel()
-    # gc.collect()
-    # torch.cuda.empty_cache()
+    destroy_model_parallel()
+    gc.collect()
+    torch.cuda.empty_cache()
 
     flash_attn_output_by_batches = []
-    flash_attn_model = vllm_runner(
-        model,
-        dtype=dtype,
-        block_size=block_size,
-        flash_style=True,
-        tensor_parallel_size=tensor_parallel_size)
+    flash_attn_model = vllm_runner(model,
+                                   dtype=dtype,
+                                   block_size=block_size,
+                                   flash_style=True,
+                                   tensor_parallel_size=tensor_parallel_size)
     for i in range(10):
         prompts = [TEST_PROMPTS[j % len(TEST_PROMPTS)] for j in range(i)]
         flash_attn_output_by_batches.append(
