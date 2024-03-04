@@ -50,7 +50,10 @@ steps:
   command: pytest -v -s worker
 
 - label: LoRA Test
-  command: pytest -v -s lora
+  command: pytest -v -s lora --forked
+
+- label: Metrics Test
+  command: pytest -v -s metrics
 
 - label: Benchmarks
   working_dir: "/vllm-workspace/.buildkite"

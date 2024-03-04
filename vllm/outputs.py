@@ -1,7 +1,8 @@
 from typing import List, Optional
+import time
 
 from vllm.sequence import (PromptLogprobs, SampleLogprobs, SequenceGroup,
-                           SequenceStatus)
+                           SequenceStatus, RequestMetrics)
 from vllm.lora.request import LoRARequest
 
 
@@ -60,6 +61,7 @@ class RequestOutput:
         prompt_logprobs: The log probabilities to return per prompt token.
         outputs: The output sequences of the request.
         finished: Whether the whole request is finished.
+        metrics: Metrics associated with the request.
         lora_request: The LoRA request that was used to generate the output.
     """
 
@@ -71,6 +73,7 @@ class RequestOutput:
         prompt_logprobs: Optional[PromptLogprobs],
         outputs: List[CompletionOutput],
         finished: bool,
+        metrics: Optional[RequestMetrics] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> None:
         self.request_id = request_id
@@ -79,6 +82,7 @@ class RequestOutput:
         self.prompt_logprobs = prompt_logprobs
         self.outputs = outputs
         self.finished = finished
+        self.metrics = metrics
         self.lora_request = lora_request
 
     @classmethod
@@ -115,12 +119,15 @@ class RequestOutput:
         prompt_token_ids = seq_group.prompt_token_ids
         prompt_logprobs = seq_group.prompt_logprobs
         finished = seq_group.is_finished()
+        finished_time = time.time() if finished else None
+        seq_group.set_finished_time(finished_time)
         return cls(seq_group.request_id,
                    prompt,
                    prompt_token_ids,
                    prompt_logprobs,
                    outputs,
                    finished,
+                   seq_group.metrics,
                    lora_request=seq_group.lora_request)
 
     def __repr__(self) -> str:
@@ -130,4 +137,5 @@ class RequestOutput:
                 f"prompt_logprobs={self.prompt_logprobs}, "
                 f"outputs={self.outputs}, "
                 f"finished={self.finished}, "
+                f"metrics={self.metrics}, "
                 f"lora_request={self.lora_request})")

@@ -5,7 +5,7 @@ from typing import AsyncGenerator, AsyncIterator, Callable, List, Optional, Dict
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from .protocol import (
+from vllm.entrypoints.openai.protocol import (
     CompletionRequest,
     CompletionResponse,
     CompletionResponseChoice,
@@ -16,6 +16,7 @@ from .protocol import (
 )
 from vllm.outputs import RequestOutput
 from vllm.entrypoints.openai.serving_engine import OpenAIServing, LoRA
+from vllm.model_executor.guided_decoding import get_guided_decoding_logits_processor
 
 logger = init_logger(__name__)
 
@@ -95,7 +96,7 @@ async def completion_stream_generator(
                         logprobs=logprobs,
                         finish_reason=finish_reason,
                     )
-                ]).model_dump_json(exclude_unset=True)
+                ]).model_dump_json()
             yield f"data: {response_json}\n\n"
 
             if output.finish_reason is not None:  # return final usage
@@ -120,7 +121,7 @@ async def completion_stream_generator(
                         )
                     ],
                     usage=final_usage,
-                ).model_dump_json(exclude_unset=True)
+                ).model_dump_json()
                 yield f"data: {response_json}\n\n"
 
     yield "data: [DONE]\n\n"
@@ -264,10 +265,9 @@ class OpenAIServingCompletion(OpenAIServing):
         See https://platform.openai.com/docs/api-reference/completions/create
         for the API specification. This API mimics the OpenAI Completion API.
 
-        NOTE: Currently we do not support the following features:
+        NOTE: Currently we do not support the following feature:
             - suffix (the language models we currently support do not support
             suffix)
-            - logit_bias (to be supported by vLLM engine)
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -277,9 +277,6 @@ class OpenAIServingCompletion(OpenAIServing):
         if request.suffix is not None:
             return self.create_error_response(
                 "suffix is not currently supported")
-        if request.logit_bias is not None and len(request.logit_bias) > 0:
-            return self.create_error_response(
-                "logit_bias is not currently supported")
 
         model_name = request.model
         request_id = f"cmpl-{random_uuid()}"
@@ -290,6 +287,14 @@ class OpenAIServingCompletion(OpenAIServing):
         try:
             sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
+            guided_decode_logit_processor = (
+                await get_guided_decoding_logits_processor(
+                    request, self.engine.get_tokenizer()))
+            if guided_decode_logit_processor is not None:
+                if sampling_params.logits_processors is None:
+                    sampling_params.logits_processors = []
+                sampling_params.logits_processors.append(
+                    guided_decode_logit_processor)
             prompt_is_tokens, prompts = parse_prompt_format(request.prompt)
 
             for i, prompt in enumerate(prompts):
@@ -301,7 +306,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         request, prompt=prompt)
 
                 generators.append(
-                    self.engine.generate(None,
+                    self.engine.generate(prompt,
                                          sampling_params,
                                          f"{request_id}-{i}",
                                          prompt_token_ids=input_ids,

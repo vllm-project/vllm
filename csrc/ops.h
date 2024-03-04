@@ -57,6 +57,10 @@ void silu_and_mul(
   torch::Tensor& out,
   torch::Tensor& input);
 
+void gelu_and_mul(
+  torch::Tensor& out,
+  torch::Tensor& input);
+
 void gelu_new(
   torch::Tensor& out,
   torch::Tensor& input);
@@ -80,6 +84,15 @@ torch::Tensor awq_dequantize(
     int split_k_iters,
     int thx,
     int thy);
+
+torch::Tensor marlin_gemm(
+    torch::Tensor& a, 
+    torch::Tensor& b_q_weight,
+    torch::Tensor& b_scales, 
+    torch::Tensor& workspace,
+    int64_t size_m, 
+    int64_t size_n, 
+    int64_t size_k);
 #endif
 
 void squeezellm_gemm(
@@ -94,11 +107,13 @@ torch::Tensor gptq_gemm(
   torch::Tensor b_gptq_qzeros,
   torch::Tensor b_gptq_scales,
   torch::Tensor b_g_idx,
-  bool use_exllama);
+  bool use_exllama,
+  int bit);
 
 void gptq_shuffle(
   torch::Tensor q_weight,
-  torch::Tensor q_perm);
+  torch::Tensor q_perm,
+  int bit);
 
 void moe_align_block_size(
   torch::Tensor topk_ids,
