@@ -5,7 +5,7 @@ from transformers import PreTrainedTokenizerBase
 from datasets import load_dataset
 from typing import List, Tuple, Optional
 from pathlib import Path
-from neuralmagic.tools.call_cmd import call_cmd
+from ...tools.call_cmd import call_cmd
 
 
 @dataclass

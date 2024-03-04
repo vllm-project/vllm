@@ -11,9 +11,9 @@ from transformers import PreTrainedTokenizerBase
 from vllm import LLM, SamplingParams
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from neuralmagic.tools.call_cmd import call_cmd
-from neuralmagic.benchmarks.datasets_registry import SHAREGPT_PATH, SHAREGPT_DOWNLOAD_STR
-from neuralmagic.benchmarks.scripts.backend_request_func import RequestFuncInput, async_request_vllm
+from .datasets_registry import SHAREGPT_PATH, SHAREGPT_DOWNLOAD_STR
+from .backend_request_func import RequestFuncInput, async_request_vllm
+from ...tools.call_cmd import call_cmd
 
 
 def num_available_gpus() -> int:

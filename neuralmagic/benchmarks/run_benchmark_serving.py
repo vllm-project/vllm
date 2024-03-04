@@ -7,9 +7,9 @@ import itertools
 from typing import NamedTuple, Optional
 from pathlib import Path
 
-from neuralmagic.tools.call_cmd import call_cmd
-from neuralmagic.benchmarks.common import download_model, max_model_length_from_model_id, script_args_to_cla, benchmark_configs
-from neuralmagic.benchmarks.scripts.common import warmup_server, num_available_gpus
+from .common import download_model, max_model_length_from_model_id, script_args_to_cla, benchmark_configs
+from .scripts.common import warmup_server, num_available_gpus
+from ..tools.call_cmd import call_cmd
 
 BENCH_SERVER_HOST = "localhost"
 BENCH_SERVER_PORT = 9000

@@ -2,8 +2,8 @@ import argparse
 from pathlib import Path
 from typing import NamedTuple, Optional
 
-from neuralmagic.tools.call_cmd import call_cmd
-from neuralmagic.benchmarks.common import script_args_to_cla, benchmark_configs, max_model_length_from_model_id
+from .common import script_args_to_cla, benchmark_configs, max_model_length_from_model_id
+from ..tools.call_cmd import call_cmd
 
 
 def run_benchmark_throughput_script(config: NamedTuple,

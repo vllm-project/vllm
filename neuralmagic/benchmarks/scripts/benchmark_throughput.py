@@ -13,8 +13,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 from transformers import AutoTokenizer
-from neuralmagic.benchmarks.scripts.common import instantiate_benchmark_results_dict, generate_synthetic_requests, warmup_vllm_engine, num_available_gpus
-from neuralmagic.benchmarks.datasets_registry import get_dataset, DatasetArgs
+from .common import instantiate_benchmark_results_dict, generate_synthetic_requests, warmup_vllm_engine, num_available_gpus
+from .datasets_registry import get_dataset, DatasetArgs
 
 
 def get_tensor_parallel_size(args: argparse.Namespace) -> int:
