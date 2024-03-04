@@ -388,7 +388,6 @@ def test_multi_query_kv_attention(
 
     seq_lens = [random.randint(1, max_len // 2) for i in range(num_seqs)]
     max_seq_len = max(seq_lens)
-    seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.int, device="cuda")
 
     if chunked_prefill:
         # context length will be different from seq_len if chunked_prefill is
@@ -397,9 +396,6 @@ def test_multi_query_kv_attention(
     else:
         context_lens = seq_lens
     max_context_len = max(context_lens)
-    context_lens_tensor = torch.tensor(context_lens,
-                                       dtype=torch.int,
-                                       device="cuda")
 
     num_tokens = sum(seq_lens)
     cu_seq_lens = [0]
@@ -466,7 +462,7 @@ def test_multi_query_kv_attention(
             None,
         )
     else:
-        assert False, f"{version=} is not supported"
+        raise AssertionError(f"{version=} is not supported")
 
     ref_output = ref_multi_query_kv_attention_padded(
         query,

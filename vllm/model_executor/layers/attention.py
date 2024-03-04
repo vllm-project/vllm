@@ -14,7 +14,6 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.triton_kernel.prefix_prefill import (
     context_attention_fwd)
 from vllm.utils import is_hip
-from flash_attn import flash_attn_func
 
 # try:
 #     from flash_attn import flash_attn_with_kvcache
