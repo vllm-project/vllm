@@ -1,6 +1,8 @@
 import json
 import os
+import sys
 import time
+import traceback
 from dataclasses import dataclass
 from typing import Optional
 
@@ -28,6 +30,7 @@ class RequestFuncOutput:
     latency: float = 0
     ttft: float = 0
     prompt_len: int = 0
+    error: str = ""
 
 
 async def async_request_tgi(
@@ -70,9 +73,12 @@ async def async_request_tgi(
                     output.generated_text = json.loads(body)["generated_text"]
                     output.success = True
                 else:
+                    output.error = response.reason
                     output.success = False
-        except (aiohttp.ClientOSError, aiohttp.ServerDisconnectedError):
+        except:
             output.success = False
+            exc_info = sys.exc_info()
+            output.error = "".join(traceback.format_exception(*exc_info))
 
         if pbar:
             pbar.update(1)
@@ -119,9 +125,12 @@ async def async_request_vllm(
                     output.success = True
 
                 else:
+                    output.error = response.reason
                     output.success = False
-        except (aiohttp.ClientOSError, aiohttp.ServerDisconnectedError):
+        except:
             output.success = False
+            exc_info = sys.exc_info()
+            output.error = "".join(traceback.format_exception(*exc_info))
 
         if pbar:
             pbar.update(1)
@@ -165,9 +174,12 @@ async def async_request_trt_llm(
                     output.success = True
 
                 else:
+                    output.error = response.reason
                     output.success = False
-        except (aiohttp.ClientOSError, aiohttp.ServerDisconnectedError):
+        except:
             output.success = False
+            exc_info = sys.exc_info()
+            output.error = "".join(traceback.format_exception(*exc_info))
 
         if pbar:
             pbar.update(1)
@@ -208,9 +220,12 @@ async def async_request_deepspeed_mii(
                     output.generated_text = parsed_resp["text"][0]
                     output.success = True
                 else:
+                    output.error = response.reason
                     output.success = False
-        except (aiohttp.ClientOSError, aiohttp.ServerDisconnectedError):
+        except:
             output.success = False
+            exc_info = sys.exc_info()
+            output.error = "".join(traceback.format_exception(*exc_info))
 
         if pbar:
             pbar.update(1)
@@ -268,9 +283,12 @@ async def async_request_openai_completions(
                     output.success = True
                     output.latency = latency
                 else:
+                    output.error = response.reason
                     output.success = False
-        except (aiohttp.ClientOSError, aiohttp.ServerDisconnectedError):
+        except:
             output.success = False
+            exc_info = sys.exc_info()
+            output.error = "".join(traceback.format_exception(*exc_info))
 
     if pbar:
         pbar.update(1)
@@ -337,9 +355,12 @@ async def async_request_openai_chat_completions(
                     output.success = True
                     output.latency = latency
                 else:
+                    output.error = response.reason
                     output.success = False
-        except (aiohttp.ClientOSError, aiohttp.ServerDisconnectedError):
+        except:
             output.success = False
+            exc_info = sys.exc_info()
+            output.error = "".join(traceback.format_exception(*exc_info))
 
     if pbar:
         pbar.update(1)

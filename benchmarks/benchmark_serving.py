@@ -172,7 +172,7 @@ def calculate_metrics(
     dur_s: float,
     tokenizer: PreTrainedTokenizerBase,
 ) -> BenchmarkMetrics:
-    total_output = 0
+    actual_output_lens = []
     total_input = 0
     completed = 0
     inter_token_latencies = []
@@ -180,18 +180,20 @@ def calculate_metrics(
     for i in range(len(outputs)):
         if outputs[i].success:
             output_len = len(tokenizer.encode(outputs[i].generated_text))
-            total_output += output_len
+            actual_output_lens.append(output_len)
             total_input += input_requests[i][1]
             if output_len > 1:
                 inter_token_latencies.append(
                     (outputs[i].latency - outputs[i].ttft) / (output_len - 1))
             ttfts.append(outputs[i].ttft)
             completed += 1
+        else:
+            actual_output_lens.append(0)
 
     metrics = BenchmarkMetrics(
         completed=completed,
         total_input=total_input,
-        total_output=total_output,
+        total_output=sum(actual_output_lens),
         request_throughput=completed / dur_s,
         input_throughput=total_input / dur_s,
         output_throughput=total_output / dur_s,
@@ -203,7 +205,7 @@ def calculate_metrics(
         p99_tpot_ms=np.percentile(inter_token_latencies, 99) * 1000,
     )
 
-    return metrics
+    return metrics, actual_output_lens
 
 
 async def benchmark(
@@ -250,7 +252,7 @@ async def benchmark(
 
     benchmark_duration = time.perf_counter() - benchmark_start_time
 
-    metrics = calculate_metrics(
+    metrics, actual_output_lens = calculate_metrics(
         input_requests=input_requests,
         outputs=outputs,
         dur_s=benchmark_duration,
@@ -284,7 +286,11 @@ async def benchmark(
         "p99_ttft_ms": metrics.p99_ttft_ms,
         "mean_tpot_ms": metrics.mean_tpot_ms,
         "median_tpot_ms": metrics.median_tpot_ms,
-        "p99_tpot_ms": metrics.p99_tpot_ms
+        "p99_tpot_ms": metrics.p99_tpot_ms,
+        "input_lens": [output.prompt_len for output in outputs],
+        "output_lens": actual_output_lens,
+        "generated_texts": [output.generated_text for output in outputs],
+        "errors": [output.error for output in outputs],
     }
     return result
 
