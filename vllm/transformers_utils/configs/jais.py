@@ -170,7 +170,7 @@ class JAISConfig(PretrainedConfig):
         self.alibi_scaling = alibi_scaling
         self._alibi_scaling_validation()
         if architectures is None:
-            architectures=['JAISLMHeadModel']
+            architectures = ['JAISLMHeadModel']
 
         super().__init__(bos_token_id=bos_token_id,
                          eos_token_id=eos_token_id,
