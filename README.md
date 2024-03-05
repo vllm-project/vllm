@@ -78,6 +78,16 @@ outputs = model.generate("Hello my name is", sampling_params=sampling_params)
 print(outputs[0].outputs[0].text)
 ```
 
+There is also support for semi-structured 2:4 sparsity using the `sparsity="semi_structured_sparse_w16a16"` argument:
+```python
+from vllm import LLM, SamplingParams
+
+model = LLM("nm-testing/llama2.c-stories110M-pruned2.4", sparsity="semi_structured_sparse_w16a16")
+sampling_params = SamplingParams(max_tokens=100, temperature=0)
+outputs = model.generate("Once upon a time, ", sampling_params=sampling_params)
+print(outputs[0].outputs[0].text)
+```
+
 #### Integration with OpenAI-Compatible Server
 
 You can also quickly use the same flow with an OpenAI-compatible model server:
