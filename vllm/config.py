@@ -95,6 +95,7 @@ class ModelConfig:
         self.quantization = quantization
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
+        self.max_logprobs = max_logprobs
         self.flash_style = flash_style
 
         if os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true":
