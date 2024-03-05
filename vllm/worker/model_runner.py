@@ -32,7 +32,7 @@ LORA_WARMUP_RANK = 8
 # NOTE: _get_graph_batch_size needs to be updated if this list is changed.
 _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [8 * i for i in range(1, 33)]
 # Capture graphs for token size 1, 2, 4, 8, 16, 24, 32, 40, ..., 512.
-_TOKEN_SIZES_TO_CAPTURE = [1, 2, 4] + [8 * i for i in range(1, 66)]
+_TOKEN_SIZES_TO_CAPTURE = [1, 2, 4] + [32 * i for i in range(1, 4)]
 
 
 class ModelRunner:
@@ -368,8 +368,8 @@ class ModelRunner:
         if use_captured_graph:
             # Pad the input tokens, positions, and slot mapping to match the
             # batch size of the captured graph.
-            graph_batch_size = _get_graph_batch_size(batch_size)
-            graph_token_size = _get_graph_batch_size(token_size)
+            graph_batch_size = _get_graph_batch_size(batch_size, 8)
+            graph_token_size = _get_graph_batch_size(token_size, 32)
             assert graph_batch_size >= batch_size
             assert graph_token_size >= token_size
             for _ in range(graph_batch_size - batch_size):
@@ -772,7 +772,7 @@ class ModelRunner:
         block_tables = torch.from_numpy(self.graph_block_tables).cuda()
 
         graph_batch_size = _get_graph_batch_size(
-            self.scheduler_config.max_num_seqs)
+            self.scheduler_config.max_num_seqs, 8)
         batch_size_capture_list = [
             bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
         ]
@@ -966,13 +966,14 @@ def _make_tensor_with_pad(
     return torch.tensor(padded_x, dtype=dtype, device=device)
 
 
-def _get_graph_batch_size(batch_size: int) -> int:
+# SANG-TODO refactor this.
+def _get_graph_batch_size(batch_size: int, padding_size: int) -> int:
     if batch_size <= 2:
         return batch_size
     elif batch_size <= 4:
         return 4
     else:
-        return (batch_size + 7) // 8 * 8
+        return (batch_size + padding_size - 1) // padding_size * padding_size
 
 
 def _async_h2d(
