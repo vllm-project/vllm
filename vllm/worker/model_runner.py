@@ -1,3 +1,4 @@
+import contextlib
 import time
 from typing import Dict, List, Optional, Tuple, Set, Union
 
@@ -9,9 +10,9 @@ from vllm.config import (DeviceConfig, ModelConfig, LoRAConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
+from vllm.model_executor.parallel_utils import cupy_utils
 from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
-from vllm.model_executor.parallel_utils.cupy_utils import get_nccl_backend
 from vllm.model_executor.parallel_utils.parallel_state import (
     with_cupy_nccl_for_all_reduce)
 from vllm.model_executor.parallel_utils import custom_all_reduce
@@ -79,9 +80,16 @@ class ModelRunner:
         self.in_wsl = in_wsl()
         self.kv_cache_dtype = kv_cache_dtype
 
+        # Set enforce_eager to True for Neuron backend, to avoid capturing graph
+        if self.device_config.is_neuron:
+            self.model_config.enforce_eager = True
+
     def load_model(self) -> None:
-        self.model = get_model(self.model_config, self.device_config,
-                               self.lora_config)
+        self.model = get_model(self.model_config,
+                               self.device_config,
+                               lora_config=self.lora_config,
+                               parallel_config=self.parallel_config,
+                               scheduler_config=self.scheduler_config)
 
         vocab_size = self.model.config.vocab_size
 
@@ -137,33 +145,37 @@ class ModelRunner:
             prompt_tokens = seq_data.get_token_ids()
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
-            prefix_len = 0
-            prefix = seq_group_metadata.prefix
-            if prefix is not None and prefix.computed:
-                prefix_len = prefix.get_length()
-                prompt_tokens = prompt_tokens[prefix_len:]
-                prefix_block_tables.append(prefix.get_block_numbers())
+            computed_len = 0
+
+            # NOTE: This only works for oooooooxxx style attention.
+            computed_block_nums = seq_group_metadata.computed_block_nums
+            if computed_block_nums is not None and len(
+                    computed_block_nums) > 0 and self.sliding_window is None:
+                # Prefix is not supported with sliding_window
+                computed_len = len(computed_block_nums) * self.block_size
+                prompt_tokens = prompt_tokens[computed_len:]
+                prefix_block_tables.append(computed_block_nums)
             else:
                 prefix_block_tables.append([])
             # actual prompt lens
-            context_lens.append(prefix_len)
-            subquery_lens.append(prompt_len - prefix_len)
+            context_lens.append(computed_len)
+            subquery_lens.append(prompt_len - computed_len)
 
             input_tokens.append(prompt_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
             input_positions.append(
-                list(range(prefix_len, prefix_len + len(prompt_tokens))))
+                list(range(computed_len, computed_len + len(prompt_tokens))))
 
             lora_id = seq_group_metadata.lora_int_id
 
             if lora_id > 0:
                 lora_requests.add(seq_group_metadata.lora_request)
 
-            lora_index_mapping.append([lora_id] * (prompt_len - prefix_len))
+            lora_index_mapping.append([lora_id] * (prompt_len - computed_len))
             lora_prompt_mapping.extend(
                 [lora_id] *
-                (prompt_len - prefix_len
+                (prompt_len - computed_len
                  if seq_group_metadata.sampling_params.prompt_logprobs else 1))
 
             if seq_group_metadata.block_tables is None:
@@ -182,11 +194,11 @@ class ModelRunner:
             # mapping will be [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
             start_idx = 0
             if self.sliding_window is not None:
-                assert prefix_len == 0, (
+                assert computed_len == 0, (
                     "Prefix caching is currently not supported with "
                     "sliding window attention")
                 start_idx = max(0, prompt_len - self.sliding_window)
-            for i in range(prefix_len, prompt_len):
+            for i in range(computed_len, prompt_len):
                 if i < start_idx:
                     slot_mapping[-1].append(_PAD_SLOT_ID)
                     continue
@@ -388,9 +400,11 @@ class ModelRunner:
     ) -> SamplingMetadata:
         seq_groups: List[Tuple[List[int], SamplingParams]] = []
         selected_token_indices: List[int] = []
+        generators: List[torch.Generator] = []
         selected_token_start_idx = 0
         categorized_sample_indices = {t: [] for t in SamplingType}
         categorized_sample_indices_start_idx = 0
+        pin_memory = not self.in_wsl and not self.device_config.is_neuron
 
         max_subquery_len = max(subquery_lens) if subquery_lens else 1
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
@@ -418,6 +432,10 @@ class ModelRunner:
                 selected_token_indices.append(selected_token_start_idx +
                                               subquery_len - 1)
                 selected_token_start_idx += max_subquery_len
+
+                if sampling_params.seed is not None:
+                    seq_group_metadata.state.generator = torch.Generator(
+                        device="cuda").manual_seed(sampling_params.seed)
             else:
                 num_seqs = len(seq_ids)
                 selected_token_indices.extend(
@@ -431,15 +449,18 @@ class ModelRunner:
                               categorized_sample_indices_start_idx + num_seqs))
                 categorized_sample_indices_start_idx += num_seqs
 
+            if sampling_params.seed is not None:
+                generators.append(seq_group_metadata.state.generator)
+
         selected_token_indices = _async_h2d(selected_token_indices,
                                             dtype=torch.long,
                                             target_device=self.device,
-                                            pin_memory=not self.in_wsl)
+                                            pin_memory=pin_memory)
         categorized_sample_indices = {
             t: _async_h2d(seq_ids,
                           dtype=torch.int,
                           target_device=self.device,
-                          pin_memory=not self.in_wsl)
+                          pin_memory=pin_memory)
             for t, seq_ids in categorized_sample_indices.items()
         }
 
@@ -453,6 +474,7 @@ class ModelRunner:
             prompt_lens=prompt_lens,
             selected_token_indices=selected_token_indices,
             categorized_sample_indices=categorized_sample_indices,
+            generators=generators,
         )
         return sampling_metadata
 
@@ -535,6 +557,7 @@ class ModelRunner:
                 prompt_lens=None,
                 selected_token_indices=metadata_dict["selected_token_indices"],
                 categorized_sample_indices=None,
+                generators=None,
                 perform_sampling=False,
             )
 
@@ -659,7 +682,7 @@ class ModelRunner:
     def capture_model(self, kv_caches: List[KVCache]) -> None:
         # NOTE(woosuk): This is a hack to ensure that the NCCL backend is never
         # deleted before the CUDA graphs.
-        self.cupy_nccl_backend = get_nccl_backend()
+        self.cupy_nccl_backend = cupy_utils.get_nccl_backend()
 
         assert not self.model_config.enforce_eager
         logger.info("Capturing the model for CUDA graphs. This may lead to "
@@ -689,8 +712,6 @@ class ModelRunner:
             bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
         ]
 
-        # NOTE: Capturing the largest batch size first may help reduce the
-        # memory usage of CUDA graph.
         # NOTE(woosuk): There are 3 backends for all-reduce: custom all-reduce
         # kernel, CuPy NCCL, and PyTorch NCCL. When using CUDA graph, we use
         # either custom all-reduce kernel or CuPy NCCL. When not using CUDA
@@ -698,6 +719,8 @@ class ModelRunner:
         # We always prioritize using custom all-reduce kernel but fall back
         # to PyTorch or CuPy NCCL if it is disabled or not supported.
         with custom_all_reduce.capture():
+            # NOTE: Capturing the largest batch size first may help reduce the
+            # memory usage of CUDA graph.
             for batch_size in reversed(batch_size_capture_list):
                 # Create dummy input_metadata.
                 input_metadata = InputMetadata(
@@ -765,7 +788,7 @@ class CUDAGraphRunner:
         # Run the model once without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
-        with with_cupy_nccl_for_all_reduce():
+        with _maybe_cupy_nccl():
             self.model(
                 input_ids,
                 positions,
@@ -779,7 +802,7 @@ class CUDAGraphRunner:
         # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
         self.graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self.graph, pool=memory_pool):  # noqa: SIM117
-            with with_cupy_nccl_for_all_reduce():
+            with _maybe_cupy_nccl():
                 hidden_states = self.model(
                     input_ids,
                     positions,
@@ -828,6 +851,15 @@ class CUDAGraphRunner:
 
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
+
+
+@contextlib.contextmanager
+def _maybe_cupy_nccl():
+    if cupy_utils.is_initialized() and not custom_all_reduce.is_initialized():
+        with with_cupy_nccl_for_all_reduce():
+            yield
+    else:
+        yield
 
 
 def _pad_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
