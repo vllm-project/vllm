@@ -36,7 +36,7 @@ class PagedAttentionImpl:
         )
 
     @staticmethod
-    def forward(
+    def forward_decode(
         query: torch.Tensor,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,

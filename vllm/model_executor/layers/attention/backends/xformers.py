@@ -171,7 +171,7 @@ class XFormersBackend:
                 )
         else:
             # Decoding run.
-            output = PagedAttentionImpl.forward(
+            output = PagedAttentionImpl.forward_decode(
                 query,
                 key_cache,
                 value_cache,
