@@ -81,7 +81,7 @@ class MultiStepWorker(Worker):
 
         proposal_lens: List[int] = []
         nonzero_proposal_len_seqs: List[SequenceGroupMetadata] = []
-        #nonzero_proposal_len_indices: List[int] = []
+        nonzero_proposal_len_indices: List[int] = []
         #zero_proposal_len_indices: List[int] = []
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             seq_data = next(iter(seq_group_metadata.seq_data.values()))
@@ -90,7 +90,7 @@ class MultiStepWorker(Worker):
             if seq_len + max_proposal_len < max_model_len:
                 proposal_lens.append(max_proposal_len)
                 nonzero_proposal_len_seqs.append(seq_group_metadata)
-                #nonzero_proposal_len_indices.append(i)
+                nonzero_proposal_len_indices.append(i)
             else:
                 proposal_lens.append(0)
                 #zero_proposal_len_indices.append(i)
@@ -102,6 +102,8 @@ class MultiStepWorker(Worker):
         
         # run fwd pass
 
+        #mapping = torch.tensor([2, 4, 6, 8, 9], dtype=torch.int64)
+
         if nonzero_proposal_len_seqs:
             sampler_output = self.execute_model_multi_step(
                 seq_group_metadata_list=nonzero_proposal_len_seqs,
@@ -110,12 +112,22 @@ class MultiStepWorker(Worker):
                 blocks_to_copy=blocks_to_copy,
                 num_steps=max_proposal_len,
             )
+            proposal_tokens, proposal_probs = sampler_output_to_torch(sampler_output)
 
             # Now, reformat the output GPU tensors such that each sequence has
             # a proposal. the proposal can be empty, e.g. [-1, -1, -1]
+            
+            batch_size = len(seq_group_metadata_list)
 
-            proposal_tokens, proposal_probs = sampler_output_to_torch(sampler_output)
-            proposal_lens = torch.ones_like(proposal_tokens[:, 0]) * max_proposal_len
+            entire_proposal_tokens = torch.ones(batch_size, *proposal_tokens.shape[1:], dtype=torch.long, device=self.device) * -1
+            entire_proposal_tokens[nonzero_proposal_len_indices] = proposal_tokens
+            entire_proposal_probs = torch.zeros(batch_size, *proposal_probs.shape[1:], dtype=torch.float32, device=self.device)
+            entire_proposal_probs[nonzero_proposal_len_indices] = proposal_probs
+
+            proposal_tokens, proposal_probs = entire_proposal_tokens, entire_proposal_probs
+            
+            proposal_lens = torch.zeros(batch_size, dtype=torch.long, device=self.device)
+            proposal_lens[nonzero_proposal_len_indices] = max_proposal_len
         else:
             proposal_tokens = torch.zeros(0, max_proposal_len, dtype=torch.long, device=self.device)
             vocab_size = 32_000 # TODO

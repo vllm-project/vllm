@@ -1,5 +1,5 @@
 import torch
-from typing import List, Optional, Dict, Iterable
+from typing import List, Optional, Dict, Iterable, Union
 from unittest.mock import MagicMock
 
 from vllm.worker.worker import Worker
@@ -230,7 +230,7 @@ def create_sampler_output_list(
 
 def create_batch(batch_size,
                  k,
-                 prompt_len: int = 10,
+                 prompt_len: Union[int, List[int]] = 10,
                  prev_output_token_len: int = 10,
                  seq_ids: Optional[List[int]] = None,
                  num_gpu_blocks: Optional[int] = None,
@@ -242,8 +242,14 @@ def create_batch(batch_size,
         num_gpu_blocks = 2048 // block_size
     
     iterator = count()
-    prompts = [[next(iterator) for _ in range(prompt_len)]
-               for _ in range(batch_size)]
+    
+    if isinstance(prompt_len, int):
+        prompt_lens = [prompt_len for _ in range(batch_size)]
+    else:
+        prompt_lens = prompt_len
+
+    prompts = [[next(iterator) for _ in range(l)]
+               for l in prompt_lens]
     prev_output_tokens = [[
         next(iterator) for _ in range(prev_output_token_len)
     ] for _ in range(batch_size)]
