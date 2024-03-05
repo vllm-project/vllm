@@ -80,6 +80,7 @@ class TensorizerArgs:
             "plaid_mode_buffers": self.plaid_mode_buffers,
             "verify_hash": self.verify_hash,
             "encryption": self.deserializer_encryption_key,
+            "force_http": True
             # "dtype":self.dtype,
             # "device":self.device,
         }
