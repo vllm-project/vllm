@@ -32,7 +32,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearMethodBase,
                                                QKVParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.rotary_embedding import get_act_fn
+from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
@@ -102,7 +102,7 @@ class JAISAttention(nn.Module):
         tp_rank = get_tensor_model_parallel_rank()
         head_start = tp_rank * self.num_heads
         head_end = (tp_rank + 1) * self.num_heads
-        alibi_slopes = _get_alibi_slopes(self.total_num_heads)
+        alibi_slopes = _get_alibi_slopes(total_num_heads)
         alibi_slopes = alibi_slopes[head_start:head_end].tolist()
         self.attn = PagedAttention(self.num_heads,
                                    self.head_dim,
@@ -154,9 +154,7 @@ class JAISMLP(nn.Module):
             linear_method=linear_method,
         )
         quant_config = getattr(linear_method, "quant_config", None)
-        self.act_gpt2 = get_act_fn(config.activation_function, quant_config,
-                                   intermediate_size)
-        self.act = SwiGLUActivation() if self.swiglu else self.act_gpt2
+        self.act = SwiGLUActivation()#  if self.swiglu else self.act_gpt2
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self.swiglu:
@@ -306,13 +304,15 @@ class JAISLMHeadModel(nn.Module):
                 # Skip attention mask.
                 # NOTE: "c_attn.bias" should not be skipped.
                 continue
+            if "relative_pe" in name:
+                continue
             if not name.startswith("transformer."):
                 name = "transformer." + name
             param = params_dict[name]
             # The HF's GPT-2 implementation uses Conv1D instead of Linear.
             # Because of this, we need to transpose the weights.
             # Note(zhuohan): the logic below might break quantized models.
-            for conv1d_weight_name in ["c_attn", "c_proj", "c_fc", "c_fc2"]:
+            for conv1d_weight_name in ["c_attn", "c_proj", "c_fc"]:
                 if conv1d_weight_name not in name:
                     continue
                 if not name.endswith(".weight"):
