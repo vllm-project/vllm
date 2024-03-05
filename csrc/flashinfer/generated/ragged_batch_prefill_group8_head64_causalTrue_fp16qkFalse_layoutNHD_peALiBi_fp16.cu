@@ -1,4 +1,4 @@
-#include "../flashinfer_decl.h"
+#include "<flashinfer_decl.h>"
 
 #include <flashinfer.cuh>
 
