@@ -221,22 +221,25 @@ class ThreadPoolTokenizerGroup(TokenizerGroup):
 
     def __init__(self, *args, max_workers: int, **tokenizer_config):
         super().__init__(*args, **tokenizer_config)
-        local = threading.local()
+        self.local = threading.local()
 
         def init_tokenizer():
-            local.tokenizer = TokenizerGroup(*args, **tokenizer_config)
+            self.local.tokenizer = TokenizerGroup(*args, **tokenizer_config)
 
-        executor = ThreadPoolExecutor(
+        self.executor = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix='tokenizer-thread-',
             initializer=init_tokenizer,
         )
 
-        def encode_local(*args, **kwargs):
-            return local.tokenizer.encode(*args, **kwargs)
+        self.encode_async = make_async(self._encode_local, self.executor)
 
-        self.encode_async = make_async(encode_local, executor)
-        self.encode = encode_local
+    def _encode_local(self, *args, **kwargs):
+        return self.local.tokenizer.encode(*args, **kwargs)
+
+    def encode(self, *args, **kwargs):
+        return self.executor.submit(self._encode_local, *args,
+                                    **kwargs).result()
 
 
 if ray:
