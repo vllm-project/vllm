@@ -54,7 +54,8 @@ def test_auto_prefix_caching(model: str, block_size: int, max_num_seqs: int):
         for prompt in prompts:
             hashes[-1].append([])
             prompt_token_ids = tokenizer.encode(prompt)
-            seq = Sequence(seq_id, prompt, prompt_token_ids, block_size)
+            seq = Sequence(seq_id, prompt, prompt_token_ids, block_size,
+                           tokenizer.tokenizer.eos_token_id)
 
             num_blocks = len(prompt_token_ids) // block_size
             for idx in range(num_blocks):
