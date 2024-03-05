@@ -1,7 +1,7 @@
 import asyncio
+import multiprocessing
 import traceback
 import threading
-import multiprocessing as mp
 import uuid
 from multiprocessing.connection import wait
 from dataclasses import dataclass
@@ -14,6 +14,10 @@ logger = init_logger(__name__)
 T = TypeVar('T')
 
 _TERMINATE = "TERMINATE"  # sentinel
+
+# Use dedicated multiprocess context for workers.
+# Both spawn and fork work
+mp = multiprocessing.get_context("fork")
 
 
 @dataclass
