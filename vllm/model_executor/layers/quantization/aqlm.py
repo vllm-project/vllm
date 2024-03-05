@@ -41,7 +41,7 @@ class AQLMConfig(QuantizationConfig):
         self.out_group_size = out_group_size
 
         # out_group_size > 1 is untested, and probably won't work as-is.
-        assert(self.out_group_size == 1)
+        assert (self.out_group_size == 1)
         self.pack_factor = (self.in_group_size * self.out_group_size)
 
     def __repr__(self) -> str:
@@ -211,8 +211,7 @@ class AQLMLinearMethod(LinearMethodBase):
             for output_size in output_partition_sizes:
                 shard_output = ops.aqlm_gemm(
                     x, codes.narrow(0, output_offset, output_size),
-                    codebooks.narrow(0, codebooks_offset,
-                                     num_codebooks),
+                    codebooks.narrow(0, codebooks_offset, num_codebooks),
                     scales.narrow(0, output_offset, output_size),
                     None if bias is None else bias.narrow(
                         0, output_offset, output_size))
