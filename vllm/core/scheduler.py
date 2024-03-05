@@ -2,6 +2,8 @@ from collections import deque
 import enum
 import time
 from typing import Deque, Dict, Iterable, List, Optional, Tuple, Union, Set
+from regex import X
+from torch import xlogy_
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.block_manager import AllocStatus, BlockSpaceManager
@@ -43,7 +45,7 @@ class TokenBudget:
 
     def __init__(self, token_budget: int):
         self.token_budget = token_budget
-        self.prefill_seqlen = []
+        self.num_prefill_tokens = 0
         self.num_decoding_tokens = 0
 
     def record_prefill_tokens(self, prefill_tokens: int):
@@ -52,7 +54,7 @@ class TokenBudget:
         Padding is automatically recorded, so the
         `prefill_tokens` should not include paddings.
         """
-        self.prefill_seqlen.append(prefill_tokens)
+        self.num_prefill_tokens += prefill_tokens
 
     def record_decoding_tokens(self, decoding_tokens: int):
         """Record the decoding tokens.
@@ -66,20 +68,21 @@ class TokenBudget:
         """Get the remaining token budget."""
         # Each prefill requests are padded to the longest
         # seqlen.
-        longest_prefill_seqlen = (0 if len(self.prefill_seqlen) == 0 else max(
-            self.prefill_seqlen))
-        prefill_token_budgets = (longest_prefill_seqlen *
-                                 len(self.prefill_seqlen))
-        return (self.token_budget - prefill_token_budgets -
-                self.num_decoding_tokens)
+        padded_prefill = self._round_up_by_padding(self.num_prefill_tokens, 8)
+        padded_decoding = self._round_up_by_padding(self.num_decoding_tokens, 8)
+        return (self.token_budget - padded_prefill -
+                padded_decoding)
 
     @property
     def num_batched_tokens(self):
-        longest_prefill_seqlen = (0 if len(self.prefill_seqlen) == 0 else max(
-            self.prefill_seqlen))
-        prefill_token_budgets = (longest_prefill_seqlen *
-                                 len(self.prefill_seqlen))
-        return prefill_token_budgets + self.num_decoding_tokens
+        return self.num_prefill_tokens + self.num_decoding_tokens
+
+    def _round_up_by_padding(self, x: int, padding_size) -> int:
+        remainder = x % padding_size
+        if remainder == 0:
+            return x
+        else:
+            return x + padding_size - remainder
 
 
 class SchedulerOutputs:

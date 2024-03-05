@@ -10,7 +10,7 @@ from .utils import create_dummy_prompt
 
 def test_scheduler_add_seq_group():
     block_size = 4
-    scheduler_config = SchedulerConfig(100, 64, 1, 256)
+    scheduler_config = SchedulerConfig(100, 64, 1)
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 4
     cache_config.num_gpu_blocks = 4
@@ -26,7 +26,7 @@ def test_scheduler_add_seq_group():
 
 def test_scheduler_abort_seq_group():
     block_size = 4
-    scheduler_config = SchedulerConfig(100, 64, 1, 256)
+    scheduler_config = SchedulerConfig(100, 64, 1)
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 4
     cache_config.num_gpu_blocks = 4
@@ -51,7 +51,7 @@ def test_scheduler_schedule_simple():
     block_size = 4
     num_seq_group = 4
     max_model_len = 16
-    scheduler_config = SchedulerConfig(64, num_seq_group, max_model_len, 256)
+    scheduler_config = SchedulerConfig(64, num_seq_group, max_model_len)
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 8
     cache_config.num_gpu_blocks = 8
@@ -85,7 +85,7 @@ def test_scheduler_schedule_simple():
 def test_scheduler_schedule_preempt_abort():
     block_size = 4
     max_model_len = 16
-    scheduler_config = SchedulerConfig(64, 2, max_model_len, 256)
+    scheduler_config = SchedulerConfig(64, 2, max_model_len)
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 2
     cache_config.num_gpu_blocks = 2
@@ -137,7 +137,7 @@ def test_scheduler_max_seqs():
     num_seq_group = 4
     max_seq_group = 2
     max_model_len = 16
-    scheduler_config = SchedulerConfig(64, max_seq_group, max_model_len, 256)
+    scheduler_config = SchedulerConfig(64, max_seq_group, max_model_len)
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 8
     cache_config.num_gpu_blocks = 8
@@ -181,7 +181,6 @@ def test_scheduler_schedule_chunked_prefill():
         64,
         num_seq_group,
         max_model_len,
-        max_paddings=1024,
         max_chunked_prefill_len=max_chunked_prefill_len,
         max_num_prompt_seqs=max_num_prompt_seqs,
         flash_style=True,

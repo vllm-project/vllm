@@ -422,7 +422,6 @@ def _sample(
             raise ValueError(f"Unsupported sampling type: {sampling_type}")
 
     # GPU<->CPU sync happens in the loop below.
-
     for sampling_type in SamplingType:
         if sampling_type not in sample_metadata:
             continue

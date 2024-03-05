@@ -149,7 +149,7 @@ def create_seq_group_metadata_from_prompts(
         for i, final_len in enumerate(final_seq_lens)
     }
 
-    return [
+    result = [
         SequenceGroupMetadata(
             request_id=str(i),
             is_prompt=len(cont_token_ids) == 0,
@@ -164,6 +164,12 @@ def create_seq_group_metadata_from_prompts(
         ) for i, (prompt_token_ids, cont_token_ids, num_tokens_saved) in
         enumerate(zip(prompts, continuations, num_tokens_processed))
     ]
+
+    for g in result:
+        for data in g.seq_data.values():
+            data.advance_prefill_range(len(data.prompt_token_ids))
+    
+    return result
 
 
 def assert_logprobs_dict_allclose(
