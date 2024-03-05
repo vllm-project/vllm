@@ -83,8 +83,13 @@ class ModelRunner:
         # Set enforce_eager to True for Neuron backend, to avoid capturing graph
         if self.device_config.is_neuron:
             self.model_config.enforce_eager = True
-        self.is_encoder_decoder = getattr(self.model_config.hf_config,
-                                          "is_encoder_decoder", False)
+
+        # Unpack HF is_encoder_decoder config attribute
+        # NOTE: must handle "self.model_config is None" case imposed by certain tests i.e. test_prepare_prompt()
+        # In the None case, default to is_encoder_decoder == False since vLLM decoder-only mode is known to handle
+        # the None case correctly.
+        self.is_encoder_decoder = False if self.model_config is None else \
+                                        getattr(self.model_config.hf_config, "is_encoder_decoder", False)
 
     def load_model(self) -> None:
         self.model = get_model(self.model_config,
