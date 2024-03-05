@@ -261,8 +261,7 @@ def test_same_output_for_multi_step():
                                       single_step_logprobs)
 
 @torch.inference_mode()
-@pytest.mark.parametrize("pc", list(range(10)))
-def test_get_proposals_full_speculation_len(pc):
+def test_get_proposals_full_speculation_len():
     """
     """
     seed = 100

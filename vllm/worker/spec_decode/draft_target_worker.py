@@ -35,23 +35,6 @@ TokenId = int
 
 logger = logging.getLogger(__name__)
 
-"""
-Run spec step (ExecuteModelData -> AcceptedTokens)
-- get proposals (ExecuteModelData -> Top1Proposals)
-- score proposals ((ExecuteModelData, Top1Proposals) -> Top1Scores)
-- verify proposals ((ExecuteModelData, Top1Proposals, Top1Scores) -> AcceptedTokens)
-
-Missing pieces:
-- get_proposals in DraftTargetWorker --> currently all mocked
-- Tests cover vertical functionality.
-
-I can start by writing get_proposals without batch expansion, write tests.
-Then abstract out score proposals batch expansion. Move tests over to batch expander.
-Then abstract out Top1Scores and rejection sampler interface. Fix tests.
-
-
-"""
-
 @dataclass
 class Top1Proposals:
     proposal_token_ids: torch.Tensor
@@ -92,52 +75,6 @@ class Top1ProposerWorker:
         - create output
         """
         pass
-        """
-        New thinking:
-        This should go directly into the multi step worker.
-        The multi step worker should be in charge of dropping k=0 sequences.
-        The multi step worker should be in charge of returning blocks of output
-            that have the correct format, e.g. sequences in same order.
-
-        so, we have a MultiStepWorker, MultiStepTop1ProposerWorker
-
-        how about only multi step worker.
-        -> the return type is just proposals; top1 is a special case of topk
-        -> to have variable k, the proposals should also know about proposal lens
-        -> that means that the step output should be "padded" if a sequence ends
-        -> / stops proposing
-        -> 
-        -> why do I need variable k now? because I want to refactor the k=0 case
-        -> to be within the worker itself. why? because it will decouple proposals
-        -> from batch expansion.
-        ->
-        -> do I need to figure out this new padding stuff now? can wait for Lily
-        -> not really.. the alternative is to support only k=0 and k=k, then do
-        -> similar indexing tricks to meet the interface. ("similar indexing tricks"
-        -> means remove k=0 from batch, do fwd pass, place back in batch)
-        ->
-        -> So, I am focusing on expressing k=0 and k=k in a variable k framework, but
-        -> not doing that work.
-        ->
-        -> So, what do I need? the multi step worker needs to have get_proposals.
-        -> it will do the k=0 removal code, multi step fwd pass, then create proposal
-        -> output (with k=0 and k=k).
-        ->
-        -> Last question, where does this logic live? it can live in multi step worker
-        -> class, or it can be decoupled in separate class. Why would we decouple?
-        -> code cleanliness (but complexity :(). any other reason?
-        ->
-        -> it should live in the worker as only the worker knows how many proposals
-        -> there will be
-
-        Now, next step:
-        * write test for multi step worker get_proposals which ensures correct output
-            format
-        * write test for multi step worker get_proposals which ensures mixed
-            k=0/k=k supported
-        * write test for multi_step_worker get_proposals which ensures only k=0
-            supported
-        """
 
 class Top1ScorerWorker:
     def init_model(self):
