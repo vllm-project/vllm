@@ -1,5 +1,5 @@
 import time
-from typing import Tuple
+from typing import Tuple, Optional
 
 from vllm import SamplingParams
 from vllm.sequence import Sequence, SequenceGroup
@@ -8,8 +8,7 @@ from vllm.sequence import Sequence, SequenceGroup
 def create_dummy_prompt(
         request_id: str,
         prompt_length: int,
-        block_size: int = None,
-        num_processed_token_ids: int = 0) -> Tuple[Sequence, SequenceGroup]:
+        block_size: Optional[int] = None) -> Tuple[Sequence, SequenceGroup]:
     if not block_size:
         block_size = prompt_length
 
@@ -19,6 +18,6 @@ def create_dummy_prompt(
     prompt_str = " ".join([str(t) for t in prompt_tokens])
     prompt = Sequence(int(request_id), prompt_str, prompt_tokens, block_size)
     seq_group = SequenceGroup(request_id, [prompt], SamplingParams(),
-                              time.time(), time.perf_counter())
+                              time.time())
 
     return prompt, seq_group

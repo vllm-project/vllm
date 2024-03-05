@@ -96,6 +96,13 @@ class SequenceData:
         self.output_token_ids.append(token_id)
         self.cumulative_logprob += logprob
 
+    def reset_processed_tokens(self) -> None:
+        """Used when a sequence is
+        preempted by recomputation. This reset the prefill range as well.
+        """
+        self._prefill_start = 0
+        self._prefill_end = 0
+
     def get_len(self) -> int:
         return len(self.output_token_ids) + len(self.prompt_token_ids)
 
@@ -236,6 +243,9 @@ class Sequence:
         self._append_tokens_to_blocks([token_id])
         self.output_logprobs.append(logprobs)
         self.data.append_token_id(token_id, logprobs[token_id])
+
+    def reset_processed_tokens(self):
+        self.data.reset_processed_tokens()
 
     def get_len(self) -> int:
         return self.data.get_len()

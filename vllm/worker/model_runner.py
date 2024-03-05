@@ -151,8 +151,8 @@ class ModelRunner:
 
             if seq_group_metadata.is_chunked_prefill:
                 num_chunked_prefill += 1
-                # TODO(sang): Support it.
-                if computed_block_nums is not None:
+                # TODO(sang): Support prefix caching.
+                if seq_group_metadata.computed_block_nums is not None:
                     raise RuntimeError(
                         "chunked prefill cannot be used with prefix caching now."
                     )

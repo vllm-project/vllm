@@ -534,15 +534,6 @@ def flash_single_query_cached_kv_attention(
     based on key/value caches. The main difference is this uses flash attention
     style key-value caches.
 
-    CHEN:
-    - input queries are flattened.
-    - First portion is N decoding tokens.
-    - Second portion is a single (or multiple) prefill token.
-    - Still needs to separate out (it doens't improve performance).
-    - oss flash kernel for prefill doesn't support varlen.
-    - 
-
-
     Arguments:
         output: [num_padded_tokens, num_heads, head_size], output tensor
             to write. if None an new output tensor will be created.

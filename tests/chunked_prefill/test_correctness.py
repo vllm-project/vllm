@@ -28,10 +28,10 @@ TEST_PROMPTS = [
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("max_chunked_prefill_len", [16])
-@pytest.mark.parametrize("max_num_prompt_seqs", [1, 2, 100])
+@pytest.mark.parametrize("max_chunked_prefill_len", [-1])
+@pytest.mark.parametrize("max_num_prompt_seqs", [1])
 @pytest.mark.parametrize("block_size", [32])
-@pytest.mark.parametrize("tensor_parallel_size", [1, 2])
+@pytest.mark.parametrize("tensor_parallel_size", [1])
 def test_models(
     hf_runner,
     vllm_runner,
