@@ -12,7 +12,7 @@ import triton
 
 def main():
     method = fused_moe
-    for bs in [128]:
+    for bs in [1, 2, 4, 8, 16, 24, 32, 80, 96, 128, 192, 200, 208, 216, 224, 256, 512, 1024, 1536, 2048, 3072, 4096]:
         run_grid(bs, method=method)
 
 
