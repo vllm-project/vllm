@@ -164,6 +164,8 @@ class JAISAttention(nn.Module):
         assert total_num_heads % tensor_model_parallel_world_size == 0
         self.num_heads = total_num_heads // tensor_model_parallel_world_size
         self.head_dim = self.hidden_size // total_num_heads
+        if hasattr(config, "scale_qk_dot_by_d"):
+            config.mup_scale_qk_dot_by_d = config.scale_qk_dot_by_d
         self.attn_scale_power = 1.0 if config.mup_scale_qk_dot_by_d else 0.5
         self.scale = self.head_dim**-self.attn_scale_power
 
