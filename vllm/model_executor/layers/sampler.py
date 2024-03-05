@@ -376,7 +376,7 @@ def _multinomial(
     return probs.div_(q).argmax(dim=1).view(-1, num_samples)
 
 
-def _sample_old(
+def _sample_with_torch(
     probs: torch.Tensor,
     logprobs: torch.Tensor,
     sampling_metadata: SamplingMetadata,
@@ -534,8 +534,9 @@ def _sample(
     sampling_metadata: SamplingMetadata,
     sampling_tensors: SamplingTensors,
 ) -> List[Tuple[List[int], List[int]]]:
-    return _sample_with_triton_kernel(probs, logprobs, sampling_metadata,
-                                      sampling_tensors)
+    return _sample_with_torch(probs, logprobs, sampling_metadata)
+    # return _sample_with_triton_kernel(probs, logprobs, sampling_metadata,
+    #                                   sampling_tensors)
 
 
 def _get_logprobs(
