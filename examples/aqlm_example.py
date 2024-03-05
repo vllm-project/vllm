@@ -3,14 +3,11 @@ import argparse
 
 def main():
 
-    # Create argument parser
     parser = argparse.ArgumentParser(description='Example script with command-line arguments')
 
-    # Add arguments
     parser.add_argument('--model', '-m', type=int, default=0, help='Model ID [0-2]')
     parser.add_argument('--tensor_parallel_size', '-t', type=int, default=1, help='tensor parallel size')
 
-    # Parse the command-line arguments
     args = parser.parse_args()
 
     # These are the verified working models.
