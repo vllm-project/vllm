@@ -189,6 +189,7 @@ class CompletionRequest(BaseModel):
     guided_json: Optional[Union[str, dict, BaseModel]] = None
     guided_regex: Optional[str] = None
     guided_choice: Optional[List[str]] = None
+    response_format: Optional[ResponseFormat] = None
 
     def to_sampling_params(self):
         echo_without_generation = self.echo and self.max_tokens == 0
