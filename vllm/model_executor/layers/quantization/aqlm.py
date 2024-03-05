@@ -150,7 +150,8 @@ class AQLMLinearMethod(LinearMethodBase):
         set_weight_attrs(
             codebooks,
             {
-                "shard_dim": 0,
+                # metadata indicates fixed size concatenated along dim 0
+                "is_metadata": True,
                 "output_partition_sizes": torch.tensor(output_partition_sizes, device='cpu'),
             },
         )
