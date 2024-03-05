@@ -260,10 +260,9 @@ def test_same_output_for_multi_step():
         assert_logprobs_dict_allclose(multi_step_logprobs,
                                       single_step_logprobs)
 
-
-def test_get_proposals():
-    """Call get_proposals and verify the proposals are as expected.
-    Check proposal_len, token id, and probs.
+@torch.inference_mode()
+def test_get_proposals_full_speculation_len():
+    """
     """
     seed = 100
     model_name = 'JackFram/llama-68m'
@@ -286,9 +285,16 @@ def test_get_proposals():
         **execute_model_data.to_dict(),
         max_proposal_len=k,
     )
+    
+    assert torch.is_tensor(proposals.proposal_token_ids)
+    assert torch.is_tensor(proposals.proposal_probs)
 
+    assert proposals.proposal_token_ids.shape == torch.Size([batch_size, k])
+    assert proposals.proposal_probs.shape[:-1] == torch.Size([batch_size, k])
 
-    raise NotImplementedError
+    assert proposals.proposal_lens.shape == torch.Size([batch_size])
+    assert proposals.proposal_lens.tolist() == [k for _ in range(batch_size)]
+
 
 #def test_get_proposals_mixed_k():
 #    """Call get_proposals and verify the proposals are as expected.

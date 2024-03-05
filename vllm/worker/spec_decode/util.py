@@ -21,6 +21,7 @@ class SpeculativeProposals:
     # Proposal token ids and probs speculated by draft worker.
     proposal_token_ids: torch.Tensor
     proposal_probs: torch.Tensor
+    proposal_lens: torch.Tensor
 
     def __repr__(self):
         return (f"SpeculativeProposals(spec_seqs={len(self.spec_seqs)}, "

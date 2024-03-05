@@ -115,6 +115,7 @@ class MultiStepWorker(Worker):
         # a proposal. the proposal can be empty, e.g. [-1, -1, -1]
 
         proposal_tokens, proposal_probs = sampler_output_to_torch(sampler_output)
+        proposal_lens = torch.ones_like(proposal_tokens[:, 0]) * max_proposal_len
 
         proposals = SpeculativeProposals(
             # TODO remove unused.
@@ -124,7 +125,10 @@ class MultiStepWorker(Worker):
             original_indices=None,
             proposal_token_ids=proposal_tokens,
             proposal_probs=proposal_probs,
+            proposal_lens=proposal_lens,
         )
+
+        return proposals
 
 
     def _append_new_tokens(
