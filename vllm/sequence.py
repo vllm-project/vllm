@@ -140,11 +140,11 @@ class Sequence:
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
         self.start_time = time.monotonic()
-        
+
     @property
     def status(self):
         return self._status
-    
+
     @status.setter
     def status(self, new_status: SequenceStatus) -> None:
         """Set the status of the sequence."""
@@ -152,12 +152,11 @@ class Sequence:
         labels = {"from": self._status, "to": new_status}
         if new_status == SequenceStatus.RUNNING:
             histogram_infernce_queue_duration.observe(labels, dwell_time)
-        
+
         if self._status == SequenceStatus.RUNNING:
             histogram_infernce_compute_duration.observe(labels, dwell_time)
 
         self._status = new_status
-        
 
     @property
     def lora_int_id(self) -> int:

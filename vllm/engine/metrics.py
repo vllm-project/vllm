@@ -4,10 +4,8 @@ from aioprometheus import Counter, Gauge, Histogram
 import time
 import numpy as np
 from typing import List, Dict
-import copy
 from dataclasses import dataclass
 import pynvml
-import torch
 
 logger = init_logger(__name__)
 
@@ -66,17 +64,28 @@ histogram_e2e_request_latency = Histogram(
     buckets=[1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0])
 # end-metrics-definitions
 
-counter_inference_request_success = Counter('vllm:inference_request_success', 'Number of successful inference calls')
-counter_inference_request_aborted = Counter('vllm:inference_request_aborted', 'Number of aborted inference calls')
-histogram_infernce_queue_duration= Histogram('vllm:inference_queue_duration', 'Histogram of wait time. From WAITING state to RUNNING state')
-histogram_infernce_compute_duration = Histogram('vllm:inference_compute_duration', 'Histogram of compute time. From RUNINNG state to the next state')
-gauge_gpu_temperature = Gauge("vllm:gpu_temperature", "GPU temperature in celcius")
-gauge_gpu_power_usage = Gauge("vllm:gpu_power_usage", "GPU power usage in milli Watts")
+counter_inference_request_success = Counter(
+    'vllm:inference_request_success', 'Number of successful inference calls')
+counter_inference_request_aborted = Counter(
+    'vllm:inference_request_aborted', 'Number of aborted inference calls')
+histogram_infernce_queue_duration = Histogram(
+    'vllm:inference_queue_duration',
+    'Histogram of wait time. From WAITING state to RUNNING state')
+histogram_infernce_compute_duration = Histogram(
+    'vllm:inference_compute_duration',
+    'Histogram of compute time. From RUNINNG state to the next state')
+gauge_gpu_temperature = Gauge("vllm:gpu_temperature",
+                              "GPU temperature in celcius")
+gauge_gpu_power_usage = Gauge("vllm:gpu_power_usage",
+                              "GPU power usage in milli Watts")
 # ---
 gauge_gpu_utilization = Gauge("vllm:gpu_utilization", "Used GPU")
 # ---
-gauge_gpu_memory_total_bytes = Gauge("vllm:gpu_memory_total_bytes", "GPU memory capacity in Bytes")
-gauge_gpu_memory_used_bytes = Gauge("vllm:gpu_memory_used_bytes", "Bytes that occupy the GPU memory")
+gauge_gpu_memory_total_bytes = Gauge("vllm:gpu_memory_total_bytes",
+                                     "GPU memory capacity in Bytes")
+gauge_gpu_memory_used_bytes = Gauge("vllm:gpu_memory_used_bytes",
+                                    "Bytes that occupy the GPU memory")
+
 
 @dataclass
 class Stats:
@@ -138,7 +147,6 @@ class StatLogger:
             histogram_e2e_request_latency.observe(labels, e2e)
 
         self._log_gpu_metrics(labels)
-        
 
     def _log_prometheus_interval(self, prompt_throughput: float,
                                  generation_throughput: float) -> None:
@@ -188,39 +196,38 @@ class StatLogger:
             self.num_prompt_tokens = []
             self.num_generation_tokens = []
             self.last_local_log = stats.now
-            
-            
+
     def _log_gpu_metrics(self, labels: Dict):
-        
-        def _log_temperature(gpu_id: int ):
+
+        def _log_temperature(gpu_id: int):
             label_temp = {}
             label_temp["units"] = "C"
             handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
             gpu_name = pynvml.nvmlDeviceGetName(handle)
             label_temp["gpu"] = f"[{gpu_id}] {gpu_name}"
-            
-            temperature = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
-            
+
+            temperature = pynvml.nvmlDeviceGetTemperature(
+                handle, pynvml.NVML_TEMPERATURE_GPU)
+
             # log temperature
             gauge_gpu_temperature.set({**labels, **label_temp}, temperature)
-        
+
         def _log_gpu_power(gpu_id: int):
             label_power = {}
             label_power["units"] = "mW"
             handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
             gpu_name = pynvml.nvmlDeviceGetName(handle)
             label_power["gpu"] = f"[{gpu_id}] {gpu_name}"
-            
+
             power_usage = pynvml.nvmlDeviceGetPowerUsage(handle)
-            
-            # log power     
+
+            # log power
             gauge_gpu_power_usage.set({**labels, **label_power}, power_usage)
-            
-            
+
         def _log_memory(gpu_id: int):
             label_mem = {}
             label_mem["units"] = "B"
-            
+
             handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
             gpu_name = pynvml.nvmlDeviceGetName(handle)
             label_mem["gpu"] = f"[{gpu_id}] {gpu_name}"
@@ -228,15 +235,20 @@ class StatLogger:
             used_memory = pynvml.nvmlDeviceGetMemoryInfo(handle).used
             total_memory = pynvml.nvmlDeviceGetMemoryInfo(handle).total
             gpu_utilization = pynvml.nvmlDeviceGetUtilizationRates(handle).gpu
-            
-            # log volatile gpu utilization 
+
+            # log volatile gpu utilization
             gauge_gpu_utilization.set({**labels, **label_mem}, gpu_utilization)
             # log used bytes
-            gauge_gpu_memory_used_bytes.set({**labels, **label_mem}, used_memory)
+            gauge_gpu_memory_used_bytes.set({
+                **labels,
+                **label_mem
+            }, used_memory)
             # log total bytes (static)
-            gauge_gpu_memory_total_bytes.set({**labels, **label_mem},total_memory )
-        
-       
+            gauge_gpu_memory_total_bytes.set({
+                **labels,
+                **label_mem
+            }, total_memory)
+
         try:
             pynvml.nvmlInit()
             num_gpus = pynvml.nvmlDeviceGetCount()
@@ -244,6 +256,6 @@ class StatLogger:
                 _log_temperature(gpu_id)
                 _log_gpu_power(gpu_id)
                 _log_memory(gpu_id)
-                
-        finally: 
+
+        finally:
             pynvml.nvmlShutdown()
