@@ -1,4 +1,4 @@
-from typing import Any, Optional, Union, ClassVar
+from typing import Optional, Union, ClassVar
 from dataclasses import dataclass
 import os
 from packaging.version import Version

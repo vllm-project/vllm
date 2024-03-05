@@ -184,6 +184,6 @@ torch::Tensor aqlm_gemm(
     return code2x8_matmat(input, codes, codebooks, scales, bias);
   }
 
-  TORCH_CHECK(False, "AQLM with ", nbooks, " codebooks and ", entries, " entries is not currently supported.")
+  TORCH_CHECK(false, "AQLM with ", nbooks, " codebooks and ", entries, " entries is not currently supported.")
   return {};
 }

@@ -41,7 +41,7 @@ class AQLMConfig(QuantizationConfig):
         self.out_group_size = out_group_size
 
         # out_group_size > 1 is untested, and probably won't work as-is.
-        assert(self.out_group_size == 1)
+        assert (self.out_group_size == 1)
         self.pack_factor = (self.in_group_size * self.out_group_size)
 
     def __repr__(self) -> str:
@@ -61,7 +61,7 @@ class AQLMConfig(QuantizationConfig):
     @classmethod
     # Need to figure it out
     def get_min_capability(cls) -> int:
-        return 60
+        return 70
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:

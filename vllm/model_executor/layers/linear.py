@@ -154,7 +154,7 @@ class ColumnParallelLinear(torch.nn.Module):
         skip_bias_add: bool = False,
         params_dtype: Optional[torch.dtype] = None,
         linear_method: Optional[LinearMethodBase] = None,
-        output_sizes: List[int] = [0],
+        output_sizes: Optional[List[int]] = None,
     ):
         super().__init__()
 
@@ -171,6 +171,8 @@ class ColumnParallelLinear(torch.nn.Module):
         self.params_dtype = params_dtype
         if linear_method is None:
             linear_method = UnquantizedLinearMethod()
+        if output_sizes is None:
+            output_sizes = [output_size]
         self.linear_method = linear_method
         self.linear_weights = self.linear_method.create_weights(
             self.input_size, self.output_size_per_partition, self.input_size,
