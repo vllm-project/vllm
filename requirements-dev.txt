@@ -15,6 +15,7 @@ types-setuptools
 pytest
 pytest-forked
 pytest-asyncio
+pytest-rerunfailures
 httpx
 einops # required for MPT
 openai
