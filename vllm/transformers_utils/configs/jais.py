@@ -85,6 +85,8 @@ class JAISConfig(PretrainedConfig):
             or `train_seq_len` for dynamic scaling on input samples with sequence length > `train_seq_len`. The expected
             formats are `{"type": strategy name, "factor": scaling factor}` or
             `{"type": strategy name, "train_seq_len": training sequence length}`.
+        architectures (`List`, *optional*, defaults to ['JAISLMHeadModel']):
+            architecture names for Jais.
 
     Example:
 
