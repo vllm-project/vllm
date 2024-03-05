@@ -170,16 +170,19 @@ def make_async(func: Callable[..., T]) -> Callable[..., Awaitable[T]]:
 
 
 def get_ip() -> str:
-    # try ipv4
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        s.connect(("8.8.8.8", 80))  # Doesn't need to be reachable
-        return s.getsockname()[0]
-    except OSError:
-        # try ipv6
-        s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
-        s.connect(("dns.google", 80))
-        return s.getsockname()[0]
+        # try ipv4
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))  # Doesn't need to be reachable
+            return s.getsockname()[0]
+        except OSError:
+            # try ipv6
+            s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+            s.connect(("dns.google", 80))
+            return s.getsockname()[0]
+    except:
+        return socket.gethostbyname(socket.gethostname())
 
 
 def get_distributed_init_method(ip: str, port: int) -> str:
