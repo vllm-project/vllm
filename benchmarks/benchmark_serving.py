@@ -52,7 +52,7 @@ class BenchmarkMetrics:
     p99_tpot_ms: float
 
 
-def sample_requests(
+def sample_sharegpt_requests(
     dataset_path: str,
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
@@ -100,6 +100,55 @@ def sample_requests(
     return sampled_requests
 
 
+def sample_sonnet_requests(
+    dataset_path: str,
+    num_requests: int,
+    input_len: int,
+    output_len: int,
+    prefix_len: int,
+    tokenizer: PreTrainedTokenizerBase,
+) -> List[Tuple[str, int, int]]:
+
+    assert input_len > prefix_len, "input_len must be greater than prefix_len."
+
+    # Load the dataset.
+    with open(dataset_path) as f:
+        poem_lines = f.readlines()
+
+    # Tokenize the poem lines.
+    poem_token_ids = tokenizer(poem_lines).input_ids
+    average_poem_len = sum(
+        len(token_ids) for token_ids in poem_token_ids) / len(poem_token_ids)
+
+    # Base prefix for all requests.
+    base_prompt = "Pick as many lines as you can from these poem lines:\n"
+    base_prompt_offset = len(tokenizer(base_prompt).input_ids)
+
+    assert input_len > base_prompt_offset, f"input_len is too short, please specify a number higher than {base_prompt_offset}."
+    num_input_lines = round(
+        (input_len - base_prompt_offset) / average_poem_len)
+
+    # First approximately `prefix_len` number of tokens in the prompt are fixed poem lines.
+    assert prefix_len > base_prompt_offset, f"prefix_len is too short, please specify a number higher than {base_prompt_offset}."
+
+    num_prefix_lines = round(
+        (prefix_len - base_prompt_offset) / average_poem_len)
+    prefix_lines = poem_lines[:num_prefix_lines]
+
+    # Sample the rest of lines per request.
+    sampled_requests: List[Tuple[str, int, int]] = []
+    for i in range(num_requests):
+        sampled_lines = "".join(
+            prefix_lines +
+            random.sample(poem_lines, num_input_lines - num_prefix_lines))
+
+        prompt = f"{base_prompt}{sampled_lines}"
+        prompt_len = len(tokenizer(prompt).input_ids)
+        sampled_requests.append((prompt, prompt_len, output_len))
+
+    return sampled_requests
+
+
 async def get_request(
     input_requests: List[Tuple[str, int, int]],
     request_rate: float,
@@ -126,7 +175,7 @@ def calculate_metrics(
     total_output = 0
     total_input = 0
     completed = 0
-    per_token_latencies = []
+    inter_token_latencies = []
     ttfts = []
     for i in range(len(outputs)):
         if outputs[i].success:
@@ -134,7 +183,8 @@ def calculate_metrics(
             total_output += output_len
             total_input += input_requests[i][1]
             if output_len > 1:
-                inter_token_latencies.append((outputs[i].latency - output_lens[i].ttft) / (output_len - 1))
+                inter_token_latencies.append(
+                    (outputs[i].latency - outputs[i].ttft) / (output_len - 1))
             ttfts.append(outputs[i].ttft)
             completed += 1
 
@@ -255,7 +305,25 @@ def main(args: argparse.Namespace):
 
     tokenizer = get_tokenizer(tokenizer_id,
                               trust_remote_code=args.trust_remote_code)
-    input_requests = sample_requests(args.dataset, args.num_prompts, tokenizer)
+
+    if args.dataset_name == "sharegpt":
+        input_requests = sample_sharegpt_requests(
+            dataset_path=args.dataset_path,
+            num_requests=args.num_prompts,
+            tokenizer=tokenizer)
+
+    elif args.dataset_name == "sonnet":
+        input_requests = sample_sonnet_requests(
+            dataset_path=args.dataset_path,
+            num_requests=args.num_prompts,
+            input_len=args.input_len,
+            output_len=args.output_len,
+            prefix_len=args.prefix_len,
+            tokenizer=tokenizer,
+        )
+
+    else:
+        raise ValueError(f"Unknown dataset: {args.dataset_name}")
 
     benchmark_result = asyncio.run(
         benchmark(
@@ -328,7 +396,12 @@ if __name__ == "__main__":
         default="/generate",
         help="API endpoint.",
     )
-    parser.add_argument("--dataset",
+    parser.add_argument("--dataset-name",
+                        type=str,
+                        default="sharegpt",
+                        choices=["sharegpt", "sonnet"],
+                        help="Name of the dataset to benchmark on.")
+    parser.add_argument("--dataset-path",
                         type=str,
                         required=True,
                         help="Path to the dataset.")
@@ -357,6 +430,27 @@ if __name__ == "__main__":
         type=int,
         default=1000,
         help="Number of prompts to process.",
+    )
+    parser.add_argument(
+        "--input-len",
+        type=int,
+        default=550,
+        help=
+        "Number of input tokens per request, used only for sonnet dataset.",
+    )
+    parser.add_argument(
+        "--output-len",
+        type=int,
+        default=150,
+        help=
+        "Number of output tokens per request, used only for sonnet dataset.",
+    )
+    parser.add_argument(
+        "--prefix-len",
+        type=int,
+        default=200,
+        help=
+        "Number of prefix tokens per request, used only for sonnet dataset.",
     )
     parser.add_argument(
         "--request-rate",
