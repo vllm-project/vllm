@@ -322,6 +322,7 @@ def _uniform_to_exponential(uniform_noise):
     exponential_noise = -tl.log(uniform_noise)
     return exponential_noise
 
+
 @triton.jit
 def _sample_triton(
         sample_indices_ptr: torch.Tensor, output_ptr: torch.Tensor,
