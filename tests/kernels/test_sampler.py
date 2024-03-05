@@ -4,29 +4,13 @@ import triton
 import triton.language as tl
 
 from vllm.model_executor.layers.triton_kernel.sample import (
-    sample, get_num_triton_sampler_splits, MAX_TRITON_N_COLS)
+    _uniform_to_exponential, sample, get_num_triton_sampler_splits,
+    MAX_TRITON_N_COLS)
 from vllm.model_executor.utils import set_random_seed
 from vllm.model_executor.sampling_metadata import SamplingTensors
 
-_EPS = 1e-6
-
 SINGLE_SPLIT_VOCAB_SIZE = 32000  # llama/mistral/mixtral vocab size
 MULTI_SPLIT_VOCAB_SIZE = (MAX_TRITON_N_COLS * 2) - 100
-
-
-# same code as in vllm/model_executor/layers/triton_kernel/rand.py
-# TODO(yard1): figure out how to keep in sync...
-@triton.jit
-def _uniform_to_exponential(uniform_noise):
-    """Convert uniform samples to exponential samples."""
-    # tl.rand returns values in [0, 1), so we clamp lower bound
-    # to _EPS to avoid log(0) and thus division by 0 later
-    lb = tl.full(uniform_noise.shape, _EPS, uniform_noise.dtype)
-    uniform_noise = tl.maximum(uniform_noise, lb)
-    # Use the inversion method to turn uniform samples
-    # into exponential samples
-    exponential_noise = -tl.log(uniform_noise)
-    return exponential_noise
 
 
 @triton.jit

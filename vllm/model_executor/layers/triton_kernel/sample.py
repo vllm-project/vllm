@@ -311,6 +311,18 @@ def _sample(probs: torch.Tensor,
 
 
 @triton.jit
+def _uniform_to_exponential(uniform_noise):
+    """Convert uniform samples to exponential samples."""
+    # tl.rand returns values in [0, 1), so we clamp lower bound
+    # to _EPS to avoid log(0) and thus division by 0 later
+    lb = tl.full(uniform_noise.shape, _EPS, uniform_noise.dtype)
+    uniform_noise = tl.maximum(uniform_noise, lb)
+    # Use the inversion method to turn uniform samples
+    # into exponential samples
+    exponential_noise = -tl.log(uniform_noise)
+    return exponential_noise
+
+@triton.jit
 def _sample_triton(
         sample_indices_ptr: torch.Tensor, output_ptr: torch.Tensor,
         output_logprobs_ptr: torch.Tensor,
@@ -349,16 +361,7 @@ def _sample_triton(
         uniform_noise = tl.load(uniform_noise_start_ptr + col_offsets,
                                 mask=col_offsets < n_cols,
                                 other=0.5)
-
-        # NEEDS TO BE MANUALLY KEPT IN SYNC WITH tests/kernels/test_rand.py
-        # tl.rand returns values in [0, 1), so we clamp lower bound
-        # to _EPS to avoid log(0) and thus division by nan later
-        lb = tl.full(uniform_noise.shape, _EPS, uniform_noise.dtype)
-        uniform_noise = tl.maximum(uniform_noise, lb)
-        # Use the inversion method to turn uniform samples
-        # into exponential samples
-        exponential_noise = -tl.log(uniform_noise)
-
+        exponential_noise = _uniform_to_exponential(uniform_noise)
         row /= exponential_noise
 
     sampled_value, sampled_token = tl.max(row, axis=0, return_indices=True)
