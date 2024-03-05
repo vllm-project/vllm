@@ -31,6 +31,8 @@ LORA_WARMUP_RANK = 8
 # Capture graphs for batch size 1, 2, 4, 8, 16, 24, 32, 40, ..., 256.
 # NOTE: _get_graph_batch_size needs to be updated if this list is changed.
 _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [8 * i for i in range(1, 33)]
+# Capture graphs for token size 1, 2, 4, 8, 16, 24, 32, 40, ..., 512.
+_TOKEN_SIZES_TO_CAPTURE = [1, 2, 4] + [8 * i for i in range(1, 66)]
 
 
 class ModelRunner:
@@ -183,7 +185,6 @@ class ModelRunner:
                 #     prefix_block_tables.append(
                 #         seq_group_metadata.block_tables[seq_id])
                 context_len = prompt_len
-
             context_lens.append(context_len)
             subquery_lens.append(prompt_len - computed_len)
 
@@ -214,7 +215,6 @@ class ModelRunner:
                 continue
 
             # Compute the slot mapping.
-            slot_mapping.append(_PAD_SLOT_ID)
             block_table = seq_group_metadata.block_tables[seq_id]
             # Mask the [0, start_idx) tokens of the prompt with _PAD_SLOT_ID,
             # where start_idx is max(0, prompt_len - sliding_window).
@@ -357,24 +357,32 @@ class ModelRunner:
                     block_table = block_table[-sliding_window_blocks:]
                 block_tables.append(block_table)
 
-        batch_size = len(input_tokens)
+        token_size = len(input_tokens)
+        batch_size = len(seq_group_metadata_list)
         max_context_len = max(context_lens)
         use_captured_graph = (
             not self.model_config.enforce_eager
             and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
+            and token_size <= _TOKEN_SIZES_TO_CAPTURE[-1]
             and max_context_len <= self.max_context_len_to_capture)
         if use_captured_graph:
             # Pad the input tokens, positions, and slot mapping to match the
             # batch size of the captured graph.
             graph_batch_size = _get_graph_batch_size(batch_size)
+            graph_token_size = _get_graph_batch_size(token_size)
             assert graph_batch_size >= batch_size
+            assert graph_token_size >= token_size
             for _ in range(graph_batch_size - batch_size):
+                context_lens.append(1)
+                block_tables.append(0)
+
+            for _ in range(graph_token_size - token_size):
                 input_tokens.append(0)
                 input_positions.append(0)
                 slot_mapping.append(_PAD_SLOT_ID)
-                context_lens.append(1)
-                block_tables.append(0)
+
             batch_size = graph_batch_size
+            token_size = graph_token_size
 
         input_tokens = _make_tensor_with_pad_for_alignment(input_tokens,
                                                            multiple_of=8,
@@ -451,7 +459,6 @@ class ModelRunner:
         categorized_sample_indices_start_idx = 0
         pin_memory = not self.in_wsl and not self.device_config.is_neuron
 
-        max_subquery_len = max(subquery_lens) if subquery_lens else 1
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             seq_ids = list(seq_group_metadata.seq_data.keys())
             sampling_params = seq_group_metadata.sampling_params
@@ -476,8 +483,7 @@ class ModelRunner:
                               selected_token_start_idx + subquery_len - 1))
                 selected_token_indices.append(selected_token_start_idx +
                                               subquery_len - 1)
-                # SANG-TODO max_subquery len is wrong for variable length.
-                selected_token_start_idx += max_subquery_len
+                selected_token_start_idx += subquery_len
 
                 if sampling_params.seed is not None:
                     seq_group_metadata.state.generator = torch.Generator(
@@ -634,8 +640,10 @@ class ModelRunner:
 
         # Execute the model.
         if input_metadata.use_cuda_graph:
-            graph_batch_size = input_tokens.shape[0]
-            model_executable = self.graph_runners[graph_batch_size]
+            graph_token_size = input_tokens.shape[0]
+            graph_batch_size = input_metadata.context_lens.shape[0]
+            model_executable = self.graph_runners[(graph_batch_size,
+                                                   graph_token_size)]
         else:
             model_executable = self.model
         hidden_states = model_executable(
@@ -755,10 +763,10 @@ class ModelRunner:
 
         # Prepare dummy inputs. These will be reused for all batch sizes.
         max_batch_size = max(_BATCH_SIZES_TO_CAPTURE)
-        input_tokens = torch.zeros(max_batch_size, dtype=torch.long).cuda()
-        input_positions = torch.zeros(max_batch_size,
-                                      dtype=torch.long).cuda()
-        slot_mapping = torch.empty(max_batch_size, dtype=torch.long).cuda()
+        max_token_size = max(_TOKEN_SIZES_TO_CAPTURE)
+        input_tokens = torch.zeros(max_token_size, dtype=torch.long).cuda()
+        input_positions = torch.zeros(max_token_size, dtype=torch.long).cuda()
+        slot_mapping = torch.empty(max_token_size, dtype=torch.long).cuda()
         slot_mapping.fill_(_PAD_SLOT_ID)
         context_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
         block_tables = torch.from_numpy(self.graph_block_tables).cuda()
@@ -767,6 +775,9 @@ class ModelRunner:
             self.scheduler_config.max_num_seqs)
         batch_size_capture_list = [
             bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
+        ]
+        token_size_capture_list = [
+            bs for bs in _TOKEN_SIZES_TO_CAPTURE if bs <= graph_batch_size
         ]
 
         # NOTE(woosuk): There are 3 backends for all-reduce: custom all-reduce
@@ -778,42 +789,43 @@ class ModelRunner:
         with custom_all_reduce.capture():
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
-            for batch_size in reversed(batch_size_capture_list):
-                # Create dummy input_metadata.
-                input_metadata = InputMetadata(
-                    is_prompt=False,
-                    slot_mapping=slot_mapping[:batch_size],
-                    prompt_lens=None,
-                    num_chunked_prefill=0,
-                    num_prompt_tokens=0,
-                    num_generation_tokens=0,
-                    max_seq_len=None,
-                    start_loc=None,
-                    max_context_len=self.max_context_len_to_capture,
-                    context_lens=context_lens[:batch_size],
-                    block_tables=block_tables[:batch_size],
-                    use_cuda_graph=True,
-                    kv_cache_dtype=self.kv_cache_dtype,
-                    flash_style=self.flash_style,
-                    prefix_enabled=False)
+            for token_size in reversed(token_size_capture_list):
+                for batch_size in reversed(batch_size_capture_list):
+                    # Create dummy input_metadata.
+                    input_metadata = InputMetadata(
+                        is_prompt=False,
+                        slot_mapping=slot_mapping[:token_size],
+                        prompt_lens=None,
+                        num_chunked_prefill=0,
+                        num_prompt_tokens=0,
+                        num_generation_tokens=0,
+                        max_seq_len=None,
+                        start_loc=None,
+                        max_context_len=self.max_context_len_to_capture,
+                        context_lens=context_lens[:batch_size],
+                        block_tables=block_tables[:batch_size],
+                        use_cuda_graph=True,
+                        kv_cache_dtype=self.kv_cache_dtype,
+                        flash_style=self.flash_style,
+                        prefix_enabled=False)
 
-                if self.lora_config:
-                    lora_mapping = LoRAMapping(
-                        [0] * batch_size,
-                        [0] * batch_size,
+                    if self.lora_config:
+                        lora_mapping = LoRAMapping(
+                            [0] * batch_size,
+                            [0] * batch_size,
+                        )
+                        self.set_active_loras(set(), lora_mapping)
+
+                    graph_runner = CUDAGraphRunner(self.model)
+                    graph_runner.capture(
+                        input_tokens[:token_size],
+                        input_positions[:token_size],
+                        kv_caches,
+                        input_metadata,
+                        memory_pool=self.graph_memory_pool,
                     )
-                    self.set_active_loras(set(), lora_mapping)
-
-                graph_runner = CUDAGraphRunner(self.model)
-                graph_runner.capture(
-                    input_tokens[:batch_size],
-                    input_positions[:batch_size],
-                    kv_caches,
-                    input_metadata,
-                    memory_pool=self.graph_memory_pool,
-                )
-                self.graph_memory_pool = graph_runner.graph.pool()
-                self.graph_runners[batch_size] = graph_runner
+                    self.graph_memory_pool = graph_runner.graph.pool()
+                    self.graph_runners[(batch_size, token_size)] = graph_runner
 
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time

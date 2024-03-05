@@ -168,7 +168,7 @@ def create_seq_group_metadata_from_prompts(
     for g in result:
         for data in g.seq_data.values():
             data.advance_prefill_range(len(data.prompt_token_ids))
-    
+
     return result
 
 

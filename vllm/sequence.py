@@ -252,7 +252,7 @@ class Sequence:
         assert token_id in logprobs
         self._append_tokens_to_blocks([token_id])
         self.output_logprobs.append(logprobs)
-        self.data.append_token_id(token_id, logprobs[token_id])
+        self.data.append_token_id(token_id, logprobs[token_id].logprob)
 
     def reset_processed_tokens(self):
         self.data.reset_processed_tokens()

@@ -237,8 +237,8 @@ class PagedAttention(nn.Module):
                         input_metadata.attn_bias = attn_bias
                     else:
                         input_metadata.attn_bias = _make_alibi_bias(
-                            self.alibi_slopes, self.num_kv_heads,
-                            query.dtype, input_metadata)
+                            self.alibi_slopes, self.num_kv_heads, query.dtype,
+                            input_metadata)
 
                 if self.use_ref_attention:
                     out = self.ref_masked_attention(
@@ -258,10 +258,9 @@ class PagedAttention(nn.Module):
                     key = key.unsqueeze(0)
                     value = value.unsqueeze(0)
                 else:
-                    assert False
-                    query = query.unflatten(0, (batch_size, seq_len))
-                    key = key.unflatten(0, (batch_size, seq_len))
-                    value = value.unflatten(0, (batch_size, seq_len))
+                    query = query.unflatten(0, (num_tokens))
+                    key = key.unflatten(0, (num_tokens))
+                    value = value.unflatten(0, (num_tokens))
                 out = xops.memory_efficient_attention_forward(
                     query,
                     key,

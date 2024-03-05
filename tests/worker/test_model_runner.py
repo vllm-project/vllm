@@ -50,10 +50,10 @@ def test_prepare_prompt():
     def round_up_to_next_multiple_of_8(n):
         return ((n + 7) // 8) * 8
 
-    assert input_tokens.shape == (
-        round_up_to_next_multiple_of_8(sum(prompt_lens)), )
-    assert input_positions.shape == (
-        round_up_to_next_multiple_of_8(sum(prompt_lens)), )
+    assert input_tokens.shape == (round_up_to_next_multiple_of_8(
+        sum(prompt_lens)), )
+    assert input_positions.shape == (round_up_to_next_multiple_of_8(
+        sum(prompt_lens)), )
     torch.testing.assert_close(input_tokens, input_positions)
 
     actual = sampling_metadata.selected_token_indices

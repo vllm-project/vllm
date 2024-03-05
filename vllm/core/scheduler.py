@@ -69,9 +69,9 @@ class TokenBudget:
         # Each prefill requests are padded to the longest
         # seqlen.
         padded_prefill = self._round_up_by_padding(self.num_prefill_tokens, 8)
-        padded_decoding = self._round_up_by_padding(self.num_decoding_tokens, 8)
-        return (self.token_budget - padded_prefill -
-                padded_decoding)
+        padded_decoding = self._round_up_by_padding(self.num_decoding_tokens,
+                                                    8)
+        return (self.token_budget - padded_prefill - padded_decoding)
 
     @property
     def num_batched_tokens(self):
