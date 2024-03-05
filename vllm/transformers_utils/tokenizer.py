@@ -3,6 +3,7 @@ import os
 import threading
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
+from threading import current_thread
 from typing import List, Optional, Tuple, Union
 
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
@@ -224,11 +225,12 @@ class ThreadPoolTokenizerGroup(TokenizerGroup):
         self.local = threading.local()
 
         def init_tokenizer():
+            logger.info(f"Starting tokenizer thread {current_thread().name}")
             self.local.tokenizer = TokenizerGroup(*args, **tokenizer_config)
 
         self.executor = ThreadPoolExecutor(
             max_workers=max_workers,
-            thread_name_prefix='tokenizer-thread-',
+            thread_name_prefix='tokenizer_thread',
             initializer=init_tokenizer,
         )
 
