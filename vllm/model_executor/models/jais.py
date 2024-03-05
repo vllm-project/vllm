@@ -32,20 +32,14 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearMethodBase,
                                                QKVParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.sampler import (Sampler,
-                                                _prune_hidden_states,
-                                                _apply_logits_processors,
-                                                _apply_penalties,
-                                                _apply_top_k_top_p,
-                                                _apply_min_p,
-                                                _sample,
-                                                _get_logprobs,
-                                                _build_sampler_output)
+from vllm.model_executor.layers.sampler import (
+    Sampler, _prune_hidden_states, _apply_logits_processors, _apply_penalties,
+    _apply_top_k_top_p, _apply_min_p, _sample, _get_logprobs,
+    _build_sampler_output)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
@@ -74,6 +68,7 @@ def _get_alibi_slopes(n):
         return (get_slopes_power_of_2(closest_power_of_2) + _get_alibi_slopes(
             2 * closest_power_of_2)[0::2][:n - closest_power_of_2])
 
+
 class JAISSampler(Sampler):
 
     def __init__(self,
@@ -98,9 +93,8 @@ class JAISSampler(Sampler):
 
             # Get the logits for the next tokens.
             logits = self._get_logits(hidden_states, embedding, embedding_bias)
-            logits *= torch.tensor(
-                float(output_logits_scale), dtype=logits.dtype
-            )
+            logits *= torch.tensor(float(output_logits_scale),
+                                   dtype=logits.dtype)
         
 
         # Only perform sampling in the driver worker.
@@ -154,6 +148,7 @@ class JAISSampler(Sampler):
             logprobs, sampling_metadata, sample_results)
         return _build_sampler_output(sample_results, sampling_metadata,
                                      prompt_logprobs, sample_logprobs)
+
 
 class JAISAttention(nn.Module):
 
@@ -241,7 +236,7 @@ class JAISMLP(nn.Module):
             bias=True,
             linear_method=linear_method,
         )
-    
+
         self.act = SwiGLUActivation()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -336,9 +331,8 @@ class JAISModel(nn.Module):
             hidden_states = inputs_embeds + position_embeds
         else:
             hidden_states = inputs_embeds
-        hidden_states *= torch.tensor(
-            float(self.embeddings_scale), dtype=hidden_states.dtype
-        )
+        hidden_states *= torch.tensor(float(self.embeddings_scale),
+                                      dtype=hidden_states.dtype)
 
         for i in range(len(self.h)):
             layer = self.h[i]
@@ -365,7 +359,7 @@ class JAISLMHeadModel(nn.Module):
         else:
             self.output_logits_scale = config.mup_output_alpha * config.mup_width_scale
         self.sampler = JAISSampler(config.vocab_size)
-        
+
     def forward(
         self,
         input_ids: torch.Tensor,
