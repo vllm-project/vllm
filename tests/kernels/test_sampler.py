@@ -12,7 +12,7 @@ from vllm.model_executor.utils import set_random_seed
 from vllm.model_executor.sampling_metadata import SamplingTensors
 
 SINGLE_SPLIT_VOCAB_SIZE = 32000  # llama/mistral/mixtral vocab size
-MULTI_SPLIT_VOCAB_SIZE = (MAX_TRITON_N_COLS * 2) - 100
+MULTI_SPLIT_VOCAB_SIZE = MAX_TRITON_N_COLS + 100
 
 
 @pytest.fixture(autouse=True)
