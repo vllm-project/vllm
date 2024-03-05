@@ -36,7 +36,7 @@ def _is_neuron() -> bool:
     torch_neuronx_installed = True
     try:
         subprocess.run(["neuron-ls"], capture_output=True, check=True)
-    except FileNotFoundError:
+    except (FileNotFoundError, PermissionError):
         torch_neuronx_installed = False
     return torch_neuronx_installed
 
@@ -342,6 +342,8 @@ vllm_extension_sources = [
 
 if _is_cuda():
     vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
+    vllm_extension_sources.append(
+        "csrc/quantization/marlin/marlin_cuda_kernel.cu")
     vllm_extension_sources.append("csrc/custom_all_reduce.cu")
 
     # Add MoE kernels.
@@ -432,7 +434,9 @@ def get_requirements() -> List[str]:
     return requirements
 
 
-package_data = {"vllm": ["py.typed"]}
+package_data = {
+    "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
+}
 if os.environ.get("VLLM_USE_PRECOMPILED"):
     ext_modules = []
     package_data["vllm"].append("*.so")

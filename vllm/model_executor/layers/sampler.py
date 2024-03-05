@@ -8,8 +8,10 @@ from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_gather)
 from vllm.model_executor.sampling_metadata import SamplingMetadata, SamplingTensors
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.sequence import (PromptLogprobs, SampleLogprobs, SamplerOutput,
-                           SequenceData, SequenceGroupOutput, SequenceOutput)
+from vllm.sequence import (Logprob, PromptLogprobs, SampleLogprobs,
+                           SamplerOutput, SequenceData, SequenceGroupOutput,
+                           SequenceOutput)
+from vllm.utils import is_neuron
 
 
 class Sampler(nn.Module):
@@ -32,6 +34,8 @@ class Sampler(nn.Module):
                  org_vocab_size: Optional[int] = None) -> None:
         super().__init__()
         self.vocab_size = vocab_size
+        # Transformers-neuronx generate outputs as logits directly.
+        self.logits_as_hidden_states = is_neuron()
         # original vocabulary size (without LoRA).
         self.org_vocab_size = org_vocab_size or vocab_size
 
@@ -55,10 +59,14 @@ class Sampler(nn.Module):
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[SamplerOutput]:
         # Get the hidden states that we use for sampling.
-        hidden_states = _prune_hidden_states(hidden_states, sampling_metadata)
+        if self.logits_as_hidden_states:
+            logits = hidden_states
+        else:
+            hidden_states = _prune_hidden_states(hidden_states,
+                                                 sampling_metadata)
 
-        # Get the logits for the next tokens.
-        logits = self._get_logits(hidden_states, embedding, embedding_bias)
+            # Get the logits for the next tokens.
+            logits = self._get_logits(hidden_states, embedding, embedding_bias)
 
         # Only perform sampling in the driver worker.
         # Note: `_get_logits` is still distributed across TP workers because
@@ -395,7 +403,8 @@ def _sample(
         sample_metadata[sampling_type] = (seq_group_ids, seq_groups,
                                           is_prompts, sample_indices)
         if sampling_type == SamplingType.GREEDY:
-            greedy_samples = torch.argmax(logprobs[sample_indices], dim=-1)
+            greedy_samples = torch.argmax(logprobs[sample_indices.long()],
+                                          dim=-1)
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
             max_best_of = 1
             for seq_group, is_prompt in zip(seq_groups, is_prompts):
@@ -407,7 +416,7 @@ def _sample(
                 "generators": sampling_metadata.generators,
             }
             multinomial_samples[sampling_type] = _multinomial(
-                probs[sample_indices], max_best_of, **seeded_args)
+                probs[sample_indices.long()], max_best_of, **seeded_args)
         elif sampling_type == SamplingType.BEAM:
             beam_search_logprobs = logprobs[sample_indices]
         else:
@@ -520,7 +529,10 @@ def _get_logprobs(
                     prompt_logprobs_dict.update(
                         zip(top_token_ids[sample_idx, :num_logprobs].tolist(),
                             top_logprobs[sample_idx, :num_logprobs].tolist()))
-                group_prompt_logprobs.append(prompt_logprobs_dict)
+                group_prompt_logprobs.append({
+                    token_id: Logprob(logprob)
+                    for token_id, logprob in prompt_logprobs_dict.items()
+                })
                 sample_idx += 1
                 query_result_idx += 1
             result_prompt_logprobs.append(group_prompt_logprobs)
@@ -545,7 +557,10 @@ def _get_logprobs(
                                       parent_id, :num_logprobs].tolist(),
                         top_logprobs[sample_idx +
                                      parent_id, :num_logprobs].tolist()))
-            group_sample_logprobs.append(sample_logprobs_dict)
+            group_sample_logprobs.append({
+                token_id: Logprob(logprob)
+                for token_id, logprob in sample_logprobs_dict.items()
+            })
         result_sample_logprobs.append(group_sample_logprobs)
         sample_idx += len(seq_ids)
 
