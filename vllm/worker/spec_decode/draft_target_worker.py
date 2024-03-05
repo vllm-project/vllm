@@ -283,21 +283,12 @@ class DraftTargetWorker:
             multiple times.
         """
 
-        logger.debug(f"running draft model for {k=} steps")
-
-        draft_max_model_len, target_max_model_len = self._get_max_model_len()
-        max_model_len = min(draft_max_model_len, target_max_model_len)
-
         # Generate proposals using draft worker.
         proposals = self.draft_worker.get_spec_proposals(
             seq_group_metadata_list, blocks_to_swap_in, blocks_to_swap_out,
-            blocks_to_copy, k, max_model_len)
+            blocks_to_copy, k)
 
-        logger.debug("scoring draft tokens")
-        (proposal_scores, bonus_token_ids,
-         non_spec_token_ids, original_indices) = self._score_proposals(
-        # TODO name
-        #all_tokens, all_probs = self._score_proposals(
+        all_tokens, all_probs = self._score_proposals(
              seq_group_metadata_list,
              blocks_to_swap_in,
              blocks_to_swap_out,
@@ -306,17 +297,39 @@ class DraftTargetWorker:
              proposals,
         )
 
-        with nvtx_range("draft_target_worker.rejection_sampler"):
-            accepted_token_ids = self.rejection_sampler(
-                proposal_scores,
-                bonus_token_ids,
-                proposals.proposal_probs,
-                proposals.proposal_token_ids,
-            )
+        accepted_token_ids = self._verify_tokens(seq_group_metadata_list, all_tokens, all_probs, proposals, k)
+
+        return self._create_output_sampler_list(seq_group_metadata_list,
+            accepted_token_ids, k)
+
+    @nvtx_range("draft_target_worker._verify_tokens")
+    def _verify_tokens(
+        self,
+        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        all_tokens: torch.Tensor,
+        all_probs: torch.Tensor,
+        proposals: SpeculativeProposals,
+        max_proposal_len: int,
+    ) -> torch.Tensor:
+        proposal_lens_list = proposals.proposal_lens.tolist()
+        spec_indices = [i for i, (_, proposal_len) in enumerate(zip(seq_group_metadata_list, proposal_lens_list)) if proposal_len != 0]
+        non_spec_indices = [i for i, (_, proposal_len) in enumerate(zip(seq_group_metadata_list, proposal_lens_list)) if proposal_len == 0]
+        original_indices = spec_indices + non_spec_indices
+
+        proposal_scores = all_probs[spec_indices, :-1]
+        bonus_token_ids = all_tokens[spec_indices, -1:]
+        non_spec_token_ids = all_tokens[non_spec_indices]
+        
+        accepted_token_ids = self.rejection_sampler(
+            proposal_scores,
+            bonus_token_ids,
+            proposals.proposal_probs,
+            proposals.proposal_token_ids,
+        )
 
         # Append output tokens from non-speculative sequences to
         # the accepted token ids tensor.
-        non_spec_token_ids = non_spec_token_ids.expand(-1, k + 1).clone()
+        non_spec_token_ids = non_spec_token_ids.expand(-1, max_proposal_len + 1).clone()
         non_spec_token_ids[:, 1:] = -1
         accepted_token_ids = torch.cat(
             [accepted_token_ids, non_spec_token_ids])
@@ -325,18 +338,7 @@ class DraftTargetWorker:
         # metadata.
         accepted_token_ids[original_indices] = accepted_token_ids.clone()
 
-        # Construct output.
-        seq_ids = self._get_all_seq_ids(seq_group_metadata_list)
-        sampler_output = self._create_output_sampler_list(
-            seq_ids, accepted_token_ids)
-
-        maybe_rejsample_metrics = self._metrics.maybe_collect_rejsample_metrics(
-            k)
-        if maybe_rejsample_metrics is not None:
-            sampler_output[
-                0].draft_target_worker_metrics = maybe_rejsample_metrics
-
-        return sampler_output
+        return accepted_token_ids
 
     def _get_max_model_len(self) -> Tuple[int, int]:
         draft_max_model_len = self.draft_worker.max_model_len
@@ -476,8 +478,6 @@ class DraftTargetWorker:
             all_tokens = torch.ones(full_bs, k + 1, device=self.device, dtype=torch.long) * -1
             all_probs = torch.zeros(full_bs, k + 1, self._vocab_size, device=self.device, dtype=torch.float32)
             
-            #breakpoint()
-            
             if non_spec_indices:
                 all_tokens[non_spec_indices, 0] = non_spec_target_token_ids
                 all_probs[non_spec_indices, 1:, :] = non_spec_target_probs
@@ -489,12 +489,14 @@ class DraftTargetWorker:
         else:
             raise NotImplementedError
         
-        #return all_tokens, all_probs
-
+        return all_tokens, all_probs
+        
+        # TODO remove
         proposal_scores = all_probs[spec_indices, :-1]
         bonus_token_ids = all_tokens[spec_indices, -1:]
         non_spec_target_token_ids = all_tokens[non_spec_indices]
         #original_indices = ...
+        
 
         return proposal_scores, bonus_token_ids, non_spec_target_token_ids, original_indices
 
@@ -652,14 +654,17 @@ class DraftTargetWorker:
 
     def _create_output_sampler_list(
         self,
-        seq_ids: List[SeqId],
-        accepted_token_ids: torch.Tensor  # shape: [batch_size, k+1]
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        accepted_token_ids: torch.Tensor,  # shape: [batch_size, k+1]
+        k: int,
     ) -> List[SamplerOutput]:
         """Given the accepted token ids, create a list of SamplerOutput.
 
         The output is padded with -1 tokens such that each sequence has
         the same number of outputs.
         """
+        seq_ids = self._get_all_seq_ids(seq_group_metadata_list)
+
         # shape: [k+1, batch_size]
         accepted_token_ids_by_step = accepted_token_ids.transpose(0,
                                                                   1).tolist()
@@ -685,6 +690,12 @@ class DraftTargetWorker:
                     ))
             sampler_output_list.append(
                 SamplerOutput(outputs=step_output_token_ids))
+
+        maybe_rejsample_metrics = self._metrics.maybe_collect_rejsample_metrics(
+            k)
+        if maybe_rejsample_metrics is not None:
+            sampler_output_list[
+                0].draft_target_worker_metrics = maybe_rejsample_metrics
 
         return sampler_output_list
 

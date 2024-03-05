@@ -145,9 +145,8 @@ def test_correctly_calls_draft_model(k: int, batch_size: int):
     """Verify that the DraftTargetWorker calls the draft model with correct
     inputs. Everything else is mocked out.
     """
-    max_model_len = 2048
-    draft_worker = mock_worker(max_model_len=max_model_len)
-    target_worker = mock_worker(max_model_len=max_model_len)
+    draft_worker = mock_worker()
+    target_worker = mock_worker()
     rejection_sampler = MagicMock()
     metrics_collector = MagicMock()
     worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
@@ -165,16 +164,14 @@ def test_correctly_calls_draft_model(k: int, batch_size: int):
     assert len(call_args_list) == 1
 
     for args, _ in call_args_list:
-        #(actual_execute_model_data, actual_k, actual_max_model_len) = args
         (seq_group_metadata_list, blocks_to_swap_in, blocks_to_swap_out,
-         blocks_to_copy, actual_k, actual_max_model_len) = args
+         blocks_to_copy, actual_k) = args
         actual_execute_model_data = ExecuteModelData(seq_group_metadata_list,
                                                      blocks_to_swap_in,
                                                      blocks_to_swap_out,
                                                      blocks_to_copy)
         assert actual_execute_model_data == execute_model_data
         assert actual_k == k
-        assert actual_max_model_len == max_model_len
 
 
 @pytest.mark.parametrize('k', [1, 2, 6])
