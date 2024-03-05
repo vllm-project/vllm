@@ -134,7 +134,6 @@ class AQLMLinearMethod(LinearMethodBase):
                 "output_dim": 0,
                 "packed_dim": 1,
                 "pack_factor": self.quant_config.pack_factor,
-                "output_partition_sizes": output_partition_sizes
             },
         )
 
@@ -152,7 +151,10 @@ class AQLMLinearMethod(LinearMethodBase):
             codebooks,
             {
                 # metadata indicates fixed size concatenated along dim 0
-                "is_metadata": True,
+                "is_metadata":
+                True,
+                "output_partition_sizes":
+                torch.tensor(output_partition_sizes, device='cpu'),
             },
         )
 
@@ -193,42 +195,15 @@ class AQLMLinearMethod(LinearMethodBase):
         codebooks = weights["codebooks"]
         codes = weights["codes"]
         scales = weights["scales"]
-
-        is_metadata = getattr(codebooks, "is_metadata", False)
-        if is_metadata:
-            output_shape = x.shape[:-1] + (scales.shape[0], )
-            output = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-            output_partition_sizes = getattr(codes, "output_partition_sizes",
-                                             None)
-            num_outputs = len(output_partition_sizes)
-
-            # break the inputs and codebooks apart then combine the outputs.
-            num_codebooks = codebooks.shape[0] // num_outputs
-            assert (scales.shape[0] == codes.shape[0])
-            assert (sum(output_partition_sizes) == scales.shape[0])
-            output_offset = 0
-            codebooks_offset = 0
-            for output_size in output_partition_sizes:
-                shard_output = ops.aqlm_gemm(
-                    x, codes.narrow(0, output_offset, output_size),
-                    codebooks.narrow(0, codebooks_offset, num_codebooks),
-                    scales.narrow(0, output_offset, output_size),
-                    None if bias is None else bias.narrow(
-                        0, output_offset, output_size))
-
-                output_slice = output.narrow(-1, output_offset, output_size)
-                assert (output_slice.shape == shard_output.shape)
-                output_slice.copy_(shard_output)
-                output_offset += output_size
-                codebooks_offset += num_codebooks
-
-            return output
+        output_partition_sizes = getattr(codebooks, "output_partition_sizes",
+                                         None)
 
         output = ops.aqlm_gemm(
             x,
             codes,
             codebooks,
             scales,
+            output_partition_sizes,
             bias,
         )
 

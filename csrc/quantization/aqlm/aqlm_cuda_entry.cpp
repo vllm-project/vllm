@@ -13,7 +13,9 @@ void code1x16_matvec_cuda(
         void* C,
   const void* codebook,
   int prob_m,
-  int prob_k
+  int prob_k,
+  const int4 codebook_a_sizes,  // cumulative sizes of A spanning each codebook, at most 3 long.
+  const int codebook_stride // as int4.
 );
 
 void code2x8_matvec_cuda(
@@ -29,18 +31,22 @@ void code1x16_matvec(
   const torch::Tensor& A,
   const torch::Tensor& B,
         torch::Tensor& C,
-  const torch::Tensor& codebook
+  const torch::Tensor& codebook,
+  const int4 codebook_a_sizes  // cumulative sizes of A spanning each codebook, at most 3 long.
 ) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(A));
   int prob_m = C.size(0);
   int prob_k = B.size(0);
+
   code1x16_matvec_cuda(
     A.data_ptr(),
     B.data_ptr(),
     C.data_ptr(),
     codebook.data_ptr(),
     prob_m,
-    prob_k
+    prob_k,
+    codebook_a_sizes,
+    codebook.stride(0) * codebook.element_size() / sizeof(int4)
   );
 }
 
@@ -49,8 +55,8 @@ torch::Tensor code1x16_matmat(
   const torch::Tensor& codes,
   const torch::Tensor& codebooks,
   const torch::Tensor& scales,
-  const std::optional<torch::Tensor>& bias
-) {
+  const int4 codebook_a_sizes,
+  const std::optional<torch::Tensor>& bias) {
   auto input_sizes = input.sizes();
   auto out_features = codes.size(0) * codebooks.size(2);
   auto flat_input = input.reshape({-1, input.size(-1)});
@@ -67,7 +73,8 @@ torch::Tensor code1x16_matmat(
       codes.squeeze(2),
       input_vec,
       output_vec,
-      codebooks
+      codebooks,
+      codebook_a_sizes
     );
   }
   flat_output *= scales.flatten().unsqueeze(0);
@@ -145,15 +152,32 @@ torch::Tensor aqlm_gemm(
   const torch::Tensor& codes,
   const torch::Tensor& codebooks,
   const torch::Tensor& scales,
+  const torch::Tensor& codebook_partition_sizes,
   const std::optional<torch::Tensor>& bias
 )
 {
-  int const nbooks = codebooks.size(0);
+  int const nbooks = codebooks.size(0) / codebook_partition_sizes.size(0);
   int const entries = codebooks.size(1);
 
   if (nbooks == 1 && entries == (1 << 16))
   {
-    return code1x16_matmat(input, codes, codebooks, scales, bias);
+    int4 cumulative_sizes;
+    auto cumulative_size = &cumulative_sizes.x;
+    int i =0;
+    int last = 0;
+    assert(codebook_partition_sizes.size(0) <= 4);
+    for (; i <  codebook_partition_sizes.size(0); ++i, ++cumulative_size)
+    {
+      *cumulative_size = codebook_partition_sizes[i].item<int>() + last;
+      last = *cumulative_size;
+    }
+    // fill in the rest with unreachable.
+    for (; i < 4; ++i, ++cumulative_size)
+    {
+      *cumulative_size = last*10;
+    }
+
+    return code1x16_matmat(input, codes, codebooks, scales, cumulative_sizes, bias);
   }
   if (nbooks == 2 && entries == (1 << 8))
   {
