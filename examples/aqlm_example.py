@@ -1,10 +1,10 @@
 from vllm import LLM, SamplingParams
 
-#model = LLM("BlackSamorez/Llama-2-7b-AQLM-2Bit-1x16-hf", enforce_eager=True)
+model = LLM("BlackSamorez/Llama-2-7b-AQLM-2Bit-1x16-hf", enforce_eager=True)
 
 #model = LLM("BlackSamorez/Llama-2-7b-AQLM-2Bit-2x8-hf", enforce_eager=True)
 
-model = LLM("BlackSamorez/TinyLlama-1_1B-Chat-v1_0-AQLM-2Bit-1x16-hf", enforce_eager=True, tensor_parallel_size=2)
+#model = LLM("BlackSamorez/TinyLlama-1_1B-Chat-v1_0-AQLM-2Bit-1x16-hf", enforce_eager=True)
 
 # this has the dimensions 0 and 1 transposed for the codes, and we don't currently support 8x8 anyway.
 #model = LLM("BlackSamorez/Llama-2-7b-AQLM-2Bit-8x8-hf", enforce_eager=True)

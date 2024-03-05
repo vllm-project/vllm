@@ -264,7 +264,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
-        # shard_dim indicates fixed size concatenated at shard_id
+        # shard_dim indicates fixed size concatenated along shard_id
         shard_dim = getattr(param, "shard_dim", None)
         if loaded_shard_id is None:
             # Loaded weight is already packed.

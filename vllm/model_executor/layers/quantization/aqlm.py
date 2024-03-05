@@ -151,7 +151,7 @@ class AQLMLinearMethod(LinearMethodBase):
             codebooks,
             {
                 "shard_dim": 0,
-                "output_partition_sizes": output_partition_sizes,
+                "output_partition_sizes": torch.tensor(output_partition_sizes, device='cpu'),
             },
         )
 

@@ -14,18 +14,18 @@ __global__ void Code1x16MatVec(
   const int4* __restrict__ codebook,
   const int prob_m,
   const int prob_k,
-  const int codebook_a_sizes[4],  // cumulative sizes of A spanning each codebook, at most 3 long.
+  const int4 codebook_a_sizes,  // cumulative sizes of A spanning each codebook, at most 3 long.
   const int codebook_stride // as int4.
 ) {
   int a_gl_stride = prob_k / 8 / 8;
   int a_gl_rd = (blockDim.x / 32) * blockIdx.x + (threadIdx.x / 32);
 
-  // advance to the codebook we are in, this easy because we only multiply one column of the codebook.
-  int codebook_index = 0;
-  while (a_gl_rd >= codebook_a_sizes[codebook_index])
+  // advance to the correct codebook, this easy because we only multiply one column of the codebook.
+  auto codebook_size = &codebook_a_sizes.x;
+  while (a_gl_rd >= *codebook_size)
   {
       codebook += codebook_stride; 
-      ++codebook_index;
+      ++codebook_size;
   }
 
   bool pred = a_gl_rd < prob_m;
@@ -168,7 +168,7 @@ void  code1x16_matvec_cuda(
   const void* __restrict__ codebook,
   int prob_m,
   int prob_k,
-  const int codebook_a_sizes[4],
+  const int4 codebook_a_sizes,
   const int codebook_stride
 ) {
   int sms;

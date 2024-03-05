@@ -14,7 +14,7 @@ void code1x16_matvec_cuda(
   const void* codebook,
   int prob_m,
   int prob_k,
-  const int codebook_a_sizes[4],  // cumulative sizes of A spanning each codebook, at most 3 long.
+  const int4 codebook_a_sizes,  // cumulative sizes of A spanning each codebook, at most 3 long.
   const int codebook_stride // as int4.
 );
 
@@ -32,21 +32,12 @@ void code1x16_matvec(
   const torch::Tensor& B,
         torch::Tensor& C,
   const torch::Tensor& codebook,
-  const int codebook_a_sizes[4]  // cumulative sizes of A spanning each codebook, at most 3 long.
+  const int4 codebook_a_sizes  // cumulative sizes of A spanning each codebook, at most 3 long.
 ) {
-
-  // @TEST
-  int stride = codebook.stride(0) * codebook.element_size() / sizeof(int4);
-  printf("codebook rank is %ld: %ld %ld %ld %ld", codebook.dim(),codebook.size(0),codebook.size(1),codebook.size(2),codebook.size(3));
-  std::cout << "codebook element size is " << codebook.element_size() << "\n";
-  std::cout << "sizeof int4 is " << sizeof(int4) << "\n";
-  std::cout << "stride is " << stride << "\n";
-  //std::cout << "codebook dtype is " << codebook.dtype << "\n";
-  assert(false);
-
   const at::cuda::OptionalCUDAGuard device_guard(device_of(A));
   int prob_m = C.size(0);
   int prob_k = B.size(0);
+
   code1x16_matvec_cuda(
     A.data_ptr(),
     B.data_ptr(),
@@ -64,7 +55,7 @@ torch::Tensor code1x16_matmat(
   const torch::Tensor& codes,
   const torch::Tensor& codebooks,
   const torch::Tensor& scales,
-  const int codebook_a_sizes[4],
+  const int4 codebook_a_sizes,
   const std::optional<torch::Tensor>& bias) {
   auto input_sizes = input.sizes();
   auto out_features = codes.size(0) * codebooks.size(2);
@@ -165,25 +156,25 @@ torch::Tensor aqlm_gemm(
   const std::optional<torch::Tensor>& bias
 )
 {
-  int const nbooks = codebooks.size(0);
+  int const nbooks = codebooks.size(0) / codebook_partition_sizes.size(0);
   int const entries = codebooks.size(1);
 
   if (nbooks == 1 && entries == (1 << 16))
   {
-    int cumulative_sizes[4];
+    int4 cumulative_sizes;
+    auto cumulative_size = &cumulative_sizes.x;
     int i =0;
     int last = 0;
-    for (; i <  codebook_partition_sizes.size(0); ++i)
+    assert(codebook_partition_sizes.size(0) <= 4);
+    for (; i <  codebook_partition_sizes.size(0); ++i, ++cumulative_size)
     {
-      cumulative_sizes[i] = codebook_partition_sizes[i] + last;
-      printf("cum size %d is %d", i, cumulative_sizes[i]);
-      last = cumulative_sizes[i];
+      *cumulative_size = codebook_partition_sizes[i].item<int>() + last;
+      last = *cumulative_size;
     }
-    // just fill in the rest with unreachable.
-    for (; i < 4; ++i)
+    // fill in the rest with unreachable.
+    for (; i < 4; ++i, ++cumulative_size)
     {
-      cumulative_sizes[i] = last*10;
-      printf("cum size %d is %d", i, cumulative_sizes[i]);
+      *cumulative_size = last*10;
     }
 
     return code1x16_matmat(input, codes, codebooks, scales, cumulative_sizes, bias);
