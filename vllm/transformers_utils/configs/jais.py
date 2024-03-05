@@ -138,7 +138,7 @@ class JAISConfig(PretrainedConfig):
         mup_output_alpha=1.0,
         mup_scale_qk_dot_by_d=False,
         alibi_scaling=None,
-        architectures=['JAISLMHeadModel'],
+        architectures=None,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -169,6 +169,8 @@ class JAISConfig(PretrainedConfig):
 
         self.alibi_scaling = alibi_scaling
         self._alibi_scaling_validation()
+        if architectures==None:
+            architectures=['JAISLMHeadModel']
 
         super().__init__(bos_token_id=bos_token_id,
                          eos_token_id=eos_token_id,
