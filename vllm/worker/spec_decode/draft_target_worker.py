@@ -234,17 +234,18 @@ class DraftTargetWorker:
         TODO update
         """
 
-        self.draft_worker.execute_model(seq_group_metadata_list,
-                                        blocks_to_swap_in,
-                                        blocks_to_swap_out,
-                                        blocks_to_copy,
+        self.draft_worker.execute_model(
+            seq_group_metadata_list=seq_group_metadata_list,
+                                        blocks_to_swap_in=blocks_to_swap_in,
+                                        blocks_to_swap_out=blocks_to_swap_out,
+                                        blocks_to_copy=blocks_to_copy,
                                         return_python_output=False)
 
         sampler_output = self.target_worker.execute_model(
-            seq_group_metadata_list,
-            blocks_to_swap_in,
-            blocks_to_swap_out,
-            blocks_to_copy,
+            seq_group_metadata_list=seq_group_metadata_list,
+            blocks_to_swap_in=blocks_to_swap_in,
+            blocks_to_swap_out=blocks_to_swap_out,
+            blocks_to_copy=blocks_to_copy,
         )
 
         # Do not want PyTorch tensors transferred back.

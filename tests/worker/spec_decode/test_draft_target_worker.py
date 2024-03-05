@@ -445,9 +445,9 @@ def test_k_equals_zero(k: int, batch_size: int):
     assert out[
         0].sampled_tokens == None, "expect gpu tensor references to be None"
 
-    assert draft_worker.execute_model.called_once_with(
-        **execute_model_data.to_dict())
-    assert target_worker.execute_model.called_once_with(
+    draft_worker.execute_model.assert_called_once_with(
+        **execute_model_data.to_dict(), return_python_output=False)
+    target_worker.execute_model.assert_called_once_with(
         **execute_model_data.to_dict())
 
 
@@ -484,9 +484,9 @@ def test_empty_input_batch(k: int, batch_size: int):
     assert out[
         0].sampled_tokens == None, "expect gpu tensor references to be None"
 
-    assert draft_worker.execute_model.called_once_with(
-        **execute_model_data.to_dict())
-    assert target_worker.execute_model.called_once_with(
+    draft_worker.execute_model.assert_called_once_with(
+        **execute_model_data.to_dict(), return_python_output=False)
+    target_worker.execute_model.assert_called_once_with(
         **execute_model_data.to_dict())
 
 
@@ -503,14 +503,12 @@ def test_init_model():
 
     worker.init_model()
 
-    assert draft_worker.init_model.called_once()
-    assert draft_worker.include_gpu_probs_tensors.called_once()
+    draft_worker.init_model.assert_called_once()
 
-    assert target_worker.init_model.called_once()
-    assert target_worker.include_gpu_probs_tensors.called_once()
+    target_worker.init_model.assert_called_once()
 
-    assert metrics_collector.init_gpu_tensors.called_once()
-    assert rejection_sampler.init_gpu_tensors.called_once()
+    metrics_collector.init_gpu_tensors.assert_called_once()
+    rejection_sampler.init_gpu_tensors.assert_called_once()
 
 
 @torch.inference_mode()
@@ -528,8 +526,8 @@ def test_init_cache_engine():
 
     worker.init_cache_engine(cache_config)
 
-    assert draft_worker.init_cache_engine.called_once_with(cache_config)
-    assert target_worker.init_cache_engine.called_once_with(cache_config)
+    draft_worker.init_cache_engine.assert_called_once_with(cache_config)
+    target_worker.init_cache_engine.assert_called_once_with(cache_config)
 
 
 @pytest.mark.parametrize('available_gpu_blocks', [1, 1024])
@@ -564,7 +562,7 @@ def test_profile_num_available_blocks(available_gpu_blocks: int,
     num_gpu_blocks, num_cpu_blocks = worker.profile_num_available_blocks(
         block_size, gpu_memory_utilization, cpu_swap_space)
 
-    assert target_worker.profile_num_available_blocks.called_once_with(
+    target_worker.profile_num_available_blocks.assert_called_once_with(
         block_size, gpu_memory_utilization, cpu_swap_space)
     assert num_cpu_blocks == available_cpu_blocks
 
