@@ -564,10 +564,8 @@ class T5ForConditionalGeneration(nn.Module):
 
     def sample(self, hidden_states: torch.Tensor,
                sampling_metadata: SamplingMetadata):
-        # logger.info(f"decoder_outputs: {decoder_outputs}")
         next_tokens = self.sampler(self.shared.weight, hidden_states,
                                    sampling_metadata)
-        # logger.info(f"next_tokens: {next_tokens}")
         return next_tokens
 
     def load_weights(
