@@ -59,9 +59,11 @@ async def async_request_tgi(
             async with session.post(url=api_url, json=payload) as response:
                 if response.status == 200:
                     async for data in response.content.iter_any():
-                        if ttft == 0:
-                            ttft = time.perf_counter() - st
-                            output.ttft = ttft
+                        if "data" in data.decode("utf-8"):
+                            if ttft == 0:
+                                ttft = time.perf_counter() - st
+                                output.ttft = ttft
+                            body = data.decode("utf-8")
                     output.latency = time.perf_counter() - st
 
                     body = data.decode("utf-8").lstrip("data:")
@@ -203,7 +205,7 @@ async def async_request_deepspeed_mii(
                 if resp.status == 200:
                     parsed_resp = await resp.json()
                     output.latency = time.perf_counter() - st
-                    output.generated_text = parsed_resp[0]["generated_text"]
+                    output.generated_text = parsed_resp["text"][0]
                     output.success = True
                 else:
                     output.success = False
