@@ -181,7 +181,8 @@ def get_ip() -> str:
             s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
             s.connect(("dns.google", 80))
             return s.getsockname()[0]
-    except:
+    except Exception:
+        # fall back to method from release 0.2.7
         return socket.gethostbyname(socket.gethostname())
 
 
