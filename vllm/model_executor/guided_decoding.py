@@ -9,14 +9,41 @@ from typing import Union, Tuple
 from pydantic import BaseModel
 
 from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest
-from vllm.model_executor.guided_logits_processors import JSONLogitsProcessor, RegexLogitsProcessor
+from vllm.model_executor.guided_logits_processors import JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor
 
 
 class GuidedDecodingMode(Enum):
     JSON = "json"
     REGEX = "regex"
     CHOICE = "choice"
+    CFG = "cfg"
 
+
+# https://github.com/outlines-dev/outlines/blob/main/outlines/grammars/json.lark
+# the main difference is that we changed the start: value to start: object | array
+# so we are denying scalar values as the root of the JSON. Starting with scalars as the root
+# seems to cause llama to generate without stop.
+JSON_CFG_GRAMMAR = r"""
+?start: object | array
+
+?value: object
+| array
+| UNESCAPED_STRING
+| SIGNED_NUMBER      -> number
+| "true"             -> true
+| "false"            -> false
+| "null"             -> null
+
+array  : "[" [value ("," value)*] "]"
+object : "{" [pair ("," pair)*] "}"
+pair   : UNESCAPED_STRING ":" value
+
+%import common.UNESCAPED_STRING
+%import common.SIGNED_NUMBER
+%import common.WS
+
+%ignore WS
+"""
 
 global_thread_pool = None  # used for generating logits processor fsm
 
@@ -83,7 +110,8 @@ def _get_guide_and_mode(
         ]
         choices_regex = "(" + "|".join(choices) + ")"
         return choices_regex, GuidedDecodingMode.CHOICE
-
+    elif request.response_format is not None and request.response_format.type == "json_object":
+        return JSON_CFG_GRAMMAR, GuidedDecodingMode.CFG
     else:
         return None, None
 
@@ -95,5 +123,7 @@ def _get_cached_logits_processor(guide: str, tokenizer,
         return JSONLogitsProcessor(guide, tokenizer)
     elif mode == GuidedDecodingMode.REGEX or mode == GuidedDecodingMode.CHOICE:
         return RegexLogitsProcessor(guide, tokenizer)
+    elif mode == GuidedDecodingMode.CFG:
+        return CFGLogitsProcessor(guide, tokenizer)
     else:
         raise ValueError(f"Unknown guided decoding mode {mode}")

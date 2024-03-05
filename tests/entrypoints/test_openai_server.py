@@ -595,5 +595,21 @@ async def test_guided_decoding_type_error(server, client: openai.AsyncOpenAI):
             extra_body=dict(guided_regex=TEST_REGEX, guided_json=TEST_SCHEMA))
 
 
+async def test_response_format_json_object(server, client: openai.AsyncOpenAI):
+    resp = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{
+            "role":
+            "user",
+            "content":
+            'what is 1+1? please respond with a JSON object, the format is {"result": 2}'
+        }],
+        response_format={"type": "json_object"})
+
+    content = resp.choices[0].message.content
+    loaded = json.loads(content)
+    assert loaded == {"result": 2}, loaded
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
