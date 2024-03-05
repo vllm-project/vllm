@@ -6,7 +6,6 @@ import pkg_resources
 import requests
 import datetime
 import psutil
-import cpuinfo
 from threading import Thread
 from pathlib import Path
 from typing import Optional
@@ -119,16 +118,17 @@ class UsageMessage:
         self.model = model
         self.log_time = _get_current_timestamp_ns()
         self.num_cpu = os.cpu_count()
-        self.cpu_type = cpuinfo.get_cpu_info()['brand_raw']
+        #Best effort reading processor name
+        self.cpu_type = platform.processor()
         self.total_memory = psutil.virtual_memory().total
         self.source = os.environ.get("VLLM_USAGE_SOURCE", "production")
         self._write_to_file()
         headers = {'Content-type': 'application/x-ndjson'}
         payload = json.dumps(vars(self))
-        try:
-            requests.post(_USAGE_STATS_SERVER, data=payload, headers=headers)
-        except requests.exceptions.RequestException:
-            print("Usage Log Request Failed")
+        # try:
+        #     requests.post(_USAGE_STATS_SERVER, data=payload, headers=headers)
+        # except requests.exceptions.RequestException:
+        #     print("Usage Log Request Failed")
 
     def _write_to_file(self):
         os.makedirs(os.path.dirname(_USAGE_STATS_FILE), exist_ok=True)
