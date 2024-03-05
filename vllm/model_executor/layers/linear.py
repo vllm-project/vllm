@@ -264,8 +264,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
-        # shard_dim indicates fixed size concatenated at shard_id
-        shard_dim = getattr(param, "shard_dim", None)
+        is_metadata = getattr(param, "is_metadata", False)
         if loaded_shard_id is None:
             # Loaded weight is already packed.
             if output_dim is None:
@@ -306,10 +305,11 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             start_idx = tp_rank * shard_size
             loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                  shard_size)
-        elif shard_dim is not None:
-            shard_size = loaded_weight.shape[shard_dim]
+        elif is_metadata:
+            # metadata indicates fixed size concatenated along dim 0
+            shard_size = loaded_weight.shape[0]
             shard_offset = loaded_shard_id * shard_size
-            param_data = param_data.narrow(shard_dim, shard_offset, shard_size)
+            param_data = param_data.narrow(0, shard_offset, shard_size)
         else:
             ignore_warning = getattr(param, "ignore_warning", False)
             if not ignore_warning:
@@ -389,8 +389,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                       loaded_shard_id: Optional[str] = None):
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
-        shard_dim = getattr(param, "shard_dim", None)
-
+        is_metadata = getattr(param, "is_metadata", False)
         if loaded_shard_id is None:
             # Loaded weight is already packed.
             if output_dim is None:
@@ -445,10 +444,11 @@ class QKVParallelLinear(ColumnParallelLinear):
             start_idx = shard_id * shard_size
             loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                  shard_size)
-        elif shard_dim is not None:
-            shard_size = loaded_weight.shape[shard_dim]
+        elif is_metadata:
+            # metadata indicates fixed size concatenated along dim 0
+            shard_size = loaded_weight.shape[0]
             shard_index = ["q", "k", "v"].index(loaded_shard_id)
-            param_data = param_data.narrow(shard_dim, shard_index * shard_size,
+            param_data = param_data.narrow(0, shard_index * shard_size,
                                            shard_size)
         else:
             ignore_warning = getattr(param, "ignore_warning", False)

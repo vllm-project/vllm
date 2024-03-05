@@ -151,7 +151,8 @@ class AQLMLinearMethod(LinearMethodBase):
         set_weight_attrs(
             codebooks,
             {
-                "shard_dim": 0,
+                # metadata indicates fixed size concatenated along dim 0
+                "is_metadata": True,
             },
         )
 
@@ -193,8 +194,8 @@ class AQLMLinearMethod(LinearMethodBase):
         codes = weights["codes"]
         scales = weights["scales"]
 
-        shard_dim = getattr(codebooks, "shard_dim", None)
-        if shard_dim is not None:
+        is_metadata = getattr(codebooks, "is_metadata", False)
+        if is_metadata:
             output_shape = x.shape[:-1] + (scales.shape[0], )
             output = torch.empty(output_shape, dtype=x.dtype, device=x.device)
             output_partition_sizes = getattr(codes, "output_partition_sizes",
@@ -202,8 +203,7 @@ class AQLMLinearMethod(LinearMethodBase):
             num_outputs = len(output_partition_sizes)
 
             # break the inputs and codebooks apart then combine the outputs.
-            assert (shard_dim == 0)
-            num_codebooks = codebooks.shape[shard_dim] // num_outputs
+            num_codebooks = codebooks.shape[0] // num_outputs
             assert (scales.shape[0] == codes.shape[0])
             assert (sum(output_partition_sizes) == scales.shape[0])
             output_offset = 0
@@ -211,7 +211,7 @@ class AQLMLinearMethod(LinearMethodBase):
             for output_size in output_partition_sizes:
                 shard_output = ops.aqlm_gemm(
                     x, codes.narrow(0, output_offset, output_size),
-                    codebooks.narrow(shard_dim, codebooks_offset,
+                    codebooks.narrow(0, codebooks_offset,
                                      num_codebooks),
                     scales.narrow(0, output_offset, output_size),
                     None if bias is None else bias.narrow(
