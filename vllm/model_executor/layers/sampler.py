@@ -118,8 +118,18 @@ class Sampler(nn.Module):
         # Get the logprobs query results.
         prompt_logprobs, sample_logprobs = _get_logprobs(
             logprobs, sampling_metadata, sample_results)
-        return _build_sampler_output(sample_results, sampling_metadata,
+
+        output = _build_sampler_output(sample_results, sampling_metadata,
                                      prompt_logprobs, sample_logprobs)
+        
+        if self.include_gpu_probs_tensor:
+            # TODO move to build_sampler_output
+            output.sampled_token_probs = probs
+
+            # TODO use actual sampled token ids
+            output.sampled_token_ids = torch.zeros(probs.shape[0], dtype=torch.long, device='cuda')
+
+        return output
 
 
 def _prune_hidden_states(

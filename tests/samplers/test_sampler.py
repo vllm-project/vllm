@@ -397,3 +397,37 @@ def test_sampler_top_k_top_p(seed: int, device: str):
     assert torch.equal(hf_probs.eq(0), sample_probs.eq(0))
 
     del model_runner
+
+@pytest.mark.parametrize("seed", [0])
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("include_gpu_probs_tensor", [True, False])
+def test_sampler_returns_gpu_tensors(seed: int, device: str, include_gpu_probs_tensor: bool):
+    """Verify sampler includes raw GPU tensors in the output when configured
+    to do so.
+    """
+    set_random_seed(seed)
+    torch.set_default_device(device)
+    batch_size = random.randint(1, 256)
+    input_tensor, fake_logits, sampler, model_runner = _prepare_test(
+        batch_size)
+
+    sampler.include_gpu_probs_tensor = include_gpu_probs_tensor
+
+    for i in range(batch_size):
+        fake_logits[i, i] = 1e2
+
+    sampling_params = SamplingParams(
+        temperature=1.0,
+        n=random.randint(1, 10),
+    )
+    sampler_output = _do_sample(batch_size, input_tensor, sampler,
+                                model_runner, sampling_params)
+    
+    if include_gpu_probs_tensor:
+        assert torch.is_tensor(sampler_output.sampled_token_probs)
+        assert torch.is_tensor(sampler_output.sampled_token_ids)
+    else:
+        assert sampler_output.sampled_token_probs is None
+        assert sampler_output.sampled_token_ids is None
+
+    del model_runner

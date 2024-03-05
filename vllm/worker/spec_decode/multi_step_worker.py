@@ -115,8 +115,9 @@ class MultiStepWorker(Worker):
         # a proposal. the proposal can be empty, e.g. [-1, -1, -1]
 
         proposal_tokens, proposal_probs = sampler_output_to_torch(sampler_output)
-        
+
         proposals = SpeculativeProposals(
+            # TODO remove unused.
             spec_seqs=[],
             non_spec_seqs=[],
             all_seqs=[],
@@ -124,8 +125,6 @@ class MultiStepWorker(Worker):
             proposal_token_ids=proposal_tokens,
             proposal_probs=proposal_probs,
         )
-
-        breakpoint()
 
 
     def _append_new_tokens(
