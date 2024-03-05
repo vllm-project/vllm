@@ -87,7 +87,6 @@ class BaseLogitsProcessor:
             last_seq_id = hash(tuple(input_ids[:-1]))
             self.fsm_state[seq_id] = self.fsm.next_state(
                 self.fsm_state[last_seq_id], last_token)
-            del self.fsm_state[last_seq_id]
 
         allowed_tokens = self.fsm.allowed_token_ids(self.fsm_state[seq_id])
 
