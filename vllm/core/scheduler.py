@@ -27,6 +27,7 @@ class PreemptionMode(enum.Enum):
     RECOMPUTE = enum.auto()
 
 
+# SANG-TODO Fix padding implementation.
 class TokenBudget:
     """Used to track how many token budgets are available.
 
@@ -79,13 +80,6 @@ class TokenBudget:
         prefill_token_budgets = (longest_prefill_seqlen *
                                  len(self.prefill_seqlen))
         return prefill_token_budgets + self.num_decoding_tokens
-
-    @property
-    def num_prefill_paddings(self):
-        """Return a number of paddings in the prefill requests.
-        
-        NOTE: This doesn't include padding for decode requests."""
-        return self.num_batched_tokens - sum(self.prefill_seqlen)
 
 
 class SchedulerOutputs:
@@ -576,10 +570,6 @@ class Scheduler:
             num_new_seqs = seq_group.get_max_num_running_seqs()
             if (num_curr_seqs + num_new_seqs >
                     self.scheduler_config.max_num_seqs):
-                break
-
-            num_paddings = token_budget.num_prefill_paddings
-            if num_paddings > self.scheduler_config.max_paddings:
                 break
 
             if curr_loras is not None and lora_int_id > 0:

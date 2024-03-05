@@ -27,6 +27,12 @@ def test_prepare_prompt():
                 block_tables={0: [1]},
             ))
 
+    # Advanced prefill range.
+    for seq_group_meta, prompt_len in zip(seq_group_metadata_list,
+                                          prompt_lens):
+        for _, data in seq_group_meta.seq_data.items():
+            data.advance_prefill_range(prompt_len)
+
     expected_selected_token_indices = []
     selected_token_start_idx = 0
     max_seq_len = max(prompt_lens)
@@ -40,8 +46,14 @@ def test_prepare_prompt():
     sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
                                                      prompt_lens,
                                                      subquery_lens=prompt_lens)
-    assert input_tokens.shape == (batch_size, max_seq_len)
-    assert input_positions.shape == (batch_size, max_seq_len)
+
+    def round_up_to_next_multiple_of_8(n):
+        return ((n + 7) // 8) * 8
+
+    assert input_tokens.shape == (
+        round_up_to_next_multiple_of_8(sum(prompt_lens)), )
+    assert input_positions.shape == (
+        round_up_to_next_multiple_of_8(sum(prompt_lens)), )
     torch.testing.assert_close(input_tokens, input_positions)
 
     actual = sampling_metadata.selected_token_indices

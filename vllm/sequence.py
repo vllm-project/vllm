@@ -124,7 +124,9 @@ class SequenceData:
         return self.prompt_token_ids + self.output_token_ids
 
     def advance_prefill_range(self, size: int) -> int:
-        """Advance the prefill range by the specified amount
+        """Advance the prefill range by the specified amount.
+
+        This API has to be called before accessing `get_prefill_range`.
 
         Args:
             size: The amount to advance the prefill range.

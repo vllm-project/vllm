@@ -8,22 +8,28 @@ class InputMetadata:
 
     Args:
         prompt_lens: Lengths of prompts.
+        slot_mapping: The index of each token mapped into a physical block
+            in block tables. E.g., if block_size is 32, 35 means it is in
+            the block number 1, 3rd index.
         num_chunked_prefill: Number of chunked prefill requests across
             sequences.
+        num_prompt_tokens: The number of tokens in the prompts. This might
+            include padding.
+        num_generation_tokens: The number of tokens in the generation sequences.
+            This might include padding.
         slot_mapping: The address to write the new KV to of each token.
             index: token_id, value: address within kv_cache.
         max_context_len: The maximum context length.
         context_lens: the length of attention context for each sequence.
         block_tables: The block tables. (Seq id -> list of physical block)
         kv_cache_dtype: Data type to store kv cache.
-        num_prompt_tokens: The number of tokens in the prompts. This might
-            include padding.
         num_generation_tokens: The number of tokens in the generation sequences.
             This might include padding.
     """
 
     def __init__(self, is_prompt: bool, slot_mapping: torch.Tensor,
                  prompt_lens: Optional[torch.Tensor], num_chunked_prefill: int,
+                 num_prompt_tokens: int, num_generation_tokens: int,
                  max_seq_len: Optional[int], start_loc: Optional[torch.Tensor],
                  max_context_len: Optional[int],
                  context_lens: Optional[torch.Tensor],
@@ -33,6 +39,8 @@ class InputMetadata:
         self.is_prompt = is_prompt
         self.prompt_lens = prompt_lens
         self.num_chunked_prefill = num_chunked_prefill
+        self.num_prompt_tokens = num_prompt_tokens
+        self.num_generation_tokens = num_generation_tokens
         self.max_seq_len = max_seq_len
         self.start_loc = start_loc
         self.max_context_len = max_context_len
@@ -47,6 +55,7 @@ class InputMetadata:
         # Set during the execution of the first attention op.
         # FIXME(woosuk): This is a hack.
         self.attn_bias = None
+        self.num_valid_tokens = slot_mapping.shape[0]
 
         # SANG-TODO
         # # Prompt related metadata

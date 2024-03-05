@@ -127,9 +127,9 @@ class ModelRunner:
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, List[int], List[int],
                List[int], List[int], Set[LoRARequest]]:
         assert len(seq_group_metadata_list) > 0
-        input_tokens: List[List[int]] = []
-        input_positions: List[List[int]] = []
-        slot_mapping: List[List[int]] = []
+        input_tokens: List[int] = []
+        input_positions: List[int] = []
+        slot_mapping: List[int] = []
         lora_index_mapping: List[int] = []
         lora_prompt_mapping: List[int] = []
         lora_requests: Set[LoRARequest] = set()
@@ -187,13 +187,13 @@ class ModelRunner:
             context_lens.append(context_len)
             subquery_lens.append(prompt_len - computed_len)
 
-            input_tokens.append(prompt_tokens)
+            input_tokens.extend(prompt_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
             # NOTE(sang): prefill_end is always # of prompts if chunked
             # prefill is not enabled. Prefix caching is not working with
             # chunked prefill now.
-            input_positions.append(
+            input_positions.extend(
                 list(range(computed_len, computed_len + prefill_end)))
 
             lora_id = seq_group_metadata.lora_int_id
@@ -210,11 +210,11 @@ class ModelRunner:
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
                 # yet. In this case, we just use a dummy slot mapping.
-                slot_mapping.append([_PAD_SLOT_ID] * prompt_len)
+                slot_mapping.extend([_PAD_SLOT_ID] * prompt_len)
                 continue
 
             # Compute the slot mapping.
-            slot_mapping.append([])
+            slot_mapping.append(_PAD_SLOT_ID)
             block_table = seq_group_metadata.block_tables[seq_id]
             # Mask the [0, start_idx) tokens of the prompt with _PAD_SLOT_ID,
             # where start_idx is max(0, prompt_len - sliding_window).
@@ -236,30 +236,32 @@ class ModelRunner:
 
             for i in range(computed_len, prefill_end):
                 if i < start_idx:
-                    slot_mapping[-1].append(_PAD_SLOT_ID)
+                    slot_mapping.append(_PAD_SLOT_ID)
                     continue
 
                 block_number = block_table[i // self.block_size]
                 block_offset = i % self.block_size
                 slot = block_number * self.block_size + block_offset
-                slot_mapping[-1].append(slot)
+                slot_mapping.append(slot)
 
         max_prompt_len = max(subquery_lens)
-        input_tokens = _make_tensor_with_pad(input_tokens,
-                                             max_prompt_len,
-                                             pad=0,
-                                             dtype=torch.long,
-                                             device=self.device)
-        input_positions = _make_tensor_with_pad(input_positions,
-                                                max_prompt_len,
-                                                pad=0,
-                                                dtype=torch.long,
-                                                device=self.device)
-        slot_mapping = _make_tensor_with_pad(slot_mapping,
-                                             max_prompt_len,
-                                             pad=_PAD_SLOT_ID,
-                                             dtype=torch.long,
-                                             device=self.device)
+        num_prompt_tokens = len(input_tokens)
+        input_tokens = _make_tensor_with_pad_for_alignment(input_tokens,
+                                                           multiple_of=8,
+                                                           pad=0,
+                                                           dtype=torch.long,
+                                                           device=self.device)
+        input_positions = _make_tensor_with_pad_for_alignment(
+            input_positions,
+            multiple_of=8,
+            pad=0,
+            dtype=torch.long,
+            device=self.device)
+        slot_mapping = _make_tensor_with_pad_for_alignment(slot_mapping,
+                                                           multiple_of=8,
+                                                           pad=_PAD_SLOT_ID,
+                                                           dtype=torch.long,
+                                                           device=self.device)
         lora_index_mapping = [
             _pad_to_max(mapping, max_prompt_len, pad=0)
             for mapping in lora_index_mapping
@@ -289,6 +291,8 @@ class ModelRunner:
                                        slot_mapping=slot_mapping,
                                        prompt_lens=prompt_lens_tensor,
                                        num_chunked_prefill=num_chunked_prefill,
+                                       num_prompt_tokens=num_prompt_tokens,
+                                       num_generation_tokens=0,
                                        max_seq_len=max_prompt_len,
                                        start_loc=start_loc_tensor,
                                        max_context_len=None,
@@ -308,9 +312,9 @@ class ModelRunner:
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, List[int], List[int],
                Set[LoRARequest]]:
         assert len(seq_group_metadata_list) > 0
-        input_tokens: List[List[int]] = []
-        input_positions: List[List[int]] = []
-        slot_mapping: List[List[int]] = []
+        input_tokens: List[int] = []
+        input_positions: List[int] = []
+        slot_mapping: List[int] = []
         context_lens: List[int] = []
         block_tables: List[List[int]] = []
         lora_index_mapping: List[int] = []
@@ -329,11 +333,11 @@ class ModelRunner:
             for seq_id in seq_ids:
                 seq_data = seq_group_metadata.seq_data[seq_id]
                 generation_token = seq_data.get_last_token_id()
-                input_tokens.append([generation_token])
+                input_tokens.append(generation_token)
 
                 seq_len = seq_data.get_len()
                 position = seq_len - 1
-                input_positions.append([position])
+                input_positions.append(position)
 
                 context_len = seq_len if self.sliding_window is None else min(
                     seq_len, self.sliding_window)
@@ -343,7 +347,7 @@ class ModelRunner:
                 block_number = block_table[position // self.block_size]
                 block_offset = position % self.block_size
                 slot = block_number * self.block_size + block_offset
-                slot_mapping.append([slot])
+                slot_mapping.append(slot)
                 lora_index_mapping.append([lora_id])
                 lora_prompt_mapping.append(lora_id)
 
@@ -365,28 +369,29 @@ class ModelRunner:
             graph_batch_size = _get_graph_batch_size(batch_size)
             assert graph_batch_size >= batch_size
             for _ in range(graph_batch_size - batch_size):
-                input_tokens.append([])
-                input_positions.append([])
-                slot_mapping.append([])
+                input_tokens.append(0)
+                input_positions.append(0)
+                slot_mapping.append(_PAD_SLOT_ID)
                 context_lens.append(1)
-                block_tables.append([])
+                block_tables.append(0)
             batch_size = graph_batch_size
 
-        input_tokens = _make_tensor_with_pad(input_tokens,
-                                             max_len=1,
-                                             pad=0,
-                                             dtype=torch.long,
-                                             device=self.device)
-        input_positions = _make_tensor_with_pad(input_positions,
-                                                max_len=1,
-                                                pad=0,
-                                                dtype=torch.long,
-                                                device=self.device)
-        slot_mapping = _make_tensor_with_pad(slot_mapping,
-                                             max_len=1,
-                                             pad=_PAD_SLOT_ID,
-                                             dtype=torch.long,
-                                             device=self.device)
+        input_tokens = _make_tensor_with_pad_for_alignment(input_tokens,
+                                                           multiple_of=8,
+                                                           pad=0,
+                                                           dtype=torch.long,
+                                                           device=self.device)
+        input_positions = _make_tensor_with_pad_for_alignment(
+            input_positions,
+            multiple_of=8,
+            pad=0,
+            dtype=torch.long,
+            device=self.device)
+        slot_mapping = _make_tensor_with_pad_for_alignment(slot_mapping,
+                                                           multiple_of=8,
+                                                           pad=_PAD_SLOT_ID,
+                                                           dtype=torch.long,
+                                                           device=self.device)
         context_lens = torch.tensor(context_lens,
                                     dtype=torch.int,
                                     device=self.device)
@@ -418,6 +423,8 @@ class ModelRunner:
                                        slot_mapping=slot_mapping,
                                        prompt_lens=None,
                                        num_chunked_prefill=0,
+                                       num_prompt_tokens=0,
+                                       num_generation_tokens=len(input_tokens),
                                        max_seq_len=None,
                                        start_loc=None,
                                        max_context_len=max_context_len,
@@ -469,6 +476,7 @@ class ModelRunner:
                               selected_token_start_idx + subquery_len - 1))
                 selected_token_indices.append(selected_token_start_idx +
                                               subquery_len - 1)
+                # SANG-TODO max_subquery len is wrong for variable length.
                 selected_token_start_idx += max_subquery_len
 
                 if sampling_params.seed is not None:
@@ -587,6 +595,8 @@ class ModelRunner:
                 slot_mapping=metadata_dict["slot_mapping"],
                 prompt_lens=metadata_dict["prompt_lens"],
                 num_chunked_prefill=metadata_dict["num_chunked_prefill"],
+                num_prompt_tokens=metadata_dict["num_prompt_tokens"],
+                num_generation_tokens=metadata_dict["num_generation_tokens"],
                 max_seq_len=metadata_dict["max_seq_len"],
                 start_loc=metadata_dict["start_loc"],
                 max_context_len=metadata_dict["max_context_len"],
@@ -745,10 +755,10 @@ class ModelRunner:
 
         # Prepare dummy inputs. These will be reused for all batch sizes.
         max_batch_size = max(_BATCH_SIZES_TO_CAPTURE)
-        input_tokens = torch.zeros(max_batch_size, 1, dtype=torch.long).cuda()
-        input_positions = torch.zeros(max_batch_size, 1,
+        input_tokens = torch.zeros(max_batch_size, dtype=torch.long).cuda()
+        input_positions = torch.zeros(max_batch_size,
                                       dtype=torch.long).cuda()
-        slot_mapping = torch.empty(max_batch_size, 1, dtype=torch.long).cuda()
+        slot_mapping = torch.empty(max_batch_size, dtype=torch.long).cuda()
         slot_mapping.fill_(_PAD_SLOT_ID)
         context_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
         block_tables = torch.from_numpy(self.graph_block_tables).cuda()
@@ -775,6 +785,8 @@ class ModelRunner:
                     slot_mapping=slot_mapping[:batch_size],
                     prompt_lens=None,
                     num_chunked_prefill=0,
+                    num_prompt_tokens=0,
+                    num_generation_tokens=0,
                     max_seq_len=None,
                     start_loc=None,
                     max_context_len=self.max_context_len_to_capture,
@@ -911,9 +923,24 @@ def _maybe_cupy_nccl():
         yield
 
 
+def _pad_to_alignment(x: List[int], multiple_of: int, pad: int) -> List[int]:
+    return x + [pad] * ((-len(x)) % multiple_of)
+
+
 def _pad_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
     assert len(x) <= max_len
     return x + [pad] * (max_len - len(x))
+
+
+def _make_tensor_with_pad_for_alignment(
+    x: List[int],
+    multiple_of: int,
+    pad: int,
+    dtype: torch.dtype,
+    device: Optional[Union[str, torch.device]],
+) -> torch.Tensor:
+    padded_x = _pad_to_alignment(x, multiple_of, pad)
+    return torch.tensor(padded_x, dtype=dtype, device=device)
 
 
 def _make_tensor_with_pad(
