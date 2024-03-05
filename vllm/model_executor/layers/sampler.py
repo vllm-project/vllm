@@ -272,7 +272,7 @@ def _apply_quadratic_sampling(
     s = (smoothing_curves - 1) / 2
 
     mask = smoothing_factors > 0
-    mask = mask.expand(*logits.shape)
+    mask = mask.expand(logits.shape[0], logits.shape[1])
 
     # only transform logits when they're not -inf, otherwise
     # fails at smoothing_curves==3
