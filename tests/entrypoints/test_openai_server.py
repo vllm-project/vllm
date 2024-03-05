@@ -688,7 +688,6 @@ number: "1" | "2"
         extra_body=dict(guided_cfg=simple_sql_grammar))
 
     content = completion.choices[0].text
-    print(completion)
 
     # use Lark to parse the output, and make sure it's a valid parse tree
     from lark import Lark
