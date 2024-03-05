@@ -127,11 +127,6 @@ class MultiStepWorker(Worker):
             proposal_lens = torch.zeros(len(proposal_lens), dtype=torch.long, device=self.device)
 
         proposals = SpeculativeProposals(
-            # TODO remove unused.
-            spec_seqs=[],
-            non_spec_seqs=[],
-            all_seqs=[],
-            original_indices=None,
             proposal_token_ids=proposal_tokens,
             proposal_probs=proposal_probs,
             proposal_lens=proposal_lens,

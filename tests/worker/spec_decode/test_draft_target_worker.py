@@ -210,18 +210,19 @@ def test_correctly_calls_target_model(k: int, batch_size: int):
                                 vocab_size,
                                 dtype=torch.float32,
                                 device='cuda')
+    proposal_lens = torch.ones(batch_size, dtype=torch.int64, device='cuda') * k
 
     execute_model_data, prompts, prev_output_tokens = create_batch(
         batch_size, k)
 
     draft_worker.get_spec_proposals.return_value = SpeculativeProposals(
-        spec_seqs=execute_model_data.seq_group_metadata_list,
-        non_spec_seqs=[],
-        all_seqs=execute_model_data.seq_group_metadata_list,
-        original_indices=torch.arange(batch_size),
+        #spec_seqs=execute_model_data.seq_group_metadata_list,
+        #non_spec_seqs=[],
+        #all_seqs=execute_model_data.seq_group_metadata_list,
+        #original_indices=torch.arange(batch_size),
         proposal_token_ids=proposal_token_ids,
         proposal_probs=proposal_probs,
-        proposal_lens=None)
+        proposal_lens=proposal_lens)
 
     exception_secret = 'artifical stop'
     target_worker.execute_model.side_effect = ValueError(exception_secret)
@@ -293,16 +294,18 @@ def test_correctly_calls_rejection_sampler(k: int, batch_size: int):
                                 dtype=torch.float32,
                                 device='cuda')
 
+    proposal_lens = torch.ones(batch_size, dtype=torch.int64, device='cuda') * k
+
     execute_model_data, _, _ = create_batch(batch_size, k)
 
     draft_worker.get_spec_proposals.return_value = SpeculativeProposals(
-        spec_seqs=execute_model_data.seq_group_metadata_list,
-        non_spec_seqs=[],
-        all_seqs=execute_model_data.seq_group_metadata_list,
-        original_indices=torch.arange(batch_size),
+        #spec_seqs=execute_model_data.seq_group_metadata_list,
+        #non_spec_seqs=[],
+        #all_seqs=execute_model_data.seq_group_metadata_list,
+        #original_indices=torch.arange(batch_size),
         proposal_token_ids=proposal_token_ids,
         proposal_probs=proposal_probs,
-        proposal_lens=None)
+        proposal_lens=proposal_lens)
 
     target_token_ids = torch.randint(low=0,
                                      high=vocab_size,
@@ -372,16 +375,14 @@ def test_correctly_formats_output(k: int, batch_size: int):
                                 dtype=torch.float32,
                                 device='cuda')
 
+    proposal_lens = torch.ones(batch_size, dtype=torch.int64, device='cuda') * k
+
     execute_model_data, _, _ = create_batch(batch_size, k)
 
     draft_worker.get_spec_proposals.return_value = SpeculativeProposals(
-        spec_seqs=execute_model_data.seq_group_metadata_list,
-        non_spec_seqs=[],
-        all_seqs=execute_model_data.seq_group_metadata_list,
-        original_indices=torch.arange(batch_size),
         proposal_token_ids=proposal_token_ids,
         proposal_probs=proposal_probs,
-        proposal_lens=None)
+        proposal_lens=proposal_lens)
 
     target_token_ids = torch.randint(low=0,
                                      high=vocab_size,
@@ -485,16 +486,14 @@ def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool):
                                 dtype=torch.float32,
                                 device='cuda')
 
+    proposal_lens = torch.ones(batch_size, dtype=torch.int64, device='cuda') * k
+
     execute_model_data, _, _ = create_batch(batch_size, k)
 
     draft_worker.get_spec_proposals.return_value = SpeculativeProposals(
-        spec_seqs=execute_model_data.seq_group_metadata_list,
-        non_spec_seqs=[],
-        all_seqs=execute_model_data.seq_group_metadata_list,
-        original_indices=torch.arange(batch_size),
         proposal_token_ids=proposal_token_ids,
         proposal_probs=proposal_probs,
-        proposal_lens=None)
+        proposal_lens=proposal_lens)
 
     target_token_ids = torch.randint(low=0,
                                      high=vocab_size,
