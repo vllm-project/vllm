@@ -117,10 +117,8 @@ class Sampler(nn.Module):
         prompt_logprobs, sample_logprobs = _get_logprobs(
             logprobs, sampling_metadata, sample_results)
 
-        output = _build_sampler_output(sample_results, sampling_metadata,
+        return _build_sampler_output(sample_results, sampling_metadata,
                                      prompt_logprobs, sample_logprobs)
-
-        return output
 
 
 def _prune_hidden_states(
@@ -585,8 +583,4 @@ def _build_sampler_output(
         sampler_output.append(
             SequenceGroupOutput(seq_outputs, group_prompt_logprobs))
 
-    return SamplerOutput(
-        outputs=sampler_output,
-        sampled_token_probs=None,
-        sampled_token_ids=None,
-    )
+    return SamplerOutput(outputs=sampler_output)
