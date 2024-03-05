@@ -139,7 +139,6 @@ class DraftTargetWorker:
         self.target_worker = target_worker
         self.rejection_sampler = rejection_sampler
 
-        self.device = None
         self._metrics = AsyncMetricsCollector(
             rejection_sampler
         ) if metrics_collector is None else metrics_collector
@@ -160,10 +159,12 @@ class DraftTargetWorker:
 
         self._configure_samplers()
 
-        self.device = self.target_worker.device
-
         self._metrics.init_gpu_tensors(self.rank)
         self.rejection_sampler.init_gpu_tensors(self.rank)
+
+    @property
+    def device(self):
+        return self.target_worker.device
 
     def profile_num_available_blocks(self, block_size: int,
                                      gpu_memory_utilization: float,
@@ -295,6 +296,8 @@ class DraftTargetWorker:
         logger.debug("scoring draft tokens")
         (proposal_scores, bonus_token_ids,
          non_spec_token_ids, original_indices) = self._score_proposals(
+        # TODO name
+        #all_tokens, all_probs = self._score_proposals(
              seq_group_metadata_list,
              blocks_to_swap_in,
              blocks_to_swap_out,
@@ -302,10 +305,6 @@ class DraftTargetWorker:
              k,
              proposals,
         )
-             #execute_model_data,
-             #proposals.proposal_token_ids,
-             #proposals.spec_seqs,
-             #proposals.non_spec_seqs)
 
         with nvtx_range("draft_target_worker.rejection_sampler"):
             accepted_token_ids = self.rejection_sampler(
@@ -430,8 +429,12 @@ class DraftTargetWorker:
             proposal_token_ids_list = proposals.proposal_token_ids.tolist()
 
             spec_seqs = [seq_group for seq_group, proposal_len in zip(seq_group_metadata_list, proposal_lens_list) if proposal_len != 0]
+            spec_indices = [i for i, (_, proposal_len) in enumerate(zip(seq_group_metadata_list, proposal_lens_list)) if proposal_len != 0]
+
             non_spec_seqs = [seq_group for seq_group, proposal_len in zip(seq_group_metadata_list, proposal_lens_list) if proposal_len == 0]
-            original_indices = [i for i, (_, proposal_len) in enumerate(zip(seq_group_metadata_list, proposal_lens_list)) if proposal_len != 0]
+            non_spec_indices = [i for i, (_, proposal_len) in enumerate(zip(seq_group_metadata_list, proposal_lens_list)) if proposal_len == 0]
+
+            original_indices = spec_indices + non_spec_indices
 
             # Convert to target sequence ids.
             target_seq_group_metadata_list = self._create_scoring_model_input(
@@ -451,7 +454,7 @@ class DraftTargetWorker:
         
         if self.use_batch_expansion:
             (target_token_ids, target_probs,
-             non_spec_target_token_ids) = self._split_scoring_output(
+             non_spec_target_token_ids, non_spec_target_probs) = self._split_scoring_output(
                  target_sampler_output, num_scoring_tokens)
 
             # Map distinct sequences used to score each token
@@ -468,8 +471,30 @@ class DraftTargetWorker:
 
             # shape: [batch_size, k, vocab_size]
             proposal_scores = target_probs[:, :-1]
+            
+            full_bs = len(seq_group_metadata_list)
+            all_tokens = torch.ones(full_bs, k + 1, device=self.device, dtype=torch.long) * -1
+            all_probs = torch.zeros(full_bs, k + 1, self._vocab_size, device=self.device, dtype=torch.float32)
+            
+            #breakpoint()
+            
+            if non_spec_indices:
+                all_tokens[non_spec_indices, 0] = non_spec_target_token_ids
+                all_probs[non_spec_indices, 1:, :] = non_spec_target_probs
+
+            if spec_indices:
+                all_tokens[spec_indices] = target_token_ids
+                all_probs[spec_indices] = target_probs
+
         else:
             raise NotImplementedError
+        
+        #return all_tokens, all_probs
+
+        proposal_scores = all_probs[spec_indices, :-1]
+        bonus_token_ids = all_tokens[spec_indices, -1:]
+        non_spec_target_token_ids = all_tokens[non_spec_indices]
+        #original_indices = ...
 
         return proposal_scores, bonus_token_ids, non_spec_target_token_ids, original_indices
 
@@ -596,7 +621,7 @@ class DraftTargetWorker:
 
     def _split_scoring_output(
         self, sampler_output: SamplerOutput, num_scoring_tokens: int
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Split the target model output into speculative and non-speculative
         output.
         """
@@ -620,10 +645,10 @@ class DraftTargetWorker:
         # Convert non-speculative output tokens to tensors.
         sampler_output.sampled_token_probs = non_spec_probs
         sampler_output.sampled_token_ids = non_spec_sampled_tokens
-        non_spec_target_token_ids, _ = sampler_output_to_torch(
+        non_spec_target_token_ids, non_spec_target_probs = sampler_output_to_torch(
             [sampler_output])
 
-        return target_token_ids, target_probs, non_spec_target_token_ids
+        return target_token_ids, target_probs, non_spec_target_token_ids, non_spec_target_probs
 
     def _create_output_sampler_list(
         self,

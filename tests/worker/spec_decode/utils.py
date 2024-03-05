@@ -65,6 +65,7 @@ def mock_worker(vocab_size: int = 30_000,
     worker.vocab_size = vocab_size
     worker.max_model_len = max_model_len
     worker.rank = rank
+    worker.device = 'cuda:0'
     return worker
 
 
