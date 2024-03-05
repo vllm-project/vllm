@@ -77,8 +77,7 @@ class MultiStepWorker(Worker):
             - inject empty rows for token ids/probs tensor
         """
         
-        # TODO
-        max_model_len = 2048
+        max_model_len = self.max_model_len
 
         proposal_lens: List[int] = []
         nonzero_proposal_len_seqs: List[SequenceGroupMetadata] = []
@@ -103,19 +102,26 @@ class MultiStepWorker(Worker):
         
         # run fwd pass
 
-        sampler_output = self.execute_model_multi_step(
-            seq_group_metadata_list=nonzero_proposal_len_seqs,
-            blocks_to_swap_in=blocks_to_swap_in,
-            blocks_to_swap_out=blocks_to_swap_out,
-            blocks_to_copy=blocks_to_copy,
-            num_steps=max_proposal_len,
-        )
+        if nonzero_proposal_len_seqs:
+            sampler_output = self.execute_model_multi_step(
+                seq_group_metadata_list=nonzero_proposal_len_seqs,
+                blocks_to_swap_in=blocks_to_swap_in,
+                blocks_to_swap_out=blocks_to_swap_out,
+                blocks_to_copy=blocks_to_copy,
+                num_steps=max_proposal_len,
+            )
 
-        # Now, reformat the output GPU tensors such that each sequence has
-        # a proposal. the proposal can be empty, e.g. [-1, -1, -1]
+            # Now, reformat the output GPU tensors such that each sequence has
+            # a proposal. the proposal can be empty, e.g. [-1, -1, -1]
 
-        proposal_tokens, proposal_probs = sampler_output_to_torch(sampler_output)
-        proposal_lens = torch.ones_like(proposal_tokens[:, 0]) * max_proposal_len
+            proposal_tokens, proposal_probs = sampler_output_to_torch(sampler_output)
+            proposal_lens = torch.ones_like(proposal_tokens[:, 0]) * max_proposal_len
+        else:
+            proposal_tokens = torch.zeros(0, max_proposal_len, dtype=torch.long, device=self.device)
+            vocab_size = 32_000 # TODO
+            # self.model.config.vocab_size
+            proposal_probs = torch.zeros(0, max_proposal_len, vocab_size, dtype=torch.float32, device=self.device)
+            proposal_lens = torch.zeros(len(proposal_lens), dtype=torch.long, device=self.device)
 
         proposals = SpeculativeProposals(
             # TODO remove unused.

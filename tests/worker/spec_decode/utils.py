@@ -232,9 +232,15 @@ def create_batch(batch_size,
                  k,
                  prompt_len: int = 10,
                  prev_output_token_len: int = 10,
-                 seq_ids: Optional[List[int]] = None):
-    block_size = 8
-    num_gpu_blocks = 2048 // block_size
+                 seq_ids: Optional[List[int]] = None,
+                 num_gpu_blocks: Optional[int] = None,
+                 block_size: Optional[int] = None):
+    if block_size is None:
+        block_size = 8
+    
+    if num_gpu_blocks is None:
+        num_gpu_blocks = 2048 // block_size
+    
     iterator = count()
     prompts = [[next(iterator) for _ in range(prompt_len)]
                for _ in range(batch_size)]
@@ -245,6 +251,7 @@ def create_batch(batch_size,
         len(prompt) + len(prev_output_token) + k + 1
         for prompt, prev_output_token in zip(prompts, prev_output_tokens)
     ]
+    
     execute_model_data = create_execute_model_data(
         create_seq_group_metadata_from_prompts(prompts, num_gpu_blocks,
                                                block_size, final_seq_lens,

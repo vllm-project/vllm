@@ -238,6 +238,10 @@ class Worker:
         """
         self.model_runner.include_gpu_probs_tensor()
 
+    @property
+    def max_model_len(self) -> int:
+        return self.model_config.max_model_len
+
 def init_distributed_environment(
     parallel_config: ParallelConfig,
     rank: int,

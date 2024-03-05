@@ -1,7 +1,7 @@
 import torch
 import random
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, PropertyMock, patch
 
 from vllm.worker.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.worker.worker import Worker
@@ -279,7 +279,7 @@ def test_get_proposals_full_speculation_len():
         seed,
     )
 
-    execute_model_data, _, _ = create_batch(batch_size, k)
+    execute_model_data, _, _ = create_batch(batch_size, k, prompt_len=1024)
 
     proposals = multi_step_worker.get_spec_proposals(
         **execute_model_data.to_dict(),
@@ -295,6 +295,49 @@ def test_get_proposals_full_speculation_len():
     assert proposals.proposal_lens.shape == torch.Size([batch_size])
     assert proposals.proposal_lens.tolist() == [k for _ in range(batch_size)]
 
+@torch.inference_mode()
+def test_get_proposals_no_speculations():
+    """
+    """
+    seed = 100
+    model_name = 'JackFram/llama-68m'
+    k = 10
+    batch_size = 10
+
+    block_size = 16
+    prompt_len = 10
+    num_gpu_blocks = 2048 // block_size
+    fake_max_model_len = prompt_len + k - 1
+
+    execute_model_data, _, _ = create_batch(batch_size, k, prompt_len=prompt_len,
+        num_gpu_blocks=num_gpu_blocks,
+        block_size=block_size,
+    )
+
+    # Mock out the max model len so speculation is disabled for all inputs.
+    with patch.object(MultiStepWorker, 'max_model_len', new_callable=PropertyMock) as mock_max_model_len:
+        mock_max_model_len.return_value = fake_max_model_len
+
+        multi_step_worker = create_worker(
+            MultiStepWorker,
+            model_name,
+            block_size,
+            num_gpu_blocks,
+            seed,
+        )
+        proposals = multi_step_worker.get_spec_proposals(
+            **execute_model_data.to_dict(),
+            max_proposal_len=k,
+        )
+    
+    assert torch.is_tensor(proposals.proposal_token_ids)
+    assert torch.is_tensor(proposals.proposal_probs)
+
+    assert proposals.proposal_token_ids.shape == torch.Size([0, k])
+    assert proposals.proposal_probs.shape[:-1] == torch.Size([0, k])
+
+    assert proposals.proposal_lens.shape == torch.Size([batch_size])
+    assert proposals.proposal_lens.tolist() == [0 for _ in range(batch_size)]
 
 #def test_get_proposals_mixed_k():
 #    """Call get_proposals and verify the proposals are as expected.
