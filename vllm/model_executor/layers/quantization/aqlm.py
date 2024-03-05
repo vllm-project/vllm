@@ -195,12 +195,6 @@ class AQLMLinearMethod(LinearMethodBase):
         output_partition_sizes = getattr(codebooks, "output_partition_sizes",
                                          None)
 
-        #test
-        print("codes shape", codes.shape)
-        print("code books shape", codebooks.shape)
-        print("partition sizes", output_partition_sizes)
-        print("input shape", x.shape)
-
         output = ops.aqlm_gemm(
             x,
             codes,
@@ -209,7 +203,5 @@ class AQLMLinearMethod(LinearMethodBase):
             output_partition_sizes,
             bias,
         )
-
-        print("output shape", output.shape)
 
         return output
