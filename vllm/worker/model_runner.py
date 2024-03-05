@@ -221,8 +221,6 @@ class ModelRunner:
                 block_tables.append(block_table)
                 max_block_table_len = max(max_block_table_len,
                                           len(block_table))
-        # print("slot_mapping: ", slot_mapping)
-        # print("block_tables: ", block_tables)
         max_prompt_len = max(subquery_lens)
         input_tokens = _make_tensor_with_pad(input_tokens,
                                              max_prompt_len,
@@ -278,8 +276,7 @@ class ModelRunner:
                 max_len=max_prompt_block_table_len,
                 pad=0,
                 dtype=torch.int,
-                device=self.device
-            )
+                device=self.device)
         start_loc_tensor = torch.arange(0,
                                         len(prompt_lens) * max_prompt_len,
                                         max_prompt_len,
@@ -527,7 +524,6 @@ class ModelRunner:
                                             dtype=torch.long,
                                             target_device=self.device,
                                             pin_memory=pin_memory)
-        # print("selected_token_indices: ", selected_token_indices)
         categorized_sample_indices = {
             t: _async_h2d(seq_ids,
                           dtype=torch.int,
@@ -535,12 +531,11 @@ class ModelRunner:
                           pin_memory=pin_memory)
             for t, seq_ids in categorized_sample_indices.items()
         }
-        # print("categorized_sample_indices: ", categorized_sample_indices)
 
         seq_data: Dict[int, SequenceData] = {}
         for seq_group_metadata in seq_group_metadata_list:
             seq_data.update(seq_group_metadata.seq_data)
-        # print("selected_token_indices: ", selected_token_indices)
+
         sampling_metadata = SamplingMetadata(
             seq_groups=seq_groups,
             seq_data=seq_data,
@@ -662,8 +657,6 @@ class ModelRunner:
             kv_caches=kv_caches,
             input_metadata=input_metadata,
         )
-        # print("hidden_states shape: ", hidden_states.shape)
-        # print("hidden_states: ", hidden_states)
 
         # Sample the next token.
         output = self.model.sample(
