@@ -279,7 +279,7 @@ def test_get_proposals_full_speculation_len():
         seed,
     )
 
-    execute_model_data, _, _ = create_batch(batch_size, k, prompt_len=1024)
+    execute_model_data, _, _ = create_batch(batch_size, k)
 
     proposals = multi_step_worker.get_spec_proposals(
         **execute_model_data.to_dict(),
