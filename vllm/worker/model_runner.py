@@ -273,6 +273,7 @@ class ModelRunner:
                 max_len=max_prompt_block_table_len,
                 pad=0,
                 dtype=torch.int,
+                device=self.device
             )
         start_loc_tensor = torch.arange(0,
                                         len(prompt_lens) * max_prompt_len,
