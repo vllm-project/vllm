@@ -35,13 +35,11 @@ def is_hpu() -> bool:
     return importlib.util.find_spec('habana_frameworks') is not None
 
 
-if is_hpu():
-    from vllm.hpu import cuda_utils
-else:
-    from vllm._C import cuda_utils
-
-
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
+    if is_hpu():
+        from vllm.hpu import cuda_utils
+    else:
+        from vllm._C import cuda_utils
     """Returns the maximum shared memory per thread block in bytes."""
     # https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html
     cudaDevAttrMaxSharedMemoryPerBlockOptin = 97 if not is_hip() else 74

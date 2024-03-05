@@ -14,7 +14,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
-
+from vllm.utils import is_hpu
 
 class Worker:
     """A worker class that executes (a partition of) the model on a GPU.
@@ -62,10 +62,14 @@ class Worker:
         self.rank = self.rank if self.rank is not None else int(
             os.getenv("RANK", "-1"))
         local_rank = int(os.getenv("LOCAL_RANK", "0"))
-        self.device = torch.device(f"cuda:{local_rank}")
+        device_str = f"cuda:{local_rank}" if not is_hpu() else "hpu"
+        self.device = torch.device(device_str)
         if self.rank < 0:
             raise ValueError("Invalid or unspecified rank.")
-        torch.cuda.set_device(self.device)
+        if is_hpu():
+            torch.hpu.set_device(self.device)
+        else:
+            torch.cuda.set_device(self.device)
 
         _check_if_gpu_supports_dtype(self.model_config.dtype)
 

@@ -17,10 +17,14 @@ from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
                            SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                get_tokenizer)
-from vllm.utils import Counter
+from vllm.utils import Counter, is_hpu
 
 if ray:
     from ray.air.util.torch_dist import init_torch_dist_process_group
+    if is_hpu():  # TODO: check if guarding that with is_hpu() does not break anything
+        from vllm.hpu.ray_torch_dist import init_torch_dist_process_group
+    else:
+        from ray.air.util.torch_dist import init_torch_dist_process_group
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 if TYPE_CHECKING:
@@ -158,7 +162,8 @@ class LLMEngine:
 
         self.workers: List[Worker] = []
         for bundle in placement_group.bundle_specs:
-            if not bundle.get("GPU", 0):
+            ray_accel_name = "HPU" if is_hpu() else "GPU"
+            if not bundle.get(ray_accel_name, 0):
                 continue
             if self.parallel_config.tensor_parallel_size == 1:
                 num_gpus = self.cache_config.gpu_memory_utilization
@@ -166,7 +171,8 @@ class LLMEngine:
                 num_gpus = 1
             worker = ray.remote(
                 num_cpus=0,
-                num_gpus=num_gpus,
+                num_gpus=num_gpus if not is_hpu() else 0,
+                resources={'HPU': num_gpus} if is_hpu() else {},
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=placement_group,
                     placement_group_capture_child_tasks=True),
@@ -175,7 +181,8 @@ class LLMEngine:
             self.workers.append(worker)
 
         # Initialize torch distributed process group for the workers.
-        init_torch_dist_process_group(self.workers, backend="nccl")
+        torch_dist_backend = 'hccl' if is_hpu() else 'nccl'
+        init_torch_dist_process_group(self.workers, backend=torch_dist_backend)
         model_config = copy.deepcopy(self.model_config)
         parallel_config = copy.deepcopy(self.parallel_config)
         scheduler_config = copy.deepcopy(self.scheduler_config)
