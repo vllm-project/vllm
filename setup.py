@@ -67,6 +67,20 @@ ABI = 1 if torch._C._GLIBCXX_USE_CXX11_ABI else 0
 CXX_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
 NVCC_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
 
+def get_amdgpu_offload_arch():
+    command = "/opt/rocm/llvm/bin/amdgpu-offload-arch"
+    try:
+        output = subprocess.check_output([command])
+        return output.decode('utf-8').strip()
+    except subprocess.CalledProcessError as e:
+        error_message = f"Error: {e}"
+        raise RuntimeError(error_message) from e
+    except FileNotFoundError as e:
+        # If the command is not found, print an error message
+        error_message = f"The command {command} was not found."
+        raise RuntimeError(error_message) from e
+
+    return None
 
 def get_hipcc_rocm_version():
     # Run the hipcc --version command
