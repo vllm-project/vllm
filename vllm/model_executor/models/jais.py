@@ -154,7 +154,7 @@ class JAISMLP(nn.Module):
             linear_method=linear_method,
         )
         # quant_config = getattr(linear_method, "quant_config", None)
-        self.act = SwiGLUActivation()#  if self.swiglu else self.act_gpt2
+        self.act = SwiGLUActivation()  #  if self.swiglu else self.act_gpt2
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self.swiglu:
