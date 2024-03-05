@@ -3,6 +3,9 @@ from typing import List, Tuple
 from dataclasses import dataclass
 from vllm.sequence import SequenceGroupMetadata, SamplerOutput
 from contextlib import contextmanager
+from itertools import chain
+
+SeqId = int
 
 @dataclass
 class SpeculativeProposals:
@@ -30,6 +33,16 @@ class SpeculativeProposals:
                 f"proposal_probs={self.proposal_probs.shape}, "
                 f"proposal_lens={self.proposal_lens.shape})")
 
+
+def get_all_seq_ids(seq_group_metadata_list: List[SequenceGroupMetadata]) -> List[SeqId]:
+    """Given a list of SequenceGroupMetadata, create a list of all
+    sequence ids.
+    """
+    return list(
+        chain.from_iterable([
+            seq_group_metadata.seq_data.keys()
+            for seq_group_metadata in seq_group_metadata_list
+        ]))
 
 def sampler_output_to_torch(
     sampler_output_list: List[SamplerOutput],

@@ -27,8 +27,8 @@ from vllm.config import CacheConfig
 #from vllm.worker.base_worker import BaseWorker
 #from vllm.model_executor.layers.sampler import RawSamplerOutput
 from vllm.utils import in_wsl
-from vllm.worker.spec_decode.util import nvtx_range, sampler_output_to_torch, SpeculativeProposals
-from vllm.worker.spec_decode.scoring import BatchExpansionTop1Scorer, get_all_seq_ids
+from vllm.worker.spec_decode.util import nvtx_range, sampler_output_to_torch, SpeculativeProposals, get_all_seq_ids
+from vllm.worker.spec_decode.scoring import BatchExpansionTop1Scorer
 
 SeqId = int
 TargetSeqId = int

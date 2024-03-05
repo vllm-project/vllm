@@ -27,7 +27,7 @@ from vllm.config import CacheConfig
 #from vllm.worker.base_worker import BaseWorker
 #from vllm.model_executor.layers.sampler import RawSamplerOutput
 from vllm.utils import in_wsl
-from vllm.worker.spec_decode.util import nvtx_range, sampler_output_to_torch, SpeculativeProposals
+from vllm.worker.spec_decode.util import nvtx_range, sampler_output_to_torch, SpeculativeProposals, get_all_seq_ids
 
 SeqId = int
 TargetSeqId = int
@@ -326,12 +326,3 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         return token_ids_to_score
 
 
-def get_all_seq_ids(seq_group_metadata_list: List[SequenceGroupMetadata]) -> List[SeqId]:
-    """Given a list of SequenceGroupMetadata, create a list of all
-    sequence ids.
-    """
-    return list(
-        chain.from_iterable([
-            seq_group_metadata.seq_data.keys()
-            for seq_group_metadata in seq_group_metadata_list
-        ]))
