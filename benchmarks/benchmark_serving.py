@@ -133,7 +133,8 @@ def calculate_metrics(
             output_len = len(tokenizer.encode(outputs[i].generated_text))
             total_output += output_len
             total_input += input_requests[i][1]
-            per_token_latencies.append(outputs[i].latency / output_len)
+            if output_len > 1:
+                inter_token_latencies.append((outputs[i].latency - output_lens[i].ttft) / (output_len - 1))
             ttfts.append(outputs[i].ttft)
             completed += 1
 
@@ -147,9 +148,9 @@ def calculate_metrics(
         mean_ttft_ms=np.mean(ttfts) * 1000,
         median_ttft_ms=np.median(ttfts) * 1000,
         p99_ttft_ms=np.percentile(ttfts, 99) * 1000,
-        mean_tpot_ms=np.mean(per_token_latencies) * 1000,
-        median_tpot_ms=np.median(per_token_latencies) * 1000,
-        p99_tpot_ms=np.percentile(per_token_latencies, 99) * 1000,
+        mean_tpot_ms=np.mean(inter_token_latencies) * 1000,
+        median_tpot_ms=np.median(inter_token_latencies) * 1000,
+        p99_tpot_ms=np.percentile(inter_token_latencies, 99) * 1000,
     )
 
     return metrics
