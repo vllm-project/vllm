@@ -161,7 +161,7 @@ class LLMEngine:
     def __reduce__(self):
         # This is to ensure that the LLMEngine is not referenced in
         # the closure used to initialize Ray worker actors
-        raise RuntimeException("LLMEngine should not be pickled!")
+        raise RuntimeError("LLMEngine should not be pickled!")
 
     def get_tokenizer_for_seq(self, sequence: Sequence):
         return self.tokenizer.get_lora_tokenizer(sequence.lora_request)
