@@ -156,7 +156,7 @@ class ModelConfig:
 
     def _verify_quantization(self) -> None:
         supported_quantization = ["aqlm", "awq", "gptq", "squeezellm"]
-        rocm_not_supported_quantization = ["awq"]
+        rocm_not_supported_quantization = ["aqlm", "awq"]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
 
