@@ -24,7 +24,7 @@ wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/r
 timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
 python3 benchmarks/benchmark_serving.py \
     --backend openai \
-    --datset-name sharegpt \
+    --dataset-name sharegpt \
     --dataset-path ./ShareGPT_V3_unfiltered_cleaned_split.json \
     --model meta-llama/Llama-2-7b-chat-hf \
     --num-prompts 20 \
