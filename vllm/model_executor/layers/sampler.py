@@ -277,7 +277,7 @@ def _apply_quadratic_sampling(
     # only transform logits when they're not -inf, otherwise
     # fails at smoothing_curves==3
     transformed_logits = torch.where(
-        (logits != float('-inf')) & ~mask, -(k * smoothing_factors * diff**2) +
+        (logits != float('-inf')) & mask, -(k * smoothing_factors * diff**2) +
         (s * smoothing_factors * diff**3) + max_logits, logits)
 
     return transformed_logits
