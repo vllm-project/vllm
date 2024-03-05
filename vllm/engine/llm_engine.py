@@ -158,6 +158,11 @@ class LLMEngine:
         if USE_RAY_COMPILED_DAG:
             self.forward_dag = self._compiled_ray_dag()
 
+    def __reduce__(self):
+        # This is to ensure that the LLMEngine is not referenced in
+        # the closure used to initialize Ray worker actors
+        raise Exception("LLMEngine should not be pickled!")
+
     def get_tokenizer_for_seq(self, sequence: Sequence):
         return self.tokenizer.get_lora_tokenizer(sequence.lora_request)
 
