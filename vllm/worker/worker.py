@@ -242,6 +242,10 @@ class Worker:
     def max_model_len(self) -> int:
         return self.model_config.max_model_len
 
+    @property
+    def vocab_size(self) -> int:
+        return self.model_runner.vocab_size
+
 def init_distributed_environment(
     parallel_config: ParallelConfig,
     rank: int,

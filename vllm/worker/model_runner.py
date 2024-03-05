@@ -91,8 +91,6 @@ class ModelRunner:
                                parallel_config=self.parallel_config,
                                scheduler_config=self.scheduler_config)
 
-        vocab_size = self.model.config.vocab_size
-
         if self.lora_config:
             assert hasattr(
                 self.model, "supported_lora_modules"
@@ -105,7 +103,7 @@ class ModelRunner:
             self.lora_manager = LRUCacheWorkerLoRAManager(
                 self.scheduler_config.max_num_seqs,
                 self.scheduler_config.max_num_batched_tokens +
-                self.scheduler_config.max_paddings, vocab_size,
+                self.scheduler_config.max_paddings, self.vocab_size,
                 self.lora_config, self.device, self.model.embedding_modules,
                 self.model.embedding_padding_modules)
             self.model = self.lora_manager.create_lora_manager(self.model)
@@ -596,8 +594,7 @@ class ModelRunner:
     @torch.inference_mode()
     def profile_run(self) -> None:
         # Enable top-k sampling to reflect the accurate memory usage.
-        vocab_size = self.model_config.get_vocab_size()
-        sampling_params = SamplingParams(top_p=0.99, top_k=vocab_size - 1)
+        sampling_params = SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
         max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
         max_num_seqs = self.scheduler_config.max_num_seqs
 
@@ -767,6 +764,10 @@ class ModelRunner:
         """Include GPU probs tensor in sampler output.
         """
         self.model.sampler.include_gpu_probs_tensor = True
+
+    @property
+    def vocab_size(self) -> int:
+        return self.model_config.get_vocab_size()
 
 
 class CUDAGraphRunner:
