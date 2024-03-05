@@ -140,7 +140,6 @@ class Sequence:
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
         self.start_time = time.monotonic()
-        breakpoint()
         
     @property
     def status(self):

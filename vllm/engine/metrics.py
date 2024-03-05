@@ -75,7 +75,7 @@ gauge_gpu_power_usage = Gauge("vllm:gpu_power_usage", "GPU power usage in milli 
 # ---
 gauge_gpu_utilization = Gauge("vllm:gpu_utilization", "Used GPU")
 # ---
-gauge_gpu_memory_total_bytes = Gauge("vllm:gou_memory_total_bytes", "GPU memory capacity in Bytes")
+gauge_gpu_memory_total_bytes = Gauge("vllm:gpu_memory_total_bytes", "GPU memory capacity in Bytes")
 gauge_gpu_memory_used_bytes = Gauge("vllm:gpu_memory_used_bytes", "Bytes that occupy the GPU memory")
 
 @dataclass
@@ -202,7 +202,7 @@ class StatLogger:
             temperature = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
             
             # log temperature
-            gauge_gpu_temperature({**labels, **label_temp}, temperature)
+            gauge_gpu_temperature.set({**labels, **label_temp}, temperature)
         
         def _log_gpu_power(gpu_id: int):
             label_power = {}
@@ -214,7 +214,7 @@ class StatLogger:
             power_usage = pynvml.nvmlDeviceGetPowerUsage(handle)
             
             # log power     
-            gauge_gpu_power_usage({**labels, **label_power}, power_usage)
+            gauge_gpu_power_usage.set({**labels, **label_power}, power_usage)
             
             
         def _log_memory(gpu_id: int):
@@ -227,13 +227,18 @@ class StatLogger:
 
             used_memory = pynvml.nvmlDeviceGetMemoryInfo(handle).used
             total_memory = pynvml.nvmlDeviceGetMemoryInfo(handle).total
-
-            # log used bytes
-            gauge_gpu_memory_used_bytes({**labels, **label_mem}, used_memory)
-            # log total bytes (static)
-            gauge_gpu_memory_total_bytes({**labels, **label_mem},total_memory )
+            gpu_utilization = pynvml.nvmlDeviceGetUtilizationRates(handle).gpu
             
+            # log volatile gpu utilization 
+            gauge_gpu_utilization.set({**labels, **label_mem}, gpu_utilization)
+            # log used bytes
+            gauge_gpu_memory_used_bytes.set({**labels, **label_mem}, used_memory)
+            # log total bytes (static)
+            gauge_gpu_memory_total_bytes.set({**labels, **label_mem},total_memory )
+        
+       
         try:
+            pynvml.nvmlInit()
             num_gpus = pynvml.nvmlDeviceGetCount()
             for gpu_id in range(num_gpus):
                 _log_temperature(gpu_id)
