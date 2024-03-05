@@ -151,8 +151,10 @@ class AQLMLinearMethod(LinearMethodBase):
             codebooks,
             {
                 # metadata indicates fixed size concatenated along dim 0
-                "is_metadata": True,
-                "output_partition_sizes": torch.tensor(output_partition_sizes, device='cpu'),
+                "is_metadata":
+                True,
+                "output_partition_sizes":
+                torch.tensor(output_partition_sizes, device='cpu'),
             },
         )
 
