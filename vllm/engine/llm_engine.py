@@ -280,6 +280,8 @@ class LLMEngine:
         parallel_config = copy.deepcopy(self.parallel_config)
         scheduler_config = copy.deepcopy(self.scheduler_config)
         device_config = copy.deepcopy(self.device_config)
+        lora_config = copy.deepcopy(self.lora_config)
+        kv_cache_dtype = self.cache_config.cache_dtype
 
         for rank, (worker, (node_id,
                             _)) in enumerate(zip(self.workers,
@@ -295,22 +297,22 @@ class LLMEngine:
                     local_rank,
                     rank,
                     distributed_init_method,
-                    lora_config=self.lora_config,
-                    kv_cache_dtype=self.cache_config.cache_dtype,
+                    lora_config=lora_config,
+                    kv_cache_dtype=kv_cache_dtype,
                 ))
 
         driver_rank = 0
         driver_local_rank = node_workers[driver_node_id].index(driver_rank)
         self.driver_worker = Worker(
-            model_config,
-            parallel_config,
-            scheduler_config,
-            device_config,
+            self.model_config,
+            self.parallel_config,
+            self.scheduler_config,
+            self.device_config,
             driver_local_rank,
             driver_rank,
             distributed_init_method,
             lora_config=self.lora_config,
-            kv_cache_dtype=self.cache_config.cache_dtype,
+            kv_cache_dtype=kv_cache_dtype,
             is_driver_worker=True,
         )
 
