@@ -1,3 +1,5 @@
+import gc
+
 import torch
 import pytest
 import triton
@@ -11,6 +13,13 @@ from vllm.model_executor.sampling_metadata import SamplingTensors
 
 SINGLE_SPLIT_VOCAB_SIZE = 32000  # llama/mistral/mixtral vocab size
 MULTI_SPLIT_VOCAB_SIZE = (MAX_TRITON_N_COLS * 2) - 100
+
+
+@pytest.fixture(autouse=True)
+def _cleanup():
+    yield
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @triton.jit
