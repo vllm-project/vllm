@@ -763,6 +763,11 @@ class ModelRunner:
         self.graph_runners.clear()
         self.cupy_nccl_backend = None
 
+    def include_gpu_probs_tensor(self) -> None:
+        """Include GPU probs tensor in sampler output.
+        """
+        self.model.sampler.include_gpu_probs_tensor = True
+
 
 class CUDAGraphRunner:
 

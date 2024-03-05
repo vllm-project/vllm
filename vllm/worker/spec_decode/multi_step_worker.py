@@ -5,6 +5,7 @@ import torch
 
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.worker import Worker
+from vllm.worker.spec_decode.util import SpeculativeProposals, sampler_output_to_torch
 
 
 class MultiStepWorker(Worker):
@@ -57,6 +58,75 @@ class MultiStepWorker(Worker):
             model_outputs.append(model_output)
 
         return model_outputs
+
+    def get_spec_proposals(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        blocks_to_swap_in: Dict[int, int],
+        blocks_to_swap_out: Dict[int, int],
+        blocks_to_copy: Dict[int, List[int]],
+        max_proposal_len: int,
+    ) -> SpeculativeProposals:
+        """
+        - create proposal lens tensor
+            - determine which seqs are over len
+            - set k = 0
+        - create new batch that ignores k=0
+        - do normal fwd pass
+        - construct output
+            - inject empty rows for token ids/probs tensor
+        """
+        
+        # TODO
+        max_model_len = 2048
+
+        proposal_lens: List[int] = []
+        nonzero_proposal_len_seqs: List[SequenceGroupMetadata] = []
+        #nonzero_proposal_len_indices: List[int] = []
+        #zero_proposal_len_indices: List[int] = []
+        for i, seq_group_metadata in enumerate(seq_group_metadata_list):
+            seq_data = next(iter(seq_group_metadata.seq_data.values()))
+            seq_len = seq_data.get_len()
+
+            if seq_len + max_proposal_len < max_model_len:
+                proposal_lens.append(max_proposal_len)
+                nonzero_proposal_len_seqs.append(seq_group_metadata)
+                #nonzero_proposal_len_indices.append(i)
+            else:
+                proposal_lens.append(0)
+                #zero_proposal_len_indices.append(i)
+        
+        # create new batch which ignores k=0
+        # problem -> prepare inputs encodes some things based off of indices
+        #       -> we may violate some assumption (num_prompt, etc)
+        # going to continue for now..
+        
+        # run fwd pass
+
+        sampler_output = self.execute_model_multi_step(
+            seq_group_metadata_list=nonzero_proposal_len_seqs,
+            blocks_to_swap_in=blocks_to_swap_in,
+            blocks_to_swap_out=blocks_to_swap_out,
+            blocks_to_copy=blocks_to_copy,
+            num_steps=max_proposal_len,
+        )
+
+        # Now, reformat the output GPU tensors such that each sequence has
+        # a proposal. the proposal can be empty, e.g. [-1, -1, -1]
+
+        proposal_tokens, proposal_probs = sampler_output_to_torch(sampler_output)
+        
+        proposals = SpeculativeProposals(
+            spec_seqs=[],
+            non_spec_seqs=[],
+            all_seqs=[],
+            original_indices=None,
+            proposal_token_ids=proposal_tokens,
+            proposal_probs=proposal_probs,
+        )
+
+        breakpoint()
+
 
     def _append_new_tokens(
             self, model_output: SamplerOutput,

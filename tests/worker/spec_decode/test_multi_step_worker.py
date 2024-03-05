@@ -10,7 +10,7 @@ from vllm.model_executor.utils import set_random_seed
 from .utils import (create_execute_model_data, create_worker,
                     create_seq_group_metadata_from_prompts, zero_kv_cache,
                     patch_execute_model_with_seeds,
-                    assert_logprobs_dict_allclose)
+                    assert_logprobs_dict_allclose, create_batch)
 
 
 @pytest.mark.parametrize('num_steps', list(range(1, 17)))
@@ -262,4 +262,44 @@ def test_same_output_for_multi_step():
 
 
 def test_get_proposals():
-    pass
+    """Call get_proposals and verify the proposals are as expected.
+    Check proposal_len, token id, and probs.
+    """
+    seed = 100
+    model_name = 'JackFram/llama-68m'
+    k = 10
+    batch_size = 10
+
+    block_size = 16
+    num_gpu_blocks = 2048 // block_size
+    multi_step_worker = create_worker(
+        MultiStepWorker,
+        model_name,
+        block_size,
+        num_gpu_blocks,
+        seed,
+    )
+
+    execute_model_data, _, _ = create_batch(batch_size, k)
+
+    proposals = multi_step_worker.get_spec_proposals(
+        **execute_model_data.to_dict(),
+        max_proposal_len=k,
+    )
+
+
+    raise NotImplementedError
+
+#def test_get_proposals_mixed_k():
+#    """Call get_proposals and verify the proposals are as expected.
+#    Specifically, some sequences will be over model len, so k=0 for them.
+#    Check proposal_len, token id, and probs.
+#    """
+#    raise NotImplementedError
+#
+#def test_get_proposals_k_equals_0():
+#    """Call get_proposals and verify the proposals are as expected.
+#    Specifically, all sequences are over model len, so k=0 for all.
+#    Check proposal_len, token id, and probs.
+#    """
+#    raise NotImplementedError

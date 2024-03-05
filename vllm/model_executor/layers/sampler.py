@@ -30,6 +30,7 @@ class Sampler(nn.Module):
 
     def __init__(self,
                  vocab_size: int,
+                 include_gpu_probs_tensor: bool = False,
                  org_vocab_size: Optional[int] = None) -> None:
         super().__init__()
         self.vocab_size = vocab_size
@@ -37,6 +38,7 @@ class Sampler(nn.Module):
         self.logits_as_hidden_states = is_neuron()
         # original vocabulary size (without LoRA).
         self.org_vocab_size = org_vocab_size or vocab_size
+        self.include_gpu_probs_tensor = include_gpu_probs_tensor
 
     def _get_logits(self, hidden_states: torch.Tensor, embedding: torch.Tensor,
                     embedding_bias: Optional[torch.Tensor]) -> torch.Tensor:
@@ -581,4 +583,9 @@ def _build_sampler_output(
                 SequenceOutput(seq_ids[parent_id], next_token_id, logprobs))
         sampler_output.append(
             SequenceGroupOutput(seq_outputs, group_prompt_logprobs))
-    return sampler_output
+
+    return SamplerOutput(
+        outputs=sampler_output,
+        sampled_token_probs=None,
+        sampled_token_ids=None,
+    )

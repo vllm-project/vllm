@@ -526,10 +526,10 @@ class SamplerOutput:
     outputs: List[SequenceGroupOutput]
 
     # Used to store an on-GPU tensor containing the batch probabilities.
-    probs: Optional["torch.Tensor"] = None
+    sampled_token_probs: Optional["torch.Tensor"] = None
 
     # Used to store an on-GPU tensor containing the sampled token ids.
-    sampled_tokens: Optional["torch.Tensor"] = None
+    sampled_token_ids: Optional["torch.Tensor"] = None
 
     # Used to store an on-CPU tensor containing the batch logits
     # for the full sequence.

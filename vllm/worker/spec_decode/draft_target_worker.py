@@ -27,7 +27,7 @@ from vllm.config import CacheConfig
 #from vllm.worker.base_worker import BaseWorker
 #from vllm.model_executor.layers.sampler import RawSamplerOutput
 from vllm.utils import in_wsl
-from vllm.worker.spec_decode.util import nvtx_range
+from vllm.worker.spec_decode.util import nvtx_range, sampler_output_to_torch
 
 SeqId = int
 TargetSeqId = int
@@ -756,34 +756,3 @@ def calculate_gpu_blocks(target_kv_size_bytes: int, draft_kv_size_bytes: int,
                              (draft_kv_size_bytes + target_kv_size_bytes))
 
     return new_num_gpu_blocks
-
-
-def sampler_output_to_torch(
-    sampler_output_list: List[SamplerOutput],
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Utility function which converts a list of SamplerOutput to tensors.
-
-        Returns:
-            token_ids: torch.Tensor
-                shape: [batch_size, len(sampler_output_list)]
-
-            probs: torch.Tensor
-                shape: [batch_size, len(sampler_output_list), vocab_size]
-        """
-
-    # shape: [batch_size, num_sampler_output, vocab_size]
-    probs = torch.stack(
-        [sampler_output.probs for sampler_output in sampler_output_list],
-        dim=0,
-    ).transpose(0, 1)
-
-    # shape: [batch_size, num_sampler_output]
-    token_ids = torch.stack(
-        [
-            sampler_output.sampled_tokens.flatten()
-            for sampler_output in sampler_output_list
-        ],
-        dim=0,
-    ).transpose(0, 1)
-
-    return token_ids, probs
