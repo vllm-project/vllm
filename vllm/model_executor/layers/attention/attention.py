@@ -32,13 +32,13 @@ class Attention(nn.Module):
         super().__init__()
         if not is_hip() and torch.cuda.get_device_capability()[0] >= 8:
             # Ampere or later NVIDIA GPUs.
-            from vllm.model_executor.layers.attention_backends.flash_attn import FlashAttentionBackend
+            from vllm.model_executor.layers.attention.backends.flash_attn import FlashAttentionBackend
             self.backend = FlashAttentionBackend(num_heads, head_size, scale,
                                                  num_kv_heads, alibi_slopes,
                                                  sliding_window)
         else:
             # Turing and Volta NVIDIA GPUs or AMD GPUs.
-            from vllm.model_executor.layers.attention_backends.xformers import XFormersBackend
+            from vllm.model_executor.layers.attention.backends.xformers import XFormersBackend
             self.backend = XFormersBackend(num_heads, head_size, scale,
                                            num_kv_heads, alibi_slopes,
                                            sliding_window)
