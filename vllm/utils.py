@@ -273,11 +273,7 @@ def create_kv_caches_with_random(
                 raise ValueError(f"Invalid model dtype: {model_dtype}")
         elif cache_dtype in ["half", "bfloat16", "float"]:
             torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
-<<<<<<< HEAD
-        elif cache_dtype in ["fp8_e5m2", "fp8_e4m3"]:
-=======
         elif cache_dtype == "fp8":
->>>>>>> Rename remaining fp8_e5m2 to general fp8
             torch_dtype = torch.uint8
         else:
             raise ValueError(f"Invalid kv cache dtype: {cache_dtype}")
