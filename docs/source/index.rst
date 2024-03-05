@@ -62,6 +62,7 @@ Documentation
 
    getting_started/installation
    getting_started/amd-installation
+   getting_started/neuron-installation
    getting_started/quickstart
 
 .. toctree::
@@ -97,6 +98,7 @@ Documentation
    :caption: Developer Documentation
 
    dev/engine/engine_index
+   dev/kernel/paged_attention
 
 Indices and tables
 ==================

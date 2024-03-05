@@ -8,8 +8,16 @@ from vllm.block import LogicalTokenBlock
 from vllm.sampling_params import SamplingParams
 from vllm.lora.request import LoRARequest
 
-PromptLogprobs = List[Optional[Dict[int, float]]]
-SampleLogprobs = List[Dict[int, float]]
+
+@dataclass
+class Logprob:
+    """Infos for supporting OpenAI compatible logprobs."""
+    logprob: float
+    decoded_token: Optional[str] = None
+
+
+PromptLogprobs = List[Optional[Dict[int, Logprob]]]
+SampleLogprobs = List[Dict[int, Logprob]]
 
 
 class SequenceStatus(enum.Enum):
@@ -160,10 +168,10 @@ class Sequence:
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
-    # TODO The current hashing function is O(L^2). We should optimize this in
-    # the future.
     def hash_of_block(self, logical_idx: int) -> int:
         # Compute the number of tokens in the sequence
+        # TODO: The current hashing function is O(L^2). We should optimize
+        # this in the future.
         num_tokens = self.num_hashed_tokens_of_block(logical_idx)
         return hash(tuple(self.data.get_token_ids()[0:num_tokens]))
 
@@ -196,12 +204,12 @@ class Sequence:
     def append_token_id(
         self,
         token_id: int,
-        logprobs: Dict[int, float],
+        logprobs: Dict[int, Logprob],
     ) -> None:
         assert token_id in logprobs
         self._append_tokens_to_blocks([token_id])
         self.output_logprobs.append(logprobs)
-        self.data.append_token_id(token_id, logprobs[token_id])
+        self.data.append_token_id(token_id, logprobs[token_id].logprob)
 
     def get_len(self) -> int:
         return self.data.get_len()
@@ -307,10 +315,6 @@ class SequenceGroup:
         # All sequences in the group should have the same prompt.
         # We use the prompt of an arbitrary sequence.
         return next(iter(self.seqs_dict.values())).data.prompt_token_ids
-
-    @property
-    def block_size(self) -> int:
-        return next(iter(self.seqs_dict.values())).block_size
 
     @property
     def lora_int_id(self) -> int:
@@ -460,7 +464,7 @@ class SequenceOutput:
         self,
         parent_seq_id: int,
         output_token: int,
-        logprobs: Dict[int, float],
+        logprobs: Dict[int, Logprob],
     ) -> None:
         self.parent_seq_id = parent_seq_id
         self.output_token = output_token
@@ -474,9 +478,10 @@ class SequenceOutput:
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, SequenceOutput):
             raise NotImplementedError()
-        return (self.parent_seq_id == other.parent_seq_id
-                and self.output_token == other.output_token
-                and self.logprobs == other.logprobs)
+        equal = (self.parent_seq_id == other.parent_seq_id
+                 and self.output_token == other.output_token)
+        log_probs_equal = other.logprobs == self.logprobs
+        return equal and log_probs_equal
 
 
 class SequenceGroupOutput:

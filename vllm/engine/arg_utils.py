@@ -31,6 +31,7 @@ class EngineArgs:
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
     max_paddings: int = 256
+    max_logprobs: int = 5  # OpenAI default value
     disable_log_stats: bool = False
     revision: Optional[str] = None
     code_revision: Optional[str] = None
@@ -46,6 +47,7 @@ class EngineArgs:
     lora_dtype = 'auto'
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
+    ray_workers_use_nsight: bool = False
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -168,6 +170,10 @@ class EngineArgs:
             help='load model sequentially in multiple batches, '
             'to avoid RAM OOM when using tensor '
             'parallel and large models')
+        parser.add_argument(
+            '--ray-workers-use-nsight',
+            action='store_true',
+            help='If specified, use nsight to profile ray workers')
         # KV cache arguments
         parser.add_argument('--block-size',
                             type=int,
@@ -207,6 +213,12 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.max_paddings,
                             help='maximum number of paddings in a batch')
+        parser.add_argument(
+            '--max-logprobs',
+            type=int,
+            default=EngineArgs.max_logprobs,
+            help=('max number of log probs to return logprobs is specified in'
+                  ' SamplingParams'))
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='disable logging statistics')
@@ -295,7 +307,8 @@ class EngineArgs:
             self.trust_remote_code, self.download_dir, self.load_format,
             self.dtype, self.seed, self.revision, self.code_revision,
             self.tokenizer_revision, self.max_model_len, self.quantization,
-            self.enforce_eager, self.max_context_len_to_capture)
+            self.enforce_eager, self.max_context_len_to_capture,
+            self.max_logprobs)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
@@ -305,7 +318,8 @@ class EngineArgs:
                                          self.tensor_parallel_size,
                                          self.worker_use_ray,
                                          self.max_parallel_loading_workers,
-                                         self.disable_custom_all_reduce)
+                                         self.disable_custom_all_reduce,
+                                         self.ray_workers_use_nsight)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
                                            model_config.max_model_len,

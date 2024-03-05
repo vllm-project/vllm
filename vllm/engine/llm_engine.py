@@ -18,7 +18,7 @@ from vllm.engine.ray_utils import RayWorkerVllm, initialize_cluster, ray
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
+from vllm.sequence import (Logprob, SamplerOutput, Sequence, SequenceGroup,
                            SequenceGroupOutput, SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                TokenizerGroup)
@@ -124,7 +124,20 @@ class LLMEngine:
             ray_usage = os.environ.get("RAY_USAGE_STATS_ENABLED", "0")
             if ray_usage != "1":
                 os.environ["RAY_USAGE_STATS_ENABLED"] = "0"
-            self._init_workers_ray(placement_group)
+            # Pass additional arguments to initialize the worker
+            additional_ray_args = {}
+            if self.parallel_config.ray_workers_use_nsight:
+                logger.info("Configuring Ray workers to use nsight.")
+                additional_ray_args = {
+                    "runtime_env": {
+                        "nsight": {
+                            "t": "cuda,cudnn,cublas",
+                            "o": "'worker_process_%p'",
+                            "cuda-graph-trace": "node",
+                        }
+                    }
+                }
+            self._init_workers_ray(placement_group, **additional_ray_args)
         else:
             self._init_workers()
 
@@ -460,6 +473,13 @@ class LLMEngine:
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
+        max_logprobs = self.get_model_config().max_logprobs
+        if (sampling_params.logprobs
+                and sampling_params.logprobs > max_logprobs) or (
+                    sampling_params.prompt_logprobs
+                    and sampling_params.prompt_logprobs > max_logprobs):
+            raise ValueError(f"Cannot request more than "
+                             f"{max_logprobs} logprobs.")
         if arrival_time is None:
             arrival_time = time.monotonic()
         prompt_token_ids = self.encode_request(
@@ -570,6 +590,13 @@ class LLMEngine:
         # Process prompt logprobs
         prompt_logprobs = outputs.prompt_logprobs
         if prompt_logprobs is not None:
+            # We can pick any sequence for the prompt.
+            seq = next(iter(seq_group.seqs_dict.values()))
+            all_token_ids = seq.get_token_ids()
+            for i, prompt_logprobs_for_token in enumerate(prompt_logprobs):
+                self._decode_logprobs(seq, seq_group.sampling_params,
+                                      prompt_logprobs_for_token,
+                                      all_token_ids[:i])
             seq_group.prompt_logprobs = prompt_logprobs
 
         # Process samples
@@ -917,12 +944,36 @@ class LLMEngine:
             time_e2e_requests=time_e2e_requests,
         )
 
+    def _decode_logprobs(self, seq: Sequence, prms: SamplingParams,
+                         logprobs: Dict[int, Logprob],
+                         all_input_ids: List[int]) -> None:
+        if not logprobs:
+            return
+        for token_id, sample_logprob in logprobs.items():
+            if (sample_logprob.decoded_token is None and token_id != -1):
+                all_input_ids_with_logprob = all_input_ids[:-1] + [token_id]
+                _, new_text, prefix_offset, read_offset = detokenize_incrementally(
+                    self.get_tokenizer_for_seq(seq),
+                    all_input_ids=all_input_ids_with_logprob,
+                    prev_tokens=seq.tokens,
+                    prefix_offset=seq.prefix_offset,
+                    read_offset=seq.read_offset,
+                    skip_special_tokens=prms.skip_special_tokens,
+                    spaces_between_special_tokens=prms.
+                    spaces_between_special_tokens,
+                )
+                sample_logprob.decoded_token = new_text
+
     def _decode_sequence(self, seq: Sequence, prms: SamplingParams) -> None:
         """Decodes the new token for a sequence."""
+        all_input_ids = seq.get_token_ids()
+        self._decode_logprobs(seq, prms, seq.output_logprobs[-1],
+                              all_input_ids)
+
         (new_tokens, new_output_text, prefix_offset,
          read_offset) = detokenize_incrementally(
              self.get_tokenizer_for_seq(seq),
-             all_input_ids=seq.get_token_ids(),
+             all_input_ids=all_input_ids,
              prev_tokens=seq.tokens,
              prefix_offset=seq.prefix_offset,
              read_offset=seq.read_offset,
@@ -1068,3 +1119,23 @@ class LLMEngine:
                 for worker in self.workers
             ])
         return forward_dag.experimental_compile()
+
+    def check_health(self) -> None:
+        """Raises an error if engine is unhealthy."""
+        self._check_if_any_actor_is_dead()
+
+    def _check_if_any_actor_is_dead(self):
+        if not self.parallel_config.worker_use_ray:
+            return
+
+        if not self.workers:
+            return
+
+        dead_actors = []
+        for actor in self.workers:
+            actor_state = ray.state.actors(actor._ray_actor_id.hex())  # pylint: disable=protected-access
+            if actor_state["State"] == "DEAD":
+                dead_actors.append(actor)
+        if dead_actors:
+            raise RuntimeError("At least one Worker is dead. "
+                               f"Dead Workers: {dead_actors}. ")
