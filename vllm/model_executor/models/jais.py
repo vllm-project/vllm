@@ -32,7 +32,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearMethodBase,
                                                QKVParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.activation import get_act_fn
+# from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
@@ -153,7 +153,7 @@ class JAISMLP(nn.Module):
             bias=True,
             linear_method=linear_method,
         )
-        quant_config = getattr(linear_method, "quant_config", None)
+        # quant_config = getattr(linear_method, "quant_config", None)
         self.act = SwiGLUActivation()#  if self.swiglu else self.act_gpt2
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
