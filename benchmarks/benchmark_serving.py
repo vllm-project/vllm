@@ -196,7 +196,7 @@ def calculate_metrics(
         total_output=sum(actual_output_lens),
         request_throughput=completed / dur_s,
         input_throughput=total_input / dur_s,
-        output_throughput=total_output / dur_s,
+        output_throughput=sum(actual_output_lens) / dur_s,
         mean_ttft_ms=np.mean(ttfts) * 1000,
         median_ttft_ms=np.median(ttfts) * 1000,
         p99_ttft_ms=np.percentile(ttfts, 99) * 1000,
