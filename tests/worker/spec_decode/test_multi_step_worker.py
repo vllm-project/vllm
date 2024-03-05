@@ -261,16 +261,17 @@ def test_same_output_for_multi_step():
                                       single_step_logprobs)
 
 @torch.inference_mode()
-def test_get_proposals_full_speculation_len():
+@pytest.mark.parametrize("pc", list(range(10)))
+def test_get_proposals_full_speculation_len(pc):
     """
     """
     seed = 100
     model_name = 'JackFram/llama-68m'
     k = 10
-    batch_size = 10
+    batch_size = 1
 
     block_size = 16
-    num_gpu_blocks = 2048 // block_size
+    num_gpu_blocks = 4096 // block_size
     multi_step_worker = create_worker(
         MultiStepWorker,
         model_name,
@@ -279,12 +280,26 @@ def test_get_proposals_full_speculation_len():
         seed,
     )
 
-    execute_model_data, _, _ = create_batch(batch_size, k)
+    execute_model_data, _, _ = create_batch(batch_size, k, num_gpu_blocks=num_gpu_blocks, block_size=block_size)
 
     proposals = multi_step_worker.get_spec_proposals(
         **execute_model_data.to_dict(),
         max_proposal_len=k,
     )
+    
+    ## TODO this cleanup is necessary for some reason
+    #from vllm.model_executor.parallel_utils.parallel_state import destroy_model_parallel
+    #import gc
+    #import contextlib
+
+    #del multi_step_worker
+    #
+    #destroy_model_parallel()
+    #with contextlib.suppress(AssertionError):
+    #    torch.distributed.destroy_process_group()
+    #gc.collect()
+    #torch.cuda.empty_cache()
+    ##ray.shutdown()
     
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)

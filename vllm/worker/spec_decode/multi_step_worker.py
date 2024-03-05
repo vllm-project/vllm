@@ -82,7 +82,6 @@ class MultiStepWorker(Worker):
         proposal_lens: List[int] = []
         nonzero_proposal_len_seqs: List[SequenceGroupMetadata] = []
         nonzero_proposal_len_indices: List[int] = []
-        #zero_proposal_len_indices: List[int] = []
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             seq_data = next(iter(seq_group_metadata.seq_data.values()))
             seq_len = seq_data.get_len()
@@ -93,16 +92,8 @@ class MultiStepWorker(Worker):
                 nonzero_proposal_len_indices.append(i)
             else:
                 proposal_lens.append(0)
-                #zero_proposal_len_indices.append(i)
-        
-        # create new batch which ignores k=0
-        # problem -> prepare inputs encodes some things based off of indices
-        #       -> we may violate some assumption (num_prompt, etc)
-        # going to continue for now..
         
         # run fwd pass
-
-        #mapping = torch.tensor([2, 4, 6, 8, 9], dtype=torch.int64)
 
         if nonzero_proposal_len_seqs:
             sampler_output = self.execute_model_multi_step(

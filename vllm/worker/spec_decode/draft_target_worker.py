@@ -661,21 +661,21 @@ class DraftTargetWorker:
         # speculative samples.
         split_sizes = [
             num_scoring_tokens,
-            sampler_output.sampled_tokens.numel() - num_scoring_tokens
+            sampler_output.sampled_token_ids.numel() - num_scoring_tokens
         ]
-        (spec_probs, non_spec_probs) = sampler_output.probs.split(split_sizes)
+        (spec_probs, non_spec_probs) = sampler_output.sampled_token_probs.split(split_sizes)
         (spec_sampled_tokens, non_spec_sampled_tokens
-         ) = sampler_output.sampled_tokens.flatten().split(split_sizes)
+         ) = sampler_output.sampled_token_ids.flatten().split(split_sizes)
 
         # Convert scores to tensors.
-        sampler_output.probs = spec_probs
-        sampler_output.sampled_tokens = spec_sampled_tokens
+        sampler_output.sampled_token_probs = spec_probs
+        sampler_output.sampled_token_ids = spec_sampled_tokens
         target_token_ids, target_probs = sampler_output_to_torch(
             [sampler_output])
 
         # Convert non-speculative output tokens to tensors.
-        sampler_output.probs = non_spec_probs
-        sampler_output.sampled_tokens = non_spec_sampled_tokens
+        sampler_output.sampled_token_probs = non_spec_probs
+        sampler_output.sampled_token_ids = non_spec_sampled_tokens
         non_spec_target_token_ids, _ = sampler_output_to_torch(
             [sampler_output])
 

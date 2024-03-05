@@ -220,7 +220,8 @@ def test_correctly_calls_target_model(k: int, batch_size: int):
         all_seqs=execute_model_data.seq_group_metadata_list,
         original_indices=torch.arange(batch_size),
         proposal_token_ids=proposal_token_ids,
-        proposal_probs=proposal_probs)
+        proposal_probs=proposal_probs,
+        proposal_lens=None)
 
     exception_secret = 'artifical stop'
     target_worker.execute_model.side_effect = ValueError(exception_secret)
@@ -300,7 +301,8 @@ def test_correctly_calls_rejection_sampler(k: int, batch_size: int):
         all_seqs=execute_model_data.seq_group_metadata_list,
         original_indices=torch.arange(batch_size),
         proposal_token_ids=proposal_token_ids,
-        proposal_probs=proposal_probs)
+        proposal_probs=proposal_probs,
+        proposal_lens=None)
 
     target_token_ids = torch.randint(low=0,
                                      high=vocab_size,
@@ -378,7 +380,8 @@ def test_correctly_formats_output(k: int, batch_size: int):
         all_seqs=execute_model_data.seq_group_metadata_list,
         original_indices=torch.arange(batch_size),
         proposal_token_ids=proposal_token_ids,
-        proposal_probs=proposal_probs)
+        proposal_probs=proposal_probs,
+        proposal_lens=None)
 
     target_token_ids = torch.randint(low=0,
                                      high=vocab_size,
@@ -490,7 +493,8 @@ def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool):
         all_seqs=execute_model_data.seq_group_metadata_list,
         original_indices=torch.arange(batch_size),
         proposal_token_ids=proposal_token_ids,
-        proposal_probs=proposal_probs)
+        proposal_probs=proposal_probs,
+        proposal_lens=None)
 
     target_token_ids = torch.randint(low=0,
                                      high=vocab_size,

@@ -222,8 +222,8 @@ def create_sampler_output_list(
                 prompt_logprobs=None,
             ) for seq_index, token_id in enumerate(token_ids_by_step[step])
         ],
-                      probs=probs[step],
-                      sampled_tokens=token_ids[step])
+                      sampled_token_probs=probs[step],
+                      sampled_token_ids=token_ids[step])
         for step in range(num_steps)
     ]
 
