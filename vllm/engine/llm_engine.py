@@ -19,7 +19,7 @@ from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
 from vllm.utils import Counter
 
 from vllm.executor.single_gpu_executor import SingleGPUModelExecutor
-from vllm.executor.distributed_executor import RayDistributedModelExecutor
+from vllm.executor.ray_distributed_executor import RayDistributedModelExecutor
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
