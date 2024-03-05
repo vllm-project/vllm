@@ -233,11 +233,6 @@ class Worker:
     def list_loras(self) -> Set[int]:
         return self.model_runner.list_loras()
 
-    def include_gpu_probs_tensor(self) -> None:
-        """Include GPU probs tensor in sampler output.
-        """
-        self.model_runner.include_gpu_probs_tensor()
-
     @property
     def max_model_len(self) -> int:
         return self.model_config.max_model_len

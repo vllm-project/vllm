@@ -159,8 +159,6 @@ class DraftTargetWorker:
         self.target_worker.init_model()
         self.draft_worker.init_model()
 
-        self._configure_samplers()
-
         self._metrics.init_gpu_tensors(self.rank)
         self.rejection_sampler.init_gpu_tensors(self.rank)
         self.scorer = BatchExpansionTop1Scorer(
@@ -192,13 +190,6 @@ class DraftTargetWorker:
         self.target_worker.init_cache_engine(cache_config)
         self.draft_worker.init_cache_engine(cache_config)
 
-    def _configure_samplers(self):
-        """Configure model samplers to return a probability tensor in the
-        SamplerOutput. This simplifies the data wrangling logic in speculative
-        decoding.
-        """
-        self.draft_worker.include_gpu_probs_tensor()
-        self.target_worker.include_gpu_probs_tensor()
 
     @torch.inference_mode()
     def execute_model(

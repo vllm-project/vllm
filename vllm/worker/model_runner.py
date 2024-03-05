@@ -760,11 +760,6 @@ class ModelRunner:
         self.graph_runners.clear()
         self.cupy_nccl_backend = None
 
-    def include_gpu_probs_tensor(self) -> None:
-        """Include GPU probs tensor in sampler output.
-        """
-        self.model.sampler.include_gpu_probs_tensor = True
-
     @property
     def vocab_size(self) -> int:
         return self.model_config.get_vocab_size()
