@@ -46,7 +46,7 @@ class EngineArgs:
     lora_extra_vocab_size: int = 256
     lora_dtype = 'auto'
     max_cpu_loras: Optional[int] = None
-    device: str = 'auto'
+    device: str = 'cuda'
     ray_workers_use_nsight: bool = False
 
     def __post_init__(self):
@@ -285,7 +285,7 @@ class EngineArgs:
         parser.add_argument("--device",
                             type=str,
                             default=EngineArgs.device,
-                            choices=["auto", "cuda", "neuron"],
+                            choices=["cuda", "neuron"],
                             help='Device type for vLLM execution.')
         return parser
 

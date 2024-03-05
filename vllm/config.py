@@ -495,18 +495,8 @@ class SchedulerConfig:
 
 class DeviceConfig:
 
-    def __init__(self, device: str = "auto") -> None:
-        if device == "auto":
-            # Automated device type detection
-            if torch.cuda.is_available():
-                self.device_type = "cuda"
-            elif is_neuron():
-                self.device_type = "neuron"
-            else:
-                raise RuntimeError("No supported device detected.")
-        else:
-            # Device type is assigned explicitly
-            self.device_type = device
+    def __init__(self, device: str = "cuda") -> None:
+        self.device_type = device
 
         # Some device types require processing inputs on CPU
         if self.device_type in ["neuron"]:
