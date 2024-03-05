@@ -3,6 +3,7 @@ import random
 import pytest
 
 from vllm.worker.spec_decode.draft_target_worker import DraftTargetWorker, calculate_gpu_blocks
+from vllm.worker.spec_decode.draft_target_worker import BatchExpansionTop1Scorer, get_all_seq_ids
 from vllm.worker.spec_decode.util import SpeculativeProposals
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SequenceGroupMetadata
@@ -18,9 +19,6 @@ from unittest.mock import MagicMock
 def test_get_all_seq_ids():
     """Verify get_all_seq_ids extracts all seq ids.
     """
-    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock(),
-                               MagicMock())
-
     expected_seq_ids = list(range(10)) + list(range(100, 110))
 
     seq_group_metadata_list = [
@@ -39,7 +37,7 @@ def test_get_all_seq_ids():
         ) for seq_id in expected_seq_ids
     ]
 
-    actual_seq_ids = worker._get_all_seq_ids(seq_group_metadata_list)  # pylint: disable=protected-access
+    actual_seq_ids = get_all_seq_ids(seq_group_metadata_list)
     assert actual_seq_ids == expected_seq_ids
 
 
@@ -47,8 +45,7 @@ def test_get_all_seq_ids():
 def test_create_target_seq_id_iterator(num_target_seq_ids: int):
     """Assert all target seq ids are greater than input seq ids.
     """
-    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock(),
-                               MagicMock())
+    scorer = BatchExpansionTop1Scorer(mock_worker(), 'cuda:0', 32_000)
 
     all_seq_ids = [
         [1, 3, 5, 7],
@@ -58,14 +55,14 @@ def test_create_target_seq_id_iterator(num_target_seq_ids: int):
 
     for seq_ids in all_seq_ids:
         max_seq_id = max(seq_ids)
-        iterator = worker._create_target_seq_id_iterator(seq_ids)  # pylint: disable=protected-access
+        iterator = scorer._create_target_seq_id_iterator(seq_ids)  # pylint: disable=protected-access
         for _ in range(num_target_seq_ids):
             assert next(iterator) > max_seq_id
 
 
 @pytest.mark.parametrize('k', [1, 2, 6])
 def test_get_token_ids_to_score(k: int):
-    """Verify DraftTargetWorker correctly determines which token ids need
+    """Verify BatchExpansionTop1Scorer correctly determines which token ids need
     to be scored.
     """
     proposal_token_ids = torch.tensor(
@@ -80,9 +77,8 @@ def test_get_token_ids_to_score(k: int):
     for i in range(proposal_token_ids.shape[0]):
         expected_output.append(proposal_token_ids[:i + 1].tolist())
 
-    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock(),
-                               MagicMock())
-    actual_output = worker._get_token_ids_to_score(proposal_token_ids)  # pylint: disable=protected-access
+    scorer = BatchExpansionTop1Scorer(mock_worker(), 'cuda:0', 32_000)
+    actual_output = scorer._get_token_ids_to_score(proposal_token_ids)  # pylint: disable=protected-access
 
     actual_output = [
         x.tolist() if isinstance(x, torch.Tensor) else x for x in actual_output
@@ -114,9 +110,8 @@ def test_create_single_target_seq_group_metadata(k: int):
     input_seq_id = list(input_seq_group_metadata.seq_data.keys())[0]
     target_seq_id = 100
 
-    worker = DraftTargetWorker(mock_worker(), mock_worker(), MagicMock(),
-                               MagicMock())
-    output = worker._create_single_target_seq_group_metadata(  # pylint: disable=protected-access
+    scorer = BatchExpansionTop1Scorer(mock_worker(), 'cuda:0', 32_000)
+    output = scorer._create_single_target_seq_group_metadata(  # pylint: disable=protected-access
         input_seq_group_metadata,
         input_seq_id,
         target_seq_id,
@@ -194,6 +189,7 @@ def test_correctly_calls_target_model(k: int, batch_size: int):
 
     worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
                                metrics_collector)
+    worker.init_model()
 
     vocab_size = 32_000
 
@@ -279,6 +275,7 @@ def test_correctly_calls_rejection_sampler(k: int, batch_size: int):
 
     worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
                                metrics_collector)
+    worker.init_model()
 
     proposal_token_ids = torch.randint(low=0,
                                        high=vocab_size,
@@ -360,6 +357,7 @@ def test_correctly_formats_output(k: int, batch_size: int):
 
     worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
                                metrics_collector)
+    worker.init_model()
 
     proposal_token_ids = torch.randint(low=0,
                                        high=vocab_size,

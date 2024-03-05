@@ -147,6 +147,7 @@ class DraftTargetWorker:
         self.token_id_dtype = self.rejection_sampler.token_id_dtype
 
         self.use_batch_expansion = True
+        self.scorer: SpeculativeScorer = None
 
         #self._profiler = TorchProfiler()
 
@@ -161,6 +162,11 @@ class DraftTargetWorker:
 
         self._metrics.init_gpu_tensors(self.rank)
         self.rejection_sampler.init_gpu_tensors(self.rank)
+        self.scorer = BatchExpansionTop1Scorer(
+            scorer_worker=self.target_worker,
+            device=self.device,
+            vocab_size=self._vocab_size
+        )
 
     @property
     def device(self):
@@ -287,8 +293,8 @@ class DraftTargetWorker:
         proposals = self.draft_worker.get_spec_proposals(
             seq_group_metadata_list, blocks_to_swap_in, blocks_to_swap_out,
             blocks_to_copy, k)
-
-        all_tokens, all_probs = self._score_proposals(
+        
+        all_tokens, all_probs = self.scorer.score_proposals(
              seq_group_metadata_list,
              blocks_to_swap_in,
              blocks_to_swap_out,
@@ -340,80 +346,121 @@ class DraftTargetWorker:
 
         return accepted_token_ids
 
-    def _get_max_model_len(self) -> Tuple[int, int]:
-        draft_max_model_len = self.draft_worker.max_model_len
-        target_max_model_len = self.target_worker.max_model_len
-
-        assert draft_max_model_len is not None
-        assert target_max_model_len is not None
-
-        return draft_max_model_len, target_max_model_len
-
-    def _get_all_seq_ids(
-            self, seq_group_metadata_list: List[SequenceGroupMetadata]
-    ) -> List[SeqId]:
-        """Given a list of SequenceGroupMetadata, create a list of all
-        sequence ids.
-        """
-        return list(
-            chain.from_iterable([
-                seq_group_metadata.seq_data.keys()
-                for seq_group_metadata in seq_group_metadata_list
-            ]))
-
-    def _create_target_seq_id_iterator(
-            self, seq_ids: List[SeqId]) -> Iterator[TargetSeqId]:
-        """Create an iterator for creating target sequence ids.
-        Target sequence ids are distinct from sequence ids because we create a
-        distinct target sequence id for each proposal token to be scored.
-
-        This implementation increments a counter starting at 1 + max of all
-        provided input sequence ids.
-        """
-        return count(start=max(seq_ids) + 1)
-
-    def _get_token_ids_to_score(
-            self,
-            full_spec_token_ids: List[int]  # shape: [k]
-    ) -> List[List[TokenId]]:
-        """Given an int tensor of proposal token ids, return a list of
-        token ids that should be scored.
-
-        Returns k+1 output lists. The additional one is used for generating the
-        bonus token.
-
-        Example:
-            Input: [0, 1, 2, 3] (k=4)
-            Output: (k+1 lists)
-                []
-                [0]
-                [0, 1]
-                [0, 1, 2]
-                [0, 1, 2, 3]
-        """
-        empty_token_ids = []
-
-        token_ids_to_score = [empty_token_ids]
-        token_ids_to_score.extend([
-            full_spec_token_ids[:i + 1]
-            for i in range(len(full_spec_token_ids))
-        ])
-        return token_ids_to_score
-
-    @nvtx_range("draft_target_worker._score_proposals")
-    def _score_proposals(
+    def _create_output_sampler_list(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-        blocks_to_swap_in: Optional[Dict[int, int]],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        accepted_token_ids: torch.Tensor,  # shape: [batch_size, k+1]
+        k: int,
+    ) -> List[SamplerOutput]:
+        """Given the accepted token ids, create a list of SamplerOutput.
+
+        The output is padded with -1 tokens such that each sequence has
+        the same number of outputs.
+        """
+        seq_ids = get_all_seq_ids(seq_group_metadata_list)
+
+        # shape: [k+1, batch_size]
+        accepted_token_ids_by_step = accepted_token_ids.transpose(0,
+                                                                  1).tolist()
+        sampler_output_list = []
+        for token_ids_by_step in accepted_token_ids_by_step:
+            if all(token_id == -1 for token_id in token_ids_by_step):
+                break
+
+            step_output_token_ids = []
+            for token_id, seq_id in zip(token_ids_by_step, seq_ids):
+                step_output_token_ids.append(
+                    SequenceGroupOutput(
+                        samples=[
+                            SequenceOutput(
+                                parent_seq_id=seq_id,
+                                output_token=token_id,
+                                # TODO currently rejection sampling does not
+                                # emit probs, so this value is meaningless.
+                                logprobs={token_id: 0.0},
+                            )
+                        ],
+                        prompt_logprobs=None,
+                    ))
+            sampler_output_list.append(
+                SamplerOutput(outputs=step_output_token_ids))
+
+        maybe_rejsample_metrics = self._metrics.maybe_collect_rejsample_metrics(
+            k)
+        if maybe_rejsample_metrics is not None:
+            sampler_output_list[
+                0].draft_target_worker_metrics = maybe_rejsample_metrics
+
+        return sampler_output_list
+
+    @cached_property
+    def _vocab_size(self) -> int:
+        """Get the vocab size of the model and make sure it's consistent between
+        draft and target workers.
+        """
+        vocab_sizes = [
+            worker.vocab_size
+            for worker in [self.draft_worker, self.target_worker]
+        ]
+        assert all(vocab_sizes[0] == vocab_size for vocab_size in vocab_sizes)
+        return vocab_sizes[0]
+
+    @property
+    def rank(self):
+        return self.target_worker.rank
+
+
+# TODO name
+def calculate_gpu_blocks(target_kv_size_bytes: int, draft_kv_size_bytes: int,
+                         total_num_gpu_blocks: int) -> int:
+    """Given total_num_gpu_blocks, the number of GPU blocks that could be
+    allocate to the target model, this function calculates how many blocks
+    should be given to the draft and target model.
+
+    Note that usually the block size, in bytes, of each model is different,
+    as it's a function of number of KV/layer, number of heads, and hidden
+    dimension size.
+
+    Since the target and draft models allocate the same number of blocks, we
+    simply calculate the number of blocks where if allocated by both models,
+    the total memory usage from KV cache is no larger than the number of
+    blocks allocatable by the target model alone.
+    """
+    new_num_gpu_blocks = int(total_num_gpu_blocks * target_kv_size_bytes /
+                             (draft_kv_size_bytes + target_kv_size_bytes))
+
+    return new_num_gpu_blocks
+
+from abc import ABC, abstractmethod
+
+
+class SpeculativeScorer(ABC):
+    @abstractmethod
+    def score_proposals(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata], blocks_to_swap_in: Optional[Dict[int, int]],
         blocks_to_swap_out: Optional[Dict[int, int]],
         blocks_to_copy: Optional[Dict[int, List[int]]],
         k: int,
         proposals: SpeculativeProposals,
-        #execute_model_data: ExecuteModelData,
-        #proposal_token_ids: torch.Tensor,  # shape: [batch_size, k]
-        #spec_seqs: List[SequenceGroupMetadata],
-        #non_spec_seqs: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: # TODO update
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError
+
+class BatchExpansionTop1Scorer(SpeculativeScorer):
+    def __init__(self, scorer_worker: Worker, device: str, vocab_size: int):
+        self._scorer_worker = scorer_worker
+        self._device = device
+        self._vocab_size = vocab_size
+
+    @nvtx_range("BatchExpansionTop1Scorer.score_proposals")
+    def score_proposals(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata], blocks_to_swap_in: Optional[Dict[int, int]],
+        blocks_to_swap_out: Optional[Dict[int, int]],
+        blocks_to_copy: Optional[Dict[int, List[int]]],
+        k: int,
+        proposals: SpeculativeProposals,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Score the proposed tokens via the target model.
 
         This converts each input sequence to a set of k+1 target sequences. The
@@ -423,82 +470,65 @@ class DraftTargetWorker:
         This adds overhead and should be removed. It is done because the sampler
         currently operates on sequences instead of queries.
         """
-        
-        if self.use_batch_expansion:
 
-            # TODO(cade) perform this on GPU to remove blocking call.
-            proposal_lens_list = proposals.proposal_lens.tolist()
-            proposal_token_ids_list = proposals.proposal_token_ids.tolist()
+        # TODO(cade) perform this on GPU to remove blocking call.
+        proposal_lens_list = proposals.proposal_lens.tolist()
+        proposal_token_ids_list = proposals.proposal_token_ids.tolist()
 
-            spec_seqs = [seq_group for seq_group, proposal_len in zip(seq_group_metadata_list, proposal_lens_list) if proposal_len != 0]
-            spec_indices = [i for i, (_, proposal_len) in enumerate(zip(seq_group_metadata_list, proposal_lens_list)) if proposal_len != 0]
+        spec_seqs = [seq_group for seq_group, proposal_len in zip(seq_group_metadata_list, proposal_lens_list) if proposal_len != 0]
+        spec_indices = [i for i, (_, proposal_len) in enumerate(zip(seq_group_metadata_list, proposal_lens_list)) if proposal_len != 0]
 
-            non_spec_seqs = [seq_group for seq_group, proposal_len in zip(seq_group_metadata_list, proposal_lens_list) if proposal_len == 0]
-            non_spec_indices = [i for i, (_, proposal_len) in enumerate(zip(seq_group_metadata_list, proposal_lens_list)) if proposal_len == 0]
+        non_spec_seqs = [seq_group for seq_group, proposal_len in zip(seq_group_metadata_list, proposal_lens_list) if proposal_len == 0]
+        non_spec_indices = [i for i, (_, proposal_len) in enumerate(zip(seq_group_metadata_list, proposal_lens_list)) if proposal_len == 0]
 
-            original_indices = spec_indices + non_spec_indices
+        original_indices = spec_indices + non_spec_indices
 
-            # Convert to target sequence ids.
-            target_seq_group_metadata_list = self._create_scoring_model_input(
-                spec_seqs, proposal_token_ids_list)
-            target_seq_group_metadata_list.extend(non_spec_seqs)
-            num_scoring_tokens = len(target_seq_group_metadata_list)
-        else:
-            raise NotImplementedError
+        # Convert to target sequence ids.
+        target_seq_group_metadata_list = self._create_scoring_model_input(
+            spec_seqs, proposal_token_ids_list)
+        target_seq_group_metadata_list.extend(non_spec_seqs)
+        num_scoring_tokens = len(target_seq_group_metadata_list)
 
         # Score proposal token ids.
-        target_sampler_output = self.target_worker.execute_model(
+        target_sampler_output = self._scorer_worker.execute_model(
             seq_group_metadata_list=target_seq_group_metadata_list,
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
             return_python_output=False)
         
-        if self.use_batch_expansion:
-            (target_token_ids, target_probs,
-             non_spec_target_token_ids, non_spec_target_probs) = self._split_scoring_output(
-                 target_sampler_output, num_scoring_tokens)
+        (target_token_ids, target_probs,
+         non_spec_target_token_ids, non_spec_target_probs) = self._split_scoring_output(
+             target_sampler_output, num_scoring_tokens)
 
-            # Map distinct sequences used to score each token
-            # of shape [batch_size * k + 1] back to [batch_size, k + 1].
-            batch_size, k = proposals.proposal_token_ids.shape
+        # Map distinct sequences used to score each token
+        # of shape [batch_size * k + 1] back to [batch_size, k + 1].
+        batch_size, k = proposals.proposal_token_ids.shape
 
-            target_token_ids = target_token_ids.squeeze().reshape(
-                batch_size, k + 1)
-            target_probs = target_probs.squeeze().reshape(batch_size, k + 1,
-                                                          self._vocab_size)
+        target_token_ids = target_token_ids.squeeze().reshape(
+            batch_size, k + 1)
+        target_probs = target_probs.squeeze().reshape(batch_size, k + 1,
+                                                      self._vocab_size)
 
-            # shape: [batch_size, 1]
-            bonus_token_ids = target_token_ids[:, -1:]
+        # shape: [batch_size, 1]
+        bonus_token_ids = target_token_ids[:, -1:]
 
-            # shape: [batch_size, k, vocab_size]
-            proposal_scores = target_probs[:, :-1]
+        # shape: [batch_size, k, vocab_size]
+        proposal_scores = target_probs[:, :-1]
+        
+        full_bs = len(seq_group_metadata_list)
+        all_tokens = torch.ones(full_bs, k + 1, device=self._device, dtype=torch.long) * -1
+        all_probs = torch.zeros(full_bs, k + 1, self._vocab_size, device=self._device, dtype=torch.float32)
             
-            full_bs = len(seq_group_metadata_list)
-            all_tokens = torch.ones(full_bs, k + 1, device=self.device, dtype=torch.long) * -1
-            all_probs = torch.zeros(full_bs, k + 1, self._vocab_size, device=self.device, dtype=torch.float32)
-            
-            if non_spec_indices:
-                all_tokens[non_spec_indices, 0] = non_spec_target_token_ids
-                all_probs[non_spec_indices, 1:, :] = non_spec_target_probs
+        if non_spec_indices:
+            all_tokens[non_spec_indices, 0] = non_spec_target_token_ids
+            all_probs[non_spec_indices, 1:, :] = non_spec_target_probs
 
-            if spec_indices:
-                all_tokens[spec_indices] = target_token_ids
-                all_probs[spec_indices] = target_probs
-
-        else:
-            raise NotImplementedError
+        if spec_indices:
+            all_tokens[spec_indices] = target_token_ids
+            all_probs[spec_indices] = target_probs
         
         return all_tokens, all_probs
-        
-        # TODO remove
-        proposal_scores = all_probs[spec_indices, :-1]
-        bonus_token_ids = all_tokens[spec_indices, -1:]
-        non_spec_target_token_ids = all_tokens[non_spec_indices]
-        #original_indices = ...
-        
-
-        return proposal_scores, bonus_token_ids, non_spec_target_token_ids, original_indices
 
     def _create_scoring_model_input(
             self,
@@ -513,7 +543,7 @@ class DraftTargetWorker:
             return []
 
         target_seq_ids_iter = self._create_target_seq_id_iterator(
-            self._get_all_seq_ids(seq_group_metadata_list))
+            get_all_seq_ids(seq_group_metadata_list))
 
         target_seq_group_metadata = list(
             chain.from_iterable(
@@ -652,87 +682,52 @@ class DraftTargetWorker:
 
         return target_token_ids, target_probs, non_spec_target_token_ids, non_spec_target_probs
 
-    def _create_output_sampler_list(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        accepted_token_ids: torch.Tensor,  # shape: [batch_size, k+1]
-        k: int,
-    ) -> List[SamplerOutput]:
-        """Given the accepted token ids, create a list of SamplerOutput.
+    def _create_target_seq_id_iterator(
+            self, seq_ids: List[SeqId]) -> Iterator[TargetSeqId]:
+        """Create an iterator for creating target sequence ids.
+        Target sequence ids are distinct from sequence ids because we create a
+        distinct target sequence id for each proposal token to be scored.
 
-        The output is padded with -1 tokens such that each sequence has
-        the same number of outputs.
+        This implementation increments a counter starting at 1 + max of all
+        provided input sequence ids.
         """
-        seq_ids = self._get_all_seq_ids(seq_group_metadata_list)
+        return count(start=max(seq_ids) + 1)
 
-        # shape: [k+1, batch_size]
-        accepted_token_ids_by_step = accepted_token_ids.transpose(0,
-                                                                  1).tolist()
-        sampler_output_list = []
-        for token_ids_by_step in accepted_token_ids_by_step:
-            if all(token_id == -1 for token_id in token_ids_by_step):
-                break
+    def _get_token_ids_to_score(
+            self,
+            full_spec_token_ids: List[int]  # shape: [k]
+    ) -> List[List[TokenId]]:
+        """Given an int tensor of proposal token ids, return a list of
+        token ids that should be scored.
 
-            step_output_token_ids = []
-            for token_id, seq_id in zip(token_ids_by_step, seq_ids):
-                step_output_token_ids.append(
-                    SequenceGroupOutput(
-                        samples=[
-                            SequenceOutput(
-                                parent_seq_id=seq_id,
-                                output_token=token_id,
-                                # TODO currently rejection sampling does not
-                                # emit probs, so this value is meaningless.
-                                logprobs={token_id: 0.0},
-                            )
-                        ],
-                        prompt_logprobs=None,
-                    ))
-            sampler_output_list.append(
-                SamplerOutput(outputs=step_output_token_ids))
+        Returns k+1 output lists. The additional one is used for generating the
+        bonus token.
 
-        maybe_rejsample_metrics = self._metrics.maybe_collect_rejsample_metrics(
-            k)
-        if maybe_rejsample_metrics is not None:
-            sampler_output_list[
-                0].draft_target_worker_metrics = maybe_rejsample_metrics
-
-        return sampler_output_list
-
-    @cached_property
-    def _vocab_size(self) -> int:
-        """Get the vocab size of the model and make sure it's consistent between
-        draft and target workers.
+        Example:
+            Input: [0, 1, 2, 3] (k=4)
+            Output: (k+1 lists)
+                []
+                [0]
+                [0, 1]
+                [0, 1, 2]
+                [0, 1, 2, 3]
         """
-        vocab_sizes = [
-            worker.vocab_size
-            for worker in [self.draft_worker, self.target_worker]
-        ]
-        assert all(vocab_sizes[0] == vocab_size for vocab_size in vocab_sizes)
-        return vocab_sizes[0]
+        empty_token_ids = []
 
-    @property
-    def rank(self):
-        return self.target_worker.rank
+        token_ids_to_score = [empty_token_ids]
+        token_ids_to_score.extend([
+            full_spec_token_ids[:i + 1]
+            for i in range(len(full_spec_token_ids))
+        ])
+        return token_ids_to_score
 
 
-# TODO name
-def calculate_gpu_blocks(target_kv_size_bytes: int, draft_kv_size_bytes: int,
-                         total_num_gpu_blocks: int) -> int:
-    """Given total_num_gpu_blocks, the number of GPU blocks that could be
-    allocate to the target model, this function calculates how many blocks
-    should be given to the draft and target model.
-
-    Note that usually the block size, in bytes, of each model is different,
-    as it's a function of number of KV/layer, number of heads, and hidden
-    dimension size.
-
-    Since the target and draft models allocate the same number of blocks, we
-    simply calculate the number of blocks where if allocated by both models,
-    the total memory usage from KV cache is no larger than the number of
-    blocks allocatable by the target model alone.
+def get_all_seq_ids(seq_group_metadata_list: List[SequenceGroupMetadata]) -> List[SeqId]:
+    """Given a list of SequenceGroupMetadata, create a list of all
+    sequence ids.
     """
-    new_num_gpu_blocks = int(total_num_gpu_blocks * target_kv_size_bytes /
-                             (draft_kv_size_bytes + target_kv_size_bytes))
-
-    return new_num_gpu_blocks
+    return list(
+        chain.from_iterable([
+            seq_group_metadata.seq_data.keys()
+            for seq_group_metadata in seq_group_metadata_list
+        ]))
