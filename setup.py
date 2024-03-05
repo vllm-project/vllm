@@ -324,6 +324,32 @@ if _is_cuda():
                     "nvcc": NVCC_FLAGS_PUNICA,
                 },
             ))
+
+    install_flashinfer = True
+    device_count = torch.cuda.device_count()
+    for i in range(device_count):
+        major, minor = torch.cuda.get_device_capability(i)
+        if major < 8:
+            install_flashinfer = False
+            break
+    if install_flashinfer:
+        root = Path(__name__).parent
+        ext_modules.append(
+        CUDAExtension(
+            name="vllm._flashinfer_C",
+            sources=glob("3rd_party/flashinfer/python/csrc/*.cu") + glob("csrc/flashinfer/generated/*.cu"),
+            extra_compile_args={
+                "cxx": CXX_FLAGS,
+                "nvcc": NVCC_FLAGS_PUNICA + ["-DFLASHINFER_ENABLE_FP8", "-DFLASHINFER_ENABLE_BF16"],
+            },
+            include_dirs=[
+                str(root.resolve() / "3rd_party/flashinfer/python/include"),
+                str(root.resolve() / "3rd_party/flashinfer/python/csrc/"),
+                str(root.resolve() / "csrc/flashinfer/"),
+            ],
+        ))
+
+
 elif _is_neuron():
     neuronxcc_version = get_neuronxcc_version()
 
