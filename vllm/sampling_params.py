@@ -92,7 +92,8 @@ class SamplingParams:
         logits_processors: List of functions that modify logits based on
             previously generated tokens.
         truncate_prompt_tokens: If set to an integer k, will use only the last k
-            tokens from the prompt. Defaults to None (no truncation).
+            tokens from the prompt (i.e., left truncation). Defaults to None (i.e.,
+            no truncation).
     """
 
     def __init__(
