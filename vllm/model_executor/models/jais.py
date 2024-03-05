@@ -32,8 +32,15 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearMethodBase,
                                                QKVParallelLinear,
                                                RowParallelLinear)
-# from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import (Sampler,
+                                                _prune_hidden_states,
+                                                _apply_logits_processors,
+                                                _apply_penalties,
+                                                _apply_top_k_top_p,
+                                                _apply_min_p,
+                                                _sample,
+                                                _get_logprobs,
+                                                _build_sampler_output)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.parallel_utils.parallel_state import (
@@ -42,6 +49,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
+from vllm.model_executor.sampling_metadata import SamplingMetadata, SamplingTensors
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -66,6 +74,86 @@ def _get_alibi_slopes(n):
         return (get_slopes_power_of_2(closest_power_of_2) + _get_alibi_slopes(
             2 * closest_power_of_2)[0::2][:n - closest_power_of_2])
 
+class JAISSampler(Sampler):
+
+    def __init__(self,
+                 vocab_size: int,
+                 org_vocab_size: Optional[int] = None) -> None:
+        super().__init__(vocab_size, org_vocab_size)
+
+    def forward(
+        self,
+        embedding: torch.Tensor,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        output_logits_scale: float,
+        embedding_bias: Optional[torch.Tensor] = None,
+    ) -> Optional[SamplerOutput]:
+        # Get the hidden states that we use for sampling.
+        if self.logits_as_hidden_states:
+            logits = hidden_states
+        else:
+            hidden_states = _prune_hidden_states(hidden_states,
+                                                 sampling_metadata)
+
+            # Get the logits for the next tokens.
+            logits = self._get_logits(hidden_states, embedding, embedding_bias)
+            logits *= torch.tensor(
+                float(output_logits_scale), dtype=logits.dtype
+            )
+        
+
+        # Only perform sampling in the driver worker.
+        # Note: `_get_logits` is still distributed across TP workers because
+        # the `embedding` weight is distributed across TP workers.
+        # TODO(zhuohan): Change the get_logits part to a separate stage.
+        if not sampling_metadata.perform_sampling:
+            return None
+
+        assert logits is not None
+        _, vocab_size = logits.shape
+
+        # Apply logits processors (if any).
+        logits = _apply_logits_processors(logits, sampling_metadata)
+
+        # Prepare sampling tensors with pinned memory to avoid blocking.
+        (sampling_tensors, do_penalties, do_top_p_top_k,
+         do_min_p) = SamplingTensors.from_sampling_metadata(
+             sampling_metadata, vocab_size, logits.device, logits.dtype)
+
+        # Apply presence and frequency penalties.
+        if do_penalties:
+            logits = _apply_penalties(logits, sampling_tensors.prompt_tokens,
+                                      sampling_tensors.output_tokens,
+                                      sampling_tensors.presence_penalties,
+                                      sampling_tensors.frequency_penalties,
+                                      sampling_tensors.repetition_penalties)
+
+        # Apply temperature scaling.
+        # Use in-place division to avoid creating a new tensor.
+        logits.div_(sampling_tensors.temperatures.unsqueeze_(dim=1))
+
+        if do_top_p_top_k:
+            logits = _apply_top_k_top_p(logits, sampling_tensors.top_ps,
+                                        sampling_tensors.top_ks)
+
+        if do_min_p:
+            logits = _apply_min_p(logits, sampling_tensors.min_ps)
+
+        # We use float32 for probabilities and log probabilities.
+        # Compute the probabilities.
+        probs = torch.softmax(logits, dim=-1, dtype=torch.float)
+        # Compute the log probabilities.
+        # Use log_softmax to ensure numerical stability.
+        logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
+
+        # Sample the next tokens.
+        sample_results = _sample(probs, logprobs, sampling_metadata)
+        # Get the logprobs query results.
+        prompt_logprobs, sample_logprobs = _get_logprobs(
+            logprobs, sampling_metadata, sample_results)
+        return _build_sampler_output(sample_results, sampling_metadata,
+                                     prompt_logprobs, sample_logprobs)
 
 class JAISAttention(nn.Module):
 
@@ -103,7 +191,7 @@ class JAISAttention(nn.Module):
         head_start = tp_rank * self.num_heads
         head_end = (tp_rank + 1) * self.num_heads
         alibi_slopes = _get_alibi_slopes(total_num_heads)
-        alibi_slopes = alibi_slopes[head_start:head_end].tolist()
+        alibi_slopes = alibi_slopes[head_start:head_end]
         self.attn = PagedAttention(self.num_heads,
                                    self.head_dim,
                                    scale=self.scale,
@@ -153,8 +241,8 @@ class JAISMLP(nn.Module):
             bias=True,
             linear_method=linear_method,
         )
-        # quant_config = getattr(linear_method, "quant_config", None)
-        self.act = SwiGLUActivation()  #  if self.swiglu else self.act_gpt2
+    
+        self.act = SwiGLUActivation()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self.swiglu:
@@ -225,7 +313,10 @@ class JAISModel(nn.Module):
         self.wpe = nn.Embedding(
             config.max_position_embeddings, self.embed_dim
         ) if config.position_embedding_type != "alibi" else None
-        self.embeddings_scale = config.mup_embeddings_scale
+        if hasattr(config, 'embeddings_scale'):
+            self.embeddings_scale = config.embeddings_scale
+        else:
+            self.embeddings_scale = config.mup_embeddings_scale
         self.h = nn.ModuleList([
             JAISBlock(config, linear_method)
             for _ in range(config.num_hidden_layers)
@@ -245,6 +336,9 @@ class JAISModel(nn.Module):
             hidden_states = inputs_embeds + position_embeds
         else:
             hidden_states = inputs_embeds
+        hidden_states *= torch.tensor(
+            float(self.embeddings_scale), dtype=hidden_states.dtype
+        )
 
         for i in range(len(self.h)):
             layer = self.h[i]
@@ -266,8 +360,12 @@ class JAISLMHeadModel(nn.Module):
         self.linear_method = linear_method
         self.transformer = JAISModel(config, linear_method)
         self.lm_head_weight = self.transformer.wte.weight
-        self.sampler = Sampler(config.vocab_size)
-
+        if hasattr(config, 'width_scale'):
+            self.output_logits_scale = config.width_scale
+        else:
+            self.output_logits_scale = config.mup_output_alpha * config.mup_width_scale
+        self.sampler = JAISSampler(config.vocab_size)
+        
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -285,7 +383,7 @@ class JAISLMHeadModel(nn.Module):
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(self.lm_head_weight, hidden_states,
-                                   sampling_metadata)
+                                   sampling_metadata, self.output_logits_scale)
         return next_tokens
 
     def load_weights(self,
