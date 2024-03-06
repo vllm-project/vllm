@@ -59,10 +59,9 @@ class SchedulerOutputs:
                 and not self.blocks_to_swap_out and not self.blocks_to_copy)
 
     def _sort_by_lora_ids(self) -> bool:
-        self.scheduled_seq_groups = sorted(
-            self.scheduled_seq_groups,
-            key=lambda g: (g.lora_request.lora_int_id
-                           if g.lora_request else 0, g.request_id))
+        self.scheduled_seq_groups = sorted(self.scheduled_seq_groups,
+                                           key=lambda g:
+                                           (g.lora_int_id, g.request_id))
 
     @property
     def lora_requests(self) -> Set[LoRARequest]:

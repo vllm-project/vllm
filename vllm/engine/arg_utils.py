@@ -48,12 +48,9 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = None
     flash_style: bool = False
     device: str = 'auto'
-<<<<<<< HEAD
+    ray_workers_use_nsight: bool = False
     max_chunked_prefill_len: int = -1
     max_num_prompt_seqs: int = 256
-=======
-    ray_workers_use_nsight: bool = False
->>>>>>> chunked-prefill-3
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -340,8 +337,8 @@ class EngineArgs:
                                          self.tensor_parallel_size,
                                          self.worker_use_ray,
                                          self.max_parallel_loading_workers,
-<<<<<<< HEAD
-                                         self.disable_custom_all_reduce)
+                                         self.disable_custom_all_reduce,
+                                         self.ray_workers_use_nsight)
         scheduler_config = SchedulerConfig(
             self.max_num_batched_tokens,
             self.max_num_seqs,
@@ -351,14 +348,6 @@ class EngineArgs:
             max_num_prompt_seqs=self.max_num_prompt_seqs,
             flash_style=self.flash_style,
         )
-=======
-                                         self.disable_custom_all_reduce,
-                                         self.ray_workers_use_nsight)
-        scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
-                                           self.max_num_seqs,
-                                           model_config.max_model_len,
-                                           self.max_paddings)
->>>>>>> chunked-prefill-3
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,
