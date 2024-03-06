@@ -1,6 +1,6 @@
 """A block manager that manages token blocks."""
 import enum
-from itertools import count
+from itertools import count, takewhile
 from os.path import commonprefix
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -445,10 +445,10 @@ class BlockSpaceManager:
         # TODO We exclude the last block to avoid the case where the entire
         # prompt is cached. This would currently cause erroneous behavior in
         # worker.
-        for block_idx in range(len(block_table) - 1):
-            if block_table[block_idx].computed:
-                return [b.block_number for b in block_table[:block_idx + 1]]
-        return []
+        return [
+            b.block_number
+            for b in takewhile(lambda b: b.computed, block_table[:-1])
+        ]
 
     def get_common_computed_block_ids(self,
                                       seq_group: SequenceGroup) -> List[int]:
