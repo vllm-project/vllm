@@ -77,13 +77,19 @@ if __name__ == '__main__':
                         type=int,
                         choices=[64, 80, 96, 112, 128, 256],
                         default=128)
-    parser.add_argument("--rottery-dim", type=int, choices=[16, 32], default=32)
+    parser.add_argument("--rottery-dim",
+                        type=int,
+                        choices=[16, 32],
+                        default=32)
     parser.add_argument("--dtype",
                         type=str,
                         choices=["half", "bfloat16", "float"],
                         default="half")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--device", type=str, choices=["cuda:0", "cuda:1"], default="cuda:0")
+    parser.add_argument("--device",
+                        type=str,
+                        choices=["cuda:0", "cuda:1"],
+                        default="cuda:0")
     args = parser.parse_args()
     print(args)
 
