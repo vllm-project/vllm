@@ -33,10 +33,10 @@ def get_instantiation_cu() -> List[str]:
     head_dims = os.environ.get("FLASHINFER_HEAD_DIMS", "64,128,256").split(",")
     group_sizes = [int(x) for x in group_sizes]
     head_dims = [int(x) for x in head_dims]
-    causal_options = [True]  # NOTE(woosuk): Disabled non-causal for now.
-    allow_fp16_qk_reduction_options = [False]  # NOTE(woosuk): Disabled for now.
-    layout_options = ["NHD"]  # NOTE(woosuk): Disabled other layouts for now.
-    pos_encoding_mode_options = ["None", "ALiBi"]  # NOTE(woosuk): Disabled RoPELlama for now.
+    causal_options = [False, True]
+    allow_fp16_qk_reduction_options = [False, True]
+    layout_options = ["HND", "NHD"]
+    pos_encoding_mode_options = ["None", "RoPELlama", "ALiBi"]
 
     # dispatch.inc
     path = root / prefix / "dispatch.inc"
