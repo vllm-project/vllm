@@ -7,6 +7,7 @@ usage() {
     echo
     echo "  -t    - test directory, i.e. location of *.py test files. (default 'tests/')"
     echo "  -r    - desired results base directory. xml results will mirror provided tests directory structure. (default 'test-results/')"
+    echo "  -f    - file with test skip list, e.g. ' neuralmagic/tests/skip-for-remote-push.txt'. (default is to run all found tests)"
     echo "  -h    - this list of options"
     echo
     echo "note: all paths are relative to 'nm-vllm' root"
@@ -16,8 +17,9 @@ usage() {
 
 TEST_DIR=tests
 RESULTS_DIR=test-results
+SKIP_LIST=
 
-while getopts "ht:r:" OPT; do
+while getopts "ht:r:f:" OPT; do
     case "${OPT}" in
 	h)
 	    usage
@@ -27,6 +29,9 @@ while getopts "ht:r:" OPT; do
 	    ;;
     r)
         RESULTS_DIR="${OPTARG}"
+        ;;
+    f)
+        SKIP_LIST="${OPTARG}"
         ;;
     esac
 done
@@ -47,29 +52,56 @@ if [ ! -d "${TEST_DIR}" ]; then
     usage
 fi
 
-# run tests serially
-TESTS_DOT_PY=$(find ${TEST_DIR} -name "test*.py")
-TESTS_TO_RUN=($TESTS_DOT_PY)
+# find tests
+TESTS_DOT_PY=$(find ${TEST_DIR} -type f -name "test*.py")
+TESTS_FOUND=(${TESTS_DOT_PY})
+
+echo "found:"
+for FOUND in "${TESTS_FOUND[@]}"; do
+    echo "${FOUND}"
+done
+
+# build the skip list from provided file
+declare -a TESTS_TO_EXCLUDE
+if [ -f "${SKIP_LIST}" ]; then
+    while IFS= read -r line
+    do
+        TESTS_TO_EXCLUDE+=("${line}")
+    done < "${SKIP_LIST}"
+fi
+
+for EXCLUDE in "${TESTS_TO_EXCLUDE[@]}"; do
+    for JJ in "${!TESTS_FOUND[@]}"; do
+        if [[ ${TESTS_FOUND[$JJ]} = ${EXCLUDE} ]]; then
+            echo "excluding: ${EXCLUDE}"
+            unset 'TESTS_FOUND[$JJ]'
+        fi
+    done
+done
+
+# run selected tests
 SUCCESS=0
-for TEST in "${TESTS_TO_RUN[@]}"
+for TEST in "${TESTS_FOUND[@]}"
 do
     LOCAL_SUCCESS=0
     RESULT_XML=$(echo ${TEST} | sed -e "s/${TEST_DIR}/${RESULTS_DIR}/" | sed -e "s/.py/.xml/")
 
+    echo "planning to generate ... .coverage-$(basename ${TEST})"
+
     # this is a bit messy and brittle, but certain tests
     # need to be run with specific options
     if [[ "${TEST}" == *"kernels/test_pos_encoding"* ]]; then
-            CUDA_VISIBLE_DEVICES=0,1 pytest --forked --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
+        CUDA_VISIBLE_DEVICES=0,1 coverage run --data-file=.coverage-$(basename ${TEST}) -m pytest --forked --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
     elif [[ "${TEST}" == *"kernels"* ]]; then
-        CUDA_VISIBLE_DEVICES=0,1 pytest --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
+        CUDA_VISIBLE_DEVICES=0,1 coverage run --data-file=.coverage-$(basename ${TEST}) -m pytest --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
     elif [[ "${TEST}" == *"samplers"* ]]; then
-        CUDA_VISIBLE_DEVICES=0,1 pytest --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
+        CUDA_VISIBLE_DEVICES=0,1 coverage run --data-file=.coverage-$(basename ${TEST}) -m pytest --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
     elif [[ "${TEST}" == *"distributed"* ]]; then
-        pytest --forked --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
+        coverage run --data-file=.coverage-$(basename ${TEST}) -m pytest --forked --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
     elif [[ "${TEST}" == *"models_logprobs"* ]]; then
-        pytest --forked --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
+        coverage run --data-file=.coverage-$(basename ${TEST}) -m pytest --forked --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
     else
-        pytest --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
+        coverage run --data-file=.coverage-$(basename ${TEST}) -m pytest --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
     fi
 
     SUCCESS=$((SUCCESS + LOCAL_SUCCESS))

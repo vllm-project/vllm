@@ -1,6 +1,9 @@
 name: test nm-vllm
 description: "test nm-vllm via, 'pytest tests/'"
 inputs:
+  test_skip_list:
+    description: 'file containing tests to skip'
+    required: true
   test_directory:
     description: 'test directory, path is relative to nm-vllm'
     required: true
@@ -30,9 +33,10 @@ runs:
       source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
       pip3 install --index-url http://${{ inputs.pypi }}:8080/ --trusted-host ${{ inputs.pypi }} nm-magic-wand
       pip3 install -r requirements-dev.txt
+      pip3 install coverage
       # run tests via runner script
       SUCCESS=0
-      ./.github/scripts/run-tests -t ${{ inputs.test_directory }} -r ${{ inputs.test_results }} || SUCCESS=$?
+      ./.github/scripts/run-tests -t ${{ inputs.test_directory }} -r ${{ inputs.test_results }} -f ${{ inputs.test_skip_list }} || SUCCESS=$?
       echo "was this a SUCCESS? ${SUCCESS}"
       echo "status=${SUCCESS}" >> "$GITHUB_OUTPUT"
       exit ${SUCCESS}

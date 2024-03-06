@@ -25,4 +25,5 @@ jobs:
             gitref: '${{ github.ref }}'
             Gi_per_thread: 4
             python: ${{ matrix.python }}
+            test_skip_list: neuralmagic/tests/skip-for-remote-push.txt
         secrets: inherit

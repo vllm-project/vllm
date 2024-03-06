@@ -1,0 +1,26 @@
+name: code coverage report
+description: "test nm-vllm via, 'pytest tests/'"
+inputs:
+  python:
+    description: 'python version, e.g. 3.10.12'
+    required: true
+  venv:
+    description: 'name for python virtual environment'
+    required: true
+  reports_directory:
+    description: 'directory for code coverage reports, path is relative to nm-vllm'
+    required: true
+runs:
+  using: composite
+  steps:
+  - id: code_coverage
+    run: |
+      COVERAGE_REPORTS=$(find . -type f -iname ".coverage*")
+      echo "... ${COVERAGE_REPORTS}"
+      COMMIT=${{ github.sha }}
+      VENV="${{ inputs.venv }}-${COMMIT:0:7}"
+      source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
+      coverage combine --keep ${COVERAGE_REPORTS}
+      ls -alh
+      coverage html --ignore-errors --directory=${{ inputs.reports_directory }}
+    shell: bash

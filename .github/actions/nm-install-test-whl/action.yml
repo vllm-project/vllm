@@ -10,6 +10,9 @@ inputs:
   whl:
     description: 'filepath for magic_wand whl file'
     required: true
+  test_skip_list:
+    description: 'file containing tests to skip'
+    required: true
   test_directory:
     description: 'directory to test files'
     required: true
@@ -29,12 +32,13 @@ runs:
         VENV="${{ inputs.venv }}-${COMMIT:0:7}"
         pyenv virtualenv ${VENV}
         source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
+        pip3 install coverage
         pip3 list
         ls -alh dist
         pip3 install ${{ inputs.whl }}
         pip3 install -r requirements-dev.txt
         SUCCESS=0
-        ./.github/scripts/run-tests -t ${{ inputs.test_directory }} -r ${{ inputs.test_results }} || SUCCESS=$?
+        ./.github/scripts/run-tests -t ${{ inputs.test_directory }} -r ${{ inputs.test_results }} -f ${{ inputs.test_skip_list }}|| SUCCESS=$?
         echo "status=${SUCCESS}" >> "$GITHUB_OUTPUT"
         exit ${SUCCESS}
       shell: bash

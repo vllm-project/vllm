@@ -23,6 +23,10 @@ on:
         description: "python version, e.g. 3.10.12"
         type: string
         required: true
+      test_skip_list:
+        description: 'file containing tests to skip'
+        type: string
+        required: true
 
   # makes workflow manually callable
   workflow_dispatch:
@@ -45,6 +49,10 @@ on:
         required: true
       python:
         description: "python version, e.g. 3.10.12"
+        type: string
+        required: true
+      test_skip_list:
+        description: 'file containing tests to skip'
         type: string
         required: true
 
@@ -112,11 +120,28 @@ jobs:
               id: test
               uses: ./.github/actions/nm-test-vllm/
               with:
+                test_skip_list: ${{ inputs.test_skip_list }}
                 test_directory: tests
                 test_results: test-results
                 python: ${{ inputs.python }}
                 venv: TEST
                 pypi: ${{ secrets.NM_PRIVATE_PYPI_LOCATION }}
+
+            - name: generate code coverage
+              uses: ./.github/actions/nm-code-coverage/
+              if: success() || failure()
+              with:
+                python: ${{ inputs.python }}
+                venv: TEST
+                reports_directory: cc-nm-vllm-html
+
+            - name: upload code coverage html
+              uses: actions/upload-artifact@v4
+              if: success() || failure()
+              with:
+                name: cc-nm-vllm-html
+                path: cc-nm-vllm-html
+                retention-days: 15
 
             - name: report test results
               id: report_test
