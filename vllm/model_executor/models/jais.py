@@ -93,8 +93,9 @@ class JAISSampler(Sampler):
 
             # Get the logits for the next tokens.
             logits = self._get_logits(hidden_states, embedding, embedding_bias)
-            logits *= torch.tensor(float(output_logits_scale),
-                                   dtype=logits.dtype)
+            if logits is not None:
+                logits *= torch.tensor(float(output_logits_scale),
+                                       dtype=logits.dtype)
 
         # Only perform sampling in the driver worker.
         # Note: `_get_logits` is still distributed across TP workers because
