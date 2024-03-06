@@ -13,6 +13,9 @@ steps:
 
 - label: Basic Correctness Test
   command: pytest -v -s --forked basic_correctness
+  
+- label: Core Test
+  command: pytest -v -s core
 
 - label: Distributed Comm Ops Test
   command: pytest -v -s --forked test_comm_ops.py
