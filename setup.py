@@ -333,7 +333,13 @@ if _is_cuda():
             install_flashinfer = False
             break
     if install_flashinfer:
-        root = Path(__name__).parent
+        root = Path(__name__).parent.resolve()
+        subprocess.run(
+            ["python", str(root / "csrc/flashinfer/generator.py")],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True)
+
         ext_modules.append(
             CUDAExtension(
                 name="vllm._flashinfer_C",
@@ -347,10 +353,9 @@ if _is_cuda():
                      ["-DFLASHINFER_ENABLE_FP8", "-DFLASHINFER_ENABLE_BF16"]),
                 },
                 include_dirs=[
-                    str(root.resolve() /
-                        "3rd_party/flashinfer/python/include"),
-                    str(root.resolve() / "3rd_party/flashinfer/python/csrc/"),
-                    str(root.resolve() / "csrc/flashinfer/"),
+                    str(root / "3rd_party/flashinfer/python/include"),
+                    str(root / "3rd_party/flashinfer/python/csrc/"),
+                    str(root / "csrc/flashinfer/"),
                 ],
             ))
 
