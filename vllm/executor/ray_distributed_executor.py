@@ -9,6 +9,7 @@ from vllm.lora.request import LoRARequest
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, LoRAConfig)
 from vllm.engine.ray_utils import RayWorkerVllm, ray
+from vllm.executor.utils import check_block_size
 from vllm.logger import init_logger
 from vllm.sequence import SequenceGroupMetadata
 from vllm.utils import (set_cuda_visible_devices, get_ip, get_open_port,
@@ -235,18 +236,8 @@ class RayDistributedModelExecutor:
         logger.info(f"# GPU blocks: {num_gpu_blocks}, "
                     f"# CPU blocks: {num_cpu_blocks}")
 
-        if num_gpu_blocks <= 0:
-            raise ValueError("No available memory for the cache blocks. "
-                             "Try increasing `gpu_memory_utilization` when "
-                             "initializing the engine.")
-        max_seq_len = self.cache_config.block_size * num_gpu_blocks
-        if self.model_config.max_model_len > max_seq_len:
-            raise ValueError(
-                f"The model's max seq len ({self.model_config.max_model_len}) "
-                "is larger than the maximum number of tokens that can be "
-                f"stored in KV cache ({max_seq_len}). Try increasing "
-                "`gpu_memory_utilization` or decreasing `max_model_len` when "
-                "initializing the engine.")
+        check_block_size(num_gpu_blocks, self.cache_config.block_size,
+                         self.model_config.max_model_len)
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
