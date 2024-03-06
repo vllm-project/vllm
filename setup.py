@@ -3,6 +3,7 @@ import io
 import os
 import re
 import subprocess
+import sys
 import warnings
 from pathlib import Path
 from typing import List, Set
@@ -14,6 +15,8 @@ import torch.utils.cpp_extension as torch_cpp_ext
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME, ROCM_HOME
 
 ROOT_DIR = os.path.dirname(__file__)
+# This is a temporary directory to store third-party packages.
+THIRDPARTY_SUBDIR = "vllm/thirdparty_files"
 
 # If you are developing the C++ backend of vLLM, consider building vLLM with
 # `python setup.py develop` since it will give you incremental builds.
@@ -324,6 +327,23 @@ if _is_cuda():
                     "nvcc": NVCC_FLAGS_PUNICA,
                 },
             ))
+
+    # Install FlashAttention inside vLLM package.
+    # Adapted from https://github.com/ray-project/ray/blob/f92928c9cfcbbf80c3a8534ca4911de1b44069c0/python/setup.py#L518-L530
+    subprocess.check_call(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "-q",
+            "--target=" + os.path.join(ROOT_DIR, THIRDPARTY_SUBDIR),
+            "einops",  # Dependency of flash-attn.
+            "flash-attn==2.5.6",
+            "--no-dependencies",  # Required to avoid installing torch.
+        ],
+        env=dict(os.environ, CC="gcc"),
+    )
 elif _is_neuron():
     neuronxcc_version = get_neuronxcc_version()
 
