@@ -19,7 +19,7 @@ import os
 import pathlib
 from typing import List
 
-root = pathlib.Path(__name__).cwd()
+root = pathlib.Path(__file__).parent.absolute()
 enable_bf16 = True
 
 
