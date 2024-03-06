@@ -99,9 +99,7 @@ class SpecDecodeWorker:
             "speculative decoding "
             "requires non-None seq_group_metadata_list")
 
-        k = num_spec_tokens
-
-        if k == 0 or len(seq_group_metadata_list) == 0:
+        if num_spec_tokens == 0 or len(seq_group_metadata_list) == 0:
             return self._run_no_spec(
                 seq_group_metadata_list=seq_group_metadata_list,
                 blocks_to_swap_in=blocks_to_swap_in,
@@ -114,7 +112,7 @@ class SpecDecodeWorker:
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
-            k=k,
+            k=num_spec_tokens,
         )
 
     @nvtx_range("spec_decode_worker._run_no_spec")
