@@ -2,6 +2,7 @@ import contextlib
 import io
 import os
 import re
+import shutil
 import subprocess
 import sys
 import warnings
@@ -10,6 +11,7 @@ from typing import List, Set
 
 from packaging.version import parse, Version
 import setuptools
+import setuptools.command.build_ext
 import torch
 import torch.utils.cpp_extension as torch_cpp_ext
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME, ROCM_HOME
@@ -345,8 +347,55 @@ if _is_cuda():
         ],
         env=dict(os.environ, CC="gcc"),
     )
-elif _is_neuron():
-    neuronxcc_version = get_neuronxcc_version()
+
+    def pip_run(build_ext):
+        def walk_directory(directory):
+            file_list = []
+            for root, dirs, filenames in os.walk(directory):
+                for name in filenames:
+                    file_list.append(os.path.join(root, name))
+            return file_list
+
+        def copy_file(target_dir, filename, rootdir):
+            # TODO(rkn): This feels very brittle. It may not handle all cases. See
+            # https://github.com/apache/arrow/blob/master/python/setup.py for an
+            # example.
+            # File names can be absolute paths, e.g. from walk_directory().
+            source = os.path.relpath(filename, rootdir)
+            destination = os.path.join(target_dir, source)
+            # Create the target directory if it doesn't already exist.
+            os.makedirs(os.path.dirname(destination), exist_ok=True)
+            if not os.path.exists(destination):
+                if sys.platform == "win32":
+                    # Does not preserve file mode (needed to avoid read-only bit)
+                    shutil.copyfile(source, destination, follow_symlinks=True)
+                else:
+                    # Preserves file mode (needed to copy executable bit)
+                    shutil.copy(source, destination, follow_symlinks=True)
+                return 1
+            return 0
+
+        thirdparty_dir = os.path.join(ROOT_DIR, THIRDPARTY_SUBDIR)
+        files_to_include = walk_directory(thirdparty_dir)
+        for filename in files_to_include:
+            copy_file(build_ext.build_lib, filename, ROOT_DIR)
+
+    class build_ext(setuptools.command.build_ext.build_ext):
+
+        def run(self):
+            return pip_run(self)
+
+    class BinaryDistribution(setuptools.Distribution):
+
+        def has_ext_modules(self):
+            return True
+
+else:
+    build_ext = setuptools.command.build_ext.build_ext
+    BinaryDistribution = setuptools.Distribution
+
+    if _is_neuron():
+        neuronxcc_version = get_neuronxcc_version()
 
 vllm_extension_sources = [
     "csrc/cache_kernels.cu",
@@ -489,6 +538,7 @@ setuptools.setup(
     python_requires=">=3.8",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
-    cmdclass={"build_ext": BuildExtension} if not _is_neuron() else {},
+    cmdclass={"build_ext": build_ext} if not _is_neuron() else {},
+    distclass=BinaryDistribution,
     package_data=package_data,
 )
