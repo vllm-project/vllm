@@ -58,53 +58,27 @@ class DraftModelTop1Proposer(SpeculativeProposer):
         - construct output
             - inject empty rows for token ids/probs tensor
         """
-        
-        max_model_len = self._max_model_len
-
-        proposal_lens: List[int] = []
-        nonzero_proposal_len_seqs: List[SequenceGroupMetadata] = []
-        nonzero_proposal_len_indices: List[int] = []
-        for i, seq_group_metadata in enumerate(seq_group_metadata_list):
-            seq_data = next(iter(seq_group_metadata.seq_data.values()))
-            seq_len = seq_data.get_len()
-
-            if seq_len + max_proposal_len < max_model_len:
-                proposal_lens.append(max_proposal_len)
-                nonzero_proposal_len_seqs.append(seq_group_metadata)
-                nonzero_proposal_len_indices.append(i)
-            else:
-                proposal_lens.append(0)
+        proposal_lens, nonzero_proposal_len_seqs, nonzero_proposal_len_indices = self._split_by_max_model_len(seq_group_metadata_list, max_proposal_len)
         
         # run fwd pass
 
         if nonzero_proposal_len_seqs:
-            sampler_output = self._draft_worker.execute_model_multi_step(
+            maybe_sampler_output = self._draft_worker.execute_model_multi_step(
                 seq_group_metadata_list=nonzero_proposal_len_seqs,
                 blocks_to_swap_in=blocks_to_swap_in,
                 blocks_to_swap_out=blocks_to_swap_out,
                 blocks_to_copy=blocks_to_copy,
                 num_steps=max_proposal_len,
             )
-            proposal_tokens, proposal_probs = sampler_output_to_torch(sampler_output)
-
-            # Now, reformat the output GPU tensors such that each sequence has
-            # a proposal. the proposal can be empty, e.g. [-1, -1, -1]
-            
-            batch_size = len(seq_group_metadata_list)
-
-            entire_proposal_tokens = torch.ones(batch_size, *proposal_tokens.shape[1:], dtype=torch.long, device=self._device) * -1
-            entire_proposal_tokens[nonzero_proposal_len_indices] = proposal_tokens
-            entire_proposal_probs = torch.zeros(batch_size, *proposal_probs.shape[1:], dtype=torch.float32, device=self._device)
-            entire_proposal_probs[nonzero_proposal_len_indices] = proposal_probs
-
-            proposal_tokens, proposal_probs = entire_proposal_tokens, entire_proposal_probs
-            
-            proposal_lens = torch.zeros(batch_size, dtype=torch.long, device=self._device)
-            proposal_lens[nonzero_proposal_len_indices] = max_proposal_len
         else:
-            proposal_tokens = torch.zeros(0, max_proposal_len, dtype=torch.long, device=self._device)
-            proposal_probs = torch.zeros(0, max_proposal_len, self._vocab_size, dtype=torch.float32, device=self._device)
-            proposal_lens = torch.zeros(len(proposal_lens), dtype=torch.long, device=self._device)
+            maybe_sampler_output = None
+
+        proposal_tokens, proposal_probs, proposal_lens = self._merge_outputs(
+            batch_size=len(seq_group_metadata_list),
+            max_proposal_len=max_proposal_len,
+            maybe_sampler_output=maybe_sampler_output,
+            proposal_lens=proposal_lens,
+            nonzero_proposal_len_indices=nonzero_proposal_len_indices,)
 
         proposals = SpeculativeProposals(
             proposal_token_ids=proposal_tokens,
@@ -113,3 +87,61 @@ class DraftModelTop1Proposer(SpeculativeProposer):
         )
 
         return proposals
+
+    def _merge_outputs(
+        self,
+        batch_size: int,
+        max_proposal_len: int,
+        maybe_sampler_output: Optional[SamplerOutput],
+        proposal_lens: List[int],
+        nonzero_proposal_len_indices: List[int],
+        ) -> Tuple[torch.Tensor, torch.tensor, torch.Tensor]:
+        if maybe_sampler_output is None:
+            proposal_tokens = torch.zeros(0, max_proposal_len, dtype=torch.long, device=self._device)
+            proposal_probs = torch.zeros(0, max_proposal_len, self._vocab_size, dtype=torch.float32, device=self._device)
+            proposal_lens = torch.zeros(len(proposal_lens), dtype=torch.long, device=self._device)
+            return proposal_tokens, proposal_probs, proposal_lens
+
+        sampler_output = maybe_sampler_output
+
+        proposal_tokens, proposal_probs = sampler_output_to_torch(sampler_output)
+
+        # Now, reformat the output GPU tensors such that each sequence has
+        # a proposal. the proposal can be empty, e.g. [-1, -1, -1]
+        
+        entire_proposal_tokens = torch.ones(batch_size, *proposal_tokens.shape[1:], dtype=torch.long, device=self._device) * -1
+        entire_proposal_tokens[nonzero_proposal_len_indices] = proposal_tokens
+        entire_proposal_probs = torch.zeros(batch_size, *proposal_probs.shape[1:], dtype=torch.float32, device=self._device)
+        entire_proposal_probs[nonzero_proposal_len_indices] = proposal_probs
+
+        proposal_tokens, proposal_probs = entire_proposal_tokens, entire_proposal_probs
+        
+        proposal_lens = torch.zeros(batch_size, dtype=torch.long, device=self._device)
+        proposal_lens[nonzero_proposal_len_indices] = max_proposal_len
+
+        return proposal_tokens, proposal_probs, proposal_lens
+        
+
+    def _split_by_max_model_len(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        max_proposal_len: int,
+    ) -> Tuple[List[int], List[SequenceGroupMetadata], List[int]]:
+
+        proposal_lens: List[int] = []
+        nonzero_proposal_len_seqs: List[SequenceGroupMetadata] = []
+        nonzero_proposal_len_indices: List[int] = []
+        for i, seq_group_metadata in enumerate(seq_group_metadata_list):
+            seq_data = next(iter(seq_group_metadata.seq_data.values()))
+            seq_len = seq_data.get_len()
+
+            if seq_len + max_proposal_len < self._max_model_len:
+                proposal_lens.append(max_proposal_len)
+                nonzero_proposal_len_seqs.append(seq_group_metadata)
+                nonzero_proposal_len_indices.append(i)
+            else:
+                proposal_lens.append(0)
+
+        return proposal_lens, nonzero_proposal_len_seqs, nonzero_proposal_len_indices
+        
+
