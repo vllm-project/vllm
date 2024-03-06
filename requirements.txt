@@ -5,8 +5,6 @@ sentencepiece  # Required for LLaMA tokenizer.
 numpy
 torch == 2.1.2
 transformers >= 4.38.0  # Required for Gemma.
-packaging  # Required for flash_attn.
-flash_attn == 2.5.5
 xformers == 0.0.23.post1  # Required for CUDA 12.1.
 fastapi
 uvicorn[standard]
