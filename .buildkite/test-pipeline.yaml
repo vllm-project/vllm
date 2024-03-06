@@ -49,8 +49,8 @@ steps:
 - label: Worker Test
   command: pytest -v -s worker
 
-- label: Speculative decoding unit tests
-  command: pytest -v -s worker/spec_decode
+- label: Speculative decoding tests
+  command: pytest -v -s spec_decode
 
 - label: LoRA Test
   command: pytest -v -s lora --forked
