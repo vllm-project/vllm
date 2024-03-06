@@ -142,7 +142,7 @@ class Sequence:
         prompt: str,
         prompt_token_ids: List[int],
         block_size: int,
-        eos_token_id: int,
+        eos_token_id: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> None:
         self.seq_id = seq_id
