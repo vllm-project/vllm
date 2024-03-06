@@ -1,15 +1,12 @@
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import copy
-from typing import List, Tuple, Optional, Dict
 
 import torch
 
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.worker import Worker
-from vllm.spec_decode.interfaces import SpeculativeProposals
-from vllm.sequence import (SamplerOutput, SequenceGroupMetadata)
-from vllm.spec_decode.util import sampler_output_to_torch
 from vllm.spec_decode.interfaces import SpeculativeProposals, SpeculativeProposer
+from vllm.spec_decode.util import sampler_output_to_torch
 
 
 class MultiStepWorker(Worker):

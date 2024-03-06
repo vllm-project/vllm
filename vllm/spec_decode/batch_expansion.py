@@ -325,8 +325,8 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         return count(start=max(seq_ids) + 1)
 
     def _get_token_ids_to_score(
-            self,
-            full_spec_token_ids: List[TokenId]  # shape: [k]
+        self,
+        full_spec_token_ids: List[TokenId]  # shape: [k]
     ) -> List[List[TokenId]]:
         """Given an int tensor of proposal token ids, return a list of
         token ids that should be scored.

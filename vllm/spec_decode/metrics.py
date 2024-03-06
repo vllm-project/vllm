@@ -30,7 +30,7 @@ class SpecDecodeWorkerMetrics:
 
     # The number of tokens accepted by the scoring model and verification
     # routine, e.g. Llama2-70B and lossless rejection sampling.
-    # 
+    #
     # NOTE: Any token accepted by the verification routine is considered
     # accepted (regardless of if the speculative prefix is also accepted). The
     # user will usually see less accepted tokens. This metric is helpful when
