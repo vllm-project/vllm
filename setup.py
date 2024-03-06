@@ -330,6 +330,7 @@ if _is_cuda():
 
     # Install FlashAttention inside vLLM package.
     # Adapted from https://github.com/ray-project/ray/blob/f92928c9cfcbbf80c3a8534ca4911de1b44069c0/python/setup.py#L518-L530
+    flash_attn_version = "2.5.6"
     subprocess.check_call(
         [
             sys.executable,
@@ -339,8 +340,8 @@ if _is_cuda():
             "-q",
             "--target=" + os.path.join(ROOT_DIR, THIRDPARTY_SUBDIR),
             "einops",  # Dependency of flash-attn.
-            "flash-attn==2.5.6",
-            "--no-dependencies",  # Required to avoid installing torch.
+            f"flash-attn=={flash_attn_version}",
+            "--no-dependencies",  # Required to avoid re-installing torch.
         ],
         env=dict(os.environ, CC="gcc"),
     )
