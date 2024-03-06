@@ -164,9 +164,10 @@ def broadcast_tensor_dict(
         metadata_list = []
         for key, value in tensor_dict.items():
             if isinstance(value, torch.Tensor):
-                assert value.is_cuda, (
-                    f"Tensor {key}: {value} is not on cuda. Currently we only "
-                    f"support broadcasting tensors on cuda.")
+                if torch.cuda.is_available():
+                    assert value.is_cuda, (
+                        f"Tensor {key}: {value} is not on cuda. Currently we only "
+                        f"support broadcasting tensors on cuda.")
                 metadata_list.append(
                     (key, TensorMetadata(value.dtype, value.size())))
             else:
@@ -190,7 +191,7 @@ def broadcast_tensor_dict(
             if isinstance(value, TensorMetadata):
                 tensor = torch.empty(value.size,
                                      dtype=value.dtype,
-                                     device="cuda")
+                                     device="xpu")
                 async_handle = torch.distributed.broadcast(tensor,
                                                            src=src,
                                                            async_op=True,
