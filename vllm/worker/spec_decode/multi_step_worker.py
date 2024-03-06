@@ -6,7 +6,7 @@ import torch
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.worker import Worker
 from vllm.worker.spec_decode.util import SpeculativeProposals, sampler_output_to_torch
-from vllm.worker.spec_decode.proposing import DraftModelProposer
+from vllm.worker.spec_decode.proposing import DraftModelTop1Proposer
 
 
 class MultiStepWorker(Worker):
@@ -24,12 +24,12 @@ class MultiStepWorker(Worker):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self._proposer: Optional[DraftModelProposer] = None
+        self._proposer: Optional[DraftModelTop1Proposer] = None
 
     def init_model(self):
         super().init_model()
 
-        self._proposer = DraftModelProposer(
+        self._proposer = DraftModelTop1Proposer(
             self,
             self.device,
             self.max_model_len,

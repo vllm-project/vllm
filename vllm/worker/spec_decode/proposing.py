@@ -50,7 +50,7 @@ class SpeculativeProposer(ABC):
     ) -> SpeculativeProposals:
         raise NotImplementedError
 
-class DraftModelProposer(SpeculativeProposer):
+class DraftModelTop1Proposer(SpeculativeProposer):
     def __init__(
         self,
         draft_worker: "MultiStepWorker",

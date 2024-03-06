@@ -81,10 +81,10 @@ class DraftTargetWorker:
             self.scorer_worker.profile_num_available_blocks(
                 block_size, gpu_memory_utilization, cpu_swap_space))
 
-        target_kv_size_bytes = self.scorer_worker.get_kv_size_bytes(block_size)
-        draft_kv_size_bytes = self.proposer_worker.get_kv_size_bytes(block_size)
+        target_cache_block_size_bytes = self.scorer_worker.get_cache_block_size_bytes(block_size)
+        draft_kv_size_bytes = self.proposer_worker.get_cache_block_size_bytes(block_size)
 
-        new_num_gpu_blocks = calculate_gpu_blocks(target_kv_size_bytes,
+        new_num_gpu_blocks = calculate_gpu_blocks(target_cache_block_size_bytes,
                                                   draft_kv_size_bytes,
                                                   num_gpu_blocks)
         return new_num_gpu_blocks, num_cpu_blocks
@@ -307,7 +307,7 @@ class DraftTargetWorker:
 
 
 # TODO name
-def calculate_gpu_blocks(target_kv_size_bytes: int, draft_kv_size_bytes: int,
+def calculate_gpu_blocks(target_cache_block_size_bytes: int, draft_kv_size_bytes: int,
                          total_num_gpu_blocks: int) -> int:
     """Given total_num_gpu_blocks, the number of GPU blocks that could be
     allocate to the target model, this function calculates how many blocks
@@ -322,7 +322,7 @@ def calculate_gpu_blocks(target_kv_size_bytes: int, draft_kv_size_bytes: int,
     the total memory usage from KV cache is no larger than the number of
     blocks allocatable by the target model alone.
     """
-    new_num_gpu_blocks = int(total_num_gpu_blocks * target_kv_size_bytes /
-                             (draft_kv_size_bytes + target_kv_size_bytes))
+    new_num_gpu_blocks = int(total_num_gpu_blocks * target_cache_block_size_bytes /
+                             (draft_kv_size_bytes + target_cache_block_size_bytes))
 
     return new_num_gpu_blocks

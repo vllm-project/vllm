@@ -23,7 +23,7 @@ def test_correctly_calls_draft_model(k: int, batch_size: int):
     """Verify that the DraftTargetWorker calls the draft model with correct
     inputs. Everything else is mocked out.
     """
-    draft_worker = mock_worker()
+    draft_worker = mock_worker(cls=MultiStepWorker)
     target_worker = mock_worker()
     rejection_sampler = MagicMock(spec=RejectionSampler)
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
@@ -59,7 +59,7 @@ def test_correctly_calls_target_model(k: int, batch_size: int):
     """Verify that the DraftTargetWorker calls the target model with correct
     inputs. Everything else is mocked out.
     """
-    draft_worker = mock_worker()
+    draft_worker = mock_worker(cls=MultiStepWorker)
     target_worker = mock_worker()
     rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
@@ -139,8 +139,8 @@ def test_correctly_calls_rejection_sampler(k: int, batch_size: int):
     """
     vocab_size = 32_000
 
-    draft_worker = mock_worker(vocab_size)
-    target_worker = mock_worker(vocab_size)
+    draft_worker = mock_worker(cls=MultiStepWorker,vocab_size=vocab_size)
+    target_worker = mock_worker(vocab_size=vocab_size)
     rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
@@ -217,8 +217,8 @@ def test_correctly_formats_output(k: int, batch_size: int):
     """
     vocab_size = 32_000
 
-    draft_worker = mock_worker(vocab_size)
-    target_worker = mock_worker(vocab_size)
+    draft_worker = mock_worker(cls=MultiStepWorker,vocab_size=vocab_size)
+    target_worker = mock_worker(vocab_size=vocab_size)
     rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
@@ -328,8 +328,8 @@ def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool):
     """
     vocab_size = 32_000
 
-    draft_worker = mock_worker(vocab_size)
-    target_worker = mock_worker(vocab_size)
+    draft_worker = mock_worker(cls=MultiStepWorker,vocab_size=vocab_size)
+    target_worker = mock_worker(vocab_size=vocab_size)
     rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
@@ -409,7 +409,7 @@ def test_k_equals_zero(k: int, batch_size: int):
     """Verify that the DraftTargetWorker calls the draft and target workers
     when k is zero. This happens during prefill.
     """
-    draft_worker = mock_worker()
+    draft_worker = mock_worker(cls=MultiStepWorker)
     target_worker = mock_worker()
     rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
@@ -448,7 +448,7 @@ def test_empty_input_batch(k: int, batch_size: int):
     when the input batch is empty. This can happen if the engine communicates
     to the workers information without scheduling a batch.
     """
-    draft_worker = mock_worker()
+    draft_worker = mock_worker(cls=MultiStepWorker)
     target_worker = mock_worker()
     rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
@@ -481,7 +481,7 @@ def test_empty_input_batch(k: int, batch_size: int):
 
 @torch.inference_mode()
 def test_init_model():
-    draft_worker = mock_worker()
+    draft_worker = mock_worker(cls=MultiStepWorker)
     target_worker = mock_worker()
     rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
@@ -502,7 +502,7 @@ def test_init_model():
 
 @torch.inference_mode()
 def test_init_cache_engine():
-    draft_worker = mock_worker()
+    draft_worker = mock_worker(cls=MultiStepWorker)
     target_worker = mock_worker()
     rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
@@ -521,14 +521,14 @@ def test_init_cache_engine():
 
 @pytest.mark.parametrize('available_gpu_blocks', [1, 1024])
 @pytest.mark.parametrize('available_cpu_blocks', [500])
-@pytest.mark.parametrize('target_kv_size_bytes', [2 * 2 * 4096])
+@pytest.mark.parametrize('target_cache_block_size_bytes', [2 * 2 * 4096])
 @pytest.mark.parametrize('draft_kv_size_bytes', [0, 2 * 2 * 768, 2 * 2 * 4096])
 @torch.inference_mode()
 def test_profile_num_available_blocks(available_gpu_blocks: int,
                                       available_cpu_blocks: int,
-                                      target_kv_size_bytes: int,
+                                      target_cache_block_size_bytes: int,
                                       draft_kv_size_bytes: int):
-    draft_worker = mock_worker()
+    draft_worker = mock_worker(cls=MultiStepWorker)
     target_worker = mock_worker()
     rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
@@ -536,8 +536,8 @@ def test_profile_num_available_blocks(available_gpu_blocks: int,
 
     target_worker.profile_num_available_blocks.return_value = (
         available_gpu_blocks, available_cpu_blocks)
-    target_worker.get_kv_size_bytes.return_value = target_kv_size_bytes
-    draft_worker.get_kv_size_bytes.return_value = draft_kv_size_bytes
+    target_worker.get_cache_block_size_bytes.return_value = target_cache_block_size_bytes
+    draft_worker.get_cache_block_size_bytes.return_value = draft_kv_size_bytes
 
     worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
                                metrics_collector)
@@ -555,22 +555,22 @@ def test_profile_num_available_blocks(available_gpu_blocks: int,
         block_size, gpu_memory_utilization, cpu_swap_space)
     assert num_cpu_blocks == available_cpu_blocks
 
-    assert num_gpu_blocks == calculate_gpu_blocks(target_kv_size_bytes,
+    assert num_gpu_blocks == calculate_gpu_blocks(target_cache_block_size_bytes,
                                                   draft_kv_size_bytes,
                                                   available_gpu_blocks)
 
 
 @pytest.mark.parametrize('available_gpu_blocks',
                          list(range(20)) + [1024, 1024**2])
-@pytest.mark.parametrize('target_kv_size_bytes', [2 * 2 * 4096, 2 * 2 * 8192])
+@pytest.mark.parametrize('target_cache_block_size_bytes', [2 * 2 * 4096, 2 * 2 * 8192])
 @pytest.mark.parametrize('draft_kv_size_bytes', [0, 2 * 2 * 768, 2 * 2 * 4096])
 @torch.inference_mode()
 def test_calculate_gpu_blocks(available_gpu_blocks: int,
-                              target_kv_size_bytes: int,
+                              target_cache_block_size_bytes: int,
                               draft_kv_size_bytes: int):
-    num_blocks = calculate_gpu_blocks(target_kv_size_bytes,
+    num_blocks = calculate_gpu_blocks(target_cache_block_size_bytes,
                                       draft_kv_size_bytes,
                                       available_gpu_blocks)
-    assert (num_blocks * target_kv_size_bytes) + (
+    assert (num_blocks * target_cache_block_size_bytes) + (
         num_blocks * draft_kv_size_bytes) <= (available_gpu_blocks *
-                                              target_kv_size_bytes)
+                                              target_cache_block_size_bytes)

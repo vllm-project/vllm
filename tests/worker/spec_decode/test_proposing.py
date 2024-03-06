@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import MagicMock, PropertyMock, patch
 
 from vllm.worker.spec_decode.multi_step_worker import MultiStepWorker
-from vllm.worker.spec_decode.proposing import DraftModelProposer
+from vllm.worker.spec_decode.proposing import DraftModelTop1Proposer
 from vllm.worker.worker import Worker
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SamplerOutput
@@ -25,7 +25,7 @@ def test_draft_proposals_full_speculation_len():
     device='cuda:0'
 
     draft_worker = MagicMock()
-    proposer = DraftModelProposer(
+    proposer = DraftModelTop1Proposer(
         draft_worker=draft_worker,
         device=device,
         max_model_len=2048,
@@ -64,7 +64,7 @@ def test_draft_proposals_no_speculations():
     prompt_len = 10
 
     draft_worker = MagicMock()
-    proposer = DraftModelProposer(
+    proposer = DraftModelTop1Proposer(
         draft_worker=draft_worker,
         device=device,
         max_model_len=prompt_len + k - 1,
@@ -107,7 +107,7 @@ def test_draft_proposals_mixed_k():
     prompt_len = [small_prompt_len for _ in range(expected_num_proposal_seqs - 1)] + [long_prompt_len for _ in range(expected_num_no_proposal_seqs)] + [small_prompt_len]
 
     draft_worker = MagicMock()
-    proposer = DraftModelProposer(
+    proposer = DraftModelTop1Proposer(
         draft_worker=draft_worker,
         device=device,
         max_model_len=long_prompt_len + prev_output_token_len + k - 1,
