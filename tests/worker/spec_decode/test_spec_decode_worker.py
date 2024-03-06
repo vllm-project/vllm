@@ -4,16 +4,12 @@ import pytest
 from unittest.mock import MagicMock
 
 from vllm.worker.spec_decode.multi_step_worker import MultiStepWorker
-from vllm.worker.worker import Worker
 from vllm.worker.spec_decode.spec_decode_worker import SpecDecodeWorker, split_num_cache_blocks_evenly
-from vllm.worker.spec_decode.scoring import BatchExpansionTop1Scorer, get_all_seq_ids
 from vllm.worker.spec_decode.interfaces import SpeculativeProposals
 from vllm.model_executor.utils import set_random_seed
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
-from vllm.sequence import SequenceGroupMetadata
-from .utils import mock_worker, create_batch, ExecuteModelData, create_seq_group_metadata_from_prompts, create_sampler_output_list
+from .utils import mock_worker, create_batch, ExecuteModelData, create_sampler_output_list
 from vllm.worker.spec_decode.metrics import SpecDecodeWorkerMetrics, AsyncMetricsCollector
-
 
 
 @pytest.mark.parametrize('k', [1, 2, 6])
@@ -28,7 +24,7 @@ def test_correctly_calls_draft_model(k: int, batch_size: int):
     rejection_sampler = MagicMock(spec=RejectionSampler)
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
-                               metrics_collector)
+                              metrics_collector)
 
     exception_secret = 'artifical stop'
     draft_worker.get_spec_proposals.side_effect = ValueError(exception_secret)
@@ -71,7 +67,7 @@ def test_correctly_calls_target_model(k: int, batch_size: int):
     set_random_seed(1)
 
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
-                               metrics_collector)
+                              metrics_collector)
     worker.init_model()
 
     vocab_size = 32_000
@@ -86,7 +82,8 @@ def test_correctly_calls_target_model(k: int, batch_size: int):
                                 vocab_size,
                                 dtype=torch.float32,
                                 device='cuda')
-    proposal_lens = torch.ones(batch_size, dtype=torch.int64, device='cuda') * k
+    proposal_lens = torch.ones(batch_size, dtype=torch.int64,
+                               device='cuda') * k
 
     execute_model_data, prompts, prev_output_tokens = create_batch(
         batch_size, k)
@@ -139,7 +136,7 @@ def test_correctly_calls_rejection_sampler(k: int, batch_size: int):
     """
     vocab_size = 32_000
 
-    draft_worker = mock_worker(cls=MultiStepWorker,vocab_size=vocab_size)
+    draft_worker = mock_worker(cls=MultiStepWorker, vocab_size=vocab_size)
     target_worker = mock_worker(vocab_size=vocab_size)
     rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
@@ -150,7 +147,7 @@ def test_correctly_calls_rejection_sampler(k: int, batch_size: int):
     set_random_seed(1)
 
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
-                               metrics_collector)
+                              metrics_collector)
     worker.init_model()
 
     proposal_token_ids = torch.randint(low=0,
@@ -164,7 +161,8 @@ def test_correctly_calls_rejection_sampler(k: int, batch_size: int):
                                 dtype=torch.float32,
                                 device='cuda')
 
-    proposal_lens = torch.ones(batch_size, dtype=torch.int64, device='cuda') * k
+    proposal_lens = torch.ones(batch_size, dtype=torch.int64,
+                               device='cuda') * k
 
     execute_model_data, _, _ = create_batch(batch_size, k)
 
@@ -217,7 +215,7 @@ def test_correctly_formats_output(k: int, batch_size: int):
     """
     vocab_size = 32_000
 
-    draft_worker = mock_worker(cls=MultiStepWorker,vocab_size=vocab_size)
+    draft_worker = mock_worker(cls=MultiStepWorker, vocab_size=vocab_size)
     target_worker = mock_worker(vocab_size=vocab_size)
     rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
@@ -228,7 +226,7 @@ def test_correctly_formats_output(k: int, batch_size: int):
     set_random_seed(1)
 
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
-                               metrics_collector)
+                              metrics_collector)
     worker.init_model()
 
     proposal_token_ids = torch.randint(low=0,
@@ -242,7 +240,8 @@ def test_correctly_formats_output(k: int, batch_size: int):
                                 dtype=torch.float32,
                                 device='cuda')
 
-    proposal_lens = torch.ones(batch_size, dtype=torch.int64, device='cuda') * k
+    proposal_lens = torch.ones(batch_size, dtype=torch.int64,
+                               device='cuda') * k
 
     execute_model_data, _, _ = create_batch(batch_size, k)
 
@@ -328,7 +327,7 @@ def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool):
     """
     vocab_size = 32_000
 
-    draft_worker = mock_worker(cls=MultiStepWorker,vocab_size=vocab_size)
+    draft_worker = mock_worker(cls=MultiStepWorker, vocab_size=vocab_size)
     target_worker = mock_worker(vocab_size=vocab_size)
     rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
@@ -339,7 +338,7 @@ def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool):
     set_random_seed(1)
 
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
-                               metrics_collector)
+                              metrics_collector)
     worker.init_model()
 
     proposal_token_ids = torch.randint(low=0,
@@ -353,7 +352,8 @@ def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool):
                                 dtype=torch.float32,
                                 device='cuda')
 
-    proposal_lens = torch.ones(batch_size, dtype=torch.int64, device='cuda') * k
+    proposal_lens = torch.ones(batch_size, dtype=torch.int64,
+                               device='cuda') * k
 
     execute_model_data, _, _ = create_batch(batch_size, k)
 
@@ -389,7 +389,8 @@ def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool):
 
     rejection_sampler.return_value = rejection_sampler_output
 
-    mock_rejsample_metrics = MagicMock(spec=SpecDecodeWorkerMetrics) if returns_metrics else None
+    mock_rejsample_metrics = MagicMock(
+        spec=SpecDecodeWorkerMetrics) if returns_metrics else None
     metrics_collector.maybe_collect_rejsample_metrics.return_value = mock_rejsample_metrics
 
     output = worker.execute_model(**execute_model_data.to_dict(),
@@ -421,7 +422,7 @@ def test_k_equals_zero(k: int, batch_size: int):
     set_random_seed(1)
 
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
-                               metrics_collector)
+                              metrics_collector)
 
     execute_model_data, prompts, prev_output_tokens = create_batch(
         batch_size, k, prev_output_token_len=0)
@@ -430,9 +431,9 @@ def test_k_equals_zero(k: int, batch_size: int):
                                num_spec_tokens=k)
 
     assert len(out) == 1, f"expected only one token output when {k=}"
-    assert out[0].probs == None, "expect gpu tensor references to be None"
+    assert out[0].probs is None, "expect gpu tensor references to be None"
     assert out[
-        0].sampled_tokens == None, "expect gpu tensor references to be None"
+        0].sampled_tokens is None, "expect gpu tensor references to be None"
 
     draft_worker.execute_model.assert_called_once_with(
         **execute_model_data.to_dict(), return_python_output=False)
@@ -460,7 +461,7 @@ def test_empty_input_batch(k: int, batch_size: int):
     set_random_seed(1)
 
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
-                               metrics_collector)
+                              metrics_collector)
 
     execute_model_data, prompts, prev_output_tokens = create_batch(
         batch_size, k, prev_output_token_len=0)
@@ -469,9 +470,9 @@ def test_empty_input_batch(k: int, batch_size: int):
                                num_spec_tokens=k)
 
     assert len(out) == 1, f"expected only one token output when {k=}"
-    assert out[0].probs == None, "expect gpu tensor references to be None"
+    assert out[0].probs is None, "expect gpu tensor references to be None"
     assert out[
-        0].sampled_tokens == None, "expect gpu tensor references to be None"
+        0].sampled_tokens is None, "expect gpu tensor references to be None"
 
     draft_worker.execute_model.assert_called_once_with(
         **execute_model_data.to_dict(), return_python_output=False)
@@ -488,7 +489,7 @@ def test_init_model():
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
-                               metrics_collector)
+                              metrics_collector)
 
     worker.init_model()
 
@@ -509,7 +510,7 @@ def test_init_cache_engine():
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
-                               metrics_collector)
+                              metrics_collector)
 
     cache_config = MagicMock()
 
@@ -540,7 +541,7 @@ def test_profile_num_available_blocks(available_gpu_blocks: int,
     draft_worker.get_cache_block_size_bytes.return_value = draft_kv_size_bytes
 
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
-                               metrics_collector)
+                              metrics_collector)
 
     # These values do not directly impact the adjusted block size calculation,
     # so they can be fixed.
@@ -555,22 +556,23 @@ def test_profile_num_available_blocks(available_gpu_blocks: int,
         block_size, gpu_memory_utilization, cpu_swap_space, "auto")
     assert num_cpu_blocks == available_cpu_blocks
 
-    assert num_gpu_blocks == split_num_cache_blocks_evenly(target_cache_block_size_bytes,
-                                                  draft_kv_size_bytes,
-                                                  available_gpu_blocks)
+    assert num_gpu_blocks == split_num_cache_blocks_evenly(
+        target_cache_block_size_bytes, draft_kv_size_bytes,
+        available_gpu_blocks)
 
 
 @pytest.mark.parametrize('available_gpu_blocks',
                          list(range(20)) + [1024, 1024**2])
-@pytest.mark.parametrize('target_cache_block_size_bytes', [2 * 2 * 4096, 2 * 2 * 8192])
+@pytest.mark.parametrize('target_cache_block_size_bytes',
+                         [2 * 2 * 4096, 2 * 2 * 8192])
 @pytest.mark.parametrize('draft_kv_size_bytes', [0, 2 * 2 * 768, 2 * 2 * 4096])
 @torch.inference_mode()
 def test_split_num_cache_blocks_evenly(available_gpu_blocks: int,
-                              target_cache_block_size_bytes: int,
-                              draft_kv_size_bytes: int):
+                                       target_cache_block_size_bytes: int,
+                                       draft_kv_size_bytes: int):
     num_blocks = split_num_cache_blocks_evenly(target_cache_block_size_bytes,
-                                      draft_kv_size_bytes,
-                                      available_gpu_blocks)
+                                               draft_kv_size_bytes,
+                                               available_gpu_blocks)
     assert (num_blocks * target_cache_block_size_bytes) + (
         num_blocks * draft_kv_size_bytes) <= (available_gpu_blocks *
                                               target_cache_block_size_bytes)

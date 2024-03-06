@@ -58,7 +58,8 @@ def create_execute_model_data(
     )
 
 
-def mock_worker(cls=None, vocab_size: int = 30_000,
+def mock_worker(cls=None,
+                vocab_size: int = 30_000,
                 max_model_len: int = 2048,
                 rank: int = 0) -> MagicMock:
     if cls is None:
@@ -171,8 +172,8 @@ def create_seq_group_metadata_from_prompts(
             },
             sampling_params=SamplingParams(temperature=0.0, ),
             block_tables={i: block_allocations[i][:]},
-        ) for i, (prompt_token_ids, cont_token_ids) in
-        enumerate(zip(prompts, continuations))
+        ) for i, (prompt_token_ids,
+                  cont_token_ids) in enumerate(zip(prompts, continuations))
     ]
 
 
@@ -227,19 +228,18 @@ def create_batch(batch_size,
                  block_size: Optional[int] = None):
     if block_size is None:
         block_size = 8
-    
+
     if num_gpu_blocks is None:
         num_gpu_blocks = 2048 // block_size
-    
+
     iterator = count()
-    
+
     if isinstance(prompt_len, int):
         prompt_lens = [prompt_len for _ in range(batch_size)]
     else:
         prompt_lens = prompt_len
 
-    prompts = [[next(iterator) for _ in range(l)]
-               for l in prompt_lens]
+    prompts = [[next(iterator) for _ in range(p_len)] for p_len in prompt_lens]
     prev_output_tokens = [[
         next(iterator) for _ in range(prev_output_token_len)
     ] for _ in range(batch_size)]
@@ -247,7 +247,7 @@ def create_batch(batch_size,
         len(prompt) + len(prev_output_token) + k + 1
         for prompt, prev_output_token in zip(prompts, prev_output_tokens)
     ]
-    
+
     execute_model_data = create_execute_model_data(
         create_seq_group_metadata_from_prompts(prompts, num_gpu_blocks,
                                                block_size, final_seq_lens,

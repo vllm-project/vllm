@@ -1,6 +1,5 @@
 import torch
 from typing import List, Tuple
-from dataclasses import dataclass
 from vllm.sequence import SequenceGroupMetadata, SamplerOutput
 from contextlib import contextmanager
 from itertools import chain
@@ -8,7 +7,8 @@ from itertools import chain
 SeqId = int
 
 
-def get_all_seq_ids(seq_group_metadata_list: List[SequenceGroupMetadata]) -> List[SeqId]:
+def get_all_seq_ids(
+        seq_group_metadata_list: List[SequenceGroupMetadata]) -> List[SeqId]:
     """Given a list of SequenceGroupMetadata, create a list of all
     sequence ids.
     """
@@ -17,6 +17,7 @@ def get_all_seq_ids(seq_group_metadata_list: List[SequenceGroupMetadata]) -> Lis
             seq_group_metadata.seq_data.keys()
             for seq_group_metadata in seq_group_metadata_list
         ]))
+
 
 def sampler_output_to_torch(
     sampler_output_list: List[SamplerOutput],
@@ -30,10 +31,13 @@ def sampler_output_to_torch(
             sampled_token_probs: torch.Tensor
                 shape: [batch_size, len(sampler_output_list), vocab_size]
         """
-    
+
     # shape: [batch_size, num_sampler_output, vocab_size]
     sampled_token_probs = torch.stack(
-        [sampler_output.sampled_token_probs for sampler_output in sampler_output_list],
+        [
+            sampler_output.sampled_token_probs
+            for sampler_output in sampler_output_list
+        ],
         dim=0,
     ).transpose(0, 1)
 
@@ -47,6 +51,7 @@ def sampler_output_to_torch(
     ).transpose(0, 1)
 
     return sampled_token_ids, sampled_token_probs
+
 
 @contextmanager
 def nvtx_range(msg, *args, **kwargs):

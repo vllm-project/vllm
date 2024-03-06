@@ -1,11 +1,10 @@
-from typing import List, Dict
+from typing import List, Dict, Optional
 import copy
 
 import torch
 
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.worker import Worker
-from vllm.worker.spec_decode.util import sampler_output_to_torch
 from vllm.worker.spec_decode.interfaces import SpeculativeProposals
 from vllm.worker.spec_decode.proposing import DraftModelTop1Proposer
 
@@ -101,7 +100,6 @@ class MultiStepWorker(Worker):
             blocks_to_copy,
             max_proposal_len,
         )
-        
 
     def _append_new_tokens(
             self, model_output: SamplerOutput,

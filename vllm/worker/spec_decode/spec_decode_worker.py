@@ -1,26 +1,20 @@
-from typing import Iterator, List, Tuple, Optional, Union, Dict
-from itertools import chain, count
+from typing import List, Tuple, Optional, Dict
 from functools import cached_property
-import logging
-import time
-from dataclasses import dataclass
 
 import torch
-import traceback
 
-from vllm.worker.spec_decode.metrics import SpecDecodeWorkerMetrics, AsyncMetricsCollector
-from vllm.sequence import (SamplerOutput, SequenceGroupMetadata, SequenceData,
+from vllm.worker.spec_decode.metrics import AsyncMetricsCollector
+from vllm.sequence import (SamplerOutput, SequenceGroupMetadata,
                            SequenceGroupOutput, SequenceOutput)
 from vllm.worker.worker import Worker
 from vllm.worker.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
-from vllm.model_executor.parallel_utils.parallel_state import get_tensor_model_parallel_group
 from vllm.config import CacheConfig
-from vllm.utils import in_wsl
-from vllm.worker.spec_decode.util import nvtx_range, sampler_output_to_torch, get_all_seq_ids
+from vllm.worker.spec_decode.util import nvtx_range, get_all_seq_ids
 from vllm.worker.spec_decode.interfaces import SpeculativeProposals, SpeculativeScores
 from vllm.worker.spec_decode.scoring import BatchExpansionTop1Scorer
 from vllm.worker.spec_decode.interfaces import SpeculativeScorer
+
 
 class SpecDecodeWorker:
 
@@ -67,28 +61,30 @@ class SpecDecodeWorker:
         self.scorer = BatchExpansionTop1Scorer(
             scorer_worker=self.scorer_worker,
             device=self.device,
-            vocab_size=self._vocab_size
-        )
+            vocab_size=self._vocab_size)
 
     def profile_num_available_blocks(self, block_size: int,
                                      gpu_memory_utilization: float,
-                                     cpu_swap_space: int, cache_dtype: str) -> Tuple[int, int]:
+                                     cpu_swap_space: int,
+                                     cache_dtype: str) -> Tuple[int, int]:
         num_gpu_blocks, num_cpu_blocks = (
             self.scorer_worker.profile_num_available_blocks(
-                block_size, gpu_memory_utilization, cpu_swap_space, cache_dtype))
+                block_size, gpu_memory_utilization, cpu_swap_space,
+                cache_dtype))
 
-        scorer_cache_block_size_bytes = self.scorer_worker.get_cache_block_size_bytes(block_size, cache_dtype)
-        proposer_cache_block_size_bytes = self.proposer_worker.get_cache_block_size_bytes(block_size, cache_dtype)
+        scorer_cache_block_size_bytes = self.scorer_worker.get_cache_block_size_bytes(
+            block_size, cache_dtype)
+        proposer_cache_block_size_bytes = self.proposer_worker.get_cache_block_size_bytes(
+            block_size, cache_dtype)
 
-        new_num_gpu_blocks = split_num_cache_blocks_evenly(scorer_cache_block_size_bytes,
-                                                  proposer_cache_block_size_bytes,
-                                                  num_gpu_blocks)
+        new_num_gpu_blocks = split_num_cache_blocks_evenly(
+            scorer_cache_block_size_bytes, proposer_cache_block_size_bytes,
+            num_gpu_blocks)
         return new_num_gpu_blocks, num_cpu_blocks
 
     def init_cache_engine(self, cache_config: CacheConfig):
         self.scorer_worker.init_cache_engine(cache_config)
         self.proposer_worker.init_cache_engine(cache_config)
-
 
     @torch.inference_mode()
     def execute_model(
@@ -99,7 +95,8 @@ class SpecDecodeWorker:
         blocks_to_copy: Optional[Dict[int, List[int]]],
         num_spec_tokens: int,
     ) -> List[SamplerOutput]:
-        assert seq_group_metadata_list is not None, ("speculative decoding "
+        assert seq_group_metadata_list is not None, (
+            "speculative decoding "
             "requires non-None seq_group_metadata_list")
 
         k = num_spec_tokens
@@ -136,10 +133,10 @@ class SpecDecodeWorker:
 
         self.proposer_worker.execute_model(
             seq_group_metadata_list=seq_group_metadata_list,
-                                        blocks_to_swap_in=blocks_to_swap_in,
-                                        blocks_to_swap_out=blocks_to_swap_out,
-                                        blocks_to_copy=blocks_to_copy,
-                                        return_python_output=False)
+            blocks_to_swap_in=blocks_to_swap_in,
+            blocks_to_swap_out=blocks_to_swap_out,
+            blocks_to_copy=blocks_to_copy,
+            return_python_output=False)
 
         sampler_output = self.scorer_worker.execute_model(
             seq_group_metadata_list=seq_group_metadata_list,
@@ -186,20 +183,21 @@ class SpecDecodeWorker:
         proposals = self.proposer_worker.get_spec_proposals(
             seq_group_metadata_list, blocks_to_swap_in, blocks_to_swap_out,
             blocks_to_copy, k)
-        
+
         proposal_scores = self.scorer.score_proposals(
-             seq_group_metadata_list,
-             blocks_to_swap_in,
-             blocks_to_swap_out,
-             blocks_to_copy,
-             k,
-             proposals,
+            seq_group_metadata_list,
+            blocks_to_swap_in,
+            blocks_to_swap_out,
+            blocks_to_copy,
+            k,
+            proposals,
         )
 
-        accepted_token_ids = self._verify_tokens(seq_group_metadata_list, proposal_scores, proposals, k)
+        accepted_token_ids = self._verify_tokens(seq_group_metadata_list,
+                                                 proposal_scores, proposals, k)
 
         return self._create_output_sampler_list(seq_group_metadata_list,
-            accepted_token_ids, k)
+                                                accepted_token_ids, k)
 
     @nvtx_range("spec_decode_worker._verify_tokens")
     def _verify_tokens(
@@ -210,14 +208,22 @@ class SpecDecodeWorker:
         max_proposal_len: int,
     ) -> torch.Tensor:
         proposal_lens_list = proposals.proposal_lens.tolist()
-        spec_indices = [i for i, (_, proposal_len) in enumerate(zip(seq_group_metadata_list, proposal_lens_list)) if proposal_len != 0]
-        non_spec_indices = [i for i, (_, proposal_len) in enumerate(zip(seq_group_metadata_list, proposal_lens_list)) if proposal_len == 0]
+        spec_indices = [
+            i for i, (_, proposal_len) in enumerate(
+                zip(seq_group_metadata_list, proposal_lens_list))
+            if proposal_len != 0
+        ]
+        non_spec_indices = [
+            i for i, (_, proposal_len) in enumerate(
+                zip(seq_group_metadata_list, proposal_lens_list))
+            if proposal_len == 0
+        ]
         original_indices = spec_indices + non_spec_indices
 
         proposal_probs = proposal_scores.probs[spec_indices, :-1]
         bonus_token_ids = proposal_scores.token_ids[spec_indices, -1:]
         non_spec_token_ids = proposal_scores.token_ids[non_spec_indices]
-        
+
         accepted_token_ids = self.rejection_sampler(
             proposal_probs,
             bonus_token_ids,
@@ -227,7 +233,8 @@ class SpecDecodeWorker:
 
         # Append output tokens from non-speculative sequences to
         # the accepted token ids tensor.
-        non_spec_token_ids = non_spec_token_ids.expand(-1, max_proposal_len + 1).clone()
+        non_spec_token_ids = non_spec_token_ids.expand(-1, max_proposal_len +
+                                                       1).clone()
         non_spec_token_ids[:, 1:] = -1
         accepted_token_ids = torch.cat(
             [accepted_token_ids, non_spec_token_ids])
@@ -305,8 +312,9 @@ class SpecDecodeWorker:
         return self.scorer_worker.device
 
 
-def split_num_cache_blocks_evenly(scorer_cache_block_size_bytes: int, proposer_cache_block_size_bytes: int,
-                         total_num_gpu_blocks: int) -> int:
+def split_num_cache_blocks_evenly(scorer_cache_block_size_bytes: int,
+                                  proposer_cache_block_size_bytes: int,
+                                  total_num_gpu_blocks: int) -> int:
     """Given total_num_gpu_blocks, the number of GPU blocks that could be
     allocate to the target model, this function calculates how many blocks
     should be given to the draft and target model.
@@ -320,7 +328,8 @@ def split_num_cache_blocks_evenly(scorer_cache_block_size_bytes: int, proposer_c
     the total memory usage from KV cache is no larger than the number of
     blocks allocatable by the target model alone.
     """
-    new_num_gpu_blocks = int(total_num_gpu_blocks * scorer_cache_block_size_bytes /
-                             (proposer_cache_block_size_bytes + scorer_cache_block_size_bytes))
+    new_num_gpu_blocks = int(
+        total_num_gpu_blocks * scorer_cache_block_size_bytes /
+        (proposer_cache_block_size_bytes + scorer_cache_block_size_bytes))
 
     return new_num_gpu_blocks

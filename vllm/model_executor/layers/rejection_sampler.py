@@ -41,6 +41,7 @@ class RejectionSampler(nn.Module):
         self.num_emitted_tokens = torch.tensor(0,
                                                dtype=torch.long,
                                                device=device)
+
     @property
     def probs_dtype(self):
         return torch.float32

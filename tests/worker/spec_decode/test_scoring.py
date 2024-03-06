@@ -1,14 +1,9 @@
 import torch
-import random
 import pytest
 
 from vllm.worker.spec_decode.scoring import BatchExpansionTop1Scorer
-from vllm.model_executor.utils import set_random_seed
-from vllm.sequence import SequenceGroupMetadata
 
-from .utils import mock_worker, create_batch, ExecuteModelData, create_seq_group_metadata_from_prompts, create_sampler_output_list
-
-from unittest.mock import MagicMock
+from .utils import mock_worker, create_seq_group_metadata_from_prompts
 
 
 @pytest.mark.parametrize('num_target_seq_ids', [100])

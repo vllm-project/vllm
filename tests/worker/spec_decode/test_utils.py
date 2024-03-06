@@ -1,13 +1,5 @@
-import torch
-import random
-import pytest
-
 from vllm.worker.spec_decode.util import get_all_seq_ids
-from vllm.worker.spec_decode.interfaces import SpeculativeProposals
-from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SequenceGroupMetadata
-
-from .utils import mock_worker, create_batch, ExecuteModelData, create_seq_group_metadata_from_prompts, create_sampler_output_list
 
 from unittest.mock import MagicMock
 

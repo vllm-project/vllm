@@ -80,6 +80,7 @@ class SequenceData:
         output_token_ids: The token IDs of the output.
         cumulative_logprob: The cumulative log probability of the output.
     """
+
     def __init__(
         self,
         prompt_token_ids: List[int],

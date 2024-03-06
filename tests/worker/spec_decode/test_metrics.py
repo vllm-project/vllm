@@ -4,7 +4,7 @@ import pytest
 
 from unittest.mock import MagicMock
 
-from vllm.worker.spec_decode.metrics import SpecDecodeWorkerMetrics, AsyncMetricsCollector
+from vllm.worker.spec_decode.metrics import AsyncMetricsCollector
 
 
 def test_initial_call_returns_none():
@@ -50,24 +50,6 @@ def test_second_call_returns_metrics():
 
 @pytest.mark.parametrize("rank", [1, 2, 3, 4])
 def test_nonzero_rank_noop(rank):
-    rej_sampler = MagicMock()
-    rej_sampler.num_accepted_tokens = torch.tensor(0,
-                                                   dtype=torch.long,
-                                                   device='cuda')
-    rej_sampler.num_emitted_tokens = torch.tensor(0,
-                                                  dtype=torch.long,
-                                                  device='cuda')
-    rej_sampler.num_draft_tokens = 0
-
-    collector = AsyncMetricsCollector(rej_sampler)
-    collector.init_gpu_tensors(rank=rank)
-    _ = collector.maybe_collect_rejsample_metrics(k=5)
-    metrics = collector.maybe_collect_rejsample_metrics(k=5)
-    assert metrics is None
-
-
-@pytest.mark.parametrize("rank", [1, 2, 3, 4])
-def test_nonzero_rank_noop(rank: int):
     rej_sampler = MagicMock()
     rej_sampler.num_accepted_tokens = torch.tensor(0,
                                                    dtype=torch.long,

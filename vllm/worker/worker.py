@@ -240,11 +240,14 @@ class Worker:
     def vocab_size(self) -> int:
         return self.model_runner.vocab_size
 
-    def get_cache_block_size_bytes(self, block_size: int, cache_dtype: str) -> int:
+    def get_cache_block_size_bytes(self, block_size: int,
+                                   cache_dtype: str) -> int:
         """Get the size of the KV cache block size in bytes.
         """
-        return CacheEngine.get_cache_block_size(block_size, cache_dtype, self.model_config,
+        return CacheEngine.get_cache_block_size(block_size, cache_dtype,
+                                                self.model_config,
                                                 self.parallel_config)
+
 
 def init_distributed_environment(
     parallel_config: ParallelConfig,

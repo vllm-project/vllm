@@ -1,27 +1,13 @@
-from typing import Iterator, List, Tuple, Optional, Union, Dict
-from itertools import chain, count
-from functools import cached_property
+from typing import List, Tuple, Optional, Dict
 import logging
-import time
 from dataclasses import dataclass
+from abc import ABC, abstractmethod
 
 import torch
-import traceback
 
-from vllm.worker.spec_decode.metrics import SpecDecodeWorkerMetrics, AsyncMetricsCollector
-from vllm.sequence import (SamplerOutput, SequenceGroupMetadata, SequenceData,
-                           SequenceGroupOutput, SequenceOutput)
-from vllm.worker.worker import Worker
-from vllm.model_executor.layers.rejection_sampler import RejectionSampler
-from vllm.model_executor.parallel_utils.parallel_state import get_tensor_model_parallel_group
-from vllm.config import CacheConfig
-from vllm.utils import in_wsl
-from vllm.worker.spec_decode.util import nvtx_range, sampler_output_to_torch, get_all_seq_ids
-
+from vllm.sequence import (SequenceGroupMetadata)
 
 logger = logging.getLogger(__name__)
-
-from abc import ABC, abstractmethod
 
 
 @dataclass
@@ -40,6 +26,7 @@ class SpeculativeProposals:
                 f"proposal_probs={self.proposal_probs.shape}, "
                 f"proposal_lens={self.proposal_lens.shape})")
 
+
 @dataclass
 class SpeculativeScores:
     probs: torch.Tensor
@@ -50,7 +37,9 @@ class SpeculativeScores:
                 f"probs={self.probs.shape}, "
                 f"token_ids={self.token_ids.shape})")
 
+
 class SpeculativeProposer(ABC):
+
     @abstractmethod
     def get_proposals(
         self,
@@ -64,10 +53,12 @@ class SpeculativeProposer(ABC):
 
 
 class SpeculativeScorer(ABC):
+
     @abstractmethod
     def score_proposals(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata], blocks_to_swap_in: Optional[Dict[int, int]],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        blocks_to_swap_in: Optional[Dict[int, int]],
         blocks_to_swap_out: Optional[Dict[int, int]],
         blocks_to_copy: Optional[Dict[int, List[int]]],
         k: int,
