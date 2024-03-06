@@ -73,20 +73,12 @@ class EncoderAttention(EncDecAttention):
         query = query.view(batch_size, seq_len, self.num_heads, self.head_size)
         key = key.view(batch_size, seq_len, self.num_heads, self.head_size)
         value = value.view(batch_size, seq_len, self.num_heads, self.head_size)
-        # print("query shape: ", query.shape)
         if input_metadata.attn_bias is None:
             input_metadata.attn_bias = BlockDiagonalCausalMask.from_seqlens(
                 [seq_len] * batch_size)
-        # When using custom attention bias, xformers requires the bias to
-        # be sliced from a tensor whose length is a multiple of 8.
-        # padded_len = (seq_len + 7) // 8 * 8
-        # pad_len = padded_len - seq_len
-        # input_metadata.attn_bias = F.pad(input_metadata.attn_bias, (0, pad_len))
-        # print("attention bias padded shape: ", input_metadata.attn_bias.shape)
 
         input_metadata.attn_bias = input_metadata.attn_bias[:, :, :, :seq_len]
 
-        # print("attention bias shape: ", input_metadata.attn_bias.shape)
         # Normal attention
         out = xops.memory_efficient_attention_forward(
             query,
@@ -135,34 +127,21 @@ class DecoderAttention(EncDecAttention):
             Output tensor.
         """
 
-        # print("key shape pre view: ", key.shape)
-        # print("value shape pre view: ", value.shape)
-
         batch_size, seq_len, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_heads, self.head_size)
         value = value.view(-1, self.num_heads, self.head_size)
-        # print("key shape: ", key.shape)
-        # print("key: ", key)
-        # print("value shape: ", value.shape)
-        # print("value: ", value)
-        # print("slot mapping: ", input_metadata.slot_mapping[:, -1].flatten())
         # Reshape the keys and values and store them in the cache.
         # If key_cache and value_cache are not provided, the new key and value
         # vectors will not be cached. This happens during the initial memory
         # profiling run.
         if key_cache is not None and value_cache is not None:
-            # print("key_cache before: ", key_cache)
-            # print("value_cache before: ", value_cache)
 
             cache_ops.reshape_and_cache(
                 key, value, key_cache, value_cache,
                 input_metadata.slot_mapping[:, -1].flatten().contiguous(),
                 input_metadata.kv_cache_dtype)
-
-            # print("key_cache after: ", key_cache)
-            # print("value_cache after: ", value_cache)
 
         max_prompt_len = input_metadata.prompt_lens.max().item()
         block_size = value_cache.shape[3]
@@ -170,7 +149,6 @@ class DecoderAttention(EncDecAttention):
         block_tables = input_metadata.block_tables[:,
                                                    prompt_table_len:].contiguous(
                                                    )
-        # print("decoder self attention block_tables", block_tables)
         output = paged_attention(
             query=query,
             key_cache=key_cache,
@@ -222,18 +200,10 @@ class CrossAttention(EncDecAttention):
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)
         if key is not None:
-            # print("key shape pre view: ", key.shape)
             key = key.view(-1, self.num_heads, self.head_size)
-            # print("key_shape: ", key.shape)
-            # print("key sum", key.sum((1, 2)))
         if value is not None:
-            # print("value shape pre view: ", value.shape)
             value = value.view(-1, self.num_heads, self.head_size)
-            # print("value_shape: ", value.shape)
-            # print("value sum", value.sum((1, 2)))
 
-        # print("slot mapping: ", input_metadata.slot_mapping[:, :-1].flatten().shape)
-        # print("slot mapping: ", input_metadata.slot_mapping[:, :-1].flatten())
         # Reshape the keys and values and store them in the cache.
         # It only happens during the first pass.
         if (input_metadata.is_prompt and key_cache is not None
@@ -248,14 +218,7 @@ class CrossAttention(EncDecAttention):
                 input_metadata.kv_cache_dtype,
             )
 
-        # for slot in input_metadata.slot_mapping[:, :-1].flatten():
-        #     if slot != -1:
-        #         block_number = slot//16;
-        #         block_offset = slot%16;
-        #         print(f"key_cache sum at {slot}: ", key_cache[block_number, :, :, block_offset, :].sum())
-        #         print(f"value_cache sum at {slot}: ", value_cache[block_number, :, :, block_offset].sum())
         max_prompt_len = input_metadata.prompt_lens.int().max().item()
-        # print("max_prompt_len: ", max_prompt_len)
         block_size = value_cache.shape[3]
         prompt_table_len = (max_prompt_len + block_size - 1) // block_size
         block_tables = input_metadata.block_tables[:, :
