@@ -184,3 +184,6 @@ _build/
 
 # Benchmark dataset
 *.json
+
+# FlashInfer generated files
+csrc/flashinfer/generated/
