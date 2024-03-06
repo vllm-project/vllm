@@ -473,7 +473,7 @@ setuptools.setup(
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
-         "License :: Other/Proprietary License",
+        "License :: Other/Proprietary License",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
     license_files=('LICENSE', 'licenses/LICENSE.apache',
