@@ -93,7 +93,6 @@ class SingleGPUModelExecutor:
                 cache_dtype=self.cache_config.cache_dtype,
             ))
 
-        # FIXME(woosuk): Change to debug log.
         logger.info(f"# GPU blocks: {num_gpu_blocks}, "
                     f"# CPU blocks: {num_cpu_blocks}")
 

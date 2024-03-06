@@ -232,7 +232,6 @@ class RayDistributedModelExecutor:
         # operators can be applied to all workers.
         num_gpu_blocks = min(b[0] for b in num_blocks)
         num_cpu_blocks = min(b[1] for b in num_blocks)
-        # FIXME(woosuk): Change to debug log.
         logger.info(f"# GPU blocks: {num_gpu_blocks}, "
                     f"# CPU blocks: {num_cpu_blocks}")
 
