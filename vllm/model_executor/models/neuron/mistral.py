@@ -59,7 +59,7 @@ class MistralForCausalLM(nn.Module):
     ) -> SamplerOutput:
         # TODO: drop this line
         batch_size, n_active_tokens = input_ids.shape
-        positions = positions # [:1, :]
+        positions = positions  # [:1, :]
 
         with torch.inference_mode():
             seq_ids = []
@@ -68,10 +68,12 @@ class MistralForCausalLM(nn.Module):
                 seq_ids = input_metadata.slot_mapping[:, 0] // block_size
             else:
                 seq_ids = input_metadata.block_tables
-            
-            logits = self.model(input_ids, cache_ids=positions, start_ids=seq_ids)
+
+            logits = self.model(input_ids,
+                                cache_ids=positions,
+                                start_ids=seq_ids)
         return logits
-    
+
     def sample(
         self,
         hidden_states: torch.Tensor,
@@ -88,7 +90,7 @@ class MistralForCausalLM(nn.Module):
                      revision: Optional[str] = None,
                      **kwargs):
         from transformers_neuronx.mistral.model import MistralForSampling
-        
+
         split_model_dir = f"{model_name_or_path}-split"
         if os.path.isdir(os.path.join(model_name_or_path,
                                       "pytorch_model.bin")):
@@ -97,10 +99,10 @@ class MistralForCausalLM(nn.Module):
             from transformers import MistralForCausalLM
             from transformers_neuronx.module import save_pretrained_split
 
-            hf_model = MistralForCausalLM.from_pretrained(model_name_or_path,
-                                                        low_cpu_mem_usage=True)
+            hf_model = MistralForCausalLM.from_pretrained(
+                model_name_or_path, low_cpu_mem_usage=True)
             save_pretrained_split(hf_model, f"{model_name_or_path}-split")
 
-        self.model = MistralForSampling.from_pretrained(split_model_dir,
-                                                      **kwargs)
+        self.model = MistralForSampling.from_pretrained(
+            split_model_dir, **kwargs)
         self.model.to_neuron()

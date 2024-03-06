@@ -6,7 +6,6 @@ import torch.nn as nn
 from vllm.logger import init_logger
 from vllm.utils import is_hip, is_neuron
 
-
 logger = init_logger(__name__)
 
 # Architecture -> (module, class).
@@ -64,7 +63,10 @@ _ROCM_PARTIALLY_SUPPORTED_MODELS = {
 }
 
 # Models supported by Neuron.
-_NEURON_SUPPORTED_MODELS = {"LlamaForCausalLM": "neuron.llama", "MistralForCausalLM": "neuron.mistral"}
+_NEURON_SUPPORTED_MODELS = {
+    "LlamaForCausalLM": "neuron.llama",
+    "MistralForCausalLM": "neuron.mistral"
+}
 
 
 class ModelRegistry:
