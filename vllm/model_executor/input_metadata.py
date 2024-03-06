@@ -23,8 +23,7 @@ class InputMetadata:
         context_lens: the length of attention context for each sequence.
         block_tables: The block tables. (Seq id -> list of physical block)
         kv_cache_dtype: Data type to store kv cache.
-        num_generation_tokens: The number of tokens in the generation sequences.
-            This might include padding.
+        prefix_enabled: True if prefix caching is enabled.
     """
 
     def __init__(self, is_prompt: bool, slot_mapping: torch.Tensor,
