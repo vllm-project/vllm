@@ -3,6 +3,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 import os
+import sys
 import importlib
 import inspect
 
@@ -23,9 +24,12 @@ from vllm.logger import init_logger
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_engine import LoRA
+from vllm.entrypoints.openai.tools import OpenAIToolsPrompter
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
+vllm_engine: AsyncLLMEngine = None
+vllm_engine_args = None
 openai_serving_chat: OpenAIServingChat = None
 openai_serving_completion: OpenAIServingCompletion = None
 logger = init_logger(__name__)
@@ -37,9 +41,9 @@ async def lifespan(app: fastapi.FastAPI):
     async def _force_log():
         while True:
             await asyncio.sleep(10)
-            await engine.do_log_stats()
+            await vllm_engine.do_log_stats()
 
-    if not engine_args.disable_log_stats:
+    if not vllm_engine_args.disable_log_stats:
         asyncio.create_task(_force_log())
 
     yield
@@ -112,6 +116,14 @@ def parse_args():
                         help="The file path to the chat template, "
                         "or the template in single-line form "
                         "for the specified model")
+    parser.add_argument("--tools-template",
+                        type=str,
+                        default=None,
+                        help="The file path to alternative tools template")
+    parser.add_argument("--enable-api-tools",
+                        action="store_true",
+                        help="Enable OpenAI-like tools API "
+                        "(only function calls are currently supported)")
     parser.add_argument("--response-role",
                         type=str,
                         default="assistant",
@@ -125,6 +137,12 @@ def parse_args():
                         type=str,
                         default=None,
                         help="The file path to the SSL cert file")
+    parser.add_argument(
+        "--privileged",
+        action="store_true",
+        help=
+        "Enable API internals and templates reloading but do not deallocate the engine. "
+        "This should only be used for development purpose.")
     parser.add_argument(
         "--root-path",
         type=str,
@@ -146,6 +164,32 @@ def parse_args():
     return parser.parse_args()
 
 
+def _loadServingServices():
+    """ Load or reload the OpenAI service.
+        This function should only be called once on initialization, but may be called to reload the API internals.
+        Reloading must be used for development purpose only. """
+    global openai_serving_chat
+    global openai_serving_completion
+    if openai_serving_chat is not None:
+        del openai_serving_chat
+    if openai_serving_completion is not None:
+        del openai_serving_completion
+
+    openai_tools_prompter = OpenAIToolsPrompter(
+        template_path=args.tools_template) if args.enable_api_tools else None
+    openai_serving_chat = OpenAIServingChat(
+        engine=vllm_engine,
+        served_model=served_model,
+        response_role=args.response_role,
+        lora_modules=args.lora_modules,
+        chat_template=args.chat_template,
+        openai_tools_prompter=openai_tools_prompter,
+        privileged=args.privileged)
+
+    openai_serving_completion = OpenAIServingCompletion(
+        vllm_engine, served_model, args.lora_modules)
+
+
 # Add prometheus asgi middleware to route /metrics requests
 metrics_app = make_asgi_app()
 app.mount("/metrics", metrics_app)
@@ -161,6 +205,16 @@ async def validation_exception_handler(_, exc):
 async def health() -> Response:
     """Health check."""
     return Response(status_code=200)
+
+
+if "--privileged" in sys.argv:
+
+    @app.get("/privileged")
+    async def privileged() -> Response:
+        """Reload the API internals. Danger !"""
+        logger.warning("privileged called.")
+        _loadServingServices()
+        return Response(status_code=200)
 
 
 @app.get("/v1/models")
@@ -241,19 +295,27 @@ if __name__ == "__main__":
     logger.info(f"vLLM API server version {vllm.__version__}")
     logger.info(f"args: {args}")
 
+    if args.privileged:
+        logger.warning(
+            "\n"
+            "##########################################################################\n"
+            "privileged mode enabled. This should only be used for development purpose.\n"
+            "If It's not the case, you should disable this !\n"
+            "##########################################################################\n"
+        )
+
     if args.served_model_name is not None:
         served_model = args.served_model_name
     else:
         served_model = args.model
 
-    engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine = AsyncLLMEngine.from_engine_args(engine_args)
-    openai_serving_chat = OpenAIServingChat(engine, served_model,
-                                            args.response_role,
-                                            args.lora_modules,
-                                            args.chat_template)
-    openai_serving_completion = OpenAIServingCompletion(
-        engine, served_model, args.lora_modules)
+    vllm_engine_args = AsyncEngineArgs.from_cli_args(args)
+    # A virer !!!
+    logger.warning("A virer !")
+    vllm_engine_args.enforce_eager = True
+
+    vllm_engine = AsyncLLMEngine.from_engine_args(vllm_engine_args)
+    _loadServingServices()
 
     app.root_path = args.root_path
     uvicorn.run(app,

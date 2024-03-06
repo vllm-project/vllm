@@ -1,7 +1,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Dict, List, Literal, Optional, Union
+from typing import Dict, List, Literal, Optional, Union, Any
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -55,9 +55,61 @@ class UsageInfo(BaseModel):
     completion_tokens: Optional[int] = 0
 
 
+class Function(BaseModel):
+    name: str
+    arguments: str
+
+
+class ChatCompletionMessageToolCall(BaseModel):
+    index: int
+    id: str
+    type: str
+    function: Function
+
+
+class FunctionDefinition(BaseModel):
+    name: str
+    description: str
+    parameters: Optional[Any] = None
+    # See : https://json-schema.org/understanding-json-schema/reference/object
+
+
+class ChatCompletionToolParam(BaseModel):
+    type: str = "function"
+    function: FunctionDefinition = None
+
+
+class ChatCompletionSystemMessage(BaseModel):
+    role: Literal["system"]
+    content: str
+    name: Optional[str] = None
+
+
+class ChatCompletionUserMessage(BaseModel):
+    role: Literal["user"]
+    content: Union[str, List[str]]
+    name: Optional[str] = None
+
+
+class ChatCompletionAssistantMessage(BaseModel):
+    role: Literal["assistant"]
+    content: Optional[str] = None
+    name: Optional[str] = None
+    tool_calls: Optional[List[ChatCompletionMessageToolCall]] = None
+
+
+class ChatCompletionToolMessage(BaseModel):
+    role: Literal["tool"]
+    content: str
+    tool_call_id: str
+
+
 class ChatCompletionRequest(BaseModel):
     model: str
-    messages: List[Dict[str, str]]
+    messages: List[Union[ChatCompletionToolMessage,
+                         ChatCompletionAssistantMessage,
+                         ChatCompletionUserMessage,
+                         ChatCompletionSystemMessage]]
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
     n: Optional[int] = 1
@@ -71,6 +123,8 @@ class ChatCompletionRequest(BaseModel):
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
+    tools: Optional[List[ChatCompletionToolParam]] = None
+    tool_choice: Optional[str] = None
     # Additional parameters supported by vLLM
     best_of: Optional[int] = None
     top_k: Optional[int] = -1
@@ -283,14 +337,15 @@ class CompletionStreamResponse(BaseModel):
 
 class ChatMessage(BaseModel):
     role: str
-    content: str
+    content: Optional[str] = None
+    tool_calls: Optional[List[ChatCompletionMessageToolCall]] = None
 
 
 class ChatCompletionResponseChoice(BaseModel):
     index: int
     message: ChatMessage
     logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[Literal["stop", "length"]] = None
+    finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None
 
 
 class ChatCompletionResponse(BaseModel):
@@ -302,16 +357,24 @@ class ChatCompletionResponse(BaseModel):
     usage: UsageInfo
 
 
+class ChoiceDeltaToolCall(BaseModel):
+    index: int
+    id: str
+    type: str
+    function: Function
+
+
 class DeltaMessage(BaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
+    tool_calls: Optional[List[ChoiceDeltaToolCall]] = None
 
 
 class ChatCompletionResponseStreamChoice(BaseModel):
     index: int
     delta: DeltaMessage
     logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[Literal["stop", "length"]] = None
+    finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None
 
 
 class ChatCompletionStreamResponse(BaseModel):
