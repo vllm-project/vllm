@@ -334,11 +334,13 @@ if _is_cuda():
             break
     if install_flashinfer:
         root = Path(__name__).parent.resolve()
-        subprocess.run(
+        result = subprocess.run(
             ["python", str(root / "csrc/flashinfer/generator.py")],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True)
+        if result.returncode != 0:
+            raise RuntimeError("Failed to generate flashinfer kernels.")
 
         ext_modules.append(
             CUDAExtension(
