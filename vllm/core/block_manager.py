@@ -426,20 +426,21 @@ class BlockSpaceManager:
         for block in block_table:
             block.last_accessed = access_time
 
-    def compute_last_full_block_in_seq(self, seq: Sequence):
+    def compute_full_blocks_in_seq(self, seq: Sequence):
         if seq.seq_id not in self.block_tables:
             return
         max_full_block = seq.get_len() // self.block_size - 1
         block_table = self.block_tables[seq.seq_id]
         if max_full_block == -1:
             return
-        block_table[max_full_block].computed = True
+        for i in range(max_full_block):
+            block_table[i].computed = True
 
     def get_all_block_ids_till_computed(self, seq: Sequence) -> List[int]:
         if seq.seq_id not in self.block_tables:
             return []
         block_table = self.block_tables[seq.seq_id]
-        for block_idx in reversed(range(len(block_table))):
+        for block_idx in reversed(range(len(block_table) - 1)):
             if block_table[block_idx].computed:
                 return [b.block_number for b in block_table[:block_idx + 1]]
         return []
@@ -461,4 +462,4 @@ class BlockSpaceManager:
         # all blocks until the marked one are guaranteed to be computed.
         if self.enable_caching:
             for seq in seq_group.seqs_dict.values():
-                self.compute_last_full_block_in_seq(seq)
+                self.compute_full_blocks_in_seq(seq)
