@@ -1,5 +1,6 @@
 import contextlib
 import gc
+import os
 import tempfile
 from collections import OrderedDict
 from unittest.mock import patch, MagicMock
@@ -20,6 +21,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.parallel_utils.parallel_state import (
     destroy_model_parallel, initialize_model_parallel)
+
+TMP_PATH = "/mnt/local_storage/"
 
 
 def cleanup():
@@ -119,6 +122,14 @@ def dummy_model_gate_up() -> nn.Module:
 @pytest.fixture(scope="session")
 def sql_lora_files():
     return snapshot_download(repo_id="yard1/llama-2-7b-sql-lora-test")
+
+
+@pytest.fixture(scope="session")
+def tmp_path():
+    if os.path.exists(TMP_PATH):
+        return TMP_PATH
+    else:
+        return tempfile.mkstemp()[1]
 
 
 @pytest.fixture(scope="session")
