@@ -335,20 +335,24 @@ if _is_cuda():
     if install_flashinfer:
         root = Path(__name__).parent
         ext_modules.append(
-        CUDAExtension(
-            name="vllm._flashinfer_C",
-            sources=glob("3rd_party/flashinfer/python/csrc/*.cu") + glob("csrc/flashinfer/generated/*.cu"),
-            extra_compile_args={
-                "cxx": CXX_FLAGS,
-                "nvcc": NVCC_FLAGS_PUNICA + ["-DFLASHINFER_ENABLE_FP8", "-DFLASHINFER_ENABLE_BF16"],
-            },
-            include_dirs=[
-                str(root.resolve() / "3rd_party/flashinfer/python/include"),
-                str(root.resolve() / "3rd_party/flashinfer/python/csrc/"),
-                str(root.resolve() / "csrc/flashinfer/"),
-            ],
-        ))
-
+            CUDAExtension(
+                name="vllm._flashinfer_C",
+                sources=(glob("3rd_party/flashinfer/python/csrc/*.cu") +
+                         glob("csrc/flashinfer/generated/*.cu")),
+                extra_compile_args={
+                    "cxx":
+                    CXX_FLAGS,
+                    "nvcc":
+                    (NVCC_FLAGS_PUNICA +
+                     ["-DFLASHINFER_ENABLE_FP8", "-DFLASHINFER_ENABLE_BF16"]),
+                },
+                include_dirs=[
+                    str(root.resolve() /
+                        "3rd_party/flashinfer/python/include"),
+                    str(root.resolve() / "3rd_party/flashinfer/python/csrc/"),
+                    str(root.resolve() / "csrc/flashinfer/"),
+                ],
+            ))
 
 elif _is_neuron():
     neuronxcc_version = get_neuronxcc_version()
