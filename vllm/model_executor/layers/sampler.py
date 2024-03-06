@@ -116,7 +116,6 @@ class Sampler(nn.Module):
         # Get the logprobs query results.
         prompt_logprobs, sample_logprobs = _get_logprobs(
             logprobs, sampling_metadata, sample_results)
-
         return _build_sampler_output(sample_results, sampling_metadata,
                                      prompt_logprobs, sample_logprobs)
 
@@ -582,5 +581,4 @@ def _build_sampler_output(
                 SequenceOutput(seq_ids[parent_id], next_token_id, logprobs))
         sampler_output.append(
             SequenceGroupOutput(seq_outputs, group_prompt_logprobs))
-
     return SamplerOutput(outputs=sampler_output)

@@ -136,24 +136,11 @@ def create_seq_group_metadata_from_prompts(
     block_size: int,
     final_seq_lens: List[int],
     continuations: Optional[List[List[int]]] = None,
-    num_tokens_processed: Optional[List[int]] = None,
     seq_ids: Optional[List[int]] = None,
 ) -> List[SequenceGroupMetadata]:
 
     if continuations is None:
         continuations = [[] for _ in prompts]
-
-    if num_tokens_processed is None:
-        # Default to 1 token missing from kv cache for generation sequences.
-        num_tokens_processed = []
-        for continuation, prompt in zip(continuations, prompts):
-            # If prefill, then default to zero tokens processed.
-            if not continuation:
-                num_tokens_processed.append(0)
-            else:
-                # If generation, then default to all but one tokens processed.
-                num_tokens_processed.append(
-                    len(continuation) + len(prompt) - 1)
 
     if seq_ids is None:
         seq_ids = list(i for i, _ in enumerate(prompts))
@@ -174,16 +161,15 @@ def create_seq_group_metadata_from_prompts(
             is_prompt=len(cont_token_ids) == 0,
             seq_data={
                 i:
-                SequenceData.from_anyscale_sd(
-                    token_ids=prompt_token_ids[:] + cont_token_ids[:],
-                    num_prompt_tokens=len(prompt_token_ids[:]),
-                    num_processed_token_ids=num_tokens_saved,
-                )
+                SequenceData(
+                    prompt_token_ids=prompt_token_ids[:],
+                    output_token_ids=cont_token_ids[:],
+                ),
             },
             sampling_params=SamplingParams(temperature=0.0, ),
             block_tables={i: block_allocations[i][:]},
-        ) for i, (prompt_token_ids, cont_token_ids, num_tokens_saved) in
-        enumerate(zip(prompts, continuations, num_tokens_processed))
+        ) for i, (prompt_token_ids, cont_token_ids) in
+        enumerate(zip(prompts, continuations))
     ]
 
 
