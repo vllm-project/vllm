@@ -514,7 +514,7 @@ class SamplerOutput:
     # Used to store an on-GPU tensor containing the sampled token ids.
     sampled_token_ids: Optional["torch.Tensor"] = None
 
-    draft_target_worker_metrics: Optional["DraftTargetWorkerMetrics"] = None
+    spec_decode_worker_metrics: Optional["SpecDecodeWorkerMetrics"] = None
 
     def __getitem__(self, idx: int):
         return self.outputs[idx]

@@ -8,7 +8,7 @@ from typing import Callable
 
 
 @dataclass
-class DraftTargetWorkerMetrics:
+class SpecDecodeWorkerMetrics:
     num_spec_tokens: int
     draft_acceptance_rate: float
     system_efficiency: float
@@ -51,7 +51,7 @@ class AsyncMetricsCollector:
         self._copy_stream = torch.cuda.Stream()
 
     def maybe_collect_rejsample_metrics(
-            self, k: int) -> Optional[DraftTargetWorkerMetrics]:
+            self, k: int) -> Optional[SpecDecodeWorkerMetrics]:
 
         # If a copy was initiated in the previous call, collect and return.
         if self._in_flight_copy is not None:
@@ -103,7 +103,7 @@ class AsyncMetricsCollector:
 
     def _collect_rejsample_metrics(
             self, k: int,
-            ready_event: torch.cuda.Event) -> DraftTargetWorkerMetrics:
+            ready_event: torch.cuda.Event) -> SpecDecodeWorkerMetrics:
         """Create metrics object from statistics copied asynchronously.
 
         Args:
@@ -130,7 +130,7 @@ class AsyncMetricsCollector:
         else:
             system_efficiency = float("nan")
 
-        return DraftTargetWorkerMetrics(
+        return SpecDecodeWorkerMetrics(
             num_spec_tokens=k,
             draft_acceptance_rate=draft_acceptance_rate,
             system_efficiency=system_efficiency,

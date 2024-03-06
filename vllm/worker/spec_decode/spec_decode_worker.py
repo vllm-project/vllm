@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import torch
 import traceback
 
-from vllm.worker.spec_decode.metrics import DraftTargetWorkerMetrics, AsyncMetricsCollector
+from vllm.worker.spec_decode.metrics import SpecDecodeWorkerMetrics, AsyncMetricsCollector
 from vllm.sequence import (SamplerOutput, SequenceGroupMetadata, SequenceData,
                            SequenceGroupOutput, SequenceOutput)
 from vllm.worker.worker import Worker
@@ -20,7 +20,7 @@ from vllm.utils import in_wsl
 from vllm.worker.spec_decode.util import nvtx_range, sampler_output_to_torch, SpeculativeProposals, get_all_seq_ids
 from vllm.worker.spec_decode.scoring import BatchExpansionTop1Scorer
 
-class DraftTargetWorker:
+class SpecDecodeWorker:
 
     def __init__(
         self,
@@ -30,7 +30,7 @@ class DraftTargetWorker:
         metrics_collector: Optional[AsyncMetricsCollector] = None,
     ):
         """
-        Create a DraftTargetWorker.
+        Create a SpecDecodeWorker.
 
         Args:
             proposer_worker: A draft worker that can run multiple steps
@@ -118,7 +118,7 @@ class DraftTargetWorker:
             k=k,
         )
 
-    @nvtx_range("draft_target_worker._run_no_spec")
+    @nvtx_range("spec_decode_worker._run_no_spec")
     def _run_no_spec(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -151,7 +151,7 @@ class DraftTargetWorker:
         sampler_output.sampled_tokens = None
         return [sampler_output]
 
-    @nvtx_range("draft_target_worker._run_speculative_decoding_step")
+    @nvtx_range("spec_decode_worker._run_speculative_decoding_step")
     def _run_speculative_decoding_step(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -199,7 +199,7 @@ class DraftTargetWorker:
         return self._create_output_sampler_list(seq_group_metadata_list,
             accepted_token_ids, k)
 
-    @nvtx_range("draft_target_worker._verify_tokens")
+    @nvtx_range("spec_decode_worker._verify_tokens")
     def _verify_tokens(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -280,7 +280,7 @@ class DraftTargetWorker:
             k)
         if maybe_rejsample_metrics is not None:
             sampler_output_list[
-                0].draft_target_worker_metrics = maybe_rejsample_metrics
+                0].spec_decode_worker_metrics = maybe_rejsample_metrics
 
         return sampler_output_list
 

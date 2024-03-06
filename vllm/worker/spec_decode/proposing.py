@@ -9,11 +9,11 @@ from dataclasses import dataclass
 import torch
 import traceback
 
-from vllm.worker.spec_decode.metrics import DraftTargetWorkerMetrics, AsyncMetricsCollector
+from vllm.worker.spec_decode.metrics import SpecDecodeWorkerMetrics, AsyncMetricsCollector
 #from vllm.anyscale.shm.msgspec_shm import SharedMsgspecBufferWithEvent
 #from vllm.sequence import (SampleLogprob, SamplerOutput, SequenceGroupMetadata,
 #                           ExecuteModelData, SequenceOutputs, SequenceData,
-#                           SequenceGroupOutputs, DraftTargetWorkerMetrics)
+#                           SequenceGroupOutputs, SpecDecodeWorkerMetrics)
 from vllm.sequence import (SamplerOutput, SequenceGroupMetadata, SequenceData,
                            SequenceGroupOutput, SequenceOutput)
 from vllm.worker.worker import Worker

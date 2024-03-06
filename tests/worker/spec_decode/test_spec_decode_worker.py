@@ -5,14 +5,14 @@ from unittest.mock import MagicMock
 
 from vllm.worker.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.worker.worker import Worker
-from vllm.worker.spec_decode.draft_target_worker import DraftTargetWorker, calculate_gpu_blocks
+from vllm.worker.spec_decode.spec_decode_worker import SpecDecodeWorker, calculate_gpu_blocks
 from vllm.worker.spec_decode.scoring import BatchExpansionTop1Scorer, get_all_seq_ids
 from vllm.worker.spec_decode.util import SpeculativeProposals
 from vllm.model_executor.utils import set_random_seed
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.sequence import SequenceGroupMetadata
 from .utils import mock_worker, create_batch, ExecuteModelData, create_seq_group_metadata_from_prompts, create_sampler_output_list
-from vllm.worker.spec_decode.metrics import DraftTargetWorkerMetrics, AsyncMetricsCollector
+from vllm.worker.spec_decode.metrics import SpecDecodeWorkerMetrics, AsyncMetricsCollector
 
 
 
@@ -20,14 +20,14 @@ from vllm.worker.spec_decode.metrics import DraftTargetWorkerMetrics, AsyncMetri
 @pytest.mark.parametrize('batch_size', [1, 2, 32])
 @torch.inference_mode()
 def test_correctly_calls_draft_model(k: int, batch_size: int):
-    """Verify that the DraftTargetWorker calls the draft model with correct
+    """Verify that the SpecDecodeWorker calls the draft model with correct
     inputs. Everything else is mocked out.
     """
     draft_worker = mock_worker(cls=MultiStepWorker)
     target_worker = mock_worker()
     rejection_sampler = MagicMock(spec=RejectionSampler)
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
-    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
+    worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
                                metrics_collector)
 
     exception_secret = 'artifical stop'
@@ -56,7 +56,7 @@ def test_correctly_calls_draft_model(k: int, batch_size: int):
 @pytest.mark.parametrize('batch_size', [1, 2, 32])
 @torch.inference_mode()
 def test_correctly_calls_target_model(k: int, batch_size: int):
-    """Verify that the DraftTargetWorker calls the target model with correct
+    """Verify that the SpecDecodeWorker calls the target model with correct
     inputs. Everything else is mocked out.
     """
     draft_worker = mock_worker(cls=MultiStepWorker)
@@ -70,7 +70,7 @@ def test_correctly_calls_target_model(k: int, batch_size: int):
 
     set_random_seed(1)
 
-    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
+    worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
                                metrics_collector)
     worker.init_model()
 
@@ -134,7 +134,7 @@ def test_correctly_calls_target_model(k: int, batch_size: int):
 @pytest.mark.parametrize('batch_size', [1, 2, 32])
 @torch.inference_mode()
 def test_correctly_calls_rejection_sampler(k: int, batch_size: int):
-    """Verify that the DraftTargetWorker calls the rejection sampler with
+    """Verify that the SpecDecodeWorker calls the rejection sampler with
     correct inputs. Everything else is mocked out.
     """
     vocab_size = 32_000
@@ -149,7 +149,7 @@ def test_correctly_calls_rejection_sampler(k: int, batch_size: int):
 
     set_random_seed(1)
 
-    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
+    worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
                                metrics_collector)
     worker.init_model()
 
@@ -212,7 +212,7 @@ def test_correctly_calls_rejection_sampler(k: int, batch_size: int):
 @pytest.mark.parametrize('batch_size', [1, 2, 32])
 @torch.inference_mode()
 def test_correctly_formats_output(k: int, batch_size: int):
-    """Verify that the DraftTargetWorker formats rejection sampler output
+    """Verify that the SpecDecodeWorker formats rejection sampler output
     correctly. Everything else is mocked out.
     """
     vocab_size = 32_000
@@ -227,7 +227,7 @@ def test_correctly_formats_output(k: int, batch_size: int):
 
     set_random_seed(1)
 
-    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
+    worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
                                metrics_collector)
     worker.init_model()
 
@@ -338,7 +338,7 @@ def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool):
 
     set_random_seed(1)
 
-    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
+    worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
                                metrics_collector)
     worker.init_model()
 
@@ -389,12 +389,12 @@ def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool):
 
     rejection_sampler.return_value = rejection_sampler_output
 
-    mock_rejsample_metrics = MagicMock(spec=DraftTargetWorkerMetrics) if returns_metrics else None
+    mock_rejsample_metrics = MagicMock(spec=SpecDecodeWorkerMetrics) if returns_metrics else None
     metrics_collector.maybe_collect_rejsample_metrics.return_value = mock_rejsample_metrics
 
     output = worker.execute_model(**execute_model_data.to_dict(),
                                   num_spec_tokens=k)
-    assert output[0].draft_target_worker_metrics == mock_rejsample_metrics
+    assert output[0].spec_decode_worker_metrics == mock_rejsample_metrics
 
     call_args_list = metrics_collector.maybe_collect_rejsample_metrics.call_args_list
     assert len(call_args_list) == 1
@@ -406,7 +406,7 @@ def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool):
 @pytest.mark.parametrize('batch_size', [1, 2, 32])
 @torch.inference_mode()
 def test_k_equals_zero(k: int, batch_size: int):
-    """Verify that the DraftTargetWorker calls the draft and target workers
+    """Verify that the SpecDecodeWorker calls the draft and target workers
     when k is zero. This happens during prefill.
     """
     draft_worker = mock_worker(cls=MultiStepWorker)
@@ -420,7 +420,7 @@ def test_k_equals_zero(k: int, batch_size: int):
 
     set_random_seed(1)
 
-    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
+    worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
                                metrics_collector)
 
     execute_model_data, prompts, prev_output_tokens = create_batch(
@@ -444,7 +444,7 @@ def test_k_equals_zero(k: int, batch_size: int):
 @pytest.mark.parametrize('batch_size', [0])
 @torch.inference_mode()
 def test_empty_input_batch(k: int, batch_size: int):
-    """Verify that the DraftTargetWorker calls the draft and target workers
+    """Verify that the SpecDecodeWorker calls the draft and target workers
     when the input batch is empty. This can happen if the engine communicates
     to the workers information without scheduling a batch.
     """
@@ -459,7 +459,7 @@ def test_empty_input_batch(k: int, batch_size: int):
 
     set_random_seed(1)
 
-    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
+    worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
                                metrics_collector)
 
     execute_model_data, prompts, prev_output_tokens = create_batch(
@@ -487,7 +487,7 @@ def test_init_model():
     rejection_sampler.token_id_dtype = torch.int64
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
-    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
+    worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
                                metrics_collector)
 
     worker.init_model()
@@ -508,7 +508,7 @@ def test_init_cache_engine():
     rejection_sampler.token_id_dtype = torch.int64
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
-    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
+    worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
                                metrics_collector)
 
     cache_config = MagicMock()
@@ -539,7 +539,7 @@ def test_profile_num_available_blocks(available_gpu_blocks: int,
     target_worker.get_cache_block_size_bytes.return_value = target_cache_block_size_bytes
     draft_worker.get_cache_block_size_bytes.return_value = draft_kv_size_bytes
 
-    worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
+    worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
                                metrics_collector)
 
     # These values do not directly impact the adjusted block size calculation,
