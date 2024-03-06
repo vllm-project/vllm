@@ -2,11 +2,15 @@
 import copy
 import enum
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, TYPE_CHECKING
 
 from vllm.block import LogicalTokenBlock
 from vllm.sampling_params import SamplingParams
 from vllm.lora.request import LoRARequest
+
+if TYPE_CHECKING:
+    import torch
+    from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 
 @dataclass
