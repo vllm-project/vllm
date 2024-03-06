@@ -8,6 +8,7 @@ transformers >= 4.38.0  # Required for Gemma.
 xformers == 0.0.23.post1  # Required for CUDA 12.1.
 fastapi
 uvicorn[standard]
+peft == 0.8.2
 pydantic >= 2.0  # Required for OpenAI server.
 prometheus_client >= 0.18.0
 pynvml == 11.5.0
