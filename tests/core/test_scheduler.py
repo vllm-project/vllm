@@ -3,7 +3,7 @@ import pytest  # noqa
 
 from vllm.config import CacheConfig, SchedulerConfig
 from vllm.core.scheduler import Scheduler
-from vllm.sequence import SequenceGroup
+from vllm.sequence import SequenceGroup, Logprob
 
 from .utils import create_dummy_prompt
 
@@ -108,8 +108,8 @@ def test_scheduler_schedule_preempt_abort():
     # Append "generated" tokens, allowing the sequence to mark prompt tokens as
     # processed.
     token_id = 0
-    seq_a.append_token_id(token_id, {token_id: 0.0})
-    seq_b.append_token_id(token_id, {token_id: 0.0})
+    seq_a.append_token_id(token_id, {token_id: Logprob(0.0)})
+    seq_b.append_token_id(token_id, {token_id: Logprob(0.0)})
 
     # Schedule seq groups generation and preempt seq group b.
     seq_group_meta, out = scheduler.schedule()
