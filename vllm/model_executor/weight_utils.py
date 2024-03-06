@@ -316,7 +316,7 @@ def kv_cache_scales_iterator(filename: str,
         logger.error(f"An error occurred while reading '{filename}': {e}")
     # This section is only reached if any of the excepts are hit
     # Return an empty iterator (tuple) => no KV cache scales are loaded
-    # which effectively defaults to 1.0 scales
+    # which defaults to 1.0 scales
     logger.warn(f"Defaulting to KV cache scaling factors = 1.0 for all layers in TP rank {tp_rank}"
                 " as an error occurred during loading.")
     return ()

@@ -7,7 +7,7 @@ import numpy as np
 import os
 from safetensors.torch import safe_open
 import torch
-from typing import List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 
 # Adapted from vllm/model_executor/weight_utils.py
@@ -90,12 +90,11 @@ def _hf_tensorfile_iterator(filename: str, load_format: str,
         torch.cuda.empty_cache()
 
 
-def main(args):
-    rank_tensors_map = {}
-    hf_tensor_files, use_safetensors = _prepare_hf_weights(args.quantized_model, args.load_format)
-    # Matches the number immediately after this keyword in the tensor filename to
-    # determine the TP rank corresponding to said tensor file
-    rank_keyword = "rank"
+def _kv_scales_extractor(hf_tensor_files: Iterator[str],
+                        use_safetensors: bool,
+                        rank_keyword: str = "rank",
+                        expected_tp_size: Optional[int] = None,) -> Dict[int, Dict[int, float]]:
+    rank_scales_map = {}
     for tensor_file in hf_tensor_files:
         try:
             rank_idx = tensor_file.find(rank_keyword)
@@ -118,9 +117,9 @@ def main(args):
                   f"corresponding to file '{tensor_file}'")
             raise
         
-        if rank not in rank_tensors_map:
+        if rank not in rank_scales_map:
             layer_scales_map = {}
-            rank_tensors_map[rank] = layer_scales_map
+            rank_scales_map[rank] = layer_scales_map
         else:
             raise RuntimeError(f"Tensor file '{tensor_file}' shares TP rank {rank} "
                                "with another tensor file.")
@@ -138,9 +137,92 @@ def main(args):
                     layer_scales_map[layer_idx] = param.item()
                 except RuntimeError:
                     print("This utility supports only per-tensor scalar scale factors "
-                            f"for now. The tensor\n {name} = {param} is an invalid "
+                            f"for now. The tensor\n {name} = {param} \nis an invalid "
                             "scale factor.")
                     raise
+
+    if all(len(layer_scales_map) == 0 for layer_scales_map in rank_scales_map.values()):
+        # Note: this is true even if the rank_scales_map is empty
+        print("WARNING: No KV cache scale factors found. No output saved.")
+        return None
+    empirical_tp_world_size = max(rank_scales_map.keys()) + 1
+    if expected_tp_size is not None:
+        assert expected_tp_size == empirical_tp_world_size, "User expected TP world size = " \
+            f"{expected_tp_size} from model but tool is expecting TP world size = " \
+            f"{empirical_tp_world_size} from model instead."
+    for i in range(empirical_tp_world_size):
+        assert i in rank_scales_map, f"Expected TP world size = {empirical_tp_world_size} " \
+                                        "but did not find KV cache scaling factors " \
+                                        f"for TP rank {i}"
+    print(f"Found TP world size = {empirical_tp_world_size} when extracting KV cache scales!")
+    return rank_scales_map
+
+
+def _metadata_extractor(quantized_model_dir: str,
+                        metadata_from_schema: Dict[str, Callable[[Dict[str, Any]], Any]]) -> Dict[str, Any]:
+    if not os.path.isdir(quantized_model_dir):
+        raise FileNotFoundError(f"The quantized model directory `{quantized_model_dir}` "
+                                "does not exist.")
+    allow_patterns = [ "*.json" ]
+
+    metadata_files: List[str] = []
+    for pattern in allow_patterns:
+        metadata_files += glob.glob(os.path.join(quantized_model_dir, pattern))
+    
+    result = {}
+    for file in metadata_files:
+        with open(file) as f:
+            try:
+                schema = json.load(f)
+                for metadata, from_schema_fn in metadata_from_schema.items():
+                    if metadata not in result:
+                        result[metadata] = from_schema_fn(schema)
+                    
+            except json.JSONDecodeError:
+                pass
+            except ValueError:
+                pass
+    return result
+
+
+def main(args):
+    metadata_from_schema = {
+        "model_type": lambda schema: schema["layers"][0]["decoder_type"],
+        "tp_size": lambda schema: int(schema["tensor_parallel"]),
+        "model_dtype": lambda schema: schema["dtype"]
+    }
+    metadata_dict = _metadata_extractor(args.quantized_model, metadata_from_schema)
+    model_dtype = metadata_dict["model_dtype"]
+
+    hf_tensor_files, use_safetensors = _prepare_hf_weights(args.quantized_model, args.load_format)
+    # Matches the number immediately after this keyword in the tensor filename to
+    # determine the TP rank corresponding to said tensor file
+    rank_keyword = "rank"
+    rank_scales_map = _kv_scales_extractor(hf_tensor_files, use_safetensors,
+                                           rank_keyword, args.tp_size)
+    # Postprocess: formatting to the current schema. Consider pulling it out into a dedicated
+    # function should it ever become more complicated.
+    rank_scales_map = { rank_keyword + str(rank) : scale
+                        for rank, scale in rank_scales_map.items() }
+
+    # Consider unifying and formalizing this into its own class (and other necessary subclasses) in
+    # the future
+    schema = { "model_type": metadata_dict["model_type"],
+               "kv_cache": {
+                   "dtype": "fp8" if rank_scales_map else model_dtype,
+                   "scaling_factor": rank_scales_map
+               },
+               # The fields below this comment are not used or checked for now
+               # but will be in the future
+               "activation": {
+                   "dtype": model_dtype,
+                   "scaling_factor": None,
+               },
+               "weight": {
+                   "dtype": model_dtype,
+                   "scaling_factor": None
+               }
+             }
 
     if args.output_dir is None:
         output_file = os.path.join(args.quantized_model, args.output_name)
@@ -149,23 +231,12 @@ def main(args):
         if not os.path.isdir(args.output_dir):
             os.makedirs(args.output_dir, exist_ok=True)
 
-    if all(len(layer_scales_map) == 0 for layer_scales_map in rank_tensors_map.values()):
-        # Note: this is true even if the rank_tensors_map is empty
-        print("WARNING: No KV cache scale factors found. No output saved.")
-    else:
-        empirical_tp_world_size = max(rank_tensors_map.keys()) + 1
-        if args.tp_size is not None:
-            assert args.tp_size == empirical_tp_world_size, "User expected TP world size = " \
-                f"{args.tp_size} from model but tool is expecting TP world size = " \
-                f"{empirical_tp_world_size} from model instead."
-        for i in range(empirical_tp_world_size):
-            assert i in rank_tensors_map, f"Expected TP world size = {empirical_tp_world_size} " \
-                                          "but did not find KV cache scaling factors " \
-                                          f"for TP rank {i}"
-        with open(output_file, 'w') as f:
-            json.dump(rank_tensors_map, f, sort_keys=True, indent=4)
-            print(f"Completed! Found TP world size = {empirical_tp_world_size}.",
-                  f"KV cache scaling factors saved to {output_file}")
+   
+    with open(output_file, 'w') as f:
+        pass
+        #json.dump(rank_scales_map, f, sort_keys=True, indent=4)
+        #print(f"Completed! Found TP world size = {empirical_tp_world_size}.",
+        #        f"KV cache scaling factors saved to {output_file}")
 
 
 if __name__ == "__main__":
