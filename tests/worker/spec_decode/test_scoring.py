@@ -2,16 +2,12 @@ import torch
 import random
 import pytest
 
-#from vllm.worker.spec_decode.draft_target_worker import DraftTargetWorker, calculate_gpu_blocks
 from vllm.worker.spec_decode.scoring import BatchExpansionTop1Scorer
 from vllm.worker.spec_decode.util import SpeculativeProposals
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SequenceGroupMetadata
 
 from .utils import mock_worker, create_batch, ExecuteModelData, create_seq_group_metadata_from_prompts, create_sampler_output_list
-#from .utils import (mock_worker,
-#                    create_seq_group_metadata_from_prompts, create_batch,
-#                    create_sampler_output_list)
 
 from unittest.mock import MagicMock
 
@@ -99,9 +95,6 @@ def test_create_single_target_seq_group_metadata(k: int):
     ) == prompt_tokens
     assert output.seq_data[target_seq_id].get_output_token_ids(
     ) == prev_output_tokens + token_ids
-
-    #assert output.seq_data[target_seq_id].get_num_processed_token_ids(
-    #) == num_tokens_processed + k
 
     assert len(output.block_tables) == 1
     assert output.block_tables[

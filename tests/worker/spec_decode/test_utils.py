@@ -2,15 +2,11 @@ import torch
 import random
 import pytest
 
-#from vllm.worker.spec_decode.draft_target_worker import DraftTargetWorker, calculate_gpu_blocks
 from vllm.worker.spec_decode.util import SpeculativeProposals, get_all_seq_ids
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SequenceGroupMetadata
 
 from .utils import mock_worker, create_batch, ExecuteModelData, create_seq_group_metadata_from_prompts, create_sampler_output_list
-#from .utils import (mock_worker,
-#                    create_seq_group_metadata_from_prompts, create_batch,
-#                    create_sampler_output_list)
 
 from unittest.mock import MagicMock
 
@@ -24,7 +20,6 @@ def test_get_all_seq_ids():
         SequenceGroupMetadata(
             request_id=str(seq_id),
             is_prompt=True,
-            #is_chunked_prefill=False,
             seq_data={
                 seq_id: MagicMock(),
             },

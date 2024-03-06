@@ -96,7 +96,7 @@ class DraftTargetWorker:
         blocks_to_swap_out: Optional[Dict[int, int]],
         blocks_to_copy: Optional[Dict[int, List[int]]],
         num_spec_tokens: int,
-    ) -> Optional[SamplerOutput]:
+    ) -> List[SamplerOutput]:
         assert seq_group_metadata_list is not None, ("speculative decoding "
             "requires non-None seq_group_metadata_list")
 
@@ -185,7 +185,7 @@ class DraftTargetWorker:
             seq_group_metadata_list, blocks_to_swap_in, blocks_to_swap_out,
             blocks_to_copy, k)
         
-        all_tokens, all_probs = self.scorer.score_proposals(
+        scorer_token_ids, scorer_token_probs = self.scorer.score_proposals(
              seq_group_metadata_list,
              blocks_to_swap_in,
              blocks_to_swap_out,
@@ -194,7 +194,7 @@ class DraftTargetWorker:
              proposals,
         )
 
-        accepted_token_ids = self._verify_tokens(seq_group_metadata_list, all_tokens, all_probs, proposals, k)
+        accepted_token_ids = self._verify_tokens(seq_group_metadata_list, scorer_token_ids, scorer_token_probs, proposals, k)
 
         return self._create_output_sampler_list(seq_group_metadata_list,
             accepted_token_ids, k)
@@ -203,8 +203,8 @@ class DraftTargetWorker:
     def _verify_tokens(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-        all_tokens: torch.Tensor,
-        all_probs: torch.Tensor,
+        scorer_token_ids: torch.Tensor,
+        scorer_token_probs: torch.Tensor,
         proposals: SpeculativeProposals,
         max_proposal_len: int,
     ) -> torch.Tensor:
@@ -213,9 +213,9 @@ class DraftTargetWorker:
         non_spec_indices = [i for i, (_, proposal_len) in enumerate(zip(seq_group_metadata_list, proposal_lens_list)) if proposal_len == 0]
         original_indices = spec_indices + non_spec_indices
 
-        proposal_scores = all_probs[spec_indices, :-1]
-        bonus_token_ids = all_tokens[spec_indices, -1:]
-        non_spec_token_ids = all_tokens[non_spec_indices]
+        proposal_scores = scorer_token_probs[spec_indices, :-1]
+        bonus_token_ids = scorer_token_ids[spec_indices, -1:]
+        non_spec_token_ids = scorer_token_ids[non_spec_indices]
         
         accepted_token_ids = self.rejection_sampler(
             proposal_scores,
