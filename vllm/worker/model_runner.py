@@ -611,7 +611,6 @@ class ModelRunner:
             kv_caches=kv_caches,
             input_metadata=input_metadata,
         )
-        breakpoint()
 
         # Sample the next token.
         output = self.model.sample(
@@ -878,7 +877,6 @@ class CUDAGraphRunner:
                                                  non_blocking=True)
         self.input_buffers["block_tables"].copy_(input_metadata.block_tables,
                                                  non_blocking=True)
-        breakpoint()
         # Run the graph.
         self.graph.replay()
 

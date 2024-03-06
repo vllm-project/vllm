@@ -26,7 +26,7 @@ MODELS = [
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("enforce_eager", [False])
+@pytest.mark.parametrize("enforce_eager", [False, True])
 def test_models(
     hf_runner,
     vllm_runner,

@@ -141,29 +141,17 @@ class PagedAttention(nn.Module):
         # If key_cache and value_cache are not provided, the new key and value
         # vectors will not be cached. This happens during the initial memory
         # profiling run.
-        num_valid_tokens = input_metadata.num_valid_tokens
-        if (num_valid_tokens > 0 and key_cache is not None
-                and value_cache is not None):
-            key_to_cache = key[:num_valid_tokens]
-            value_to_cache = value[:num_valid_tokens]
+        if (key_cache is not None and value_cache is not None):
             cache_ops.reshape_and_cache(
-                key_to_cache,
-                value_to_cache,
+                key,
+                value,
                 key_cache,
                 value_cache,
                 input_metadata.slot_mapping.flatten(),
                 input_metadata.kv_cache_dtype,
             )
 
-        num_prompt_tokens = input_metadata.num_prompt_tokens
-        num_generation_tokens = input_metadata.num_generation_tokens
-        print(num_generation_tokens)
-
-        if num_prompt_tokens > 0:
-            assert num_generation_tokens == 0
-            query = query[:num_prompt_tokens]
-            key = key[:num_prompt_tokens]
-            value = value[:num_prompt_tokens]
+        if input_metadata.is_prompt:
             # normal attention
             if (key_cache is None or value_cache is None
                     or input_metadata.block_tables.numel() == 0):
@@ -202,7 +190,7 @@ class PagedAttention(nn.Module):
                             input_metadata)
 
                 if self.use_ref_attention:
-                    output[:num_prompt_tokens] = self.ref_masked_attention(
+                    output = self.ref_masked_attention(
                         query,
                         key,
                         value,
@@ -222,18 +210,17 @@ class PagedAttention(nn.Module):
                     key = key.unflatten(0, (num_tokens))
                     value = value.unflatten(0, (num_tokens))
 
-                output[:
-                       num_prompt_tokens] = xops.memory_efficient_attention_forward(
-                           query,
-                           key,
-                           value,
-                           attn_bias=input_metadata.attn_bias,
-                           p=0.0,
-                           scale=self.scale,
-                           op=xops.fmha.
-                           MemoryEfficientAttentionFlashAttentionOp[0] if
-                           (is_hip()) else None,
-                       ).view_as(query)
+                out = xops.memory_efficient_attention_forward(
+                    query,
+                    key,
+                    value,
+                    attn_bias=input_metadata.attn_bias,
+                    p=0.0,
+                    scale=self.scale,
+                    op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if
+                    (is_hip()) else None,
+                )
+                output = out.view_as(query)
             else:
                 # prefix-enabled attention
                 output = torch.empty_like(query)
@@ -252,13 +239,11 @@ class PagedAttention(nn.Module):
                     getattr(self, "alibi_slopes", None),
                 )
 
-        if num_generation_tokens > 0:
-            breakpoint()
-            assert num_prompt_tokens == 0
+        else:
             # Decoding run.
             output = _paged_attention(
-                output[num_prompt_tokens:num_valid_tokens],
-                query[num_prompt_tokens:num_valid_tokens],
+                output,
+                query,
                 key_cache,
                 value_cache,
                 input_metadata,
