@@ -6,10 +6,11 @@ import torch
 
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.worker import Worker
-from vllm.worker.spec_decode.interfaces import SpeculativeProposals
+from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.sequence import (SamplerOutput, SequenceGroupMetadata)
-from vllm.worker.spec_decode.util import sampler_output_to_torch
-from vllm.worker.spec_decode.interfaces import SpeculativeProposals, SpeculativeProposer
+from vllm.spec_decode.util import sampler_output_to_torch
+from vllm.spec_decode.interfaces import SpeculativeProposals, SpeculativeProposer
+
 
 class MultiStepWorker(Worker):
     """The MultiStepWorker is equivalent to a Worker except that it allows

@@ -1,4 +1,4 @@
-from vllm.worker.spec_decode.util import get_all_seq_ids
+from vllm.spec_decode.util import get_all_seq_ids
 from vllm.sequence import SequenceGroupMetadata
 
 from unittest.mock import MagicMock

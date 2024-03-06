@@ -3,17 +3,17 @@ from functools import cached_property
 
 import torch
 
-from vllm.worker.spec_decode.metrics import AsyncMetricsCollector
+from vllm.spec_decode.metrics import AsyncMetricsCollector
 from vllm.sequence import (SamplerOutput, SequenceGroupMetadata,
                            SequenceGroupOutput, SequenceOutput)
 from vllm.worker.worker import Worker
-from vllm.worker.spec_decode.multi_step_worker import MultiStepWorker
+from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.config import CacheConfig
-from vllm.worker.spec_decode.util import nvtx_range, get_all_seq_ids
-from vllm.worker.spec_decode.interfaces import SpeculativeProposals, SpeculativeScores
-from vllm.worker.spec_decode.batch_expansion import BatchExpansionTop1Scorer
-from vllm.worker.spec_decode.interfaces import SpeculativeScorer
+from vllm.spec_decode.util import nvtx_range, get_all_seq_ids
+from vllm.spec_decode.interfaces import SpeculativeProposals, SpeculativeScores
+from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
+from vllm.spec_decode.interfaces import SpeculativeScorer
 
 
 class SpecDecodeWorker:

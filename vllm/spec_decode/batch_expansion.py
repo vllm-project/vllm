@@ -5,8 +5,8 @@ import torch
 
 from vllm.sequence import (SamplerOutput, SequenceGroupMetadata, SequenceData)
 from vllm.worker.worker import Worker
-from vllm.worker.spec_decode.util import nvtx_range, sampler_output_to_torch, get_all_seq_ids
-from vllm.worker.spec_decode.interfaces import SpeculativeScorer, SpeculativeProposals, SpeculativeScores
+from vllm.spec_decode.util import nvtx_range, sampler_output_to_torch, get_all_seq_ids
+from vllm.spec_decode.interfaces import SpeculativeScorer, SpeculativeProposals, SpeculativeScores
 
 SeqId = int
 TargetSeqId = int

@@ -4,7 +4,7 @@ import pytest
 
 from unittest.mock import MagicMock
 
-from vllm.worker.spec_decode.metrics import AsyncMetricsCollector
+from vllm.spec_decode.metrics import AsyncMetricsCollector
 
 
 def test_initial_call_returns_none():
