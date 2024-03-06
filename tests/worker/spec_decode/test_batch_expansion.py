@@ -1,7 +1,7 @@
 import torch
 import pytest
 
-from vllm.worker.spec_decode.scoring import BatchExpansionTop1Scorer
+from vllm.worker.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 
 from .utils import mock_worker, create_seq_group_metadata_from_prompts
 

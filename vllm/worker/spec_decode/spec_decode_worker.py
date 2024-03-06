@@ -12,7 +12,7 @@ from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.config import CacheConfig
 from vllm.worker.spec_decode.util import nvtx_range, get_all_seq_ids
 from vllm.worker.spec_decode.interfaces import SpeculativeProposals, SpeculativeScores
-from vllm.worker.spec_decode.scoring import BatchExpansionTop1Scorer
+from vllm.worker.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 from vllm.worker.spec_decode.interfaces import SpeculativeScorer
 
 
