@@ -20,8 +20,7 @@ from vllm.model_executor.layers.quantization import (get_quantization_config,
 
 logger = init_logger(__name__)
 
-_xdg_cache_home = os.getenv('XDG_CACHE_HOME',
-                             os.path.expanduser('~/.cache'))
+_xdg_cache_home = os.getenv('XDG_CACHE_HOME', os.path.expanduser('~/.cache'))
 _vllm_filelocks_path = os.path.join(_xdg_cache_home, 'vllm/locks/')
 
 
