@@ -1,6 +1,6 @@
 """A block manager that manages token blocks."""
 import enum
-from itertools import count
+from itertools import count, takewhile
 from os.path import commonprefix
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -87,7 +87,8 @@ class BlockAllocator:
             raise ValueError(f"Double free! {block} is already freed.")
         block.ref_count -= 1
         if block.ref_count == 0:
-            assert block.block_hash not in self.evictor
+            if self.enable_caching:
+                assert block.block_hash not in self.evictor
             self.evictor.add(block)
 
             # If caching is enabled, remove the block from the cached_blocks
@@ -98,6 +99,7 @@ class BlockAllocator:
         return self.num_blocks - self.current_num_blocks + self.evictor.num_blocks
 
     def contains_block(self, block_hash: int) -> bool:
+        assert self.enable_caching
         return block_hash in self.cached_blocks or block_hash in self.evictor
 
     def update_hash(self, block_hash: int, block: PhysicalTokenBlock):
@@ -196,10 +198,12 @@ class BlockSpaceManager:
             if (self.block_sliding_window is not None
                     and logical_idx >= self.block_sliding_window):
                 block = block_table[logical_idx % self.block_sliding_window]
-            else:
+            elif self.enable_caching:
                 block = self.gpu_allocator.allocate(
                     seq.hash_of_block(logical_idx),
                     seq.num_hashed_tokens_of_block(logical_idx))
+            else:
+                block = self.gpu_allocator.allocate()
             block_table.append(block)
 
         # Assign the block table for each sequence.
@@ -218,6 +222,8 @@ class BlockSpaceManager:
         seq: Sequence,
         last_block: PhysicalTokenBlock,
     ) -> PhysicalTokenBlock:
+        assert self.enable_caching
+
         # Compute a new hash for the block so that it can be shared by other Sequences
         new_hash = seq.hash_of_block(len(seq.logical_token_blocks) - 1)
 
@@ -241,7 +247,7 @@ class BlockSpaceManager:
         seq: Sequence,
         last_block: PhysicalTokenBlock,
     ) -> PhysicalTokenBlock:
-        if self._is_last_block_full(seq):
+        if self.enable_caching and self._is_last_block_full(seq):
             return self._promote_last_block(seq, last_block)
         else:
             return last_block
@@ -250,6 +256,8 @@ class BlockSpaceManager:
         self,
         seq: Sequence,
     ) -> PhysicalTokenBlock:
+        if not self.enable_caching:
+            return self.gpu_allocator.allocate()
         block_hash: Optional[int] = None
         if (self._is_last_block_full(seq)):
             block_hash = seq.hash_of_block(len(seq.logical_token_blocks) - 1)
@@ -422,27 +430,34 @@ class BlockSpaceManager:
         seq: Sequence,
         access_time: float,
     ) -> None:
-        block_table = self.block_tables[seq.seq_id]
-        for block in block_table:
-            block.last_accessed = access_time
+        if self.enable_caching:
+            block_table = self.block_tables[seq.seq_id]
+            for block in block_table:
+                block.last_accessed = access_time
 
-    def compute_last_full_block_in_seq(self, seq: Sequence):
-        if seq.seq_id not in self.block_tables:
-            return
-        max_full_block = seq.get_len() // self.block_size - 1
-        block_table = self.block_tables[seq.seq_id]
-        if max_full_block == -1:
-            return
-        block_table[max_full_block].computed = True
+    def compute_full_blocks_in_seq(self, seq: Sequence):
+         if seq.seq_id not in self.block_tables:
+             return
+         max_full_block = seq.get_len() // self.block_size - 1
+         block_table = self.block_tables[seq.seq_id]
+         if max_full_block == -1:
+             return
+         for i in reversed(range(max_full_block)):
+             if block_table[i].computed:
+                 break
+             block_table[i].computed = True
 
-    def get_all_block_ids_till_computed(self, seq: Sequence) -> List[int]:
-        if seq.seq_id not in self.block_tables:
-            return []
-        block_table = self.block_tables[seq.seq_id]
-        for block_idx in reversed(range(len(block_table))):
-            if block_table[block_idx].computed:
-                return [b.block_number for b in block_table[:block_idx + 1]]
-        return []
+    def get_all_computed_blocks(self, seq: Sequence) -> List[int]:
+         if seq.seq_id not in self.block_tables:
+             return []
+         block_table = self.block_tables[seq.seq_id]
+         # TODO We exclude the last block to avoid the case where the entire
+         # prompt is cached. This would currently cause erroneous behavior in
+         # worker.
+         return [
+             b.block_number
+             for b in takewhile(lambda b: b.computed, block_table[:-1])
+         ]
 
     def get_common_computed_block_ids(self,
                                       seq_group: SequenceGroup) -> List[int]:
@@ -451,7 +466,7 @@ class BlockSpaceManager:
             return []
 
         ids_list = [
-            self.get_all_block_ids_till_computed(seq)
+            self.get_all_computed_blocks(seq)
             for seq in iter(seq_group.seqs_dict.values())
         ]
         return commonprefix([ids for ids in ids_list if ids != []])
@@ -461,4 +476,4 @@ class BlockSpaceManager:
         # all blocks until the marked one are guaranteed to be computed.
         if self.enable_caching:
             for seq in seq_group.seqs_dict.values():
-                self.compute_last_full_block_in_seq(seq)
+                self.compute_full_blocks_in_seq(seq)

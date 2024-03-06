@@ -2,7 +2,7 @@ import enum
 from typing import Dict, List, Optional
 from abc import ABC, abstractmethod, abstractproperty
 
-from vllm.block import PhysicalTokenBlock
+from vllm.block import PhysicalTokenBlock, BlockTable
 
 
 class EvictionPolicy(enum.Enum):
@@ -123,29 +123,23 @@ class RandomEvictor(Evictor):
     """Evicts in a first-in-first-out order"""
 
     def __init__(self):
-        self.free_table: Dict[int, PhysicalTokenBlock] = {}
+        self.free_table: BlockTable = []
 
     def __contains__(self, block_hash: int) -> bool:
-        return block_hash in self.free_table
+        raise AssertionError("Invalid evictor codepath.")
 
     def evict(self) -> PhysicalTokenBlock:
-        if len(self.free_table) == 0:
+        if not self.free_table:
             raise ValueError("No usable cache memory left")
-        evicted_block = next(iter(self.free_table.values()))
+        evicted_block = self.free_table.pop()
         evicted_block.computed = False
-        del self.free_table[evicted_block.block_hash]
         return evicted_block
 
     def add(self, block: PhysicalTokenBlock):
-        self.free_table[block.block_hash] = block
+        self.free_table.append(block)
 
     def remove(self, block_hash: int) -> PhysicalTokenBlock:
-        if block_hash not in self.free_table:
-            raise ValueError(
-                "Attempting to remove block that's not in the evictor")
-        block: PhysicalTokenBlock = self.free_table[block_hash]
-        del self.free_table[block_hash]
-        return block
+        raise AssertionError("Invalid evictor codepath.")
 
     @property
     def num_blocks(self) -> int:
