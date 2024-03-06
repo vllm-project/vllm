@@ -53,8 +53,8 @@ End of list
 {%- if CONTEXT == FORCE_CALL or CONTEXT == FUNCTIONS_LIST -%}
 To call a function, the message must start by "{{func_call_token}}" followed by a json like this:
 * With arguments:
-{{func_call_token}}{"call": "function_name", "arguments": {"arg1": "value1"}}
+{{func_call_token}}{"name": "function_name", "arguments": {"arg1": "value1"}}
 * Without arguments:
-{{func_call_token}}{"call": "function_name", "arguments": null}
+{{func_call_token}}{"name": "function_name", "arguments": null}
 End of functions instructions
 {%- endif -%} {#- CONTEXT == FORCE_CALL or CONTEXT == FUNCTIONS_LIST -#}

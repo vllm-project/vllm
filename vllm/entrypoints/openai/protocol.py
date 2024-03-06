@@ -1,7 +1,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Dict, List, Literal, Optional, Union, Any
+from typing import Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -70,12 +70,12 @@ class ChatCompletionMessageToolCall(BaseModel):
 class FunctionDefinition(BaseModel):
     name: str
     description: str
-    parameters: Optional[Any] = None
+    parameters: Optional[Dict[str, object]] = None
     # See : https://json-schema.org/understanding-json-schema/reference/object
 
 
 class ChatCompletionToolParam(BaseModel):
-    type: str = "function"
+    type: str = Literal["function"]
     function: FunctionDefinition = None
 
 
@@ -103,6 +103,12 @@ class ChatCompletionToolMessage(BaseModel):
     content: str
     tool_call_id: str
 
+class ChatCompletionNamedFunction(BaseModel):
+    name: str
+
+class ChatCompletionNamedToolChoiceParam(BaseModel):
+    function: ChatCompletionNamedFunction
+    type: Optional[Literal["function"]] = None
 
 class ChatCompletionRequest(BaseModel):
     model: str
@@ -124,7 +130,7 @@ class ChatCompletionRequest(BaseModel):
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
     tools: Optional[List[ChatCompletionToolParam]] = None
-    tool_choice: Optional[str] = None
+    tool_choice: Optional[Union[Literal["auto", "none"], ChatCompletionNamedToolChoiceParam]] = "auto"
     # Additional parameters supported by vLLM
     best_of: Optional[int] = None
     top_k: Optional[int] = -1
@@ -339,7 +345,6 @@ class ChatMessage(BaseModel):
     role: str
     content: Optional[str] = None
     tool_calls: Optional[List[ChatCompletionMessageToolCall]] = None
-
 
 class ChatCompletionResponseChoice(BaseModel):
     index: int

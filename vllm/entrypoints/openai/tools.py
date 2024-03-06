@@ -7,7 +7,7 @@ from vllm.logger import init_logger
 from .protocol import (ChatCompletionRequest, ChatCompletionToolParam,
                        ChoiceDeltaToolCall, ChatCompletionMessageToolCall,
                        Function, ChatCompletionAssistantMessage,
-                       ChatCompletionToolMessage)
+                       ChatCompletionToolMessage, ChatCompletionNamedToolChoiceParam)
 
 logger = init_logger(__name__)
 
@@ -22,6 +22,7 @@ class ToolsCallsTemplateContext(Enum):
 
 
 class ToolsCallsTemplate:
+    """ This template system is only used when the tool_choice is set to "auto" """
 
     def __init__(self, template_path=None):
         self.trim_blocks = True
@@ -58,7 +59,7 @@ class ToolsCallsTemplate:
         return self.template.render(
             CONTEXT=ToolsCallsTemplateContext.TOOL_RESPONSE, message=message)
 
-    def render_toolslist(self, tool_choice: Union[str, None],
+    def render_toolslist(self, tool_choice: Union[str, ChatCompletionNamedToolChoiceParam],
                          tools_list: [ChatCompletionToolParam]) -> str:
         if isinstance(tool_choice, str) and tool_choice == "auto":
             tool_choice = None
@@ -69,7 +70,7 @@ class ToolsCallsTemplate:
                     return self.template.render(
                         CONTEXT=ToolsCallsTemplateContext.FORCE_CALL,
                         tool=tool)
-            return None
+            return ""  # Tool not found. What should we do ?
         else:
             return self.template.render(
                 CONTEXT=ToolsCallsTemplateContext.FUNCTIONS_LIST,
@@ -113,11 +114,15 @@ class OpenAIToolsPrompter:
         """ Generate and inject the prompt for tools calls. """
         if request.tools is not None and self.call_token_str is not None and len(
                 request.tools):
-            select_tool_choice = request.tool_choice if (
-                request.tool_choice is not None
-                and request.tool_choice != "auto") else None
+            if (isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)):
+                if request.tool_choice.type == "function":
+                    select_tool_choice = request.tool_choice.function.name
+                else:
+                    select_tool_choice = None
+            else:
+                select_tool_choice = None
             text_inject = self.template.render_toolslist(
-                tool_choice=select_tool_choice, tools_list=request.tools)
+            tool_choice=select_tool_choice, tools_list=request.tools)
             if isinstance(request.messages, str):
                 request.messages = text_inject + request.messages
             elif isinstance(request.messages,
@@ -135,6 +140,7 @@ class ChatPromptCapture:
         self.prefix_size = 0
         self.calls_list: List[{}] = []
         self.after_new_function_call = False
+        self.named_function_call = False  # True if the function call is forced using request.tool_choice
 
     def __str__(self):
         """ Show current state. For debugging purpose. """
@@ -151,6 +157,7 @@ class ChatPromptCapture:
         self.content = ""
         self.maybe_function_call = False
         self.is_function_call = False
+        self.named_function_call = False
         self.prefix_size = 0
         if reset_calls_list:
             self.calls_list = []
@@ -158,13 +165,43 @@ class ChatPromptCapture:
     def num_calls(self):
         return len(self.calls_list)
 
+    def startNamedFunction(self, tool_choice: ChatCompletionNamedToolChoiceParam):
+        # Shound not have to be templated since it's defined by the OpenAI reference:
+        self.content = "{ \"name\": \"" + tool_choice.function.name + "\", \"arguments\": "
+        self.named_function_call = True
+        self.prefix_size = 0
+        self.is_function_call = True
+
+    def closeNamedFunction(self):
+        self.content += "}"
+
+    def checkBracketsFunctionCall(self) -> bool:
+        """ Count brackets in a string to check if the function call is complete. """
+        if self.content.rfind("}", -6) != -1:
+            c1 = self.content.count("{")
+            c2 = self.content.count("}")
+            if self.named_function_call:
+                return c1 == (c2 + 1)
+            else:
+                return c1 == c2  # We have the complete call block
+
     def make_calls_list(self, prompter: OpenAIToolsPrompter):
-        calls_list = self.content.split(prompter.func_call_token())
-        for v_call in calls_list:
-            if len(v_call):
+        """ Convert the extracted text to json function calls. """
+        if self.named_function_call:
+            try:
+                call_dict = json.loads(self.content)
+                if "name" in call_dict:
+                    self.calls_list.append(call_dict)
+            except json.decoder.JSONDecodeError as exc:
+                # Simply ignore invalid functions calls...
+                logger.warning("Error in parsing the function call. This should not happen since it's guided generation : %s" % str(exc))
+                pass
+        else:
+            calls_list = self.content.split(prompter.func_call_token())
+            for v_call in calls_list:
                 try:
                     call_dict = json.loads(v_call)
-                    if "call" in call_dict:
+                    if "name" in call_dict:
                         self.calls_list.append(call_dict)
                 except json.decoder.JSONDecodeError:
                     # Simply ignore invalid functions calls...
@@ -175,10 +212,12 @@ class ChatPromptCapture:
         if len(self.calls_list) and call_id < len(self.calls_list):
             call = self.calls_list[call_id]
             arguments = call["arguments"] if "arguments" in call else None
-            function_call = Function(name=call["call"],
+            if arguments is None and "parameters" in call:
+                arguments = call["parameters"]
+            function_call = Function(name=call["name"],
                                      arguments=json.dumps(arguments)
                                      if arguments is not None else "")
-            return ChatCompletionMessageToolCall(index=call_id, id="call_" + call["call"] +
+            return ChatCompletionMessageToolCall(index=call_id, id="call_" + call["name"] +
                                                  "_" + str(call_id),
                                                  type="function",
                                                  function=function_call)

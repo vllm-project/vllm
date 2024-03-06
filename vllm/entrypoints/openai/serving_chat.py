@@ -9,7 +9,7 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
-    ChatCompletionAssistantMessage, ChatCompletionToolMessage,
+    ChatCompletionAssistantMessage, ChatCompletionToolMessage, ChatCompletionNamedToolChoiceParam,
     ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse,
     UsageInfo)
 from vllm.outputs import RequestOutput
@@ -141,10 +141,15 @@ class OpenAIServingChat(OpenAIServing):
         chunk_object_type = "chat.completion.chunk"
         first_iteration = True
 
-        if self.openai_tools_prompter is not None and request.tools is not None:
+        if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):  # Guided function call
             tools_capture_texts = [ChatPromptCapture() for i in range(request.n)]
+            is_tools_guided_generation = True
         else:
-            tools_capture_texts = None
+            is_tools_guided_generation = False
+            if self.openai_tools_prompter is not None and (isinstance(request.tool_choice, str) and request.tool_choice == "auto"):
+                tools_capture_texts = [ChatPromptCapture() for i in range(request.n)]
+            else:
+                tools_capture_texts = None
 
         # Send response for each token for each request.n (index)
         previous_texts = [""] * request.n
@@ -234,60 +239,69 @@ class OpenAIServingChat(OpenAIServing):
                     else:
                         logprobs = None
 
-                    logger.info("TOKEN: >%s< (%i)" % (output.text[len(previous_texts[i]):], output.token_ids[-1]))
-                    logger.info(str(current_capture))
-
-                    # Manage tools calling
-                    if self.openai_tools_prompter is not None and \
-                            request.tools is not None and \
-                            output.finish_reason is None:
+                    if is_tools_guided_generation:  # Manage tools calling when request.tool_choice set a function
                         if len(current_capture.content) == 0:
-                            current_token: str = output.text[
-                                len(previous_texts[i]):]
-                            if self.openai_tools_prompter.func_call_token_pre(
-                            ) in current_token:
-                                start_pos: int = current_token.index(
-                                    self.openai_tools_prompter.
-                                    func_call_token_pre())
-                                current_capture.content = current_token[
-                                    start_pos:]  # With some models the completion may start by a space.
-                                current_capture.prefix_size = len(
-                                    output.text) - len(current_capture.content)
-                                current_capture.maybe_function_call = True
-                        else:  # Maybe a function call...
-                            current_token: str = output.text[
-                                len(current_capture.content) +
-                                current_capture.prefix_size:]
+                            current_capture.startNamedFunction(request.tool_choice)
+                        current_token: str = output.text[len(previous_texts[i]):]
+                        if len(current_token):
                             current_capture.content += current_token
-                            if len(
-                                    current_capture.content
-                            ) < self.openai_tools_prompter.func_call_token_size(
-                            ):
-                                pass
-                            elif not current_capture.is_function_call:
-                                if current_capture.content.startswith(
+                            if current_capture.checkBracketsFunctionCall():  # We have the complete call block
+                                previous_texts[i] = output.text
+                                current_capture.closeNamedFunction()
+                                current_capture.make_calls_list(
+                                    self.openai_tools_prompter)
+                                current_capture.reset(False)
+                                current_capture.after_new_function_call = True
+                    else:  # Manage tools calling when request.tool_choice is "auto"
+                        if (self.openai_tools_prompter is not None) and \
+                                (current_capture is not None) and \
+                                (request.tools is not None) and \
+                                (output.finish_reason is None):
+                            if len(current_capture.content) == 0:
+                                current_token: str = output.text[
+                                    len(previous_texts[i]):]
+                                if self.openai_tools_prompter.func_call_token_pre(
+                                ) in current_token:
+                                    start_pos: int = current_token.index(
                                         self.openai_tools_prompter.
-                                        func_call_token()):  # Function call !
-                                    current_capture.is_function_call = True
-                                else:  # This is not a function call...
-                                    current_capture.reset(False)
-                            else:  # Currently extracting the function call
-                                if current_capture.content.rfind("}",
-                                                                 -6) != -1:
-                                    c1 = current_capture.content.count("{")
-                                    c2 = current_capture.content.count("}")
-                                    if c1 == c2:  # We have the complete call block
+                                        func_call_token_pre())
+                                    current_capture.content = current_token[
+                                        start_pos:]  # With some models the completion may start by a space.
+                                    current_capture.prefix_size = len(
+                                        output.text) - len(current_capture.content)
+                                    current_capture.maybe_function_call = True
+                            else:  # Maybe a function call...
+                                current_token: str = output.text[
+                                    len(current_capture.content) +
+                                    current_capture.prefix_size:]
+                                current_capture.content += current_token
+                                if len(
+                                        current_capture.content
+                                ) < self.openai_tools_prompter.func_call_token_size(
+                                ):
+                                    pass
+                                elif not current_capture.is_function_call:
+                                    if current_capture.content.startswith(
+                                            self.openai_tools_prompter.
+                                            func_call_token()):  # Function call !
+                                        current_capture.is_function_call = True
+                                    else:  # This is not a function call...
+                                        current_capture.reset(False)
+                                else:  # Currently extracting the function call
+                                    if current_capture.checkBracketsFunctionCall():  # We have the complete call block
                                         previous_texts[i] = output.text
                                         current_capture.make_calls_list(
                                             self.openai_tools_prompter)
                                         current_capture.reset(False)
                                         current_capture.after_new_function_call = True
-                                else:
-                                    pass
+                                    else:
+                                        pass
+
 
                     if current_capture is None or (
-                            not current_capture.maybe_function_call):
+                            isinstance(current_capture, ChatPromptCapture) and not current_capture.maybe_function_call):
                         delta_text = output.text[len(previous_texts[i]):]
+                        logger.info("Appels de fonction (1) (%s:%s) : %s" % (output.finish_reason, delta_text, str(current_capture.calls_list)))
                         previous_texts[i] = output.text
                         previous_num_tokens[i] = len(output.token_ids)
                         if output.finish_reason is None:
@@ -307,8 +321,9 @@ class OpenAIServingChat(OpenAIServing):
                                 data = chunk.model_dump_json(exclude_unset=True)
                                 yield f"data: {data}\n\n"
                         else:
+                            logger.info("Appels de fonction (2) (%s) : %s" % (output.finish_reason, str(current_capture.calls_list)))
                             if output.finish_reason == "stop" and (
-                                    current_capture is not None and
+                                    isinstance(current_capture, ChatPromptCapture) and
                                     (current_capture.num_calls() > 0)):
                                 tools_calls_list = current_capture.to_ChoiceDeltaToolCallList(
                                 )
@@ -405,38 +420,46 @@ class OpenAIServingChat(OpenAIServing):
                     request.tools is not None:
                 current_capture = ChatPromptCapture()
 
-                start_pos = 0
-                while True:
-                    pos = output.text.find(
-                        self.openai_tools_prompter.func_call_token(),
-                        start_pos, -1)
-                    if pos < 0:
-                        break
-                    start_bloc = output.text.find("{", pos, -1)
-                    if start_bloc < 0:
-                        break
-                    if (start_bloc -
-                        (pos +
-                         self.openai_tools_prompter.func_call_token_size())
-                        ) > 1:
-                        break
-                    count = 1
-                    bloc_end = start_bloc + 1
-                    for it_ch in range(start_bloc + 1, len(output.text), 1):
-                        ch = output.text[it_ch]
-                        bloc_end += 1
-                        if ch == "{":
-                            count += 1
-                        elif ch == "}":
-                            count -= 1
-                        if count == 0:  # We have the complete call block
-                            current_capture.content = output.text[
-                                start_bloc:bloc_end]
-                            current_capture.make_calls_list(
-                                self.openai_tools_prompter)
-                            current_capture.reset(False)
+                if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):  # Guided function call
+                    current_capture.startNamedFunction(request.tool_choice)
+                    current_capture.content += output.text
+                    current_capture.closeNamedFunction()
+                    current_capture.make_calls_list(
+                        self.openai_tools_prompter)
+                    current_capture.reset(False)
+                else:
+                    start_pos = 0
+                    while True:
+                        pos = output.text.find(
+                            self.openai_tools_prompter.func_call_token(),
+                            start_pos, -1)
+                        if pos < 0:
                             break
-                    start_pos = bloc_end + 1
+                        start_bloc = output.text.find("{", pos, -1)
+                        if start_bloc < 0:
+                            break
+                        if (start_bloc -
+                            (pos +
+                             self.openai_tools_prompter.func_call_token_size())
+                            ) > 1:
+                            break
+                        count = 1
+                        bloc_end = start_bloc + 1
+                        for it_ch in range(start_bloc + 1, len(output.text), 1):
+                            ch = output.text[it_ch]
+                            bloc_end += 1
+                            if ch == "{":
+                                count += 1
+                            elif ch == "}":
+                                count -= 1
+                            if count == 0:  # We have the complete call block
+                                current_capture.content = output.text[
+                                    start_bloc:bloc_end]
+                                current_capture.make_calls_list(
+                                    self.openai_tools_prompter)
+                                current_capture.reset(False)
+                                break
+                        start_pos = bloc_end + 1
 
                 if current_capture.num_calls() > 0:
                     tools_calls_validation = True
