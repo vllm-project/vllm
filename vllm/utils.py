@@ -118,6 +118,14 @@ def is_hip() -> bool:
     return torch.version.hip is not None
 
 
+def is_neuron() -> bool:
+    try:
+        import transformers_neuronx
+    except ImportError:
+        transformers_neuronx = None
+    return transformers_neuronx is not None
+
+
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
     # NOTE: This import statement should be executed lazily since
@@ -165,7 +173,7 @@ def get_ip() -> str:
     # try ipv4
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        s.connect(("dns.google", 80))  # Doesn't need to be reachable
+        s.connect(("8.8.8.8", 80))  # Doesn't need to be reachable
         return s.getsockname()[0]
     except OSError:
         # try ipv6
