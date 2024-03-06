@@ -781,3 +781,6 @@ class LLMEngine:
 
     def list_loras(self) -> List[int]:
         return self.model_executor.list_loras()
+
+    def check_health(self):
+        self.model_executor.check_health()

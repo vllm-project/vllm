@@ -23,3 +23,8 @@ class SingleGPUModelExecutorAsync(SingleGPUModelExecutor):
                     blocks_to_swap_out=blocks_to_swap_out,
                     blocks_to_copy=blocks_to_copy))
         return output
+
+    async def check_health(self) -> bool:
+        # SingleGPUModelExecutor will always be healthy as long as
+        # it's running.
+        return

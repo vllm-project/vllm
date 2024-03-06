@@ -148,3 +148,8 @@ class SingleGPUModelExecutor:
 
     def list_loras(self) -> List[int]:
         return self.driver_worker.list_loras()
+
+    def check_health(self) -> bool:
+        # SingleGPUModelExecutor will always be healthy as long as
+        # it's running.
+        return

@@ -38,10 +38,12 @@ class RayDistributedModelExecutorAsync(RayDistributedModelExecutor):
         return all_outputs
 
     async def execute_model_async(
-            self, seq_group_metadata_list: List[SequenceGroupMetadata],
-            blocks_to_swap_in: Dict[int, int], blocks_to_swap_out: Dict[int,
-                                                                        int],
-            blocks_to_copy: Dict[int, List[int]]):
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        blocks_to_swap_in: Dict[int, int],
+        blocks_to_swap_out: Dict[int, int],
+        blocks_to_copy: Dict[int, List[int]],
+    ):
         all_outputs = await self._run_workers_async(
             "execute_model",
             driver_kwargs={

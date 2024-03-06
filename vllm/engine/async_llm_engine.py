@@ -262,6 +262,9 @@ class _AsyncLLMEngine(LLMEngine):
             lora_request=lora_request,
         )
 
+    async def check_health_async(self):
+        self.model_executor.check_health()
+
 
 class AsyncLLMEngine:
     """An asynchronous wrapper for LLMEngine.
