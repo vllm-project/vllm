@@ -4,6 +4,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.sampling_params import SamplingParams
 
+
 @pytest.mark.parametrize("model", ["facebook/opt-125m"])
 @pytest.mark.parametrize("block_size", [16])
 def test_computed_prefix_blocks(model: str, block_size: int):
@@ -20,10 +21,9 @@ def test_computed_prefix_blocks(model: str, block_size: int):
         "handle technical difficulties of building a car, but also "
         "decoration.")
 
-    engine_args = EngineArgs(
-        model=model,
-        block_size=block_size,
-        enable_prefix_caching=True)
+    engine_args = EngineArgs(model=model,
+                             block_size=block_size,
+                             enable_prefix_caching=True)
 
     engine = LLMEngine.from_engine_args(engine_args)
     sampling_params = SamplingParams()
