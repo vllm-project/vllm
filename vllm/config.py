@@ -92,6 +92,7 @@ class ModelConfig:
         self.download_dir = download_dir
         self.kv_cache_scales_path = kv_cache_scales_path
         self.load_format = load_format
+        self.dtype = dtype
         self.seed = seed
         self.revision = revision
         self.code_revision = code_revision
@@ -99,7 +100,6 @@ class ModelConfig:
         self.quantization = quantization
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
-
         if os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true":
             # download model from ModelScope hub,
             # lazy import so that modelscope is not required for normal use.

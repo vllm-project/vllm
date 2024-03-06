@@ -7,7 +7,6 @@ from vllm._C import cache_ops
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
 from vllm.utils import in_wsl, is_neuron, STR_DTYPE_TO_TORCH_DTYPE
-from vllm.model_executor.weight_utils import kv_cache_scales_iterator
 from vllm.utils import in_wsl, STR_DTYPE_TO_TORCH_DTYPE
 
 logger = init_logger(__name__)

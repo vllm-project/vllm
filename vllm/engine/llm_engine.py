@@ -114,10 +114,9 @@ class LLMEngine:
         self.device_config = device_config
         self.log_stats = log_stats
         self._verify_args()
-
         self._init_tokenizer()
         self.seq_counter = Counter()
-
+        
         # Create the parallel GPU workers.
         if self.parallel_config.worker_use_ray:
             # Disable Ray usage stats collection.

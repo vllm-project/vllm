@@ -72,8 +72,8 @@ def run_vllm(
     max_model_len: Optional[int],
     enforce_eager: bool,
     kv_cache_dtype: str,
-    device: str,
     kv_cache_scales_path: Optional[str],
+    device: str,
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(
@@ -87,8 +87,8 @@ def run_vllm(
         max_model_len=max_model_len,
         enforce_eager=enforce_eager,
         kv_cache_dtype=kv_cache_dtype,
-        device=device,
         kv_cache_scales_path=kv_cache_scales_path,
+        device=device,
     )
 
     # Add the requests to the engine.
@@ -213,7 +213,7 @@ def main(args: argparse.Namespace):
                                 args.seed, args.n, args.use_beam_search,
                                 args.trust_remote_code, args.dtype,
                                 args.max_model_len, args.enforce_eager,
-                                args.kv_cache_dtype, args.kv_cache_scales_path, args.device)
+                                args.kv_cache_dtype,args.kv_cache_scales_path,args.device)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -300,12 +300,6 @@ if __name__ == "__main__":
         'FP8_E5M2 (without scaling) is only supported on cuda version greater than 11.8. '
         'On ROCm (AMD GPU), FP8_E4M3 is instead supported for common inference criteria.')
     parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda",
-        choices=["cuda"],
-        help='device type for vLLM execution, supporting CUDA only currently.')
-    parser.add_argument(
         '--kv-cache-scales-path',
         type=str,
         default=None,
@@ -314,7 +308,15 @@ if __name__ == "__main__":
         'KV cache scaling factors default to 1.0, which may cause accuracy issues. '
         'FP8_E5M2 (without scaling) is only supported on cuda version greater than 11.8. '
         'On ROCm (AMD GPU), FP8_E4M3 is instead supported for common inference criteria.')
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda",
+        choices=["cuda"],
+        help='device type for vLLM execution, supporting CUDA only currently.')
+    
     args = parser.parse_args()
+
     if args.tokenizer is None:
         args.tokenizer = args.model
     if args.dataset is None:
