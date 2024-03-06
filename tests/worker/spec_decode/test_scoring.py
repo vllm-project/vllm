@@ -3,7 +3,6 @@ import random
 import pytest
 
 from vllm.worker.spec_decode.scoring import BatchExpansionTop1Scorer
-from vllm.worker.spec_decode.util import SpeculativeProposals
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SequenceGroupMetadata
 

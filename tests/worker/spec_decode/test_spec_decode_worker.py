@@ -7,7 +7,7 @@ from vllm.worker.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.worker.worker import Worker
 from vllm.worker.spec_decode.spec_decode_worker import SpecDecodeWorker, calculate_gpu_blocks
 from vllm.worker.spec_decode.scoring import BatchExpansionTop1Scorer, get_all_seq_ids
-from vllm.worker.spec_decode.util import SpeculativeProposals
+from vllm.worker.spec_decode.interfaces import SpeculativeProposals
 from vllm.model_executor.utils import set_random_seed
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.sequence import SequenceGroupMetadata

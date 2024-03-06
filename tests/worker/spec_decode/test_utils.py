@@ -2,7 +2,8 @@ import torch
 import random
 import pytest
 
-from vllm.worker.spec_decode.util import SpeculativeProposals, get_all_seq_ids
+from vllm.worker.spec_decode.util import get_all_seq_ids
+from vllm.worker.spec_decode.interfaces import SpeculativeProposals
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SequenceGroupMetadata
 

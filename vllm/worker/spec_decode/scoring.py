@@ -17,8 +17,8 @@ from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.model_executor.parallel_utils.parallel_state import get_tensor_model_parallel_group
 from vllm.config import CacheConfig
 from vllm.utils import in_wsl
-from vllm.worker.spec_decode.util import nvtx_range, sampler_output_to_torch, SpeculativeProposals, get_all_seq_ids
-from vllm.worker.spec_decode.interfaces import SpeculativeScorer
+from vllm.worker.spec_decode.util import nvtx_range, sampler_output_to_torch, get_all_seq_ids
+from vllm.worker.spec_decode.interfaces import SpeculativeScorer, SpeculativeProposals
 
 SeqId = int
 TargetSeqId = int
