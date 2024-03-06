@@ -3,7 +3,7 @@ import pytest  # noqa
 
 from vllm.config import CacheConfig, SchedulerConfig
 from vllm.core.scheduler import Scheduler
-from vllm.sequence import SequenceGroup
+from vllm.sequence import SequenceGroup, Logprob
 
 from .utils import create_dummy_prompt
 
@@ -46,7 +46,6 @@ def test_scheduler_abort_seq_group():
     assert scheduler.get_num_unfinished_seq_groups() == 0
 
 
-# SANG-TODO Fixing this now.
 def test_scheduler_schedule_simple():
     block_size = 4
     num_seq_group = 4
@@ -109,8 +108,8 @@ def test_scheduler_schedule_preempt_abort():
     # Append "generated" tokens, allowing the sequence to mark prompt tokens as
     # processed.
     token_id = 0
-    seq_a.append_token_id(token_id, {token_id: 0.0})
-    seq_b.append_token_id(token_id, {token_id: 0.0})
+    seq_a.append_token_id(token_id, {token_id: Logprob(0.0)})
+    seq_b.append_token_id(token_id, {token_id: Logprob(0.0)})
 
     # Schedule seq groups generation and preempt seq group b.
     seq_group_meta, out = scheduler.schedule()
@@ -130,45 +129,6 @@ def test_scheduler_schedule_preempt_abort():
             and not out.blocks_to_swap_out)
     assert len(seq_group_meta) == 1
     assert scheduler.get_num_unfinished_seq_groups() == 1
-
-
-def test_scheduler_max_seqs():
-    block_size = 4
-    num_seq_group = 4
-    max_seq_group = 2
-    max_model_len = 16
-    scheduler_config = SchedulerConfig(64, max_seq_group, max_model_len, 256)
-    cache_config = CacheConfig(block_size, 1.0, 1, "auto")
-    cache_config.num_cpu_blocks = 8
-    cache_config.num_gpu_blocks = 8
-    scheduler = Scheduler(scheduler_config, cache_config, None)
-
-    all_seq_groups: List[SequenceGroup] = []
-    # Add seq groups to scheduler.
-    for i in range(num_seq_group):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=block_size)
-        all_seq_groups.append(seq_group)
-
-    # Append 1 seq group
-    scheduler.add_seq_group(all_seq_groups[0])
-
-    # Schedule seq groups prompts.
-    _, out = scheduler.schedule()
-    assert set(out.scheduled_seq_groups) == set([all_seq_groups[0]])
-
-    # Schedule seq groups generation.
-    _, out = scheduler.schedule()
-    assert set(out.scheduled_seq_groups) == set([all_seq_groups[0]])
-
-    # Append 2 more seq group
-    scheduler.add_seq_group(all_seq_groups[1])
-    scheduler.add_seq_group(all_seq_groups[2])
-
-    # Schedule seq groups prompts.
-    # Only 1 seq group should be scheduled since max_seq_group is 2
-    # and one is prompting.
-    _, out = scheduler.schedule()
-    assert set(out.scheduled_seq_groups) == set([all_seq_groups[1]])
 
 
 def test_scheduler_schedule_chunked_prefill():
@@ -240,3 +200,43 @@ def test_scheduler_schedule_chunked_prefill():
     assert seq_group_meta[1].request_id == "0"
     assert not seq_group_meta[1].is_chunked_prefill
     assert not seq_group_meta[1].is_prompt
+
+
+def test_scheduler_max_seqs():
+    block_size = 4
+    num_seq_group = 4
+    max_seq_group = 2
+    max_model_len = 16
+    scheduler_config = SchedulerConfig(64, max_seq_group, max_model_len, 256)
+    cache_config = CacheConfig(block_size, 1.0, 1, "auto")
+    cache_config.num_cpu_blocks = 8
+    cache_config.num_gpu_blocks = 8
+    scheduler = Scheduler(scheduler_config, cache_config, None)
+
+    all_seq_groups: List[SequenceGroup] = []
+    # Add seq groups to scheduler.
+    for i in range(num_seq_group):
+        _, seq_group = create_dummy_prompt(str(i), prompt_length=block_size)
+        all_seq_groups.append(seq_group)
+
+    # Append 1 seq group
+    scheduler.add_seq_group(all_seq_groups[0])
+
+    # Schedule seq groups prompts.
+    _, out = scheduler.schedule()
+    assert set(out.scheduled_seq_groups) == set([all_seq_groups[0]])
+
+    # Schedule seq groups generation.
+    _, out = scheduler.schedule()
+    assert set(out.scheduled_seq_groups) == set([all_seq_groups[0]])
+
+    # Append 2 more seq group
+    scheduler.add_seq_group(all_seq_groups[1])
+    scheduler.add_seq_group(all_seq_groups[2])
+
+    # Schedule seq groups prompts.
+    # Only 1 seq group should be scheduled since max_seq_group is 2
+    # and one is prompting.
+    _, out = scheduler.schedule()
+    assert set(out.scheduled_seq_groups) == set([all_seq_groups[1]])
+

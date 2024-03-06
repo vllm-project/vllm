@@ -48,9 +48,9 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = None
     flash_style: bool = False
     device: str = 'auto'
+    ray_workers_use_nsight: bool = False
     max_chunked_prefill_len: int = -1
     max_num_prompt_seqs: int = 256
-    ray_workers_use_nsight: bool = False
 
     def __post_init__(self):
         if self.tokenizer is None:
