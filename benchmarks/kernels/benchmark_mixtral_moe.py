@@ -12,22 +12,39 @@ import triton
 
 def main():
     method = fused_moe
-    for bs in [
-            1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256, 512, 1024, 1536,
-            2048, 3072, 4096
-    ]:
-        run_grid(bs, method=method)
-
-
-def run_grid(bs, method):
     d_model = 4096
     num_total_experts = 8
     top_k = 2
     tp_size = 2
     model_intermediate_size = 14336
     num_layers = 32
-    num_calls = 100
+    best_configs = {}
 
+    for bs in [
+            1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256, 512, 1024, 1536,
+            2048, 3072, 4096
+    ]:
+        best_configs.update(
+            run_grid(bs=bs,
+                     method=method,
+                     d_model=d_model,
+                     num_total_experts=num_total_experts,
+                     top_k=top_k,
+                     tp_size=tp_size,
+                     model_intermediate_size=model_intermediate_size,
+                     num_layers=num_layers))
+
+    device_name = torch.cuda.get_device_name().replace(" ", "_")
+    filename = f"E={num_total_experts},N={model_intermediate_size//tp_size},device_name={device_name}.json"
+    print(f"writing combined configs to file {filename}")
+    with open(filename, 'w') as fd:
+        json.dump(best_configs, fd, indent=4)
+
+
+def run_grid(bs: int, method, d_model: int, num_total_experts: int, top_k: int,
+             tp_size: int, model_intermediate_size: int,
+             num_layers: int) -> float:
+    num_calls = 100
     num_warmup_trials = 1
     num_trials = 1
 
@@ -64,7 +81,7 @@ def run_grid(bs, method):
         print(f'{tp_size=} {bs=}')
         print(f'{config}')
         # warmup
-        print(f'warming up')
+        print('warming up')
         try:
             for _ in range(num_warmup_trials):
                 run_timing(
@@ -82,7 +99,7 @@ def run_grid(bs, method):
             continue
 
         # trial
-        print(f'benchmarking')
+        print('benchmarking')
         for _ in range(num_trials):
             kernel_dur_ms = run_timing(
                 num_calls=num_calls,
@@ -109,11 +126,14 @@ def run_grid(bs, method):
 
     print("best_time_us", best_time_us)
     print("best_config", best_config)
+    bs_best_config = {str(bs): best_config}
 
     filename = "/tmp/config.jsonl"
     print(f"writing config to file {filename}")
     with open(filename, "a") as f:
-        f.write(json.dumps({str(bs): best_config}) + "\n")
+        f.write(json.dumps(bs_best_config) + "\n")
+
+    return bs_best_config
 
 
 def run_timing(num_calls: int, bs: int, d_model: int, num_total_experts: int,
