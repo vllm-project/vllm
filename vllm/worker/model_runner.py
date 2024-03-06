@@ -265,7 +265,7 @@ class ModelRunner:
             num_generation_tokens=0,
             max_seq_len=max_prompt_len,
             start_loc=start_loc_tensor,
-            max_context_len=max(context_lens),
+            max_context_len=None,
             context_lens=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=False,
@@ -344,10 +344,11 @@ class ModelRunner:
                 input_tokens.append(0)
                 input_positions.append(0)
                 slot_mapping.append(_PAD_SLOT_ID)
-                context_lens.append(1)
+                context_lens.append(0)
                 block_tables.append([])
             batch_size = graph_batch_size
 
+        # Q: should we not pad when cuda graph is disabled?
         input_tokens = _make_tensor_with_pad_for_alignment(input_tokens,
                                                            pad=0,
                                                            dtype=torch.long,
@@ -610,6 +611,7 @@ class ModelRunner:
             kv_caches=kv_caches,
             input_metadata=input_metadata,
         )
+        breakpoint()
 
         # Sample the next token.
         output = self.model.sample(
@@ -717,7 +719,7 @@ class ModelRunner:
         # deleted before the CUDA graphs.
         self.cupy_nccl_backend = cupy_utils.get_nccl_backend()
 
-        assert not self.model_config.enforce_eager
+        # assert not self.model_config.enforce_eager
         logger.info("Capturing the model for CUDA graphs. This may lead to "
                     "unexpected consequences if the model is not static. To "
                     "run the model in eager mode, set 'enforce_eager=True' or "
@@ -735,7 +737,7 @@ class ModelRunner:
         input_positions = torch.zeros(max_batch_size, dtype=torch.long).cuda()
         slot_mapping = torch.empty(max_batch_size, dtype=torch.long).cuda()
         slot_mapping.fill_(_PAD_SLOT_ID)
-        context_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
+        context_lens = torch.zeros(max_batch_size, dtype=torch.int32).cuda()
         block_tables = torch.from_numpy(self.graph_block_tables).cuda()
 
         graph_batch_size = _get_graph_batch_size(
@@ -876,7 +878,7 @@ class CUDAGraphRunner:
                                                  non_blocking=True)
         self.input_buffers["block_tables"].copy_(input_metadata.block_tables,
                                                  non_blocking=True)
-
+        breakpoint()
         # Run the graph.
         self.graph.replay()
 

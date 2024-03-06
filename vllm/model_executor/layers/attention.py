@@ -157,6 +157,7 @@ class PagedAttention(nn.Module):
 
         num_prompt_tokens = input_metadata.num_prompt_tokens
         num_generation_tokens = input_metadata.num_generation_tokens
+        print(num_generation_tokens)
 
         if num_prompt_tokens > 0:
             assert num_generation_tokens == 0
@@ -252,6 +253,7 @@ class PagedAttention(nn.Module):
                 )
 
         if num_generation_tokens > 0:
+            breakpoint()
             assert num_prompt_tokens == 0
             # Decoding run.
             output = _paged_attention(
