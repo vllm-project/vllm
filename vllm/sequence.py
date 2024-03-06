@@ -80,21 +80,6 @@ class SequenceData:
         output_token_ids: The token IDs of the output.
         cumulative_logprob: The cumulative log probability of the output.
     """
-
-    def from_anyscale_sd(
-        token_ids: List[int],
-        num_prompt_tokens: int,
-        num_processed_token_ids: int,
-        cumulative_logprob: float = 0.0,
-    ) -> "SequenceData":
-        prompt_token_ids = token_ids[:num_prompt_tokens]
-        output_token_ids = token_ids[num_prompt_tokens:]
-        # NOTE: num_processed_token_ids not yet used
-        return SequenceData(
-            prompt_token_ids,
-            output_token_ids,
-        )
-
     def __init__(
         self,
         prompt_token_ids: List[int],

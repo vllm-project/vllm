@@ -221,31 +221,15 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         prompt_token_ids = seq_data.get_prompt_token_ids()
         new_output_token_ids = [*seq_data.get_output_token_ids(), *token_ids]
 
-        # The first scoring sequence will include the normal number of
-        # processed tokens. This allows it to write KV from the previous
-        # iteration.
-        #
-        # Subsequent scoring sequences only include a single unprocessed token;
-        # the token they score.
-        #if len(token_ids) == 0:
-        #    num_processed_token_ids = seq_data.get_num_processed_token_ids()
-        #else:
-        #    num_processed_token_ids = seq_data.get_len() + len(token_ids) - 1
-        num_processed_token_ids = seq_data.get_len() + len(token_ids) - 1
-
         return SequenceGroupMetadata(
             request_id=seq_group_metadata.request_id,
             is_prompt=seq_group_metadata.is_prompt,
             #is_chunked_prefill=seq_group_metadata.is_chunked_prefill,
             seq_data={
                 target_seq_id:
-                SequenceData.from_anyscale_sd(
-                    token_ids=prompt_token_ids + new_output_token_ids,
-                    num_prompt_tokens=len(prompt_token_ids),
-                    # Support for tracking cumulative logprob not yet
-                    # implemented.
-                    cumulative_logprob=0.0,
-                    num_processed_token_ids=num_processed_token_ids,
+                SequenceData(
+                    prompt_token_ids=prompt_token_ids,
+                    output_token_ids=new_output_token_ids,
                 ),
             },
             sampling_params=seq_group_metadata.sampling_params,
