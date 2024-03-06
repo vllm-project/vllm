@@ -3,10 +3,13 @@ import random
 import pytest
 from unittest.mock import MagicMock
 
+from vllm.worker.spec_decode.multi_step_worker import MultiStepWorker
+from vllm.worker.worker import Worker
 from vllm.worker.spec_decode.draft_target_worker import DraftTargetWorker, calculate_gpu_blocks
 from vllm.worker.spec_decode.scoring import BatchExpansionTop1Scorer, get_all_seq_ids
 from vllm.worker.spec_decode.util import SpeculativeProposals
 from vllm.model_executor.utils import set_random_seed
+from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.sequence import SequenceGroupMetadata
 from .utils import mock_worker, create_batch, ExecuteModelData, create_seq_group_metadata_from_prompts, create_sampler_output_list
 from vllm.worker.spec_decode.metrics import DraftTargetWorkerMetrics, AsyncMetricsCollector
@@ -22,7 +25,7 @@ def test_correctly_calls_draft_model(k: int, batch_size: int):
     """
     draft_worker = mock_worker()
     target_worker = mock_worker()
-    rejection_sampler = MagicMock()
+    rejection_sampler = MagicMock(spec=RejectionSampler)
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
     worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
                                metrics_collector)
@@ -58,9 +61,9 @@ def test_correctly_calls_target_model(k: int, batch_size: int):
     """
     draft_worker = mock_worker()
     target_worker = mock_worker()
-    rejection_sampler = MagicMock()
+    rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
-    metrics_collector = MagicMock()
+    metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
     draft_worker.device = 'cuda'
     target_worker.device = 'cuda'
@@ -138,9 +141,9 @@ def test_correctly_calls_rejection_sampler(k: int, batch_size: int):
 
     draft_worker = mock_worker(vocab_size)
     target_worker = mock_worker(vocab_size)
-    rejection_sampler = MagicMock()
+    rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
-    metrics_collector = MagicMock()
+    metrics_collector = MagicMock(spec=AsyncMetricsCollector)
     draft_worker.device = 'cuda'
     target_worker.device = 'cuda'
 
@@ -216,9 +219,9 @@ def test_correctly_formats_output(k: int, batch_size: int):
 
     draft_worker = mock_worker(vocab_size)
     target_worker = mock_worker(vocab_size)
-    rejection_sampler = MagicMock()
+    rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
-    metrics_collector = MagicMock()
+    metrics_collector = MagicMock(spec=AsyncMetricsCollector)
     draft_worker.device = 'cuda'
     target_worker.device = 'cuda'
 
@@ -327,9 +330,9 @@ def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool):
 
     draft_worker = mock_worker(vocab_size)
     target_worker = mock_worker(vocab_size)
-    rejection_sampler = MagicMock()
+    rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
-    metrics_collector = MagicMock()
+    metrics_collector = MagicMock(spec=AsyncMetricsCollector)
     draft_worker.device = 'cuda'
     target_worker.device = 'cuda'
 
@@ -408,9 +411,9 @@ def test_k_equals_zero(k: int, batch_size: int):
     """
     draft_worker = mock_worker()
     target_worker = mock_worker()
-    rejection_sampler = MagicMock()
+    rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
-    metrics_collector = MagicMock()
+    metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
     draft_worker.device = 'cuda'
     target_worker.device = 'cuda'
@@ -447,9 +450,9 @@ def test_empty_input_batch(k: int, batch_size: int):
     """
     draft_worker = mock_worker()
     target_worker = mock_worker()
-    rejection_sampler = MagicMock()
+    rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
-    metrics_collector = MagicMock()
+    metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
     draft_worker.device = 'cuda'
     target_worker.device = 'cuda'
@@ -480,9 +483,9 @@ def test_empty_input_batch(k: int, batch_size: int):
 def test_init_model():
     draft_worker = mock_worker()
     target_worker = mock_worker()
-    rejection_sampler = MagicMock()
+    rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
-    metrics_collector = MagicMock()
+    metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
     worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
                                metrics_collector)
@@ -501,9 +504,9 @@ def test_init_model():
 def test_init_cache_engine():
     draft_worker = mock_worker()
     target_worker = mock_worker()
-    rejection_sampler = MagicMock()
+    rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
-    metrics_collector = MagicMock()
+    metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
     worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
                                metrics_collector)
@@ -527,9 +530,9 @@ def test_profile_num_available_blocks(available_gpu_blocks: int,
                                       draft_kv_size_bytes: int):
     draft_worker = mock_worker()
     target_worker = mock_worker()
-    rejection_sampler = MagicMock()
+    rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
-    metrics_collector = MagicMock()
+    metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
     target_worker.profile_num_available_blocks.return_value = (
         available_gpu_blocks, available_cpu_blocks)

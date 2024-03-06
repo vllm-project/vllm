@@ -58,10 +58,13 @@ def create_execute_model_data(
     )
 
 
-def mock_worker(vocab_size: int = 30_000,
+def mock_worker(cls=None, vocab_size: int = 30_000,
                 max_model_len: int = 2048,
                 rank: int = 0) -> MagicMock:
-    worker = MagicMock()
+    if cls is None:
+        cls = Worker
+
+    worker = MagicMock(spec=cls)
     worker.vocab_size = vocab_size
     worker.max_model_len = max_model_len
     worker.rank = rank
