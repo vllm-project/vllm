@@ -265,19 +265,24 @@ endmacro()
 # Define a target named `GPU_MOD_NAME` for a single extension. The
 # arguments are:
 #
-# DESTINATION <dest>         - module destination directory.
-# LANGUAGE <lang>            - the GPU language for this module, e.g CUDA, HIP,
+# DESTINATION <dest>         - Module destination directory.
+# LANGUAGE <lang>            - The GPU language for this module, e.g CUDA, HIP,
 #                              etc.
-# SOURCES <sources>          - list of source files relative to CMakeLists.txt
+# SOURCES <sources>          - List of source files relative to CMakeLists.txt
 #                              directory.
-# ARCHITECTURES <arches>     - a list of target GPU architectures in cmake
+#
+# Optional arguments:
+#
+# ARCHITECTURES <arches>     - A list of target GPU architectures in cmake
 #                              format.
 #                              Refer `CMAKE_CUDA_ARCHITECTURES` documentation
 #                              and `CMAKE_HIP_ARCHITECTURES` for more info.
-# COMPILE_FLAGS <flags>      - extra compiler flags passed to NVCC/hip.
-# INCLUDE_DIRECTORIES <dirs> - extra include directories.
-# LINK_LIBRARIES <libraries> - extra link libraries.
-# WITH_SOABI                 - generate library with python SOABI suffix name.
+#                              ARCHITECTURES will use cmake's defaults if
+#                              not provided.
+# COMPILE_FLAGS <flags>      - Extra compiler flags passed to NVCC/hip.
+# INCLUDE_DIRECTORIES <dirs> - Extra include directories.
+# LINK_LIBRARIES <libraries> - Extra link libraries.
+# WITH_SOABI                 - Generate library with python SOABI suffix name.
 #
 # Note: optimization level/debug info is set via cmake build type.
 #

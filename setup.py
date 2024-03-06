@@ -189,7 +189,6 @@ def _is_cuda() -> bool:
 
 
 def _install_punica() -> bool:
-    print(f"DEBUG device_count = {torch.cuda.device_count()}")
     return bool(int(os.getenv("VLLM_INSTALL_PUNICA_KERNELS", "0")))
 
 
