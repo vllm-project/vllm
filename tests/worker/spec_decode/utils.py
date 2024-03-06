@@ -252,5 +252,4 @@ def create_batch(batch_size,
         create_seq_group_metadata_from_prompts(prompts, num_gpu_blocks,
                                                block_size, final_seq_lens,
                                                prev_output_tokens, seq_ids), )
-    #num_preallocated_slots=k)
     return execute_model_data, prompts, prev_output_tokens
