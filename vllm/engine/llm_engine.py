@@ -12,7 +12,7 @@ from vllm.engine.ray_utils import initialize_ray_cluster
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
+from vllm.sequence import (Logprob, SamplerOutput, Sequence, SequenceGroup,
                            SequenceGroupOutput, SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                TokenizerGroup)
@@ -135,6 +135,11 @@ class LLMEngine:
                      log_stats=not engine_args.disable_log_stats)
         return engine
 
+    def __reduce__(self):
+        # This is to ensure that the LLMEngine is not referenced in
+        # the closure used to initialize Ray worker actors
+        raise RuntimeError("LLMEngine should not be pickled!")
+
     def get_tokenizer_for_seq(self, sequence: Sequence):
         return self.tokenizer.get_lora_tokenizer(sequence.lora_request)
 
@@ -224,6 +229,13 @@ class LLMEngine:
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
+        max_logprobs = self.get_model_config().max_logprobs
+        if (sampling_params.logprobs
+                and sampling_params.logprobs > max_logprobs) or (
+                    sampling_params.prompt_logprobs
+                    and sampling_params.prompt_logprobs > max_logprobs):
+            raise ValueError(f"Cannot request more than "
+                             f"{max_logprobs} logprobs.")
         if arrival_time is None:
             arrival_time = time.monotonic()
         prompt_token_ids = self.encode_request(
@@ -235,8 +247,10 @@ class LLMEngine:
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
+        eos_token_id = self.tokenizer.get_lora_tokenizer(
+            lora_request).eos_token_id
         seq = Sequence(seq_id, prompt, prompt_token_ids, block_size,
-                       lora_request)
+                       eos_token_id, lora_request)
 
         # Defensive copy of SamplingParams, which are used by the sampler,
         # this doesn't deep-copy LogitsProcessor objects
@@ -292,15 +306,13 @@ class LLMEngine:
         if early_stopping is True:
             return True
 
-        current_worst_score = (current_worst_seq.get_beam_search_score(
+        current_worst_score = current_worst_seq.get_beam_search_score(
             length_penalty=length_penalty,
-            eos_token_id=self.get_tokenizer_for_seq(
-                current_worst_seq).eos_token_id))
+            eos_token_id=current_worst_seq.eos_token_id)
         if early_stopping is False:
-            highest_attainable_score = (best_running_seq.get_beam_search_score(
+            highest_attainable_score = best_running_seq.get_beam_search_score(
                 length_penalty=length_penalty,
-                eos_token_id=self.get_tokenizer_for_seq(
-                    best_running_seq).eos_token_id))
+                eos_token_id=best_running_seq.eos_token_id)
         else:
             assert early_stopping == "never"
             if length_penalty > 0.0:
@@ -314,8 +326,7 @@ class LLMEngine:
                 highest_attainable_score = (
                     best_running_seq.get_beam_search_score(
                         length_penalty=length_penalty,
-                        eos_token_id=self.get_tokenizer_for_seq(
-                            best_running_seq).eos_token_id,
+                        eos_token_id=best_running_seq.eos_token_id,
                         seq_len=max_possible_length))
             else:
                 # Otherwise, beam search will prefer shorter sequences. The
@@ -324,8 +335,7 @@ class LLMEngine:
                 highest_attainable_score = (
                     best_running_seq.get_beam_search_score(
                         length_penalty=length_penalty,
-                        eos_token_id=self.get_tokenizer_for_seq(
-                            best_running_seq).eos_token_id))
+                        eos_token_id=best_running_seq.eos_token_id))
         return current_worst_score >= highest_attainable_score
 
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
@@ -334,6 +344,13 @@ class LLMEngine:
         # Process prompt logprobs
         prompt_logprobs = outputs.prompt_logprobs
         if prompt_logprobs is not None:
+            # We can pick any sequence for the prompt.
+            seq = next(iter(seq_group.seqs_dict.values()))
+            all_token_ids = seq.get_token_ids()
+            for i, prompt_logprobs_for_token in enumerate(prompt_logprobs):
+                self._decode_logprobs(seq, seq_group.sampling_params,
+                                      prompt_logprobs_for_token,
+                                      all_token_ids[:i])
             seq_group.prompt_logprobs = prompt_logprobs
 
         # Process samples
@@ -416,8 +433,7 @@ class LLMEngine:
         all_finished_seqs = existing_finished_seqs + new_finished_seqs
         # Sort the finished sequences by their scores.
         all_finished_seqs.sort(key=lambda x: x[0].get_beam_search_score(
-            length_penalty=length_penalty,
-            eos_token_id=self.get_tokenizer_for_seq(x[0]).eos_token_id),
+            length_penalty=length_penalty, eos_token_id=x[0].eos_token_id),
                                reverse=True)
         for seq, parent, is_new in all_finished_seqs[:beam_width]:
             if is_new:
@@ -444,8 +460,7 @@ class LLMEngine:
                               if not seq.is_finished()]
         # Sort the running sequences by their scores.
         running_child_seqs.sort(key=lambda x: x[0].get_beam_search_score(
-            length_penalty=length_penalty,
-            eos_token_id=self.get_tokenizer_for_seq(x[0]).eos_token_id),
+            length_penalty=length_penalty, eos_token_id=x[0].eos_token_id),
                                 reverse=True)
 
         # Check if we can stop the beam search.
@@ -672,12 +687,36 @@ class LLMEngine:
             time_e2e_requests=time_e2e_requests,
         )
 
+    def _decode_logprobs(self, seq: Sequence, prms: SamplingParams,
+                         logprobs: Dict[int, Logprob],
+                         all_input_ids: List[int]) -> None:
+        if not logprobs:
+            return
+        for token_id, sample_logprob in logprobs.items():
+            if (sample_logprob.decoded_token is None and token_id != -1):
+                all_input_ids_with_logprob = all_input_ids[:-1] + [token_id]
+                _, new_text, prefix_offset, read_offset = detokenize_incrementally(
+                    self.get_tokenizer_for_seq(seq),
+                    all_input_ids=all_input_ids_with_logprob,
+                    prev_tokens=seq.tokens,
+                    prefix_offset=seq.prefix_offset,
+                    read_offset=seq.read_offset,
+                    skip_special_tokens=prms.skip_special_tokens,
+                    spaces_between_special_tokens=prms.
+                    spaces_between_special_tokens,
+                )
+                sample_logprob.decoded_token = new_text
+
     def _decode_sequence(self, seq: Sequence, prms: SamplingParams) -> None:
         """Decodes the new token for a sequence."""
+        all_input_ids = seq.get_token_ids()
+        self._decode_logprobs(seq, prms, seq.output_logprobs[-1],
+                              all_input_ids)
+
         (new_tokens, new_output_text, prefix_offset,
          read_offset) = detokenize_incrementally(
              self.get_tokenizer_for_seq(seq),
-             all_input_ids=seq.get_token_ids(),
+             all_input_ids=all_input_ids,
              prev_tokens=seq.tokens,
              prefix_offset=seq.prefix_offset,
              read_offset=seq.read_offset,
@@ -718,8 +757,8 @@ class LLMEngine:
             return
 
         # Check if the sequence has generated the EOS token.
-        if ((not sampling_params.ignore_eos) and seq.get_last_token_id()
-                == self.get_tokenizer_for_seq(seq).eos_token_id):
+        if ((not sampling_params.ignore_eos)
+                and seq.get_last_token_id() == seq.eos_token_id):
             seq.status = SequenceStatus.FINISHED_STOPPED
             return
 
