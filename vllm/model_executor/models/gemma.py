@@ -340,8 +340,6 @@ class GemmaForCausalLM(nn.Module):
                 # (1 + weight) to the output, instead of just weight.
                 if "norm.weight" in name:
                     loaded_weight += 1.0
-                if name == "lm_head.weight" and name not in params_dict:
-                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
