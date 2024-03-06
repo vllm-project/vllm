@@ -549,10 +549,10 @@ def test_profile_num_available_blocks(available_gpu_blocks: int,
     block_size = 16
 
     num_gpu_blocks, num_cpu_blocks = worker.profile_num_available_blocks(
-        block_size, gpu_memory_utilization, cpu_swap_space)
+        block_size, gpu_memory_utilization, cpu_swap_space, cache_dtype="auto")
 
     target_worker.profile_num_available_blocks.assert_called_once_with(
-        block_size, gpu_memory_utilization, cpu_swap_space)
+        block_size, gpu_memory_utilization, cpu_swap_space, "auto")
     assert num_cpu_blocks == available_cpu_blocks
 
     assert num_gpu_blocks == calculate_gpu_blocks(target_cache_block_size_bytes,
