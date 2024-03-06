@@ -4,7 +4,6 @@ import pytest  # noqa
 from vllm.config import CacheConfig, SchedulerConfig
 from vllm.core.scheduler import Scheduler
 from vllm.sequence import SequenceGroup, Logprob
-from tests.core.utils import round_up_to_next_block
 
 from .utils import create_dummy_prompt
 

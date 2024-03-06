@@ -126,13 +126,15 @@ def test_append_slot_cow():
                                       watermark=0)
 
     # Allocate prompt to gpu block. There is one slot left in the block.
-    prompt = Sequence(seq_id=1, prompt="one two three", prompt_token_ids=[1, 2, 3], block_size=block_size)
+    prompt = Sequence(seq_id=1,
+                      prompt="one two three",
+                      prompt_token_ids=[1, 2, 3],
+                      block_size=block_size)
 
     # Fork the sequence, such that a COW will be required when we append a new
     # token id.
     child = prompt.fork(new_seq_id=2)
 
-    
     # Allocate space for the sequence group.
     seq_group = SequenceGroup("1", [prompt, child], SamplingParams(),
                               time.time(), time.perf_counter)
