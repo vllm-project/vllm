@@ -12,11 +12,12 @@ client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
 models = client.models.list()
 model = models.data[0].id
 temperature = 0.1
-stream = False
+stream = True
 
 EXTRA_BODY_OPENAI = {"stop_token_ids": [32000]}
 
-httpx.get('http://localhost:8000/privileged')
+# Can be used to reset the tokenizer and functions templates. Vllm have to be launch with --privileged argument:
+# httpx.get('http://localhost:8000/privileged')
 
 def get_current_date_utc():
     print("Calling get_current_date_utc client side.")
@@ -121,8 +122,10 @@ def run_conversation(question: str, tool_choice_param):
         if not len(response.choices):
             return None
         response_message = response.choices[0].message
-        # print(str(response_message))
-        tool_calls = response_message.tool_calls
+        if response_message.tool_calls is not None:
+            tool_calls = response_message.tool_calls
+        else:
+            print("The tool_calls response is null ?!")
 
     # Step 2: check if the model wanted to call a function
     if len(tool_calls):
