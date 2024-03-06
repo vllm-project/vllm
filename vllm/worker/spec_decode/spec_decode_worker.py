@@ -80,7 +80,7 @@ class SpecDecodeWorker:
         scorer_cache_block_size_bytes = self.scorer_worker.get_cache_block_size_bytes(block_size, cache_dtype)
         proposer_cache_block_size_bytes = self.proposer_worker.get_cache_block_size_bytes(block_size, cache_dtype)
 
-        new_num_gpu_blocks = calculate_gpu_blocks(scorer_cache_block_size_bytes,
+        new_num_gpu_blocks = split_num_cache_blocks_evenly(scorer_cache_block_size_bytes,
                                                   proposer_cache_block_size_bytes,
                                                   num_gpu_blocks)
         return new_num_gpu_blocks, num_cpu_blocks
@@ -305,8 +305,7 @@ class SpecDecodeWorker:
         return self.scorer_worker.device
 
 
-# TODO name
-def calculate_gpu_blocks(scorer_cache_block_size_bytes: int, proposer_cache_block_size_bytes: int,
+def split_num_cache_blocks_evenly(scorer_cache_block_size_bytes: int, proposer_cache_block_size_bytes: int,
                          total_num_gpu_blocks: int) -> int:
     """Given total_num_gpu_blocks, the number of GPU blocks that could be
     allocate to the target model, this function calculates how many blocks

@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 from vllm.worker.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.worker.worker import Worker
-from vllm.worker.spec_decode.spec_decode_worker import SpecDecodeWorker, calculate_gpu_blocks
+from vllm.worker.spec_decode.spec_decode_worker import SpecDecodeWorker, split_num_cache_blocks_evenly
 from vllm.worker.spec_decode.scoring import BatchExpansionTop1Scorer, get_all_seq_ids
 from vllm.worker.spec_decode.interfaces import SpeculativeProposals
 from vllm.model_executor.utils import set_random_seed
@@ -555,7 +555,7 @@ def test_profile_num_available_blocks(available_gpu_blocks: int,
         block_size, gpu_memory_utilization, cpu_swap_space, "auto")
     assert num_cpu_blocks == available_cpu_blocks
 
-    assert num_gpu_blocks == calculate_gpu_blocks(target_cache_block_size_bytes,
+    assert num_gpu_blocks == split_num_cache_blocks_evenly(target_cache_block_size_bytes,
                                                   draft_kv_size_bytes,
                                                   available_gpu_blocks)
 
@@ -565,10 +565,10 @@ def test_profile_num_available_blocks(available_gpu_blocks: int,
 @pytest.mark.parametrize('target_cache_block_size_bytes', [2 * 2 * 4096, 2 * 2 * 8192])
 @pytest.mark.parametrize('draft_kv_size_bytes', [0, 2 * 2 * 768, 2 * 2 * 4096])
 @torch.inference_mode()
-def test_calculate_gpu_blocks(available_gpu_blocks: int,
+def test_split_num_cache_blocks_evenly(available_gpu_blocks: int,
                               target_cache_block_size_bytes: int,
                               draft_kv_size_bytes: int):
-    num_blocks = calculate_gpu_blocks(target_cache_block_size_bytes,
+    num_blocks = split_num_cache_blocks_evenly(target_cache_block_size_bytes,
                                       draft_kv_size_bytes,
                                       available_gpu_blocks)
     assert (num_blocks * target_cache_block_size_bytes) + (
