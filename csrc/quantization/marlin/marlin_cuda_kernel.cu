@@ -1,5 +1,6 @@
 /*
- * Copyright (C) Marlin.2024 Elias Frantar (elias.frantar@ist.ac.at)
+ * Modified by Neural Magic
+ * Copyright (C) Marlin.2024 Elias Frantar
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -406,7 +407,7 @@ Marlin(const int4 *__restrict__ A, // fp16 input matrix of shape mxk
   }
 
   // Since B-accesses have non-constant stride they have to be computed at
-  // runtime; we break dependicies between subsequent accesses with a tile by
+  // runtime; we break dependencies between subsequent accesses with a tile by
   // maintining multiple pointers (we have enough registers), a tiny
   // optimization.
   const int4 *B_ptr[b_sh_wr_iters];
@@ -479,7 +480,7 @@ Marlin(const int4 *__restrict__ A, // fp16 input matrix of shape mxk
     // It may seem inefficient that we reload the groups for every sub-tile;
     // however, this does not seem to be a significant bottleneck, while some
     // theoretically better attempts have lead to bad instruction ordering by
-    // the compiler and correspondingly a noticable drop in performance.
+    // the compiler and correspondingly a noticeable drop in performance.
     if (group_blocks != -1) {
       int4 *sh_s_stage =
           sh_s + s_sh_stage * ((group_blocks / thread_k_blocks) *
@@ -577,7 +578,7 @@ Marlin(const int4 *__restrict__ A, // fp16 input matrix of shape mxk
   };
 
   // Since multiple threadblocks may process parts of the same column slice, we
-  // finally have to globally reduce over the results. As the striped partioning
+  // finally have to globally reduce over the results. As the striped partitioning
   // minimizes the number of such reductions and our outputs are usually rather
   // small, we perform this reduction serially in L2 cache.
   auto global_reduce = [&](bool first = false, bool last = false) {
@@ -741,7 +742,7 @@ Marlin(const int4 *__restrict__ A, // fp16 input matrix of shape mxk
 
     // Process results and, if necessary, proceed to the next column slice.
     // While this pattern may not be the most readable, other ways of writing
-    // the loop seemed to noticeably worse performance after compliation.
+    // the loop seemed to noticeably worse performance after compilation.
     if (slice_iters == 0) {
       cp_async_wait<0>();
       bool last = slice_idx == slice_count - 1;

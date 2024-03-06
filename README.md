@@ -2,7 +2,7 @@
 
 ## Overview
 
-[vLLM](https://github.com/vllm-project/vllm) is a fast and easy-to-use library for LLM inference that Neural Magic regularly contributes upstream improvements to. This fork, `nm-vllm` is our opinionated focus on incorporating the latest LLM optimizations like quantization and sparsity for enhanced performance. 
+[vLLM](https://github.com/vllm-project/vllm) is a fast and easy-to-use library for LLM inference that Neural Magic regularly contributes upstream improvements to. This fork, `nm-vllm` is our opinionated focus on incorporating the latest LLM optimizations like quantization and sparsity for enhanced performance.
 
 ## Installation
 
@@ -31,8 +31,8 @@ Neural Magic maintains a variety of sparse models on our Hugging Face organizati
 
 #### Model Inference with Marlin (4-bit Quantization)
 
-Marlin is an extremely optimized FP16xINT4 matmul kernel aimed at LLM inference that can deliver close to ideal (4x) speedups up to batchsizes of 16-32 tokens. 
-To use Marlin within nm-vllm, simply pass the Marlin quantized directly to the engine. It will detect the quantization from the model's config. 
+Marlin is an extremely optimized FP16xINT4 matmul kernel aimed at LLM inference that can deliver close to ideal (4x) speedups up to batchsizes of 16-32 tokens.
+To use Marlin within nm-vllm, simply pass the Marlin quantized directly to the engine. It will detect the quantization from the model's config.
 
 Here is a demonstraiton with a [4-bit quantized Llama-2 7B chat](https://huggingface.co/neuralmagic/llama-2-7b-chat-marlin) model:
 
@@ -53,7 +53,7 @@ For a quick demonstration, here's how to run a small [50% sparse llama2-110M](ht
 from vllm import LLM, SamplingParams
 
 model = LLM(
-    "nm-testing/llama2.c-stories110M-pruned50", 
+    "nm-testing/llama2.c-stories110M-pruned2.4",
     sparsity="sparse_w16a16",   # If left off, model will be loaded as dense
 )
 

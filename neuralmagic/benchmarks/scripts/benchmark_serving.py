@@ -385,7 +385,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--disable-tqdm",
         action="store_true",
-        help="Specify to disbale tqdm progress bar.",
+        help="Specify to disable tqdm progress bar.",
     )
 
     parser.add_argument("--save-directory",
