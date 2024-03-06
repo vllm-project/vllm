@@ -16,7 +16,7 @@ from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics, AsyncMetricsCollec
 @pytest.mark.parametrize('batch_size', [1, 2, 32])
 @torch.inference_mode()
 def test_correctly_calls_draft_model(k: int, batch_size: int):
-    """Verify that the SpecDecodeWorker calls the draft model with correct
+    """Verify SpecDecodeWorker calls the draft worker with correct
     inputs. Everything else is mocked out.
     """
     draft_worker = mock_worker(cls=MultiStepWorker)
@@ -52,7 +52,7 @@ def test_correctly_calls_draft_model(k: int, batch_size: int):
 @pytest.mark.parametrize('batch_size', [1, 2, 32])
 @torch.inference_mode()
 def test_correctly_calls_target_model(k: int, batch_size: int):
-    """Verify that the SpecDecodeWorker calls the target model with correct
+    """Verify SpecDecodeWorker calls the target model with correct
     inputs. Everything else is mocked out.
     """
     draft_worker = mock_worker(cls=MultiStepWorker)
@@ -131,7 +131,7 @@ def test_correctly_calls_target_model(k: int, batch_size: int):
 @pytest.mark.parametrize('batch_size', [1, 2, 32])
 @torch.inference_mode()
 def test_correctly_calls_rejection_sampler(k: int, batch_size: int):
-    """Verify that the SpecDecodeWorker calls the rejection sampler with
+    """Verify SpecDecodeWorker calls the rejection sampler with
     correct inputs. Everything else is mocked out.
     """
     vocab_size = 32_000
@@ -210,8 +210,8 @@ def test_correctly_calls_rejection_sampler(k: int, batch_size: int):
 @pytest.mark.parametrize('batch_size', [1, 2, 32])
 @torch.inference_mode()
 def test_correctly_formats_output(k: int, batch_size: int):
-    """Verify that the SpecDecodeWorker formats rejection sampler output
-    correctly. Everything else is mocked out.
+    """Verify SpecDecodeWorker formats sampler output correctly.
+    Everything else is mocked out.
     """
     vocab_size = 32_000
 
@@ -323,7 +323,7 @@ def test_correctly_formats_output(k: int, batch_size: int):
 @pytest.mark.parametrize('returns_metrics', [True, False])
 @torch.inference_mode()
 def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool):
-    """TODO
+    """Verify SpecDecodeWorker collects metrics.
     """
     vocab_size = 32_000
 
@@ -482,6 +482,9 @@ def test_empty_input_batch(k: int, batch_size: int):
 
 @torch.inference_mode()
 def test_init_model():
+    """Verify SpecDecodeWorker invokes proposer/scorer worker init_model, as
+    well as other GPU initialization.
+    """
     draft_worker = mock_worker(cls=MultiStepWorker)
     target_worker = mock_worker()
     rejection_sampler = MagicMock(spec=RejectionSampler)
@@ -503,6 +506,9 @@ def test_init_model():
 
 @torch.inference_mode()
 def test_init_cache_engine():
+    """Verify SpecDecodeWorker invokes init_cache_engine on proposer/scorer
+    workers.
+    """
     draft_worker = mock_worker(cls=MultiStepWorker)
     target_worker = mock_worker()
     rejection_sampler = MagicMock(spec=RejectionSampler)
@@ -529,6 +535,10 @@ def test_profile_num_available_blocks(available_gpu_blocks: int,
                                       available_cpu_blocks: int,
                                       target_cache_block_size_bytes: int,
                                       draft_kv_size_bytes: int):
+    """Verify SpecDecodeWorker correctly profiles num available GPU blocks.
+    Specifically, it should run profiling in the scorer worker, and then evenly
+    split the blocks between proposer and scorer worker.
+    """
     draft_worker = mock_worker(cls=MultiStepWorker)
     target_worker = mock_worker()
     rejection_sampler = MagicMock(spec=RejectionSampler)
@@ -570,6 +580,9 @@ def test_profile_num_available_blocks(available_gpu_blocks: int,
 def test_split_num_cache_blocks_evenly(available_gpu_blocks: int,
                                        target_cache_block_size_bytes: int,
                                        draft_kv_size_bytes: int):
+    """Verify split_num_cache_blocks_evenly does not exceed original memory
+    allocation in bytes.
+    """
     num_blocks = split_num_cache_blocks_evenly(target_cache_block_size_bytes,
                                                draft_kv_size_bytes,
                                                available_gpu_blocks)

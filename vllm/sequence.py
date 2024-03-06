@@ -74,6 +74,8 @@ class SequenceData:
 
     Args:
         prompt_token_ids: The token IDs of the prompt.
+        output_token_ids: The token IDs of the output. Set to an empty list if
+            None.
 
     Attributes:
         prompt_token_ids: The token IDs of the prompt.
@@ -504,6 +506,8 @@ class SequenceGroupOutput:
 
 @dataclass
 class SamplerOutput:
+    """Helper 
+    """
     """For each sequence group, we generate a list of SequenceOutput object,
     each of which contains one possible candidate for the next token.
     """

@@ -8,7 +8,8 @@ from .utils import mock_worker, create_seq_group_metadata_from_prompts
 
 @pytest.mark.parametrize('num_target_seq_ids', [100])
 def test_create_target_seq_id_iterator(num_target_seq_ids: int):
-    """Assert all target seq ids are greater than input seq ids.
+    """Verify all new sequence ids are greater than all input
+    seq ids.
     """
     scorer = BatchExpansionTop1Scorer(mock_worker(), 'cuda:0', 32_000)
 
@@ -27,8 +28,7 @@ def test_create_target_seq_id_iterator(num_target_seq_ids: int):
 
 @pytest.mark.parametrize('k', [1, 2, 6])
 def test_get_token_ids_to_score(k: int):
-    """Verify BatchExpansionTop1Scorer correctly determines which token ids need
-    to be scored.
+    """Verify correct tokens are selected for scoring.
     """
     proposal_token_ids = torch.tensor(
         list(range(k)),
@@ -54,7 +54,7 @@ def test_get_token_ids_to_score(k: int):
 
 @pytest.mark.parametrize('k', [1, 2, 6])
 def test_create_single_target_seq_group_metadata(k: int):
-    """Verify correct creation of a target seq group metadata.
+    """Verify correct creation of a batch-expanded seq group metadata.
     """
 
     prompt_tokens = [1, 2, 3]

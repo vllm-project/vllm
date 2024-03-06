@@ -270,7 +270,8 @@ def test_same_output_for_multi_step():
 
 @torch.inference_mode()
 def test_draft_proposals_full_speculation_len():
-    """
+    """Verify DraftModelTop1Proposer correctly handles case where all sequences
+    can speculate.
     """
     k = 10
     batch_size = 32
@@ -318,7 +319,8 @@ def test_draft_proposals_full_speculation_len():
 
 @torch.inference_mode()
 def test_draft_proposals_no_speculations():
-    """
+    """Verify DraftModelTop1Proposer correctly handles case where no sequences
+    can speculate.
     """
     k = 10
     batch_size = 32
@@ -355,7 +357,8 @@ def test_draft_proposals_no_speculations():
 
 @torch.inference_mode()
 def test_draft_proposals_mixed_k():
-    """
+    """Verify DraftModelTop1Proposer correctly handles case some sequences can
+    speculate and some can't.
     """
     k = 10
     batch_size = 32

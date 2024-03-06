@@ -8,6 +8,8 @@ from vllm.spec_decode.metrics import AsyncMetricsCollector
 
 
 def test_initial_call_returns_none():
+    """Expect first call to get metrics to return None.
+    """
     rej_sampler = MagicMock()
     rej_sampler.num_accepted_tokens = torch.tensor(0,
                                                    dtype=torch.long,
@@ -24,6 +26,8 @@ def test_initial_call_returns_none():
 
 
 def test_second_call_returns_metrics():
+    """Expect second call to not return None.
+    """
     rej_sampler = MagicMock()
     rej_sampler.num_accepted_tokens = torch.tensor(0,
                                                    dtype=torch.long,
@@ -50,6 +54,8 @@ def test_second_call_returns_metrics():
 
 @pytest.mark.parametrize("rank", [1, 2, 3, 4])
 def test_nonzero_rank_noop(rank):
+    """Verify nonzero ranks don't collect metrics.
+    """
     rej_sampler = MagicMock()
     rej_sampler.num_accepted_tokens = torch.tensor(0,
                                                    dtype=torch.long,
@@ -67,6 +73,8 @@ def test_nonzero_rank_noop(rank):
 
 
 def test_noop_until_time():
+    """Verify metrics aren't collected until enough time passes.
+    """
     rej_sampler = MagicMock()
     rej_sampler.num_accepted_tokens = torch.tensor(0,
                                                    dtype=torch.long,
@@ -99,6 +107,8 @@ def test_noop_until_time():
 
 @pytest.mark.parametrize("has_data", [True, False])
 def test_initial_metrics_has_correct_values(has_data: bool):
+    """Test correctness of metrics data.
+    """
     if has_data:
         num_accepted_tokens = 103
         num_emitted_tokens = 104

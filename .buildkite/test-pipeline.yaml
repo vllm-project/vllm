@@ -25,7 +25,7 @@ steps:
   num_gpus: 2 # only support 1 or 2 for now.
 
 - label: Engine Test
-  command: pytest -v -s engine
+  command: pytest -v -s engine test_sequence.py
 
 - label: Entrypoints Test
   command: pytest -v -s entrypoints
