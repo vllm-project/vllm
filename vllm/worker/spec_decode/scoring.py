@@ -28,6 +28,7 @@ from vllm.config import CacheConfig
 #from vllm.model_executor.layers.sampler import RawSamplerOutput
 from vllm.utils import in_wsl
 from vllm.worker.spec_decode.util import nvtx_range, sampler_output_to_torch, SpeculativeProposals, get_all_seq_ids
+from vllm.worker.spec_decode.interfaces import SpeculativeScorer
 
 SeqId = int
 TargetSeqId = int
@@ -37,18 +38,6 @@ logger = logging.getLogger(__name__)
 
 from abc import ABC, abstractmethod
 
-
-class SpeculativeScorer(ABC):
-    @abstractmethod
-    def score_proposals(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata], blocks_to_swap_in: Optional[Dict[int, int]],
-        blocks_to_swap_out: Optional[Dict[int, int]],
-        blocks_to_copy: Optional[Dict[int, List[int]]],
-        k: int,
-        proposals: SpeculativeProposals,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        raise NotImplementedError
 
 class BatchExpansionTop1Scorer(SpeculativeScorer):
     def __init__(self, scorer_worker: Worker, device: str, vocab_size: int):
