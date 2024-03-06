@@ -17,6 +17,10 @@ from vllm.spec_decode.interfaces import SpeculativeScorer
 
 
 class SpecDecodeWorker:
+    """Worker which implements speculative decoding.
+
+    See https://github.com/vllm-project/vllm/pull/3103 for more info.
+    """
 
     def __init__(
         self,
@@ -29,12 +33,15 @@ class SpecDecodeWorker:
         Create a SpecDecodeWorker.
 
         Args:
-            proposer_worker: A draft worker that can run multiple steps
-                in a row.
-            scorer_worker: The normal worker that is used for scoring.
-                It should contain the target model.
+            proposer_worker: A worker that can produce speculative tokens for
+                sequences.
+            scorer_worker: A worker that produces probabilities of speculative
+                tokens according to some base model. Typically a vanilla vLLM
+                Worker.
             rejection_sampler: A Torch module used to perform modified rejection
                 sampling for speculative decoding.
+            metrics_collector: Helper class for collecting metrics; can be set
+                for testing purposes.
         """
         self.proposer_worker = proposer_worker
         self.scorer_worker = scorer_worker
@@ -50,9 +57,10 @@ class SpecDecodeWorker:
         self.scorer: SpeculativeScorer = None
 
     def init_model(self) -> None:
-        # Initialize the target model before the draft model.
-        # This allows the draft model to have a smaller TP degree than the
-        # larger model without refactors to parallel_state.
+        """Initialize both scorer and proposer models.
+        """
+        # The scorer worker model is initialized first in case the proposer
+        # model has a smaller TP degree than the target worker.
         self.scorer_worker.init_model()
         self.proposer_worker.init_model()
 
@@ -67,6 +75,13 @@ class SpecDecodeWorker:
                                      gpu_memory_utilization: float,
                                      cpu_swap_space: int,
                                      cache_dtype: str) -> Tuple[int, int]:
+        """Determine the number of cache blocks to use.
+
+        This is done by profiling the scorer model (which is typically the
+        larger of the two). Then the total memory which would be used by the
+        scorer cache is divided evenly between the proposer and scorer model KV,
+        such that the number of blocks is equal in both KV caches.
+        """
         num_gpu_blocks, num_cpu_blocks = (
             self.scorer_worker.profile_num_available_blocks(
                 block_size, gpu_memory_utilization, cpu_swap_space,
@@ -83,6 +98,8 @@ class SpecDecodeWorker:
         return new_num_gpu_blocks, num_cpu_blocks
 
     def init_cache_engine(self, cache_config: CacheConfig):
+        """Initialize the cache engine of the scorer and proposer workers.
+        """
         self.scorer_worker.init_cache_engine(cache_config)
         self.proposer_worker.init_cache_engine(cache_config)
 
@@ -95,10 +112,15 @@ class SpecDecodeWorker:
         blocks_to_copy: Optional[Dict[int, List[int]]],
         num_spec_tokens: int,
     ) -> List[SamplerOutput]:
+        """Perform speculative decoding on the input batch.
+        """
+
         assert seq_group_metadata_list is not None, (
             "speculative decoding "
             "requires non-None seq_group_metadata_list")
 
+        # If no spec tokens, call the proposer and scorer workers normally.
+        # Used for prefill.
         if num_spec_tokens == 0 or len(seq_group_metadata_list) == 0:
             return self._run_no_spec(
                 seq_group_metadata_list=seq_group_metadata_list,
@@ -124,9 +146,8 @@ class SpecDecodeWorker:
         blocks_to_copy: Optional[Dict[int, List[int]]],
     ) -> List[SamplerOutput]:
         """Run a prefill step, without any speculation. The input is sent to the
-        draft and target model so that prompt KV are stored in both caches.
-
-        TODO update
+        proposer and scorer model so that the KV cache is consistent between the
+        two.
         """
 
         self.proposer_worker.execute_model(
@@ -143,7 +164,8 @@ class SpecDecodeWorker:
             blocks_to_copy=blocks_to_copy,
         )
 
-        # Do not want PyTorch tensors transferred back.
+        # Clear device tensors from sampler output. This reduces communication
+        # overhead when the engine runs in a different process than the workers.
         sampler_output.probs = None
         sampler_output.sampled_tokens = None
         return [sampler_output]
@@ -159,22 +181,11 @@ class SpecDecodeWorker:
     ) -> List[SamplerOutput]:
         """Execute a single step of speculative decoding.
 
-        This runs the draft model k times, then scores each token using the
-        target model. Rejection sampling is performed on the draft and target
-        outputs to determine which tokens can be accepted without modifying the
-        true distribution.
+        This invokes the proposer worker to get k speculative tokens for each
+        sequence, then scores each speculative token using the scoring worker.
 
-        Args:
-            execute_model_data: The input sequences that will be speculated
-                upon.
-            k: A hyperparameter integer dictating how many tokens to speculate.
-                Given some k, this will return a number of tokens per sequence
-                in the interval [1, k+1], depending on how many tokens are
-                accepted.
-
-        Returns:
-            A List of SamplerOutput, as if the target worker were simply called
-            multiple times.
+        Returns a list of SamplerOutput, each containing a single token per
+        sequence.
         """
 
         # Generate proposals using draft worker.
@@ -205,6 +216,9 @@ class SpecDecodeWorker:
         proposals: SpeculativeProposals,
         max_proposal_len: int,
     ) -> torch.Tensor:
+        """Determine which speculative tokens are accepted using the
+        probabilities of each token according to the proposer and scorer models.
+        """
         proposal_lens_list = proposals.proposal_lens.tolist()
         spec_indices = [
             i for i, (_, proposal_len) in enumerate(

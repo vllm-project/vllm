@@ -9,18 +9,45 @@ from typing import Callable
 
 @dataclass
 class SpecDecodeWorkerMetrics:
-    num_spec_tokens: int
+    """Dataclass holding metrics emitted from the spec decode worker.
+    """
+
+    # The empirical acceptance rate of the proposal method on a per-token basis.
+    # This is useful for evaluating how well the proposal method aligns with the
+    # scoring method.
     draft_acceptance_rate: float
+
+    # The empirical efficiency, measured as the number of tokens emitted by the
+    # system divided by the number of tokens that could be emitted by the system
+    # if the proposal method were perfect.
     system_efficiency: float
-    accepted_tokens: int
+
+    # The number of speculative tokens produced by the proposal method.
     draft_tokens: int
+
+    # The number of tokens emitted by the entire system.
     emitted_tokens: int
+
+    # The number of tokens accepted by the scoring model and verification
+    # routine, e.g. Llama2-70B and lossless rejection sampling.
+    # 
+    # NOTE: Any token accepted by the verification routine is considered
+    # accepted (regardless of if the speculative prefix is also accepted). The
+    # user will usually see less accepted tokens. This metric is helpful when
+    # evaluating alignment of the proposal method with the scoring model.
+    accepted_tokens: int
+
+    # The number of speculative tokens per sequence.
+    num_spec_tokens: int
 
 
 Timer = Callable[[], float]
 
 
 class AsyncMetricsCollector:
+    """Class which copies rejection sampler metrics from the device to CPU on a
+    non-default Torch stream.
+    """
 
     def __init__(self,
                  rejection_sampler: RejectionSampler,

@@ -14,6 +14,19 @@ TokenId = int
 
 
 class BatchExpansionTop1Scorer(SpeculativeScorer):
+    """Implements a speculative scorer that uses batch expansion to get
+    probabilities of speculative tokens according to the scoring model.
+
+    Batch expansion converts a list of sequences and multiple query positions
+    to a new batch of sequences, each with a single query position. This allows
+    for MQA-like scoring in speculative decoding without requiring an MQA
+    kernel.
+
+    It is strictly less efficient than MQA scoring.
+
+    It only supports scoring the top1 proposal tokens of the proposer, instead
+    of topk/tree.
+    """
 
     def __init__(self, scorer_worker: Worker, device: str, vocab_size: int):
         self._scorer_worker = scorer_worker
@@ -30,14 +43,25 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         k: int,
         proposals: SpeculativeProposals,
     ) -> SpeculativeScores:
-        """Score the proposed tokens via the target model.
+        """Score the proposed tokens via the scoerer model.
 
         This converts each input sequence to a set of k+1 target sequences. The
         target sequences have the unique continuations to be scored and a
         unique sequence ID that is different from all input sequence ids.
 
-        This adds overhead and should be removed. It is done because the sampler
-        currently operates on sequences instead of queries.
+        If a speculative sequence length would exceed the max model length, then
+        no speculation is produced for that sequence.
+
+        Args:
+            seq_group_metadata_list: The input sequence group metadata.
+            blocks_to_swap_in: This is passed to the worker during scoring.
+            blocks_to_swap_out: This is passed to the worker during scoring.
+            blocks_to_copy: This is passed to the worker during scoring.
+            k: The fixed proposal length.
+            proposals: The speculative proposals to score.
+        Returns:
+            SpeculativeScores: The scores of each speculative token, along with
+                which sequences were ignored during scoring.
         """
 
         # TODO(cade) perform this on GPU to remove blocking call.
@@ -75,9 +99,13 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
     def _expand_batch(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-        proposal_token_ids_list: List[int],
+        proposal_token_ids_list: List[TokenId],
         proposal_lens_list: List[int],
     ) -> Tuple[List[int], List[int], List[SequenceGroupMetadata], int]:
+        """Given the input sequences and potentially multiple corresponding
+        proposal tokens, create a new batch where each sequence has a single
+        query token.
+        """
 
         spec_seqs = [
             seq_group for seq_group, proposal_len in zip(
@@ -101,7 +129,6 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             if proposal_len == 0
         ]
 
-        # Convert to target sequence ids.
         target_seq_group_metadata_list = self._create_scoring_model_input(
             spec_seqs, proposal_token_ids_list)
         num_scoring_tokens = len(target_seq_group_metadata_list)
@@ -115,6 +142,10 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                         num_scoring_tokens: int, non_spec_indices: List[int],
                         spec_indices: List[int],
                         k: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Contract the expanded batch back into its original size.
+        This maps the scores of speculative tokens back to their original
+        sequences.
+        """
         (target_token_ids, target_probs, non_spec_target_token_ids,
          non_spec_target_probs) = self._split_scoring_output(
              target_sampler_output, num_scoring_tokens)
@@ -149,7 +180,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
     def _create_scoring_model_input(
             self,
             seq_group_metadata_list: List[SequenceGroupMetadata],
-            proposal_token_ids: List[List[int]],  # shape: [batch_size, k]
+            proposal_token_ids: List[List[TokenId]],  # shape: [batch_size, k]
     ) -> List[SequenceGroupMetadata]:
         """Given the original input sequences and proposed tokens from the draft
         model, create a list of target sequences that can be used for scoring.
@@ -176,7 +207,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
     def _create_target_seq_group_metadata(
         self,
         input_seq_group_metadata: SequenceGroupMetadata,
-        proposal_token_ids: List[int],  # shape: [batch_size, k]
+        proposal_token_ids: List[TokenId],  # shape: [batch_size, k]
         batch_index: int,
         target_seq_ids_iter: Iterator[TargetSeqId],
     ) -> List[SequenceGroupMetadata]:
@@ -295,7 +326,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
 
     def _get_token_ids_to_score(
             self,
-            full_spec_token_ids: List[int]  # shape: [k]
+            full_spec_token_ids: List[TokenId]  # shape: [k]
     ) -> List[List[TokenId]]:
         """Given an int tensor of proposal token ids, return a list of
         token ids that should be scored.

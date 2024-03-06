@@ -506,19 +506,22 @@ class SequenceGroupOutput:
 
 @dataclass
 class SamplerOutput:
-    """Helper 
-    """
     """For each sequence group, we generate a list of SequenceOutput object,
     each of which contains one possible candidate for the next token.
+
+    This datastructure implements methods so it can be used like a list, but
+    also has optional fields for device tensors.
     """
+
     outputs: List[SequenceGroupOutput]
 
-    # Used to store an on-GPU tensor containing the batch probabilities.
+    # On-device tensor containing probabilities of each token.
     sampled_token_probs: Optional["torch.Tensor"] = None
 
-    # Used to store an on-GPU tensor containing the sampled token ids.
+    # On-device tensor containing the sampled token ids.
     sampled_token_ids: Optional["torch.Tensor"] = None
 
+    # Spec decode metrics populated by workers.
     spec_decode_worker_metrics: Optional["SpecDecodeWorkerMetrics"] = None
 
     def __getitem__(self, idx: int):

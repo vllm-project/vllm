@@ -86,14 +86,8 @@ class MultiStepWorker(Worker):
         blocks_to_copy: Dict[int, List[int]],
         max_proposal_len: int,
     ) -> SpeculativeProposals:
-        """
-        - create proposal lens tensor
-            - determine which seqs are over len
-            - set k = 0
-        - create new batch that ignores k=0
-        - do normal fwd pass
-        - construct output
-            - inject empty rows for token ids/probs tensor
+        """Produce speculations given an input batch of sequences. The number of
+        speculative tokens per sequence is determined by max_proposal_len.
         """
 
         return self._proposer.get_proposals(
@@ -131,21 +125,9 @@ class MultiStepWorker(Worker):
         """Copy input data structures to remove side-effects when input data
         structures are shared with other modules.
 
-        The multi-step worker must be able to append tokens to sequences after
-        a forward pass. This necessitates modification of the data structures
-        used by the worker. Since these data structures are shared with other
-        parts of vLLM, like the scheduler, we must take care not to introduce
-        unexpected side-effects.
-
-        When Ray is used to orchestrate worker processes (such as when the
-        tensor-parallel degree is >1), this is not a problem because the input
-        datastructures will be serialized and created anew in the worker
-        process.
-
-        However, when Ray is not used to orchestrate the worker processes (such
-        as when the tensor-parallel degree is 1), this is a problem. We avoid
-        the problem by shallow-copying the input datastructures (specifically,
-        the parts that will change in multiple steps).
+        Helpful when the vLLM scheduler runs in the same process as the worker.
+        The alternative is deep-copying (or other form of deep copy); this has
+        performance downsides.
         """
 
         # Shallow-copy the list of SequenceGroupMetadata. This allows us to
@@ -225,6 +207,9 @@ class MultiStepWorker(Worker):
 
 
 class DraftModelTop1Proposer(SpeculativeProposer):
+    """Helper class which separates out sequences which would exceed the max
+    model length when speculated upon.
+    """
 
     def __init__(
         self,
@@ -246,21 +231,19 @@ class DraftModelTop1Proposer(SpeculativeProposer):
         blocks_to_copy: Dict[int, List[int]],
         max_proposal_len: int,
     ) -> SpeculativeProposals:
+        """Get speculative proposals given the input batch.
+
+        Sequences which would exceed the max model length are skipped during
+        speculation.
         """
-        - create proposal lens tensor
-            - determine which seqs are over len
-            - set k = 0
-        - create new batch that ignores k=0
-        - do normal fwd pass
-        - construct output
-            - inject empty rows for token ids/probs tensor
-        """
+
+        # Split speculative- and non-speculative- sequences.
         proposal_lens, nonzero_proposal_len_seqs, nonzero_proposal_len_indices = self._split_by_max_model_len(
             seq_group_metadata_list, max_proposal_len)
 
-        # run fwd pass
-
         if nonzero_proposal_len_seqs:
+            # Speculate tokens using the draft worker for the speculative
+            # sequences.
             maybe_sampler_output = self._draft_worker.execute_model_multi_step(
                 seq_group_metadata_list=nonzero_proposal_len_seqs,
                 blocks_to_swap_in=blocks_to_swap_in,
@@ -269,8 +252,11 @@ class DraftModelTop1Proposer(SpeculativeProposer):
                 num_steps=max_proposal_len,
             )
         else:
+            # If no sequences can be speculated, set sampler output to None.
             maybe_sampler_output = None
 
+        # Combine speculative- and non-speculative sequences into the same
+        # representation.
         proposal_tokens, proposal_probs, proposal_lens = self._merge_outputs(
             batch_size=len(seq_group_metadata_list),
             max_proposal_len=max_proposal_len,
@@ -295,7 +281,12 @@ class DraftModelTop1Proposer(SpeculativeProposer):
         proposal_lens: List[int],
         nonzero_proposal_len_indices: List[int],
     ) -> Tuple[torch.Tensor, torch.tensor, torch.Tensor]:
+        """After speculations are produced, merge the speculation results with
+        the skipped sequences.
+        """
         if maybe_sampler_output is None:
+            # If no speculative tokens, the sampler output will be None.
+            # In this case we return empty tensors.
             proposal_tokens = torch.zeros(0,
                                           max_proposal_len,
                                           dtype=torch.long,
@@ -343,6 +334,8 @@ class DraftModelTop1Proposer(SpeculativeProposer):
         seq_group_metadata_list: List[SequenceGroupMetadata],
         max_proposal_len: int,
     ) -> Tuple[List[int], List[SequenceGroupMetadata], List[int]]:
+        """Determine which sequences would exceed the max model length.
+        """
 
         proposal_lens: List[int] = []
         nonzero_proposal_len_seqs: List[SequenceGroupMetadata] = []
