@@ -18,7 +18,7 @@ from vllm.model_executor.parallel_utils.parallel_state import get_tensor_model_p
 from vllm.config import CacheConfig
 from vllm.utils import in_wsl
 from vllm.worker.spec_decode.util import nvtx_range, sampler_output_to_torch, get_all_seq_ids
-from vllm.worker.spec_decode.interfaces import SpeculativeScorer, SpeculativeProposals
+from vllm.worker.spec_decode.interfaces import SpeculativeScorer, SpeculativeProposals, SpeculativeScores
 
 SeqId = int
 TargetSeqId = int
@@ -38,7 +38,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         blocks_to_copy: Optional[Dict[int, List[int]]],
         k: int,
         proposals: SpeculativeProposals,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> SpeculativeScores:
         """Score the proposed tokens via the target model.
 
         This converts each input sequence to a set of k+1 target sequences. The
@@ -106,7 +106,10 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             all_tokens[spec_indices] = target_token_ids
             all_probs[spec_indices] = target_probs
         
-        return all_tokens, all_probs
+        return SpeculativeScores(
+            probs=all_probs,
+            token_ids=all_tokens,
+        )
 
     def _create_scoring_model_input(
             self,
