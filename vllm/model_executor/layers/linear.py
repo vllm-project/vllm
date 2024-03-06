@@ -8,7 +8,7 @@ from torch.nn.parameter import Parameter
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.communication_op import (
-    tensor_model_parallel_all_reduce, tensor_model_parallel_all_gather)
+    tensor_model_parallel_all_reduce)
 from vllm.model_executor.parallel_utils.utils import (
     divide, split_tensor_along_last_dim)
 from vllm.model_executor.utils import set_weight_attrs
@@ -214,13 +214,8 @@ class ColumnParallelLinear(torch.nn.Module):
         # Matrix multiply.
         output_parallel = self.linear_method.apply_weights(
             self.linear_weights, input_, bias)
-        if self.gather_output:
-            # All-gather across the partitions.
-            output = tensor_model_parallel_all_gather(output_parallel)
-        else:
-            output = output_parallel
         output_bias = self.bias if self.skip_bias_add else None
-        return output, output_bias
+        return output_parallel, output_bias
 
 
 class MergedColumnParallelLinear(ColumnParallelLinear):

@@ -12,7 +12,6 @@ from vllm.config import LoRAConfig
 from vllm.lora.punica import add_lora, add_lora_slice, bgmv
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.parallel_utils.communication_op import (
-    tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
     tensor_model_parallel_gather,
 )
@@ -369,14 +368,9 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
 
         # Matrix multiply.
         output_parallel = self.apply_weights(input_, bias)
-        if self.base_layer.gather_output:
-            # All-gather across the partitions.
-            output = tensor_model_parallel_all_gather(output_parallel)
-        else:
-            output = output_parallel
         output_bias = (self.base_layer.bias
                        if self.base_layer.skip_bias_add else None)
-        return output, output_bias
+        return output_parallel, output_bias
 
     @property
     def linear_weights(self):
