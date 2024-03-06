@@ -1,19 +1,16 @@
 import torch
 import random
 import pytest
+from unittest.mock import MagicMock
 
 from vllm.worker.spec_decode.draft_target_worker import DraftTargetWorker, calculate_gpu_blocks
 from vllm.worker.spec_decode.scoring import BatchExpansionTop1Scorer, get_all_seq_ids
 from vllm.worker.spec_decode.util import SpeculativeProposals
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SequenceGroupMetadata
-
 from .utils import mock_worker, create_batch, ExecuteModelData, create_seq_group_metadata_from_prompts, create_sampler_output_list
-#from .utils import (mock_worker,
-#                    create_seq_group_metadata_from_prompts, create_batch,
-#                    create_sampler_output_list)
+from vllm.worker.spec_decode.metrics import DraftTargetWorkerMetrics, AsyncMetricsCollector
 
-from unittest.mock import MagicMock
 
 
 @pytest.mark.parametrize('k', [1, 2, 6])
@@ -26,7 +23,7 @@ def test_correctly_calls_draft_model(k: int, batch_size: int):
     draft_worker = mock_worker()
     target_worker = mock_worker()
     rejection_sampler = MagicMock()
-    metrics_collector = MagicMock()
+    metrics_collector = MagicMock(spec=AsyncMetricsCollector)
     worker = DraftTargetWorker(draft_worker, target_worker, rejection_sampler,
                                metrics_collector)
 
@@ -92,10 +89,6 @@ def test_correctly_calls_target_model(k: int, batch_size: int):
         batch_size, k)
 
     draft_worker.get_spec_proposals.return_value = SpeculativeProposals(
-        #spec_seqs=execute_model_data.seq_group_metadata_list,
-        #non_spec_seqs=[],
-        #all_seqs=execute_model_data.seq_group_metadata_list,
-        #original_indices=torch.arange(batch_size),
         proposal_token_ids=proposal_token_ids,
         proposal_probs=proposal_probs,
         proposal_lens=proposal_lens)
@@ -111,9 +104,6 @@ def test_correctly_calls_target_model(k: int, batch_size: int):
     call_args_list = target_worker.execute_model.call_args_list
     assert len(call_args_list) == 1
     for args, kwargs in call_args_list:
-        #(target_execute_model_data, ) = args
-        #(seq_group_metadata_list, blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy, _) = args
-        #target_execute_model_data = ExecuteModelData(seq_group_metadata_list, blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
         target_execute_model_data = ExecuteModelData.from_dict(kwargs)
 
         assert len(target_execute_model_data.seq_group_metadata_list) == (
@@ -176,10 +166,6 @@ def test_correctly_calls_rejection_sampler(k: int, batch_size: int):
     execute_model_data, _, _ = create_batch(batch_size, k)
 
     draft_worker.get_spec_proposals.return_value = SpeculativeProposals(
-        #spec_seqs=execute_model_data.seq_group_metadata_list,
-        #non_spec_seqs=[],
-        #all_seqs=execute_model_data.seq_group_metadata_list,
-        #original_indices=torch.arange(batch_size),
         proposal_token_ids=proposal_token_ids,
         proposal_probs=proposal_probs,
         proposal_lens=proposal_lens)
@@ -400,7 +386,7 @@ def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool):
 
     rejection_sampler.return_value = rejection_sampler_output
 
-    mock_rejsample_metrics = "cade make this a dtw metrics" if returns_metrics else None
+    mock_rejsample_metrics = MagicMock(spec=DraftTargetWorkerMetrics) if returns_metrics else None
     metrics_collector.maybe_collect_rejsample_metrics.return_value = mock_rejsample_metrics
 
     output = worker.execute_model(**execute_model_data.to_dict(),

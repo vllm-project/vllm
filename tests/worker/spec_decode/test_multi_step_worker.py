@@ -1,7 +1,7 @@
 import torch
 import random
 import pytest
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock
 
 from vllm.worker.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.worker.worker import Worker
@@ -10,7 +10,7 @@ from vllm.model_executor.utils import set_random_seed
 from .utils import (create_execute_model_data, create_worker,
                     create_seq_group_metadata_from_prompts, zero_kv_cache,
                     patch_execute_model_with_seeds,
-                    assert_logprobs_dict_allclose, create_batch)
+                    assert_logprobs_dict_allclose)
 
 
 @pytest.mark.parametrize('num_steps', list(range(1, 17)))

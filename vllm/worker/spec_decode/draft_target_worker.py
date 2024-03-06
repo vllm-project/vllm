@@ -5,123 +5,27 @@ import logging
 import time
 from dataclasses import dataclass
 
-#import msgspec
 import torch
 import traceback
 
 from vllm.worker.spec_decode.metrics import DraftTargetWorkerMetrics, AsyncMetricsCollector
-#from vllm.anyscale.shm.msgspec_shm import SharedMsgspecBufferWithEvent
-#from vllm.sequence import (SampleLogprob, SamplerOutput, SequenceGroupMetadata,
-#                           ExecuteModelData, SequenceOutputs, SequenceData,
-#                           SequenceGroupOutputs, DraftTargetWorkerMetrics)
 from vllm.sequence import (SamplerOutput, SequenceGroupMetadata, SequenceData,
                            SequenceGroupOutput, SequenceOutput)
 from vllm.worker.worker import Worker
 from vllm.worker.spec_decode.multi_step_worker import MultiStepWorker
-#from vllm.worker.prompt_lookup_worker import PromptLookupWorker
-#from vllm.worker.single_tp_worker import SingleTpWorker
-#from vllm.model_executor.layers.sampler import sampler_output_to_torch
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.model_executor.parallel_utils.parallel_state import get_tensor_model_parallel_group
 from vllm.config import CacheConfig
-#from vllm.worker.base_worker import BaseWorker
-#from vllm.model_executor.layers.sampler import RawSamplerOutput
 from vllm.utils import in_wsl
 from vllm.worker.spec_decode.util import nvtx_range, sampler_output_to_torch, SpeculativeProposals, get_all_seq_ids
 from vllm.worker.spec_decode.scoring import BatchExpansionTop1Scorer
-
-SeqId = int
-TargetSeqId = int
-TokenId = int
-
-logger = logging.getLogger(__name__)
-
-@dataclass
-class Top1Proposals:
-    proposal_token_ids: torch.Tensor
-    proposal_token_probs: torch.Tensor
-
-    # not sure
-    proposal_lens: torch.Tensor
-
-@dataclass
-class Top1Scores:
-    # TODO: how to represent bonus token ?
-    # current thinking ->
-    #   always have bonus token such that num_scored_tokens == k+1.
-    token_probs: torch.Tensor
-
-@dataclass
-class AcceptedTokens:
-    accepted_tokens: torch.Tensor
-    logprobs: torch.Tensor
-
-class Top1ProposerWorker:
-
-    def init_model(self):
-        pass
-        # etc.
-
-    def get_proposals(
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-        blocks_to_swap_in: Optional[Dict[int, int]],
-        blocks_to_swap_out: Optional[Dict[int, int]],
-        blocks_to_copy: Optional[Dict[int, List[int]]],
-        num_spec_tokens: int,
-    ) -> Top1Proposals:
-        """
-        - determine k
-        - drop k=0
-        - fwd pass
-        - create output
-        """
-        pass
-
-class Top1ScorerWorker:
-    def init_model(self):
-        pass
-        # etc.
-
-    def score_proposals(
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-        blocks_to_swap_in: Optional[Dict[int, int]],
-        blocks_to_swap_out: Optional[Dict[int, int]],
-        blocks_to_copy: Optional[Dict[int, List[int]]],
-        num_spec_tokens: int,
-        proposals: Top1Proposals,
-    ) -> Top1Scores:
-        """
-        - extract k=0
-        - batch expand k>0
-        - combine
-        - fwd pass
-        - batch contract
-        """
-        pass
-
-class Top1Verifier:
-    def init_gpu_tensors(self):
-        pass
-
-    def verify_proposals(
-        #seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-        #blocks_to_swap_in: Optional[Dict[int, int]],
-        #blocks_to_swap_out: Optional[Dict[int, int]],
-        #blocks_to_copy: Optional[Dict[int, List[int]]],
-        #num_spec_tokens: int,
-        proposals: Top1Proposals,
-        scores: Top1Scores,
-    ) -> AcceptedTokens:
-        pass
 
 class DraftTargetWorker:
 
     def __init__(
         self,
-        draft_worker: MultiStepWorker,
-        #draft_worker: Union[MultiStepWorker, SingleTpWorker,
-        #                    PromptLookupWorker],
-        target_worker: Worker,
+        proposer_worker: MultiStepWorker,
+        scorer_worker: Worker,
         rejection_sampler: RejectionSampler,
         metrics_collector: Optional["AsyncMetricsCollector"] = None,
     ):
@@ -129,15 +33,15 @@ class DraftTargetWorker:
         Create a DraftTargetWorker.
 
         Args:
-            draft_worker: A draft worker that can run multiple steps
+            proposer_worker: A draft worker that can run multiple steps
                 in a row.
-            target_worker: The normal worker that is used for scoring.
+            scorer_worker: The normal worker that is used for scoring.
                 It should contain the target model.
             rejection_sampler: A Torch module used to perform modified rejection
                 sampling for speculative decoding.
         """
-        self.draft_worker = draft_worker
-        self.target_worker = target_worker
+        self.proposer_worker = proposer_worker
+        self.scorer_worker = scorer_worker
         self.rejection_sampler = rejection_sampler
 
         self._metrics = AsyncMetricsCollector(
@@ -147,7 +51,6 @@ class DraftTargetWorker:
         self.probs_dtype = self.rejection_sampler.probs_dtype
         self.token_id_dtype = self.rejection_sampler.token_id_dtype
 
-        self.use_batch_expansion = True
         self.scorer: SpeculativeScorer = None
 
         #self._profiler = TorchProfiler()
@@ -156,30 +59,30 @@ class DraftTargetWorker:
         # Initialize the target model before the draft model.
         # This allows the draft model to have a smaller TP degree than the
         # larger model without refactors to parallel_state.
-        self.target_worker.init_model()
-        self.draft_worker.init_model()
+        self.scorer_worker.init_model()
+        self.proposer_worker.init_model()
 
         self._metrics.init_gpu_tensors(self.rank)
         self.rejection_sampler.init_gpu_tensors(self.rank)
         self.scorer = BatchExpansionTop1Scorer(
-            scorer_worker=self.target_worker,
+            scorer_worker=self.scorer_worker,
             device=self.device,
             vocab_size=self._vocab_size
         )
 
     @property
     def device(self):
-        return self.target_worker.device
+        return self.scorer_worker.device
 
     def profile_num_available_blocks(self, block_size: int,
                                      gpu_memory_utilization: float,
                                      cpu_swap_space: int) -> Tuple[int, int]:
         num_gpu_blocks, num_cpu_blocks = (
-            self.target_worker.profile_num_available_blocks(
+            self.scorer_worker.profile_num_available_blocks(
                 block_size, gpu_memory_utilization, cpu_swap_space))
 
-        target_kv_size_bytes = self.target_worker.get_kv_size_bytes(block_size)
-        draft_kv_size_bytes = self.draft_worker.get_kv_size_bytes(block_size)
+        target_kv_size_bytes = self.scorer_worker.get_kv_size_bytes(block_size)
+        draft_kv_size_bytes = self.proposer_worker.get_kv_size_bytes(block_size)
 
         new_num_gpu_blocks = calculate_gpu_blocks(target_kv_size_bytes,
                                                   draft_kv_size_bytes,
@@ -187,8 +90,8 @@ class DraftTargetWorker:
         return new_num_gpu_blocks, num_cpu_blocks
 
     def init_cache_engine(self, cache_config: CacheConfig):
-        self.target_worker.init_cache_engine(cache_config)
-        self.draft_worker.init_cache_engine(cache_config)
+        self.scorer_worker.init_cache_engine(cache_config)
+        self.proposer_worker.init_cache_engine(cache_config)
 
 
     @torch.inference_mode()
@@ -219,7 +122,7 @@ class DraftTargetWorker:
             k,
         )
 
-    @nvtx_range("draft_target_worker._run_no_spec")
+    @nvtx_range("draft_scorer_worker._run_no_spec")
     def _run_no_spec(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
@@ -234,14 +137,14 @@ class DraftTargetWorker:
         TODO update
         """
 
-        self.draft_worker.execute_model(
+        self.proposer_worker.execute_model(
             seq_group_metadata_list=seq_group_metadata_list,
                                         blocks_to_swap_in=blocks_to_swap_in,
                                         blocks_to_swap_out=blocks_to_swap_out,
                                         blocks_to_copy=blocks_to_copy,
                                         return_python_output=False)
 
-        sampler_output = self.target_worker.execute_model(
+        sampler_output = self.scorer_worker.execute_model(
             seq_group_metadata_list=seq_group_metadata_list,
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
@@ -253,7 +156,7 @@ class DraftTargetWorker:
         sampler_output.sampled_tokens = None
         return [sampler_output]
 
-    @nvtx_range("draft_target_worker._run_speculative_decoding_step")
+    @nvtx_range("draft_scorer_worker._run_speculative_decoding_step")
     def _run_speculative_decoding_step(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
@@ -283,7 +186,7 @@ class DraftTargetWorker:
         """
 
         # Generate proposals using draft worker.
-        proposals = self.draft_worker.get_spec_proposals(
+        proposals = self.proposer_worker.get_spec_proposals(
             seq_group_metadata_list, blocks_to_swap_in, blocks_to_swap_out,
             blocks_to_copy, k)
         
@@ -301,7 +204,7 @@ class DraftTargetWorker:
         return self._create_output_sampler_list(seq_group_metadata_list,
             accepted_token_ids, k)
 
-    @nvtx_range("draft_target_worker._verify_tokens")
+    @nvtx_range("draft_scorer_worker._verify_tokens")
     def _verify_tokens(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
@@ -393,14 +296,14 @@ class DraftTargetWorker:
         """
         vocab_sizes = [
             worker.vocab_size
-            for worker in [self.draft_worker, self.target_worker]
+            for worker in [self.proposer_worker, self.scorer_worker]
         ]
         assert all(vocab_sizes[0] == vocab_size for vocab_size in vocab_sizes)
         return vocab_sizes[0]
 
     @property
     def rank(self):
-        return self.target_worker.rank
+        return self.scorer_worker.rank
 
 
 # TODO name
