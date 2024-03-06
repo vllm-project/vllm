@@ -1,6 +1,5 @@
 import contextlib
 import gc
-import os
 import tempfile
 from collections import OrderedDict
 from unittest.mock import patch, MagicMock
@@ -122,14 +121,6 @@ def dummy_model_gate_up() -> nn.Module:
 @pytest.fixture(scope="session")
 def sql_lora_files():
     return snapshot_download(repo_id="yard1/llama-2-7b-sql-lora-test")
-
-
-@pytest.fixture(scope="session")
-def tmp_path():
-    if os.path.exists(TMP_PATH):
-        return TMP_PATH
-    else:
-        return tempfile.mkstemp()[1]
 
 
 @pytest.fixture(scope="session")
