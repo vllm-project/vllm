@@ -209,6 +209,9 @@ class PagedAttention(nn.Module):
             else:
                 # prefix-enabled attention
                 output = torch.empty_like(query)
+                if input_metadata.kv_cache_dtype == "fp8_e5m2":
+                    key_cache = key_cache.view(dtype=torch.float8_e5m2)
+                    value_cache = value_cache.view(dtype=torch.float8_e5m2)
                 context_attention_fwd(
                     query,
                     key,
