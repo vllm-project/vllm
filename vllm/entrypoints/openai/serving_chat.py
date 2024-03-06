@@ -101,7 +101,7 @@ class OpenAIServingChat(OpenAIServing):
     ) -> Union[ErrorResponse, AsyncGenerator[str, None]]:
 
         model_name = request.model
-        created_time = int(time.monotonic())
+        created_time = int(time.time())
         chunk_object_type = "chat.completion.chunk"
         first_iteration = True
 
@@ -239,7 +239,7 @@ class OpenAIServingChat(OpenAIServing):
             request_id: str) -> Union[ErrorResponse, ChatCompletionResponse]:
 
         model_name = request.model
-        created_time = int(time.monotonic())
+        created_time = int(time.time())
         final_res: RequestOutput = None
 
         async for res in result_generator:
