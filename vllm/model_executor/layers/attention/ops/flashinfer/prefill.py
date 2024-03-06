@@ -20,7 +20,7 @@ import torch
 import logging
 
 try:
-    from . import _kernels
+    from vllm import _flashinfer_C as _kernels
 except ImportError as e:
     import os
     import logging

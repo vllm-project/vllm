@@ -19,7 +19,7 @@ from typing import Optional, Union
 import torch
 
 try:
-    from . import _kernels
+    from vllm import _flashinfer_C as _kernels
 except ImportError as e:
     import os
     import logging
