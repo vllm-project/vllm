@@ -27,7 +27,7 @@ class DraftTargetWorker:
         proposer_worker: MultiStepWorker,
         scorer_worker: Worker,
         rejection_sampler: RejectionSampler,
-        metrics_collector: Optional["AsyncMetricsCollector"] = None,
+        metrics_collector: Optional[AsyncMetricsCollector] = None,
     ):
         """
         Create a DraftTargetWorker.
@@ -53,8 +53,6 @@ class DraftTargetWorker:
 
         self.scorer: SpeculativeScorer = None
 
-        #self._profiler = TorchProfiler()
-
     def init_model(self) -> None:
         # Initialize the target model before the draft model.
         # This allows the draft model to have a smaller TP degree than the
@@ -69,10 +67,6 @@ class DraftTargetWorker:
             device=self.device,
             vocab_size=self._vocab_size
         )
-
-    @property
-    def device(self):
-        return self.scorer_worker.device
 
     def profile_num_available_blocks(self, block_size: int,
                                      gpu_memory_utilization: float,
@@ -97,39 +91,40 @@ class DraftTargetWorker:
     @torch.inference_mode()
     def execute_model(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
         blocks_to_swap_in: Optional[Dict[int, int]],
         blocks_to_swap_out: Optional[Dict[int, int]],
         blocks_to_copy: Optional[Dict[int, List[int]]],
         num_spec_tokens: int,
     ) -> Optional[SamplerOutput]:
+        assert seq_group_metadata_list is not None, ("speculative decoding "
+            "requires non-None seq_group_metadata_list")
 
         k = num_spec_tokens
 
         if k == 0 or len(seq_group_metadata_list) == 0:
             return self._run_no_spec(
-                seq_group_metadata_list,
-                blocks_to_swap_in,
-                blocks_to_swap_out,
-                blocks_to_copy,
+                seq_group_metadata_list=seq_group_metadata_list,
+                blocks_to_swap_in=blocks_to_swap_in,
+                blocks_to_swap_out=blocks_to_swap_out,
+                blocks_to_copy=blocks_to_copy,
             )
 
         return self._run_speculative_decoding_step(
-            seq_group_metadata_list,
-            blocks_to_swap_in,
-            blocks_to_swap_out,
-            blocks_to_copy,
-            k,
+            seq_group_metadata_list=seq_group_metadata_list,
+            blocks_to_swap_in=blocks_to_swap_in,
+            blocks_to_swap_out=blocks_to_swap_out,
+            blocks_to_copy=blocks_to_copy,
+            k=k,
         )
 
-    @nvtx_range("draft_scorer_worker._run_no_spec")
+    @nvtx_range("draft_target_worker._run_no_spec")
     def _run_no_spec(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
         blocks_to_swap_in: Optional[Dict[int, int]],
         blocks_to_swap_out: Optional[Dict[int, int]],
         blocks_to_copy: Optional[Dict[int, List[int]]],
-        #execute_model_data: ExecuteModelData
     ) -> List[SamplerOutput]:
         """Run a prefill step, without any speculation. The input is sent to the
         draft and target model so that prompt KV are stored in both caches.
@@ -156,10 +151,10 @@ class DraftTargetWorker:
         sampler_output.sampled_tokens = None
         return [sampler_output]
 
-    @nvtx_range("draft_scorer_worker._run_speculative_decoding_step")
+    @nvtx_range("draft_target_worker._run_speculative_decoding_step")
     def _run_speculative_decoding_step(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
         blocks_to_swap_in: Optional[Dict[int, int]],
         blocks_to_swap_out: Optional[Dict[int, int]],
         blocks_to_copy: Optional[Dict[int, List[int]]],
@@ -204,10 +199,10 @@ class DraftTargetWorker:
         return self._create_output_sampler_list(seq_group_metadata_list,
             accepted_token_ids, k)
 
-    @nvtx_range("draft_scorer_worker._verify_tokens")
+    @nvtx_range("draft_target_worker._verify_tokens")
     def _verify_tokens(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
         all_tokens: torch.Tensor,
         all_probs: torch.Tensor,
         proposals: SpeculativeProposals,
@@ -304,6 +299,11 @@ class DraftTargetWorker:
     @property
     def rank(self):
         return self.scorer_worker.rank
+
+    @property
+    def device(self):
+        return self.scorer_worker.device
+
 
 
 # TODO name
