@@ -142,7 +142,14 @@ class Sequence:
         prompt: str,
         prompt_token_ids: List[int],
         block_size: int,
+<<<<<<< HEAD
         eos_token_id: int,
+=======
+<<<<<<< Updated upstream
+=======
+        eos_token_id: Optional[int] = None,
+>>>>>>> Stashed changes
+>>>>>>> c4ab3bc35f0... wip
         lora_request: Optional[LoRARequest] = None,
     ) -> None:
         self.seq_id = seq_id

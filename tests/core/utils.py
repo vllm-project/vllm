@@ -18,7 +18,15 @@ def create_dummy_prompt(
     prompt_str = " ".join([str(t) for t in prompt_tokens])
     prompt = Sequence(int(request_id), prompt_str, prompt_tokens, block_size)
     seq_group = SequenceGroup(request_id, [prompt], SamplingParams(),
+<<<<<<< HEAD
                               time.time(), None, None)
+=======
+<<<<<<< Updated upstream
+                              time.time(), time.perf_counter())
+=======
+                              time.time(), None)
+>>>>>>> Stashed changes
+>>>>>>> c4ab3bc35f0... wip
 
     return prompt, seq_group
 
