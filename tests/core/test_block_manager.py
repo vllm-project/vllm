@@ -200,7 +200,6 @@ def test_swap():
     # tokens will be written in the next forward pass.
     token_id = 0
     prompt.status = SequenceStatus.RUNNING
-    prompt.append_token_id(token_id, {token_id: 0.0})
     prompt.append_token_id(token_id, {token_id: Logprob(0.0)})
 
     # Swap seq group from GPU -> CPU.
