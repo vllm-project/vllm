@@ -175,7 +175,8 @@ class Sequence:
         # TODO: The current hashing function is O(L^2). We should optimize
         # this in the future.
         num_tokens = self.num_hashed_tokens_of_block(logical_idx)
-        return hash(tuple(self.data.get_token_ids()[0:num_tokens]))
+        return hash(
+            (tuple(self.data.get_token_ids()[0:num_tokens]), self.lora_int_id))
 
     def num_hashed_tokens_of_block(self, logical_idx: int):
         return logical_idx * self.block_size + self.block_size
