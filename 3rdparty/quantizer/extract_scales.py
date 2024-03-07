@@ -7,7 +7,7 @@ import numpy as np
 import os
 from safetensors.torch import safe_open
 import torch
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 
 # Adapted from vllm/model_executor/weight_utils.py
@@ -90,7 +90,7 @@ def _hf_tensorfile_iterator(filename: str, load_format: str,
         torch.cuda.empty_cache()
 
 
-def _kv_scales_extractor(hf_tensor_files: Iterator[str],
+def _kv_scales_extractor(hf_tensor_files: Iterable[str],
                          use_safetensors: bool,
                          rank_keyword: str = "rank",
                          expected_tp_size: Optional[int] = None) -> Dict[int, Dict[int, float]]:
