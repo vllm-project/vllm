@@ -3,6 +3,7 @@ from typing import List, Optional
 import peft
 import pytest
 from random import sample
+import tempfile
 import torch
 from transformers import AutoModelForCausalLM
 
@@ -69,7 +70,7 @@ for length in range(2, 6):
 @pytest.mark.parametrize("tp_size", [1, 4])
 @pytest.mark.parametrize("target_modules", TARGET_MODULES_LIST)
 @pytest.mark.parametrize("rank", [8, 16, 32, 64])
-def test_layer_variation_correctness(tp_size, target_modules, rank, tmpdir):
+def test_layer_variation_correctness(tp_size, target_modules, rank):
     if torch.cuda.device_count() < tp_size:
         pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
 
@@ -80,24 +81,25 @@ def test_layer_variation_correctness(tp_size, target_modules, rank, tmpdir):
                    tensor_parallel_size=tp_size,
                    worker_use_ray=True)
     model = get_lora_model(MODEL_PATH, target_modules, rank)
-    tmp_dir_lora = os.path.join(tmpdir, "tmp_dir_lora")
-    model.save_pretrained(tmp_dir_lora)
-    merged_probs = do_sample(llm, tmp_dir_lora, 1, logprobs=5, n_tokens=32)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_dir_lora = os.path.join(tmpdir, "tmp_dir_lora")
+        model.save_pretrained(tmp_dir_lora)
+        merged_probs = do_sample(llm, tmp_dir_lora, 1, logprobs=5, n_tokens=32)
     del llm
     cleanup()
     reference_id_sets = [set(prob[0]) for prob in merged_probs]
 
     model = get_lora_model(MODEL_PATH, target_modules, rank)
-    tmp_dir_merged = os.path.join(tmpdir, "tmp_dir_merged")
-    merged_model = model.merge_and_unload()
-    merged_model.save_pretrained(tmp_dir_merged)
-
-    llm = vllm.LLM(tmp_dir_merged,
-                   tokenizer=MODEL_PATH,
-                   enable_lora=False,
-                   max_num_seqs=16,
-                   tensor_parallel_size=4,
-                   worker_use_ray=True)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_dir_merged = os.path.join(tmpdir, "tmp_dir_merged")
+        merged_model = model.merge_and_unload()
+        merged_model.save_pretrained(tmp_dir_merged)
+        llm = vllm.LLM(tmp_dir_merged,
+                       tokenizer=MODEL_PATH,
+                       enable_lora=False,
+                       max_num_seqs=16,
+                       tensor_parallel_size=4,
+                       worker_use_ray=True)
     probs = do_sample(llm, logprobs=5, n_tokens=32)
     del llm
     cleanup()
