@@ -5,11 +5,16 @@ import torch
 from vllm._C import cache_ops
 from vllm._C import ops
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.attention.ops.prefix_prefill import (
-    context_attention_fwd)
+try:
+    from vllm.model_executor.layers.attention.ops.prefix_prefill import (
+        context_attention_fwd)
+except ImportError:
+    context_attention_fwd = None
 
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
+
+ATTENTION_FWD_SUPPORTED = context_attention_fwd is not None
 
 
 class PagedAttentionImpl:
@@ -61,7 +66,7 @@ class PagedAttentionImpl:
         # For context len > 8192, use V2 kernel to avoid shared memory shortage.
         use_v1 = input_metadata.max_context_len <= 8192 and (
             max_num_partitions == 1 or num_seqs * num_heads > 512)
-        if use_v1:
+        if use_v1 or query.is_cpu:
             # Run PagedAttention V1.
             ops.paged_attention_v1(
                 output,

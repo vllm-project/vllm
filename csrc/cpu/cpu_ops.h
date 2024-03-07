@@ -6,6 +6,8 @@ void rotary_embedding_cpu(torch::Tensor &positions, torch::Tensor &query,
 
 void silu_and_mul_cpu(torch::Tensor &out, torch::Tensor &input);
 
+void gelu_and_mul_cpu(torch::Tensor &out, torch::Tensor &input);
+
 void gelu_new_cpu(torch::Tensor &out, torch::Tensor &input);
 
 void gelu_fast_cpu(torch::Tensor &out, torch::Tensor &input);
@@ -14,14 +16,16 @@ void paged_attention_v1_cpu(
     torch::Tensor &out, torch::Tensor &query, torch::Tensor &key_cache,
     torch::Tensor &value_cache, int num_kv_heads, float scale,
     torch::Tensor &block_tables, torch::Tensor &context_lens, int block_size,
-    int max_context_len, const c10::optional<torch::Tensor> &alibi_slopes);
+    int max_context_len, const c10::optional<torch::Tensor> &alibi_slopes,
+    const std::string& kv_cache_dtype);
 
 void paged_attention_v2_cpu(
     torch::Tensor &out, torch::Tensor &exp_sums, torch::Tensor &max_logits,
     torch::Tensor &tmp_out, torch::Tensor &query, torch::Tensor &key_cache,
     torch::Tensor &value_cache, int num_kv_heads, float scale,
     torch::Tensor &block_tables, torch::Tensor &context_lens, int block_size,
-    int max_context_len, const c10::optional<torch::Tensor> &alibi_slopes);
+    int max_context_len, const c10::optional<torch::Tensor> &alibi_slopes,
+    const std::string& kv_cache_dtype);
 
 void copy_blocks_cpu(
     std::vector<torch::Tensor> &key_caches,
@@ -30,7 +34,7 @@ void copy_blocks_cpu(
 
 void reshape_and_cache_cpu(torch::Tensor &key, torch::Tensor &value,
                            torch::Tensor &key_cache, torch::Tensor &value_cache,
-                           torch::Tensor &slot_mapping);
+                           torch::Tensor &slot_mapping, const std::string& kv_cache_dtype);
 
 void swap_blocks_cpu(torch::Tensor &src, torch::Tensor &dst,
                      const std::map<int64_t, int64_t> &block_mapping);
@@ -74,7 +78,11 @@ inline torch::Tensor awq_dequantize_cpu(torch::Tensor &_in_feats, torch::Tensor 
   TORCH_CHECK(false, "Quantization is not supported on CPU.");
 }
 
-inline void moe_align_block_size(torch::Tensor &topk_ids, int num_experts, int block_size,
+inline void moe_align_block_size_cpu(torch::Tensor &topk_ids, int num_experts, int block_size,
                          torch::Tensor &sorted_token_ids, torch::Tensor &experts_ids,
                          torch::Tensor &num_tokens_post_pad) {
+}
+
+inline void convert_fp8_e5m2_cpu(torch::Tensor& src_cache, torch::Tensor& dst_cache) {
+  TORCH_CHECK(false, "convert_fp8_e5m2 is not supported on CPU.");
 }

@@ -297,9 +297,9 @@ def init_distributed_environment(
         )
 
     # A small all_reduce for warmup.
-    torch.distributed.all_reduce(torch.zeros(1).cuda(), device=parallel_config.device)
+    torch.distributed.all_reduce(torch.zeros(1).to(parallel_config.device))
     if cupy_utils.is_initialized():
-        cupy_utils.all_reduce(torch.zeros(1).cuda())
+        cupy_utils.all_reduce(torch.zeros(1).to(parallel_config.device))
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
 

@@ -15,20 +15,26 @@ void paged_attention_v1_dispatch(
     torch::Tensor &out, torch::Tensor &query, torch::Tensor &key_cache,
     torch::Tensor &value_cache, int num_kv_heads, float scale,
     torch::Tensor &block_tables, torch::Tensor &context_lens, int block_size,
-    int max_context_len, const c10::optional<torch::Tensor> &alibi_slopes) {
-  VLLM_DISPATCH_DEVICES(out.device(), paged_attention_v1, out, query, key_cache, value_cache, num_kv_heads, scale, block_tables, context_lens, block_size, max_context_len, alibi_slopes);
+    int max_context_len, const c10::optional<torch::Tensor> &alibi_slopes,
+    const std::string& kv_cache_dtype) {
+  VLLM_DISPATCH_DEVICES(out.device(), paged_attention_v1, out, query, key_cache, value_cache, num_kv_heads, scale, block_tables, context_lens, block_size, max_context_len, alibi_slopes, kv_cache_dtype);
 }
 
 void paged_attention_v2_dispatch(torch::Tensor &out, torch::Tensor &exp_sums,
     torch::Tensor &max_logits, torch::Tensor &tmp_out, torch::Tensor &query, 
     torch::Tensor &key_cache, torch::Tensor &value_cache, int num_kv_heads, 
     float scale, torch::Tensor &block_tables, torch::Tensor &context_lens, int block_size,
-    int max_context_len, const c10::optional<torch::Tensor> &alibi_slopes) {
-  VLLM_DISPATCH_DEVICES(out.device(), paged_attention_v2, out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache, num_kv_heads, scale, block_tables, context_lens, block_size,max_context_len, alibi_slopes);
+    int max_context_len, const c10::optional<torch::Tensor> &alibi_slopes,
+    const std::string& kv_cache_dtype) {
+  VLLM_DISPATCH_DEVICES(out.device(), paged_attention_v2, out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache, num_kv_heads, scale, block_tables, context_lens, block_size,max_context_len, alibi_slopes, kv_cache_dtype);
 }
 
 void silu_and_mul_dispatch(torch::Tensor &out, torch::Tensor &input) {
   VLLM_DISPATCH_DEVICES(out.device(), silu_and_mul, out, input);
+}
+
+void gelu_and_mul_dispatch(torch::Tensor &out, torch::Tensor &input) {
+  VLLM_DISPATCH_DEVICES(out.device(), gelu_and_mul, out, input);
 }
 
 void gelu_new_dispatch(torch::Tensor &out, torch::Tensor &input) {
@@ -64,11 +70,11 @@ void squeezellm_gemm_dispatch(torch::Tensor& vec, torch::Tensor& mat, torch::Ten
 }
 
 torch::Tensor marlin_gemm_dispatch(torch::Tensor& a, torch::Tensor& b_q_weight, torch::Tensor& b_scales, torch::Tensor& workspace, int64_t size_m, int64_t size_n, int64_t size_k) {
-  VLLM_DISPATCH_DEVICES(a.device(), a, b_q_weight, b_scales, workspace, size_m, size_n, size_k);
+  VLLM_DISPATCH_DEVICES(a.device(), marlin_gemm, a, b_q_weight, b_scales, workspace, size_m, size_n, size_k);
 }
 
 torch::Tensor awq_dequantize_dispatch(torch::Tensor& _in_feats, torch::Tensor& _kernel, torch::Tensor& _scaling_factors, torch::Tensor& _zeros, int split_k_iters, int thx, int thy) {
-  VLLM_DISPATCH_DEVICES(_in_feats.device(), awq_gemm, _in_feats, _kernel, _scaling_factors, _zeros, split_k_iters, thx, thy);
+  VLLM_DISPATCH_DEVICES(_in_feats.device(), awq_dequantize, _in_feats, _kernel, _scaling_factors, _zeros, split_k_iters, thx, thy);
 }
 
 void swap_blocks_dispatch(torch::Tensor& src, torch::Tensor& dst, const std::map<int64_t, int64_t>& block_mapping) {
@@ -79,12 +85,16 @@ void copy_blocks_dispatch(std::vector<torch::Tensor>& key_caches, std::vector<to
   VLLM_DISPATCH_DEVICES(key_caches[0].device(), copy_blocks, key_caches, value_caches, block_mapping);
 }
 
-void reshape_and_cache_dispatch(torch::Tensor& key, torch::Tensor& value, torch::Tensor& key_cache, torch::Tensor& value_cache, torch::Tensor& slot_mapping) {
-  VLLM_DISPATCH_DEVICES(key.device(), reshape_and_cache, key, value, key_cache, value_cache, slot_mapping);
+void reshape_and_cache_dispatch(torch::Tensor& key, torch::Tensor& value, torch::Tensor& key_cache, torch::Tensor& value_cache, torch::Tensor& slot_mapping, const std::string& kv_cache_dtype) {
+  VLLM_DISPATCH_DEVICES(key.device(), reshape_and_cache, key, value, key_cache, value_cache, slot_mapping, kv_cache_dtype);
 }
 
-void moe_align_block_size(torch::Tensor &topk_ids, int num_experts, int block_size, torch::Tensor &sorted_token_ids, torch::Tensor &experts_ids, torch::Tensor &num_tokens_post_pad) {
-  VLLM_DISPATCH_DEVICES(topk_ids.device(), reshape_and_cache, topk_ids, num_experts, block_size, sorted_token_ids, experts_ids, num_tokens_post_pad);
+void moe_align_block_size_dispatch(torch::Tensor &topk_ids, int num_experts, int block_size, torch::Tensor &sorted_token_ids, torch::Tensor &experts_ids, torch::Tensor &num_tokens_post_pad) {
+  VLLM_DISPATCH_DEVICES(topk_ids.device(), moe_align_block_size, topk_ids, num_experts, block_size, sorted_token_ids, experts_ids, num_tokens_post_pad);
+}
+
+void convert_fp8_e5m2_dispatch(torch::Tensor& src_cache, torch::Tensor& dst_cache) {
+  VLLM_DISPATCH_DEVICES(src_cache.device(), convert_fp8_e5m2, src_cache, dst_cache);
 }
 
 #ifdef VLLM_BUILD_CPU_ONLY
@@ -114,7 +124,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     "Activation function used in SwiGLU.");
   ops.def(
     "gelu_and_mul",
-    &gelu_and_mul,
+    &gelu_and_mul_dispatch,
     "Activation function used in GeGLU.");
   ops.def(
     "gelu_new",
@@ -176,6 +186,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     &convert_fp8_e5m2_dispatch,
     "Convert the key and value cache to fp8_e5m2 data type");
 
+#if !defined(VLLM_BUILD_CPU_ONLY)
   // Cuda utils
   pybind11::module cuda_utils = m.def_submodule("cuda_utils", "vLLM cuda utils");
   cuda_utils.def(
@@ -187,8 +198,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     "get_max_shared_memory_per_block_device_attribute",
     &get_max_shared_memory_per_block_device_attribute,
     "Gets the maximum shared memory per block device attribute.");
+#endif
 
-#ifndef USE_ROCM
+#if !defined(USE_ROCM) && !defined(VLLM_BUILD_CPU_ONLY)
   // Custom all-reduce kernels
   pybind11::module custom_ar = m.def_submodule("custom_ar", "custom allreduce");
   custom_ar.def("init_custom_ar", &init_custom_ar, "init_custom_ar");

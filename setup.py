@@ -49,13 +49,29 @@ def _is_neuron() -> bool:
     return torch_neuronx_installed
 
 
-ABI = 1 if torch._C._GLIBCXX_USE_CXX11_ABI else 0
-CXX_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
-NVCC_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
-
-
 def _is_cuda() -> bool:
     return (torch.version.cuda is not None) and not _is_neuron() and VLLM_TARGET_DEVICE != "cpu"
+
+
+if _is_cuda():
+    # Copy the FlashAttention package into the vLLM package after build.
+    class build_ext(BuildExtension):
+
+        def run(self):
+            super().run()
+            target_dir = os.path.join(self.build_lib, THIRDPARTY_SUBDIR)
+            if not os.path.exists(target_dir):
+                os.makedirs(target_dir)
+            self.copy_tree(install_dir, target_dir)
+
+    class BinaryDistribution(setuptools.Distribution):
+
+        def has_ext_modules(self):
+            return True
+
+else:
+    build_ext = BuildExtension
+    BinaryDistribution = setuptools.Distribution
 
 
 def generate_vllm_cuda_extension():
@@ -388,31 +404,13 @@ def generate_vllm_cuda_extension():
             env=dict(os.environ, CC="gcc"),
         )
     
-        # Copy the FlashAttention package into the vLLM package after build.
-        class build_ext(BuildExtension):
-    
-            def run(self):
-                super().run()
-                target_dir = os.path.join(self.build_lib, THIRDPARTY_SUBDIR)
-                if not os.path.exists(target_dir):
-                    os.makedirs(target_dir)
-                self.copy_tree(install_dir, target_dir)
-    
-        class BinaryDistribution(setuptools.Distribution):
-    
-            def has_ext_modules(self):
-                return True
-
-    else:
-        build_ext = BuildExtension
-        BinaryDistribution = setuptools.Distribution
-
     if _is_neuron():
         neuronxcc_version = get_neuronxcc_version()
 
     if VLLM_TARGET_DEVICE == "cpu":
         # Setup CPU Operations
         CPU_OPS_SOURCES = []
+        LIBS = []
         if True:  # BUILD_CPU_OPS:
             if VLLM_TARGET_DEVICE == "cpu":
                 CXX_FLAGS += ["-DVLLM_BUILD_CPU_ONLY"]
@@ -447,6 +445,7 @@ def generate_vllm_cuda_extension():
             extra_compile_args={
                 "cxx": CXX_FLAGS,
             },
+            libraries=LIBS,
         )
         ext_modules.append(vllm_extension)
     elif not _is_neuron():
@@ -536,7 +535,7 @@ if os.environ.get("VLLM_USE_PRECOMPILED"):
     ext_modules = []
     package_data["vllm"].append("*.so")
 
-if VLLM_TARGET_DEVICE == "cuda" or VLLM_TARGET_DEVICE == "neuron" or VLLM_TARGET_DEVICE == "rocm":
+if VLLM_TARGET_DEVICE == "cuda" or VLLM_TARGET_DEVICE == "neuron" or VLLM_TARGET_DEVICE == "rocm" or VLLM_TARGET_DEVICE == "cpu":
     vllm_version, vllm_requirements, ext_modules = generate_vllm_cuda_extension(
     )
 

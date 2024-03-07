@@ -383,7 +383,8 @@ void paged_attention_v1_cpu(torch::Tensor &out, torch::Tensor &query,
                             float scale, torch::Tensor &block_tables,
                             torch::Tensor &context_lens, int block_size,
                             int max_context_len,
-                            const c10::optional<torch::Tensor> &alibi_slopes) {
+                            const c10::optional<torch::Tensor> &alibi_slopes,
+                            const std::string& kv_cache_dtype) {
   VLLM_DISPATCH_FLOATING_TYPES(query.scalar_type(), "paged_attention_v1_impl",
                                [&] {
                                  CPU_KERNEL_GUARD_IN(paged_attention_v1_impl)
@@ -399,6 +400,7 @@ void paged_attention_v2_cpu(torch::Tensor &out, torch::Tensor &exp_sums,
                             float scale, torch::Tensor &block_tables,
                             torch::Tensor &context_lens, int block_size,
                             int max_context_len,
-                            const c10::optional<torch::Tensor> &alibi_slopes) {
+                            const c10::optional<torch::Tensor> &alibi_slopes,
+                            const std::string& kv_cache_dtype) {
   TORCH_CHECK(false, "paged_attention_v2 is unsupported on CPU.")
 }

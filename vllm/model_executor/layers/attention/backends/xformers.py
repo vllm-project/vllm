@@ -9,7 +9,7 @@ from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention.ops.paged_attn import (
-    PagedAttentionImpl)
+    PagedAttentionImpl, ATTENTION_FWD_SUPPORTED)
 from vllm.utils import is_hip
 
 
@@ -84,7 +84,7 @@ class XFormersBackend:
         if input_metadata.is_prompt:
             # Prompt run.
             if (key_cache is None or value_cache is None
-                    or input_metadata.block_tables.numel() == 0):
+                    or input_metadata.block_tables.numel() == 0 or not ATTENTION_FWD_SUPPORTED):
                 # normal attention
                 if self.num_kv_heads != self.num_heads:
                     # As of Nov 2023, xformers only supports MHA. For MQA/GQA,
@@ -160,7 +160,7 @@ class XFormersBackend:
                     query.movedim(1, query.dim() - 2),
                     key.movedim(1, query.dim() - 2),
                     value.movedim(1, value.dim() - 2),
-                    input_metadata.attn_bias,
+                    input_metadata.attn_bias.materialize((1, seq_len * batch_size, seq_len * batch_size), dtype=query.dtype),
                     0.0).movedim(query.dim() - 2, 1).contiguous()
                 output = out.view_as(query)
 
@@ -231,31 +231,3 @@ def _check_use_ref_attention() -> bool:
     # For ROCm, check whether flash attention is installed or not.
     # if not, use_ref_attention needs to be True
     return importlib.util.find_spec("flash_attn") is None
-
-
-def _ref_masked_attention(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    num_heads: int,
-    num_kv_heads: int,
-    head_size: int,
-    scale: float,
-) -> torch.Tensor:
-    query = query.view(-1, num_heads, head_size)
-    key = key.view(-1, num_kv_heads, head_size)
-    value = value.view(-1, num_kv_heads, head_size)
-
-    seq_len, _, _ = query.shape
-    attn_mask = torch.triu(torch.ones(seq_len,
-                                      seq_len,
-                                      dtype=query.dtype,
-                                      device=query.device),
-                           diagonal=1)
-    attn_mask = attn_mask * torch.finfo(query.dtype).min
-
-    attn_weights = scale * torch.einsum("qhd,khd->hqk", query, key).float()
-    attn_weights = attn_weights + attn_mask.float()
-    attn_weights = torch.softmax(attn_weights, dim=-1).to(value.dtype)
-    out = torch.einsum("hqk,khd->qhd", attn_weights, value)
-    return out
