@@ -328,9 +328,10 @@ if _is_cuda():
                 },
             ))
 
-    # Install FlashAttention inside vLLM package.
+    # Download the FlashAttention package.
     # Adapted from https://github.com/ray-project/ray/blob/f92928c9cfcbbf80c3a8534ca4911de1b44069c0/python/setup.py#L518-L530
     flash_attn_version = "2.5.6"
+    install_dir = os.path.join(ROOT_DIR, THIRDPARTY_SUBDIR)
     subprocess.check_call(
         [
             sys.executable,
@@ -338,7 +339,7 @@ if _is_cuda():
             "pip",
             "install",
             "-q",
-            "--target=" + os.path.join(ROOT_DIR, THIRDPARTY_SUBDIR),
+            f"--target={install_dir}",
             "einops",  # Dependency of flash-attn.
             f"flash-attn=={flash_attn_version}",
             "--no-dependencies",  # Required to avoid re-installing torch.
@@ -346,8 +347,20 @@ if _is_cuda():
         env=dict(os.environ, CC="gcc"),
     )
 
-elif _is_neuron():
-    neuronxcc_version = get_neuronxcc_version()
+    # Copy the FlashAttention package into the vLLM package after build.
+    class build_ext(BuildExtension):
+
+        def run(self):
+            super().run()
+            target_dir = os.path.join(self.build_lib, THIRDPARTY_SUBDIR)
+            if not os.path.exists(target_dir):
+                os.makedirs(target_dir)
+            self.copy_tree(install_dir, target_dir)
+
+else:
+    build_ext = BuildExtension
+    if _is_neuron():
+        neuronxcc_version = get_neuronxcc_version()
 
 vllm_extension_sources = [
     "csrc/cache_kernels.cu",
@@ -490,6 +503,6 @@ setuptools.setup(
     python_requires=">=3.8",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
-    cmdclass={"build_ext": BuildExtension} if not _is_neuron() else {},
+    cmdclass={"build_ext": build_ext} if not _is_neuron() else {},
     package_data=package_data,
 )
