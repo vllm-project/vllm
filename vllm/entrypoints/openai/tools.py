@@ -4,7 +4,7 @@ import jinja2
 from enum import Enum
 from typing import List, Union
 from vllm.logger import init_logger
-from .protocol import (ChatCompletionRequest, ChatCompletionToolParam,
+from vllm.entrypoints.openai.protocol import (ChatCompletionRequest, ChatCompletionToolParam,
                        ChoiceDeltaToolCall, ChatCompletionMessageToolCall,
                        Function, ChatCompletionAssistantMessage,
                        ChatCompletionToolMessage, ChatCompletionNamedToolChoiceParam)

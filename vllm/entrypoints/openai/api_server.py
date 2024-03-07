@@ -310,10 +310,6 @@ if __name__ == "__main__":
         served_model = args.model
 
     vllm_engine_args = AsyncEngineArgs.from_cli_args(args)
-    # A virer !!!
-    logger.warning("A virer !")
-    vllm_engine_args.enforce_eager = True
-
     vllm_engine = AsyncLLMEngine.from_engine_args(vllm_engine_args)
     _loadServingServices()
 
