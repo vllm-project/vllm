@@ -7,8 +7,7 @@ import triton.language as tl
 import packaging
 
 assert packaging.version.parse(triton.__version__) >= packaging.version.parse(
-    "2.1.0"), "Triton version >= 2.1.0 is required."
-
+    "2.2.0"), "Triton version >= 2.2.0 is required."
 
 @triton.jit
 def _fwd_kernel(
@@ -99,7 +98,7 @@ def _fwd_kernel(
                  (start_n + offs_n[:, None]) % block_size * stride_v_cache_bl)
         k = tl.load(K_cache + off_k,
                     mask=(start_n + offs_n[None, :]) < cur_batch_ctx_len,
-                    other=0.0)
+                    other=0.0).to(q.dtype)
 
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         qk += tl.dot(q, k)
@@ -126,7 +125,7 @@ def _fwd_kernel(
         # update acc
         v = tl.load(V_cache + off_v,
                     mask=(start_n + offs_n[:, None]) < cur_batch_ctx_len,
-                    other=0.0)
+                    other=0.0).to(k.dtype)
 
         p = p.to(v.dtype)
         acc += tl.dot(p, v)
