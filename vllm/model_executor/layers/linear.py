@@ -61,7 +61,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
                        output_size: int,
                        params_dtype: torch.dtype) -> Dict[str, Any]:
         weight = Parameter(torch.empty(size=(output_size_per_partition,
-                                       input_size_per_partition),
+                                             input_size_per_partition),
                                        dtype=params_dtype),
                            requires_grad=False)
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
@@ -120,7 +120,8 @@ class ReplicatedLinear(torch.nn.Module):
                 self.register_parameter(name, weight)
         if bias:
             self.bias = Parameter(
-                torch.empty(size=(self.output_size, ), dtype=self.params_dtype))
+                torch.empty(size=(self.output_size, ),
+                            dtype=self.params_dtype))
             set_weight_attrs(self.bias, {"output_dim": 0})
         else:
             self.register_parameter("bias", None)
