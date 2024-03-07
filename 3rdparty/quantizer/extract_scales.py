@@ -248,7 +248,7 @@ def main(args):
         metadata_tp_size = metadata_dict["tp_size"]
         if metadata_tp_size is not None:
             assert args.tp_size == metadata_tp_size, "User expected TP world size = " \
-              f"{args.tp_size} but found TP world size = {metadata_tp_size}!"
+              f"{args.tp_size} but found TP world size = {metadata_tp_size} from metadata!"
     expected_tp_size = args.tp_size or metadata_dict["tp_size"]
     rank_keyword = "rank"
     rank_scales_map = _kv_scales_extractor(hf_tensor_files, use_safetensors,
@@ -256,7 +256,7 @@ def main(args):
     # Postprocess: formatting to the current schema. Consider pulling it out into a dedicated
     # function should it ever become more complicated.
     rank_scales_map = { rank_keyword + str(rank) :
-                        { k: scale[k] for k in sorted(scale.keys())}
+                        {k: scale[k] for k in sorted(scale.keys())}
                         for rank, scale in rank_scales_map.items() }
 
     model_dtype = metadata_dict["model_dtype"]
@@ -297,7 +297,7 @@ if __name__ == "__main__":
                                      "and saves them to a JSON file compatible with later "
                                      "use by vLLM (pass this file to the appropriate "
                                      "runtime typically using the argument "
-                                     "--scales_path <filename>). This is only used "
+                                     "--scales-path <filename>). This is only used "
                                      "if the KV cache dtype is FP8 and on ROCm (AMD GPU).")
     parser.add_argument("--quantized_model",
                         help="Specify the directory containing a single quantized HF model. "

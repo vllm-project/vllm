@@ -27,7 +27,7 @@ class ModelConfig:
             downloading the model and tokenizer.
         download_dir: Directory to download and load the weights, default to the
             default cache directory of huggingface.
-        scales_path: Path to file containing scaling factors. Used to load
+        scales_path: Path to JSON file containing scaling factors. Used to load
             KV cache scaling factors into the model when KV cache type
             is FP8_E4M3 on ROCm (AMD GPU). In the future these will also be used
             to load activation and weight scaling factors when the model dtype is

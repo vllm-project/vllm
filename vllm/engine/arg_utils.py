@@ -136,7 +136,7 @@ class EngineArgs:
             '--scales-path',
             type=str,
             default=None,
-            help='Path to the JSON file containing scaling factors. '
+            help='Path to the JSON file containing the KV cache scaling factors. '
             'This should generally be supplied, when KV cache dtype is FP8. Otherwise, '
             'KV cache scaling factors default to 1.0, which may cause accuracy issues. '
             'FP8_E5M2 (without scaling) is only supported on cuda version greater than 11.8. '

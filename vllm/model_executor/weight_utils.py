@@ -5,7 +5,7 @@ import fnmatch
 import json
 import os
 from collections import defaultdict
-from typing import Any, Iterator, List, Optional, Tuple
+from typing import Any, Iterable, Iterator, List, Optional, Tuple
 
 from huggingface_hub import snapshot_download, HfFileSystem
 import numpy as np
@@ -266,8 +266,7 @@ def kv_cache_scales_loader(filename: str,
                            tp_rank: int,
                            tp_size: int,
                            num_hidden_layers: int,
-                           model_type: Optional[str],
-                           rank_keyword="rank") -> Iterator[Tuple[int, float]]:
+                           model_type: Optional[str]) -> Iterable[Tuple[int, float]]:
     """
     A simple utility to read in KV cache scaling factors that have been
     previously serialized to disk. Used by the model to populate the appropriate
@@ -293,13 +292,21 @@ def kv_cache_scales_loader(filename: str,
             assert isinstance(schema, dict), malformed_schema_str
             if schema["model_type"] is not None:
                 assert model_type == schema["model_type"], f"Model type is {model_type} but loaded " \
-                  f"scaling factors belonging to different model type {schema["model_type"]}!"
+                  f"scaling factors belonging to different model type {schema['model_type']}!"
             assert isinstance(schema["kv_cache"], dict), malformed_schema_str
             assert schema["kv_cache"]["dtype"] == "fp8", "Loaded scaling factors intended for KV " \
-              f"cache dtype = {schema["kv_cache"]["dtype"]} rather than FP8!"
+              f"cache dtype = {schema['kv_cache']['dtype']} rather than FP8!"
             assert isinstance(schema["kv_cache"]["scaling_factor"], dict), malformed_schema_str
+            raw_rank_scales_map = schema["kv_cache"]["scaling_factor"]
+            # The keys in raw_rank_scales_map should be strings with the format
+            # f"{rank_keyword}{tp_rank}", where rank_keyword is an alphabetical string shared
+            # amongst all keys and tp_rank is a numeric string. Thus, recovering the alphabetical
+            # components of any key should return rank_keyword
+            rank_keyword = "".join(char for char in
+                                   next(iter(raw_rank_scales_map.keys()))
+                                   if char.isalpha())
             rank_scales_map = {int(rank.replace(rank_keyword, "")) : scales_map
-                               for rank, scales_map in schema["kv_cache"]["scaling_factor"].items()}
+                               for rank, scales_map in raw_rank_scales_map.items()}
             assert len(rank_scales_map) != 0, "Loaded dictionary is empty."
             loaded_tp_size = max(rank_scales_map.keys()) + 1
             assert loaded_tp_size == tp_size, f"Loaded dictionary has TP size {loaded_tp_size} " \
@@ -327,7 +334,7 @@ def kv_cache_scales_loader(filename: str,
     except Exception as e:
         logger.error(f"An error occurred while reading '{filename}': {e}")
     # This section is reached if and only if any of the excepts are hit
-    # Return an empty iterator (tuple) => no KV cache scales are loaded
+    # Return an empty iterable (tuple) => no KV cache scales are loaded
     # which effectively defaults to 1.0 scales
     logger.warn(f"Defaulting to KV cache scaling factors = 1.0 for all layers in TP rank {tp_rank}"
                 " as an error occurred during loading.")

@@ -85,7 +85,7 @@ class LLMEngine:
             f"quantization={model_config.quantization}, "
             f"enforce_eager={model_config.enforce_eager}, "
             f"kv_cache_dtype={cache_config.cache_dtype}, "
-            f"kv_cache_scales_path={model_config.kv_cache_scales_path}, "
+            f"scales_path={model_config.scales_path}, "
             f"seed={model_config.seed})")
         # TODO(woosuk): Print more configs in debug mode.
 
