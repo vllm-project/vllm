@@ -510,6 +510,13 @@ if os.environ.get("VLLM_USE_PRECOMPILED"):
     ext_modules = []
     package_data["vllm"].append("*.so")
 
+cmdclass={"build_ext": build_ext} if not (_is_neuron() or _is_hip()) else {}
+
+if not (_is_neuron() or _is_hip()):
+    distclass = BinaryDistribution
+else:
+    distclass = None
+
 setuptools.setup(
     name="vllm",
     version=get_vllm_version(),
@@ -537,7 +544,7 @@ setuptools.setup(
     python_requires=">=3.8",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
-    cmdclass={"build_ext": build_ext} if not _is_neuron() else {},
-    distclass=BinaryDistribution,
+    cmdclass=cmdclass,
+    distclass=distclass,
     package_data=package_data,
 )
