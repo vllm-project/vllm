@@ -13,6 +13,9 @@ steps:
 
 - label: Basic Correctness Test
   command: pytest -v -s --forked basic_correctness
+  
+- label: Core Test
+  command: pytest -v -s core
 
 - label: Distributed Comm Ops Test
   command: pytest -v -s --forked test_comm_ops.py
@@ -50,7 +53,10 @@ steps:
   command: pytest -v -s worker
 
 - label: LoRA Test
-  command: pytest -v -s lora
+  command: pytest -v -s lora --forked
+
+- label: Metrics Test
+  command: pytest -v -s metrics
 
 - label: Benchmarks
   working_dir: "/vllm-workspace/.buildkite"

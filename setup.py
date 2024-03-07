@@ -3,6 +3,7 @@ import io
 import os
 import re
 import subprocess
+import sys
 import warnings
 from pathlib import Path
 from typing import List, Set
@@ -14,6 +15,8 @@ import torch.utils.cpp_extension as torch_cpp_ext
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME, ROCM_HOME
 
 ROOT_DIR = os.path.dirname(__file__)
+# This is a temporary directory to store third-party packages.
+THIRDPARTY_SUBDIR = "vllm/thirdparty_files"
 
 # If you are developing the C++ backend of vLLM, consider building vLLM with
 # `python setup.py develop` since it will give you incremental builds.
@@ -24,7 +27,7 @@ MAIN_CUDA_VERSION = "12.1"
 
 # Supported NVIDIA GPU architectures.
 NVIDIA_SUPPORTED_ARCHS = {"7.0", "7.5", "8.0", "8.6", "8.9", "9.0"}
-ROCM_SUPPORTED_ARCHS = {"gfx90a", "gfx942", "gfx1100"}
+ROCM_SUPPORTED_ARCHS = {"gfx908", "gfx90a", "gfx942", "gfx1100"}
 # SUPPORTED_ARCHS = NVIDIA_SUPPORTED_ARCHS.union(ROCM_SUPPORTED_ARCHS)
 
 
@@ -36,7 +39,7 @@ def _is_neuron() -> bool:
     torch_neuronx_installed = True
     try:
         subprocess.run(["neuron-ls"], capture_output=True, check=True)
-    except FileNotFoundError:
+    except (FileNotFoundError, PermissionError):
         torch_neuronx_installed = False
     return torch_neuronx_installed
 
@@ -324,8 +327,46 @@ if _is_cuda():
                     "nvcc": NVCC_FLAGS_PUNICA,
                 },
             ))
-elif _is_neuron():
-    neuronxcc_version = get_neuronxcc_version()
+
+    # Download the FlashAttention package.
+    # Adapted from https://github.com/ray-project/ray/blob/f92928c9cfcbbf80c3a8534ca4911de1b44069c0/python/setup.py#L518-L530
+    flash_attn_version = "2.5.6"
+    install_dir = os.path.join(ROOT_DIR, THIRDPARTY_SUBDIR)
+    subprocess.check_call(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "-q",
+            f"--target={install_dir}",
+            "einops",  # Dependency of flash-attn.
+            f"flash-attn=={flash_attn_version}",
+            "--no-dependencies",  # Required to avoid re-installing torch.
+        ],
+        env=dict(os.environ, CC="gcc"),
+    )
+
+    # Copy the FlashAttention package into the vLLM package after build.
+    class build_ext(BuildExtension):
+
+        def run(self):
+            super().run()
+            target_dir = os.path.join(self.build_lib, THIRDPARTY_SUBDIR)
+            if not os.path.exists(target_dir):
+                os.makedirs(target_dir)
+            self.copy_tree(install_dir, target_dir)
+
+    class BinaryDistribution(setuptools.Distribution):
+
+        def has_ext_modules(self):
+            return True
+
+else:
+    build_ext = BuildExtension
+    BinaryDistribution = setuptools.Distribution
+    if _is_neuron():
+        neuronxcc_version = get_neuronxcc_version()
 
 vllm_extension_sources = [
     "csrc/cache_kernels.cu",
@@ -342,6 +383,8 @@ vllm_extension_sources = [
 
 if _is_cuda():
     vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
+    vllm_extension_sources.append(
+        "csrc/quantization/marlin/marlin_cuda_kernel.cu")
     vllm_extension_sources.append("csrc/custom_all_reduce.cu")
 
     # Add MoE kernels.
@@ -432,7 +475,9 @@ def get_requirements() -> List[str]:
     return requirements
 
 
-package_data = {"vllm": ["py.typed"]}
+package_data = {
+    "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
+}
 if os.environ.get("VLLM_USE_PRECOMPILED"):
     ext_modules = []
     package_data["vllm"].append("*.so")
@@ -464,6 +509,7 @@ setuptools.setup(
     python_requires=">=3.8",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
-    cmdclass={"build_ext": BuildExtension} if not _is_neuron() else {},
+    cmdclass={"build_ext": build_ext} if not _is_neuron() else {},
+    distclass=BinaryDistribution,
     package_data=package_data,
 )
