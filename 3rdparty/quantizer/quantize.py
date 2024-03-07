@@ -193,7 +193,7 @@ def get_calib_dataloader(data="cnn_dailymail",
 
     batch_encoded = tokenizer.batch_encode_plus(dataset,
                                                 return_tensors="pt",
-                                                padding=True,
+                                                padding="max_length",
                                                 truncation=True,
                                                 max_length=block_size)
     if device:
@@ -311,18 +311,6 @@ def main(args):
                                 # export_tensorrt_llm_config=(not export_npz),
                                 export_tensorrt_llm_config=False,
                                 export_npz=export_npz)
-
-            # export npz (reference)
-            export_model_config(model,
-                                model_type,
-                                getattr(torch, args.dtype),
-                                export_dir=export_path,
-                                inference_tensor_parallel=args.tp_size,
-                                inference_pipeline_parallel=args.pp_size,
-                                # export_tensorrt_llm_config=(not export_npz),
-                                export_tensorrt_llm_config=False,
-                                # export_npz=export_npz,
-                                export_npz=True)
 
             # Workaround for wo quantization
             if args.qformat in ["int8_wo", "int4_wo", "full_prec"]:

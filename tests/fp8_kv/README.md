@@ -36,7 +36,7 @@ The detailed quantization toolkit (AMMO) conversion guide for FP8 can be found [
 # prerequisites:
 # - Quantized HF LLaMa 2 model 
 python3 3rdparty/quantizer/extract_scales.py --help
-Useage: extract_scales.py [-h] --quantized_model QUANTIZED_MODEL [--cache_dir CACHE_DIR] [--load_format {auto,safetensors,npz,pt}] [--revision REVISION] [--output_dir OUTPUT_DIR] [--output_name OUTPUT_NAME] [--tp_size TP_SIZE]
+Useage: extract_scales.py [-h] --quantized_model QUANTIZED_MODEL [--load_format {auto,safetensors,npz,pt}] [--output_dir OUTPUT_DIR] [--output_name OUTPUT_NAME] [--tp_size TP_SIZE]
 
 KV Scale Extraction Example
 
@@ -55,7 +55,7 @@ Example:
 python3 3rdparty/quantizer/extract_scales.py --model <QUANTIZED_MODEL_DIR> --tp_size <TENSOR_PARALLEL_SIZE> --output_dir <PATH_TO_OUTPUT_DIR>
 ```
 ### 4. Load KV Cache Scaling Factors into VLLM.
-This script evaluates the inference throughput of language models using various backends such as vLLM. It measures the time taken to process a given number of prompts and generate sequences for each prompt. The recently generated KV cache scaling factors are now integrated into the benchmarking process and allow for kv cache scaling factors to be utilized for FP8.
+This script evaluates the inference throughput of language models using various backends such as vLLM. It measures the time taken to process a given number of prompts and generate sequences for each prompt. The recently generated KV cache scaling factors are now integrated into the benchmarking process and allow for KV cache scaling factors to be utilized for FP8.
 ```python
 # prerequisites:
 # -  LLaMa 2 kv_cache_scales.json file
@@ -65,7 +65,7 @@ usage: benchmark_throughput.py [-h] [--backend {vllm,hf,mii}] [--dataset DATASET
                                [--tokenizer TOKENIZER] [--quantization {awq,gptq,squeezellm,None}] [--tensor-parallel-size TENSOR_PARALLEL_SIZE] [--n N]
                                [--use-beam-search] [--num-prompts NUM_PROMPTS] [--seed SEED] [--hf-max-batch-size HF_MAX_BATCH_SIZE] [--trust-remote-code]
                                [--max-model-len MAX_MODEL_LEN] [--dtype {auto,half,float16,bfloat16,float,float32}] [--enforce-eager] [--kv-cache-dtype {auto,fp8}]
-                               [--kv-cache-scales-path KV_CACHE_SCALES_PATH]
+                               [--scales-path KV_CACHE_SCALES_PATH]
 
 Benchmark Throughput Example  
 optional arguments:
@@ -88,9 +88,9 @@ optional arguments:
   --dtype {auto,half,float16,bfloat16,float,float32}  data type for model weights and activations. The "auto" option will use FP16 precision for FP32 and FP16 models, and BF16 precision for BF16 models.
   --enforce-eager  enforce eager execution
   --kv-cache-dtype {auto,fp8} Data type for kv cache storage. If "auto", will use model data type. FP8_E5M2 (without scaling) is only supported on cuda version greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead supported ```for common inference criteria.
-  --kv-cache-scales-path KV_CACHE_SCALES_PATH  Path to the JSON files containing the KV cache scaling factors. This should generally be supplied, when KV cache dtype is FP8. Otherwise, KV cache  scaling factors default to 1.0, which may cause accuracy issues. FP8_E5M2 (without scaling) is only supported on cuda version greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead supported for common inference criteria.
+  --scales-path KV_CACHE_SCALES_PATH  Path to the JSON file containing the KV cache scaling factors. This should generally be supplied, when KV cache dtype is FP8. Otherwise, KV cache scaling factors default to 1.0, which may cause accuracy issues. FP8_E5M2 (without scaling) is only supported on cuda version greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead supported for common inference criteria.
 ```
 ```
 Example:
-python3 benchmarks/benchmark_throughput.py --input-len <INPUT_LEN> --output-len <OUTPUT_LEN> -tp <TENSOR_PARALLEL_SIZE> --kv-cache-dtype fp8 --kv-cache-scales-path </path/to/kv_cache_scales.json>
+python3 benchmarks/benchmark_throughput.py --input-len <INPUT_LEN> --output-len <OUTPUT_LEN> -tp <TENSOR_PARALLEL_SIZE> --kv-cache-dtype fp8 --scales-path </path/to/kv_cache_scales.json>
 ```python

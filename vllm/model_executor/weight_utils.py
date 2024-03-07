@@ -5,7 +5,7 @@ import fnmatch
 import json
 import os
 from collections import defaultdict
-from typing import Any, Iterator, List, Optional, Tuple
+from typing import Any, Iterable, Iterator, List, Optional, Tuple
 
 from huggingface_hub import snapshot_download, HfFileSystem
 import numpy as np
@@ -262,9 +262,10 @@ def hf_model_weights_iterator(
 
 
 def kv_cache_scales_loader(filename: str,
-                             tp_rank: int,
-                             tp_size: int,
-                             num_hidden_layers: int) -> Iterator[Tuple[int, float]]:
+                           tp_rank: int,
+                           tp_size: int,
+                           num_hidden_layers,
+                           model_type: Optional[str]) -> Iterable[Tuple[int, float]]:
     """
     A simple utility to read in KV cache scaling factors that have been
     previously serialized to disk. Used by the model to populate the appropriate
@@ -282,26 +283,44 @@ def kv_cache_scales_loader(filename: str,
             # Since the number of layers is small and (for now) we use scalar
             # scaling factors (so the size they use is also small), this is
             # not a concern at present.
-            raw_rank_map = json.load(f, parse_int=int, parse_constant=float)
-
-            # If any of the inputs are malformed, it raises an error somewhere
-            # in the following lines and is caught in except
-            assert isinstance(raw_rank_map, dict), "Did not load a dictionary from file."
-            assert len(raw_rank_map) != 0, "Loaded dictionary is empty."
-            loaded_tp_size = max(int(rank) for rank in raw_rank_map) + 1
+            schema = json.load(f, parse_int=int, parse_constant=float)
+            
+            malformed_schema_str = "Malformed schema detected."
+            # If any of the inputs are malformed or mismatched, it raises an error
+            # somewhere in the following lines and is caught in except
+            assert isinstance(schema, dict), malformed_schema_str
+            if schema["model_type"] is not None:
+                assert model_type == schema["model_type"], f"Model type is {model_type} but loaded " \
+                  f"scaling factors belonging to different model type {schema['model_type']}!"
+            assert isinstance(schema["kv_cache"], dict), malformed_schema_str
+            assert schema["kv_cache"]["dtype"] == "float8_e4m3fn", "Loaded scaling factors intended " \
+              f"for KV cache dtype = {schema['kv_cache']['dtype']} rather than FP8!"
+            assert isinstance(schema["kv_cache"]["scaling_factor"], dict), malformed_schema_str
+            raw_rank_scales_map = schema["kv_cache"]["scaling_factor"]
+            # The keys in raw_rank_scales_map should be strings with the format
+            # f"{rank_keyword}{tp_rank}", where rank_keyword is an alphabetical string shared
+            # amongst all keys and tp_rank is a numeric string. Thus, recovering the alphabetical
+            # components of any key should return rank_keyword
+            rank_keyword = "".join(char for char in
+                                   next(iter(raw_rank_scales_map.keys()))
+                                   if char.isalpha())
+            rank_scales_map = {int(rank.replace(rank_keyword, "")) : scales_map
+                               for rank, scales_map in raw_rank_scales_map.items()}
+            assert len(rank_scales_map) != 0, "Loaded KV scales dictionary is empty."
+            loaded_tp_size = max(rank_scales_map.keys()) + 1
             assert loaded_tp_size == tp_size, f"Loaded dictionary has TP size {loaded_tp_size} " \
               f"but LLM engine is currently running with TP size {tp_size}."
-            for rank, scales_map in raw_rank_map.items():
+            for rank, scales_map in rank_scales_map.items():
+                assert isinstance(scales_map, dict), malformed_schema_str
                 assert len(scales_map) == num_hidden_layers, "KV cache scales map for TP rank " \
                   f"{rank} is malformed. Expected {num_hidden_layers} layers, got {len(scales_map)}."
             for i in range(tp_size):
-                assert i in raw_rank_map or str(i) in raw_rank_map, "KV cache scales map for TP rank " \
-                  f"{i} not found."
-            assert tp_rank in raw_rank_map or str(tp_rank) in raw_rank_map, "Tried to load KV cache " \
-              f"scales for TP rank {tp_rank} but these were not found."
-            raw_layer_scales_map = raw_rank_map.get(tp_rank) or raw_rank_map.get(str(tp_rank))
+                assert i in rank_scales_map, f"KV cache scales map for TP rank {i} not found."
+            assert tp_rank in rank_scales_map, "Tried to load KV cache scales for TP rank " \
+              f"{tp_rank} but these were not found."
+            assert isinstance(rank_scales_map[tp_rank], dict), malformed_schema_str
             layer_scales_map = {int(layer_idx): float(scale) 
-                                for layer_idx, scale in raw_layer_scales_map.items()}
+                                for layer_idx, scale in rank_scales_map[tp_rank].items()}
             for i in range(num_hidden_layers):
                 assert i in layer_scales_map, "Could not find KV cache scales for layer " \
                   f"{i} in TP rank {tp_rank}."
@@ -313,8 +332,8 @@ def kv_cache_scales_loader(filename: str,
         logger.error(f"Error decoding JSON in file '{filename}'.")
     except Exception as e:
         logger.error(f"An error occurred while reading '{filename}': {e}")
-    # This section is only reached if any of the excepts are hit
-    # Return an empty iterator (tuple) => no KV cache scales are loaded
+    # This section is reached if and only if any of the excepts are hit
+    # Return an empty iterable (tuple) => no KV cache scales are loaded
     # which effectively defaults to 1.0 scales
     logger.warn(f"Defaulting to KV cache scaling factors = 1.0 for all layers in TP rank {tp_rank}"
                 " as an error occurred during loading.")
