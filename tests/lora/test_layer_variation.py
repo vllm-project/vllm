@@ -3,7 +3,6 @@ from typing import List, Optional
 import peft
 import pytest
 from random import sample
-import shutil
 import torch
 from transformers import AutoModelForCausalLM
 
@@ -33,7 +32,7 @@ def do_sample(llm,
               n_tokens: int = 256):
     prompts = PROMPTS
     sampling_params = vllm.SamplingParams(temperature=0,
-                                          max_tokens=256,
+                                          max_tokens=n_tokens,
                                           logprobs=logprobs,
                                           stop=["[/assistant]"])
     outputs = llm.generate(
@@ -52,7 +51,7 @@ def do_sample(llm,
         generated_logprobs.append([
             list(logprob.keys()) for out in output.outputs
             for logprob in out.logprobs
-        ][:n_tokens])
+        ])
     return generated_logprobs if logprobs else generated_texts
 
 
@@ -67,7 +66,7 @@ for length in range(2, 6):
 
 
 # Test the correctness when layer and rank are varied
-@pytest.mark.parametrize("tp_size", [4])
+@pytest.mark.parametrize("tp_size", [1, 4])
 @pytest.mark.parametrize("target_modules", TARGET_MODULES_LIST)
 @pytest.mark.parametrize("rank", [8, 16, 32, 64])
 def test_layer_variation_correctness(tp_size, target_modules, rank, tmpdir):
@@ -86,7 +85,6 @@ def test_layer_variation_correctness(tp_size, target_modules, rank, tmpdir):
     merged_probs = do_sample(llm, tmp_dir_lora, 1, logprobs=5, n_tokens=32)
     del llm
     cleanup()
-    shutil.rmtree(str(tmpdir))
     reference_id_sets = [set(prob[0]) for prob in merged_probs]
 
     model = get_lora_model(MODEL_PATH, target_modules, rank)
@@ -103,7 +101,6 @@ def test_layer_variation_correctness(tp_size, target_modules, rank, tmpdir):
     probs = do_sample(llm, logprobs=5, n_tokens=32)
     del llm
     cleanup()
-    shutil.rmtree(str(tmpdir))
     # verify the top-5 tokens are identical for each token
     id_sets = [set(prob[0]) for prob in probs]
     assert id_sets == reference_id_sets
