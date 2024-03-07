@@ -4,6 +4,7 @@ import peft
 import pytest
 from random import sample
 import shutil
+import torch
 from transformers import AutoModelForCausalLM
 
 import vllm
@@ -66,14 +67,18 @@ for length in range(2, 6):
 
 
 # Test the correctness when layer and rank are varied
+@pytest.mark.parametrize("tp_size", [4])
 @pytest.mark.parametrize("target_modules", TARGET_MODULES_LIST)
 @pytest.mark.parametrize("rank", [8, 16, 32, 64])
-def test_layer_variation_correctness(target_modules, rank, tmpdir):
+def test_layer_variation_correctness(tp_size, target_modules, rank, tmpdir):
+    if torch.cuda.device_count() < tp_size:
+        pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
+
     llm = vllm.LLM(MODEL_PATH,
                    enable_lora=True,
                    max_num_seqs=16,
                    max_loras=4,
-                   tensor_parallel_size=4,
+                   tensor_parallel_size=tp_size,
                    worker_use_ray=True)
     model = get_lora_model(MODEL_PATH, target_modules, rank)
     tmp_dir_lora = os.path.join(tmpdir, "tmp_dir_lora")
