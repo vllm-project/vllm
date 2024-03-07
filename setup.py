@@ -357,8 +357,13 @@ if _is_cuda():
                 os.makedirs(target_dir)
             self.copy_tree(install_dir, target_dir)
 
+    class BinaryDistribution(setuptools.Distribution):
+        def has_ext_modules(self):
+            return True
+
 else:
     build_ext = BuildExtension
+    BinaryDistribution = setuptools.Distribution
     if _is_neuron():
         neuronxcc_version = get_neuronxcc_version()
 
@@ -504,5 +509,6 @@ setuptools.setup(
     install_requires=get_requirements(),
     ext_modules=ext_modules,
     cmdclass={"build_ext": build_ext} if not _is_neuron() else {},
+    distclass=BinaryDistribution,
     package_data=package_data,
 )
