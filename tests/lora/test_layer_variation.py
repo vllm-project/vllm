@@ -68,8 +68,7 @@ for length in range(2, 6):
 # Test the correctness when layer and rank are varied
 @pytest.mark.parametrize("target_modules", TARGET_MODULES_LIST)
 @pytest.mark.parametrize("rank", [8, 16, 32, 64])
-def test_layer_variation_correctness(target_modules, rank, tmpdir,
-                                     cleanup_fixture):
+def test_layer_variation_correctness(target_modules, rank, tmpdir):
     llm = vllm.LLM(MODEL_PATH,
                    enable_lora=True,
                    max_num_seqs=16,
