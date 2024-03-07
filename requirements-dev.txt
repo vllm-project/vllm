@@ -21,3 +21,6 @@ einops # required for MPT
 openai
 requests
 ray
+
+# Benchmarking
+aiohttp
