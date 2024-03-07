@@ -45,6 +45,13 @@ class InputMetadata:
         self.start_loc = start_loc
         self.max_context_len = max_context_len
         self.slot_mapping = slot_mapping
+        # Index: The batched sequence's index.
+        # Value: The length of attention context.
+        # NOTE(sang): When it is prefill/decoding,
+        # the definition is different. For prefill,
+        # it means the the length of KV that are cached
+        # excluding the new KVs. In decoding, this
+        # includes a new KV.
         self.context_lens = context_lens
         self.block_tables = block_tables
         self.use_cuda_graph = use_cuda_graph
@@ -53,6 +60,8 @@ class InputMetadata:
         # Set during the execution of the first attention op.
         # FIXME(woosuk): This is a hack.
         self.attn_bias = None
+        # Number of valid tokens. It includes paddings.
+        # See attention.py for precise definition.
         self.num_valid_tokens = slot_mapping.shape[0]
 
     def __repr__(self) -> str:

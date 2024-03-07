@@ -31,8 +31,6 @@ LORA_WARMUP_RANK = 8
 _BATCH_SIZE_ALIGNMENT = 8
 # Capture graphs for token size 1, 2, 4, 8, 16, 24, 32, 40, ..., 256.
 # NOTE: _get_graph_batch_size needs to be updated if this list is changed.
-# Note that cuda graph is only used for decoding because it speeds up
-# the performance when num_tokens < 200. Batch here means a single token.
 _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
     _BATCH_SIZE_ALIGNMENT * i for i in range(1, 33)
 ]
@@ -215,6 +213,9 @@ class ModelRunner:
 
         max_prompt_len = max(subquery_lens)
         num_prompt_tokens = len(input_tokens)
+
+        # Pad tokens to better utilize tensor cores although
+        # cuda graph is not enabled.
         input_tokens = _make_tensor_with_pad_for_alignment(input_tokens,
                                                            pad=0,
                                                            dtype=torch.long,
@@ -347,7 +348,8 @@ class ModelRunner:
                 block_tables.append([])
             batch_size = graph_batch_size
 
-        # Q: should we not pad when cuda graph is disabled?
+        # Pad tokens to better utilize tensor cores although
+        # cuda graph is not enabled.
         input_tokens = _make_tensor_with_pad_for_alignment(input_tokens,
                                                            pad=0,
                                                            dtype=torch.long,
@@ -599,9 +601,6 @@ class ModelRunner:
 
         # Execute the model.
         if input_metadata.use_cuda_graph:
-            # NOTE: We use cuda graph only when there are only
-            # decoding requests, which means the number of batch
-            # size is equivalent to number of input tokens.
             graph_batch_size = input_tokens.shape[0]
             model_executable = self.graph_runners[graph_batch_size]
         else:
@@ -719,7 +718,7 @@ class ModelRunner:
         # deleted before the CUDA graphs.
         self.cupy_nccl_backend = cupy_utils.get_nccl_backend()
 
-        # assert not self.model_config.enforce_eager
+        assert not self.model_config.enforce_eager
         logger.info("Capturing the model for CUDA graphs. This may lead to "
                     "unexpected consequences if the model is not static. To "
                     "run the model in eager mode, set 'enforce_eager=True' or "
@@ -915,7 +914,6 @@ def _make_tensor_with_pad_for_alignment(
     """Create a tensor of a given list x with padding.
     It adds paddings to align with graph batch size. See
     _get_graph_batch_size for more details.
-    # NOTE: This API is only for decoding requests.
     """
     batch_size = len(x)
     batch_size = _get_graph_batch_size(batch_size)

@@ -242,7 +242,6 @@ class PagedAttention(nn.Module):
         else:
             # Decoding run.
             output = _paged_attention(
-                output,
                 query,
                 key_cache,
                 value_cache,
@@ -289,15 +288,17 @@ def _make_alibi_bias(
 
 
 def _paged_attention(
-    output: torch.Tensor,  # [num_tokens, num_heads, head_size]
     query: torch.Tensor,  # [num_tokens, num_heads, head_size]
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
+    key_cache: torch.
+    Tensor,  # [num_total_blocks, block_size, num_heads, head_size]
+    value_cache: torch.
+    Tensor,  # [num_total_blocks, block_size, num_heads, head_size]
     input_metadata: InputMetadata,
     num_kv_heads: int,
     scale: float,
     alibi_slopes: Optional[torch.Tensor],
 ) -> torch.Tensor:
+    output = torch.empty_like(query)
     block_size = value_cache.shape[3]
     num_seqs, num_heads, head_size = query.shape
     max_num_partitions = (
