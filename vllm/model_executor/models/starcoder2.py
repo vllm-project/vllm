@@ -25,7 +25,7 @@ from torch import nn
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.layers.attention import PagedAttention
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -103,7 +103,7 @@ class Starcoder2Attention(nn.Module):
             base=int(self.rope_theta),
             is_neox_style=True,
         )
-        self.attn = PagedAttention(
+        self.attn = Attention(
             self.num_heads,
             self.head_dim,
             self.scaling,

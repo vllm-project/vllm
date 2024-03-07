@@ -184,3 +184,6 @@ _build/
 
 # Benchmark dataset
 *.json
+
+# Third-party Python packages.
+vllm/thirdparty_files/
