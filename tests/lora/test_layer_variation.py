@@ -47,7 +47,7 @@ def do_sample(llm,
         generated_texts.append(generated_text)
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
         generated_logprobs.append([
-            list(logprob.keys()) for logprob in outputs[0].outputs[0].logprobs
+            list(logprob.keys()) for logprob in output.outputs[0].logprobs
         ][:n_tokens])
     return generated_logprobs if logprobs else generated_texts
 
@@ -78,6 +78,7 @@ def test_layer_variation_verify_reference(target_modules, rank, tmpdir):
     model.save_pretrained(tmp_dir_lora)
     merged_probs = do_sample(llm, tmp_dir_lora, 1, logprobs=5, n_tokens=1)
     reference_id_sets = [set(prob[0]) for prob in merged_probs]
+    breakpoint()
     assert reference_id_sets == [{450, 13, 306, 11221, 2266},
                                  {450, 13, 306, 11221, 2266},
                                  {450, 13, 306, 11221, 2266}]
