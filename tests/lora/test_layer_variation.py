@@ -78,7 +78,7 @@ def test_layer_variation_correctness(target_modules, rank, tmpdir):
     model = get_lora_model(MODEL_PATH, target_modules, rank)
     tmp_dir_lora = os.path.join(tmpdir, "tmp_dir_lora")
     model.save_pretrained(tmp_dir_lora)
-    merged_probs = do_sample(llm, tmp_dir_lora, 1, logprobs=5, n_tokens=1)
+    merged_probs = do_sample(llm, tmp_dir_lora, 1, logprobs=5, n_tokens=32)
     del llm
     cleanup()
     shutil.rmtree(str(tmpdir))
