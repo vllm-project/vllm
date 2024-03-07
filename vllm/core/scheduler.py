@@ -102,6 +102,9 @@ class Scheduler:
         self.running: Deque[SequenceGroup] = deque()
         # Sequence groups in the SWAPPED state.
         self.swapped: Deque[SequenceGroup] = deque()
+        self.prev_time = 0.0
+        self.prev_prompt = False
+        self.last_prompt_latency = 0.0
 
     @property
     def lora_enabled(self) -> bool:
@@ -179,7 +182,23 @@ class Scheduler:
             # sequence groups are added to the front and the new sequence groups
             # are added to the back.
             leftover_waiting_sequences = deque()
-            while self.waiting:
+
+            if self.prev_prompt:
+                self.last_prompt_latency = now - self.prev_time
+
+            self.prev_time, self.prev_prompt = now, False
+
+            # Delay scheduling prompts to let waiting queue fill up
+            if self.scheduler_config.use_delay and self.waiting:
+                earliest_arrival_time = min(
+                    [e.metrics.arrival_time for e in self.waiting])
+                passed_delay = ((now - earliest_arrival_time) >
+                                (0.5 * self.last_prompt_latency)
+                                or not self.running)
+            else:
+                passed_delay = True
+
+            while passed_delay and self.waiting:
                 seq_group = self.waiting[0]
                 waiting_seqs = seq_group.get_seqs(
                     status=SequenceStatus.WAITING)
@@ -252,6 +271,7 @@ class Scheduler:
             self.waiting.extendleft(leftover_waiting_sequences)
 
             if scheduled or ignored_seq_groups:
+                self.prev_prompt = True
                 scheduler_outputs = SchedulerOutputs(
                     scheduled_seq_groups=scheduled,
                     prompt_run=True,
