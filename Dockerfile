@@ -99,6 +99,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install accelerate
 
 COPY --from=build /workspace/vllm/*.so /workspace/vllm/
+COPY --from=build /workspace/vllm/thirdparty_files /workspace/vllm/thirdparty_files
 COPY vllm vllm
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
