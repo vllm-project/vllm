@@ -1,6 +1,6 @@
 # Performantly Quantize LLMs to 4-bits with Marlin and nm-vllm
 
-[![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/neuralmagic/nm-vllm/blob/main/examples-neuralmagic/marlin_quantization_and_deploy/Performantly_Quantize_LLMs_to_4_bits_with_Marlin_and_nm_vllm.ipynb)
+[![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://bit.ly/3uY6NTx)
 
 This notebook walks through how to compress a pretrained LLM and deploy it with `nm-vllm`. To create a new 4-bit quantized model, we can leverage AutoGPTQ. Quantizing reduces the model's precision from FP16 to INT4 which effectively reduces the file size by ~70%. The main benefits are lower latency and memory usage.
 

@@ -1,6 +1,6 @@
 # Deploy Compressed LLMs from Hugging Face with nm-vllm
 
-[![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/neuralmagic/nm-vllm/blob/main/examples-neuralmagic/deploy_compressed_huggingface_models/Deploy_Compressed_LLMs_from_Hugging_Face_with_nm_vllm.ipynb)
+[![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://bit.ly/4a3K5Iw)
 
 
 This notebook walks through how to deploy compressed models with nm-vllm's latest memory and performance optimizations.
