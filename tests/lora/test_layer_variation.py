@@ -95,7 +95,7 @@ def test_layer_variation_correctness(target_modules, rank, tmpdir):
                    max_num_seqs=16,
                    tensor_parallel_size=4,
                    worker_use_ray=True)
-    probs = do_sample(llm, logprobs=5, n_tokens=1)
+    probs = do_sample(llm, logprobs=5, n_tokens=32)
     del llm
     cleanup()
     shutil.rmtree(str(tmpdir))
