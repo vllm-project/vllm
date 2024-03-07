@@ -410,7 +410,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
         is_metadata = getattr(param, "is_metadata", False)
-        
+
         if loaded_shard_id is None:
             # Loaded weight is already packed.
             if output_dim is None:
