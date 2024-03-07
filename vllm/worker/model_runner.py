@@ -86,7 +86,7 @@ class ModelRunner:
             self.model_config.enforce_eager = True
 
     def load_model(self) -> None:
-        with measure_cuda_memory() as m:
+        with measure_cuda_memory(self.device) as m:
             self.model = get_model(self.model_config,
                                    self.device_config,
                                    lora_config=self.lora_config,

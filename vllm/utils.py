@@ -319,6 +319,8 @@ class measure_cuda_memory:
         self.device = device
 
     def current_memory_usage(self) -> float:
+        if self.device and self.device.type == 'cpu':
+            return 0.0
         # Return the memory usage in bytes.
         torch.cuda.reset_peak_memory_stats(self.device)
         mem = torch.cuda.max_memory_allocated(self.device)
