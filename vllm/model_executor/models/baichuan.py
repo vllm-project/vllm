@@ -27,7 +27,7 @@ from transformers import PretrainedConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention import PagedAttention
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                MergedColumnParallelLinear,
@@ -151,10 +151,10 @@ class BaiChuanAttention(nn.Module):
             alibi_slopes = alibi_slopes[head_start:head_end].tolist()
 
             scaling = self.head_dim**-0.5
-            self.attn = PagedAttention(self.num_heads,
-                                       self.head_dim,
-                                       scaling,
-                                       alibi_slopes=alibi_slopes)
+            self.attn = Attention(self.num_heads,
+                                  self.head_dim,
+                                  scaling,
+                                  alibi_slopes=alibi_slopes)
         else:
             self.rotary_emb = get_rope(
                 self.head_dim,
@@ -163,8 +163,7 @@ class BaiChuanAttention(nn.Module):
                 base=self.rope_theta,
             )
             self.scaling = self.head_dim**-0.5
-            self.attn = PagedAttention(self.num_heads, self.head_dim,
-                                       self.scaling)
+            self.attn = Attention(self.num_heads, self.head_dim, self.scaling)
 
     def forward(
         self,

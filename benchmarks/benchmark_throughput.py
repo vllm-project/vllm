@@ -74,6 +74,7 @@ def run_vllm(
     kv_cache_dtype: str,
     device: str,
     enable_prefix_caching: bool,
+    gpu_memory_utilization: float = 0.9,
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(model=model,
@@ -84,6 +85,7 @@ def run_vllm(
               trust_remote_code=trust_remote_code,
               dtype=dtype,
               max_model_len=max_model_len,
+              gpu_memory_utilization=gpu_memory_utilization,
               enforce_eager=enforce_eager,
               kv_cache_dtype=kv_cache_dtype,
               device=device,
@@ -206,13 +208,12 @@ def main(args: argparse.Namespace):
                                    args.output_len)
 
     if args.backend == "vllm":
-        elapsed_time = run_vllm(requests, args.model, args.tokenizer,
-                                args.quantization, args.tensor_parallel_size,
-                                args.seed, args.n, args.use_beam_search,
-                                args.trust_remote_code, args.dtype,
-                                args.max_model_len, args.enforce_eager,
-                                args.kv_cache_dtype, args.device,
-                                args.enable_prefix_caching)
+        elapsed_time = run_vllm(
+            requests, args.model, args.tokenizer, args.quantization,
+            args.tensor_parallel_size, args.seed, args.n, args.use_beam_search,
+            args.trust_remote_code, args.dtype, args.max_model_len,
+            args.enforce_eager, args.kv_cache_dtype, args.device,
+            args.enable_prefix_caching, args.gpu_memory_utilization)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -287,6 +288,12 @@ if __name__ == "__main__":
         'The "auto" option will use FP16 precision '
         'for FP32 and FP16 models, and BF16 precision '
         'for BF16 models.')
+    parser.add_argument('--gpu-memory-utilization',
+                        type=float,
+                        default=0.9,
+                        help='the fraction of GPU memory to be used for '
+                        'the model executor, which can range from 0 to 1.'
+                        'If unspecified, will use the default value of 0.9.')
     parser.add_argument("--enforce-eager",
                         action="store_true",
                         help="enforce eager execution")
