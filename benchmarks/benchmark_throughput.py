@@ -72,7 +72,7 @@ def run_vllm(
     max_model_len: Optional[int],
     enforce_eager: bool,
     kv_cache_dtype: str,
-    kv_cache_scales_path: Optional[str],
+    scales_path: Optional[str],
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(
@@ -86,7 +86,7 @@ def run_vllm(
         max_model_len=max_model_len,
         enforce_eager=enforce_eager,
         kv_cache_dtype=kv_cache_dtype,
-        kv_cache_scales_path=kv_cache_scales_path,
+        scales_path=scales_path,
     )
 
     # Add the requests to the engine.
@@ -211,7 +211,7 @@ def main(args: argparse.Namespace):
                                 args.seed, args.n, args.use_beam_search,
                                 args.trust_remote_code, args.dtype,
                                 args.max_model_len, args.enforce_eager,
-                                args.kv_cache_dtype, args.kv_cache_scales_path)
+                                args.kv_cache_dtype, args.scales_path)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -298,7 +298,7 @@ if __name__ == "__main__":
         'FP8_E5M2 (without scaling) is only supported on cuda version greater than 11.8. '
         'On ROCm (AMD GPU), FP8_E4M3 is instead supported for common inference criteria.')
     parser.add_argument(
-        '--kv-cache-scales-path',
+        '--scales-path',
         type=str,
         default=None,
         help='Path to the JSON files containing the KV cache scaling factors. '
