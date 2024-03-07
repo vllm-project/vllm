@@ -9,6 +9,7 @@ from vllm._C import ops
 from vllm.model_executor.layers.linear import LinearMethodBase, set_weight_attrs
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
+
 def get_int_dtype(nbits: int) -> torch.dtype:
     if nbits <= 8:
         return torch.int8
