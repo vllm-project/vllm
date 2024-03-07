@@ -6,6 +6,11 @@ import torch
 class InputMetadata:
     """Metadata for input sequences. Used in PagedAttention.
 
+    NOTE: Any python object stored here is not updated when it is
+    cuda-graph replays. If you have values that need to be changed
+    dynamically, it should be stored in tensor. The tensor has to be
+    updated from `CUDAGraphRunner.forward` API.
+
     Args:
         prompt_lens: Lengths of prompts.
         num_chunked_prefill: Number of chunked prefill requests across

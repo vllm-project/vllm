@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.utils import is_hip
+# from vllm.utils import is_hip
 
 
 class Attention(nn.Module):
@@ -46,8 +46,9 @@ class Attention(nn.Module):
         sliding_window: Optional[int] = None,
     ) -> None:
         super().__init__()
-        if (not is_hip() and torch.cuda.get_device_capability()[0] >= 8 and
-                torch.get_default_dtype() in (torch.float16, torch.bfloat16)):
+        # if (not is_hip() and torch.cuda.get_device_capability()[0] >= 8 and
+        #         torch.get_default_dtype() in (torch.float16, torch.bfloat16)):
+        if False:
             # Ampere or later NVIDIA GPUs.
             # NOTE(woosuk): FlashAttention does not support FP32.
             from vllm.model_executor.layers.attention.backends.flash_attn import FlashAttentionBackend
