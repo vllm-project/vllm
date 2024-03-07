@@ -176,19 +176,21 @@ def _metadata_extractor(quantized_model_dir: str,
                         metadata_extract_fns: Dict[str, Callable[[Dict[str, Any]], Any]]) \
                         -> Dict[str, Any]:
     """
-    Given the quantized model directory, tries to extract metadata from the JSON files in this
-    directory. It is assumed that each JSON file corresponds to a JSON-serialization of some
-    dictionary (the "JSON-dictionary"). The metadata fields to be extracted and how to extract
-    it is specified in metadata_extract_fns, which is a dictionary mapping metadata field names
-    to extraction functions.
-    Extraction functions should take in a JSON-dictionary as the sole argument and return the
-    metadata corresponding to that function. The extraction function is allowed to raise
-    exceptions, but the special exceptions KeyError or ValueError must be raised if and only if
-    the metadata field cannot be extracted from the current JSON-dictionary yet it remains
-    possible that said metadata field can be found in another JSON-dictionary.
-    Returns a dictionary mapping metadata fields to their extracted data. The dictionary's keys
-    are exactly the same as those in `metadata_extract_fns`: if any fields could not be extracted, 
-    their value is set to None and a warning is printed.
+    Given a directory containing quantized model files, this function aims to extract metadata
+    from the JSON files within this directory. Each JSON file is expected to represent a
+    dictionary in JSON format (referred to as a "JSON-dictionary"). Metadata extraction is
+    defined by a dictionary called metadata_extract_fns, where each metadata field name is
+    mapped to an extraction function.
+
+    These extraction functions are designed to take a JSON-dictionary as their only argument 
+    and return the corresponding metadata. While extraction functions are permitted to raise 
+    exceptions, they should only raise a KeyError or ValueError if the metadata field cannot 
+    be extracted from the current JSON-dictionary, yet there's a possibility of finding it in 
+    another JSON-dictionary.
+
+    The function returns a dictionary that maps metadata fields to their extracted data. The 
+    keys of this dictionary correspond exactly to those in metadata_extract_fns. If any fields 
+    fail to be extracted, their corresponding values are set to None, and a warning is printed.
     """
     if not os.path.isdir(quantized_model_dir):
         raise FileNotFoundError(f"The quantized model directory `{quantized_model_dir}` "
@@ -229,7 +231,8 @@ def _metadata_extractor(quantized_model_dir: str,
     # Warn if we cannot find any of the requested metadata
     for metadata_name in metadata_extract_fns:
         if metadata_name not in result:
-            print(f"Unable to find requested metadata field `{metadata_name}`!")
+            print(f"WARNING: Unable to find requested metadata field `{metadata_name}`, "
+                  "setting it to None.")
             result[metadata_name] = None
 
     return result
@@ -241,16 +244,15 @@ def main(args):
         "tp_size": lambda json_dict: int(json_dict["tensor_parallel"]),
         "model_dtype": lambda json_dict: json_dict["dtype"]
     }
-    metadata_dict = _metadata_extractor(args.quantized_model, metadata_extract_fns)
-
-    hf_tensor_files, use_safetensors = _prepare_hf_weights(args.quantized_model, args.load_format)
+    recovered_metadata = _metadata_extractor(args.quantized_model, metadata_extract_fns)
     if args.tp_size is not None:
-        metadata_tp_size = metadata_dict["tp_size"]
+        metadata_tp_size = recovered_metadata["tp_size"]
         if metadata_tp_size is not None:
             assert args.tp_size == metadata_tp_size, "User expected TP world size = " \
               f"{args.tp_size} but found TP world size = {metadata_tp_size} from metadata!"
-    expected_tp_size = args.tp_size or metadata_dict["tp_size"]
+    expected_tp_size = args.tp_size or recovered_metadata["tp_size"]
     rank_keyword = "rank"
+    hf_tensor_files, use_safetensors = _prepare_hf_weights(args.quantized_model, args.load_format)
     rank_scales_map = _kv_scales_extractor(hf_tensor_files, use_safetensors,
                                            rank_keyword, expected_tp_size)
     # Postprocess: formatting to the current schema. Consider pulling it out into a dedicated
@@ -259,24 +261,16 @@ def main(args):
                         {k: scale[k] for k in sorted(scale.keys())}
                         for rank, scale in rank_scales_map.items() }
 
-    model_dtype = metadata_dict["model_dtype"]
-    # Consider unifying and formalizing this into its own class (and other necessary subclasses) in
-    # the future
-    schema = { "model_type": metadata_dict["model_type"],
+    # Consider generalizing and formalizing this into its own class (and other necessary
+    # subclasses) in the future
+    schema = { "model_type": recovered_metadata["model_type"],
                "kv_cache": {
-                   "dtype": "fp8" if len(rank_scales_map) > 0 else model_dtype,
+                   "dtype": "float8_e4m3fn" if len(rank_scales_map) > 0 \
+                            else recovered_metadata["model_dtype"],
                    "scaling_factor": rank_scales_map
                },
-               # The fields below this comment are not used or checked for now
-               # but will be in the future
-               "activation": {
-                   "dtype": model_dtype,
-                   "scaling_factor": None,
-               },
-               "weight": {
-                   "dtype": model_dtype,
-                   "scaling_factor": None
-               }
+               # TODO: Expand this with activation and weights scaling factors when they
+               # are used in the future
              }
 
     if args.output_dir is None:

@@ -294,8 +294,8 @@ def kv_cache_scales_loader(filename: str,
                 assert model_type == schema["model_type"], f"Model type is {model_type} but loaded " \
                   f"scaling factors belonging to different model type {schema['model_type']}!"
             assert isinstance(schema["kv_cache"], dict), malformed_schema_str
-            assert schema["kv_cache"]["dtype"] == "fp8", "Loaded scaling factors intended for KV " \
-              f"cache dtype = {schema['kv_cache']['dtype']} rather than FP8!"
+            assert schema["kv_cache"]["dtype"] == "float8_e4m3fn", "Loaded scaling factors intended " \
+              f"for KV cache dtype = {schema['kv_cache']['dtype']} rather than FP8!"
             assert isinstance(schema["kv_cache"]["scaling_factor"], dict), malformed_schema_str
             raw_rank_scales_map = schema["kv_cache"]["scaling_factor"]
             # The keys in raw_rank_scales_map should be strings with the format
@@ -307,7 +307,7 @@ def kv_cache_scales_loader(filename: str,
                                    if char.isalpha())
             rank_scales_map = {int(rank.replace(rank_keyword, "")) : scales_map
                                for rank, scales_map in raw_rank_scales_map.items()}
-            assert len(rank_scales_map) != 0, "Loaded dictionary is empty."
+            assert len(rank_scales_map) != 0, "Loaded KV scales dictionary is empty."
             loaded_tp_size = max(rank_scales_map.keys()) + 1
             assert loaded_tp_size == tp_size, f"Loaded dictionary has TP size {loaded_tp_size} " \
               f"but LLM engine is currently running with TP size {tp_size}."

@@ -49,7 +49,6 @@ from vllm.model_executor.weight_utils import (default_weight_loader,
 from vllm.sequence import SamplerOutput
 from vllm.config import LoRAConfig
 from vllm.utils import is_hip
-from vllm.utils import is_hip
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
