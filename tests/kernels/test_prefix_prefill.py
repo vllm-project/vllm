@@ -3,7 +3,7 @@ import pytest
 import time
 
 import torch
-from vllm.model_executor.layers.triton_kernel.prefix_prefill import (
+from vllm.model_executor.layers.attention.ops.prefix_prefill import (
     context_attention_fwd)
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalFromBottomRightMask
@@ -113,7 +113,6 @@ def test_contexted_kv_attention(
     # to V_cache[num_blocks, num_kv_heads, head_size, block_size]
     v_cache = v_cache.view(-1, block_size, num_kv_heads,
                            head_size).permute(0, 2, 3, 1).contiguous()
-
     # Warm up the Triton kernel by calling it once before actually measuring generation time
     context_attention_fwd(query, k, v, output, k_cache, v_cache, block_table,
                           b_start_loc, b_seq_len, b_ctx_len, max_input_len)
