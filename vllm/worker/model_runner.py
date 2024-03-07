@@ -109,8 +109,7 @@ class ModelRunner:
                            ), "Model does not have embedding_padding_modules"
             self.lora_manager = LRUCacheWorkerLoRAManager(
                 self.scheduler_config.max_num_seqs,
-                self.scheduler_config.max_num_batched_tokens +
-                self.scheduler_config.max_paddings, vocab_size,
+                self.scheduler_config.max_num_batched_tokens, vocab_size,
                 self.lora_config, self.device, self.model.embedding_modules,
                 self.model.embedding_padding_modules)
             self.model = self.lora_manager.create_lora_manager(self.model)
@@ -163,7 +162,7 @@ class ModelRunner:
                 context_len = computed_len
             else:
                 prefix_block_tables.append([])
-                context_len = prompt_len
+                context_len = 0
             # actual prompt lens
             context_lens.append(context_len)
             subquery_lens.append(prompt_len - computed_len)
@@ -363,10 +362,12 @@ class ModelRunner:
                                     dtype=torch.int,
                                     device=self.device)
 
-        # The first dimension corresponds to number of tokens.
-        assert context_lens.shape[0] == input_tokens.shape[0]
-        assert context_lens.shape[0] == input_positions.shape[0]
-        assert context_lens.shape[0] == slot_mapping.shape[0]
+        if use_captured_graph:
+            # When using cuda-graph all these tensors should be
+            # padded.
+            assert context_lens.shape[0] == input_tokens.shape[0]
+            assert context_lens.shape[0] == input_positions.shape[0]
+            assert context_lens.shape[0] == slot_mapping.shape[0]
 
         if use_captured_graph:
             # The shape of graph_block_tables is

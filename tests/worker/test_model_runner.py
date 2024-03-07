@@ -61,10 +61,17 @@ def test_prepare_prompt():
     assert torch.allclose(
         input_metadata.start_loc,
         torch.tensor(start_loc, dtype=torch.long, device=device))
-    assert input_metadata.max_context_len == max(prompt_lens)
+    assert input_metadata.max_context_len is None
+    # TODO(sang): The current definition of context_lens is the
+    # number of k/v that are already cached (before this run).
+    # It is inconsistent with decoding.
     assert torch.allclose(
         input_metadata.context_lens,
-        torch.tensor(prompt_lens, dtype=torch.int, device=device))
+        torch.zeros(input_metadata.context_lens.shape[0],
+                    dtype=torch.int,
+                    device=device))
+
+    # SANG-TODO
     # assert input_metadata.slot_mapping == max(prompt_lens)
     # block_tables
     # Cuda graph should not be used for prerill.
@@ -154,6 +161,8 @@ def test_prepare_decode_cuda_graph():
     assert torch.allclose(
         input_metadata.context_lens[:len(prompt_lens)],
         torch.tensor(prompt_lens, dtype=torch.int, device=device))
+
+    # SANG-TODO
     # assert input_metadata.slot_mapping == max(prompt_lens)
     # block_tables
     # Cuda graph should not be used for prerill.
