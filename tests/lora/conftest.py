@@ -21,8 +21,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.parallel_utils.parallel_state import (
     destroy_model_parallel, initialize_model_parallel)
 
-TMP_PATH = "/mnt/local_storage/"
-
 
 def cleanup():
     destroy_model_parallel()

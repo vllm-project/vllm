@@ -3,10 +3,12 @@ from typing import List, Optional
 import peft
 import pytest
 from random import sample
+import shutil
 from transformers import AutoModelForCausalLM
 
 import vllm
 from vllm.lora.request import LoRARequest
+from .conftest import cleanup
 
 MODEL_PATH = "meta-llama/Llama-2-7b-hf"
 PROMPTS = [
@@ -47,7 +49,8 @@ def do_sample(llm,
         generated_texts.append(generated_text)
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
         generated_logprobs.append([
-            list(logprob.keys()) for logprob in output.outputs[0].logprobs
+            list(logprob.keys()) for out in output.outputs
+            for logprob in out.logprobs
         ][:n_tokens])
     return generated_logprobs if logprobs else generated_texts
 
@@ -62,11 +65,11 @@ for length in range(2, 6):
         [sample(SUPPORTED_MODULES, length) for _ in range(3)])
 
 
-# Test the functionality when layer and rank are varied.
-# Also verify the reference used below is always the same.
+# Test the correctness when layer and rank are varied
 @pytest.mark.parametrize("target_modules", TARGET_MODULES_LIST)
 @pytest.mark.parametrize("rank", [8, 16, 32, 64])
-def test_layer_variation_verify_reference(target_modules, rank, tmpdir):
+def test_layer_variation_correctness(target_modules, rank, tmpdir,
+                                     cleanup_fixture):
     llm = vllm.LLM(MODEL_PATH,
                    enable_lora=True,
                    max_num_seqs=16,
@@ -77,23 +80,13 @@ def test_layer_variation_verify_reference(target_modules, rank, tmpdir):
     tmp_dir_lora = os.path.join(tmpdir, "tmp_dir_lora")
     model.save_pretrained(tmp_dir_lora)
     merged_probs = do_sample(llm, tmp_dir_lora, 1, logprobs=5, n_tokens=1)
+    del llm
+    cleanup()
+    shutil.rmtree(str(tmpdir))
     reference_id_sets = [set(prob[0]) for prob in merged_probs]
-    breakpoint()
-    assert reference_id_sets == [{450, 13, 306, 11221, 2266},
-                                 {450, 13, 306, 11221, 2266},
-                                 {450, 13, 306, 11221, 2266}]
-
-
-# Test the correctness when layer and rank are varied
-@pytest.mark.parametrize("target_modules", TARGET_MODULES_LIST)
-@pytest.mark.parametrize("rank", [8, 16, 32, 64])
-def test_layer_variation_correctness(target_modules, rank, tmp_path):
-    reference_id_sets = [{450, 13, 306, 11221, 2266},
-                         {450, 13, 306, 11221, 2266},
-                         {450, 13, 306, 11221, 2266}]
 
     model = get_lora_model(MODEL_PATH, target_modules, rank)
-    tmp_dir_merged = os.path.join(tmp_path, "tmp_dir_merged")
+    tmp_dir_merged = os.path.join(tmpdir, "tmp_dir_merged")
     merged_model = model.merge_and_unload()
     merged_model.save_pretrained(tmp_dir_merged)
 
@@ -104,6 +97,9 @@ def test_layer_variation_correctness(target_modules, rank, tmp_path):
                    tensor_parallel_size=4,
                    worker_use_ray=True)
     probs = do_sample(llm, logprobs=5, n_tokens=1)
-    # for the first token, verify the top-5 tokens are identical
+    del llm
+    cleanup()
+    shutil.rmtree(str(tmpdir))
+    # verify the top-5 tokens are identical for each token
     id_sets = [set(prob[0]) for prob in probs]
     assert id_sets == reference_id_sets
