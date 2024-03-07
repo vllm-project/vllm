@@ -350,9 +350,12 @@ class BlockSpaceManager:
                 if cpu_block in mapping:
                     gpu_block = mapping[cpu_block]
                     gpu_block.ref_count += 1
-                else:
+                elif self.enable_caching:
                     gpu_block = self.gpu_allocator.allocate(
                         cpu_block.block_hash, cpu_block.num_hashed_tokens)
+                    mapping[cpu_block] = gpu_block
+                else:
+                    gpu_block = self.gpu_allocator.allocate()
                     mapping[cpu_block] = gpu_block
                 new_block_table.append(gpu_block)
                 # Free the CPU block swapped in to GPU.
@@ -380,9 +383,12 @@ class BlockSpaceManager:
                 if gpu_block in mapping:
                     cpu_block = mapping[gpu_block]
                     cpu_block.ref_count += 1
-                else:
+                elif self.enable_caching:
                     cpu_block = self.cpu_allocator.allocate(
                         gpu_block.block_hash, gpu_block.num_hashed_tokens)
+                    mapping[gpu_block] = cpu_block
+                else:
+                    cpu_block = self.cpu_allocator.allocate()
                     mapping[gpu_block] = cpu_block
                 new_block_table.append(cpu_block)
                 # Free the GPU block swapped out to CPU.
