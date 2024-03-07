@@ -30,14 +30,17 @@ class Attention(nn.Module):
         sliding_window: Optional[int] = None,
     ) -> None:
         super().__init__()
-        if not is_hip() and torch.cuda.get_device_capability()[0] >= 8:
+        if (not is_hip() and torch.cuda.get_device_capability()[0] >= 8 and
+                torch.get_default_dtype() in (torch.float16, torch.bfloat16)):
             # Ampere or later NVIDIA GPUs.
+            # NOTE(woosuk): FlashAttention does not support FP32.
             from vllm.model_executor.layers.attention.backends.flash_attn import FlashAttentionBackend
             self.backend = FlashAttentionBackend(num_heads, head_size, scale,
                                                  num_kv_heads, alibi_slopes,
                                                  sliding_window)
         else:
             # Turing and Volta NVIDIA GPUs or AMD GPUs.
+            # Or FP32 on any GPU.
             from vllm.model_executor.layers.attention.backends.xformers import XFormersBackend
             self.backend = XFormersBackend(num_heads, head_size, scale,
                                            num_kv_heads, alibi_slopes,
