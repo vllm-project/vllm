@@ -22,6 +22,8 @@ def main():
 
     # These are the verified working models.
     models = [
+        "ISTA-DASLab/Llama-2-7b-AQLM-2Bit-1x16-hf",
+        "ISTA-DASLab/Llama-2-7b-AQLM-2Bit-2x8-hf",
         "BlackSamorez/TinyLlama-1_1B-Chat-v1_0-AQLM-2Bit-1x16-hf",
         "BlackSamorez/Llama-2-7b-AQLM-2Bit-1x16-hf",
         "BlackSamorez/Llama-2-7b-AQLM-2Bit-2x8-hf"

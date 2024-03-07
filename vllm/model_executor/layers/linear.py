@@ -22,9 +22,9 @@ class LinearMethodBase(ABC):
 
     @abstractmethod
     def create_weights(self, input_size_per_partition: int,
-                       output_size_per_partition: int, input_size: int,
-                       output_size: int, params_dtype: torch.dtype,
-                       output_partition_sizes: List[int]) -> Dict[str, Any]:
+                       output_partition_sizes: List[int], input_size: int,
+                       output_size: int,
+                       params_dtype: torch.dtype) -> Dict[str, Any]:
         """Create weights for a linear layer."""
         raise NotImplementedError
 
@@ -49,9 +49,10 @@ class UnquantizedLinearMethod(LinearMethodBase):
         self.separate_bias_add = separate_bias_add
 
     def create_weights(self, input_size_per_partition: int,
-                       output_size_per_partition: int, input_size: int,
-                       output_size: int, params_dtype: torch.dtype,
-                       output_partition_sizes: List[int]) -> Dict[str, Any]:
+                       output_partition_sizes: List[int], input_size: int,
+                       output_size: int,
+                       params_dtype: torch.dtype) -> Dict[str, Any]:
+        output_size_per_partition = sum(output_partition_sizes)
         weight = Parameter(torch.empty(output_size_per_partition,
                                        input_size_per_partition,
                                        dtype=params_dtype),
@@ -105,8 +106,8 @@ class ReplicatedLinear(torch.nn.Module):
             linear_method = UnquantizedLinearMethod()
         self.linear_method = linear_method
         self.linear_weights = self.linear_method.create_weights(
-            self.input_size, self.output_size, self.input_size,
-            self.output_size, self.params_dtype, [self.output_size])
+            self.input_size, [self.output_size], self.input_size,
+            self.output_size, self.params_dtype)
         for name, weight in self.linear_weights.items():
             if isinstance(weight, torch.Tensor):
                 self.register_parameter(name, weight)
@@ -175,9 +176,8 @@ class ColumnParallelLinear(torch.nn.Module):
             output_sizes = [output_size]
         self.linear_method = linear_method
         self.linear_weights = self.linear_method.create_weights(
-            self.input_size, self.output_size_per_partition, self.input_size,
-            self.output_size, self.params_dtype,
-            [x // tp_size for x in output_sizes])
+            self.input_size, [x // tp_size for x in output_sizes],
+            self.input_size, self.output_size, self.params_dtype)
 
         for name, weight in self.linear_weights.items():
             if isinstance(weight, torch.Tensor):
@@ -518,8 +518,8 @@ class RowParallelLinear(torch.nn.Module):
             linear_method = UnquantizedLinearMethod()
         self.linear_method = linear_method
         self.linear_weights = self.linear_method.create_weights(
-            self.input_size_per_partition, self.output_size, self.input_size,
-            self.output_size, self.params_dtype, [self.output_size])
+            self.input_size_per_partition, [self.output_size], self.input_size,
+            self.output_size, self.params_dtype)
         for name, weight in self.linear_weights.items():
             if isinstance(weight, torch.Tensor):
                 self.register_parameter(name, weight)

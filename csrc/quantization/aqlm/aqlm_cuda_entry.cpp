@@ -198,7 +198,7 @@ torch::Tensor aqlm_gemm(
     }
 
   if (nbooks == 1 && entries == (1 << 16))
-  {
+  { 
     return code1x16_matmat(input, codes, codebooks, scales, cumulative_sizes, bias);
   }
   if (nbooks == 2 && entries == (1 << 8))

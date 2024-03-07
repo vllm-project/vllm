@@ -93,10 +93,14 @@ class AQLMLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: AQLMConfig):
         self.quant_config = quant_config
 
-    def create_weights(self, input_size_per_partition: int,
-                       output_size_per_partition: int, input_size: int,
-                       output_size: int, params_dtype: torch.dtype,
-                       output_partition_sizes: List[int]) -> Dict[str, Any]:
+    def create_weights(
+        self,
+        input_size_per_partition: int,
+        output_partition_sizes: List[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+    ) -> Dict[str, Any]:
         del output_size  # Unused.
         del input_size  # Unused.
 
@@ -107,6 +111,8 @@ class AQLMLinearMethod(LinearMethodBase):
                 "The input size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
                 "tensor parallel size.")
+
+        output_size_per_partition = sum(output_partition_sizes)
         if output_size_per_partition % self.quant_config.out_group_size != 0:
             raise ValueError(
                 "The output size is not aligned with the quantized "
