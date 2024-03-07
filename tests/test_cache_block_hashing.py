@@ -39,9 +39,10 @@ def flatten_2d(li):
 @pytest.mark.parametrize("model", ["facebook/opt-125m"])
 @pytest.mark.parametrize("block_size", [16])
 @pytest.mark.parametrize("max_num_seqs", [256])
-@pytest.mark.parametrize("concurrent_lora_int_ids", [[None], [1], [None, 1], [None, 1, 2], [1, 2]])
-def test_auto_prefix_caching(model: str, block_size: int, max_num_seqs: int, concurrent_lora_int_ids: List[Optional[int]]):
-
+@pytest.mark.parametrize("concurrent_lora_int_ids",
+                         [[None], [1], [None, 1], [None, 1, 2], [1, 2]])
+def test_auto_prefix_caching(model: str, block_size: int, max_num_seqs: int,
+                             concurrent_lora_int_ids: List[Optional[int]]):
 
     tokenizer = TokenizerGroup(
         tokenizer_id="facebook/opt-125m",
@@ -58,11 +59,11 @@ def test_auto_prefix_caching(model: str, block_size: int, max_num_seqs: int, con
 
             if lora_int_id is not None:
                 lora_request = LoRARequest(
-                    f"example_lora_{lora_int_id}", 
-                    lora_int_id, 
+                    f"example_lora_{lora_int_id}",
+                    lora_int_id,
                     f"example/path/to/lora_{lora_int_id}",
                 )
-            
+
             hashes.append([])
             prompts = [prefix + prompt for prompt in sample_prompts]
             seq_id = 0
@@ -70,7 +71,7 @@ def test_auto_prefix_caching(model: str, block_size: int, max_num_seqs: int, con
                 hashes[-1].append([])
                 prompt_token_ids = tokenizer.encode(prompt)
                 seq = Sequence(seq_id, prompt, prompt_token_ids, block_size,
-                            tokenizer.tokenizer.eos_token_id, lora_request)
+                               tokenizer.tokenizer.eos_token_id, lora_request)
 
                 num_blocks = len(prompt_token_ids) // block_size
                 for idx in range(num_blocks):
