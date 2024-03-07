@@ -310,7 +310,8 @@ if __name__ == "__main__":
                         default=None)
     parser.add_argument("--output_name",
                         help="Optionally specify the output filename.",
-                        default="kv_cache_scales.json")
+                        # TODO: Change this once additional scaling factors are enabled
+                        default="kv_cache_scales.json")  
     parser.add_argument("--tp_size",
                         help="Optionally specify the tensor-parallel (TP) size that the "
                         "quantized model should correspond to. If specified, during KV "
