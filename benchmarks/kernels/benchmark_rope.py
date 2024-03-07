@@ -49,21 +49,22 @@ def benchmark_rope_kernels_multi_lora(
     query_types = torch.randint(0,
                                 len(scaling_factors), (batch_size, seq_len),
                                 device=device)
-    query_offsets = offset_map[query_types].flatten()
+    query_offsets = offset_map[query_types]
+    flatten_offsets = query_offsets.flatten()
 
-    torch.cuda.synchronize()
-    with nvtx.annotate("batched", color="green"):
-        rope.forward(positions, query, key, query_offsets)
-    torch.cuda.synchronize()
-
-    packed_qk = zip(query, key)
+    queries = [query[query_types == i] for i in range(len(scaling_factors))]
+    keys = [key[query_types == i] for i in range(len(scaling_factors))]
+    packed_qk = zip(queries, keys)
     torch.cuda.synchronize()
     with nvtx.annotate("non-batched", color="yellow"):
         for q, k in packed_qk:
             # the value here is actually wrong because we don't pass any offsets
             # but we are only interested in the time it takes to execute the kernel
             rope.forward(positions, q, k)
-            torch.cuda.synchronize()
+    torch.cuda.synchronize()
+    with nvtx.annotate("batched", color="green"):
+        rope.forward(positions, query, key, flatten_offsets)
+    torch.cuda.synchronize()
 
 
 if __name__ == '__main__':
