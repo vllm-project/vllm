@@ -358,6 +358,7 @@ if _is_cuda():
             self.copy_tree(install_dir, target_dir)
 
     class BinaryDistribution(setuptools.Distribution):
+
         def has_ext_modules(self):
             return True
 
