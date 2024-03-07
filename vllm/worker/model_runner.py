@@ -94,7 +94,8 @@ class ModelRunner:
 
         self.model_memory_usage = m.consumed_memory
         logger.info(
-            f"Loading model weights took {self.model_memory_usage / float(2**30):.4f} GB")
+            f"Loading model weights took {self.model_memory_usage / float(2**30):.4f} GB"
+        )
 
         vocab_size = self.model.config.vocab_size
 
