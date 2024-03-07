@@ -9,6 +9,7 @@ import packaging
 assert packaging.version.parse(triton.__version__) >= packaging.version.parse(
     "2.2.0"), "Triton version >= 2.2.0 is required."
 
+
 @triton.jit
 def _fwd_kernel(
     Q,
