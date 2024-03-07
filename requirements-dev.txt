@@ -22,3 +22,6 @@ openai
 requests
 ray
 peft
+
+# Benchmarking
+aiohttp
