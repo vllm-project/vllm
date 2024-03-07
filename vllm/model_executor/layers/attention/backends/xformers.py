@@ -83,6 +83,7 @@ class XFormersBackend:
 
         if input_metadata.is_prompt:
             # Prompt run.
+            # Unless there's a prefix, context lens is all 0 for prefill.
             if (key_cache is None or value_cache is None
                     or input_metadata.block_tables.numel() == 0):
                 # normal attention
