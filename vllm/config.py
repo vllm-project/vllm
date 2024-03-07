@@ -27,10 +27,11 @@ class ModelConfig:
             downloading the model and tokenizer.
         download_dir: Directory to download and load the weights, default to the
             default cache directory of huggingface.
-        kv_cache_scales_path: Path to files containing JSON serialization of a map
-            of layer indices to their respective KV cache scaling factors. Used to
-            load aforementioned scaling factors into the model when KV cache type
-            is FP8_E4M3 on ROCm (AMD GPU).
+        scales_path: Path to JSON file containing scaling factors. Used to load
+            KV cache scaling factors into the model when KV cache type
+            is FP8_E4M3 on ROCm (AMD GPU). In the future these will also be used
+            to load activation and weight scaling factors when the model dtype is
+            FP8_E4M3 on ROCm.
         load_format: The format of the model weights to load:
             "auto" will try to load the weights in the safetensors format and
                 fall back to the pytorch bin format if safetensors format is
@@ -70,7 +71,7 @@ class ModelConfig:
         tokenizer_mode: str,
         trust_remote_code: bool,
         download_dir: Optional[str],
-        kv_cache_scales_path: Optional[str],
+        scales_path: Optional[str],
         load_format: str,
         dtype: Union[str, torch.dtype],
         seed: int,
@@ -86,7 +87,7 @@ class ModelConfig:
         self.tokenizer_mode = tokenizer_mode
         self.trust_remote_code = trust_remote_code
         self.download_dir = download_dir
-        self.kv_cache_scales_path = kv_cache_scales_path
+        self.scales_path = scales_path
         self.load_format = load_format
         self.seed = seed
         self.revision = revision
