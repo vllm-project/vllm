@@ -442,9 +442,9 @@ class BlockSpaceManager:
         if seq.seq_id not in self.block_tables:
             return []
         block_table = self.block_tables[seq.seq_id]
-        # TODO We exclude the last block to avoid the case where the entire
-        # prompt is cached. This would currently cause erroneous behavior in
-        # worker.
+        # NOTE We exclude the last block to avoid the case where the entire
+        # prompt is cached. This would cause erroneous behavior in model
+        # runner.
         return [
             b.block_number
             for b in takewhile(lambda b: b.computed, block_table[:-1])
