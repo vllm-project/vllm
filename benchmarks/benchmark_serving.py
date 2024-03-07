@@ -19,7 +19,7 @@ On the client side, run:
         --model <your_model> \
         --backend <backend> \ # For vllm openai api server, use "openai"
         --dataset-name sharegpt \ 
-        --dataset-path <path to datatset> \
+        --dataset-path <path to dataset> \
         --request-rate <request_rate>
 """
 import argparse
