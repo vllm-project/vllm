@@ -72,7 +72,11 @@ def test_prepare_prompt():
         torch.zeros(input_metadata.context_lens.shape[0],
                     dtype=torch.int,
                     device=device))
-    assert input_metadata.block_tables is None
+
+    expected = torch.tensor([[] for _ in range(len(seq_group_metadata_list))],
+                            dtype=torch.int32,
+                            device=model_runner.device)
+    assert torch.allclose(input_metadata.block_tables, expected)
     # Cuda graph should not be used for prerill.
     assert input_metadata.use_cuda_graph is False
     assert input_metadata.kv_cache_dtype == "auto"
