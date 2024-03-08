@@ -46,6 +46,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
+from vllm.config import LoRAConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -264,12 +265,35 @@ class Qwen2Model(nn.Module):
 
 
 class Qwen2ForCausalLM(nn.Module):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+
+    # LoRA specific attributes
+    supported_lora_modules = [
+        "qkv_proj",
+        "o_proj",
+        "gate_up_proj",
+        "down_proj",
+    ]
+    embedding_modules = {}
+    embedding_padding_modules = []
 
     def __init__(
         self,
         config: Qwen2Config,
         linear_method: Optional[LinearMethodBase] = None,
+        lora_config: Optional[LoRAConfig] = None,
     ) -> None:
+        del lora_config
         super().__init__()
         self.config = config
         self.linear_method = linear_method
