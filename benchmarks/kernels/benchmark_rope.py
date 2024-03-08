@@ -26,12 +26,24 @@ def benchmark_rope_kernels_multi_lora(
     torch.set_default_device(device)
     if rotary_dim is None:
         rotary_dim = head_size
+    # silulating serving 4 LoRAs
     scaling_factors = [1, 2, 4, 8]
-    rope = get_rope(head_size, rotary_dim, max_position, base, is_neox_style, {
-        "type": "linear",
-        "factor": tuple(scaling_factors)
-    })
-    rope = rope.to(dtype=dtype)
+    # batched RoPE can take multiple scaling factors
+    batched_rope = get_rope(head_size, rotary_dim, max_position, base,
+                            is_neox_style, {
+                                "type": "linear",
+                                "factor": tuple(scaling_factors)
+                            })
+    # non-batched RoPE takes only one scaling factor, we create multiple
+    # instances to simulate the same behavior
+    non_batched_ropes = []
+    for scaling_factor in scaling_factors:
+        non_batched_ropes.append(
+            get_rope(head_size, rotary_dim, max_position, base, is_neox_style,
+                     {
+                         "type": "linear",
+                         "factor": (scaling_factor, )
+                     }))
 
     positions = torch.randint(0, max_position, (batch_size, seq_len))
     query = torch.randn(batch_size,
@@ -40,6 +52,8 @@ def benchmark_rope_kernels_multi_lora(
                         dtype=dtype)
     key = torch.randn_like(query)
 
+    # create query offsets for batched RoPE, we concat multiple kv cache
+    # together and each query needs to find the right kv cache of its type
     offset_map = torch.tensor(
         list(
             accumulate([0] + [
@@ -49,21 +63,23 @@ def benchmark_rope_kernels_multi_lora(
     query_types = torch.randint(0,
                                 len(scaling_factors), (batch_size, seq_len),
                                 device=device)
+    # map query types to offsets
     query_offsets = offset_map[query_types]
+    # the kernel takes flattened offsets
     flatten_offsets = query_offsets.flatten()
 
+    # batched queries of the same type together for non-batched RoPE
     queries = [query[query_types == i] for i in range(len(scaling_factors))]
     keys = [key[query_types == i] for i in range(len(scaling_factors))]
-    packed_qk = zip(queries, keys)
+    packed_qkr = zip(queries, keys, non_batched_ropes)
+    # synchronize before start timing
     torch.cuda.synchronize()
     with nvtx.annotate("non-batched", color="yellow"):
-        for q, k in packed_qk:
-            # the value here is actually wrong because we don't pass any offsets
-            # but we are only interested in the time it takes to execute the kernel
-            rope.forward(positions, q, k)
+        for q, k, r in packed_qkr:
+            r.forward(positions, q, k)
     torch.cuda.synchronize()
     with nvtx.annotate("batched", color="green"):
-        rope.forward(positions, query, key, flatten_offsets)
+        batched_rope.forward(positions, query, key, flatten_offsets)
     torch.cuda.synchronize()
 
 
@@ -84,8 +100,8 @@ if __name__ == '__main__':
                         default=32)
     parser.add_argument("--dtype",
                         type=str,
-                        choices=["half", "bfloat16", "float"],
-                        default="half")
+                        choices=["bfloat16", "float"],
+                        default="float")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device",
                         type=str,
