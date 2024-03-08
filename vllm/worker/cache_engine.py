@@ -1,5 +1,5 @@
 """CacheEngine class for managing the KV cache."""
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Union
 
 import torch
 
@@ -11,7 +11,6 @@ logger = init_logger(__name__)
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
-
 class CacheEngine:
     """Manages the KV cache.
 
@@ -19,6 +18,16 @@ class CacheEngine:
     caches. It also provides methods for performing KV cache operations, such
     as swapping and copying.
     """
+    @staticmethod
+    def from_config(
+        cache_config: CacheConfig,
+        model_config: ModelConfig,
+        parallel_config: ParallelConfig
+    ) -> Union['PagedCacheEngine', 'FlashCacheEngine']:
+        if __import__("os").getenv("VLLM_TEMP_USE_FLASH", "0") == "1":
+            return FlashCacheEngine(cache_config, model_config, parallel_config)
+        else:
+            return PagedCacheEngine(cache_config, model_config, parallel_config)
 
     def __init__(
         self,
@@ -57,22 +66,11 @@ class CacheEngine:
         # Initialize the events for stream synchronization.
         self.events = [torch.cuda.Event() for _ in range(self.num_layers)]
 
-    def get_key_block_shape(self) -> Tuple[int, int, int, int]:
-        element_size = torch.tensor([], dtype=self.dtype).element_size()
-        x = 16 // element_size
-        return (
-            self.num_heads,
-            self.head_size // x,
-            self.block_size,
-            x,
-        )
+    def get_key_block_shape(self) -> Tuple[int, ...]:
+        raise NotImplementedError
 
     def get_value_block_shape(self) -> Tuple[int, int, int]:
-        return (
-            self.num_heads,
-            self.head_size,
-            self.block_size,
-        )
+        raise NotImplementedError
 
     def allocate_gpu_cache(self) -> List[KVCache]:
         gpu_cache: List[KVCache] = []
@@ -117,7 +115,7 @@ class CacheEngine:
             )
             cpu_cache.append((key_blocks, value_blocks))
         return cpu_cache
-
+    
     def _swap(
         self,
         src: List[KVCache],
@@ -173,6 +171,47 @@ class CacheEngine:
         dtype_size = _get_dtype_size(dtype)
         return dtype_size * total
 
+class PagedCacheEngine(CacheEngine):
+    def __init__(
+        self,
+        cache_config: CacheConfig,
+        model_config: ModelConfig,
+        parallel_config: ParallelConfig
+    ) -> None:
+        super().__init__(cache_config, model_config, parallel_config)
+
+    def get_key_block_shape(self) -> Tuple[int, ...]:
+        element_size = torch.tensor([], dtype=self.dtype).element_size()
+        x = 16 // element_size
+        return (
+            self.num_heads,
+            self.head_size // x,
+            self.block_size,
+            x,
+        )
+
+    def get_value_block_shape(self) -> Tuple[int, ...]:
+        return (
+            self.num_heads,
+            self.head_size,
+            self.block_size,
+        )
+    
+class FlashCacheEngine(CacheEngine):
+    def __init__(
+        self,
+        cache_config: CacheConfig,
+        model_config: ModelConfig,
+        parallel_config: ParallelConfig
+    ) -> None:
+        super().__init__(cache_config, model_config, parallel_config)
+
+    def get_key_block_shape(self) -> Tuple[int, ...]:
+        return (self.block_size, self.num_heads, self.head_size)
+    
+    def get_value_block_shape(self) -> Tuple[int, ...]:
+        return (self.block_size, self.num_heads, self.head_size)
+    
 
 def _get_dtype_size(dtype: torch.dtype) -> int:
     return torch.tensor([], dtype=dtype).element_size()
