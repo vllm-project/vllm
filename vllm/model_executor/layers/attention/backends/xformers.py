@@ -1,49 +1,20 @@
-"""Multi-head attention."""
+"""Attention layer with xFormers and PagedAttention."""
+import importlib
 from typing import List, Optional
 
-import importlib
 import torch
-import torch.nn as nn
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
                                          LowerTriangularMaskWithTensorBias)
 
-from vllm._C import ops
-from vllm._C import cache_ops
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.triton_kernel.prefix_prefill import (
-    context_attention_fwd)
+from vllm.model_executor.layers.attention.ops.paged_attn import (
+    PagedAttentionImpl)
 from vllm.utils import is_hip
-
-# try:
-#     from flash_attn import flash_attn_with_kvcache
-# except ImportError:
-#     flash_attn_with_kvcache = None
-try:
-    from flash_attn import (flash_attn_with_page_attention,
-                            flash_attn_varlen_with_page_attention)
-except Exception as e:
-    flash_attn_with_page_attention = e
-    flash_attn_varlen_with_page_attention = e
-
-_SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
-# Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
-_PARTITION_SIZE = 512
+from vllm._C import cache_ops
 
 
-class PagedAttention(nn.Module):
-    """MHA/MQA/GQA layer with PagedAttention.
-
-    This class takes query, key, and value tensors as input. The input tensors
-    can either contain prompt tokens or generation tokens.
-    The class does the following:
-
-    1. Reshape and store the input key and value tensors in the KV cache.
-    2. Perform (multi-head/multi-query/grouped-query) attention using either
-        xformers or the PagedAttention custom op.
-    3. Return the output tensor.
-    """
-
+class XFormersBackend:
     def __init__(
         self,
         num_heads: int,
@@ -53,7 +24,6 @@ class PagedAttention(nn.Module):
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
     ) -> None:
-        super().__init__()
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -61,48 +31,19 @@ class PagedAttention(nn.Module):
         self.sliding_window = sliding_window
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
-        self.register_buffer("alibi_slopes", alibi_slopes, persistent=False)
+        self.alibi_slopes = alibi_slopes
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+        suppored_head_sizes = PagedAttentionImpl.get_supported_head_sizes()
+        if head_size not in suppored_head_sizes:
+            raise ValueError(
+                f"Head size {head_size} is not supported by PagedAttention. "
+                f"Supported head sizes are: {suppored_head_sizes}.")
 
-        if self.head_size not in _SUPPORTED_HEAD_SIZES:
-            raise ValueError(f"head_size ({self.head_size}) is not supported. "
-                             f"Supported head sizes: {_SUPPORTED_HEAD_SIZES}.")
+        self.use_ref_attention = _check_use_ref_attention()
 
-        self.use_ref_attention = self.check_use_ref_attention()
-
-    def check_use_ref_attention(self) -> bool:
-        if not is_hip():
-            return False
-        # For ROCm, check whether flash attention is installed or not.
-        # if not, use_ref_attention needs to be True
-        return importlib.util.find_spec("flash_attn") is None
-
-    def ref_masked_attention(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-    ) -> torch.Tensor:
-        query = query.view(-1, self.num_heads, self.head_size)
-        key = key.view(-1, self.num_kv_heads, self.head_size)
-        value = value.view(-1, self.num_kv_heads, self.head_size)
-
-        seq_len, _, _ = query.shape
-        attn_mask = torch.triu(torch.ones(seq_len,
-                                          seq_len,
-                                          dtype=query.dtype,
-                                          device=query.device),
-                               diagonal=1)
-        attn_mask = attn_mask * torch.finfo(query.dtype).min
-
-        attn_weights = self.scale * torch.einsum("qhd,khd->hqk", query,
-                                                 key).float()
-        attn_weights = attn_weights + attn_mask.float()
-        attn_weights = torch.softmax(attn_weights, dim=-1).to(value.dtype)
-        out = torch.einsum("hqk,khd->qhd", attn_weights, value)
-        return out
+    # def _update_cache(self):
 
     def forward(
         self,
@@ -113,16 +54,16 @@ class PagedAttention(nn.Module):
         value_cache: Optional[torch.Tensor],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
-        """PagedAttention forward pass.
+        """Forward pass with xFormers and PagedAttention.
 
         Args:
             query: shape = [batch_size, seq_len, num_heads * head_size]
             key: shape = [batch_size, seq_len, num_kv_heads * head_size]
             value: shape = [batch_size, seq_len, num_kv_heads * head_size]
             key_cache: shape = [num_blocks, num_kv_heads, head_size/x,
-                block_size, x]
+                block_size, x]. None if it is a profiling run.
             value_cache: shape = [num_blocks, num_kv_heads, head_size,
-                block_size]
+                block_size]. None if it is a profiling run.
             input_metadata: metadata for the inputs.
         Returns:
             shape = [batch_size, seq_len, num_heads * head_size]
@@ -145,26 +86,14 @@ class PagedAttention(nn.Module):
                     key, value, key_cache, value_cache,
                     input_metadata.slot_mapping.flatten())
             else:
-                # print("SANG-TODO reshape cache.")
-                cache_ops.reshape_and_cache(
-                    key,
-                    value,
-                    key_cache,
-                    value_cache,
-                    input_metadata.slot_mapping.flatten(),
-                    input_metadata.kv_cache_dtype,
-                )
+                PagedAttentionImpl.reshape_and_cache(key, value, key_cache,
+                                                 value_cache, input_metadata)
 
         if input_metadata.is_prompt:
-            # normal attention
+            # Prompt run.
             if (key_cache is None or value_cache is None
-                    # or input_metadata.block_tables.numel() == 0):
-                    or not input_metadata.prefix_enabled):
-                # print("SANG-TODO flash attn is used.")
-                # print(
-                #     "SANG-TODO query size: ",
-                #     query.view(batch_size, seq_len, self.num_heads,
-                #                self.head_size).size())
+                    or input_metadata.block_tables.numel() == 0):
+                # normal attention
                 if self.num_kv_heads != self.num_heads:
                     # As of Nov 2023, xformers only supports MHA. For MQA/GQA,
                     # project the key and value tensors to the desired number of
@@ -200,13 +129,19 @@ class PagedAttention(nn.Module):
                             seq_len, query.dtype)
 
                 if self.use_ref_attention:
-                    output = self.ref_masked_attention(
+                    output = _ref_masked_attention(
                         query,
                         key,
                         value,
+                        self.num_heads,
+                        self.num_kv_heads,
+                        self.head_size,
+                        self.scale,
                     )
-                    # Using view got RuntimeError: view size is not compatible with input tensor's size and stride
-                    # (at least one dimension spans across two contiguous subspaces). Use reshape instead
+                    # Using view got RuntimeError: view size is not compatible
+                    # with input tensor's size and stride (at least one
+                    # dimension spans across two contiguous subspaces).
+                    # Use reshape instead.
                     return output.reshape(batch_size, seq_len, hidden_size)
 
                 # TODO(woosuk): Too many view operations. Let's try to reduce
@@ -230,116 +165,140 @@ class PagedAttention(nn.Module):
                     (is_hip()) else None,
                 )
                 output = out.view_as(query)
-                # if key_cache is not None and value_cache is not None:
-                #     output2 = flash_single_query_cached_kv_attention(
-                #         None,
-                #         query.view(batch_size, seq_len, self.num_heads, self.head_size),
-                #         key_cache,
-                #         value_cache,
-                #         self.scale,
-                #         input_metadata.block_tables,
-                #         input_metadata.context_lens,
-                #         alibi_slopes=self.alibi_slopes,
-                #     )
-                # output3 = flash_attn_func(
-                #         query.view(batch_size, seq_len, self.num_heads, self.head_size),
-                #         key.view(batch_size, seq_len, self.num_heads, self.head_size),
-                #         value.view(batch_size, seq_len, self.num_heads, self.head_size),
-                #         softmax_scale=self.scale,
-                #         causal=True,
-                #     ).view_as(query)
-                # output4 = flash_attn_func(
-                #         query,
-                #         key,
-                #         value,
-                #         softmax_scale=self.scale,
-                #         causal=True,
-                #     ).view_as(query)
-            # if key_cache is not None and value_cache is not None:
-            #     output2 = flash_attn_with_kvcache_paged(
-            #         query.view(batch_size, seq_len, self.num_heads,
-            #                     self.head_size),
-            #         key_cache,
-            #         value_cache,
-            #         self.scale,
-            #         input_metadata.block_tables,
-            #         input_metadata.context_lens,
-            #         self.alibi_slopes,
-            #     )
-            else:
-                if input_metadata.flash_style:
-                    output = flash_single_query_cached_kv_attention(
-                        None,
-                        query.view(batch_size, seq_len, self.num_heads,
-                                   self.head_size),
-                        key_cache,
-                        value_cache,
-                        self.scale,
-                        input_metadata.block_tables,
-                        input_metadata.context_lens,
-                        alibi_slopes=self.alibi_slopes,
-                    )
-                    # output = flash_multi_query_cached_kv_attention_varlen(
-                    #     None,
-                    #     query,
-                    #     key_cache,
-                    #     value_cache,
-                    #     self.scale,
-                    #     self.block_tables,
-                    #     input_metadata.start_loc,
-                    #     input_metadata.start_loc,
-                    #     max_query_len,
-                    #     max_context_len,
-                    #     alibi_slopes=self.alibi_slopes,
-                    # )
-                else:
-                    # print("SANG-TODO context attention")
-                    # prefix-enabled attention
-                    output = torch.empty_like(query)
-                    context_attention_fwd(
-                        query,
-                        key,
-                        value,
-                        output,
-                        key_cache,
-                        value_cache,
-                        input_metadata.
-                        block_tables,  # [BS, max_block_per_request]
-                        input_metadata.start_loc,
-                        input_metadata.prompt_lens,
-                        input_metadata.context_lens,
-                        input_metadata.max_seq_len,
-                        getattr(self, "alibi_slopes", None),
-                    )
+#                 # if key_cache is not None and value_cache is not None:
+#                 #     output2 = flash_single_query_cached_kv_attention(
+#                 #         None,
+#                 #         query.view(batch_size, seq_len, self.num_heads, self.head_size),
+#                 #         key_cache,
+#                 #         value_cache,
+#                 #         self.scale,
+#                 #         input_metadata.block_tables,
+#                 #         input_metadata.context_lens,
+#                 #         alibi_slopes=self.alibi_slopes,
+#                 #     )
+#                 # output3 = flash_attn_func(
+#                 #         query.view(batch_size, seq_len, self.num_heads, self.head_size),
+#                 #         key.view(batch_size, seq_len, self.num_heads, self.head_size),
+#                 #         value.view(batch_size, seq_len, self.num_heads, self.head_size),
+#                 #         softmax_scale=self.scale,
+#                 #         causal=True,
+#                 #     ).view_as(query)
+#                 # output4 = flash_attn_func(
+#                 #         query,
+#                 #         key,
+#                 #         value,
+#                 #         softmax_scale=self.scale,
+#                 #         causal=True,
+#                 #     ).view_as(query)
+#             # if key_cache is not None and value_cache is not None:
+#             #     output2 = flash_attn_with_kvcache_paged(
+#             #         query.view(batch_size, seq_len, self.num_heads,
+#             #                     self.head_size),
+#             #         key_cache,
+#             #         value_cache,
+#             #         self.scale,
+#             #         input_metadata.block_tables,
+#             #         input_metadata.context_lens,
+#             #         self.alibi_slopes,
+#             #     )
+#             else:
+#                 if input_metadata.flash_style:
+#                     output = flash_single_query_cached_kv_attention(
+#                         None,
+#                         query.view(batch_size, seq_len, self.num_heads,
+#                                    self.head_size),
+#                         key_cache,
+#                         value_cache,
+#                         self.scale,
+#                         input_metadata.block_tables,
+#                         input_metadata.context_lens,
+#                         alibi_slopes=self.alibi_slopes,
+#                     )
+#                     # output = flash_multi_query_cached_kv_attention_varlen(
+#                     #     None,
+#                     #     query,
+#                     #     key_cache,
+#                     #     value_cache,
+#                     #     self.scale,
+#                     #     self.block_tables,
+#                     #     input_metadata.start_loc,
+#                     #     input_metadata.start_loc,
+#                     #     max_query_len,
+#                     #     max_context_len,
+#                     #     alibi_slopes=self.alibi_slopes,
+#                     # )
+#                 else:
+#                     # print("SANG-TODO context attention")
+#                     # prefix-enabled attention
+#                     output = torch.empty_like(query)
+#                     context_attention_fwd(
+#                         query,
+#                         key,
+#                         value,
+#                         output,
+#                         key_cache,
+#                         value_cache,
+#                         input_metadata.
+#                         block_tables,  # [BS, max_block_per_request]
+#                         input_metadata.start_loc,
+#                         input_metadata.prompt_lens,
+#                         input_metadata.context_lens,
+#                         input_metadata.max_seq_len,
+#                         getattr(self, "alibi_slopes", None),
+#                     )
 
-        else:
-            # Decoding run.
-            if input_metadata.flash_style:
-                # output = flash_attn_with_kvcache_paged(
-                #     query.view(batch_size, seq_len, self.num_heads,
-                #                self.head_size), key_cache, value_cache,
-                #     self.scale, input_metadata.block_tables,
-                #     input_metadata.context_lens, self.alibi_slopes)
-                output = flash_single_query_cached_kv_attention(
-                    None,
-                    query.view(batch_size, 1, self.num_heads, self.head_size),
-                    key_cache,
-                    value_cache,
-                    self.scale,
-                    input_metadata.block_tables,
-                    input_metadata.context_lens,
-                    alibi_slopes=self.alibi_slopes,
-                )
+#         else:
+#             # Decoding run.
+#             if input_metadata.flash_style:
+#                 # output = flash_attn_with_kvcache_paged(
+#                 #     query.view(batch_size, seq_len, self.num_heads,
+#                 #                self.head_size), key_cache, value_cache,
+#                 #     self.scale, input_metadata.block_tables,
+#                 #     input_metadata.context_lens, self.alibi_slopes)
+#                 output = flash_single_query_cached_kv_attention(
+#                     None,
+#                     query.view(batch_size, 1, self.num_heads, self.head_size),
+#                     key_cache,
+#                     value_cache,
+#                     self.scale,
+#                     input_metadata.block_tables,
+#                     input_metadata.context_lens,
+#                     alibi_slopes=self.alibi_slopes,
+#                 )
+#             else:
+#                 output = _paged_attention(
+#                     query,
+#                     key_cache,
+#                     value_cache,
+#                     input_metadata,
+#                     self.num_kv_heads,
+#                     self.scale,
+#                     self.alibi_slopes,
+#                 )
+# =======
+
             else:
-                output = _paged_attention(
+                # prefix-enabled attention
+                output = PagedAttentionImpl.forward_prefix(
                     query,
+                    key,
+                    value,
                     key_cache,
                     value_cache,
                     input_metadata,
-                    self.num_kv_heads,
-                    self.scale,
                     self.alibi_slopes,
                 )
+        else:
+            # Decoding run.
+            output = PagedAttentionImpl.forward_decode(
+                query,
+                key_cache,
+                value_cache,
+                input_metadata,
+                self.num_kv_heads,
+                self.scale,
+                self.alibi_slopes,
+            )
 
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
@@ -379,80 +338,40 @@ def _make_alibi_bias(
     return attn_bias
 
 
-def _paged_attention(
+def _check_use_ref_attention() -> bool:
+    if not is_hip():
+        return False
+    # For ROCm, check whether flash attention is installed or not.
+    # if not, use_ref_attention needs to be True
+    return importlib.util.find_spec("flash_attn") is None
+
+
+def _ref_masked_attention(
     query: torch.Tensor,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
-    input_metadata: InputMetadata,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    num_heads: int,
     num_kv_heads: int,
+    head_size: int,
     scale: float,
-    alibi_slopes: Optional[torch.Tensor],
 ) -> torch.Tensor:
-    output = torch.empty_like(query)
+    query = query.view(-1, num_heads, head_size)
+    key = key.view(-1, num_kv_heads, head_size)
+    value = value.view(-1, num_kv_heads, head_size)
 
-    block_size = value_cache.shape[3]
-    num_seqs, num_heads, head_size = query.shape
-    max_num_partitions = (
-        (input_metadata.max_context_len + _PARTITION_SIZE - 1) //
-        _PARTITION_SIZE)
-    # NOTE(woosuk): We use a simple heuristic to decide whether to use
-    # PagedAttention V1 or V2. If the number of partitions is 1, we use
-    # V1 to avoid the overhead of reduction. Also, if the number of
-    # sequences or heads is large, we use V1 since there is enough work
-    # to parallelize.
-    # TODO(woosuk): Tune this heuristic.
-    # For context len > 8192, use V2 kernel to avoid shared memory shortage.
-    use_v1 = input_metadata.max_context_len <= 8192 and (
-        max_num_partitions == 1 or num_seqs * num_heads > 512)
+    seq_len, _, _ = query.shape
+    attn_mask = torch.triu(torch.ones(seq_len,
+                                      seq_len,
+                                      dtype=query.dtype,
+                                      device=query.device),
+                           diagonal=1)
+    attn_mask = attn_mask * torch.finfo(query.dtype).min
 
-    if use_v1:
-        # Run PagedAttention V1.
-        ops.paged_attention_v1(
-            output,
-            query,
-            key_cache,
-            value_cache,
-            num_kv_heads,
-            scale,
-            input_metadata.block_tables,
-            input_metadata.context_lens,
-            block_size,
-            input_metadata.max_context_len,
-            alibi_slopes,
-            input_metadata.kv_cache_dtype,
-        )
-    else:
-        # Run PagedAttention V2.
-        assert _PARTITION_SIZE % block_size == 0
-        tmp_output = torch.empty(
-            size=(num_seqs, num_heads, max_num_partitions, head_size),
-            dtype=output.dtype,
-            device=output.device,
-        )
-        exp_sums = torch.empty(
-            size=(num_seqs, num_heads, max_num_partitions),
-            dtype=torch.float32,
-            device=output.device,
-        )
-        max_logits = torch.empty_like(exp_sums)
-        ops.paged_attention_v2(
-            output,
-            exp_sums,
-            max_logits,
-            tmp_output,
-            query,
-            key_cache,
-            value_cache,
-            num_kv_heads,
-            scale,
-            input_metadata.block_tables,
-            input_metadata.context_lens,
-            block_size,
-            input_metadata.max_context_len,
-            alibi_slopes,
-            input_metadata.kv_cache_dtype,
-        )
-    return output
+    attn_weights = scale * torch.einsum("qhd,khd->hqk", query, key).float()
+    attn_weights = attn_weights + attn_mask.float()
+    attn_weights = torch.softmax(attn_weights, dim=-1).to(value.dtype)
+    out = torch.einsum("hqk,khd->qhd", attn_weights, value)
+    return out
 
 
 # OSS version.
