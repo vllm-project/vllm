@@ -182,7 +182,7 @@ class ModelRunner:
             if lora_id > 0:
                 lora_requests.add(seq_group_metadata.lora_request)
 
-            lora_index_mapping.append([lora_id] * (prompt_len - computed_len))
+            lora_index_mapping += [lora_id] * (prompt_len - computed_len)
             lora_prompt_mapping.extend(
                 [lora_id] *
                 (prompt_len - computed_len
@@ -232,10 +232,11 @@ class ModelRunner:
                                                            pad=_PAD_SLOT_ID,
                                                            dtype=torch.long,
                                                            device=self.device)
-        lora_index_mapping = [
-            _pad_to_max(mapping, max_prompt_len, pad=0)
-            for mapping in lora_index_mapping
-        ]
+        lora_index_mapping = _pad_to_alignment(lora_index_mapping,
+                                               _get_graph_batch_size(
+                                                   len(lora_index_mapping)),
+                                               pad=0)
+
         context_lens_tensor = torch.tensor(context_lens,
                                            dtype=torch.int,
                                            device=self.device)
@@ -323,7 +324,7 @@ class ModelRunner:
                 block_offset = position % self.block_size
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
-                lora_index_mapping.append([lora_id])
+                lora_index_mapping.append(lora_id)
                 lora_prompt_mapping.append(lora_id)
 
                 if self.sliding_window is not None:
@@ -396,9 +397,10 @@ class ModelRunner:
                 device=self.device,
             )
 
-        lora_index_mapping = [
-            _pad_to_max(mapping, 1, pad=0) for mapping in lora_index_mapping
-        ]
+        lora_index_mapping = _pad_to_alignment(lora_index_mapping,
+                                               _get_graph_batch_size(
+                                                   len(lora_index_mapping)),
+                                               pad=0)
 
         input_metadata = InputMetadata(
             is_prompt=False,
@@ -527,11 +529,8 @@ class ModelRunner:
                                                      subquery_lens)
 
             if self.lora_config:
-                flat_lora_index_mapping = [
-                    item for sublist in lora_index_mapping for item in sublist
-                ]
                 lora_mapping = LoRAMapping(
-                    flat_lora_index_mapping,
+                    lora_index_mapping,
                     lora_prompt_mapping,
                 )
             else:
