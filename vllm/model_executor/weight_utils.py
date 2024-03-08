@@ -20,6 +20,9 @@ from vllm.model_executor.layers.quantization import (get_quantization_config,
 
 logger = init_logger(__name__)
 
+_xdg_cache_home = os.getenv('XDG_CACHE_HOME', os.path.expanduser('~/.cache'))
+_vllm_filelocks_path = os.path.join(_xdg_cache_home, 'vllm/locks/')
+
 
 class Disabledtqdm(tqdm):
 
@@ -28,7 +31,8 @@ class Disabledtqdm(tqdm):
 
 
 def get_lock(model_name_or_path: str, cache_dir: Optional[str] = None):
-    lock_dir = cache_dir if cache_dir is not None else "/tmp"
+    lock_dir = cache_dir if cache_dir is not None else _vllm_filelocks_path
+    os.makedirs(os.path.dirname(lock_dir), exist_ok=True)
     lock_file_name = model_name_or_path.replace("/", "-") + ".lock"
     lock = filelock.FileLock(os.path.join(lock_dir, lock_file_name))
     return lock
