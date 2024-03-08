@@ -160,6 +160,7 @@ async def validation_exception_handler(_, exc):
 @app.get("/health")
 async def health() -> Response:
     """Health check."""
+    await openai_serving_chat.engine.check_health()
     return Response(status_code=200)
 
 
