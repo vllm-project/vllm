@@ -399,27 +399,21 @@ class LlamaForCausalLM(nn.Module):
     # factors (or else raise an exception). Thus, handled exceptions should
     # make sure to leave KV cache scale factors in a known good (dummy) state
     def load_kv_cache_scales(self, scales_path: str) -> None:
-        # Initialize KV cache scales to dummy values first. These will be
-        # overwritten by the actual values if and only if the later loading
-        # process completes without error
-        self.load_dummy_kv_cache_scales()
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
         for layer_idx, scaling_factor in kv_cache_scales_loader(
                                             scales_path, tp_rank, tp_size,
                                             self.config.num_hidden_layers,
                                             self.config.__class__.model_type):
-            layer_paged_attn = self.model.layers[layer_idx].self_attn.attn
+            layer_paged_attn = self.model.layers[layer_idx].self_attn.attn.backend
             if is_hip():
                 # The scaling factor convention we are assuming is
                 # quantized_value * scaling_factor ~= true_value
                 # which is consistent with the practice of setting
                 # scaling_factor = tensor_amax / FPtype_max
                 scaling_factor *= 2
-            layer_paged_attn.kv_cache_scaling_factor = scaling_factor
-    
-    # Should not be called unless the KV cache dtype is FP8 on ROCm (AMD GPU)
-    def load_dummy_kv_cache_scales(self) -> None:
-        for layer_idx in range(self.model.config.num_hidden_layers):
-            layer_paged_attn = self.model.layers[layer_idx].self_attn.attn
-            setattr(layer_paged_attn, "kv_cache_scaling_factor", 1.0)
+            if hasattr(layer_paged_attn, "kv_cache_scaling_factor"):
+                layer_paged_attn.kv_cache_scaling_factor = scaling_factor
+            else:
+                raise RuntimeError("PagedAttention has no KV cache scaling "
+                                   "factor attribute!")

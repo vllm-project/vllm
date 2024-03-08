@@ -294,7 +294,7 @@ def kv_cache_scales_loader(filename: str,
                   f"scaling factors belonging to different model type {schema['model_type']}!"
             assert isinstance(schema["kv_cache"], dict), malformed_schema_str
             assert schema["kv_cache"]["dtype"] == "float8_e4m3fn", "Loaded scaling factors intended " \
-              f"for KV cache dtype = {schema['kv_cache']['dtype']} rather than FP8!"
+              f"for KV cache dtype = {schema['kv_cache']['dtype']} rather than float8_e4m3fn!"
             assert isinstance(schema["kv_cache"]["scaling_factor"], dict), malformed_schema_str
             raw_rank_scales_map = schema["kv_cache"]["scaling_factor"]
             # The keys in raw_rank_scales_map should be strings with the format
