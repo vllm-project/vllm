@@ -173,7 +173,7 @@ class PagedAttention(nn.Module):
                     input_metadata.kv_cache_dtype,
                 )
 
-        if input_metadata.is_prompt:
+        if input_metadata.num_prompt_tokens > 0:
             # normal attention
             if (key_cache is None or value_cache is None
                     or input_metadata.block_tables.numel() == 0):

@@ -512,6 +512,9 @@ class SequenceGroupMetadata:
         self.computed_block_nums = computed_block_nums
         self.state = SequenceGroupState() if state is None else state
 
+        if is_chunked_prefill:
+            assert is_prompt is True
+
     @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0

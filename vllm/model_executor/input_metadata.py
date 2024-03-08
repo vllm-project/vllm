@@ -12,7 +12,7 @@ class InputMetadata:
     updated from `CUDAGraphRunner.forward` API.
 
     Args:
-        prompt_lens: Lengths of prompts.
+        prompt_lens: Lengths of prompts. Only included in prefill requests.
         num_chunked_prefill: Number of chunked prefill requests across
             sequences.
         slot_mapping: The index of each token mapped into a physical block
@@ -35,7 +35,6 @@ class InputMetadata:
 
     def __init__(
         self,
-        is_prompt: bool,
         slot_mapping: torch.Tensor,
         prompt_lens: Optional[torch.Tensor],
         num_chunked_prefill: int,
@@ -50,11 +49,19 @@ class InputMetadata:
         kv_cache_dtype: str,
         flash_style: bool,
     ) -> None:
-        self.is_prompt = is_prompt
+        # This tensor only contains prompts.
+        # Shape: [prompt_batch_size + 1]
+        # Index: prompt request index
+        # Value: The length of prompt.
         self.prompt_lens = prompt_lens
         self.num_prompt_tokens = num_prompt_tokens
         self.num_generation_tokens = num_generation_tokens
         self.max_seq_len = max_seq_len
+        # This tensor only contains prompts.
+        # Shape: [prompt_batch_size + 1]
+        # Index: prompt request index
+        # Value: cumulative index of a prompt length.
+        # E.g., [0, 3, 8] for prompt_lens [3, 5].
         self.start_loc = start_loc
         self.max_context_len = max_context_len
         self.slot_mapping = slot_mapping
@@ -126,7 +133,6 @@ class InputMetadata:
 
     def __repr__(self) -> str:
         return ("InputMetadata("
-                f"is_prompt={self.is_prompt}, "
                 f"max_context_len={self.max_context_len}, "
                 f"num_generation_tokens={self.num_generation_tokens}, "
                 f"num_prompt_tokens={self.num_prompt_tokens}, "

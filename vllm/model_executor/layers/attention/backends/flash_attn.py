@@ -77,7 +77,7 @@ class FlashAttentionBackend:
         PagedAttentionImpl.reshape_and_cache(key, value, key_cache,
                                              value_cache, input_metadata)
 
-        if input_metadata.is_prompt:
+        if input_metadata.num_prompt_tokens > 0:
             # Prompt run.
             if (key_cache is None or value_cache is None
                     or input_metadata.block_tables.numel() == 0):
