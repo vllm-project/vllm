@@ -107,8 +107,6 @@ class LRUCache:
         return value
 
     def clear(self):
-        while len(self.cache) > 0:
-            self.remove_oldest()
         self.cache.clear()
 
 
