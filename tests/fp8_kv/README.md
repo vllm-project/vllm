@@ -92,5 +92,5 @@ optional arguments:
 ```
 ```
 Example:
-python3 benchmarks/benchmark_throughput.py --input-len <INPUT_LEN> --output-len <OUTPUT_LEN> -tp <TENSOR_PARALLEL_SIZE> --kv-cache-dtype fp8 --scales-path </path/to/kv_cache_scales.json>
+python3 benchmarks/benchmark_throughput.py --input-len <INPUT_LEN> --output-len <OUTPUT_LEN> -tp <TENSOR_PARALLEL_SIZE> --kv-cache-dtype fp8 --scales-path </path/to/kv_cache_scales.json> --model <path-to-llama2>
 ```python
