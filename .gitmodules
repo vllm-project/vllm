@@ -1,0 +1,3 @@
+[submodule "csrc/flash-attention"]
+	path = csrc/flash-attention
+	url = git@github.com:skrider/flash-attention.git
