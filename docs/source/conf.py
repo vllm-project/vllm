@@ -72,8 +72,15 @@ html_theme_options = {
 
 # Mock out external dependencies here.
 autodoc_mock_imports = [
-    "torch", "transformers", "psutil", "prometheus_client", "sentencepiece",
-    "vllm.cuda_utils", "vllm._C"
+    "torch",
+    "transformers",
+    "psutil",
+    "prometheus_client",
+    "sentencepiece",
+    "vllm.cuda_utils",
+    "vllm._C",
+    "numpy",
+    "tqdm",
 ]
 
 for mock_target in autodoc_mock_imports:
