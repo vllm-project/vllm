@@ -8,6 +8,22 @@ from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
+def make_divisible(c, divisor):
+    return (c + divisor - 1) // divisor
+
+def calculate_zeros_width(in_features, group_size=128, pack_num=8):
+    if group_size >= 128:
+        size_multiplier = 1
+    elif group_size == 64:
+        size_multiplier = 2
+    elif group_size == 32:
+        size_multiplier = 4
+    else:
+        raise NotImplementedError
+
+    base_width = make_divisible(in_features // group_size, pack_num)
+    base_width = make_divisible(base_width, size_multiplier) * size_multiplier
+    return base_width
 
 class AWQConfig(QuantizationConfig):
     """Config class for AWQ.
@@ -30,6 +46,8 @@ class AWQConfig(QuantizationConfig):
                 "Currently, only 4-bit weight quantization is supported for "
                 f"AWQ, but got {self.weight_bits} bits.")
         self.pack_factor = 32 // self.weight_bits
+        self.interleave = 4
+        self.int16_pack_num = 16 // weight_bits
 
     def __repr__(self) -> str:
         return (f"AWQConfig(weight_bits={self.weight_bits}, "
@@ -91,49 +109,97 @@ class AWQLinearMethod(LinearMethodBase):
                 "The output size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
                 "tensor parallel size.")
-
-        qweight = Parameter(
-            torch.empty(
-                input_size_per_partition,
-                output_size_per_partition // self.quant_config.pack_factor,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
-        set_weight_attrs(
-            qweight, {
+        
+        if self.quant_config:
+            # new format
+            qweight = Parameter(
+                torch.empty(
+                    output_size_per_partition // self.quant_config.interleave,
+                    input_size_per_partition // self.quant_config.int16_pack_num * self.quant_config.interleave,
+                    dtype=torch.int16,
+                ),
+                requires_grad=False,
+            )
+            # FIXME 3x: packed_dim argument needs new implementation for weight loading
+            set_weight_attrs(
+                qweight, {
+                    "input_dim": 1,
+                    "output_dim": 0,
+                    "packed_dim": 1,
+                    "pack_factor": self.quant_config.pack_factor,
+                })
+            qzeros = Parameter(
+                torch.empty(
+                    calculate_zeros_width(input_size_per_partition, self.quant_config.group_size) * self.quant_config.pack_factor,
+                    output_size_per_partition,
+                    dtype=torch.int16,
+                ),
+                requires_grad=False,
+            )
+            set_weight_attrs(
+                qzeros, {
+                    "input_dim": 0,
+                    "output_dim": 1,
+                    "packed_dim": 0,
+                    "pack_factor": self.quant_config.pack_factor,
+                })
+            scales = Parameter(
+                torch.empty(
+                    calculate_zeros_width(input_size_per_partition, self.quant_config.group_size) * self.quant_config.pack_factor,
+                    output_size_per_partition,
+                    dtype=params_dtype,
+                ),
+                requires_grad=False,
+            )
+            set_weight_attrs(scales, {
                 "input_dim": 0,
                 "output_dim": 1,
-                "packed_dim": 1,
+                "packed_dim": 0,
                 "pack_factor": self.quant_config.pack_factor,
             })
-        qzeros = Parameter(
-            torch.empty(
-                input_size_per_partition // self.quant_config.group_size,
-                output_size_per_partition // self.quant_config.pack_factor,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
-        set_weight_attrs(
-            qzeros, {
+        else:
+            qweight = Parameter(
+                torch.empty(
+                    input_size_per_partition,
+                    output_size_per_partition // self.quant_config.pack_factor,
+                    dtype=torch.int32,
+                ),
+                requires_grad=False,
+            )
+            set_weight_attrs(
+                qweight, {
+                    "input_dim": 0,
+                    "output_dim": 1,
+                    "packed_dim": 1,
+                    "pack_factor": self.quant_config.pack_factor,
+                })
+            qzeros = Parameter(
+                torch.empty(
+                    input_size_per_partition // self.quant_config.group_size,
+                    output_size_per_partition // self.quant_config.pack_factor,
+                    dtype=torch.int32,
+                ),
+                requires_grad=False,
+            )
+            set_weight_attrs(
+                qzeros, {
+                    "input_dim": 0,
+                    "output_dim": 1,
+                    "packed_dim": 1,
+                    "pack_factor": self.quant_config.pack_factor,
+                })
+            scales = Parameter(
+                torch.empty(
+                    input_size_per_partition // self.quant_config.group_size,
+                    output_size_per_partition,
+                    dtype=params_dtype,
+                ),
+                requires_grad=False,
+            )
+            set_weight_attrs(scales, {
                 "input_dim": 0,
                 "output_dim": 1,
-                "packed_dim": 1,
-                "pack_factor": self.quant_config.pack_factor,
             })
-        scales = Parameter(
-            torch.empty(
-                input_size_per_partition // self.quant_config.group_size,
-                output_size_per_partition,
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
-        )
-        set_weight_attrs(scales, {
-            "input_dim": 0,
-            "output_dim": 1,
-        })
         return {
             "qweight": qweight,
             "qzeros": qzeros,
