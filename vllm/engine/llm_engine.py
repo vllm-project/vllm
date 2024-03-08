@@ -798,7 +798,6 @@ class LLMEngine:
         # Log stats.
         if self.log_stats:
             self.stat_logger.log(self._get_stats(scheduler_outputs))
-
         return request_outputs
 
     def step(self) -> List[RequestOutput]:
@@ -853,6 +852,8 @@ class LLMEngine:
             >>>         break
         """
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
+        # print("SANG-TODO step seq_group_metadata_list length: ",
+        #       len(seq_group_metadata_list))
 
         if not scheduler_outputs.is_empty():
             # Execute the model.

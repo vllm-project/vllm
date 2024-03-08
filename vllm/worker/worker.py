@@ -20,6 +20,8 @@ from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
 from vllm.lora.request import LoRARequest
 
+MAX_INT_32 = 2**31 - 1
+
 
 class Worker:
     """A worker class that executes (a partition of) the model on a GPU.
@@ -114,6 +116,7 @@ class Worker:
             gpu_memory_utilization: The fraction of the total GPU memory to use.
             cpu_swap_space: The size of the CPU swap space in bytes.
         """
+        # print("SANG-TODO profile_num_available_blocks")
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
         torch.cuda.empty_cache()
@@ -142,6 +145,16 @@ class Worker:
             self.model_runner.remove_all_loras()
         gc.collect()
         torch.cuda.empty_cache()
+
+        # Flash attention only allows max(int32) slots.
+        # TODO: Remove this once we support int64 in flash-attention.
+        if self.model_config.flash_style:
+            num_gpu_blocks = min(num_gpu_blocks,
+                                 MAX_INT_32 // cache_block_size)
+            num_cpu_blocks = min(num_cpu_blocks,
+                                 MAX_INT_32 // cache_block_size)
+        # print("SANG-TODO profile_num_available_blocks done")
+
         return num_gpu_blocks, num_cpu_blocks
 
     def init_cache_engine(self, cache_config: CacheConfig) -> None:
@@ -193,6 +206,7 @@ class Worker:
         blocks_to_swap_out: Optional[Dict[int, int]] = None,
         blocks_to_copy: Optional[Dict[int, List[int]]] = None,
     ) -> Optional[SamplerOutput]:
+        # print("SANG-TODO execute model.")
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             num_seq_groups = len(seq_group_metadata_list)

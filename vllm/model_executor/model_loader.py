@@ -29,7 +29,7 @@ def _get_model_architecture(model_config: ModelConfig) -> Type[nn.Module]:
         architectures = ["QuantMixtralForCausalLM"]
 
     for arch in architectures:
-        model_cls = ModelRegistry.load_model_cls(arch)
+        model_cls = ModelRegistry.load_model_cls(arch, model_config)
         if model_cls is not None:
             return model_cls
     raise ValueError(

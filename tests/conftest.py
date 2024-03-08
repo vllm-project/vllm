@@ -165,6 +165,8 @@ class VllmRunner:
         dtype: str = "half",
         disable_log_stats: bool = True,
         tensor_parallel_size: int = 1,
+        block_size: int = 32,
+        flash_style: bool = False,
         **kwargs,
     ) -> None:
         self.model = LLM(
@@ -175,6 +177,8 @@ class VllmRunner:
             swap_space=0,
             disable_log_stats=disable_log_stats,
             tensor_parallel_size=tensor_parallel_size,
+            flash_style=flash_style,
+            block_size=block_size,
             **kwargs,
         )
 

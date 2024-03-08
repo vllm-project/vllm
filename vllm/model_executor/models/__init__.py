@@ -5,6 +5,7 @@ import torch.nn as nn
 
 from vllm.logger import init_logger
 from vllm.utils import is_hip, is_neuron
+from vllm.config import ModelConfig
 
 logger = init_logger(__name__)
 
@@ -69,7 +70,8 @@ _NEURON_SUPPORTED_MODELS = {"LlamaForCausalLM": "neuron.llama"}
 class ModelRegistry:
 
     @staticmethod
-    def load_model_cls(model_arch: str) -> Optional[Type[nn.Module]]:
+    def load_model_cls(model_arch: str,
+                       model_config: ModelConfig) -> Optional[Type[nn.Module]]:
         if model_arch not in _MODELS:
             return None
         if is_hip():
@@ -92,7 +94,9 @@ class ModelRegistry:
             module_name = _NEURON_SUPPORTED_MODELS[model_arch]
         module = importlib.import_module(
             f"vllm.model_executor.models.{module_name}")
-        return getattr(module, model_cls_name, None)
+        model_cls = getattr(module, model_cls_name, None)
+
+        return model_cls
 
     @staticmethod
     def get_supported_archs() -> List[str]:

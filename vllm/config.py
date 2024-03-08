@@ -60,6 +60,7 @@ class ModelConfig:
         max_context_len_to_capture: Maximum context len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
             to eager mode.
+        flash_style: Enable flash style page attention.
     """
 
     def __init__(
@@ -79,7 +80,7 @@ class ModelConfig:
         quantization: Optional[str] = None,
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
-        max_logprobs: int = 5,
+        flash_style: bool = False,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -95,6 +96,7 @@ class ModelConfig:
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
         self.max_logprobs = max_logprobs
+        self.flash_style = flash_style
 
         if os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true":
             # download model from ModelScope hub,
@@ -306,6 +308,7 @@ class CacheConfig:
         cache_dtype: str,
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
+        flash_style: bool = False,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
@@ -313,6 +316,7 @@ class CacheConfig:
         self.cache_dtype = cache_dtype
         self.sliding_window = sliding_window
         self.enable_prefix_caching = enable_prefix_caching
+        self.flash_style = flash_style
         self._verify_args()
         self._verify_cache_dtype()
 
@@ -329,6 +333,15 @@ class CacheConfig:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
+
+        if self.flash_style:
+            logger.info("Flash attention enabled.")
+            if self.block_size > 32:
+                # Flash style attention only supports block size >=256 for now.
+                # https://github.com/Dao-AILab/flash-attention/pull/824 will fix it.
+                raise ValueError(
+                    "Flash style attention only supports block size <= 32. Got"
+                    f"{self.block_size }")
 
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":
@@ -456,7 +469,6 @@ class SchedulerConfig:
             iteration.
         max_model_len: Maximum length of a sequence (including prompt
             and generated text).
-        max_paddings: Maximum number of paddings to be added to a batch.
     """
 
     def __init__(
@@ -464,7 +476,6 @@ class SchedulerConfig:
         max_num_batched_tokens: Optional[int],
         max_num_seqs: int,
         max_model_len: int,
-        max_paddings: int,
     ) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
@@ -474,7 +485,6 @@ class SchedulerConfig:
             self.max_num_batched_tokens = max(max_model_len, 2048)
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
-        self.max_paddings = max_paddings
         self._verify_args()
 
     def _verify_args(self) -> None:
