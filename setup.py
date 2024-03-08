@@ -346,7 +346,7 @@ if _is_cuda():
         )
     except Exception as e:
         print(f"An error occurred during Flash Attention installation: {e}")
- 
+
     # Copy the FlashAttention package into the vLLM package after build.
     class build_ext(BuildExtension):
 
