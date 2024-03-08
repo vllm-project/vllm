@@ -21,7 +21,7 @@ from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
-from vllm.utils import in_wsl
+from vllm.utils import in_wsl, measure_cuda_memory
 
 logger = init_logger(__name__)
 
@@ -91,11 +91,17 @@ class ModelRunner:
             self.model_config.enforce_eager = True
 
     def load_model(self) -> None:
-        self.model = get_model(self.model_config,
-                               self.device_config,
-                               lora_config=self.lora_config,
-                               parallel_config=self.parallel_config,
-                               scheduler_config=self.scheduler_config)
+        with measure_cuda_memory() as m:
+            self.model = get_model(self.model_config,
+                                   self.device_config,
+                                   lora_config=self.lora_config,
+                                   parallel_config=self.parallel_config,
+                                   scheduler_config=self.scheduler_config)
+
+        self.model_memory_usage = m.consumed_memory
+        logger.info(
+            f"Loading model weights took {self.model_memory_usage / float(2**30):.4f} GB"
+        )
 
         vocab_size = self.model.config.vocab_size
 
@@ -118,10 +124,13 @@ class ModelRunner:
     def set_block_size(self, block_size: int) -> None:
         self.block_size = block_size
 
-        max_num_blocks = (self.max_context_len_to_capture + block_size -
-                          1) // block_size
         self.graph_block_tables = np.zeros(
-            (max(_BATCH_SIZES_TO_CAPTURE), max_num_blocks), dtype=np.int32)
+            (max(_BATCH_SIZES_TO_CAPTURE), self.get_max_block_per_batch()),
+            dtype=np.int32)
+
+    def get_max_block_per_batch(self):
+        block_size = self.block_size
+        return (self.max_context_len_to_capture + block_size - 1) // block_size
 
     def _prepare_prompt(
         self,
@@ -195,7 +204,7 @@ class ModelRunner:
             if lora_id > 0:
                 lora_requests.add(seq_group_metadata.lora_request)
 
-            lora_index_mapping.append([lora_id] * (prompt_len - computed_len))
+            lora_index_mapping += [lora_id] * (prompt_len - computed_len)
             lora_prompt_mapping.extend(
                 [lora_id] *
                 (prompt_len - computed_len
@@ -239,6 +248,7 @@ class ModelRunner:
 
         max_prompt_len = max(subquery_lens)
         num_prompt_tokens = len(input_tokens)
+        assert max_prompt_len > 0
 
         # Pad tokens to better utilize tensor cores although
         # cuda graph is not enabled.
@@ -252,10 +262,11 @@ class ModelRunner:
                                                            pad=_PAD_SLOT_ID,
                                                            dtype=torch.long,
                                                            device=self.device)
-        lora_index_mapping = [
-            _pad_to_max(mapping, max_prompt_len, pad=0)
-            for mapping in lora_index_mapping
-        ]
+        lora_index_mapping = _pad_to_alignment(lora_index_mapping,
+                                               _get_graph_batch_size(
+                                                   len(lora_index_mapping)),
+                                               pad=0)
+
         context_lens_tensor = torch.tensor(context_lens,
                                            dtype=torch.int,
                                            device=self.device)
@@ -345,7 +356,7 @@ class ModelRunner:
                 block_offset = position % self.block_size
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
-                lora_index_mapping.append([lora_id])
+                lora_index_mapping.append(lora_id)
                 lora_prompt_mapping.append(lora_id)
 
                 if self.sliding_window is not None:
@@ -418,9 +429,10 @@ class ModelRunner:
                 device=self.device,
             )
 
-        lora_index_mapping = [
-            _pad_to_max(mapping, 1, pad=0) for mapping in lora_index_mapping
-        ]
+        lora_index_mapping = _pad_to_alignment(lora_index_mapping,
+                                               _get_graph_batch_size(
+                                                   len(lora_index_mapping)),
+                                               pad=0)
 
         input_metadata = InputMetadata(
             is_prompt=False,
@@ -554,11 +566,8 @@ class ModelRunner:
                                                      subquery_lens)
 
             if self.lora_config:
-                flat_lora_index_mapping = [
-                    item for sublist in lora_index_mapping for item in sublist
-                ]
                 lora_mapping = LoRAMapping(
-                    flat_lora_index_mapping,
+                    lora_index_mapping,
                     lora_prompt_mapping,
                 )
             else:
