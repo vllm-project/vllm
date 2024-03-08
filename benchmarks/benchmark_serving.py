@@ -12,7 +12,7 @@ On the server side, run one of the following commands:
 On the client side, run:
     python benchmarks/benchmark_serving.py \
         --backend <backend> \
-        --tokenizer <your_model> --dataset <target_dataset> \
+        --model <your_model> --dataset <target_dataset> \
         --request-rate <request_rate>
 """
 import argparse
@@ -171,9 +171,9 @@ async def benchmark(
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
-    pbar = None if disable_tqdm else tqdm(total=len(input_requests))
-
     print(f"Traffic request rate: {request_rate}")
+
+    pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
     benchmark_start_time = time.perf_counter()
     tasks = []
