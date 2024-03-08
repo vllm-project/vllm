@@ -5,6 +5,7 @@ On the server side, run one of the following commands:
     python -m vllm.entrypoints.openai.api_server \
         --model <your_model> --swap-space 16 \
         --disable-log-requests
+
     (vLLM Demo API server)
     python -m vllm.entrypoints.api_server \
         --model <your_model> --swap-space 16 \
@@ -16,7 +17,6 @@ On the server side, run one of the following commands:
 On the client side, run:
     python benchmarks/benchmark_serving.py \
         --backend <backend> \ # For vllm openai api server, use "openai"
-        --model <your_model> \
         --model <your_model> \
         --dataset-name sharegpt \
         --dataset-path <path to dataset> \
