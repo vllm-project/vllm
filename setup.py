@@ -332,6 +332,7 @@ if _is_cuda():
     # Adapted from https://github.com/ray-project/ray/blob/f92928c9cfcbbf80c3a8534ca4911de1b44069c0/python/setup.py#L518-L530
     flash_attn_version = "2.5.6"
     install_dir = os.path.join(ROOT_DIR, THIRDPARTY_SUBDIR)
+    os.makedirs(install_dir, exist_ok=True)
     try:
         subprocess.run(
             f"{sys.executable} -m ensurepip",
