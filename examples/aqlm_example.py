@@ -5,13 +5,18 @@ import argparse
 def main():
 
     parser = argparse.ArgumentParser(
-        description='Example script with command-line arguments')
+        description='AQLM examples')
 
     parser.add_argument('--model',
                         '-m',
+                        type=str,
+                        default=None,
+                        help='model path, as for HF')
+    parser.add_argument('--choice',
+                        '-c',
                         type=int,
                         default=0,
-                        help='Model ID [0-2]')
+                        help='known good models by index, [0-4]')
     parser.add_argument('--tensor_parallel_size',
                         '-t',
                         type=int,
@@ -28,7 +33,7 @@ def main():
         "BlackSamorez/TinyLlama-1_1B-Chat-v1_0-AQLM-2Bit-1x16-hf",
     ]
 
-    model = LLM(models[args.model],
+    model = LLM(args.model if args.model is not None else models[args.choice],
                 enforce_eager=True,
                 tensor_parallel_size=args.tensor_parallel_size)
 
