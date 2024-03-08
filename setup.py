@@ -332,21 +332,21 @@ if _is_cuda():
     # Adapted from https://github.com/ray-project/ray/blob/f92928c9cfcbbf80c3a8534ca4911de1b44069c0/python/setup.py#L518-L530
     flash_attn_version = "2.5.6"
     install_dir = os.path.join(ROOT_DIR, THIRDPARTY_SUBDIR)
-    subprocess.check_call(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            "-q",
-            f"--target={install_dir}",
-            "einops",  # Dependency of flash-attn.
-            f"flash-attn=={flash_attn_version}",
-            "--no-dependencies",  # Required to avoid re-installing torch.
-        ],
-        env=dict(os.environ, CC="gcc"),
-    )
-
+    try:
+        subprocess.run(
+            f"{sys.executable} -m ensurepip",
+            shell=True,
+            check=True,
+        )
+        subprocess.run(
+            f"{sys.executable} -m pip install -q --target={install_dir} einops flash-attn=={flash_attn_version} --no-dependencies",
+            shell=True,
+            check=True,
+            env=dict(os.environ, CC="gcc"),
+        )
+    except Exception as e:
+        print(f"An error occurred during Flash Attention installation: {e}")
+ 
     # Copy the FlashAttention package into the vLLM package after build.
     class build_ext(BuildExtension):
 
