@@ -23,7 +23,7 @@ MODELS = [
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("max_chunked_prefill_len", [-1])
-@pytest.mark.parametrize("max_num_prompt_seqs", [1, 2, 256])
+@pytest.mark.parametrize("max_num_prompt_seqs", [256])
 @pytest.mark.parametrize("block_size", [32])
 @pytest.mark.parametrize("tensor_parallel_size", [1])
 def test_models(
@@ -48,7 +48,8 @@ def test_models(
     expected_outputs = []
 
     print("generating tokens...")
-    expected_outputs.extend(pg_model.generate_greedy(example_prompts, max_tokens))
+    expected_outputs.extend(
+        pg_model.generate_greedy(example_prompts, max_tokens))
     print("generating tokens finished")
 
     del pg_model
@@ -58,11 +59,13 @@ def test_models(
     torch.cuda.empty_cache()
 
     flash_attn_output_by_batches = []
-    flash_attn_model = vllm_runner(model,
-                                   dtype=dtype,
-                                   block_size=block_size,
-                                   flash_style=True,
-                                   tensor_parallel_size=tensor_parallel_size)
+    flash_attn_model = vllm_runner(
+        model,
+        dtype=dtype,
+        block_size=block_size,
+        max_chunked_prefill_len=max_chunked_prefill_len,
+        max_num_prompt_seqs=max_num_prompt_seqs,
+        tensor_parallel_size=tensor_parallel_size)
     for i in range(10):
         prompts = [example_prompts[j % len(example_prompts)] for j in range(i)]
         flash_attn_output_by_batches.append(

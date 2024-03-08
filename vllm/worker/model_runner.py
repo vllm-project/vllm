@@ -197,7 +197,7 @@ class ModelRunner:
             # NOTE(sang): prefill_end is always # of prompts if chunked
             # prefill is not enabled. Prefix caching is not working with
             # chunked prefill now.
-            input_positions.append(
+            input_positions.extend(
                 list(range(computed_len, computed_len + prefill_end)))
             lora_id = seq_group_metadata.lora_int_id
 
@@ -249,7 +249,6 @@ class ModelRunner:
         max_prompt_len = max(subquery_lens)
         num_prompt_tokens = len(input_tokens)
         assert max_prompt_len > 0
-
         # Pad tokens to better utilize tensor cores although
         # cuda graph is not enabled.
         input_tokens = _make_tensor_with_pad_for_alignment(input_tokens,

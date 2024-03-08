@@ -320,8 +320,7 @@ class EngineArgs:
             self.dtype, self.seed, self.revision, self.code_revision,
             self.tokenizer_revision, self.max_model_len, self.quantization,
             self.enforce_eager, self.max_context_len_to_capture,
-            self.max_logprobs,
-            self.flash_style)
+            self.max_logprobs, self.flash_style)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
@@ -335,12 +334,13 @@ class EngineArgs:
                                          self.disable_custom_all_reduce,
                                          self.ray_workers_use_nsight)
         scheduler_config = SchedulerConfig(
-             self.max_num_batched_tokens,
+            self.max_num_batched_tokens,
             self.max_num_seqs,
             model_config.max_model_len,
             max_chunked_prefill_len=self.max_chunked_prefill_len,
             max_num_prompt_seqs=self.max_num_prompt_seqs,
-            flash_style=self.flash_style,)
+            flash_style=self.flash_style,
+        )
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,

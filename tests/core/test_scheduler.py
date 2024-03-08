@@ -238,4 +238,3 @@ def test_scheduler_max_seqs():
     # and one is prompting.
     _, out = scheduler.schedule()
     assert set(out.scheduled_seq_groups) == set([all_seq_groups[1]])
-
