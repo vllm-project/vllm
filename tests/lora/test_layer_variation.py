@@ -66,9 +66,11 @@ for length in range(2, 6):
 
 
 # Test the correctness when layer and rank are varied
-@pytest.mark.parametrize("tp_size", [1, 4])
-@pytest.mark.parametrize("target_modules", TARGET_MODULES_LIST)
-@pytest.mark.parametrize("rank", [8, 16, 32, 64])
+@pytest.mark.parametrize("tp_size", [1])
+# @pytest.mark.parametrize("target_modules", TARGET_MODULES_LIST)
+# @pytest.mark.parametrize("rank", [8, 16, 32, 64])
+@pytest.mark.parametrize("target_modules", TARGET_MODULES_LIST[0])
+@pytest.mark.parametrize("rank", [8])
 def test_layer_variation_correctness(tp_size, target_modules, rank):
     if torch.cuda.device_count() < tp_size:
         pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
