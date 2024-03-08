@@ -5,7 +5,6 @@ import torch
 import torch.nn as nn
 
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.utils import is_hip
 
 
 class Attention(nn.Module):
@@ -33,8 +32,8 @@ class Attention(nn.Module):
         # For now, we only support the XFormers backend.
         from vllm.model_executor.layers.attention.backends.xformers import XFormersBackend
         self.backend = XFormersBackend(num_heads, head_size, scale,
-                                        num_kv_heads, alibi_slopes,
-                                        sliding_window)
+                                       num_kv_heads, alibi_slopes,
+                                       sliding_window)
 
     def forward(
         self,
