@@ -77,11 +77,9 @@ class LRUCache:
         self.cache.move_to_end(key)
 
     def get(self, key: Hashable, default_value: Optional[Any] = None) -> int:
-        if key in self.cache:
-            value = self.cache[key]
+        value = self.cache.get(key, default_value)
+        if value is not default_value:
             self.cache.move_to_end(key)
-        else:
-            value = default_value
         return value
 
     def put(self, key: Hashable, value: Any) -> None:
@@ -103,9 +101,8 @@ class LRUCache:
             self.remove_oldest()
 
     def pop(self, key: int, default_value: Optional[Any] = None) -> Any:
-        run_on_remove = key in self.cache
         value = self.cache.pop(key, default_value)
-        if run_on_remove:
+        if value is not default_value:
             self._on_remove(key, value)
         return value
 
