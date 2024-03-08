@@ -317,7 +317,7 @@ void reshape_and_cache_flash(
   int num_tokens = key.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);
-  int block_size = kv_cache.size(1);
+  int block_size = k_cache.size(1);
 
   int key_stride = key.stride(0);
   int value_stride = value.stride(0);
