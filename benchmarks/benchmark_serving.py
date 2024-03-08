@@ -172,7 +172,7 @@ async def benchmark(
         raise ValueError(f"Unknown backend: {backend}")
 
     print(f"Traffic request rate: {request_rate}")
-    
+
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
     benchmark_start_time = time.perf_counter()
