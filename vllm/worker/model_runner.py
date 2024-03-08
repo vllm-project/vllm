@@ -222,6 +222,7 @@ class ModelRunner:
 
         max_prompt_len = max(subquery_lens)
         num_prompt_tokens = len(input_tokens)
+        assert max_prompt_len > 0
 
         # Pad tokens to better utilize tensor cores although
         # cuda graph is not enabled.
