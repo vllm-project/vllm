@@ -19,6 +19,7 @@ def test_prepare_prompt():
     batch_size = random.randint(1, 256)
     prompt_lens = []
     seq_group_metadata_list = []
+    block_tables = {0: [1]}
     for i in range(batch_size):
         # make sure all tokens fit into one block
         prompt_len = i % (model_runner.block_size - 1) + 1
@@ -30,7 +31,7 @@ def test_prepare_prompt():
                 is_prompt=True,
                 seq_data={0: SequenceData(seq_data)},
                 sampling_params=SamplingParams(temperature=0),
-                block_tables={0: [1]},
+                block_tables=block_tables,
             ))
 
     expected_selected_token_indices = []
@@ -70,10 +71,7 @@ def test_prepare_prompt():
         torch.zeros(input_metadata.context_lens.shape[0],
                     dtype=torch.int,
                     device=device))
-
-    # SANG-TODO
-    # assert input_metadata.slot_mapping == max(prompt_lens)
-    # block_tables
+    assert input_metadata.block_tables is None
     # Cuda graph should not be used for prerill.
     assert input_metadata.use_cuda_graph is False
     assert input_metadata.kv_cache_dtype == "auto"
@@ -162,9 +160,13 @@ def test_prepare_decode_cuda_graph():
         input_metadata.context_lens[:len(prompt_lens)],
         torch.tensor(prompt_lens, dtype=torch.int, device=device))
 
-    # SANG-TODO
-    # assert input_metadata.slot_mapping == max(prompt_lens)
-    # block_tables
+    # block table's first index corresponds to each batch, meaning in
+    # decoding it is each token.
+    assert input_metadata.block_tables.shape[0] == len(input_tokens)
+    # Block table's second dim correspondsd to each token's block number.
+    # It is padded up to
+    assert input_metadata.block_tables.shape[1] == (
+        model_runner.get_max_block_per_batch())
     # Cuda graph should not be used for prerill.
     assert input_metadata.use_cuda_graph is True
     assert input_metadata.kv_cache_dtype == "auto"

@@ -121,10 +121,13 @@ class ModelRunner:
     def set_block_size(self, block_size: int) -> None:
         self.block_size = block_size
 
-        max_num_blocks = (self.max_context_len_to_capture + block_size -
-                          1) // block_size
         self.graph_block_tables = np.zeros(
-            (max(_BATCH_SIZES_TO_CAPTURE), max_num_blocks), dtype=np.int32)
+            (max(_BATCH_SIZES_TO_CAPTURE), self.get_max_block_per_batch()),
+            dtype=np.int32)
+
+    def get_max_block_per_batch(self):
+        block_size = self.block_size
+        return (self.max_context_len_to_capture + block_size - 1) // block_size
 
     def _prepare_prompt(
         self,
