@@ -53,8 +53,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     "Apply GPT-NeoX or GPT-J style rotary embedding to query and key");
 
   // Quantization ops
-  ops.def("aqlm_gemm", &aqlm_gemm, "Quantized GEMM for AQLM");
 #ifndef USE_ROCM
+  ops.def("aqlm_gemm", &aqlm_gemm, "Quantized GEMM for AQLM");
   ops.def("awq_gemm", &awq_gemm, "Quantized GEMM for AWQ");
   ops.def("marlin_gemm", &marlin_gemm, "Marlin Optimized Quantized GEMM for GPTQ");
   ops.def("awq_dequantize", &awq_dequantize, "Dequantization for AWQ");

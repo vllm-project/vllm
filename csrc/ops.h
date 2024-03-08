@@ -69,6 +69,7 @@ void gelu_fast(
   torch::Tensor& out,
   torch::Tensor& input);
 
+#ifndef USE_ROCM
 torch::Tensor aqlm_gemm(
   const torch::Tensor& input,
   const torch::Tensor& codes,
@@ -78,7 +79,6 @@ torch::Tensor aqlm_gemm(
   const std::optional<torch::Tensor>& bias
 );
 
-#ifndef USE_ROCM
 torch::Tensor awq_gemm(
   torch::Tensor _in_feats,
   torch::Tensor _kernel,
