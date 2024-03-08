@@ -594,7 +594,6 @@ class ModelRunner:
                 sampling_metadata.selected_token_indices,
                 "lora_requests": lora_requests,
                 "lora_mapping": lora_mapping,
-                "prefix_enabled": input_metadata.prefix_enabled
             }
             broadcast_tensor_dict(metadata_dict, src=0)
         else:
@@ -618,7 +617,7 @@ class ModelRunner:
                 use_cuda_graph=metadata_dict["use_cuda_graph"],
                 kv_cache_dtype=metadata_dict["kv_cache_dtype"],
                 flash_style=self.flash_style,
-                prefix_enabled=metadata_dict["prefix_enabled"])
+            )
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
                 seq_data=None,
@@ -818,8 +817,7 @@ class ModelRunner:
                     block_tables=block_tables[:batch_size],
                     use_cuda_graph=True,
                     kv_cache_dtype=self.kv_cache_dtype,
-                    flash_style=self.flash_style,
-                    prefix_enabled=False)
+                    flash_style=self.flash_style)
 
                 if self.lora_config:
                     lora_mapping = LoRAMapping(

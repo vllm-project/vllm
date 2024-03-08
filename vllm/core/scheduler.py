@@ -577,10 +577,6 @@ class Scheduler:
                     self.scheduler_config.max_num_seqs):
                 break
 
-            num_paddings = token_budget.num_prefill_paddings
-            if num_paddings > self.scheduler_config.max_paddings:
-                break
-
             if curr_loras is not None and lora_int_id > 0:
                 curr_loras.add(lora_int_id)
             self.waiting.popleft()

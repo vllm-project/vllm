@@ -141,7 +141,6 @@ def test_scheduler_schedule_chunked_prefill():
         64,
         num_seq_group,
         max_model_len,
-        max_paddings=1024,
         max_chunked_prefill_len=max_chunked_prefill_len,
         max_num_prompt_seqs=max_num_prompt_seqs,
         flash_style=True,

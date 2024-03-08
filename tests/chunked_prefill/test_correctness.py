@@ -10,31 +10,25 @@ MODELS = [
     # "facebook/opt-125m",
 ]
 
-TEST_PROMPTS = [
-    # pylint: disable=line-too-long
-    "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs.",
-    "Briefly describe the major milestones in the development of artificial intelligence from 1950 to 2020.",
-    "Compare and contrast artificial intelligence with human intelligence in terms of processing information.",
-    # Different between page attention and flash attention.
-    # "Describe the basic components of a neural network and how it can be trained.",
-    "Write a short story about a robot that dreams for the first time.",
-    "Analyze the impact of the COVID-19 pandemic on global economic structures and future business models.",
-    "Explain the cultural significance of the Mona Lisa painting, and how its perception might vary in Western versus Eastern societies.",
-    "Translate the following English sentence into Japanese, French, and Swahili: 'The early bird catches the worm.'",
-]
-
 
 # TODO(sang): Add chunked prefill parameters.
+# @pytest.mark.parametrize("model", MODELS)
+# @pytest.mark.parametrize("dtype", ["half"])
+# @pytest.mark.parametrize("max_tokens", [128])
+# @pytest.mark.parametrize("max_chunked_prefill_len", [-1, 16, 64])
+# @pytest.mark.parametrize("max_num_prompt_seqs", [1, 2, 100])
+# @pytest.mark.parametrize("block_size", [32])
+# @pytest.mark.parametrize("tensor_parallel_size", [1, 2])
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("max_chunked_prefill_len", [-1])
-@pytest.mark.parametrize("max_num_prompt_seqs", [1])
+@pytest.mark.parametrize("max_num_prompt_seqs", [1, 2, 256])
 @pytest.mark.parametrize("block_size", [32])
 @pytest.mark.parametrize("tensor_parallel_size", [1])
 def test_models(
-    hf_runner,
     vllm_runner,
+    example_prompts,
     model: str,
     dtype: str,
     max_tokens: int,
@@ -54,7 +48,7 @@ def test_models(
     expected_outputs = []
 
     print("generating tokens...")
-    expected_outputs.extend(pg_model.generate_greedy(TEST_PROMPTS, max_tokens))
+    expected_outputs.extend(pg_model.generate_greedy(example_prompts, max_tokens))
     print("generating tokens finished")
 
     del pg_model
@@ -70,7 +64,7 @@ def test_models(
                                    flash_style=True,
                                    tensor_parallel_size=tensor_parallel_size)
     for i in range(10):
-        prompts = [TEST_PROMPTS[j % len(TEST_PROMPTS)] for j in range(i)]
+        prompts = [example_prompts[j % len(example_prompts)] for j in range(i)]
         flash_attn_output_by_batches.append(
             flash_attn_model.generate_greedy(prompts, max_tokens))
 
