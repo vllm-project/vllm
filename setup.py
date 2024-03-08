@@ -226,6 +226,7 @@ def get_torch_arch_list() -> Set[str]:
 if _is_hip():
     rocm_arches = get_pytorch_rocm_arch()
     NVCC_FLAGS += ["--offload-arch=" + arch for arch in rocm_arches]
+    NVCC_FLAGS += ["-DENABLE_FP8_E4M3"]
 else:
     # First, check the TORCH_CUDA_ARCH_LIST environment variable.
     compute_capabilities = get_torch_arch_list()
