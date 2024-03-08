@@ -4,8 +4,7 @@ import argparse
 
 def main():
 
-    parser = argparse.ArgumentParser(
-        description='AQLM examples')
+    parser = argparse.ArgumentParser(description='AQLM examples')
 
     parser.add_argument('--model',
                         '-m',
