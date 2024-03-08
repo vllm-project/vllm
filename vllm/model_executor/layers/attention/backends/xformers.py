@@ -57,23 +57,23 @@ class XFormersBackend:
         """Forward pass with xFormers and PagedAttention.
 
         Args:
-            query: shape = [batch_size, seq_len, num_heads * head_size]
-            key: shape = [batch_size, seq_len, num_kv_heads * head_size]
-            value: shape = [batch_size, seq_len, num_kv_heads * head_size]
+            query: shape = [num_tokens num_heads * head_size]
+            key: shape = [num_tokens, num_kv_heads * head_size]
+            value: shape = [num_tokens, num_kv_heads * head_size]
             key_cache: shape = [num_blocks, num_kv_heads, head_size/x,
                 block_size, x]. None if it is a profiling run.
             value_cache: shape = [num_blocks, num_kv_heads, head_size,
                 block_size]. None if it is a profiling run.
             input_metadata: metadata for the inputs.
         Returns:
-            shape = [batch_size, seq_len, num_heads * head_size]
+            shape = [num_tokens, num_heads * head_size]
         """
-        batch_size, seq_len, hidden_size = query.shape
-        # print("SANG-TODO query size: ", query.size())
+        num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
+        output = torch.empty_like(query)
 
         # Reshape the keys and values and store them in the cache.
         # If key_cache and value_cache are not provided, the new key and value
@@ -91,6 +91,7 @@ class XFormersBackend:
 
         if input_metadata.is_prompt:
             # Prompt run.
+            # Unless there's a prefix, context lens is all 0 for prefill.
             if (key_cache is None or value_cache is None
                     or input_metadata.block_tables.numel() == 0):
                 # normal attention
@@ -118,15 +119,15 @@ class XFormersBackend:
                 if input_metadata.attn_bias is None:
                     if self.alibi_slopes is None:
                         attn_bias = BlockDiagonalCausalMask.from_seqlens(
-                            [seq_len] * batch_size)
+                            input_metadata.prompt_lens.tolist())
                         if self.sliding_window is not None:
                             attn_bias = attn_bias.make_local_attention(
                                 self.sliding_window)
                         input_metadata.attn_bias = attn_bias
                     else:
                         input_metadata.attn_bias = _make_alibi_bias(
-                            self.alibi_slopes, self.num_kv_heads, batch_size,
-                            seq_len, query.dtype)
+                            self.alibi_slopes, self.num_kv_heads, query.dtype,
+                            input_metadata)
 
                 if self.use_ref_attention:
                     output = _ref_masked_attention(
@@ -142,7 +143,7 @@ class XFormersBackend:
                     # with input tensor's size and stride (at least one
                     # dimension spans across two contiguous subspaces).
                     # Use reshape instead.
-                    return output.reshape(batch_size, seq_len, hidden_size)
+                    return output.reshape(num_tokens, hidden_size)
 
                 # TODO(woosuk): Too many view operations. Let's try to reduce
                 # them in the future for code readability.
@@ -151,9 +152,10 @@ class XFormersBackend:
                     key = key.unsqueeze(0)
                     value = value.unsqueeze(0)
                 else:
-                    query = query.unflatten(0, (batch_size, seq_len))
-                    key = key.unflatten(0, (batch_size, seq_len))
-                    value = value.unflatten(0, (batch_size, seq_len))
+                    query = query.unflatten(0, (num_tokens))
+                    key = key.unflatten(0, (num_tokens))
+                    value = value.unflatten(0, (num_tokens))
+
                 out = xops.memory_efficient_attention_forward(
                     query,
                     key,
@@ -301,41 +303,39 @@ class XFormersBackend:
             )
 
         # Reshape the output tensor.
-        return output.view(batch_size, seq_len, hidden_size)
+        return output.view(-1, self.num_heads * self.head_size)
 
 
 def _make_alibi_bias(
     alibi_slopes: torch.Tensor,
     num_kv_heads: int,
-    batch_size: int,
-    seq_len: int,
     dtype: torch.dtype,
+    input_metadata: InputMetadata,
 ) -> LowerTriangularMaskWithTensorBias:
-    bias = torch.arange(seq_len, dtype=dtype)
-    # NOTE(zhuohan): HF uses
-    #     `bias = bias[None, :].repeat(prompt_len, 1)`
-    # here. We find that both biases give the same results, but
-    # the bias below more accurately follows the original ALiBi
-    # paper.
-    bias = bias[None, :] - bias[:, None]
+    for prompt_len in input_metadata.prompt_lens:
+        bias = torch.arange(prompt_len, dtype=dtype)
+        # NOTE(zhuohan): HF uses
+        #     `bias = bias[None, :].repeat(prompt_len, 1)`
+        # here. We find that both biases give the same results, but
+        # the bias below more accurately follows the original ALiBi
+        # paper.
+        bias = bias[None, :] - bias[:, None]
 
-    # When using custom attention bias, xformers requires the bias to
-    # be sliced from a tensor whose length is a multiple of 8.
-    padded_len = (seq_len + 7) // 8 * 8
-    num_heads = alibi_slopes.shape[0]
-    bias = torch.empty(
-        batch_size,
-        num_heads,
-        seq_len,
-        padded_len,
-        device=alibi_slopes.device,
-        dtype=dtype,
-    )[:, :, :, :seq_len].copy_(bias)
-    bias.mul_(alibi_slopes[:, None, None])
-    if num_heads != num_kv_heads:
-        bias = bias.unflatten(1, (num_kv_heads, num_heads // num_kv_heads))
-    attn_bias = LowerTriangularMaskWithTensorBias(bias)
-    return attn_bias
+        padded_len = (prompt_len + 7) // 8 * 8
+        num_heads = alibi_slopes.shape[0]
+        bias = torch.empty(
+            1,  # batch size
+            num_heads,
+            prompt_len,
+            padded_len,
+            device=alibi_slopes.device,
+            dtype=dtype,
+        )[:, :, :, :prompt_len].copy_(bias)
+        bias.mul_(alibi_slopes[:, None, None])
+        if num_heads != num_kv_heads:
+            bias = bias.unflatten(1, (num_kv_heads, num_heads // num_kv_heads))
+        attn_bias = LowerTriangularMaskWithTensorBias(bias)
+        return attn_bias
 
 
 def _check_use_ref_attention() -> bool:

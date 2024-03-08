@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.utils import is_hip
+# from vllm.utils import is_hip
 
 
 class Attention(nn.Module):
@@ -13,11 +13,27 @@ class Attention(nn.Module):
 
     This class takes query, key, and value tensors as input. The input tensors
     can either contain prompt tokens or generation tokens.
+
+
+    If the input tensors contain prompt tokens, the layout is as follows:	
+    |<---------------------- num_valid_tokens ---------------------->|	
+    |<--------------- num_prompt_tokens -------------->|	
+    |<--prompt_0-->|<--prompt_1-->|...|<--prompt_N-1-->|<--padding-->|	
+
+    Otherwise, the layout is as follows:	
+    |<------------------ num_valid_tokens ------------------->|	
+    |<------- num_generation_tokens (M) ------->|	
+    |<--generation_0-->|...|<--generation_M-1-->|<--padding-->|	
+
+    The prompts might have different lengths, while the generation tokens always	
+    have length 1. The paddings are appended to make the input length a multiple	
+    of 8, which is desirable for Tensor Cores.
+
     The class does the following:
 
     1. Store the input key and value tensors in the KV cache.
     2. Perform (multi-head/multi-query/grouped-query) attention.
-    3. Return the output tensor.
+    3. Output a flattened 1D tensor.
     """
 
     def __init__(
@@ -30,8 +46,9 @@ class Attention(nn.Module):
         sliding_window: Optional[int] = None,
     ) -> None:
         super().__init__()
-        if (not is_hip() and torch.cuda.get_device_capability()[0] >= 8 and
-                torch.get_default_dtype() in (torch.float16, torch.bfloat16)):
+        # if (not is_hip() and torch.cuda.get_device_capability()[0] >= 8 and
+        #         torch.get_default_dtype() in (torch.float16, torch.bfloat16)):
+        if False:
             # Ampere or later NVIDIA GPUs.
             # NOTE(woosuk): FlashAttention does not support FP32.
             from vllm.model_executor.layers.attention.backends.flash_attn import FlashAttentionBackend

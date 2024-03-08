@@ -53,18 +53,18 @@ class FlashAttentionBackend:
         """Forward pass with FlashAttention and PagedAttention.
 
         Args:
-            query: shape = [batch_size, seq_len, num_heads * head_size]
-            key: shape = [batch_size, seq_len, num_kv_heads * head_size]
-            value: shape = [batch_size, seq_len, num_kv_heads * head_size]
+            query: shape = [num_tokens, num_heads * head_size]
+            key: shape = [num_tokens, num_kv_heads * head_size]
+            value: shape = [num_tokens, num_kv_heads * head_size]
             key_cache: shape = [num_blocks, num_kv_heads, head_size/x,
                 block_size, x]
             value_cache: shape = [num_blocks, num_kv_heads, head_size,
                 block_size]
             input_metadata: metadata for the inputs.
         Returns:
-            shape = [batch_size, seq_len, num_heads * head_size]
+            shape = [num_tokens, num_heads * head_size]
         """
-        batch_size, seq_len, hidden_size = query.shape
+        num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
@@ -74,27 +74,25 @@ class FlashAttentionBackend:
         # If key_cache and value_cache are not provided, the new key and value
         # vectors will not be cached. This happens during the initial memory
         # profiling run.
-        if key_cache is not None and value_cache is not None:
-            PagedAttentionImpl.reshape_and_cache(key, value, key_cache,
-                                                 value_cache, input_metadata)
+        PagedAttentionImpl.reshape_and_cache(key, value, key_cache,
+                                             value_cache, input_metadata)
 
         if input_metadata.is_prompt:
             # Prompt run.
             if (key_cache is None or value_cache is None
                     or input_metadata.block_tables.numel() == 0):
                 # normal attention
-                query = query.unflatten(0, (batch_size, seq_len))
-                key = key.unflatten(0, (batch_size, seq_len))
-                value = value.unflatten(0, (batch_size, seq_len))
-                output = flash_attn_func(
-                    query,
-                    key,
-                    value,
-                    softmax_scale=self.scale,
-                    causal=True,
-                    window_size=self.sliding_window,
-                    alibi_slopes=self.alibi_slopes,
-                )
+                output = torch.empty_like(query)
+                query = query.unflatten(0, (num_tokens, ))
+                key = key.unflatten(0, (num_tokens, ))
+                value = value.unflatten(0, (num_tokens, ))
+                output = flash_attn_func(query,
+                                         key,
+                                         value,
+                                         softmax_scale=self.scale,
+                                         causal=True,
+                                         window_size=self.sliding_window,
+                                         alibi_slopes=self.alibi_slopes)
             else:
                 # prefix-enabled attention
                 output = PagedAttentionImpl.forward_prefix(
@@ -104,8 +102,6 @@ class FlashAttentionBackend:
                     key_cache,
                     value_cache,
                     input_metadata,
-                    self.num_heads,
-                    self.num_kv_heads,
                     self.alibi_slopes,
                 )
         else:
@@ -121,4 +117,4 @@ class FlashAttentionBackend:
             )
 
         # Reshape the output tensor.
-        return output.view(batch_size, seq_len, hidden_size)
+        return output.view(num_tokens, hidden_size)
