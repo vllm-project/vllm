@@ -1,5 +1,6 @@
 import time
 import codecs
+import asyncio
 from fastapi import Request
 from typing import AsyncGenerator, AsyncIterator, Optional, List, Union
 from vllm.logger import init_logger
@@ -8,11 +9,13 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
+    ChatCompletionAssistantMessage, ChatCompletionToolMessage, ChatCompletionNamedToolChoiceParam,
     ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse,
     UsageInfo)
 from vllm.outputs import RequestOutput
 from vllm.entrypoints.openai.serving_engine import OpenAIServing, LoRA
 from vllm.model_executor.guided_decoding import get_guided_decoding_logits_processor
+from vllm.entrypoints.openai.tools import OpenAIToolsPrompter, ChatPromptCapture
 
 logger = init_logger(__name__)
 
@@ -24,12 +27,26 @@ class OpenAIServingChat(OpenAIServing):
                  served_model: str,
                  response_role: str,
                  lora_modules: Optional[List[LoRA]] = None,
-                 chat_template=None):
+                 chat_template=None,
+                 openai_tools_prompter: OpenAIToolsPrompter = None,
+                 privileged: bool = False):
         super().__init__(engine=engine,
                          served_model=served_model,
                          lora_modules=lora_modules)
+        self.privileged = privileged
         self.response_role = response_role
-        self._load_chat_template(chat_template)
+        self.openai_tools_prompter = openai_tools_prompter
+
+        try:
+            event_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            event_loop = None
+
+        if event_loop is not None and event_loop.is_running(
+        ):  # If the current is instanced by Ray Serve, there is already a running event loop
+            event_loop.create_task(self._load_chat_template(chat_template))
+        else:  # When using single vLLM without engine_use_ray
+            asyncio.run(self._load_chat_template(chat_template))
 
     async def create_chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
@@ -39,13 +56,24 @@ class OpenAIServingChat(OpenAIServing):
 
         See  https://platform.openai.com/docs/api-reference/chat/create
         for the API specification. This API mimics the OpenAI ChatCompletion API.
-
-        NOTE: Currently we do not support the following feature:
-            - function_call (Users should implement this by themselves)
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
+
+        if self.openai_tools_prompter is not None:
+            self.openai_tools_prompter.inject_prompt(request)
+
+            # FIXME : As on dec 2023, the tokenizer only accept "role" and "content" attributes.
+            # FIXME : So we manually copy other attributes into "content" when needed.
+            for m in request.messages:
+                if isinstance(m, ChatCompletionAssistantMessage
+                              ) and m.tool_calls is not None:
+                    m.content = self.openai_tools_prompter.content_from_assistant(
+                        m)
+                elif isinstance(m, ChatCompletionToolMessage
+                                ) and m.tool_call_id is not None:
+                    m.content = self.openai_tools_prompter.content_from_tool(m)
 
         try:
             prompt = self.tokenizer.apply_chat_template(
@@ -56,6 +84,14 @@ class OpenAIServingChat(OpenAIServing):
             logger.error(
                 f"Error in applying chat template from request: {str(e)}")
             return self.create_error_response(str(e))
+
+        if self.privileged:  # ease the templates development
+            logger.info("\n######## Development infos (dev-mode) ########")
+            logger.info("API tools status: %s" % str(self.openai_tools_prompter is not None))
+            logger.info("- Request:\n%s" % str(request.dict()))
+            logger.info("")
+            logger.info("- Prompt:\n%s" % str(prompt))
+            logger.info("##############################################")
 
         request_id = f"cmpl-{random_uuid()}"
         try:
@@ -104,6 +140,16 @@ class OpenAIServingChat(OpenAIServing):
         created_time = int(time.monotonic())
         chunk_object_type = "chat.completion.chunk"
         first_iteration = True
+
+        if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):  # Guided function call
+            tools_capture_texts = [ChatPromptCapture() for i in range(request.n)]
+            is_tools_guided_generation = True
+        else:
+            is_tools_guided_generation = False
+            if self.openai_tools_prompter is not None and (isinstance(request.tool_choice, str) and request.tool_choice == "auto"):
+                tools_capture_texts = [ChatPromptCapture() for i in range(request.n)]
+            else:
+                tools_capture_texts = None
 
         # Send response for each token for each request.n (index)
         previous_texts = [""] * request.n
@@ -168,6 +214,17 @@ class OpenAIServingChat(OpenAIServing):
                     if finish_reason_sent[i]:
                         continue
 
+                    current_capture = tools_capture_texts[
+                        i] if tools_capture_texts is not None else None
+
+                    if current_capture is not None and current_capture.after_new_function_call:
+                        current_capture.after_new_function_call = False
+                        # If the last token is a new line char right after a function call, we ignore it.
+                        # Otherwise, each function call creates a line break in the content part of the response.
+                        if output.text[len(previous_texts[i]):] == "\n":
+                            previous_texts[i] = output.text
+                            continue
+
                     delta_token_ids = output.token_ids[previous_num_tokens[i]:]
                     top_logprobs = output.logprobs[
                         previous_num_tokens[i]:] if output.logprobs else None
@@ -182,50 +239,141 @@ class OpenAIServingChat(OpenAIServing):
                     else:
                         logprobs = None
 
-                    delta_text = output.text[len(previous_texts[i]):]
-                    previous_texts[i] = output.text
-                    previous_num_tokens[i] = len(output.token_ids)
-                    if output.finish_reason is None:
-                        # Send token-by-token response for each request.n
-                        choice_data = ChatCompletionResponseStreamChoice(
-                            index=i,
-                            delta=DeltaMessage(content=delta_text),
-                            logprobs=logprobs,
-                            finish_reason=None)
-                        chunk = ChatCompletionStreamResponse(
-                            id=request_id,
-                            object=chunk_object_type,
-                            created=created_time,
-                            choices=[choice_data],
-                            model=model_name)
-                        data = chunk.model_dump_json(exclude_unset=True)
-                        yield f"data: {data}\n\n"
-                    else:
-                        # Send the finish response for each request.n only once
-                        prompt_tokens = len(res.prompt_token_ids)
-                        final_usage = UsageInfo(
-                            prompt_tokens=prompt_tokens,
-                            completion_tokens=previous_num_tokens[i],
-                            total_tokens=prompt_tokens +
-                            previous_num_tokens[i],
-                        )
-                        choice_data = ChatCompletionResponseStreamChoice(
-                            index=i,
-                            delta=DeltaMessage(content=delta_text),
-                            logprobs=logprobs,
-                            finish_reason=output.finish_reason)
-                        chunk = ChatCompletionStreamResponse(
-                            id=request_id,
-                            object=chunk_object_type,
-                            created=created_time,
-                            choices=[choice_data],
-                            model=model_name)
-                        if final_usage is not None:
-                            chunk.usage = final_usage
-                        data = chunk.model_dump_json(exclude_unset=True,
-                                                     exclude_none=True)
-                        yield f"data: {data}\n\n"
-                        finish_reason_sent[i] = True
+                    if is_tools_guided_generation:  # Manage tools calling when request.tool_choice set a function
+                        if len(current_capture.content) == 0:
+                            current_capture.startNamedFunction(request.tool_choice)
+                        current_token: str = output.text[len(previous_texts[i]):]
+                        if len(current_token):
+                            current_capture.content += current_token
+                            if current_capture.checkBracketsFunctionCall():  # We have the complete call block
+                                previous_texts[i] = output.text
+                                current_capture.closeNamedFunction()
+                                current_capture.make_calls_list(
+                                    self.openai_tools_prompter)
+                                current_capture.reset(False)
+                                current_capture.after_new_function_call = True
+                    else:  # Manage tools calling when request.tool_choice is "auto"
+                        if (self.openai_tools_prompter is not None) and \
+                                (current_capture is not None) and \
+                                (request.tools is not None) and \
+                                (output.finish_reason is None):
+                            if len(current_capture.content) == 0:
+                                current_token: str = output.text[
+                                    len(previous_texts[i]):]
+                                if self.openai_tools_prompter.func_call_token_pre(
+                                ) in current_token:
+                                    start_pos: int = current_token.index(
+                                        self.openai_tools_prompter.
+                                        func_call_token_pre())
+                                    current_capture.content = current_token[
+                                        start_pos:]  # With some models the completion may start by a space.
+                                    current_capture.prefix_size = len(
+                                        output.text) - len(current_capture.content)
+                                    current_capture.maybe_function_call = True
+                            else:  # Maybe a function call...
+                                current_token: str = output.text[
+                                    len(current_capture.content) +
+                                    current_capture.prefix_size:]
+                                current_capture.content += current_token
+                                if len(
+                                        current_capture.content
+                                ) < self.openai_tools_prompter.func_call_token_size(
+                                ):
+                                    pass
+                                elif not current_capture.is_function_call:
+                                    if current_capture.content.startswith(
+                                            self.openai_tools_prompter.
+                                            func_call_token()):  # Function call !
+                                        current_capture.is_function_call = True
+                                    else:  # This is not a function call...
+                                        current_capture.reset(False)
+                                else:  # Currently extracting the function call
+                                    if current_capture.checkBracketsFunctionCall():  # We have the complete call block
+                                        previous_texts[i] = output.text
+                                        current_capture.make_calls_list(
+                                            self.openai_tools_prompter)
+                                        current_capture.reset(False)
+                                        current_capture.after_new_function_call = True
+                                    else:
+                                        pass
+
+
+                    if current_capture is None or (
+                            isinstance(current_capture, ChatPromptCapture) and not current_capture.maybe_function_call):
+                        delta_text = output.text[len(previous_texts[i]):]
+                        logger.info("Appels de fonction (1) (%s:%s) : %s" % (output.finish_reason, delta_text, str(current_capture.calls_list)))
+                        previous_texts[i] = output.text
+                        previous_num_tokens[i] = len(output.token_ids)
+                        if output.finish_reason is None:
+                            if len(delta_text) > 0:
+                                # Send token-by-token response for each request.n
+                                choice_data = ChatCompletionResponseStreamChoice(
+                                    index=i,
+                                    delta=DeltaMessage(content=delta_text),
+                                    logprobs=logprobs,
+                                    finish_reason=None)
+                                chunk = ChatCompletionStreamResponse(
+                                    id=request_id,
+                                    object=chunk_object_type,
+                                    created=created_time,
+                                    choices=[choice_data],
+                                    model=model_name)
+                                data = chunk.model_dump_json(exclude_unset=True)
+                                yield f"data: {data}\n\n"
+                        else:
+                            logger.info("Appels de fonction (2) (%s) : %s" % (output.finish_reason, str(current_capture.calls_list)))
+                            if output.finish_reason == "stop" and (
+                                    isinstance(current_capture, ChatPromptCapture) and
+                                    (current_capture.num_calls() > 0)):
+                                tools_calls_list = current_capture.to_ChoiceDeltaToolCallList(
+                                )
+
+                                choice_data = ChatCompletionResponseStreamChoice(
+                                    index=i,
+                                    delta=DeltaMessage(
+                                        content=None, tool_calls=tools_calls_list),
+                                    finish_reason="tool_calls")
+                                chunk = ChatCompletionStreamResponse(
+                                    id=request_id,
+                                    object=chunk_object_type,
+                                    created=created_time,
+                                    choices=[choice_data],
+                                    model=model_name)
+                                chunk.usage = UsageInfo(
+                                    prompt_tokens=len(res.prompt_token_ids),
+                                    completion_tokens=len(output.token_ids),
+                                    total_tokens=len(res.prompt_token_ids) +
+                                                 len(output.token_ids),
+                                )
+                                data = chunk.model_dump_json(exclude_unset=True,
+                                                  exclude_none=True)
+                                yield f"data: {data}\n\n"
+                            else:
+                                # Send the finish response for each request.n only once
+                                prompt_tokens = len(res.prompt_token_ids)
+                                final_usage = UsageInfo(
+                                    prompt_tokens=prompt_tokens,
+                                    completion_tokens=previous_num_tokens[i],
+                                    total_tokens=prompt_tokens +
+                                    previous_num_tokens[i],
+                                )
+                                choice_data = ChatCompletionResponseStreamChoice(
+                                    index=i,
+                                    delta=DeltaMessage(content=delta_text),
+                                    logprobs=logprobs,
+                                    finish_reason=output.finish_reason)
+                                chunk = ChatCompletionStreamResponse(
+                                    id=request_id,
+                                    object=chunk_object_type,
+                                    created=created_time,
+                                    choices=[choice_data],
+                                    model=model_name)
+                                if final_usage is not None:
+                                    chunk.usage = final_usage
+                                data = chunk.model_dump_json(exclude_unset=True,
+                                                             exclude_none=True)
+                                yield f"data: {data}\n\n"
+                                finish_reason_sent[i] = True
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             data = self.create_streaming_error_response(str(e))
@@ -251,11 +399,12 @@ class OpenAIServingChat(OpenAIServing):
         assert final_res is not None
 
         choices = []
-
         role = self.get_chat_request_role(request)
+
         for output in final_res.outputs:
             token_ids = output.token_ids
             top_logprobs = output.logprobs
+            tools_calls_validation = False
 
             if request.logprobs:
                 logprobs = self._create_logprobs(
@@ -266,13 +415,73 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 logprobs = None
 
-            choice_data = ChatCompletionResponseChoice(
-                index=output.index,
-                message=ChatMessage(role=role, content=output.text),
-                logprobs=logprobs,
-                finish_reason=output.finish_reason,
-            )
-            choices.append(choice_data)
+            # Manage tools calling
+            if self.openai_tools_prompter is not None and \
+                    request.tools is not None:
+                current_capture = ChatPromptCapture()
+
+                if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):  # Guided function call
+                    current_capture.startNamedFunction(request.tool_choice)
+                    current_capture.content += output.text
+                    current_capture.closeNamedFunction()
+                    current_capture.make_calls_list(
+                        self.openai_tools_prompter)
+                    current_capture.reset(False)
+                else:
+                    start_pos = 0
+                    while True:
+                        pos = output.text.find(
+                            self.openai_tools_prompter.func_call_token(),
+                            start_pos, -1)
+                        if pos < 0:
+                            break
+                        start_bloc = output.text.find("{", pos, -1)
+                        if start_bloc < 0:
+                            break
+                        if (start_bloc -
+                            (pos +
+                             self.openai_tools_prompter.func_call_token_size())
+                            ) > 1:
+                            break
+                        count = 1
+                        bloc_end = start_bloc + 1
+                        for it_ch in range(start_bloc + 1, len(output.text), 1):
+                            ch = output.text[it_ch]
+                            bloc_end += 1
+                            if ch == "{":
+                                count += 1
+                            elif ch == "}":
+                                count -= 1
+                            if count == 0:  # We have the complete call block
+                                current_capture.content = output.text[
+                                    start_bloc:bloc_end]
+                                current_capture.make_calls_list(
+                                    self.openai_tools_prompter)
+                                current_capture.reset(False)
+                                break
+                        start_pos = bloc_end + 1
+
+                if current_capture.num_calls() > 0:
+                    tools_calls_validation = True
+                    tools_calls_list = current_capture.to_ChatCompletionMessageToolCallList(
+                    )
+                    message = ChatMessage(role=role,
+                                          content=None,
+                                          tool_calls=tools_calls_list)
+                    choice_data = ChatCompletionResponseChoice(
+                        index=output.index,
+                        message=message,
+                        logprobs=logprobs,
+                        finish_reason="tool_calls")
+                    choices.append(choice_data)
+            if not tools_calls_validation:
+                choice_data = ChatCompletionResponseChoice(
+                    index=output.index,
+                    message=ChatMessage(role=role, content=output.text),
+                    logprobs=logprobs,
+                    finish_reason=output.finish_reason,
+                )
+                choices.append(choice_data)
 
         if request.echo:
             last_msg_content = ""
@@ -304,7 +513,11 @@ class OpenAIServingChat(OpenAIServing):
 
         return response
 
-    def _load_chat_template(self, chat_template):
+    async def _load_chat_template(self, chat_template):
+        while self.tokenizer is None:
+            logger.info("Waiting for the tokenizer initialization...")
+            await asyncio.sleep(1.00)
+
         if chat_template is not None:
             try:
                 with open(chat_template, "r") as f:

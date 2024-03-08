@@ -8,7 +8,7 @@ from re import escape as regex_escape
 from typing import Union, Tuple
 from pydantic import BaseModel
 
-from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest
+from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest, ChatCompletionNamedToolChoiceParam
 from vllm.model_executor.guided_logits_processors import JSONLogitsProcessor, RegexLogitsProcessor
 
 
@@ -53,8 +53,16 @@ async def get_guided_decoding_logits_processor(
 def _get_guide_and_mode(
     request: Union[CompletionRequest, ChatCompletionRequest]
 ) -> Tuple[str, GuidedDecodingMode]:
-
-    if request.guided_json:
+    if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
+        # Guided generation for tools/functions parameters
+        if request.tool_choice.type == "function":
+            for tool in request.tools:
+                if tool.type == "function":
+                    if tool.function.name == request.tool_choice.function.name:
+                        json = json_dumps(tool.function.parameters, sort_keys=True)
+                        return json, GuidedDecodingMode.JSON
+        return None, None
+    elif request.guided_json:
         if not isinstance(request.guided_json, (str, dict, BaseModel)):
             raise TypeError("JSON schema must be str, dict, or BaseModel")
 
