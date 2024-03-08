@@ -21,7 +21,7 @@ from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
-from vllm.utils import in_wsl
+from vllm.utils import in_wsl, measure_cuda_memory
 
 logger = init_logger(__name__)
 
@@ -85,11 +85,17 @@ class ModelRunner:
             self.model_config.enforce_eager = True
 
     def load_model(self) -> None:
-        self.model = get_model(self.model_config,
-                               self.device_config,
-                               lora_config=self.lora_config,
-                               parallel_config=self.parallel_config,
-                               scheduler_config=self.scheduler_config)
+        with measure_cuda_memory() as m:
+            self.model = get_model(self.model_config,
+                                   self.device_config,
+                                   lora_config=self.lora_config,
+                                   parallel_config=self.parallel_config,
+                                   scheduler_config=self.scheduler_config)
+
+        self.model_memory_usage = m.consumed_memory
+        logger.info(
+            f"Loading model weights took {self.model_memory_usage / float(2**30):.4f} GB"
+        )
 
         vocab_size = self.model.config.vocab_size
 
@@ -209,6 +215,7 @@ class ModelRunner:
                 slot_mapping[-1].append(slot)
 
         max_prompt_len = max(subquery_lens)
+        assert max_prompt_len > 0
         input_tokens = _make_tensor_with_pad(input_tokens,
                                              max_prompt_len,
                                              pad=0,
