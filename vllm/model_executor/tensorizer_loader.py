@@ -18,9 +18,12 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-def load_with_tensorizer(model_cls: Type[nn.Module], model_config: ModelConfig) -> nn.Module:
+
+def load_with_tensorizer(model_cls: Type[nn.Module],
+                         model_config: ModelConfig) -> nn.Module:
     tensorizer = TensorizerAgent(model_cls, model_config)
     return tensorizer.deserialize()
+
 
 def _is_vllm_model(model_config: ModelConfig = None,
                    file_uri: Optional[str] = None) -> bool:
@@ -28,6 +31,7 @@ def _is_vllm_model(model_config: ModelConfig = None,
         return "vllm" in file_uri
     else:
         return "vllm" in model_config.tensorizer_args.tensorizer_uri
+
 
 def _make_model_contiguous(model: nn.Module):
     # Ensure tensors are saved in memory contiguously
@@ -37,19 +41,10 @@ def _make_model_contiguous(model: nn.Module):
 
 @dataclass
 class TensorizerArgs:
-    tensorizer_uri: Union[
-        io.BufferedIOBase,
-        io.RawIOBase,
-        typing.BinaryIO,
-        str,
-        bytes,
-        os.PathLike,
-        int,
-    ]
+    tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, typing.BinaryIO,
+                          str, bytes, os.PathLike, int, ]
     device: Optional[Union[torch.device, str]] = None
     dtype: Optional[torch.dtype] = None
-    ## Commenting out serializer_encryption until I work out how I want to implement it
-    # serializer_encryption: Optional[bool] = False
     lazy_load: bool = False
     plaid_mode_buffers: Optional[int] = None
     verify_hash: bool = False
@@ -59,7 +54,8 @@ class TensorizerArgs:
     def __post_init__(self):
         self.file_obj = self.tensorizer_uri
         self.s3_access_key_id = os.environ.get("S3_ACCESS_KEY_ID") or None
-        self.s3_secret_access_key = os.environ.get("S3_SECRET_ACCESS_KEY") or None
+        self.s3_secret_access_key = os.environ.get(
+            "S3_SECRET_ACCESS_KEY") or None
         self.s3_endpoint = os.environ.get("S3_ENDPOINT_URL") or None
 
         self.credentials = {
@@ -67,16 +63,12 @@ class TensorizerArgs:
             "s3_secret_access_key": self.s3_secret_access_key,
             "s3_endpoint": self.s3_endpoint,
         }
-        self.serializer_params = {
-            # Placeholder for now
-        }
-
 
         # Omitting self.dtype and self.device as this behaves weirdly
         self.deserializer_params = {
             "filter_func": self.filter_func,
             "lazy_load": self.lazy_load,
-            "plaid_mode": True if _is_vllm_model(file_uri=self.file_obj) else False,
+            "plaid_mode": bool(_is_vllm_model(file_uri=self.file_obj)),
             "plaid_mode_buffers": self.plaid_mode_buffers,
             "verify_hash": self.verify_hash,
             "encryption": self.deserializer_encryption_key,
@@ -86,10 +78,9 @@ class TensorizerArgs:
         }
 
     @staticmethod
-    def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    def add_cli_args(
+            parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         """Tensorizer CLI arguments"""
-        # TODO: Add support for encryption -- CLI args can be base64 encoded
-        #       key/password for --serializer-encryption. Need to revist
         parser.add_argument(
             "--serializer-encryption",
             action="store_true",
@@ -106,7 +97,7 @@ class TensorizerArgs:
         parser.add_argument(
             "--tensorizer-uri",
             help="Path to serialized model tensors. Can be a local file path"
-                 "or a S3 URI.",
+            "or a S3 URI.",
         )
         parser.add_argument(
             "--plaid-mode-buffers",
@@ -135,21 +126,23 @@ class TensorizerArgs:
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         # Set the attributes from the parsed arguments.
-        tensorizer_args = cls(
-            **{attr: getattr(args, attr) for attr in attrs if hasattr(args, attr)}
-        )
+        tensorizer_args = cls(**{
+            attr: getattr(args, attr)
+            for attr in attrs if hasattr(args, attr)
+        })
         return tensorizer_args
 
 
-
 class TensorizerAgent:
-    def __init__(self, model_cls: Type[nn.Module],
-                 model_config: ModelConfig,
-                 ):
+
+    def __init__(
+        self,
+        model_cls: Type[nn.Module],
+        model_config: ModelConfig,
+    ):
         self.model_cls = model_cls
         self.model_config = model_config
         self.tensorizer_args = self.model_config.tensorizer_args
-        #self.serialize_model = not self._verify_path_reachable()
         self.model = self._init_model()
 
     def _init_model(self):
@@ -160,20 +153,23 @@ class TensorizerAgent:
 
     def _verify_path_reachable(self):
         if not self.tensorizer_args.tensorizer_uri.endswith(".tensors"):
-            raise ValueError(f"download_dir {self.tensorizer_args.tensorizer_uri} must specify a .tensors "
-                             f"file when load_format = tensorizer")
+            raise ValueError(
+                f"download_dir {self.tensorizer_args.tensorizer_uri} must specify a .tensors "
+                f"file when load_format = tensorizer")
 
     def deserialize(self):
         before_mem = get_mem_usage()
         # Lazy load the tensors from S3 into the model.
         start = time.time()
-        stream = stream_io.open_stream(self.tensorizer_args.tensorizer_uri, mode="rb", **self.tensorizer_args.credentials)
-        deserializer = TensorDeserializer(stream, **self.tensorizer_args.deserializer_params)
+        stream = stream_io.open_stream(self.tensorizer_args.tensorizer_uri,
+                                       mode="rb",
+                                       **self.tensorizer_args.credentials)
+        deserializer = TensorDeserializer(
+            stream, **self.tensorizer_args.deserializer_params)
         deserializer.load_into_module(self.model)
         self.model = self.model.to(dtype=self.model_config.dtype)
         end = time.time()
 
-        # Brag about how fast we are.
         total_bytes_str = convert_bytes(deserializer.total_tensor_bytes)
         duration = end - start
         per_second = convert_bytes(deserializer.total_tensor_bytes / duration)

@@ -11,7 +11,7 @@ import filelock
 import huggingface_hub.constants
 import numpy as np
 import torch
-from huggingface_hub import HfFileSystem, snapshot_download
+from huggingface_hub import HfFileSystem, snapshot_download, HfFileSystem
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
 from tensorizer.serialization import TensorDeserializer
@@ -298,7 +298,8 @@ def hf_model_weights_iterator(
         deserializer_args = tensorizer_args.deserializer_params
         credentials = tensorizer_args.credentials
         stream = open_stream(tensorizer_args.tensorizer_uri, **credentials)
-        with TensorDeserializer(stream, **deserializer_args, device="cpu") as state:
+        with TensorDeserializer(stream, **deserializer_args,
+                                device="cpu") as state:
             for name, param in state.items():
                 yield name, param
         del state

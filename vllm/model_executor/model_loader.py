@@ -11,6 +11,12 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.llava import LlavaForConditionalGeneration
 from vllm.model_executor.weight_utils import (get_quant_config,
                                               initialize_dummy_weights)
+from vllm.model_executor.tensorizer_loader import load_with_tensorizer, _is_vllm_model
+
+from torch import nn
+
+logger = init_logger(__name__)
+
 
 _VISION_MODEL_CLASSES = [
     LlavaForConditionalGeneration,
@@ -41,7 +47,8 @@ def _get_model_architecture(
             return (model_cls, arch)
     raise ValueError(
         f"Model architectures {architectures} are not supported for now. "
-        f"Supported architectures: {ModelRegistry.get_supported_archs()}")
+        f"Supported architectures: {ModelRegistry.get_supported_archs()}"
+    )
 
 
 def get_architecture_class_name(model_config: ModelConfig) -> str:
@@ -78,7 +85,8 @@ def get_model(model_config: ModelConfig, device_config: DeviceConfig,
         # Create a model instance.
         # The weights will be initialized as empty tensors.
         with torch.device(device_config.device):
-            if model_config.load_format == "tensorizer" and _is_vllm_model(model_config):
+            if model_config.load_format == "tensorizer" and _is_vllm_model(
+                    model_config):
                 model = load_with_tensorizer(model_class, model_config)
                 return model.eval()
             elif hasattr(model_class, "supported_lora_modules"):
@@ -89,7 +97,8 @@ def get_model(model_config: ModelConfig, device_config: DeviceConfig,
                     f"Model {model_class.__name__} does not support LoRA, "
                     "but LoRA is enabled. Support for this model may "
                     "be added in the future. If this is important to you, "
-                    "please open an issue on github.")
+                    "please open an issue on github."
+                )
             else:
                 if model_class not in _VISION_MODEL_CLASSES:
                     model = model_class(model_config.hf_config, linear_method)
@@ -104,7 +113,8 @@ def get_model(model_config: ModelConfig, device_config: DeviceConfig,
             # Load the weights from the cached or downloaded files.
             if model_config.load_format == "tensorizer":
                 # Provide a dynamic load format for `model.load_weights` to retain tensorizer args from CLI.
-                model_config.load_format = ("tensorizer", model_config.tensorizer_args)
+                model_config.load_format = ("tensorizer",
+                                            model_config.tensorizer_args)
             model.load_weights(
                 model_config.model,
                 model_config.download_dir,

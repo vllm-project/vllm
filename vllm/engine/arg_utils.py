@@ -1,12 +1,8 @@
 import argparse
 import dataclasses
-import torch
-import io
-import os
-import typing
 
 from dataclasses import dataclass
-from typing import Optional, Tuple, Union, Callable, Any
+from typing import Optional, Tuple
 
 from vllm.config import (CacheConfig, DeviceConfig, EngineConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
