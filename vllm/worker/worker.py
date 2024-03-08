@@ -6,9 +6,10 @@ from typing import Dict, List, Tuple, Set, Optional
 import torch
 import torch.distributed
 
-from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, LoRAConfig)
+from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig, LoRAConfig)
 from vllm.model_executor import set_random_seed
+from vllm.model_executor.parallel_utils import cupy_utils
 from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
 from vllm.model_executor.parallel_utils.custom_all_reduce import init_custom_ar
@@ -33,6 +34,7 @@ class Worker:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
+        device_config: DeviceConfig,
         local_rank: int,
         rank: int,
         distributed_init_method: str,
@@ -43,6 +45,7 @@ class Worker:
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
+        self.device_config = device_config
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
@@ -54,6 +57,7 @@ class Worker:
         self.model_runner = ModelRunner(model_config,
                                         parallel_config,
                                         scheduler_config,
+                                        device_config,
                                         lora_config=self.lora_config,
                                         kv_cache_dtype=kv_cache_dtype,
                                         is_driver_worker=is_driver_worker)
@@ -64,27 +68,30 @@ class Worker:
         self.cache_events = None
         self.gpu_cache = None
 
-    def init_model(self) -> None:
-        # torch.distributed.all_reduce does not free the input tensor until
-        # the synchronization point. This causes the memory usage to grow
-        # as the number of all_reduce calls increases. This env var disables
-        # this behavior.
-        # Related issue:
-        # https://discuss.pytorch.org/t/cuda-allocation-lifetime-for-inputs-to-distributed-all-reduce/191573
-        os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
+    def init_model(self, cupy_port: Optional[int] = None) -> None:
+        if self.device_config.device.type == "cuda":
+            # torch.distributed.all_reduce does not free the input tensor until
+            # the synchronization point. This causes the memory usage to grow
+            # as the number of all_reduce calls increases. This env var disables
+            # this behavior.
+            # Related issue:
+            # https://discuss.pytorch.org/t/cuda-allocation-lifetime-for-inputs-to-distributed-all-reduce/191573
+            os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
 
-        # This env var set by Ray causes exceptions with graph building.
-        os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
-        self.device = torch.device(f"cuda:{self.local_rank}")
-        torch.cuda.set_device(self.device)
+            # This env var set by Ray causes exceptions with graph building.
+            os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
+            self.device = torch.device(f"cuda:{self.local_rank}")
+            torch.cuda.set_device(self.device)
 
-        _check_if_gpu_supports_dtype(self.model_config.dtype)
-
+            _check_if_gpu_supports_dtype(self.model_config.dtype)
+            torch.cuda.empty_cache()
+            self.init_gpu_memory = torch.cuda.mem_get_info()[0]
+        else:
+            raise RuntimeError(
+                f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
         init_distributed_environment(self.parallel_config, self.rank,
-                                     self.distributed_init_method)
-        if not self.parallel_config.disable_custom_all_reduce:
-            init_custom_ar()
+                                     cupy_port, self.distributed_init_method)
         # Initialize the model.
         set_random_seed(self.model_config.seed)
 
@@ -119,7 +126,9 @@ class Worker:
         # profiled peak memory.
         torch.cuda.synchronize()
         free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
-        peak_memory = total_gpu_memory - free_gpu_memory
+        # NOTE(woosuk): Here we assume that the other processes using the same
+        # GPU did not change their memory usage during the profiling.
+        peak_memory = self.init_gpu_memory - free_gpu_memory
 
         cache_block_size = CacheEngine.get_cache_block_size(
             block_size, cache_dtype, self.model_config, self.parallel_config)
@@ -227,6 +236,7 @@ class Worker:
 def init_distributed_environment(
     parallel_config: ParallelConfig,
     rank: int,
+    cupy_port: Optional[int],
     distributed_init_method: Optional[str] = None,
 ) -> None:
     """Initialize the distributed environment."""
@@ -249,10 +259,34 @@ def init_distributed_environment(
             init_method=distributed_init_method,
         )
 
+    if cupy_utils.is_initialized():
+        cupy_world_size = cupy_utils.get_world_size()
+        if cupy_world_size != parallel_config.world_size:
+            raise RuntimeError(
+                "cupy.distributed is already initialized but the cupy world "
+                "size does not match parallel_config.world_size "
+                f"({cupy_world_size} vs. {parallel_config.world_size}).")
+    elif (parallel_config.world_size > 1 and cupy_port is not None):
+        # NOTE(woosuk): We don't initialize CuPy process group when world size
+        # is 1.
+        # TODO(woosuk): Support multi-node connection.
+        cupy_utils.init_process_group(
+            world_size=parallel_config.world_size,
+            rank=rank,
+            host="localhost",
+            port=cupy_port,
+        )
+
     # A small all_reduce for warmup.
     torch.distributed.all_reduce(torch.zeros(1).cuda())
+    if cupy_utils.is_initialized():
+        cupy_utils.all_reduce(torch.zeros(1).cuda())
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
+
+    # Initialize a custom fast all-reduce implementation.
+    if not parallel_config.disable_custom_all_reduce:
+        init_custom_ar()
 
 
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):

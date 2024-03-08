@@ -11,9 +11,9 @@ from huggingface_hub import snapshot_download, HfFileSystem
 import numpy as np
 from safetensors.torch import load_file, save_file, safe_open
 import torch
-from transformers import PretrainedConfig
 from tqdm.auto import tqdm
 
+from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (get_quantization_config,
                                                      QuantizationConfig)
@@ -83,25 +83,22 @@ def convert_bin_to_safetensor_file(
 
 
 # TODO(woosuk): Move this to other place.
-def get_quant_config(
-    quantization: str,
-    model_name_or_path: str,
-    hf_config: PretrainedConfig,
-    cache_dir: Optional[str] = None,
-) -> QuantizationConfig:
-    quant_cls = get_quantization_config(quantization)
+def get_quant_config(model_config: ModelConfig) -> QuantizationConfig:
+    quant_cls = get_quantization_config(model_config.quantization)
     # Read the quantization config from the HF model config, if available.
-    hf_quant_config = getattr(hf_config, "quantization_config", None)
+    hf_quant_config = getattr(model_config.hf_config, "quantization_config",
+                              None)
     if hf_quant_config is not None:
         return quant_cls.from_config(hf_quant_config)
-
+    model_name_or_path = model_config.model
     is_local = os.path.isdir(model_name_or_path)
     if not is_local:
         # Download the config files.
-        with get_lock(model_name_or_path, cache_dir):
+        with get_lock(model_name_or_path, model_config.download_dir):
             hf_folder = snapshot_download(model_name_or_path,
+                                          revision=model_config.revision,
                                           allow_patterns="*.json",
-                                          cache_dir=cache_dir,
+                                          cache_dir=model_config.download_dir,
                                           tqdm_class=Disabledtqdm)
     else:
         hf_folder = model_name_or_path
@@ -112,10 +109,12 @@ def get_quant_config(
             f.endswith(x) for x in quant_cls.get_config_filenames())
     ]
     if len(quant_config_files) == 0:
-        raise ValueError(f"Cannot find the config file for {quantization}")
+        raise ValueError(
+            f"Cannot find the config file for {model_config.quantization}")
     if len(quant_config_files) > 1:
-        raise ValueError(f"Found multiple config files for {quantization}: "
-                         f"{quant_config_files}")
+        raise ValueError(
+            f"Found multiple config files for {model_config.quantization}: "
+            f"{quant_config_files}")
 
     quant_config_file = quant_config_files[0]
     with open(quant_config_file, "r") as f:
@@ -265,7 +264,7 @@ def hf_model_weights_iterator(
 def kv_cache_scales_loader(filename: str,
                            tp_rank: int,
                            tp_size: int,
-                           num_hidden_layers: int,
+                           num_hidden_layers,
                            model_type: Optional[str]) -> Iterable[Tuple[int, float]]:
     """
     A simple utility to read in KV cache scaling factors that have been
@@ -295,7 +294,7 @@ def kv_cache_scales_loader(filename: str,
                   f"scaling factors belonging to different model type {schema['model_type']}!"
             assert isinstance(schema["kv_cache"], dict), malformed_schema_str
             assert schema["kv_cache"]["dtype"] == "float8_e4m3fn", "Loaded scaling factors intended " \
-              f"for KV cache dtype = {schema['kv_cache']['dtype']} rather than FP8!"
+              f"for KV cache dtype = {schema['kv_cache']['dtype']} rather than float8_e4m3fn!"
             assert isinstance(schema["kv_cache"]["scaling_factor"], dict), malformed_schema_str
             raw_rank_scales_map = schema["kv_cache"]["scaling_factor"]
             # The keys in raw_rank_scales_map should be strings with the format

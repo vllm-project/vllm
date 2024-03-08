@@ -43,14 +43,16 @@ KV Scale Extraction Example
 optional arguments:
 --quantized_model: Specify either the local path to, or name of, a quantized HF model. It is expected that the quantization format is FP8_E4M3, for use on ROCm (AMD GPU).
 Optional arguments:
+--cache_dir: Specify a cache directory to use in the event of a HF model download. (Default: None)
 --load_format: Specify the format of the model's tensor files containing the KV cache scaling factors. (Choices: auto, safetensors, npz, pt; Default: auto)
+--revision: Specify the model's revision number. (Default: None)
 --output_dir: Specify the output directory. By default the KV cache scaling factors will be saved in the model directory. (Default: None)
 --output_name: Specify the output filename. (Default: kv_cache_scales.json)
 --tp_size: Specify the tensor-parallel (TP) size that the quantized model should correspond to. If specified, during KV cache scaling factor extraction the observed TP size will be checked against this and an error will be raised if there is a mismatch. (Default: None)
 ```
 ```python
 Example:
-python3 3rdparty/quantizer/extract_scales.py --model <QUANTIZED_MODEL_DIR> --tp_size <TENSOR_PARALLEL_SIZE> --output_dir <PATH_TO_OUTPUT_DIR>
+python3 3rdparty/quantizer/extract_scales.py --quantized_model <QUANTIZED_MODEL_DIR> --tp_size <TENSOR_PARALLEL_SIZE> --output_dir <PATH_TO_OUTPUT_DIR>
 ```
 ### 4. Load KV Cache Scaling Factors into VLLM.
 This script evaluates the inference throughput of language models using various backends such as vLLM. It measures the time taken to process a given number of prompts and generate sequences for each prompt. The recently generated KV cache scaling factors are now integrated into the benchmarking process and allow for KV cache scaling factors to be utilized for FP8.
@@ -90,5 +92,5 @@ optional arguments:
 ```
 ```
 Example:
-python3 benchmarks/benchmark_throughput.py --input-len <INPUT_LEN> --output-len <OUTPUT_LEN> -tp <TENSOR_PARALLEL_SIZE> --kv-cache-dtype fp8 --scales-path </path/to/kv_cache_scales.json>
+python3 benchmarks/benchmark_throughput.py --input-len <INPUT_LEN> --output-len <OUTPUT_LEN> -tp <TENSOR_PARALLEL_SIZE> --kv-cache-dtype fp8 --scales-path </path/to/kv_cache_scales.json> --model <path-to-llama2>
 ```python

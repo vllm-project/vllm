@@ -6,6 +6,7 @@ import torch
 from vllm._C import cache_ops
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
+from vllm.utils import in_wsl, is_neuron, STR_DTYPE_TO_TORCH_DTYPE
 from vllm.utils import in_wsl, STR_DTYPE_TO_TORCH_DTYPE
 
 logger = init_logger(__name__)
@@ -38,6 +39,10 @@ class CacheEngine:
         self.block_size = cache_config.block_size
         self.num_gpu_blocks = cache_config.num_gpu_blocks
         self.num_cpu_blocks = cache_config.num_cpu_blocks
+
+        # Skip initializing CUDA stream and buffer for Neuron backend.
+        if is_neuron():
+            return
 
         if cache_config.cache_dtype == "auto":
             self.dtype = model_config.dtype
@@ -104,11 +109,13 @@ class CacheEngine:
                 size=(self.num_cpu_blocks, *key_block_shape),
                 dtype=self.dtype,
                 pin_memory=pin_memory,
+                device="cpu",
             )
             value_blocks = torch.empty(
                 size=(self.num_cpu_blocks, *value_block_shape),
                 dtype=self.dtype,
                 pin_memory=pin_memory,
+                device="cpu",
             )
             cpu_cache.append((key_blocks, value_blocks))
         return cpu_cache
@@ -119,6 +126,8 @@ class CacheEngine:
         dst: List[KVCache],
         src_to_dst: Dict[int, int],
     ) -> None:
+        from vllm._C import cache_ops
+
         with torch.cuda.stream(self.cache_stream):
             for i in range(self.num_layers):
                 src_key_cache, src_value_cache = src[i]

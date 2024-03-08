@@ -9,6 +9,10 @@ from vllm.model_executor.utils import set_random_seed
 
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
+]
+
 
 def mock_causal_accepted_tensor(
         k: int, last_accepted_indices: torch.Tensor) -> torch.Tensor:
@@ -39,11 +43,14 @@ def mock_causal_accepted_tensor(
 @pytest.mark.parametrize(
     "which_tokens_accepted",
     ["all_tokens_accepted", "no_tokens_accepted", "some_tokens_accepted"])
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
-def test_correct_output_format(which_tokens_accepted: str, seed: int):
+def test_correct_output_format(which_tokens_accepted: str, seed: int,
+                               device: str):
     """Verify the output has correct format given predetermined accepted matrix.
     """
     set_random_seed(seed)
+    torch.set_default_device(device)
 
     batch_size = 10
     k = 5
@@ -66,18 +73,15 @@ def test_correct_output_format(which_tokens_accepted: str, seed: int):
     recovered_token_ids = torch.randint(low=0,
                                         high=vocab_size,
                                         size=(batch_size, k),
-                                        dtype=torch.int64,
-                                        device="cuda")
+                                        dtype=torch.int64)
     draft_token_ids = torch.randint(low=0,
                                     high=vocab_size,
                                     size=(batch_size, k),
-                                    dtype=torch.int64,
-                                    device="cuda")
+                                    dtype=torch.int64)
     bonus_token_ids = torch.randint(low=0,
                                     high=vocab_size,
                                     size=(batch_size, 1),
-                                    dtype=torch.int64,
-                                    device="cuda")
+                                    dtype=torch.int64)
 
     rejection_sampler = RejectionSampler()
     rejection_sampler.init_gpu_tensors(rank=0)
@@ -120,31 +124,24 @@ def test_correct_output_format(which_tokens_accepted: str, seed: int):
 @pytest.mark.parametrize("k", list(range(1, 6)))
 @pytest.mark.parametrize("vocab_size", [30_000, 50_000])
 @pytest.mark.parametrize("batch_size", list(range(1, 32)))
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
-def test_no_crash_with_varying_dims(k: int, vocab_size: int, batch_size: int):
+def test_no_crash_with_varying_dims(k: int, vocab_size: int, batch_size: int,
+                                    device: str):
+    torch.set_default_device(device)
     rejection_sampler = RejectionSampler()
     rejection_sampler.init_gpu_tensors(rank=0)
 
-    draft_probs = torch.rand(batch_size,
-                             k,
-                             vocab_size,
-                             dtype=torch.float32,
-                             device="cuda")
-    target_probs = torch.rand(batch_size,
-                              k,
-                              vocab_size,
-                              dtype=torch.float32,
-                              device="cuda")
+    draft_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
+    target_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
     bonus_token_ids = torch.randint(low=0,
                                     high=vocab_size,
                                     size=(batch_size, 1),
-                                    dtype=torch.int64,
-                                    device="cuda")
+                                    dtype=torch.int64)
     draft_token_ids = torch.randint(low=0,
                                     high=vocab_size,
                                     size=(batch_size, k),
-                                    dtype=torch.int64,
-                                    device="cuda")
+                                    dtype=torch.int64)
 
     rejection_sampler(target_probs, bonus_token_ids, draft_probs,
                       draft_token_ids)
@@ -153,36 +150,28 @@ def test_no_crash_with_varying_dims(k: int, vocab_size: int, batch_size: int):
 @pytest.mark.parametrize("above_or_below_vocab_range", ["above", "below"])
 @pytest.mark.parametrize("which_token_ids",
                          ["bonus_token_ids", "draft_token_ids"])
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_raises_when_vocab_oob(above_or_below_vocab_range: str,
-                               which_token_ids: str):
+                               which_token_ids: str, device: str):
     k = 3
     batch_size = 5
     vocab_size = 30_000
+    torch.set_default_device(device)
 
     rejection_sampler = RejectionSampler(strict_mode=True)
     rejection_sampler.init_gpu_tensors(rank=0)
 
-    draft_probs = torch.rand(batch_size,
-                             k,
-                             vocab_size,
-                             dtype=torch.float32,
-                             device="cuda")
-    target_probs = torch.rand(batch_size,
-                              k,
-                              vocab_size,
-                              dtype=torch.float32,
-                              device="cuda")
+    draft_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
+    target_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
     bonus_token_ids = torch.randint(low=0,
                                     high=vocab_size,
                                     size=(batch_size, 1),
-                                    dtype=torch.int64,
-                                    device="cuda")
+                                    dtype=torch.int64)
     draft_token_ids = torch.randint(low=0,
                                     high=vocab_size,
                                     size=(batch_size, k),
-                                    dtype=torch.int64,
-                                    device="cuda")
+                                    dtype=torch.int64)
 
     oob_token_ids = None
     if which_token_ids == "bonus_token_ids":
@@ -237,6 +226,7 @@ def test_rejection_sampling_approximates_target_distribution(
     probabilities are exactly equal. Rejection sampling should
     still work without any NaNs or exceptions.
     """
+    torch.set_default_device("cpu")
     set_random_seed(seed)
 
     helper = _CorrectnessTestHelper(
