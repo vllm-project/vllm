@@ -104,8 +104,6 @@ class FlashAttentionBackend:
                     key_cache,
                     value_cache,
                     input_metadata,
-                    self.num_heads,
-                    self.num_kv_heads,
                     self.alibi_slopes,
                 )
         else:
