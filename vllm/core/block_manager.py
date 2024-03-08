@@ -35,7 +35,9 @@ class BlockAllocator:
         # Switch over to FIFO eviction when caching is disabled
         if not self.enable_caching:
             eviction_policy = EvictionPolicy.FIFO
-        self.evictor: Evictor = make_evictor(eviction_policy)
+            self.current_num_blocks = num_blocks
+        self.evictor: Evictor = make_evictor(eviction_policy, device,
+                                             block_size, num_blocks)
 
         self.default_hash_ctr = count()
 
@@ -59,8 +61,9 @@ class BlockAllocator:
                  num_hashed_tokens: int = 0) -> PhysicalTokenBlock:
         # If caching is disabled, just allocate a new block and return it
         if not self.enable_caching:
-            block = self.allocate_block(next(self.default_hash_ctr),
-                                        num_hashed_tokens)
+            block = self.evictor.evict()
+            block.block_hash = next(self.default_hash_ctr)
+            block.num_hashed_tokens = num_hashed_tokens
             block.ref_count += 1
             return block
 
@@ -298,8 +301,9 @@ class BlockSpaceManager:
         if last_block.ref_count == 1:
             # Not shared with other sequences. Appendable.
             # If the last block is now complete, promote it to a full block so that it can be shared
-            new_block = self._maybe_promote_last_block(seq, last_block)
-            block_table[-1] = new_block
+            if self.enable_caching:
+                new_block = self._maybe_promote_last_block(seq, last_block)
+                block_table[-1] = new_block
             return None
         else:
             # The last block is shared with other sequences.
@@ -442,28 +446,28 @@ class BlockSpaceManager:
                 block.last_accessed = access_time
 
     def compute_full_blocks_in_seq(self, seq: Sequence):
-         if seq.seq_id not in self.block_tables:
-             return
-         max_full_block = seq.get_len() // self.block_size - 1
-         block_table = self.block_tables[seq.seq_id]
-         if max_full_block == -1:
-             return
-         for i in reversed(range(max_full_block)):
-             if block_table[i].computed:
-                 break
-             block_table[i].computed = True
+        if seq.seq_id not in self.block_tables:
+            return
+        max_full_block = seq.get_len() // self.block_size - 1
+        block_table = self.block_tables[seq.seq_id]
+        if max_full_block == -1:
+            return
+        for i in reversed(range(max_full_block)):
+            if block_table[i].computed:
+                break
+            block_table[i].computed = True
 
     def get_all_computed_blocks(self, seq: Sequence) -> List[int]:
-         if seq.seq_id not in self.block_tables:
-             return []
-         block_table = self.block_tables[seq.seq_id]
-         # TODO We exclude the last block to avoid the case where the entire
-         # prompt is cached. This would currently cause erroneous behavior in
-         # worker.
-         return [
-             b.block_number
-             for b in takewhile(lambda b: b.computed, block_table[:-1])
-         ]
+        if seq.seq_id not in self.block_tables:
+            return []
+        block_table = self.block_tables[seq.seq_id]
+        # TODO We exclude the last block to avoid the case where the entire
+        # prompt is cached. This would currently cause erroneous behavior in
+        # worker.
+        return [
+            b.block_number
+            for b in takewhile(lambda b: b.computed, block_table[:-1])
+        ]
 
     def get_common_computed_block_ids(self,
                                       seq_group: SequenceGroup) -> List[int]:

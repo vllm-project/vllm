@@ -1,6 +1,7 @@
 import enum
 from typing import Dict, List, Optional
 from abc import ABC, abstractmethod, abstractproperty
+from vllm.utils import Device
 
 from vllm.block import PhysicalTokenBlock, BlockTable
 
@@ -122,11 +123,19 @@ class LRUEvictor(Evictor):
 class RandomEvictor(Evictor):
     """Evicts in a first-in-first-out order"""
 
-    def __init__(self):
+    def __init__(self, device: Device, block_size: int, num_blocks: int):
         self.free_table: BlockTable = []
+        # reserve(self.free_table, num_blocks)
+        for i in range(num_blocks):
+            block = PhysicalTokenBlock(device=device,
+                                       block_number=i,
+                                       block_size=block_size,
+                                       block_hash=-1,
+                                       num_hashed_tokens=0)
+            self.free_table.append(block)
 
     def __contains__(self, block_hash: int) -> bool:
-        raise AssertionError("Invalid evictor codepath.")
+        return any(b.block_hash == block_hash for b in self.free_table)
 
     def evict(self) -> PhysicalTokenBlock:
         if not self.free_table:
@@ -139,17 +148,19 @@ class RandomEvictor(Evictor):
         self.free_table.append(block)
 
     def remove(self, block_hash: int) -> PhysicalTokenBlock:
-        raise AssertionError("Invalid evictor codepath.")
+        new_table = [b for b in self.free_table if b.block_hash != block_hash]
+        self.free_table = new_table
 
     @property
     def num_blocks(self) -> int:
         return len(self.free_table)
 
 
-def make_evictor(eviction_policy: EvictionPolicy) -> Evictor:
+def make_evictor(eviction_policy: EvictionPolicy, device: Device,
+                 block_size: int, num_blocks: int) -> Evictor:
     if eviction_policy == EvictionPolicy.LRU:
         return LRUEvictor()
     elif eviction_policy == EvictionPolicy.FIFO:
-        return RandomEvictor()
+        return RandomEvictor(device, block_size, num_blocks)
     else:
         raise ValueError(f"Unknown cache eviction policy: {eviction_policy}")
