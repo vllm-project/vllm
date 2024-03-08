@@ -251,6 +251,9 @@ def fused_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
+    s1,
+    s2,
+    s3,
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
@@ -355,7 +358,9 @@ def fused_moe(
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
         topk_ids, config['BLOCK_SIZE_M'], E)
 
-    invoke_fused_moe_kernel(hidden_states.to(dtype=torch.float8_e4m3fn),
+    hidden_states_scaled = hidden_states / s1;
+
+    invoke_fused_moe_kernel(hidden_states_scaled.to(dtype=torch.float8_e4m3fn),
                             w1, intermediate_cache1,
                             topk_weights, topk_ids, sorted_token_ids,
                             expert_ids, num_tokens_post_padded, False,
@@ -363,7 +368,9 @@ def fused_moe(
 
     ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
 
-    invoke_fused_moe_kernel(intermediate_cache2.to(dtype=torch.float8_e4m3fn),
+    intermediate_cache2_scaled = intermediate_cache2 / s2;
+
+    invoke_fused_moe_kernel(intermediate_cache2_scaled.to(dtype=torch.float8_e4m3fn),
                             w2, intermediate_cache3,
                             topk_weights, topk_ids, sorted_token_ids,
                             expert_ids, num_tokens_post_padded, True, 1,

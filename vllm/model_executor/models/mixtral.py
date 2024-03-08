@@ -102,20 +102,17 @@ class MixtralMoE(nn.Module):
                         device="cuda",
                         dtype=torch.float8_e4m3fn))
 
-        # Scaling factors for fp8
+        # Scaling factors for fp8, s1 and s3 are actually the same
         self.s1 = nn.Parameter(
-            torch.empty(self.num_total_experts,
-                        self.hidden_size,
+            torch.empty(self.hidden_size,
                         device="cuda",
                         dtype=torch.float16))
         self.s2 = nn.Parameter(
-            torch.empty(self.num_total_experts,
-                        self.intermediate_size * self.tp_size,
+            torch.empty(self.intermediate_size,
                         device="cuda",
                         dtype=torch.float16))
         self.s3 = nn.Parameter(
-            torch.empty(self.num_total_experts,
-                        self.hidden_size,
+            torch.empty(self.hidden_size,
                         device="cuda",
                         dtype=torch.float16))
 
@@ -151,8 +148,15 @@ class MixtralMoE(nn.Module):
             param_data[expert_id, :, :] = loaded_weight[:, shard]
 
     def scale_loader(self, param: nn.Parameter, loaded_scale: torch.Tensor,
-                     scale_name: str, expert_id: int):
-        param.data[expert_id, :] = loaded_scale[:]
+                     scale_name: str):
+        tp_rank = get_tensor_model_parallel_rank()
+        shard_size = self.intermediate_size
+        shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
+        if scale_name.endswith("w2"):
+            param.data[:] = loaded_scale[shard]
+        else:
+            param.data[:] = loaded_scale[:]
+        print("loaded scale", scale_name, loaded_scale.shape)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, sequence_length, hidden_size = hidden_states.shape
@@ -162,6 +166,9 @@ class MixtralMoE(nn.Module):
         final_hidden_states = fused_moe(hidden_states,
                                         self.ws,
                                         self.w2s,
+                                        self.s1,
+                                        self.s2,
+                                        self.s3,
                                         router_logits,
                                         self.top_k,
                                         renormalize=True,
@@ -490,22 +497,19 @@ class MixtralForCausalLM(nn.Module):
     def load_scales(self, model_name_or_path: str):
 
         expert_scales_mapping = [
-            # (scale_name, weight_name, expert_id)
-            (weight_name.replace("w", "s"),
-             f"experts.{expert_id}.{weight_name}", expert_id)
-            for expert_id in range(self.config.num_local_experts)
-            for weight_name in ["w1", "w2", "w3"]
+            # (scale_name, weight_name)
+            (weight_name.replace("w", "s"), f"experts.{weight_name}") for weight_name in ["w1", "w2", "w3"]
         ]
 
-        scale_data = torch.load("/home/ray/default/mixtral_scales.pth")
+        scale_data = torch.load("/home/ray/default/mixtral_scales_mean_sqrt.pth")
 
         params_dict = dict(self.named_parameters())
         for name, loaded_scale in scale_data.items():
-            for param_name, scale_name, expert_id in expert_scales_mapping:
+            for param_name, scale_name in expert_scales_mapping:
                 if scale_name not in name:
                     continue
                 name = name.replace(scale_name, param_name)
                 param = params_dict[name]
                 scale_loader = param.scale_loader
-                scale_loader(param, loaded_scale, scale_name, expert_id=expert_id)
+                scale_loader(param, loaded_scale, scale_name)
                 break
