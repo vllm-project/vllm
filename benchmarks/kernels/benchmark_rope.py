@@ -85,7 +85,7 @@ def benchmark_rope_kernels_multi_lora(
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description="Benchmark the rottery embedding kernels.")
+        description="Benchmark the rotary embedding kernels.")
     parser.add_argument("--is-neox-style", type=bool, default=True)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--seq-len", type=int, default=512)
@@ -94,10 +94,7 @@ if __name__ == '__main__':
                         type=int,
                         choices=[64, 80, 96, 112, 128, 256],
                         default=128)
-    parser.add_argument("--rottery-dim",
-                        type=int,
-                        choices=[16, 32],
-                        default=32)
+    parser.add_argument("--rotary-dim", type=int, choices=[16, 32], default=32)
     parser.add_argument("--dtype",
                         type=str,
                         choices=["bfloat16", "float"],
@@ -116,7 +113,7 @@ if __name__ == '__main__':
         seq_len=args.seq_len,
         num_heads=args.num_heads,
         head_size=args.head_size,
-        rotary_dim=args.rottery_dim,
+        rotary_dim=args.rotary_dim,
         dtype=getattr(torch, args.dtype),
         seed=args.seed,
         device=args.device,
