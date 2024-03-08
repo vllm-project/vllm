@@ -55,6 +55,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 // Quantization ops
 #ifndef USE_ROCM
   ops.def("awq_gemm", &awq_gemm, "Quantized GEMM for AWQ");
+  ops.def("awq_gemv_fast", &awq_gemv_fast, "Quantized fast GEMV for AWQ");
+  ops.def("awq_gemm_fast", &awq_gemm_fast, "Quantized fast GEMM for AWQ");
   ops.def("marlin_gemm", &marlin_gemm, "Marlin Optimized Quantized GEMM for GPTQ");
   ops.def("awq_dequantize", &awq_dequantize, "Dequantization for AWQ");
 #endif

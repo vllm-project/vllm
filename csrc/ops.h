@@ -85,6 +85,22 @@ torch::Tensor awq_dequantize(
     int thx,
     int thy);
 
+torch::Tensor awq_gemv_fast(
+    torch::Tensor _in_feats,
+    torch::Tensor _kernel,
+    torch::Tensor _scaling_factors,
+    torch::Tensor _zeros,
+    int m,
+    int n,
+    int k,
+    int group_size);
+
+torch::Tensor awq_gemm_fast(
+  torch::Tensor _in_feats,
+  torch::Tensor _kernel,
+  torch::Tensor _scales,
+  torch::Tensor _zeros);
+
 torch::Tensor marlin_gemm(
     torch::Tensor& a, 
     torch::Tensor& b_q_weight,
