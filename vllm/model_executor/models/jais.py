@@ -190,9 +190,9 @@ class JAISAttention(nn.Module):
         alibi_slopes = _get_alibi_slopes(total_num_heads)
         alibi_slopes = alibi_slopes[head_start:head_end]
         self.attn = Attention(self.num_heads,
-                                   self.head_dim,
-                                   scale=self.scale,
-                                   alibi_slopes=alibi_slopes)
+                              self.head_dim,
+                              scale=self.scale,
+                              alibi_slopes=alibi_slopes)
 
     def forward(
         self,
