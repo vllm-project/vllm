@@ -10,7 +10,7 @@ from vllm.worker.worker import Worker
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.config import CacheConfig
-from vllm.spec_decode.util import nvtx_range, get_all_seq_ids
+from vllm.spec_decode.util import nvtx_range, get_all_seq_ids, split_batch_by_proposal_len
 from vllm.spec_decode.interfaces import SpeculativeProposals, SpeculativeScores
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 from vllm.spec_decode.interfaces import SpeculativeScorer
@@ -220,16 +220,19 @@ class SpecDecodeWorker:
         probabilities of each token according to the proposer and scorer models.
         """
         proposal_lens_list = proposals.proposal_lens.tolist()
-        spec_indices = [
-            i for i, (_, proposal_len) in enumerate(
-                zip(seq_group_metadata_list, proposal_lens_list))
-            if proposal_len != 0
-        ]
-        non_spec_indices = [
-            i for i, (_, proposal_len) in enumerate(
-                zip(seq_group_metadata_list, proposal_lens_list))
-            if proposal_len == 0
-        ]
+
+        # vLLM currently only supports proposal lens equal to zero or the batch
+        # proposal len. This adds some complexity (splitting the batch into spec
+        # and non spec sequences) and should be removed in the future. It can be
+        # done by supporting per-sequence proposal lens.
+        _, spec_indices = split_batch_by_proposal_len(
+            seq_group_metadata_list,
+            proposal_lens_list,
+            select_proposal_len_zero=False)
+        _, non_spec_indices = split_batch_by_proposal_len(
+            seq_group_metadata_list,
+            proposal_lens_list,
+            select_proposal_len_zero=True)
         original_indices = spec_indices + non_spec_indices
 
         proposal_probs = proposal_scores.probs[spec_indices, :-1]

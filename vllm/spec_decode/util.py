@@ -19,6 +19,33 @@ def get_all_seq_ids(
         ]))
 
 
+def split_batch_by_proposal_len(
+    seq_group_metadata_list: List[SequenceGroupMetadata],
+    proposal_lens: List[int], select_proposal_len_zero: bool
+) -> Tuple[List[SequenceGroupMetadata], List[int]]:
+    """Utility function that splits a batch based on whether the proposal len is
+    zero or not. We should remove this once vLLM supports per-sequence proposal
+    lens in a batch.
+    """
+
+    if select_proposal_len_zero:
+        predicate = lambda proposal_len: proposal_len == 0
+    else:
+        predicate = lambda proposal_len: proposal_len != 0
+
+    indices = [
+        i for i, (_, proposal_len
+                  ) in enumerate(zip(seq_group_metadata_list, proposal_lens))
+        if predicate(proposal_len)
+    ]
+    seq_groups = [
+        seq_group for seq_group, proposal_len in zip(
+            seq_group_metadata_list, proposal_lens) if predicate(proposal_len)
+    ]
+
+    return seq_groups, indices
+
+
 def sampler_output_to_torch(
     sampler_output_list: List[SamplerOutput],
 ) -> Tuple[torch.Tensor, torch.Tensor]:

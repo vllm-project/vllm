@@ -5,7 +5,7 @@ import torch
 
 from vllm.sequence import (SamplerOutput, SequenceGroupMetadata, SequenceData)
 from vllm.worker.worker import Worker
-from vllm.spec_decode.util import nvtx_range, sampler_output_to_torch, get_all_seq_ids
+from vllm.spec_decode.util import nvtx_range, sampler_output_to_torch, get_all_seq_ids, split_batch_by_proposal_len
 from vllm.spec_decode.interfaces import SpeculativeScorer, SpeculativeProposals, SpeculativeScores
 
 SeqId = int
@@ -107,27 +107,18 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         query token.
         """
 
-        spec_seqs = [
-            seq_group for seq_group, proposal_len in zip(
-                seq_group_metadata_list, proposal_lens_list)
-            if proposal_len != 0
-        ]
-        spec_indices = [
-            i for i, (_, proposal_len) in enumerate(
-                zip(seq_group_metadata_list, proposal_lens_list))
-            if proposal_len != 0
-        ]
-
-        non_spec_seqs = [
-            seq_group for seq_group, proposal_len in zip(
-                seq_group_metadata_list, proposal_lens_list)
-            if proposal_len == 0
-        ]
-        non_spec_indices = [
-            i for i, (_, proposal_len) in enumerate(
-                zip(seq_group_metadata_list, proposal_lens_list))
-            if proposal_len == 0
-        ]
+        # vLLM currently only supports proposal lens equal to zero or the batch
+        # proposal len. This adds some complexity (splitting the batch into spec
+        # and non spec sequences) and should be removed in the future. It can be
+        # done by supporting per-sequence proposal lens.
+        spec_seqs, spec_indices = split_batch_by_proposal_len(
+            seq_group_metadata_list,
+            proposal_lens_list,
+            select_proposal_len_zero=False)
+        non_spec_seqs, non_spec_indices = split_batch_by_proposal_len(
+            seq_group_metadata_list,
+            proposal_lens_list,
+            select_proposal_len_zero=True)
 
         target_seq_group_metadata_list = self._create_scoring_model_input(
             spec_seqs, proposal_token_ids_list)
@@ -159,8 +150,10 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         target_probs = target_probs.squeeze().reshape(batch_size, k + 1,
                                                       self._vocab_size)
 
-        all_tokens = torch.ones(
-            original_bs, k + 1, device=self._device, dtype=torch.long) * -1
+        all_tokens = torch.full(size=(original_bs, k + 1),
+                                fill_value=-1,
+                                device=self._device,
+                                dtype=torch.long)
         all_probs = torch.zeros(original_bs,
                                 k + 1,
                                 self._vocab_size,
@@ -169,7 +162,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
 
         if non_spec_indices:
             all_tokens[non_spec_indices, 0] = non_spec_target_token_ids
-            all_probs[non_spec_indices, 1:, :] = non_spec_target_probs
+            all_probs[non_spec_indices, :1, :] = non_spec_target_probs
 
         if spec_indices:
             all_tokens[spec_indices] = target_token_ids
@@ -288,6 +281,11 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         output.
         """
 
+        # vLLM currently only supports proposal lens equal to zero or the batch
+        # proposal len. This adds some complexity (splitting the batch into spec
+        # and non spec sequences) and should be removed in the future. It can be
+        # done by supporting per-sequence proposal lens.
+        #
         # First samples are from speculative scoring, latter samples are non-
         # speculative samples.
         split_sizes = [

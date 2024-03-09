@@ -206,6 +206,18 @@ class MultiStepWorker(Worker):
 class DraftModelTop1Proposer(SpeculativeProposer):
     """Helper class which separates out sequences which would exceed the max
     model length when speculated upon.
+
+    This allows combinations of models such as JackFram/llama-68m draft with
+    meta-llama/Llama2-13b-chat-hf, as llama-68m has max_position_embeddings of
+    2048 while Llama2-13b has max_position_embeddings of 4096.
+
+    We treat the sequences which exceed the proposal draft model length as
+    "non-spec sequences". Essentially they skip the draft model and go through
+    normal decoding in the target model.
+
+    Currently, only proposal_lens of 0 and k are supported, where k is a global
+    batch proposal length. In the future vLLM should support per-sequence
+    proposal lengths.
     """
 
     def __init__(
@@ -270,6 +282,32 @@ class DraftModelTop1Proposer(SpeculativeProposer):
 
         return proposals
 
+    def _split_by_max_model_len(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        max_proposal_len: int,
+    ) -> Tuple[List[int], List[SequenceGroupMetadata], List[int]]:
+        """Determine which sequences would exceed the max model length.
+        """
+
+        proposal_lens: List[int] = []
+        nonzero_proposal_len_seqs: List[SequenceGroupMetadata] = []
+        nonzero_proposal_len_indices: List[int] = []
+        for i, seq_group_metadata in enumerate(seq_group_metadata_list):
+            seq_data = next(iter(seq_group_metadata.seq_data.values()))
+            seq_len = seq_data.get_len()
+
+            # Currently only proposal lens of 0 or the global batch proposal len
+            # are supported.
+            if seq_len + max_proposal_len < self._max_model_len:
+                proposal_lens.append(max_proposal_len)
+                nonzero_proposal_len_seqs.append(seq_group_metadata)
+                nonzero_proposal_len_indices.append(i)
+            else:
+                proposal_lens.append(0)
+
+        return proposal_lens, nonzero_proposal_len_seqs, nonzero_proposal_len_indices
+
     def _merge_outputs(
         self,
         batch_size: int,
@@ -306,10 +344,11 @@ class DraftModelTop1Proposer(SpeculativeProposer):
         # Now, reformat the output GPU tensors such that each sequence has
         # a proposal. the proposal can be empty, e.g. [-1, -1, -1]
 
-        entire_proposal_tokens = torch.ones(batch_size,
-                                            *proposal_tokens.shape[1:],
+        entire_proposal_tokens = torch.full(size=(batch_size,
+                                                  *proposal_tokens.shape[1:]),
+                                            fill_value=-1,
                                             dtype=torch.long,
-                                            device=self._device) * -1
+                                            device=self._device)
         entire_proposal_tokens[nonzero_proposal_len_indices] = proposal_tokens
         entire_proposal_probs = torch.zeros(batch_size,
                                             *proposal_probs.shape[1:],
@@ -325,27 +364,3 @@ class DraftModelTop1Proposer(SpeculativeProposer):
         proposal_lens[nonzero_proposal_len_indices] = max_proposal_len
 
         return proposal_tokens, proposal_probs, proposal_lens
-
-    def _split_by_max_model_len(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        max_proposal_len: int,
-    ) -> Tuple[List[int], List[SequenceGroupMetadata], List[int]]:
-        """Determine which sequences would exceed the max model length.
-        """
-
-        proposal_lens: List[int] = []
-        nonzero_proposal_len_seqs: List[SequenceGroupMetadata] = []
-        nonzero_proposal_len_indices: List[int] = []
-        for i, seq_group_metadata in enumerate(seq_group_metadata_list):
-            seq_data = next(iter(seq_group_metadata.seq_data.values()))
-            seq_len = seq_data.get_len()
-
-            if seq_len + max_proposal_len < self._max_model_len:
-                proposal_lens.append(max_proposal_len)
-                nonzero_proposal_len_seqs.append(seq_group_metadata)
-                nonzero_proposal_len_indices.append(i)
-            else:
-                proposal_lens.append(0)
-
-        return proposal_lens, nonzero_proposal_len_seqs, nonzero_proposal_len_indices
