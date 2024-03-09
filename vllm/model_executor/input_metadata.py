@@ -26,7 +26,7 @@ class InputMetadata:
     block_tables: Optional[torch.Tensor]
     use_cuda_graph: bool
     kv_cache_dtype: str
-    decoder_wrapper: Optional[Any]
+    decoder_wrapper: Optional[Any] = None
 
     def __post_init__(self):
         # will not appear in the __repr__ and __init__

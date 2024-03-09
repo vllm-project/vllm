@@ -11,7 +11,6 @@ from vllm.model_executor.layers.attention.ops.flash_attn import (
     FlashAttentionImpl)
 from vllm.block import KVCache
 
-# this is like FlashAttention except it uses FlashAttention for all operations
 class FlashInferBackend:
     def __init__(
         self,

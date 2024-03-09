@@ -263,24 +263,6 @@ class ModelRunner:
                                           dtype=torch.long,
                                           device=self.device)
         
-        if self.use_flash_infer:
-            self.decoder_wrapper.end_forward()
-            kv_page_indptr = torch.tensor([0] + list(map(len, prefix_block_tables)), dtype=torch.int32, device=self.device)
-            kv_page_indptr = torch.cumsum(kv_page_indptr, dim=0)
-            kv_page_indices = torch.cat([torch.tensor(t, dtype=torch.int32) for t in prefix_block_tables]).to(self.device)
-            kv_last_page_len = torch.tensor(context_lens, dtype=torch.int32, device=self.device) % self.block_size
-            self.decoder_wrapper.begin_forward(
-                kv_page_indptr,
-                kv_page_indices,
-                kv_last_page_len,
-                self.model_config.get_num_heads(),
-                self.model_config.get_total_num_kv_heads(),
-                self.model_config.get_head_size(),
-                self.block_size,
-                rotary_mode="NONE",
-                data_type=self.model_config.dtype,
-            )
-
         input_metadata = InputMetadata(
             is_prompt=True,
             slot_mapping=slot_mapping,
@@ -409,6 +391,24 @@ class ModelRunner:
         lora_index_mapping = [
             _pad_to_max(mapping, 1, pad=0) for mapping in lora_index_mapping
         ]
+        
+        if self.use_flash_infer:
+            self.decoder_wrapper.end_forward()
+            kv_page_indptr = torch.tensor([0] + list(map(len, block_tables)), dtype=torch.int32, device=self.device)
+            kv_page_indptr = torch.cumsum(kv_page_indptr, dim=0)
+            kv_page_indices = torch.cat([torch.tensor(t, dtype=torch.int32) for t in block_tables]).to(self.device)
+            kv_last_page_len = torch.tensor(context_lens, dtype=torch.int32, device=self.device) % self.block_size
+            self.decoder_wrapper.begin_forward(
+                kv_page_indptr,
+                kv_page_indices,
+                kv_last_page_len,
+                self.model_config.get_num_heads(),
+                self.model_config.get_total_num_kv_heads(),
+                self.model_config.get_head_size(),
+                self.block_size,
+                rotary_mode="NONE",
+                data_type=self.model_config.dtype,
+            )
 
         input_metadata = InputMetadata(
             is_prompt=False,
@@ -421,6 +421,7 @@ class ModelRunner:
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
             kv_cache_dtype=self.kv_cache_dtype,
+            decoder_wrapper=self.decoder_wrapper,
         )
         return (input_tokens, input_positions, input_metadata,
                 lora_index_mapping, lora_prompt_mapping, lora_requests)
