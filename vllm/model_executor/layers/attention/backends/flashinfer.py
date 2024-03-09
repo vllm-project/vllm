@@ -32,7 +32,7 @@ class FlashInferBackend:
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-        suppored_head_sizes = FlashAttentionImpl.get_supported_head_sizes()
+        suppored_head_sizes = [32, 64, 128, 256]
         if head_size not in suppored_head_sizes:
             raise ValueError(
                 f"Head size {head_size} is not supported by PagedAttention. "
