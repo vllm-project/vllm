@@ -16,7 +16,6 @@ class InputMetadata:
         block_tables: The block tables. (Seq id -> list of physical block)
         kv_cache_dtype: Data type to store kv cache.
     """
-
     is_prompt: bool
     slot_mapping: torch.Tensor
     prompt_lens: Optional[torch.Tensor]
@@ -27,6 +26,7 @@ class InputMetadata:
     block_tables: Optional[torch.Tensor]
     use_cuda_graph: bool
     kv_cache_dtype: str
+    decoder_wrapper: Optional[Any]
 
     def __post_init__(self):
         # will not appear in the __repr__ and __init__

@@ -85,6 +85,15 @@ class ModelRunner:
         if self.device_config.is_neuron:
             self.model_config.enforce_eager = True
 
+        self.use_flash_infer = __import__("os").getenv("VLLM_TEMP_USE_FLASH", "0") == "1"
+        if self.use_flash_infer:
+            from flashinfer import BatchDecodeWithPagedKVCacheWrapper
+            workspace_buffer = torch.empty(16 * 1024 * 1024, dtype=torch.uint8, device=self.device)
+            self.decoder_wrapper = BatchDecodeWithPagedKVCacheWrapper(
+                workspace_buffer, "NHD")
+        else:
+            self.decoder_wrapper = None
+
     def load_model(self) -> None:
         with measure_cuda_memory() as m:
             self.model = get_model(self.model_config,
@@ -253,6 +262,24 @@ class ModelRunner:
         prompt_lens_tensor = torch.tensor(prompt_lens,
                                           dtype=torch.long,
                                           device=self.device)
+        
+        if self.use_flash_infer:
+            self.decoder_wrapper.end_forward()
+            kv_page_indptr = torch.tensor([0] + list(map(len, prefix_block_tables)), dtype=torch.int32, device=self.device)
+            kv_page_indptr = torch.cumsum(kv_page_indptr, dim=0)
+            kv_page_indices = torch.cat([torch.tensor(t, dtype=torch.int32) for t in prefix_block_tables]).to(self.device)
+            kv_last_page_len = torch.tensor(context_lens, dtype=torch.int32, device=self.device) % self.block_size
+            self.decoder_wrapper.begin_forward(
+                kv_page_indptr,
+                kv_page_indices,
+                kv_last_page_len,
+                self.model_config.get_num_heads(),
+                self.model_config.get_total_num_kv_heads(),
+                self.model_config.get_head_size(),
+                self.block_size,
+                rotary_mode="NONE",
+                data_type=self.model_config.dtype,
+            )
 
         input_metadata = InputMetadata(
             is_prompt=True,
@@ -265,6 +292,7 @@ class ModelRunner:
             block_tables=block_tables,
             use_cuda_graph=False,
             kv_cache_dtype=self.kv_cache_dtype,
+            decoder_wrapper=self.decoder_wrapper,
         )
         return (input_tokens, input_positions, input_metadata, prompt_lens,
                 subquery_lens, lora_index_mapping, lora_prompt_mapping,
