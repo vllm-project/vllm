@@ -27,7 +27,7 @@ from torch import nn
 from vllm.transformers_utils.configs import JAISConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.attention import PagedAttention
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearMethodBase,
                                                QKVParallelLinear,
@@ -189,7 +189,7 @@ class JAISAttention(nn.Module):
         head_end = (tp_rank + 1) * self.num_heads
         alibi_slopes = _get_alibi_slopes(total_num_heads)
         alibi_slopes = alibi_slopes[head_start:head_end]
-        self.attn = PagedAttention(self.num_heads,
+        self.attn = Attention(self.num_heads,
                                    self.head_dim,
                                    scale=self.scale,
                                    alibi_slopes=alibi_slopes)
