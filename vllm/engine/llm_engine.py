@@ -7,6 +7,8 @@ from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, LoRAConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
+from vllm.executor.single_gpu_executor import SingleGPUModelExecutor
+from vllm.executor.ray_distributed_executor import RayDistributedModelExecutor
 from vllm.engine.metrics import StatLogger, Stats
 from vllm.engine.ray_utils import initialize_ray_cluster
 from vllm.logger import init_logger
@@ -17,9 +19,6 @@ from vllm.sequence import (Logprob, SamplerOutput, Sequence, SequenceGroup,
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                TokenizerGroup)
 from vllm.utils import Counter
-
-from vllm.executor.single_gpu_executor import SingleGPUModelExecutor
-from vllm.executor.ray_distributed_executor import RayDistributedModelExecutor
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -782,5 +781,5 @@ class LLMEngine:
     def list_loras(self) -> List[int]:
         return self.model_executor.list_loras()
 
-    def check_health(self):
+    def check_health(self) -> None:
         self.model_executor.check_health()

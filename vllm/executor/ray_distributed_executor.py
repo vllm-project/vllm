@@ -5,17 +5,17 @@ import pickle
 import importlib
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from vllm.lora.request import LoRARequest
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, LoRAConfig)
 from vllm.engine.ray_utils import RayWorkerVllm, ray
-from vllm.executor.utils import check_block_size
+from vllm.executor.utils import check_block_size_valid
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.sequence import SequenceGroupMetadata
 from vllm.utils import (set_cuda_visible_devices, get_ip, get_open_port,
                         get_distributed_init_method)
 
-if ray:
+if ray is not None:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 if TYPE_CHECKING:
@@ -31,7 +31,7 @@ DEVICE_TO_WORKER_MODULE_MAP = {
 
 # If the env var is set, it uses the Ray's compiled DAG API
 # which optimizes the control plane overhead.
-# Run VLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
+# Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
 USE_RAY_COMPILED_DAG = bool(os.getenv("VLLM_USE_RAY_COMPILED_DAG", 0))
 
 
@@ -56,11 +56,12 @@ class RayDistributedModelExecutor:
         assert self.parallel_config.worker_use_ray
         placement_group = self.parallel_config.placement_group
 
-        # Create the parallel GPU workers.
         # Disable Ray usage stats collection.
         ray_usage = os.environ.get("RAY_USAGE_STATS_ENABLED", "0")
         if ray_usage != "1":
             os.environ["RAY_USAGE_STATS_ENABLED"] = "0"
+
+        # Create the parallel GPU workers.
         self._init_workers_ray(placement_group)
 
         # Profile the memory usage and initialize the cache.
@@ -80,13 +81,19 @@ class RayDistributedModelExecutor:
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
         if self.parallel_config.tensor_parallel_size == 1:
+            # For single GPU case, we use a ray worker with constrained memory.
             num_gpus = self.cache_config.gpu_memory_utilization
         else:
+            # Otherwise, the ray workers are allocated with a full GPU.
             num_gpus = 1
 
+        # The driver dummy worker does not acutally use any resources.
+        # It holds the resource for the driver worker.
         self.driver_dummy_worker: RayWorkerVllm = None
+        # The remaining workers are the actual ray actors.
         self.workers: List[RayWorkerVllm] = []
 
+        # Create the workers.
         driver_ip = get_ip()
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
             if not bundle.get("GPU", 0):
@@ -109,6 +116,7 @@ class RayDistributedModelExecutor:
                 # as the resource holder for the driver process.
                 self.driver_dummy_worker = worker
             else:
+                # Else, added to the list of workers.
                 self.workers.append(worker)
 
         if self.driver_dummy_worker is None:
@@ -117,6 +125,7 @@ class RayDistributedModelExecutor:
                 "adjusting the Ray placement group or running the driver on a "
                 "GPU node.")
 
+        # Get the set of GPU IDs used on each node.
         driver_node_id, driver_gpu_ids = ray.get(
             self.driver_dummy_worker.get_node_and_gpu_ids.remote())
         worker_node_and_gpu_ids = ray.get(
@@ -134,7 +143,7 @@ class RayDistributedModelExecutor:
         for node_id, gpu_ids in node_gpus.items():
             node_gpus[node_id] = sorted(gpu_ids)
 
-        # Set CUDA_VISIBLE_DEVICES for the driver.
+        # Set CUDA_VISIBLE_DEVICES for the driver and workers.
         set_cuda_visible_devices(node_gpus[driver_node_id])
         for worker, (node_id, _) in zip(self.workers, worker_node_and_gpu_ids):
             worker.set_cuda_visible_devices.remote(node_gpus[node_id])
@@ -146,7 +155,6 @@ class RayDistributedModelExecutor:
         # before CUDA_VISIBLE_DEVICES is set in the Worker
         Worker = self._dispatch_worker()
 
-        # Initialize torch distributed process group for the workers.
         model_config = copy.deepcopy(self.model_config)
         parallel_config = copy.deepcopy(self.parallel_config)
         scheduler_config = copy.deepcopy(self.scheduler_config)
@@ -154,10 +162,11 @@ class RayDistributedModelExecutor:
         lora_config = copy.deepcopy(self.lora_config)
         kv_cache_dtype = self.cache_config.cache_dtype
 
-        for rank, (worker, (node_id,
-                            _)) in enumerate(zip(self.workers,
-                                                 worker_node_and_gpu_ids),
-                                             start=1):
+        # Initialize the actual workers with the Worker class.
+        for rank, (worker, (node_id, _)) in enumerate(
+                zip(self.workers, worker_node_and_gpu_ids),
+                start=1,
+        ):
             local_rank = node_workers[node_id].index(rank)
             worker.init_worker.remote(
                 lambda rank=rank, local_rank=local_rank: Worker(
@@ -172,6 +181,7 @@ class RayDistributedModelExecutor:
                     kv_cache_dtype=kv_cache_dtype,
                 ))
 
+        # Initialize the driver worker with the Worker class.
         driver_rank = 0
         driver_local_rank = node_workers[driver_node_id].index(driver_rank)
         self.driver_worker = Worker(
@@ -187,7 +197,8 @@ class RayDistributedModelExecutor:
             is_driver_worker=True,
         )
 
-        # don't use cupy for eager mode
+        # FIXME(woosuk): We are not properly initializing cupy NCCL when
+        # we have multiple nodes.
         self._run_workers("init_model",
                           cupy_port=get_open_port()
                           if not model_config.enforce_eager else None)
@@ -216,7 +227,7 @@ class RayDistributedModelExecutor:
 
         .. tip::
             You may limit the usage of GPU memory
-            by adjusting the `gpu_memory_utilization` parameters.
+            by adjusting the `gpu_memory_utilization` parameter.
         """
         # Get the maximum number of blocks that can be allocated on GPU and CPU.
         num_blocks = self._run_workers(
@@ -235,8 +246,8 @@ class RayDistributedModelExecutor:
         logger.info(f"# GPU blocks: {num_gpu_blocks}, "
                     f"# CPU blocks: {num_cpu_blocks}")
 
-        check_block_size(num_gpu_blocks, self.cache_config.block_size,
-                         self.model_config.max_model_len)
+        check_block_size_valid(num_gpu_blocks, self.cache_config.block_size,
+                               self.model_config.max_model_len)
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks

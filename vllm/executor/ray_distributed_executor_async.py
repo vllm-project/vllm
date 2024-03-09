@@ -58,6 +58,6 @@ class RayDistributedModelExecutorAsync(RayDistributedModelExecutor):
         output = all_outputs[0]
         return output
 
-    async def check_health_async(self):
+    async def check_health_async(self) -> None:
         """Raises an error if engine is unhealthy."""
         self._check_if_any_actor_is_dead()

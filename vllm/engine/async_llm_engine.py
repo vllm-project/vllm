@@ -262,7 +262,7 @@ class _AsyncLLMEngine(LLMEngine):
             lora_request=lora_request,
         )
 
-    async def check_health_async(self):
+    async def check_health_async(self) -> None:
         self.model_executor.check_health()
 
 
@@ -664,7 +664,7 @@ class AsyncLLMEngine:
         else:
             self.engine.do_log_stats()
 
-    async def check_health(self):
+    async def check_health(self) -> None:
         """Raises an error if engine is unhealthy."""
         t = time.perf_counter()
         logger.debug("Starting health check...")

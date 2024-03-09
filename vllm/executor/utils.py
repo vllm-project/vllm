@@ -1,4 +1,4 @@
-def check_block_size(num_gpu_blocks, block_size, max_model_len):
+def check_block_size_valid(num_gpu_blocks, block_size, max_model_len) -> None:
     if num_gpu_blocks <= 0:
         raise ValueError("No available memory for the cache blocks. "
                          "Try increasing `gpu_memory_utilization` when "

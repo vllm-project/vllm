@@ -4,10 +4,10 @@ from typing import Dict, List, Optional
 from vllm.lora.request import LoRARequest
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, LoRAConfig)
-from vllm.executor.utils import check_block_size
+from vllm.executor.utils import check_block_size_valid
 from vllm.logger import init_logger
 from vllm.sequence import SequenceGroupMetadata
-from vllm.utils import (get_ip, get_open_port, get_distributed_init_method)
+from vllm.utils import get_ip, get_open_port, get_distributed_init_method
 
 logger = init_logger(__name__)
 
@@ -36,6 +36,7 @@ class SingleGPUModelExecutor:
         self.scheduler_config = scheduler_config
         self.device_config = device_config
 
+        # Instantiate the worker and load the model to GPU.
         self._init_worker()
 
         # Profile the memory usage and initialize the cache.
@@ -81,7 +82,7 @@ class SingleGPUModelExecutor:
 
         .. tip::
             You may limit the usage of GPU memory
-            by adjusting the `gpu_memory_utilization` parameters.
+            by adjusting the `gpu_memory_utilization` parameter.
         """
         # Get the maximum number of blocks that can be allocated on GPU and CPU.
         num_gpu_blocks, num_cpu_blocks = (
@@ -96,8 +97,8 @@ class SingleGPUModelExecutor:
         logger.info(f"# GPU blocks: {num_gpu_blocks}, "
                     f"# CPU blocks: {num_cpu_blocks}")
 
-        check_block_size(num_gpu_blocks, self.cache_config.block_size,
-                         self.model_config.max_model_len)
+        check_block_size_valid(num_gpu_blocks, self.cache_config.block_size,
+                               self.model_config.max_model_len)
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
@@ -132,7 +133,7 @@ class SingleGPUModelExecutor:
     def list_loras(self) -> List[int]:
         return self.driver_worker.list_loras()
 
-    def check_health(self) -> bool:
+    def check_health(self) -> None:
         # SingleGPUModelExecutor will always be healthy as long as
         # it's running.
         return
