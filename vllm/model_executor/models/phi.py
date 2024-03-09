@@ -59,7 +59,7 @@ from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 
-KVCache = Tuple[torch.Tensor, torch.Tensor]
+from vllm.block import KVCache
 
 
 class PhiAttention(nn.Module):
@@ -120,8 +120,8 @@ class PhiAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         q, k = self.rotary_emb(position_ids, q, k)
-        k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
+
+        attn_output = self.attn(q, k, v, kv_cache, input_metadata)
         output, _ = self.dense(attn_output)
         return output
 

@@ -7,6 +7,7 @@ import torch
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention.ops.paged_attn import (
     PagedAttentionImpl)
+from vllm.block import KVCache
 
 
 class FlashAttentionBackend:
@@ -45,8 +46,7 @@ class FlashAttentionBackend:
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        key_cache: Optional[torch.Tensor],
-        value_cache: Optional[torch.Tensor],
+        kv_cache: Optional[KVCache],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
@@ -68,6 +68,10 @@ class FlashAttentionBackend:
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
+
+        assert kv_cache is None or isinstance(kv_cache, tuple), "unsupported KV cache layout"
+        key_cache = None if kv_cache is None else kv_cache[0]
+        value_cache = None if kv_cache is None else kv_cache[1]
 
         # Reshape the keys and values and store them in the cache.
         # If key_cache and value_cache are not provided, the new key and value

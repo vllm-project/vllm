@@ -28,7 +28,7 @@ from vllm.model_executor.weight_utils import (default_weight_loader,
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs import ChatGLMConfig
 
-KVCache = Tuple[torch.Tensor, torch.Tensor]
+from vllm.block import KVCache
 
 
 class GLMAttention(nn.Module):
@@ -104,13 +104,12 @@ class GLMAttention(nn.Module):
         qkv, _ = self.query_key_value(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(position_ids, q, k)
-        key_cache, value_cache = kv_cache
+
         context_layer = self.attn(
             q,
             k,
             v,
-            key_cache,
-            value_cache,
+            kv_cache,
             input_metadata,
         )
         attn_output, _ = self.dense(context_layer)

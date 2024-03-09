@@ -11,7 +11,7 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 
-KVCache = Tuple[torch.Tensor, torch.Tensor]
+from vllm.block import KVCache
 
 
 class LlamaForCausalLM(nn.Module):

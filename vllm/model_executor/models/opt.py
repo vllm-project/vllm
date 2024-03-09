@@ -41,7 +41,7 @@ from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 
-KVCache = Tuple[torch.Tensor, torch.Tensor]
+from vllm.block import KVCache
 
 
 class OPTLearnedPositionalEmbedding(nn.Embedding):
@@ -101,9 +101,8 @@ class OPTAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
-        key_cache, value_cache = kv_cache
-        attn_output = self.attn(q, k, v, key_cache, value_cache,
-                                input_metadata)
+
+        attn_output = self.attn(q, k, v, kv_cache, input_metadata)
         output, _ = self.out_proj(attn_output)
         return output
 

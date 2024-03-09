@@ -25,7 +25,8 @@ from vllm.utils import in_wsl, measure_cuda_memory
 
 logger = init_logger(__name__)
 
-KVCache = Tuple[torch.Tensor, torch.Tensor]
+from vllm.block import KVCache
+
 _PAD_SLOT_ID = -1
 LORA_WARMUP_RANK = 8
 # Capture graphs for batch size 1, 2, 4, 8, 16, 24, 32, 40, ..., 256.
@@ -554,7 +555,7 @@ class ModelRunner:
     def execute_model(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+        kv_caches: List[KVCache],
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, input_metadata, sampling_metadata,
          lora_requests,

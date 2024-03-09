@@ -48,7 +48,7 @@ from vllm.model_executor.weight_utils import (default_weight_loader,
 from vllm.sequence import SamplerOutput
 from vllm.config import LoRAConfig
 
-KVCache = Tuple[torch.Tensor, torch.Tensor]
+from vllm.block import KVCache
 
 
 class Qwen2MLP(nn.Module):
@@ -152,8 +152,8 @@ class Qwen2Attention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
+
+        attn_output = self.attn(q, k, v, kv_cache, input_metadata)
         output, _ = self.o_proj(attn_output)
         return output
 

@@ -66,7 +66,7 @@ from vllm.sequence import SamplerOutput
 # this model must need this dependency
 from hf_olmo import OLMoConfig
 
-KVCache = Tuple[torch.Tensor, torch.Tensor]
+from vllm.block import KVCache
 
 
 class SwiGLU(nn.Module):
@@ -153,8 +153,8 @@ class OlmoAttention(nn.Module):
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         if self.config.rope:
             q, k = self.rotary_emb(positions, q, k)
-        k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
+
+        attn_output = self.attn(q, k, v, kv_cache, input_metadata)
         output, _ = self.attn_out(attn_output)
         return output
 

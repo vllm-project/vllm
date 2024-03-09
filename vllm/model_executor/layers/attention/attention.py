@@ -10,6 +10,7 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.utils import is_hip
 
 logger = init_logger(__name__)
+from vllm.block import KVCache
 
 
 class Attention(nn.Module):
@@ -50,11 +51,10 @@ class Attention(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        key_cache: Optional[torch.Tensor],
-        value_cache: Optional[torch.Tensor],
+        kv_cache: Optional[KVCache],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
-        return self.backend.forward(query, key, value, key_cache, value_cache,
+        return self.backend.forward(query, key, value, kv_cache,
                                     input_metadata)
 
 

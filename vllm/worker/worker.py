@@ -146,8 +146,9 @@ class Worker:
 
     def init_cache_engine(self, cache_config: CacheConfig) -> None:
         self.cache_config = cache_config
-        self.cache_engine = CacheEngine.from_config(self.cache_config, self.model_config,
-                                        self.parallel_config)
+        self.cache_engine = CacheEngine.from_config(self.cache_config,
+                                                    self.model_config,
+                                                    self.parallel_config)
         self.cache_events = self.cache_engine.events
         self.gpu_cache = self.cache_engine.gpu_cache
         self.model_runner.set_block_size(self.cache_engine.block_size)

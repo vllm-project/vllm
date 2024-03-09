@@ -48,8 +48,7 @@ class XFormersBackend:
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        key_cache: Optional[torch.Tensor],
-        value_cache: Optional[torch.Tensor],
+        kv_cache: Optional[torch.Tensor],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
@@ -71,6 +70,10 @@ class XFormersBackend:
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
+
+        assert kv_cache is None or isinstance(kv_cache, tuple), "unsupported KV cache layout"
+        key_cache = None if kv_cache is None else kv_cache[0]
+        value_cache = None if kv_cache is None else kv_cache[1]
 
         # Reshape the keys and values and store them in the cache.
         # If key_cache and value_cache are not provided, the new key and value

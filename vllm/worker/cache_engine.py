@@ -9,7 +9,8 @@ from vllm.utils import in_wsl, is_neuron, STR_DTYPE_TO_TORCH_DTYPE
 
 logger = init_logger(__name__)
 
-KVCache = Tuple[torch.Tensor, torch.Tensor]
+from vllm.block import KVCache
+
 
 class CacheEngine:
     """Manages the KV cache.
@@ -18,16 +19,18 @@ class CacheEngine:
     caches. It also provides methods for performing KV cache operations, such
     as swapping and copying.
     """
+
     @staticmethod
     def from_config(
-        cache_config: CacheConfig,
-        model_config: ModelConfig,
+        cache_config: CacheConfig, model_config: ModelConfig,
         parallel_config: ParallelConfig
     ) -> Union['PagedCacheEngine', 'FlashCacheEngine']:
         if __import__("os").getenv("VLLM_TEMP_USE_FLASH", "0") == "1":
-            return FlashCacheEngine(cache_config, model_config, parallel_config)
+            return FlashCacheEngine(cache_config, model_config,
+                                    parallel_config)
         else:
-            return PagedCacheEngine(cache_config, model_config, parallel_config)
+            return PagedCacheEngine(cache_config, model_config,
+                                    parallel_config)
 
     def __init__(
         self,
@@ -115,7 +118,7 @@ class CacheEngine:
             )
             cpu_cache.append((key_blocks, value_blocks))
         return cpu_cache
-    
+
     def _swap(
         self,
         src: List[KVCache],
@@ -171,13 +174,11 @@ class CacheEngine:
         dtype_size = _get_dtype_size(dtype)
         return dtype_size * total
 
+
 class PagedCacheEngine(CacheEngine):
-    def __init__(
-        self,
-        cache_config: CacheConfig,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig
-    ) -> None:
+
+    def __init__(self, cache_config: CacheConfig, model_config: ModelConfig,
+                 parallel_config: ParallelConfig) -> None:
         super().__init__(cache_config, model_config, parallel_config)
 
     def get_key_block_shape(self) -> Tuple[int, ...]:
@@ -196,22 +197,20 @@ class PagedCacheEngine(CacheEngine):
             self.head_size,
             self.block_size,
         )
-    
+
+
 class FlashCacheEngine(CacheEngine):
-    def __init__(
-        self,
-        cache_config: CacheConfig,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig
-    ) -> None:
+
+    def __init__(self, cache_config: CacheConfig, model_config: ModelConfig,
+                 parallel_config: ParallelConfig) -> None:
         super().__init__(cache_config, model_config, parallel_config)
 
     def get_key_block_shape(self) -> Tuple[int, ...]:
         return (self.block_size, self.num_heads, self.head_size)
-    
+
     def get_value_block_shape(self) -> Tuple[int, ...]:
         return (self.block_size, self.num_heads, self.head_size)
-    
+
 
 def _get_dtype_size(dtype: torch.dtype) -> int:
     return torch.tensor([], dtype=dtype).element_size()

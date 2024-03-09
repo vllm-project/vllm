@@ -1,5 +1,6 @@
 """Token blocks."""
-from typing import List
+from typing import List, Tuple, Union
+import torch
 
 from vllm.utils import Device
 
@@ -7,6 +8,7 @@ _BLANK_TOKEN_ID = -1
 
 DEFAULT_LAST_ACCESSED_TIME = -1
 
+KVCache = Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]
 
 class LogicalTokenBlock:
     """A block that stores a contiguous chunk of tokens from left to right.
