@@ -19,7 +19,29 @@ from vllm.spec_decode.interfaces import SpeculativeScorer
 class SpecDecodeWorker:
     """Worker which implements speculative decoding.
 
-    See https://github.com/vllm-project/vllm/pull/3103 for more info.
+    Speculative decoding reduces decoding per-token latency by using a proposal
+    method, such as a small draft model, to speculate ahead of a larger LLM. The
+    probabilities of the speculative tokens are then determined by the larger
+    LLM, after which some verification routine determines which (if any) of the
+    speculative tokens are accepted by the larger LLM.
+
+    See https://github.com/vllm-project/vllm/pull/2188 and 
+    https://github.com/vllm-project/vllm/pull/3103 for more info.
+
+    The current implementation has the following limitations:
+    * Only draft-model proposal is implemented (contributions for more forms are
+        welcome!).
+    * Only top-1 proposal and scoring are implemented. Tree-attention is left as
+        future work.
+    * Only lossless rejection sampling is supported. Contributions adding lossy
+        verification routines are welcome (e.g. Medusa's typical acceptance).
+    * All sequences in a batch must have the same proposal length, or zero. This
+        can be improved by having per-sequence speculation in the future.
+    * The scoring forward pass is done without an MQA kernel, which is
+        suboptimal especially as the batch size, proposal length, and sequence
+        lengths grow. Contributions to add a MQA scoring are welcome once
+        correctness tests pass.
+        More info here https://docs.google.com/document/d/1T-JaS2T1NRfdP51qzqpyakoCXxSXTtORppiwaj5asxA/edit.
     """
 
     def __init__(
