@@ -38,6 +38,7 @@ class FlashInferBackend:
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {suppored_head_sizes}.")
 
+        self.sliding_window = (-1, -1)
         if sliding_window is not None:        
             raise RuntimeError("FlashInfer does not support sliding window attention")
         if alibi_slopes is not None:
@@ -106,7 +107,7 @@ class FlashInferBackend:
                 raise NotImplementedError
         else:
             # Decoding run.
-            output = decoder_wrapper.forward_decode(query, kv_cache)
+            output = decoder_wrapper.forward(query.contiguous(), kv_cache)
 
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)

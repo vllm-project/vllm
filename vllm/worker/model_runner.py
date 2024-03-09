@@ -395,7 +395,7 @@ class ModelRunner:
         if self.use_flash_infer:
             self.decoder_wrapper.end_forward()
             kv_page_indptr = torch.tensor([0] + list(map(len, block_tables)), dtype=torch.int32, device=self.device)
-            kv_page_indptr = torch.cumsum(kv_page_indptr, dim=0)
+            kv_page_indptr = torch.cumsum(kv_page_indptr, dim=0, dtype=torch.int32)
             kv_page_indices = torch.cat([torch.tensor(t, dtype=torch.int32) for t in block_tables]).to(self.device)
             kv_last_page_len = torch.tensor(context_lens, dtype=torch.int32, device=self.device) % self.block_size
             self.decoder_wrapper.begin_forward(
@@ -662,7 +662,7 @@ class ModelRunner:
 
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
-        kv_caches = [(None, None)] * num_layers
+        kv_caches = [None] * num_layers
         self.execute_model(seqs, kv_caches)
         torch.cuda.synchronize()
         return

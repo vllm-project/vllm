@@ -257,6 +257,9 @@ class ModelConfig:
         # FIXME(woosuk): This may not be true for all models.
         return self.hf_config.hidden_size // self.hf_config.num_attention_heads
 
+    def get_num_heads(self) -> int:
+        return self.hf_config.num_attention_heads
+    
     def get_total_num_kv_heads(self) -> int:
         """Returns the total number of KV heads."""
         # For GPTBigCode & Falcon:

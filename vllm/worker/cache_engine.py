@@ -122,7 +122,7 @@ class CacheEngine:
             dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
         dtype_size = _get_dtype_size(dtype)
         return dtype_size * total
-
+    
 
 class PagedCacheEngine(CacheEngine):
 
@@ -251,6 +251,7 @@ class FlashInferCacheEngine(CacheEngine):
             dtype=self.dtype,
             pin_memory=pin_memory,
             device="cpu")
+
 
 def _get_dtype_size(dtype: torch.dtype) -> int:
     return torch.tensor([], dtype=dtype).element_size()
