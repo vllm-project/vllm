@@ -24,6 +24,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY requirements-dev.txt requirements-dev.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements-dev.txt
+
+# install flashinfer
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.1/
 #################### BASE BUILD IMAGE ####################
 
 
