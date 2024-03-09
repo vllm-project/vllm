@@ -3,7 +3,6 @@ import peft
 import pytest
 from random import sample
 import tempfile
-import torch
 from transformers import AutoModelForCausalLM
 
 import vllm
@@ -73,9 +72,6 @@ for length in range(2, 6):
 @pytest.mark.parametrize("target_modules", TARGET_MODULES_LIST)
 @pytest.mark.parametrize("rank", [8, 16, 32, 64])
 def test_layer_variation_correctness(tp_size, target_modules, rank):
-    if torch.cuda.device_count() < tp_size:
-        pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
-
     llm = vllm.LLM(MODEL_PATH,
                    enable_lora=True,
                    max_num_seqs=16,
