@@ -4,13 +4,13 @@ import torch
 
 SMOOTH_STRENGHT = 0.5
 
-activation_scales = torch.load("mixtral_scales.pth")
+activation_scales = torch.load("/home/ray/default/mixtral_scales.pth")
 smoothquant_scales = {}
 for layer_idx in range(32):
     key_prefix = f"model.layers.{layer_idx}.block_sparse_moe.experts"
     target_prefix = f"model.layers.{layer_idx}.block_sparse_moe.scales"
     for weight_name in ["w1", "w2", "w3"]:
-        tensors = [scales[key_prefix + f".{expert_idx}.{weight_name}"] for expert_idx in range(8)]
+        tensors = [activation_scales[key_prefix + f".{expert_idx}.{weight_name}"] for expert_idx in range(8)]
         smoothquant_scales[target_prefix + f".{weight_name}"] = torch.mean(torch.stack(tensors), dim=0)**SMOOTH_STRENGHT
 
 def rewrite_safetensors(name):
