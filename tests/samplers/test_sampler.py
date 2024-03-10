@@ -255,8 +255,8 @@ def test_sampler_mixed(seed: int, device: str):
             if metadata.sampling_params.use_beam_search:
                 continue
 
-            if metadata.sampling_params.seed is not None \
-                    and expected_tokens[i] is None:
+            if (metadata.sampling_params.seed is not None
+                    and expected_tokens[i] is None):
                 # Record seeded random result to compare with results of second invocation
                 expected_tokens[i] = [
                     nth_output.output_token
