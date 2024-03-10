@@ -4,11 +4,12 @@ from typing import Dict, List, Optional
 from vllm.lora.request import LoRARequest
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, LoRAConfig)
-from vllm.executor.executor_base import ExecutorBase
+from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.executor.utils import check_block_size_valid
 from vllm.logger import init_logger
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
-from vllm.utils import get_ip, get_open_port, get_distributed_init_method
+from vllm.utils import (get_ip, get_open_port, get_distributed_init_method,
+                        make_async)
 
 logger = init_logger(__name__)
 
@@ -135,6 +136,28 @@ class GPUExecutor(ExecutorBase):
         return self.driver_worker.list_loras()
 
     def check_health(self) -> None:
+        # GPUExecutor will always be healthy as long as
+        # it's running.
+        return
+
+
+class GPUExecutorAsync(GPUExecutor, ExecutorAsyncBase):
+
+    async def execute_model_async(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        blocks_to_swap_in: Dict[int, int],
+        blocks_to_swap_out: Dict[int, int],
+        blocks_to_copy: Dict[int, List[int]],
+    ) -> SamplerOutput:
+        output = await make_async(self.driver_worker.execute_model)(
+            seq_group_metadata_list=seq_group_metadata_list,
+            blocks_to_swap_in=blocks_to_swap_in,
+            blocks_to_swap_out=blocks_to_swap_out,
+            blocks_to_copy=blocks_to_copy)
+        return output
+
+    async def check_health_async(self) -> None:
         # GPUExecutor will always be healthy as long as
         # it's running.
         return
