@@ -10,8 +10,8 @@ from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.engine.ray_utils import initialize_ray_cluster, ray
-from vllm.executor.ray_gpu_executor_async import (RayGPUExecutorAsync)
-from vllm.executor.gpu_executor_async import GPUExecutorAsync
+from vllm.executor.ray_gpu_executor import RayGPUExecutorAsync
+from vllm.executor.gpu_executor import GPUExecutorAsync
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
