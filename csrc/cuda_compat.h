@@ -1,5 +1,15 @@
 #pragma once
 
+#ifdef USE_ROCM
+#include <hip/hip_runtime.h>
+#endif
+
+#ifndef USE_ROCM
+  #define WARP_SIZE 32
+#else
+  #define WARP_SIZE warpSize
+#endif
+
 #ifndef USE_ROCM
   #define VLLM_LDG(arg) __ldg(arg)
 #else

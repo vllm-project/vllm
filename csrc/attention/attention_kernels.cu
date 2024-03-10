@@ -15,9 +15,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#ifdef USE_ROCM
-#include <hip/hip_runtime.h>
-#endif
 
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -31,11 +28,6 @@
 
 #include <algorithm>
 
-#ifndef USE_ROCM
-#define WARP_SIZE 32
-#else
-#define WARP_SIZE warpSize
-#endif
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define DIVIDE_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
