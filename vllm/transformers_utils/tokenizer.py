@@ -120,7 +120,7 @@ class TokenizerGroup:
 
     def get_lora_tokenizer(
             self,
-            lora_request: Optional[LoRARequest]) -> "PreTrainedTokenizer":
+            lora_request: Optional[LoRARequest] = None) -> "PreTrainedTokenizer":
         if not lora_request or not self.enable_lora:
             return self.tokenizer
         if lora_request.lora_int_id not in self.lora_tokenizers:
