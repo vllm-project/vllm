@@ -11,7 +11,7 @@ from vllm.engine.ray_utils import RayWorkerVllm, ray
 from vllm.executor.utils import check_block_size_valid
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.sequence import SequenceGroupMetadata
+from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import (set_cuda_visible_devices, get_ip, get_open_port,
                         get_distributed_init_method)
 
@@ -35,7 +35,7 @@ DEVICE_TO_WORKER_MODULE_MAP = {
 USE_RAY_COMPILED_DAG = bool(os.getenv("VLLM_USE_RAY_COMPILED_DAG", 0))
 
 
-class RayDistributedModelExecutor:
+class RayGPUExecutor:
 
     def __init__(
         self,
@@ -87,7 +87,7 @@ class RayDistributedModelExecutor:
             # Otherwise, the ray workers are allocated with a full GPU.
             num_gpus = 1
 
-        # The driver dummy worker does not acutally use any resources.
+        # The driver dummy worker does not actually use any resources.
         # It holds the resource for the driver worker.
         self.driver_dummy_worker: RayWorkerVllm = None
         # The remaining workers are the actual ray actors.
@@ -262,7 +262,7 @@ class RayDistributedModelExecutor:
                       seq_group_metadata_list: List[SequenceGroupMetadata],
                       blocks_to_swap_in: Dict[int, int],
                       blocks_to_swap_out: Dict[int, int],
-                      blocks_to_copy: Dict[int, List[int]]):
+                      blocks_to_copy: Dict[int, List[int]]) -> SamplerOutput:
         all_outputs = self._run_workers(
             "execute_model",
             driver_kwargs={

@@ -7,8 +7,8 @@ from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, LoRAConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
-from vllm.executor.single_gpu_executor import SingleGPUModelExecutor
-from vllm.executor.ray_distributed_executor import RayDistributedModelExecutor
+from vllm.executor.single_gpu_executor import GPUExecutor
+from vllm.executor.ray_distributed_executor import RayGPUExecutor
 from vllm.engine.metrics import StatLogger, Stats
 from vllm.engine.ray_utils import initialize_ray_cluster
 from vllm.logger import init_logger
@@ -122,11 +122,11 @@ class LLMEngine:
         # Initialize the cluster and specify the executor class.
         if parallel_config.worker_use_ray:
             initialize_ray_cluster(parallel_config)
-            executor_class = RayDistributedModelExecutor
+            executor_class = RayGPUExecutor
         else:
             assert parallel_config.world_size == 1, (
                 "Ray is required if parallel_config.world_size > 1.")
-            executor_class = SingleGPUModelExecutor
+            executor_class = GPUExecutor
 
         # Create the LLM engine.
         engine = cls(*engine_configs,

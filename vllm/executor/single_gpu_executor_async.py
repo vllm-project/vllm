@@ -2,11 +2,11 @@ import asyncio
 from functools import partial
 from typing import Dict, List
 
-from vllm.executor.single_gpu_executor import SingleGPUModelExecutor
+from vllm.executor.single_gpu_executor import GPUExecutor
 from vllm.sequence import SequenceGroupMetadata
 
 
-class SingleGPUModelExecutorAsync(SingleGPUModelExecutor):
+class GPUExecutorAsync(GPUExecutor):
 
     async def execute_model_async(
         self,
@@ -25,6 +25,6 @@ class SingleGPUModelExecutorAsync(SingleGPUModelExecutor):
         return output
 
     async def check_health(self) -> None:
-        # SingleGPUModelExecutor will always be healthy as long as
+        # GPUExecutor will always be healthy as long as
         # it's running.
         return

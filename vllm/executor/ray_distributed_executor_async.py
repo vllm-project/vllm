@@ -2,12 +2,12 @@ import asyncio
 from functools import partial
 from typing import Any, Dict, List, Optional
 
-from vllm.executor.ray_distributed_executor import (
-    RayDistributedModelExecutor, USE_RAY_COMPILED_DAG)
+from vllm.executor.ray_distributed_executor import (RayGPUExecutor,
+                                                    USE_RAY_COMPILED_DAG)
 from vllm.sequence import SequenceGroupMetadata
 
 
-class RayDistributedModelExecutorAsync(RayDistributedModelExecutor):
+class RayGPUExecutorAsync(RayGPUExecutor):
 
     async def _run_workers_async(
         self,

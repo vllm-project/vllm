@@ -6,7 +6,7 @@ from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, LoRAConfig)
 from vllm.executor.utils import check_block_size_valid
 from vllm.logger import init_logger
-from vllm.sequence import SequenceGroupMetadata
+from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import get_ip, get_open_port, get_distributed_init_method
 
 logger = init_logger(__name__)
@@ -18,7 +18,7 @@ DEVICE_TO_WORKER_MODULE_MAP = {
 }
 
 
-class SingleGPUModelExecutor:
+class GPUExecutor:
 
     def __init__(
         self,
@@ -55,7 +55,7 @@ class SingleGPUModelExecutor:
         Worker = self._dispatch_worker()
 
         assert self.parallel_config.world_size == 1, (
-            "SingleGPUModelExecutor only supports single GPU.")
+            "GPUExecutor only supports single GPU.")
 
         distributed_init_method = get_distributed_init_method(
             get_ip(), get_open_port())
@@ -113,7 +113,7 @@ class SingleGPUModelExecutor:
                       seq_group_metadata_list: List[SequenceGroupMetadata],
                       blocks_to_swap_in: Dict[int, int],
                       blocks_to_swap_out: Dict[int, int],
-                      blocks_to_copy: Dict[int, List[int]]):
+                      blocks_to_copy: Dict[int, List[int]]) -> SamplerOutput:
         output = self.driver_worker.execute_model(
             seq_group_metadata_list=seq_group_metadata_list,
             blocks_to_swap_in=blocks_to_swap_in,
@@ -134,6 +134,6 @@ class SingleGPUModelExecutor:
         return self.driver_worker.list_loras()
 
     def check_health(self) -> None:
-        # SingleGPUModelExecutor will always be healthy as long as
+        # GPUExecutor will always be healthy as long as
         # it's running.
         return

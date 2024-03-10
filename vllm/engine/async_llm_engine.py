@@ -10,9 +10,8 @@ from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.engine.ray_utils import initialize_ray_cluster, ray
-from vllm.executor.ray_distributed_executor_async import (
-    RayDistributedModelExecutorAsync)
-from vllm.executor.single_gpu_executor_async import SingleGPUModelExecutorAsync
+from vllm.executor.ray_distributed_executor_async import (RayGPUExecutorAsync)
+from vllm.executor.single_gpu_executor_async import GPUExecutorAsync
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
@@ -328,11 +327,11 @@ class AsyncLLMEngine:
         parallel_config = engine_configs[2]
         if parallel_config.worker_use_ray or engine_args.engine_use_ray:
             initialize_ray_cluster(parallel_config)
-            executor_class = RayDistributedModelExecutorAsync
+            executor_class = RayGPUExecutorAsync
         else:
             assert parallel_config.world_size == 1, (
                 "Ray is required if parallel_config.world_size > 1.")
-            executor_class = SingleGPUModelExecutorAsync
+            executor_class = GPUExecutorAsync
         # Create the async LLM engine.
         engine = cls(parallel_config.worker_use_ray,
                      engine_args.engine_use_ray,
