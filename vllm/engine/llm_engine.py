@@ -1,5 +1,5 @@
 import time
-from typing import Dict, Iterable, List, Optional, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Tuple, Type, Union
 
 import vllm
 from vllm.lora.request import LoRARequest
@@ -7,6 +7,7 @@ from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, LoRAConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
+from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.executor.ray_gpu_executor import RayGPUExecutor
 from vllm.engine.metrics import StatLogger, Stats
@@ -60,7 +61,7 @@ class LLMEngine:
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
-        executor_class: type,
+        executor_class: Type[ExecutorBase],
         log_stats: bool,
     ) -> None:
         logger.info(
