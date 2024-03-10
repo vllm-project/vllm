@@ -497,9 +497,11 @@ async def test_guided_json_chat(server, client: openai.AsyncOpenAI):
         "role": "system",
         "content": "you are a helpful assistant"
     }, {
-        "role": "user",
-        "content": f"Give an example JSON for an employee profile that "
-                   f"fits this schema: {TEST_SCHEMA}"
+        "role":
+        "user",
+        "content":
+        f"Give an example JSON for an employee profile that "
+        f"fits this schema: {TEST_SCHEMA}"
     }]
     chat_completion = await client.chat.completions.create(
         model=MODEL_NAME,

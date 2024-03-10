@@ -273,8 +273,9 @@ class DeepseekDecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             linear_method=linear_method,
         )
-        if (config.n_routed_experts is not None and
-            layer_idx >= config.first_k_dense_replace and layer_idx % config.moe_layer_freq == 0):
+        if (config.n_routed_experts is not None
+                and layer_idx >= config.first_k_dense_replace
+                and layer_idx % config.moe_layer_freq == 0):
             self.mlp = DeepseekMoE(config=config, linear_method=linear_method)
         else:
             self.mlp = DeepseekMLP(
