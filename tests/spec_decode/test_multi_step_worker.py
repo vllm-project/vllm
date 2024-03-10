@@ -3,7 +3,8 @@ import random
 import pytest
 from unittest.mock import MagicMock
 
-from vllm.spec_decode.multi_step_worker import MultiStepWorker, DraftModelTop1Proposer
+from vllm.spec_decode.multi_step_worker import (MultiStepWorker,
+                                                DraftModelTop1Proposer)
 from vllm.worker.worker import Worker
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SamplerOutput
