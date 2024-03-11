@@ -190,8 +190,6 @@ class BlockSpaceManager:
 
         # Allocate new physical token blocks that will store the prompt tokens.
         num_prompt_blocks = len(seq.logical_token_blocks)
-        print("SANG-TODO allocate seq group: ", seq_group.request_id)
-        print("SANG-TODO num prompt blocks", num_prompt_blocks)
 
         block_table: BlockTable = []
         for logical_idx in range(num_prompt_blocks):
@@ -203,7 +201,6 @@ class BlockSpaceManager:
                     seq.hash_of_block(logical_idx),
                     seq.num_hashed_tokens_of_block(logical_idx))
             block_table.append(block)
-        print("SANG-TODO block table: ", block_table)
 
         # Assign the block table for each sequence.
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):

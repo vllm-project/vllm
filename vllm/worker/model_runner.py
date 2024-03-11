@@ -170,7 +170,8 @@ class ModelRunner:
             seq_data = seq_group_metadata.seq_data[seq_id]
             prefill_start, prefill_end = seq_data.get_prefill_range()
             prompt_tokens = seq_data.get_token_ids()[prefill_start:prefill_end]
-            prompt_len = len(prompt_tokens)
+            # prompt_len = len(prompt_tokens)
+            prompt_len = prefill_end
             prompt_lens.append(prompt_len)
 
             computed_len = prefill_start
@@ -194,8 +195,7 @@ class ModelRunner:
                 computed_len = len(computed_block_nums) * self.block_size
                 prompt_tokens = prompt_tokens[computed_len:]
                 block_tables.append(computed_block_nums)
-            # elif self.scheduler_config.chunked_prefill_enabled:
-            else:
+            elif self.scheduler_config.chunked_prefill_enabled:
                 # Update the block table so that KV cache location
                 # can be found. TODO(sang): Make it work with
                 # prefix caching.
@@ -206,13 +206,12 @@ class ModelRunner:
                     block_table = seq_group_metadata.block_tables[seq_id]
                     block_tables.append(block_table)
                 computed_len = prefill_start
-            # else:
-            #     # Normal prefill. Don't update the block table because
-            #     # we don't need to use KV cacahe when running attentions.
-            #     block_tables.append([])
-            #     assert prefill_start == 0
-            #     computed_len = prefill_start
-
+            else:
+                # Normal prefill. Don't update the block table because
+                # we don't need to use KV cacahe when running attentions.
+                block_tables.append([])
+                assert prefill_start == 0
+                computed_len = prefill_start
             context_lens.append(computed_len)
             subquery_lens.append(prefill_end - computed_len)
 
@@ -725,6 +724,7 @@ class ModelRunner:
             hidden_states=hidden_states,
             sampling_metadata=sampling_metadata,
         )
+        # print("SANG-TODO output: ", output)
         return output
 
     @torch.inference_mode()

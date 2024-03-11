@@ -90,13 +90,8 @@ class XFormersBackend:
         key = key[:num_prompt_tokens]
         value = value[:num_prompt_tokens]
 
-        # assert query.shape[0] == num_prompt_tokens
-        # assert decode_query.shape[0] == num_generation_tokens
-        # print("num_prompt_tokens", num_prompt_tokens)
-        # print("num_generation_tokens", num_generation_tokens)
-        # print("output", output.size())
-        # assert (num_prompt_tokens and num_generation_tokens) == 0, (
-        #     num_prompt_tokens, num_generation_tokens)
+        assert query.shape[0] == num_prompt_tokens
+        assert decode_query.shape[0] == num_generation_tokens
 
         if num_prompt_tokens > 0:
             prefill_input_metadata = input_metadata.prefill_input_metadata()
@@ -165,7 +160,6 @@ class XFormersBackend:
                     query = query.unflatten(0, (num_tokens))
                     key = key.unflatten(0, (num_tokens))
                     value = value.unflatten(0, (num_tokens))
-                print("SANG-TODO prefill, num_prompt_tokens, ", num_prompt_tokens)
                 out = xops.memory_efficient_attention_forward(
                     query,
                     key,
@@ -180,8 +174,6 @@ class XFormersBackend:
 
             else:
                 # prefix-enabled attention
-                print("SANG-TODO prefix prefill, num_prompt_tokens, ", num_prompt_tokens)
-                # breakpoint()
                 output[:num_prompt_tokens] = PagedAttentionImpl.forward_prefix(
                     query,
                     key,

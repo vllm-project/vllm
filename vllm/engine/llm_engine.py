@@ -591,7 +591,6 @@ class LLMEngine:
 
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
                                         outputs: SequenceGroupOutput) -> None:
-
         # Process prompt logprobs
         prompt_logprobs = outputs.prompt_logprobs
         if prompt_logprobs is not None:
@@ -645,6 +644,7 @@ class LLMEngine:
             child_seqs.append((parent, parent))
 
         for seq, _ in child_seqs:
+            # print("SANG-TODO decode sequences: ", seq_group)
             self._decode_sequence(seq, seq_group.sampling_params)
             self._check_stop(seq, seq_group.sampling_params)
 
@@ -785,8 +785,8 @@ class LLMEngine:
             # outputs are ignored. For seq_group finished chunked
             # prefilling, it will be considered as prompting.
             if i < scheduler_outputs.num_chunked_prefill_groups:
-                print("SANG-TODO Continue chunked prefill")
                 continue
+
             self._process_sequence_group_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.
@@ -805,6 +805,8 @@ class LLMEngine:
         # Log stats.
         if self.log_stats:
             self.stat_logger.log(self._get_stats(scheduler_outputs))
+        # for o in request_outputs:
+        #     print(o.outputs)
         return request_outputs
 
     def step(self) -> List[RequestOutput]:

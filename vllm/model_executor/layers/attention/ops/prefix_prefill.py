@@ -74,7 +74,6 @@ if triton.__version__ >= "2.1.0":
             Q + off_q,
             mask=offs_m[:, None] < cur_batch_seq_len - cur_batch_ctx_len,
             other=0.0)
-
         # # initialize pointer to m and l
         m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
         l_i = tl.zeros([BLOCK_M], dtype=tl.float32)

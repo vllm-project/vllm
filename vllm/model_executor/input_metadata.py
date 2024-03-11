@@ -135,7 +135,6 @@ class InputMetadata:
             self.block_tables[:self.num_prompts],
             False,
             self.kv_cache_dtype,
-            self.flash_style,
         )
 
     def decode_input_metadata(self) -> "InputMetadata":
@@ -154,7 +153,6 @@ class InputMetadata:
             self.block_tables[self.num_prompts:],
             self.use_cuda_graph,
             self.kv_cache_dtype,
-            self.flash_style,
         )
 
     def __repr__(self) -> str:
@@ -167,5 +165,4 @@ class InputMetadata:
                 f"block_tables={self.block_tables}, "
                 f"use_cuda_graph={self.use_cuda_graph}, "
                 f"kv_cache_dtype={self.kv_cache_dtype}) "
-                f"num_valid_tokens={self.num_valid_tokens} "
-                f"flash_style={self.flash_style}")
+                f"num_valid_tokens={self.num_valid_tokens}")
