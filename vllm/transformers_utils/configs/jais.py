@@ -14,7 +14,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" JAIS configuration"""
+"""JAIS configuration"""
 
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
@@ -81,7 +81,7 @@ class JAISConfig(PretrainedConfig):
             scale_attn_weights to `True` as well.
         alibi_scaling (`Dict`, *optional*):
             Dictionary containing the scaling configuration for ALiBi embeddings. Currently only supports linear
-            scaling strategy. Can specify either the scaling `factor` (must be a float greater than 1) for fixed scaling 
+            scaling strategy. Can specify either the scaling `factor` (must be a float greater than 1) for fixed scaling
             or `train_seq_len` for dynamic scaling on input samples with sequence length > `train_seq_len`. The expected
             formats are `{"type": strategy name, "factor": scaling factor}` or
             `{"type": strategy name, "train_seq_len": training sequence length}`.
@@ -170,12 +170,14 @@ class JAISConfig(PretrainedConfig):
         self.alibi_scaling = alibi_scaling
         self._alibi_scaling_validation()
         if architectures is None:
-            architectures = ['JAISLMHeadModel']
+            architectures = ["JAISLMHeadModel"]
 
-        super().__init__(bos_token_id=bos_token_id,
-                         eos_token_id=eos_token_id,
-                         architectures=architectures,
-                         **kwargs)
+        super().__init__(
+            bos_token_id=bos_token_id,
+            eos_token_id=eos_token_id,
+            architectures=architectures,
+            **kwargs,
+        )
 
     def _alibi_scaling_validation(self):
         """
@@ -184,11 +186,14 @@ class JAISConfig(PretrainedConfig):
         if self.alibi_scaling is None:
             return
 
-        if not isinstance(self.alibi_scaling,
-                          dict) or len(self.alibi_scaling) != 2:
+        if (
+            not isinstance(self.alibi_scaling, dict)
+            or len(self.alibi_scaling) != 2
+        ):
             raise ValueError(
                 "`alibi_scaling` must be a dictionary with two fields, `type` and `factor` or `type` and `train_seq_len`, "
-                f"got {self.alibi_scaling}")
+                f"got {self.alibi_scaling}"
+            )
         alibi_scaling_type = self.alibi_scaling.get("type", None)
         alibi_scaling_factor = self.alibi_scaling.get("factor", None)
         alibi_dynamic_scaling = self.alibi_scaling.get("train_seq_len", None)
@@ -196,13 +201,19 @@ class JAISConfig(PretrainedConfig):
             raise ValueError(
                 f"`alibi_scaling`'s type field must be 'linear', got {alibi_scaling_type}"
             )
-        if alibi_scaling_factor is not None and not isinstance(
-                alibi_scaling_factor, float) or alibi_scaling_factor <= 1.0:
+        if (
+            alibi_scaling_factor is not None
+            and not isinstance(alibi_scaling_factor, float)
+            or alibi_scaling_factor <= 1.0
+        ):
             raise ValueError(
                 f"`alibi_scaling`'s factor field must be a float > 1.0, got {alibi_scaling_factor}"
             )
-        if alibi_dynamic_scaling is not None and not isinstance(
-                alibi_dynamic_scaling, int) or alibi_dynamic_scaling <= 1:
+        if (
+            alibi_dynamic_scaling is not None
+            and not isinstance(alibi_dynamic_scaling, int)
+            or alibi_dynamic_scaling <= 1
+        ):
             raise ValueError(
                 f"`alibi_scaling`'s `train_seq_len` field must be an integer > 1, got {alibi_dynamic_scaling}"
             )
