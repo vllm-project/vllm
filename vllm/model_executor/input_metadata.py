@@ -48,7 +48,7 @@ class InputMetadata:
         block_tables: Optional[torch.Tensor],
         use_cuda_graph: bool,
         kv_cache_dtype: str,
-        self.flash_style: bool,
+        flash_style: bool,
     ) -> None:
         self.is_prompt = is_prompt
         self.prompt_lens = prompt_lens

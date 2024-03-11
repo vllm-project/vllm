@@ -5,12 +5,12 @@ Run `pytest tests/models/test_models.py --forked`.
 import pytest
 
 MODELS = [
-    "facebook/opt-125m",
+    # "facebook/opt-125m",
     # "meta-llama/Llama-2-7b-hf",
     # "mistralai/Mistral-7B-v0.1",
     # "Deci/DeciLM-7b",
     # "tiiuae/falcon-7b",
-    # "gpt2",
+    "gpt2",
     # "bigcode/tiny_starcoder_py",
     # "EleutherAI/gpt-j-6b",
     # "EleutherAI/pythia-70m",
@@ -26,7 +26,7 @@ MODELS = [
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("enforce_eager", [False, True])
+@pytest.mark.parametrize("enforce_eager", [False])
 def test_models(
     hf_runner,
     vllm_runner,

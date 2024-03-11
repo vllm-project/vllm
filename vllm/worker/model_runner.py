@@ -197,7 +197,7 @@ class ModelRunner:
             # NOTE(sang): prefill_end is always # of prompts if chunked
             # prefill is not enabled. Prefix caching is not working with
             # chunked prefill now.
-            input_positions.append(
+            input_positions.extend(
                 list(range(computed_len, computed_len + prefill_end)))
 
             lora_id = seq_group_metadata.lora_int_id
@@ -309,6 +309,7 @@ class ModelRunner:
             block_tables=block_tables,
             use_cuda_graph=False,
             kv_cache_dtype=self.kv_cache_dtype,
+            flash_style=self.flash_style,
         )
         return (input_tokens, input_positions, input_metadata, prompt_lens,
                 subquery_lens, lora_index_mapping, lora_prompt_mapping,
@@ -448,6 +449,7 @@ class ModelRunner:
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
             kv_cache_dtype=self.kv_cache_dtype,
+            flash_style=self.flash_style,
         )
         return (input_tokens, input_positions, input_metadata,
                 lora_index_mapping, lora_prompt_mapping, lora_requests)
