@@ -772,7 +772,7 @@ class LLMEngine:
 
         now = time.time()
         # Update the scheduled sequence groups with the model outputs.
-        scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups[]
+        scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
 
         # If prefix caching is enabled, mark all blocks in the sequence groups
         # as completed so that future requests don't attempt to recompute them
@@ -785,6 +785,7 @@ class LLMEngine:
             # outputs are ignored. For seq_group finished chunked
             # prefilling, it will be considered as prompting.
             if i < scheduler_outputs.num_chunked_prefill_groups:
+                print("SANG-TODO Continue chunked prefill")
                 continue
             self._process_sequence_group_outputs(seq_group, outputs)
 

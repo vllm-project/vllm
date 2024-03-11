@@ -657,6 +657,7 @@ class Scheduler:
         print("SANG-TODO total: ", len(scheduler_outputs.scheduled_seq_groups))
         print("SANG-TODO prompt: ", scheduler_outputs.num_prompt_groups)
         print("SANG-TODO chunked: ", scheduler_outputs.num_chunked_prefill_groups)
+        assert scheduler_outputs.num_chunked_prefill_groups == 0
 
         now = time.time()
 

@@ -92,9 +92,9 @@ class XFormersBackend:
 
         assert query.shape[0] == num_prompt_tokens
         assert decode_query.shape[0] == num_generation_tokens
-        print("num_prompt_tokens", num_prompt_tokens)
-        print("num_generation_tokens", num_generation_tokens)
-        print("output", output.size())
+        # print("num_prompt_tokens", num_prompt_tokens)
+        # print("num_generation_tokens", num_generation_tokens)
+        # print("output", output.size())
         # assert (num_prompt_tokens and num_generation_tokens) == 0, (
         #     num_prompt_tokens, num_generation_tokens)
 

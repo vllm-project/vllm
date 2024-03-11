@@ -197,7 +197,7 @@ class ModelRunner:
                 computed_len = len(computed_block_nums) * self.block_size
                 prompt_tokens = prompt_tokens[computed_len:]
                 block_tables.append(computed_block_nums)
-            elif self.scheduler_config.chunked_prefill_enabled:
+            elif False:
                 # Update the block table so that KV cache location
                 # can be found. TODO(sang): Make it work with
                 # prefix caching.
