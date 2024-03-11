@@ -163,8 +163,8 @@ def prepare_hf_model_weights(
     revision: Optional[str] = None,
 ) -> Tuple[str, List[str], bool]:
     # Download model weights from huggingface.
-    is_local = os.path.isdir(
-        model_name_or_path) and load_format != "tensorizer"
+    is_local = os.path.isdir(model_name_or_path) \
+               and load_format != "tensorizer"
     use_safetensors = False
     # Some quantized models use .pt files for storing the weights.
     if load_format == "auto":
@@ -290,10 +290,10 @@ def hf_model_weights_iterator(
                 param = np.load(f)
             yield name, torch.from_numpy(param)
     elif load_format == "tensorizer":
-        logger.warning("Deserializing HuggingFace models are not optimized for "
+        logger.warning("Deserializing HuggingFace models is not optimized for "
                        "loading on vLLM, as tensorizer is forced to load to CPU. "
                        "Consider deserializing a vLLM model instead for faster "
-                       "load times. See the `tensorize_vllm_model.py` example "
+                       "load times. See the examples/tensorize_vllm_model.py example "
                        "script for serializing vLLM models.")
         deserializer_args = tensorizer_args.deserializer_params
         stream_params = tensorizer_args.stream_params

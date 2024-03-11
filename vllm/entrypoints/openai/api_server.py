@@ -14,7 +14,8 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import make_asgi_app
 
 import vllm
-from vllm.engine.arg_utils import AsyncEngineArgs, TensorizerArgs
+from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.model_executor.tensorizer_loader import TensorizerArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,

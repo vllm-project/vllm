@@ -419,6 +419,11 @@ class EngineArgs:
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         # Set the attributes from the parsed arguments.
+
+        # tensorizer_args are not part of the CLI arguments, so we need to
+        # allow for CLI args and EngineArgs parameter incongruency so that
+        # we can instantiate TensorizerArgs if load_format = tensorizer
+        # by not populating engine_args one-to-one with the CLI arguments.
         engine_args = cls(**{
             attr: getattr(args, attr)
             for attr in attrs if hasattr(args, attr)
