@@ -33,8 +33,7 @@ import numpy as np
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from .common import instantiate_benchmark_results_dict, generate_synthetic_requests, print_benchmark_io
-# TODO (move this to scripts)
+from .common import instantiate_benchmark_results_dict, generate_synthetic_requests, print_serving_request_io
 from .datasets_registry import get_dataset, DatasetArgs
 
 from neuralmagic.benchmarks.scripts.backend_request_func import (
@@ -100,7 +99,9 @@ def calculate_metrics(
             total_output += output_len
             total_input += input_requests[i][1]
             latencies.append(outputs[i].latency)
-            tpots.append((outputs[i].latency - outputs[i].ttft) / output_len)
+            if output_len > 1:
+                tpots.append(
+                    (outputs[i].latency - outputs[i].ttft) / (output_len - 1))
             ttfts.append(outputs[i].ttft)
             completed += 1
 
@@ -167,7 +168,7 @@ async def benchmark(backend: str, api_url: str, model_id: str,
 
     # Dump model i/o
     if log_model_io:
-        print_benchmark_io(outputs)
+        print_serving_request_io(input_requests, outputs)
 
     metrics = calculate_metrics(
         input_requests=input_requests,

@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 from transformers import AutoTokenizer
-from .common import instantiate_benchmark_results_dict, generate_synthetic_requests, warmup_vllm_engine, num_available_gpus
+from .common import instantiate_benchmark_results_dict, generate_synthetic_requests, warmup_vllm_engine, num_available_gpus, print_request_outputs
 from .datasets_registry import get_dataset, DatasetArgs
 
 
@@ -25,21 +25,21 @@ def get_tensor_parallel_size(args: argparse.Namespace) -> int:
     return tensor_parallel_size
 
 
-def run_vllm(
-    requests: List[Tuple[str, int, int]],
-    model: str,
-    tokenizer: str,
-    quantization: Optional[str],
-    tensor_parallel_size: int,
-    seed: int,
-    n: int,
-    use_beam_search: bool,
-    trust_remote_code: bool,
-    dtype: str,
-    max_model_len: Optional[int],
-    enforce_eager: bool,
-    sparsity: Optional[str],
-) -> float:
+def run_vllm(requests: List[Tuple[str, int, int]],
+             model: str,
+             tokenizer: str,
+             quantization: Optional[str],
+             tensor_parallel_size: int,
+             seed: int,
+             n: int,
+             use_beam_search: bool,
+             trust_remote_code: bool,
+             dtype: str,
+             max_model_len: Optional[int],
+             enforce_eager: bool,
+             sparsity: Optional[str],
+             num_warmup_prompts: int,
+             log_model_io: bool = False) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(
         model=model,
@@ -53,13 +53,15 @@ def run_vllm(
         enforce_eager=enforce_eager,
     )
 
-    warmup_vllm_engine(engine=llm, model=model, num_prompts=1000)
+    warmup_vllm_engine(engine=llm, model=model, num_prompts=num_warmup_prompts)
 
     # Add the requests to the engine.
     for prompt, _, output_len in requests:
         sampling_params = SamplingParams(
             n=n,
-            temperature=0.0 if use_beam_search else 1.0,
+            # TODO (varun) Make temperature configurable
+            #temperature=0.0 if use_beam_search else 1.0,
+            temperature=0.0,
             top_p=1.0,
             use_beam_search=use_beam_search,
             ignore_eos=True,
@@ -74,8 +76,11 @@ def run_vllm(
 
     start = time.perf_counter()
     # FIXME(woosuk): Do not use internal method.
-    llm._run_engine(use_tqdm=True)
+    outputs = llm._run_engine(use_tqdm=True)
     end = time.perf_counter()
+
+    if log_model_io:
+        print_request_outputs(outputs)
 
     return end - start
 
@@ -96,7 +101,7 @@ def main(args: argparse.Namespace):
                                    num_samples=args.num_prompts,
                                    max_len=2048,
                                    seed=42,
-                               ))
+                                   fixed_output_len=args.output_len))
     else:
         # Make a synthetic dataset.
         requests = generate_synthetic_requests(args.input_len, args.output_len,
@@ -114,7 +119,9 @@ def main(args: argparse.Namespace):
                             args.dtype,
                             args.max_model_len,
                             args.enforce_eager,
-                            sparsity=args.sparsity)
+                            sparsity=args.sparsity,
+                            num_warmup_prompts=args.num_warmup_prompts,
+                            log_model_io=args.log_model_io)
 
     total_prompt_tokens = sum(prompt_len for _, prompt_len, _ in requests)
     total_output_tokens = sum(output_len for _, _, output_len in requests)
@@ -189,10 +196,15 @@ if __name__ == "__main__":
                         type=int,
                         default=1000,
                         help="Number of prompts to process.")
+    parser.add_argument("--num-warmup-prompts",
+                        type=int,
+                        default=1000,
+                        help="Number of prompts to do warmups with.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument('--trust-remote-code',
                         action='store_true',
                         help='trust remote code from huggingface')
+    parser.add_argument("--log-model-io", action="store_true")
     parser.add_argument(
         '--max-model-len',
         type=int,

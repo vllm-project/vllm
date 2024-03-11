@@ -111,7 +111,9 @@ async def async_request_vllm(
             "n": 1,
             "best_of": request_func_input.best_of,
             "use_beam_search": request_func_input.use_beam_search,
-            "temperature": 0.0 if request_func_input.use_beam_search else 1.0,
+            # TODO (varun) : Make temperature configurable
+            #"temperature": 0.0 if request_func_input.use_beam_search else 1.0,
+            "temperature": 0.0,
             "top_p": 1.0,
             "max_tokens": request_func_input.output_len,
             "ignore_eos": True,
