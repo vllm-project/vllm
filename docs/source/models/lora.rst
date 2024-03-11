@@ -92,7 +92,8 @@ LoRA adapter requests if they were provided and ``max_loras`` is set high enough
 
 The following is an example request 
 
-.. code-block::bash 
+.. code-block:: bash
+
     curl http://localhost:8000/v1/completions \
         -H "Content-Type: application/json" \
         -d '{
