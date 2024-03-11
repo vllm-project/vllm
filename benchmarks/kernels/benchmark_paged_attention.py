@@ -65,17 +65,14 @@ def main(
     block_tables = torch.tensor(block_tables, dtype=torch.int, device=device)
 
     # Create the KV cache.
-    flash_style = version == "flash"
-    key_caches, value_caches = create_kv_caches_with_random(
-        NUM_BLOCKS,
-        block_size,
-        1,
-        num_kv_heads,
-        head_size,
-        kv_cache_dtype,
-        dtype,
-        device=device,
-        flash_style=flash_style)
+    key_caches, value_caches = create_kv_caches_with_random(NUM_BLOCKS,
+                                                            block_size,
+                                                            1,
+                                                            num_kv_heads,
+                                                            head_size,
+                                                            kv_cache_dtype,
+                                                            dtype,
+                                                            device=device)
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Prepare for the paged attention kernel.
@@ -135,16 +132,6 @@ def main(
                     alibi_slopes,
                     kv_cache_dtype,
                 )
-            elif version == "flash":
-                flash_attn_with_kvcache_paged(
-                    query.view(num_seqs, 1, num_query_heads, head_size),
-                    key_cache,
-                    value_cache,
-                    scale,
-                    block_tables,
-                    context_lens,
-                    alibi_slopes=alibi_slopes,
-                )
             else:
                 raise ValueError(f"Invalid version: {version}")
         torch.cuda.synchronize()
@@ -172,7 +159,7 @@ if __name__ == '__main__':
         description="Benchmark the paged attention kernel.")
     parser.add_argument("--version",
                         type=str,
-                        choices=["v1", "v2", "flash"],
+                        choices=["v1", "v2"],
                         default="v2")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--context-len", type=int, default=4096)

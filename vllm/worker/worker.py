@@ -20,8 +20,6 @@ from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
 from vllm.lora.request import LoRARequest
 
-MAX_INT_32 = 2**31 - 1
-
 
 class Worker:
     """A worker class that executes (a partition of) the model on a GPU.
@@ -146,13 +144,6 @@ class Worker:
         gc.collect()
         torch.cuda.empty_cache()
 
-        # Flash attention only allows max(int32) slots.
-        # TODO: Remove this once we support int64 in flash-attention.
-        if self.model_config.flash_style:
-            num_gpu_blocks = min(num_gpu_blocks,
-                                 MAX_INT_32 // cache_block_size)
-            num_cpu_blocks = min(num_cpu_blocks,
-                                 MAX_INT_32 // cache_block_size)
         # print("SANG-TODO profile_num_available_blocks done")
 
         return num_gpu_blocks, num_cpu_blocks

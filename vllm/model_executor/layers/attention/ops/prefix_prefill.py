@@ -696,7 +696,7 @@ if triton.__version__ >= "2.1.0":
             )
             return
 
-        _fwd_kernel_flash_attn_v2[grid](
+        _fwd_kernel[grid](
             q,
             k,
             v,

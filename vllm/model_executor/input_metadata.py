@@ -54,7 +54,6 @@ class InputMetadata:
         block_tables: Optional[torch.Tensor],
         use_cuda_graph: bool,
         kv_cache_dtype: str,
-        flash_style: bool,
     ) -> None:
         # [prompt_batch_size + 1]
         # The length of prompts. If chunked prefill is enabled,
@@ -110,7 +109,6 @@ class InputMetadata:
         self.block_tables = block_tables
         self.use_cuda_graph = use_cuda_graph
         self.kv_cache_dtype = kv_cache_dtype
-        self.flash_style = flash_style
         self.num_chunked_prefill = num_chunked_prefill
 
         # Set during the execution of the first attention op.

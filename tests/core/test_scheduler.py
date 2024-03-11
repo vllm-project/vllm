@@ -143,7 +143,6 @@ def test_scheduler_schedule_chunked_prefill():
         max_model_len,
         max_chunked_prefill_len=max_chunked_prefill_len,
         max_num_prompt_seqs=max_num_prompt_seqs,
-        flash_style=True,
     )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 8
