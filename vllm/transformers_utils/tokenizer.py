@@ -64,6 +64,10 @@ def get_tokenizer(
         logger.warning(
             "Using a slow tokenizer. This might cause a significant "
             "slowdown. Consider using a fast tokenizer instead.")
+    if tokenizer.add_eos_token==True:
+        logger.warning(
+            "add_eos_token has been set to True for tokenizer. "
+            "This may cause the model to generate irrelevant sequences."
     return tokenizer
 
 
