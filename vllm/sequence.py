@@ -170,6 +170,9 @@ class Sequence:
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
+    def maybe_get_hash_of_block(self, logical_index: int) -> Optional[int]:
+        return self.logical_token_blocks[logical_index].maybe_get_content_hash()
+
     def hash_of_block(self, logical_idx: int) -> int:
         # Compute the number of tokens in the sequence
         # TODO: The current hashing function is O(L^2). We should optimize
@@ -181,9 +184,11 @@ class Sequence:
         return logical_idx * self.block_size + self.block_size
 
     def _append_logical_block(self) -> None:
+        previous_block = (self.logical_token_blocks[-1] if self.logical_token_blocks else None)
         block = LogicalTokenBlock(
             block_number=len(self.logical_token_blocks),
             block_size=self.block_size,
+            previous_block=previous_block,
         )
         self.logical_token_blocks.append(block)
 
