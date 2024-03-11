@@ -180,6 +180,9 @@ class Sequence:
         return maybe_block_hash
 
     def hash_of_block(self, logical_idx: int) -> int:
+        # NOTE: (80% confident) this has a bug where the input prompt len is < block size.
+        # It will produce a hash when it shouldn't.
+
         # Compute the number of tokens in the sequence
         # TODO: The current hashing function is O(L^2). We should optimize
         # this in the future.
