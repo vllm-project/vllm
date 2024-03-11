@@ -119,7 +119,8 @@ class DeepseekMoE(nn.Module):
                                      linear_method=None)
 
         if config.n_shared_experts is not None:
-            intermediate_size = config.moe_intermediate_size * config.n_shared_experts
+            intermediate_size = (config.moe_intermediate_size *
+                                 config.n_shared_experts)
             self.shared_experts = DeepseekMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=intermediate_size,
