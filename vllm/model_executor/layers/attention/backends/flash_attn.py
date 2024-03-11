@@ -1,7 +1,6 @@
 """Attention layer with Flash and PagedAttention."""
 from typing import List, Optional
 
-# NOTE(woosuk): This imports flash_attn under vllm/thirdparty_files/.
 from flash_attn import flash_attn_func
 import torch
 
