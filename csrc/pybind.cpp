@@ -23,6 +23,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     &silu_and_mul,
     "Activation function used in SwiGLU.");
   ops.def(
+    "scaled_silu_and_mul",
+    &scaled_silu_and_mul,
+    "Compute SwiGLU activation function and scale per channel");
+  ops.def(
     "gelu_and_mul",
     &gelu_and_mul,
     "Activation function used in GeGLU.");
