@@ -58,10 +58,11 @@ class TensorizerArgs:
             "S3_SECRET_ACCESS_KEY") or None
         self.s3_endpoint = os.environ.get("S3_ENDPOINT_URL") or None
 
-        self.credentials = {
+        self.stream_params = {
             "s3_access_key_id": self.s3_access_key_id,
             "s3_secret_access_key": self.s3_secret_access_key,
             "s3_endpoint": self.s3_endpoint,
+            "force_http": True
         }
 
         # Omitting self.dtype and self.device as this behaves weirdly
@@ -72,7 +73,6 @@ class TensorizerArgs:
             "plaid_mode_buffers": self.plaid_mode_buffers,
             "verify_hash": self.verify_hash,
             "encryption": self.deserializer_encryption_key,
-            "force_http": True
             # "dtype":self.dtype,
             # "device":self.device,
         }
@@ -163,7 +163,7 @@ class TensorizerAgent:
         start = time.time()
         stream = stream_io.open_stream(self.tensorizer_args.tensorizer_uri,
                                        mode="rb",
-                                       **self.tensorizer_args.credentials)
+                                       **self.tensorizer_args.stream_params)
         deserializer = TensorDeserializer(
             stream, **self.tensorizer_args.deserializer_params)
         deserializer.load_into_module(self.model)
