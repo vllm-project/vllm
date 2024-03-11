@@ -1,4 +1,4 @@
-from typing import Optional, Union, ClassVar
+from typing import TYPE_CHECKING, Optional, Union, ClassVar
 from dataclasses import dataclass
 import os
 from packaging.version import Version
@@ -9,6 +9,9 @@ from transformers import PretrainedConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config
 from vllm.utils import get_cpu_memory, is_hip, is_neuron, get_nvcc_cuda_version
+
+if TYPE_CHECKING:
+    from ray.util.placement_group import PlacementGroup
 
 logger = init_logger(__name__)
 
@@ -397,6 +400,7 @@ class ParallelConfig:
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
         ray_workers_use_nsight: bool = False,
+        placement_group: Optional["PlacementGroup"] = None,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         if is_neuron():
@@ -412,6 +416,7 @@ class ParallelConfig:
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
         self.ray_workers_use_nsight = ray_workers_use_nsight
+        self.placement_group = placement_group
 
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
         # Ray worker is not supported for Neuron backend.
