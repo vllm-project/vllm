@@ -54,11 +54,11 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 class Qwen2MLP(nn.Module):
 
     def __init__(
-            self,
-            hidden_size: int,
-            intermediate_size: int,
-            hidden_act: str,
-            linear_method: Optional[LinearMethodBase] = None,
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -111,7 +111,7 @@ class Qwen2Attention(nn.Module):
         self.head_dim = hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim ** -0.5
+        self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
         self.sliding_window = sliding_window if use_sliding_window else None
 
@@ -143,11 +143,11 @@ class Qwen2Attention(nn.Module):
                               sliding_window=self.sliding_window)
 
     def forward(
-            self,
-            positions: torch.Tensor,
-            hidden_states: torch.Tensor,
-            kv_cache: KVCache,
-            input_metadata: InputMetadata,
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        kv_cache: KVCache,
+        input_metadata: InputMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -161,10 +161,10 @@ class Qwen2Attention(nn.Module):
 class Qwen2DecoderLayer(nn.Module):
 
     def __init__(
-            self,
-            config: Qwen2Config,
-            layer_idx: int,
-            linear_method: Optional[LinearMethodBase] = None,
+        self,
+        config: Qwen2Config,
+        layer_idx: int,
+        linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -181,7 +181,7 @@ class Qwen2DecoderLayer(nn.Module):
             use_sliding_window=use_sliding_window,
             linear_method=linear_method,
             sliding_window=config.sliding_window)
-        self.mlp = Qwen2MLP(
+        self.mlp = (
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
@@ -193,12 +193,12 @@ class Qwen2DecoderLayer(nn.Module):
                                                 eps=config.rms_norm_eps)
 
     def forward(
-            self,
-            positions: torch.Tensor,
-            hidden_states: torch.Tensor,
-            kv_cache: KVCache,
-            input_metadata: InputMetadata,
-            residual: Optional[torch.Tensor],
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        kv_cache: KVCache,
+        input_metadata: InputMetadata,
+        residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
@@ -224,10 +224,10 @@ class Qwen2DecoderLayer(nn.Module):
 class Qwen2Model(nn.Module):
 
     def __init__(
-            self,
-            config: Qwen2Config,
-            linear_method: Optional[LinearMethodBase] = None,
-            lora_config: Optional[LoRAConfig] = None,
+        self,
+        config: Qwen2Config,
+        linear_method: Optional[LinearMethodBase] = None,
+        lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -247,11 +247,11 @@ class Qwen2Model(nn.Module):
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            kv_caches: List[KVCache],
-            input_metadata: InputMetadata,
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[KVCache],
+        input_metadata: InputMetadata,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
@@ -292,10 +292,10 @@ class Qwen2ForCausalLM(nn.Module):
     embedding_padding_modules = []
 
     def __init__(
-            self,
-            config: Qwen2Config,
-            linear_method: Optional[LinearMethodBase] = None,
-            lora_config: Optional[LoRAConfig] = None,
+        self,
+        config: Qwen2Config,
+        linear_method: Optional[LinearMethodBase] = None,
+        lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -316,20 +316,20 @@ class Qwen2ForCausalLM(nn.Module):
         self.sampler = Sampler(self.unpadded_vocab_size, config.vocab_size)
 
     def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            kv_caches: List[KVCache],
-            input_metadata: InputMetadata,
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[KVCache],
+        input_metadata: InputMetadata,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    input_metadata)
         return hidden_states
 
     def sample(
-            self,
-            hidden_states: torch.Tensor,
-            sampling_metadata: SamplingMetadata,
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
                                    sampling_metadata)
