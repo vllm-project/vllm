@@ -45,7 +45,6 @@ class EngineArgs:
     lora_extra_vocab_size: int = 256
     lora_dtype = 'auto'
     max_cpu_loras: Optional[int] = None
-    flash_style: bool = False
     device: str = 'auto'
     ray_workers_use_nsight: bool = False
     max_chunked_prefill_len: int = -1
@@ -285,9 +284,6 @@ class EngineArgs:
                             default=EngineArgs.device,
                             choices=["auto", "cuda", "neuron"],
                             help='Device type for vLLM execution.')
-        parser.add_argument('--flash-style',
-                            action='store_true',
-                            help='use flash attention.')
         parser.add_argument(
             '--max-chunked-prefill-len',
             type=int,
@@ -320,14 +316,12 @@ class EngineArgs:
             self.dtype, self.seed, self.revision, self.code_revision,
             self.tokenizer_revision, self.max_model_len, self.quantization,
             self.enforce_eager, self.max_context_len_to_capture,
-            self.max_logprobs,
-            self.flash_style)
+            self.max_logprobs)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
                                    model_config.get_sliding_window(),
-                                   self.enable_prefix_caching,
-                                   self.flash_style)
+                                   self.enable_prefix_caching)
         parallel_config = ParallelConfig(self.pipeline_parallel_size,
                                          self.tensor_parallel_size,
                                          self.worker_use_ray,
@@ -340,7 +334,6 @@ class EngineArgs:
             model_config.max_model_len,
             max_chunked_prefill_len=self.max_chunked_prefill_len,
             max_num_prompt_seqs=self.max_num_prompt_seqs,
-            flash_style=self.flash_style,
         )
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,

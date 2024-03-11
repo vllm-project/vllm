@@ -67,7 +67,6 @@ def test_models(
     flash_attn_model = vllm_runner(model,
                                    dtype=dtype,
                                    block_size=block_size,
-                                   flash_style=True,
                                    tensor_parallel_size=tensor_parallel_size)
     for i in range(10):
         prompts = [TEST_PROMPTS[j % len(TEST_PROMPTS)] for j in range(i)]

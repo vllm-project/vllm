@@ -60,33 +60,19 @@ class CacheEngine:
     def get_key_block_shape(self) -> Tuple[int, int, int, int]:
         element_size = torch.tensor([], dtype=self.dtype).element_size()
         x = 16 // element_size
-        if self.cache_config.flash_style:
-            return (
-                self.block_size,
-                self.num_heads,
-                self.head_size,
-            )
-        else:
-            return (
-                self.num_heads,
-                self.head_size // x,
-                self.block_size,
-                x,
-            )
+        return (
+            self.num_heads,
+            self.head_size // x,
+            self.block_size,
+            x,
+        )
 
     def get_value_block_shape(self) -> Tuple[int, int, int]:
-        if self.cache_config.flash_style:
-            return (
-                self.block_size,
-                self.num_heads,
-                self.head_size,
-            )
-        else:
-            return (
-                self.num_heads,
-                self.head_size,
-                self.block_size,
-            )
+        return (
+            self.num_heads,
+            self.head_size,
+            self.block_size,
+        )
 
     def allocate_gpu_cache(self) -> List[KVCache]:
         gpu_cache: List[KVCache] = []

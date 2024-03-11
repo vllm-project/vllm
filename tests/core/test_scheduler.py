@@ -144,7 +144,6 @@ def test_scheduler_schedule_chunked_prefill():
         max_paddings=1024,
         max_chunked_prefill_len=max_chunked_prefill_len,
         max_num_prompt_seqs=max_num_prompt_seqs,
-        flash_style=True,
     )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 8
@@ -239,4 +238,3 @@ def test_scheduler_max_seqs():
     # and one is prompting.
     _, out = scheduler.schedule()
     assert set(out.scheduled_seq_groups) == set([all_seq_groups[1]])
-

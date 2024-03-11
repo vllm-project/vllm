@@ -34,7 +34,6 @@ def main(args: argparse.Namespace):
         kv_cache_dtype=args.kv_cache_dtype,
         device=args.device,
         block_size=args.block_size,
-        flash_style=args.flash_style,
         max_chunked_prefill_len=args.max_chunked_prefill_len,
         max_num_prompt_seqs=args.max_num_prompt_seqs,
         ray_workers_use_nsight=args.ray_workers_use_nsight,
@@ -172,9 +171,6 @@ if __name__ == '__main__':
         default="cuda",
         choices=["cuda"],
         help='device type for vLLM execution, supporting CUDA only currently.')
-    parser.add_argument('--flash-style',
-                        action='store_true',
-                        help='enable flash attention')
     parser.add_argument('--block-size',
                         type=int,
                         default=16,
