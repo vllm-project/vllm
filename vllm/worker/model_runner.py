@@ -185,7 +185,11 @@ class ModelRunner:
                 prefix_block_tables.append(computed_block_nums)
                 context_len = computed_len
             else:
-                prefix_block_tables.append([])
+                if seq_group_metadata.block_tables is None:
+                    prefix_block_tables.append([])
+                else:
+                    block_table = seq_group_metadata.block_tables[seq_id]
+                    prefix_block_tables.append(block_table)
                 context_len = 0
             # actual prompt lens
             context_lens.append(context_len)
@@ -197,7 +201,7 @@ class ModelRunner:
             # NOTE(sang): prefill_end is always # of prompts if chunked
             # prefill is not enabled. Prefix caching is not working with
             # chunked prefill now.
-            input_positions.append(
+            input_positions.extend(
                 list(range(computed_len, computed_len + prefill_end)))
 
             lora_id = seq_group_metadata.lora_int_id
@@ -311,6 +315,7 @@ class ModelRunner:
             kv_cache_dtype=self.kv_cache_dtype,
             flash_style=self.flash_style,
         )
+
         return (input_tokens, input_positions, input_metadata, prompt_lens,
                 subquery_lens, lora_index_mapping, lora_prompt_mapping,
                 lora_requests)
