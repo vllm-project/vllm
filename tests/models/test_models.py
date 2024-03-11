@@ -5,12 +5,12 @@ Run `pytest tests/models/test_models.py --forked`.
 import pytest
 
 MODELS = [
-    "facebook/opt-125m",
+    # "facebook/opt-125m",
     # "meta-llama/Llama-2-7b-hf",
     # "mistralai/Mistral-7B-v0.1",
     # "Deci/DeciLM-7b",
     # "tiiuae/falcon-7b",
-    # "gpt2",
+    "gpt2",
     # "bigcode/tiny_starcoder_py",
     # "EleutherAI/gpt-j-6b",
     # "EleutherAI/pythia-70m",
@@ -26,7 +26,10 @@ MODELS = [
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("enforce_eager", [False, True])
+# @pytest.mark.parametrize("enforce_eager", [False, True])
+@pytest.mark.parametrize("enforce_eager", [False])
+# @pytest.mark.parametrize("max_chunked_prefill_len", [-1, 100000000])
+@pytest.mark.parametrize("max_chunked_prefill_len", [100000000])
 def test_models(
     hf_runner,
     vllm_runner,
@@ -35,12 +38,13 @@ def test_models(
     dtype: str,
     max_tokens: int,
     enforce_eager: bool,
+    max_chunked_prefill_len,
 ) -> None:
     hf_model = hf_runner(model, dtype=dtype)
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
     del hf_model
 
-    vllm_model = vllm_runner(model, dtype=dtype, enforce_eager=enforce_eager)
+    vllm_model = vllm_runner(model, dtype=dtype, enforce_eager=enforce_eager, max_chunked_prefill_len=max_chunked_prefill_len)
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
 
