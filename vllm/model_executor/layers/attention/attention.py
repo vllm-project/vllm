@@ -35,12 +35,12 @@ class Attention(nn.Module):
     ) -> None:
         super().__init__()
         if _use_flash_attn():
-            from vllm.model_executor.layers.attention.backends.flash_attn import FlashAttentionBackend
+            from vllm.model_executor.layers.attention.backends.flash_attn import FlashAttentionBackend  # noqa: E501
             self.backend = FlashAttentionBackend(num_heads, head_size, scale,
                                                  num_kv_heads, alibi_slopes,
                                                  sliding_window)
         else:
-            from vllm.model_executor.layers.attention.backends.xformers import XFormersBackend
+            from vllm.model_executor.layers.attention.backends.xformers import XFormersBackend  # noqa: E501
             self.backend = XFormersBackend(num_heads, head_size, scale,
                                            num_kv_heads, alibi_slopes,
                                            sliding_window)

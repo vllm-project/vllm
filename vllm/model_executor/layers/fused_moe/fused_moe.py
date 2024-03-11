@@ -30,9 +30,10 @@ def fused_moe_kernel(
     K,
     EM,
     num_valid_tokens,
-    # The stride variables represent how much to increase the ptr by when moving by 1
-    # element in a particular dimension. E.g. `stride_am` is how much to increase `a_ptr`
-    # by to get the element one row down (A has M rows).
+    # The stride variables represent how much to increase the ptr by when
+    # moving by 1 element in a particular dimension. E.g. `stride_am` is
+    # how much to increase `a_ptr` by to get the element one row down
+    # (A has M rows).
     stride_am,
     stride_ak,
     stride_be,
@@ -50,17 +51,30 @@ def fused_moe_kernel(
     compute_type: tl.constexpr,
 ):
     """
-    Implements the fused computation for a Mixture of Experts (MOE) using token and expert matrices.
+    Implements the fused computation for a Mixture of Experts (MOE) using
+    token and expert matrices.
 
     Key Parameters:
-    - A: The input tensor representing tokens with shape (*, K), where '*' can be any shape representing batches and K is the feature dimension of each token.
-    - B: The stacked MOE weight tensor with shape (E, N, K), where E is the number of experts, K is the input feature dimension, and N is the output feature dimension.
-    - C: The output cache tensor with shape (M, topk, N), where M is the total number of tokens post padding, topk is the number of times each token is repeated,
-        and N is the output feature dimension.
-    - sorted_token_ids: A tensor containing the sorted indices of tokens, repeated topk times and arranged by the expert index they are assigned to.
-    - expert_ids: A tensor containing the indices of the expert for each block. It determines which expert matrix from B should be used for each block in A.
-    This kernel performs the multiplication of a token by its corresponding expert matrix as determined by `expert_ids`. The sorting of `sorted_token_ids`
-    by expert index and padding ensures divisibility by BLOCK_SIZE_M, which is necessary to maintain consistency in block matrix multiplication across different blocks processed by the same expert.
+    - A: The input tensor representing tokens with shape (*, K), where '*' can
+        be any shape representing batches and K is the feature dimension of
+        each token.
+    - B: The stacked MOE weight tensor with shape (E, N, K), where E is
+        the number of experts, K is the input feature dimension, and N is
+        the output feature dimension.
+    - C: The output cache tensor with shape (M, topk, N), where M is the
+        total number of tokens post padding, topk is the number of times
+        each token is repeated, and N is the output feature dimension.
+    - sorted_token_ids: A tensor containing the sorted indices of tokens,
+        repeated topk times and arranged by the expert index they are
+        assigned to.
+    - expert_ids: A tensor containing the indices of the expert for each
+        block. It determines which expert matrix from B should be used for
+        each block in A.
+    This kernel performs the multiplication of a token by its corresponding
+    expert matrix as determined by `expert_ids`. The sorting of
+    `sorted_token_ids` by expert index and padding ensures divisibility by
+    BLOCK_SIZE_M, which is necessary to maintain consistency in block matrix
+    multiplication across different blocks processed by the same expert.
     """
     # -----------------------------------------------------------
     # Map program ids `pid` to the block of C it should compute.
@@ -105,7 +119,8 @@ def fused_moe_kernel(
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        # Load the next block of A and B, generate a mask by checking the K dimension.
+        # Load the next block of A and B, generate a mask by checking the
+        # K dimension.
         a = tl.load(a_ptrs,
                     mask=token_mask[:, None] &
                     (offs_k[None, :] < K - k * BLOCK_SIZE_K),
@@ -139,30 +154,41 @@ def moe_align_block_size(
         topk_ids: torch.Tensor, block_size: int,
         num_experts: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Aligns the token distribution across experts to be compatible with block size for matrix multiplication.
+    Aligns the token distribution across experts to be compatible with block
+    size for matrix multiplication.
 
     Parameters:
-    - topk_ids: A tensor of shape [total_tokens, top_k] representing the top-k expert indices for each token.
+    - topk_ids: A tensor of shape [total_tokens, top_k] representing the
+        top-k expert indices for each token.
     - block_size: The block size used in block matrix multiplication.
     - num_experts: The total number of experts.
 
     Returns:
-    - sorted_token_ids: A tensor containing the sorted token indices according to their allocated expert.
+    - sorted_token_ids: A tensor containing the sorted token indices according
+        to their allocated expert.
     - expert_ids: A tensor indicating the assigned expert index for each block.
-    - num_tokens_post_padded: The total number of tokens after padding, ensuring divisibility by block_size.
+    - num_tokens_post_padded: The total number of tokens after padding,
+        ensuring divisibility by block_size.
 
-    This function pads the number of tokens that each expert needs to process so that it is divisible by block_size. 
-    Padding ensures that during block matrix multiplication, the dimensions align correctly.
+    This function pads the number of tokens that each expert needs to process
+    so that it is divisible by block_size.
+    Padding ensures that during block matrix multiplication, the dimensions
+    align correctly.
 
     Example:
-    Given topk_ids = [[2, 3, 4], [1, 2, 4], [1, 3, 4], [1, 2, 3]], block_size = 4, and num_experts = 4:
-    - We initially have 12 tokens (after repeating 'top_k' times) and 4 experts, with each expert needing to process 3 tokens.
+    Given topk_ids = [[2, 3, 4], [1, 2, 4], [1, 3, 4], [1, 2, 3]],
+    block_size = 4, and num_experts = 4:
+    - We initially have 12 tokens (after repeating 'top_k' times) and 4 experts,
+        with each expert needing to process 3 tokens.
     - As block_size is 4, we pad 1 token for each expert.
     - First, flatten topk_ids to [2, 3, 4, 1, 2, 4, 1, 3, 4, 1, 2, 3].
     - Then append padding tokens [12, 12, 12, 12] for each block.
-    - After sorting by expert index, we obtain token_ids [3, 6, 9, 12, 0, 4, 10, 12, 1, 7, 11, 12, 2, 5, 8, 12]. 
-        Tokens 12 are non-existent (padding) and are ignored in the subsequent matrix multiplication.
-    - The padding ensures that the total number of tokens is now divisible by block_size for proper block matrix operations.
+    - After sorting by expert index, we obtain token_ids
+        [3, 6, 9, 12, 0, 4, 10, 12, 1, 7, 11, 12, 2, 5, 8, 12].
+        Tokens 12 are non-existent (padding) and are ignored in
+        the subsequent matrix multiplication.
+    - The padding ensures that the total number of tokens is now divisible
+        by block_size for proper block matrix operations.
     """
     sorted_ids = torch.empty(
         (topk_ids.numel() + num_experts * (block_size - 1), ),
@@ -224,13 +250,14 @@ def get_moe_configs(E: int, N: int) -> Optional[Dict[int, Any]]:
     """
     Return optimized configurations for the fused MoE kernel.
 
-    The return value will be a dictionary that maps an irregular grid of batch sizes
-    to configurations of the fused_moe kernel. To evaluate the kernel on a given batch
-    size bs, the closest batch size in the grid should be picked and the associated
-    configuration chosen to invoke the kernel.
+    The return value will be a dictionary that maps an irregular grid of
+    batch sizes to configurations of the fused_moe kernel. To evaluate the
+    kernel on a given batch size bs, the closest batch size in the grid should
+    be picked and the associated configuration chosen to invoke the kernel.
     """
 
-    # First look up if an optimized configuration is available in the configs directory
+    # First look up if an optimized configuration is available in the configs
+    # directory
     device_name = torch.cuda.get_device_name().replace(" ", "_")
 
     config_file_path = os.path.join(
@@ -243,7 +270,8 @@ def get_moe_configs(E: int, N: int) -> Optional[Dict[int, Any]]:
             # If a configuration has been found, return it
             return {int(key): val for key, val in json.load(f).items()}
 
-    # If no optimized configuration is available, we will use the default configuration
+    # If no optimized configuration is available, we will use the default
+    # configuration
     return None
 
 
@@ -258,18 +286,22 @@ def fused_moe(
     override_config: Optional[Dict[str, Any]] = None,
 ) -> torch.Tensor:
     """
-    This function computes a Mixture of Experts (MoE) layer using two sets of weights, w1 and w2, and top-k gating mechanism.
-    
+    This function computes a Mixture of Experts (MoE) layer using two sets of
+    weights, w1 and w2, and top-k gating mechanism.
+
     Parameters:
     - hidden_states (torch.Tensor): The input tensor to the MoE layer.
     - w1 (torch.Tensor): The first set of expert weights.
     - w2 (torch.Tensor): The second set of expert weights.
-    - gating_output (torch.Tensor): The output of the gating operation (before softmax).
+    - gating_output (torch.Tensor): The output of the gating operation
+        (before softmax).
     - topk (int): The number of top-k experts to select.
     - renormalize (bool): If True, renormalize the top-k weights to sum to 1.
-    - inplace (bool): If True, perform the operation in-place. Defaults to False.
-    - override_config (Optional[Dict[str, Any]]): Optional override for the kernel configuration.
-    
+    - inplace (bool): If True, perform the operation in-place.
+        Defaults to False.
+    - override_config (Optional[Dict[str, Any]]): Optional override
+        for the kernel configuration.
+
     Returns:
     - torch.Tensor: The output tensor after applying the MoE layer.
     """
@@ -325,7 +357,8 @@ def fused_moe(
         configs = get_moe_configs(E, w2.shape[2])
 
         if configs:
-            # If an optimal configuration map has been found, look up the optimal config
+            # If an optimal configuration map has been found, look up the
+            # optimal config
             config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
         else:
             # Else use the default config

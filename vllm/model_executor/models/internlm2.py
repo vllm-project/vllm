@@ -305,7 +305,8 @@ class InternLM2ForCausalLM(nn.Module):
                 param = params_dict[name]
                 if "wqkv" in name:
                     config = self.config
-                    kv_groups = config.num_attention_heads // config.num_key_value_heads
+                    kv_groups = (config.num_attention_heads //
+                                 config.num_key_value_heads)
                     head_dim = config.hidden_size // config.num_attention_heads
                     loaded_weight = loaded_weight.view(-1, 2 + kv_groups,
                                                        head_dim,

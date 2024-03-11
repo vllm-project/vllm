@@ -8,8 +8,10 @@ from re import escape as regex_escape
 from typing import Union, Tuple
 from pydantic import BaseModel
 
-from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest
-from vllm.model_executor.guided_logits_processors import JSONLogitsProcessor, RegexLogitsProcessor
+from vllm.entrypoints.openai.protocol import (CompletionRequest,
+                                              ChatCompletionRequest)
+from vllm.model_executor.guided_logits_processors import (JSONLogitsProcessor,
+                                                          RegexLogitsProcessor)
 
 
 class GuidedDecodingMode(Enum):

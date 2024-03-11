@@ -10,7 +10,8 @@ from vllm.worker.worker import Worker
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.config import CacheConfig
-from vllm.spec_decode.util import nvtx_range, get_all_seq_ids, split_batch_by_proposal_len
+from vllm.spec_decode.util import (nvtx_range, get_all_seq_ids,
+                                   split_batch_by_proposal_len)
 from vllm.spec_decode.interfaces import SpeculativeProposals, SpeculativeScores
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 from vllm.spec_decode.interfaces import SpeculativeScorer
@@ -25,7 +26,7 @@ class SpecDecodeWorker:
     LLM, after which some verification routine determines which (if any) of the
     speculative tokens are accepted by the larger LLM.
 
-    See https://github.com/vllm-project/vllm/pull/2188 and 
+    See https://github.com/vllm-project/vllm/pull/2188 and
     https://github.com/vllm-project/vllm/pull/3103 for more info.
 
     The current implementation has the following limitations:
@@ -109,10 +110,12 @@ class SpecDecodeWorker:
                 block_size, gpu_memory_utilization, cpu_swap_space,
                 cache_dtype))
 
-        scorer_cache_block_size_bytes = self.scorer_worker.get_cache_block_size_bytes(
-            block_size, cache_dtype)
-        proposer_cache_block_size_bytes = self.proposer_worker.get_cache_block_size_bytes(
-            block_size, cache_dtype)
+        scorer_cache_block_size_bytes = (
+            self.scorer_worker.get_cache_block_size_bytes(
+                block_size, cache_dtype))
+        proposer_cache_block_size_bytes = (
+            self.proposer_worker.get_cache_block_size_bytes(
+                block_size, cache_dtype))
 
         new_num_gpu_blocks = split_num_cache_blocks_evenly(
             scorer_cache_block_size_bytes, proposer_cache_block_size_bytes,
@@ -320,8 +323,8 @@ class SpecDecodeWorker:
             sampler_output_list.append(
                 SamplerOutput(outputs=step_output_token_ids))
 
-        maybe_rejsample_metrics = self._metrics.maybe_collect_rejsample_metrics(
-            k)
+        maybe_rejsample_metrics = (
+            self._metrics.maybe_collect_rejsample_metrics(k))
         if maybe_rejsample_metrics is not None:
             sampler_output_list[
                 0].spec_decode_worker_metrics = maybe_rejsample_metrics

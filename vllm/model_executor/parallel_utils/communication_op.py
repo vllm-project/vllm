@@ -11,7 +11,8 @@ from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_group,
     is_cupy_nccl_enabled_for_all_reduce,
 )
-from vllm.model_executor.parallel_utils.custom_all_reduce import custom_all_reduce
+from vllm.model_executor.parallel_utils.custom_all_reduce import (
+    custom_all_reduce)
 
 
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
@@ -24,7 +25,7 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     and GPU topology.
 
     TLDR: always assume this function modifies its input, but use the return
-    value as the output. 
+    value as the output.
     """
     # Bypass the function if we are using only 1 GPU.
     if get_tensor_model_parallel_world_size() == 1:

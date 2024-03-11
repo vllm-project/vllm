@@ -57,7 +57,8 @@ def test_fused_moe(
                          [torch.float32, torch.float16, torch.bfloat16])
 @torch.inference_mode()
 def test_mixtral_moe(dtype: torch.dtype):
-    "Make sure our Mixtral MoE implementation agrees with the one from huggingface."
+    """Make sure our Mixtral MoE implementation agrees with the one from
+    huggingface."""
 
     # Instantiate our and huggingface's MoE blocks
     config = MixtralConfig()

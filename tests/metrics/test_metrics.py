@@ -21,7 +21,8 @@ def test_metric_counter_prompt_tokens(
                              gpu_memory_utilization=0.4)
     tokenizer = vllm_model.model.get_tokenizer()
     prompt_token_counts = [len(tokenizer.encode(p)) for p in example_prompts]
-    # This test needs at least 2 prompts in a batch of different lengths to verify their token count is correct despite padding.
+    # This test needs at least 2 prompts in a batch of different lengths to
+    # verify their token count is correct despite padding.
     assert len(example_prompts) > 1, "at least 2 prompts are required"
     assert prompt_token_counts[0] != prompt_token_counts[1], (
         "prompts of different lengths are required")
@@ -33,8 +34,8 @@ def test_metric_counter_prompt_tokens(
         **stat_logger.labels)._value.get()
 
     assert vllm_prompt_token_count == metric_count, (
-        f"prompt token count: {vllm_prompt_token_count!r}\nmetric: {metric_count!r}"
-    )
+        f"prompt token count: {vllm_prompt_token_count!r}\n"
+        f"metric: {metric_count!r}")
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -60,9 +61,10 @@ def test_metric_counter_generation_tokens(
     for i in range(len(example_prompts)):
         vllm_output_ids, vllm_output_str = vllm_outputs[i]
         prompt_ids = tokenizer.encode(example_prompts[i])
-        # vllm_output_ids contains both prompt tokens and generation tokens. We're interested only in the count of the generation tokens.
+        # vllm_output_ids contains both prompt tokens and generation tokens.
+        # We're interested only in the count of the generation tokens.
         vllm_generation_count += len(vllm_output_ids) - len(prompt_ids)
 
     assert vllm_generation_count == metric_count, (
-        f"generation token count: {vllm_generation_count!r}\nmetric: {metric_count!r}"
-    )
+        f"generation token count: {vllm_generation_count!r}\n"
+        f"metric: {metric_count!r}")

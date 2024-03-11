@@ -79,7 +79,8 @@ class Worker:
         cpu_swap_space: int = 0,
         cache_dtype: str = "float16",
     ) -> Tuple[int, int]:
-        """Simply returns max_num_seqs as num_gpu_blocks, 0 as num_cpu_blocks."""
+        """Simply returns max_num_seqs as num_gpu_blocks, 0 as
+        num_cpu_blocks."""
         num_gpu_blocks = self.scheduler_config.max_num_seqs
         num_cpu_blocks = 0
         return num_gpu_blocks, num_cpu_blocks
@@ -177,7 +178,8 @@ def _init_distributed_environment(
             "distributed_init_method must be set if torch.distributed "
             "is not already initialized")
     else:
-        distributed_backend = distributed_backend if distributed_backend else "nccl"
+        distributed_backend = (distributed_backend
+                               if distributed_backend else "nccl")
         torch.distributed.init_process_group(
             backend=distributed_backend,
             world_size=parallel_config.world_size,

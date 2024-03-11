@@ -170,7 +170,8 @@ class Qwen2DecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 1000000)
-        use_sliding_window = config.use_sliding_window and layer_idx < config.max_window_layers
+        use_sliding_window = (config.use_sliding_window
+                              and layer_idx < config.max_window_layers)
         self.self_attn = Qwen2Attention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,

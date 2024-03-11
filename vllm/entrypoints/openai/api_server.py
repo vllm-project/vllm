@@ -18,7 +18,9 @@ from fastapi.responses import JSONResponse, StreamingResponse, Response
 import vllm
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest, ErrorResponse
+from vllm.entrypoints.openai.protocol import (CompletionRequest,
+                                              ChatCompletionRequest,
+                                              ErrorResponse)
 from vllm.logger import init_logger
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
@@ -84,13 +86,11 @@ def parse_args():
                         type=json.loads,
                         default=["*"],
                         help="allowed headers")
-    parser.add_argument(
-        "--api-key",
-        type=str,
-        default=None,
-        help=
-        "If provided, the server will require this key to be presented in the header."
-    )
+    parser.add_argument("--api-key",
+                        type=str,
+                        default=None,
+                        help="If provided, the server will require this key "
+                        "to be presented in the header.")
     parser.add_argument("--served-model-name",
                         type=str,
                         default=None,
@@ -103,9 +103,8 @@ def parse_args():
         default=None,
         nargs='+',
         action=LoRAParserAction,
-        help=
-        "LoRA module configurations in the format name=path. Multiple modules can be specified."
-    )
+        help="LoRA module configurations in the format name=path. "
+        "Multiple modules can be specified.")
     parser.add_argument("--chat-template",
                         type=str,
                         default=None,
@@ -138,9 +137,10 @@ def parse_args():
         help="Additional ASGI middleware to apply to the app. "
         "We accept multiple --middleware arguments. "
         "The value should be an import path. "
-        "If a function is provided, vLLM will add it to the server using @app.middleware('http'). "
-        "If a class is provided, vLLM will add it to the server using app.add_middleware(). "
-    )
+        "If a function is provided, vLLM will add it to the server "
+        "using @app.middleware('http'). "
+        "If a class is provided, vLLM will add it to the server "
+        "using app.add_middleware(). ")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     return parser.parse_args()
@@ -235,9 +235,8 @@ if __name__ == "__main__":
         elif inspect.iscoroutinefunction(imported):
             app.middleware("http")(imported)
         else:
-            raise ValueError(
-                f"Invalid middleware {middleware}. Must be a function or a class."
-            )
+            raise ValueError(f"Invalid middleware {middleware}. "
+                             f"Must be a function or a class.")
 
     logger.info(f"vLLM API server version {vllm.__version__}")
     logger.info(f"args: {args}")

@@ -4,7 +4,8 @@ from typing import List
 
 from vllm import SamplingParams
 from vllm.block import PhysicalTokenBlock
-from vllm.core.block_manager import BlockAllocator, BlockSpaceManager, AllocStatus
+from vllm.core.block_manager import (BlockAllocator, BlockSpaceManager,
+                                     AllocStatus)
 from vllm.utils import Device
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus, Logprob
 

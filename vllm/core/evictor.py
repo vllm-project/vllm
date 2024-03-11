@@ -39,9 +39,9 @@ class Evictor(ABC):
     @abstractmethod
     def remove(self, block_hash: int) -> PhysicalTokenBlock:
         """Simply removes the block with the hash value block_hash from the
-        evictor. Caller is responsible for making sure that block_hash is contained
-        in the evictor before calling remove. Should be used to "bring back" blocks
-        that have been freed but not evicted yet.
+        evictor. Caller is responsible for making sure that block_hash is
+        contained in the evictor before calling remove. Should be used to
+        "bring back" blocks that have been freed but not evicted yet.
         """
         pass
 
