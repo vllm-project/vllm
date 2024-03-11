@@ -14,6 +14,9 @@ class Attention(nn.Module):
     This class takes query, key, and value tensors as input. The input tensors
     can either contain prompt tokens or generation tokens.
 
+    There can be 3 different inputs. Prompt, decoding, and chunked prefill
+    (meaning prefill can be chunked and decoding tokens can be mixed to a
+    single batch).
 
     If the input tensors contain prompt tokens, the layout is as follows:	
     |<---------------------- num_valid_tokens ---------------------->|	
@@ -28,6 +31,12 @@ class Attention(nn.Module):
     The prompts might have different lengths, while the generation tokens always	
     have length 1. The paddings are appended to make the input length a multiple	
     of 8, which is desirable for Tensor Cores.
+
+    If chunked prefill is enabled, the input will include both prompt tokens
+    and generation tokens. The layout is as follows:
+    |<---------------------- num_valid_tokens -------------------------->|
+    |<--------- num_prompt_tokens ----->|<--- num_generation_tokens----->|
+    |<-prompt_0->|<-prompt_1->|...|<pad>||<-gen_0->|<-gen_1->|......|<pad>|
 
     The class does the following:
 

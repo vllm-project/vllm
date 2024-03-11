@@ -77,10 +77,11 @@ class FlashAttentionBackend:
         PagedAttentionImpl.reshape_and_cache(key, value, key_cache,
                                              value_cache, input_metadata)
 
-        if input_metadata.num_prompt_tokens > 0:
+        prefill_input_metadata = input_metadata.prefill_input_metadata()
+        if prefill_input_metadata.num_prompt_tokens > 0:
             # Prompt run.
             if (key_cache is None or value_cache is None
-                    or input_metadata.block_tables.numel() == 0):
+                    or prefill_input_metadata.block_tables.numel() == 0):
                 # normal attention
                 output = torch.empty_like(query)
                 query = query.unflatten(0, (num_tokens, ))
@@ -101,7 +102,7 @@ class FlashAttentionBackend:
                     value,
                     key_cache,
                     value_cache,
-                    input_metadata,
+                    prefill_input_metadata,
                     self.alibi_slopes,
                 )
         else:
@@ -110,7 +111,7 @@ class FlashAttentionBackend:
                 query,
                 key_cache,
                 value_cache,
-                input_metadata,
+                input_metadata.decode_input_metadata(),
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,

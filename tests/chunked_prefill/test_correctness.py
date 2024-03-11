@@ -11,6 +11,7 @@ MODELS = [
 ]
 
 
+# SANG-TODO enforce_eager = True and chunked prefill currently doesn't work.
 # TODO(sang): Add chunked prefill parameters.
 # @pytest.mark.parametrize("model", MODELS)
 # @pytest.mark.parametrize("dtype", ["half"])
@@ -19,13 +20,15 @@ MODELS = [
 # @pytest.mark.parametrize("max_num_prompt_seqs", [1, 2, 100])
 # @pytest.mark.parametrize("block_size", [32])
 # @pytest.mark.parametrize("tensor_parallel_size", [1, 2])
+# @pytest.mark.parametrize("enforce_eager", [True, False])
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("max_chunked_prefill_len", [-1])
+@pytest.mark.parametrize("max_chunked_prefill_len", [16])
 @pytest.mark.parametrize("max_num_prompt_seqs", [256])
 @pytest.mark.parametrize("block_size", [32])
 @pytest.mark.parametrize("tensor_parallel_size", [1])
+@pytest.mark.parametrize("enforce_eager", [False])
 def test_models(
     vllm_runner,
     example_prompts,
@@ -36,6 +39,7 @@ def test_models(
     max_num_prompt_seqs: int,
     block_size: int,
     tensor_parallel_size: int,
+    enforce_eager: bool,
 ) -> None:
     """ verify the flash attention has the same output
     as page attention """
@@ -65,7 +69,8 @@ def test_models(
         block_size=block_size,
         max_chunked_prefill_len=max_chunked_prefill_len,
         max_num_prompt_seqs=max_num_prompt_seqs,
-        tensor_parallel_size=tensor_parallel_size)
+        tensor_parallel_size=tensor_parallel_size,
+        enforce_eager=enforce_eager)
     for i in range(10):
         prompts = [example_prompts[j % len(example_prompts)] for j in range(i)]
         flash_attn_output_by_batches.append(
@@ -84,6 +89,6 @@ def test_models(
                 i % len(expected_outputs)]
             print(vllm_output_str)
             assert fa_output_ids == vllm_output_ids, (
-                f"Test{i}:\flash ids: {fa_output_ids}\nvLLM ids: {vllm_output_ids}"
+                f"Test{i}:\nflash ids: {fa_output_ids}\nvLLM ids: {vllm_output_ids}"
                 f"Test{i}:\nflash output: {fa_output_str!r}\nvLLM output: {vllm_output_str!r}"
             )

@@ -81,11 +81,29 @@ class XFormersBackend:
             PagedAttentionImpl.reshape_and_cache(key, value, key_cache,
                                                  value_cache, input_metadata)
 
-        if input_metadata.num_prompt_tokens > 0:
+
+        num_prompt_tokens = input_metadata.num_prompt_tokens
+        num_generation_tokens = input_metadata.num_generation_tokens
+
+        decode_query = query[num_prompt_tokens:]
+        query = query[:num_prompt_tokens]
+        key = key[:num_prompt_tokens]
+        value = value[:num_prompt_tokens]
+
+        assert query.shape[0] == num_prompt_tokens
+        assert decode_query.shape[0] == num_generation_tokens
+        print("num_prompt_tokens", num_prompt_tokens)
+        print("num_generation_tokens", num_generation_tokens)
+        print("output", output.size())
+        # assert (num_prompt_tokens and num_generation_tokens) == 0, (
+        #     num_prompt_tokens, num_generation_tokens)
+
+        if num_prompt_tokens > 0:
+            prefill_input_metadata = input_metadata.prefill_input_metadata()
             # Prompt run.
             # Unless there's a prefix, context lens is all 0 for prefill.
             if (key_cache is None or value_cache is None
-                    or input_metadata.block_tables.numel() == 0):
+                    or prefill_input_metadata.block_tables.numel() == 0):
                 # normal attention
                 if self.num_kv_heads != self.num_heads:
                     # As of Nov 2023, xformers only supports MHA. For MQA/GQA,
@@ -108,21 +126,21 @@ class XFormersBackend:
                 # Set attention bias if not provided. This typically happens at
                 # the very attention layer of every iteration.
                 # FIXME(woosuk): This is a hack.
-                if input_metadata.attn_bias is None:
+                if prefill_input_metadata.attn_bias is None:
                     if self.alibi_slopes is None:
                         attn_bias = BlockDiagonalCausalMask.from_seqlens(
-                            input_metadata.prompt_lens.tolist())
+                            prefill_input_metadata.prompt_lens.tolist())
                         if self.sliding_window is not None:
                             attn_bias = attn_bias.make_local_attention(
                                 self.sliding_window)
-                        input_metadata.attn_bias = attn_bias
+                        prefill_input_metadata.attn_bias = attn_bias
                     else:
-                        input_metadata.attn_bias = _make_alibi_bias(
+                        prefill_input_metadata.attn_bias = _make_alibi_bias(
                             self.alibi_slopes, self.num_kv_heads, query.dtype,
-                            input_metadata)
+                            prefill_input_metadata)
 
                 if self.use_ref_attention:
-                    output = _ref_masked_attention(
+                    output[:num_prompt_tokens] = _ref_masked_attention(
                         query,
                         key,
                         value,
@@ -147,37 +165,41 @@ class XFormersBackend:
                     query = query.unflatten(0, (num_tokens))
                     key = key.unflatten(0, (num_tokens))
                     value = value.unflatten(0, (num_tokens))
-
+                print("SANG-TODO prefill, num_prompt_tokens, ", num_prompt_tokens)
                 out = xops.memory_efficient_attention_forward(
                     query,
                     key,
                     value,
-                    attn_bias=input_metadata.attn_bias,
+                    attn_bias=prefill_input_metadata.attn_bias,
                     p=0.0,
                     scale=self.scale,
                     op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if
                     (is_hip()) else None,
                 )
-                output = out.view_as(query)
+                output[:num_prompt_tokens] = out.view_as(query)
 
             else:
                 # prefix-enabled attention
-                output = PagedAttentionImpl.forward_prefix(
+                print("SANG-TODO prefix prefill, num_prompt_tokens, ", num_prompt_tokens)
+                output[:num_prompt_tokens] = PagedAttentionImpl.forward_prefix(
                     query,
                     key,
                     value,
                     key_cache,
                     value_cache,
-                    input_metadata,
+                    prefill_input_metadata,
                     self.alibi_slopes,
                 )
-        else:
+
+        if num_generation_tokens > 0:
+            decoding_input_metadata = input_metadata.decode_input_metadata()
             # Decoding run.
-            output = PagedAttentionImpl.forward_decode(
-                query,
+            # print("SANG-TODO decoding, num_generation_tokens, ", num_generation_tokens)
+            output[num_prompt_tokens:] = PagedAttentionImpl.forward_decode(
+                decode_query,
                 key_cache,
                 value_cache,
-                input_metadata,
+                decoding_input_metadata,
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
