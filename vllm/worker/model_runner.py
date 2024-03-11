@@ -21,16 +21,19 @@ from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
-from vllm.utils import in_wsl
+from vllm.utils import in_wsl, measure_cuda_memory
 
 logger = init_logger(__name__)
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 _PAD_SLOT_ID = -1
 LORA_WARMUP_RANK = 8
-# Capture graphs for batch size 1, 2, 4, 8, 16, 24, 32, 40, ..., 256.
+_BATCH_SIZE_ALIGNMENT = 8
+# Capture graphs for token size 1, 2, 4, 8, 16, 24, 32, 40, ..., 256.
 # NOTE: _get_graph_batch_size needs to be updated if this list is changed.
-_BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [8 * i for i in range(1, 33)]
+_BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
+    _BATCH_SIZE_ALIGNMENT * i for i in range(1, 33)
+]
 
 
 class ModelRunner:
@@ -88,11 +91,17 @@ class ModelRunner:
             self.model_config.enforce_eager = True
 
     def load_model(self) -> None:
-        self.model = get_model(self.model_config,
-                               self.device_config,
-                               lora_config=self.lora_config,
-                               parallel_config=self.parallel_config,
-                               scheduler_config=self.scheduler_config)
+        with measure_cuda_memory() as m:
+            self.model = get_model(self.model_config,
+                                   self.device_config,
+                                   lora_config=self.lora_config,
+                                   parallel_config=self.parallel_config,
+                                   scheduler_config=self.scheduler_config)
+
+        self.model_memory_usage = m.consumed_memory
+        logger.info(
+            f"Loading model weights took {self.model_memory_usage / float(2**30):.4f} GB"
+        )
 
         vocab_size = self.model.config.vocab_size
 
@@ -107,8 +116,7 @@ class ModelRunner:
                            ), "Model does not have embedding_padding_modules"
             self.lora_manager = LRUCacheWorkerLoRAManager(
                 self.scheduler_config.max_num_seqs,
-                self.scheduler_config.max_num_batched_tokens +
-                self.scheduler_config.max_paddings, vocab_size,
+                self.scheduler_config.max_num_batched_tokens, vocab_size,
                 self.lora_config, self.device, self.model.embedding_modules,
                 self.model.embedding_padding_modules)
             self.model = self.lora_manager.create_lora_manager(self.model)
@@ -116,10 +124,13 @@ class ModelRunner:
     def set_block_size(self, block_size: int) -> None:
         self.block_size = block_size
 
-        max_num_blocks = (self.max_context_len_to_capture + block_size -
-                          1) // block_size
         self.graph_block_tables = np.zeros(
-            (max(_BATCH_SIZES_TO_CAPTURE), max_num_blocks), dtype=np.int32)
+            (max(_BATCH_SIZES_TO_CAPTURE), self.get_max_block_per_batch()),
+            dtype=np.int32)
+
+    def get_max_block_per_batch(self):
+        block_size = self.block_size
+        return (self.max_context_len_to_capture + block_size - 1) // block_size
 
     def _prepare_prompt(
         self,
@@ -127,9 +138,9 @@ class ModelRunner:
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, List[int], List[int],
                List[int], List[int], Set[LoRARequest]]:
         assert len(seq_group_metadata_list) > 0
-        input_tokens: List[List[int]] = []
-        input_positions: List[List[int]] = []
-        slot_mapping: List[List[int]] = []
+        input_tokens: List[int] = []
+        input_positions: List[int] = []
+        slot_mapping: List[int] = []
         lora_index_mapping: List[int] = []
         lora_prompt_mapping: List[int] = []
         lora_requests: Set[LoRARequest] = set()
@@ -140,7 +151,6 @@ class ModelRunner:
         prefix_block_tables: List[List[int]] = []
         num_chunked_prefill = 0
         # Whether or not if any seq_group has prefix cached.
-        prefix_enabled = False
         # print("SANG-TODO # of requests (seq_group_metadata_list): ",
         #       len(seq_group_metadata_list))
         for seq_group_metadata in seq_group_metadata_list:
@@ -174,20 +184,14 @@ class ModelRunner:
                 prompt_tokens = prompt_tokens[computed_len:]
                 prefix_block_tables.append(computed_block_nums)
                 context_len = computed_len
-                prefix_enabled = True
             else:
                 prefix_block_tables.append([])
-                # if seq_group_metadata.block_tables is None:
-                #     prefix_block_tables.append([])
-                # else:
-                #     prefix_block_tables.append(
-                #         seq_group_metadata.block_tables[seq_id])
-                context_len = prompt_len
-
+                context_len = 0
+            # actual prompt lens
             context_lens.append(context_len)
             subquery_lens.append(prompt_len - computed_len)
 
-            input_tokens.append(prompt_tokens)
+            input_tokens.extend(prompt_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
             # NOTE(sang): prefill_end is always # of prompts if chunked
@@ -201,7 +205,7 @@ class ModelRunner:
             if lora_id > 0:
                 lora_requests.add(seq_group_metadata.lora_request)
 
-            lora_index_mapping.append([lora_id] * (prompt_len - computed_len))
+            lora_index_mapping += [lora_id] * (prompt_len - computed_len)
             lora_prompt_mapping.extend(
                 [lora_id] *
                 (prompt_len - computed_len
@@ -210,11 +214,10 @@ class ModelRunner:
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
                 # yet. In this case, we just use a dummy slot mapping.
-                slot_mapping.append([_PAD_SLOT_ID] * prompt_len)
+                slot_mapping.extend([_PAD_SLOT_ID] * prompt_len)
                 continue
 
             # Compute the slot mapping.
-            slot_mapping.append([])
             block_table = seq_group_metadata.block_tables[seq_id]
             # Mask the [0, start_idx) tokens of the prompt with _PAD_SLOT_ID,
             # where start_idx is max(0, prompt_len - sliding_window).
@@ -236,34 +239,35 @@ class ModelRunner:
 
             for i in range(computed_len, prefill_end):
                 if i < start_idx:
-                    slot_mapping[-1].append(_PAD_SLOT_ID)
+                    slot_mapping.append(_PAD_SLOT_ID)
                     continue
 
                 block_number = block_table[i // self.block_size]
                 block_offset = i % self.block_size
                 slot = block_number * self.block_size + block_offset
-                slot_mapping[-1].append(slot)
+                slot_mapping.append(slot)
 
         max_prompt_len = max(subquery_lens)
-        input_tokens = _make_tensor_with_pad(input_tokens,
-                                             max_prompt_len,
-                                             pad=0,
-                                             dtype=torch.long,
-                                             device=self.device)
-        input_positions = _make_tensor_with_pad(input_positions,
-                                                max_prompt_len,
-                                                pad=0,
-                                                dtype=torch.long,
-                                                device=self.device)
-        slot_mapping = _make_tensor_with_pad(slot_mapping,
-                                             max_prompt_len,
-                                             pad=_PAD_SLOT_ID,
-                                             dtype=torch.long,
-                                             device=self.device)
-        lora_index_mapping = [
-            _pad_to_max(mapping, max_prompt_len, pad=0)
-            for mapping in lora_index_mapping
-        ]
+        num_prompt_tokens = len(input_tokens)
+        assert max_prompt_len > 0
+
+        # Pad tokens to better utilize tensor cores although
+        # cuda graph is not enabled.
+        input_tokens = _make_tensor_with_pad_for_alignment(input_tokens,
+                                                           pad=0,
+                                                           dtype=torch.long,
+                                                           device=self.device)
+        input_positions = _make_tensor_with_pad_for_alignment(
+            input_positions, pad=0, dtype=torch.long, device=self.device)
+        slot_mapping = _make_tensor_with_pad_for_alignment(slot_mapping,
+                                                           pad=_PAD_SLOT_ID,
+                                                           dtype=torch.long,
+                                                           device=self.device)
+        lora_index_mapping = _pad_to_alignment(lora_index_mapping,
+                                               _get_graph_batch_size(
+                                                   len(lora_index_mapping)),
+                                               pad=0)
+
         context_lens_tensor = torch.tensor(context_lens,
                                            dtype=torch.int,
                                            device=self.device)
@@ -276,28 +280,36 @@ class ModelRunner:
             dtype=torch.int,
             device=self.device,
         )
-        start_loc_tensor = torch.arange(0,
-                                        len(prompt_lens) * max_prompt_len,
-                                        max_prompt_len,
-                                        dtype=torch.long,
-                                        device=self.device)
         prompt_lens_tensor = torch.tensor(prompt_lens,
                                           dtype=torch.long,
                                           device=self.device)
 
-        input_metadata = InputMetadata(is_prompt=True,
-                                       slot_mapping=slot_mapping,
-                                       prompt_lens=prompt_lens_tensor,
-                                       num_chunked_prefill=num_chunked_prefill,
-                                       max_seq_len=max_prompt_len,
-                                       start_loc=start_loc_tensor,
-                                       max_context_len=None,
-                                       context_lens=context_lens_tensor,
-                                       block_tables=block_tables,
-                                       use_cuda_graph=False,
-                                       kv_cache_dtype=self.kv_cache_dtype,
-                                       flash_style=self.flash_style,
-                                       prefix_enabled=prefix_enabled)
+        # Cumulative index of each prompt. [prompt_lens + 1]
+        # [0, 0+1th, 0+1th+2nd, ...]
+        start_loc_tensor = torch.zeros(prompt_lens_tensor.shape[0] + 1,
+                                       dtype=torch.long,
+                                       device=self.device)
+
+        torch.cumsum(prompt_lens_tensor,
+                     dim=0,
+                     dtype=start_loc_tensor.dtype,
+                     out=start_loc_tensor[1:])
+
+        input_metadata = InputMetadata(
+            is_prompt=True,
+            slot_mapping=slot_mapping,
+            prompt_lens=prompt_lens_tensor,
+            num_chunked_prefill=num_chunked_prefill,
+            num_prompt_tokens=num_prompt_tokens,
+            num_generation_tokens=0,
+            max_seq_len=max_prompt_len,
+            start_loc=start_loc_tensor,
+            max_context_len=None,
+            context_lens=context_lens_tensor,
+            block_tables=block_tables,
+            use_cuda_graph=False,
+            kv_cache_dtype=self.kv_cache_dtype,
+        )
         return (input_tokens, input_positions, input_metadata, prompt_lens,
                 subquery_lens, lora_index_mapping, lora_prompt_mapping,
                 lora_requests)
@@ -308,9 +320,9 @@ class ModelRunner:
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, List[int], List[int],
                Set[LoRARequest]]:
         assert len(seq_group_metadata_list) > 0
-        input_tokens: List[List[int]] = []
-        input_positions: List[List[int]] = []
-        slot_mapping: List[List[int]] = []
+        input_tokens: List[int] = []
+        input_positions: List[int] = []
+        slot_mapping: List[int] = []
         context_lens: List[int] = []
         block_tables: List[List[int]] = []
         lora_index_mapping: List[int] = []
@@ -329,11 +341,11 @@ class ModelRunner:
             for seq_id in seq_ids:
                 seq_data = seq_group_metadata.seq_data[seq_id]
                 generation_token = seq_data.get_last_token_id()
-                input_tokens.append([generation_token])
+                input_tokens.append(generation_token)
 
                 seq_len = seq_data.get_len()
                 position = seq_len - 1
-                input_positions.append([position])
+                input_positions.append(position)
 
                 context_len = seq_len if self.sliding_window is None else min(
                     seq_len, self.sliding_window)
@@ -343,8 +355,8 @@ class ModelRunner:
                 block_number = block_table[position // self.block_size]
                 block_offset = position % self.block_size
                 slot = block_number * self.block_size + block_offset
-                slot_mapping.append([slot])
-                lora_index_mapping.append([lora_id])
+                slot_mapping.append(slot)
+                lora_index_mapping.append(lora_id)
                 lora_prompt_mapping.append(lora_id)
 
                 if self.sliding_window is not None:
@@ -353,6 +365,9 @@ class ModelRunner:
                     block_table = block_table[-sliding_window_blocks:]
                 block_tables.append(block_table)
 
+        # vLLM uses cuda graph only for decoding requests.
+        # See `capture_model` API for more details.
+        # For decoding requests, batch_size == input_tokens.
         batch_size = len(input_tokens)
         max_context_len = max(context_lens)
         use_captured_graph = (
@@ -365,31 +380,35 @@ class ModelRunner:
             graph_batch_size = _get_graph_batch_size(batch_size)
             assert graph_batch_size >= batch_size
             for _ in range(graph_batch_size - batch_size):
-                input_tokens.append([])
-                input_positions.append([])
-                slot_mapping.append([])
-                context_lens.append(1)
+                input_tokens.append(0)
+                input_positions.append(0)
+                slot_mapping.append(_PAD_SLOT_ID)
+                context_lens.append(0)
                 block_tables.append([])
             batch_size = graph_batch_size
 
-        input_tokens = _make_tensor_with_pad(input_tokens,
-                                             max_len=1,
-                                             pad=0,
-                                             dtype=torch.long,
-                                             device=self.device)
-        input_positions = _make_tensor_with_pad(input_positions,
-                                                max_len=1,
-                                                pad=0,
-                                                dtype=torch.long,
-                                                device=self.device)
-        slot_mapping = _make_tensor_with_pad(slot_mapping,
-                                             max_len=1,
-                                             pad=_PAD_SLOT_ID,
-                                             dtype=torch.long,
-                                             device=self.device)
+        # Pad tokens to better utilize tensor cores although
+        # cuda graph is not enabled.
+        input_tokens = _make_tensor_with_pad_for_alignment(input_tokens,
+                                                           pad=0,
+                                                           dtype=torch.long,
+                                                           device=self.device)
+        input_positions = _make_tensor_with_pad_for_alignment(
+            input_positions, pad=0, dtype=torch.long, device=self.device)
+        slot_mapping = _make_tensor_with_pad_for_alignment(slot_mapping,
+                                                           pad=_PAD_SLOT_ID,
+                                                           dtype=torch.long,
+                                                           device=self.device)
         context_lens = torch.tensor(context_lens,
                                     dtype=torch.int,
                                     device=self.device)
+
+        if use_captured_graph:
+            # When using cuda-graph all these tensors should be
+            # padded.
+            assert context_lens.shape[0] == input_tokens.shape[0]
+            assert context_lens.shape[0] == input_positions.shape[0]
+            assert context_lens.shape[0] == slot_mapping.shape[0]
 
         if use_captured_graph:
             # The shape of graph_block_tables is
@@ -410,23 +429,26 @@ class ModelRunner:
                 device=self.device,
             )
 
-        lora_index_mapping = [
-            _pad_to_max(mapping, 1, pad=0) for mapping in lora_index_mapping
-        ]
+        lora_index_mapping = _pad_to_alignment(lora_index_mapping,
+                                               _get_graph_batch_size(
+                                                   len(lora_index_mapping)),
+                                               pad=0)
 
-        input_metadata = InputMetadata(is_prompt=False,
-                                       slot_mapping=slot_mapping,
-                                       prompt_lens=None,
-                                       num_chunked_prefill=0,
-                                       max_seq_len=None,
-                                       start_loc=None,
-                                       max_context_len=max_context_len,
-                                       context_lens=context_lens,
-                                       block_tables=block_tables,
-                                       use_cuda_graph=use_captured_graph,
-                                       kv_cache_dtype=self.kv_cache_dtype,
-                                       flash_style=self.flash_style,
-                                       prefix_enabled=False)
+        input_metadata = InputMetadata(
+            is_prompt=False,
+            slot_mapping=slot_mapping,
+            prompt_lens=None,
+            num_chunked_prefill=0,
+            num_prompt_tokens=0,
+            num_generation_tokens=len(input_tokens),
+            max_seq_len=None,
+            start_loc=None,
+            max_context_len=max_context_len,
+            context_lens=context_lens,
+            block_tables=block_tables,
+            use_cuda_graph=use_captured_graph,
+            kv_cache_dtype=self.kv_cache_dtype,
+        )
         return (input_tokens, input_positions, input_metadata,
                 lora_index_mapping, lora_prompt_mapping, lora_requests)
 
@@ -444,7 +466,6 @@ class ModelRunner:
         categorized_sample_indices_start_idx = 0
         pin_memory = not self.in_wsl and not self.device_config.is_neuron
 
-        max_subquery_len = max(subquery_lens) if subquery_lens else 1
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             seq_ids = list(seq_group_metadata.seq_data.keys())
             sampling_params = seq_group_metadata.sampling_params
@@ -469,7 +490,7 @@ class ModelRunner:
                               selected_token_start_idx + subquery_len - 1))
                 selected_token_indices.append(selected_token_start_idx +
                                               subquery_len - 1)
-                selected_token_start_idx += max_subquery_len
+                selected_token_start_idx += subquery_len
 
                 if sampling_params.seed is not None:
                     seq_group_metadata.state.generator = torch.Generator(
@@ -544,11 +565,8 @@ class ModelRunner:
                                                      subquery_lens)
 
             if self.lora_config:
-                flat_lora_index_mapping = [
-                    item for sublist in lora_index_mapping for item in sublist
-                ]
                 lora_mapping = LoRAMapping(
-                    flat_lora_index_mapping,
+                    lora_index_mapping,
                     lora_prompt_mapping,
                 )
             else:
@@ -562,6 +580,8 @@ class ModelRunner:
                 "slot_mapping": input_metadata.slot_mapping,
                 "prompt_lens": input_metadata.prompt_lens,
                 "num_chunked_prefill": input_metadata.num_chunked_prefill,
+                "num_prompt_tokens": input_metadata.num_prompt_tokens,
+                "num_generation_tokens": input_metadata.num_generation_tokens,
                 "max_seq_len": input_metadata.max_seq_len,
                 "start_loc": input_metadata.start_loc,
                 "max_context_len": input_metadata.max_context_len,
@@ -573,7 +593,6 @@ class ModelRunner:
                 sampling_metadata.selected_token_indices,
                 "lora_requests": lora_requests,
                 "lora_mapping": lora_mapping,
-                "prefix_enabled": input_metadata.prefix_enabled
             }
             broadcast_tensor_dict(metadata_dict, src=0)
         else:
@@ -587,6 +606,8 @@ class ModelRunner:
                 slot_mapping=metadata_dict["slot_mapping"],
                 prompt_lens=metadata_dict["prompt_lens"],
                 num_chunked_prefill=metadata_dict["num_chunked_prefill"],
+                num_prompt_tokens=metadata_dict["num_prompt_tokens"],
+                num_generation_tokens=metadata_dict["num_generation_tokens"],
                 max_seq_len=metadata_dict["max_seq_len"],
                 start_loc=metadata_dict["start_loc"],
                 max_context_len=metadata_dict["max_context_len"],
@@ -594,8 +615,7 @@ class ModelRunner:
                 block_tables=metadata_dict["block_tables"],
                 use_cuda_graph=metadata_dict["use_cuda_graph"],
                 kv_cache_dtype=metadata_dict["kv_cache_dtype"],
-                flash_style=self.flash_style,
-                prefix_enabled=metadata_dict["prefix_enabled"])
+                flash_style=self.flash_style)
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
                 seq_data=None,
@@ -727,6 +747,18 @@ class ModelRunner:
 
     @torch.inference_mode()
     def capture_model(self, kv_caches: List[KVCache]) -> None:
+        """Cuda graph capture a model.
+
+        Note that cuda graph performance gain is negligible if number
+        of batched tokens are less than 200. And since Cuda graph
+        requires fixed sized tensors, supporting large/variable batch
+        size requires high GPU memory overhead. Thus, vLLM only captures
+        decoding requests. Mixed batch (chunked prefill + decoding) or
+        prefill requests are not captured.
+
+        this API assumes the shape is N batches of tokens flattened to 1D
+        tensor, where is token's seqlen is 1.
+        """
         # NOTE(woosuk): This is a hack to ensure that the NCCL backend is never
         # deleted before the CUDA graphs.
         self.cupy_nccl_backend = cupy_utils.get_nccl_backend()
@@ -745,12 +777,11 @@ class ModelRunner:
 
         # Prepare dummy inputs. These will be reused for all batch sizes.
         max_batch_size = max(_BATCH_SIZES_TO_CAPTURE)
-        input_tokens = torch.zeros(max_batch_size, 1, dtype=torch.long).cuda()
-        input_positions = torch.zeros(max_batch_size, 1,
-                                      dtype=torch.long).cuda()
-        slot_mapping = torch.empty(max_batch_size, 1, dtype=torch.long).cuda()
+        input_tokens = torch.zeros(max_batch_size, dtype=torch.long).cuda()
+        input_positions = torch.zeros(max_batch_size, dtype=torch.long).cuda()
+        slot_mapping = torch.empty(max_batch_size, dtype=torch.long).cuda()
         slot_mapping.fill_(_PAD_SLOT_ID)
-        context_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
+        context_lens = torch.zeros(max_batch_size, dtype=torch.int32).cuda()
         block_tables = torch.from_numpy(self.graph_block_tables).cuda()
 
         graph_batch_size = _get_graph_batch_size(
@@ -775,6 +806,8 @@ class ModelRunner:
                     slot_mapping=slot_mapping[:batch_size],
                     prompt_lens=None,
                     num_chunked_prefill=0,
+                    num_prompt_tokens=0,
+                    num_generation_tokens=0,
                     max_seq_len=None,
                     start_loc=None,
                     max_context_len=self.max_context_len_to_capture,
@@ -782,8 +815,7 @@ class ModelRunner:
                     block_tables=block_tables[:batch_size],
                     use_cuda_graph=True,
                     kv_cache_dtype=self.kv_cache_dtype,
-                    flash_style=self.flash_style,
-                    prefix_enabled=False)
+                    flash_style=self.flash_style)
 
                 if self.lora_config:
                     lora_mapping = LoRAMapping(
@@ -891,7 +923,6 @@ class CUDAGraphRunner:
                                                  non_blocking=True)
         self.input_buffers["block_tables"].copy_(input_metadata.block_tables,
                                                  non_blocking=True)
-
         # Run the graph.
         self.graph.replay()
 
@@ -911,9 +942,29 @@ def _maybe_cupy_nccl():
         yield
 
 
+def _pad_to_alignment(x: List[int], multiple_of: int, pad: int) -> List[int]:
+    return x + [pad] * ((-len(x)) % multiple_of)
+
+
 def _pad_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
     assert len(x) <= max_len
     return x + [pad] * (max_len - len(x))
+
+
+def _make_tensor_with_pad_for_alignment(
+    x: List[int],
+    pad: int,
+    dtype: torch.dtype,
+    device: Optional[Union[str, torch.device]],
+) -> torch.Tensor:
+    """Create a tensor of a given list x with padding.
+    It adds paddings to align with graph batch size. See
+    _get_graph_batch_size for more details.
+    """
+    batch_size = len(x)
+    batch_size = _get_graph_batch_size(batch_size)
+    padded_x = _pad_to_alignment(x, batch_size, pad)
+    return torch.tensor(padded_x, dtype=dtype, device=device)
 
 
 def _make_tensor_with_pad(
@@ -928,12 +979,18 @@ def _make_tensor_with_pad(
 
 
 def _get_graph_batch_size(batch_size: int) -> int:
+    """Returns the padded batch size given actual batch size.
+    
+    Batch sizes are 1, 2, 4, _BATCH_SIZE_ALIGNMENT,
+    2*_BATCH_SIZE_ALIGNMENT, 3*_BATCH_SIZE_ALIGNMENT...
+    """
     if batch_size <= 2:
         return batch_size
     elif batch_size <= 4:
         return 4
     else:
-        return (batch_size + 7) // 8 * 8
+        return ((batch_size + _BATCH_SIZE_ALIGNMENT - 1) //
+                _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
 
 
 def _async_h2d(
