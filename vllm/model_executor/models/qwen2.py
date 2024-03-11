@@ -181,7 +181,7 @@ class Qwen2DecoderLayer(nn.Module):
             use_sliding_window=use_sliding_window,
             linear_method=linear_method,
             sliding_window=config.sliding_window)
-        self.mlp = (
+        self.mlp = Qwen2MLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
