@@ -123,6 +123,48 @@ class AllocStatus(enum.Enum):
     LATER = enum.auto()
     NEVER = enum.auto()
 
+"""
+Key idea: sequence indirection is not necessary for block mapping, only logical blocks
+- so, we can combine the mapping of logical to physical in a single class to pull out the
+    specialized logic
+- all sequence-group level logic happens in block space manager
+- sequence-level logic happens in NewBlockTable
+- allocations (which can be content-informed) happen in allocator level
+
+What does this buy?
+- the separate layers make testing easier. can test each layer of the system,
+    making things easier to generalize
+- (likely, need to proof out) the separate layers allow simpler logic; can have
+    a CoW blocktable use a normal block table with additional logic. same for
+    prefix caching.
+- the key point is that generalizing the scheduler for spec decode requires tests
+    at lower-levels if the complexity of prefix caching is included.
+"""
+#class NewBlockTable:
+#    def __init__(self, seq, gpu_allocator):
+#        self.seq = seq
+#        self.gpu_allocator = gpu_allocator
+#
+#    def allocate_waiting(self):
+#        assert seq.status == SequenceStatus.WAITING
+#
+#        # Allocate new physical token blocks that will store the prompt tokens.
+#        num_prompt_blocks = len(self.seq.logical_token_blocks)
+#
+#        block_table: BlockTable = []
+#        for logical_idx in range(num_prompt_blocks):
+#            if (self.block_sliding_window is not None
+#                    and logical_idx >= self.block_sliding_window):
+#                block = block_table[logical_idx % self.block_sliding_window]
+#            else:
+#                block = self.gpu_allocator.allocate(
+#                    seq.hash_of_block(logical_idx),
+#                    seq.num_hashed_tokens_of_block(logical_idx))
+#            block_table.append(block)
+#
+#        # Assign the block table for each sequence.
+#        for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
+#            self.block_tables[seq.seq_id] = block_table.copy()
 
 class BlockSpaceManager:
     """Manages the mapping between logical and physical token blocks."""
@@ -198,7 +240,8 @@ class BlockSpaceManager:
                 block = block_table[logical_idx % self.block_sliding_window]
             else:
                 block = self.gpu_allocator.allocate(
-                    seq.hash_of_block(logical_idx),
+                    seq.get_hash_of_block(logical_idx),
+                    #seq.hash_of_block(logical_idx),
                     seq.num_hashed_tokens_of_block(logical_idx))
             block_table.append(block)
 
@@ -219,7 +262,8 @@ class BlockSpaceManager:
         last_block: PhysicalTokenBlock,
     ) -> PhysicalTokenBlock:
         # Compute a new hash for the block so that it can be shared by other Sequences
-        new_hash = seq.hash_of_block(len(seq.logical_token_blocks) - 1)
+        #new_hash = seq.hash_of_block(len(seq.logical_token_blocks) - 1)
+        new_hash = seq.get_hash_of_block(len(seq.logical_token_blocks) - 1)
 
         # if new_hash is already in the cached table, then free last_block and return the cached version
         if self.gpu_allocator.contains_block(new_hash):
@@ -256,7 +300,8 @@ class BlockSpaceManager:
         # None if the last block is not full. Otherwise, we set it to the content hash.
         block_hash: Optional[int] = None
         if (self._is_last_block_full(seq)):
-            block_hash = seq.hash_of_block(len(seq.logical_token_blocks) - 1)
+            block_hash = seq.get_hash_of_block(len(seq.logical_token_blocks) - 1)
+            #block_hash = seq.hash_of_block(len(seq.logical_token_blocks) - 1)
         num_hashed_tokens = seq.num_hashed_tokens_of_block(
             len(seq.logical_token_blocks) - 1)
 

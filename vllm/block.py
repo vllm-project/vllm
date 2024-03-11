@@ -118,6 +118,18 @@ class BlockMapping:
 
 
 """
+status:
+DONE
+* move hash to logical block
+
+TODO
+* separate out "block mapping" functions from block manager
+    - anything that touches sequence logical blocks
+    - tests on block manager
+* add tests for "block mapping"
+    - might need changes to allocator API
+
+
 BlockTable
     create_from_sequence(sequence) # for allocation of single sequence
     clone_from_blocktable(block table) # for allocation of SequenceGroup

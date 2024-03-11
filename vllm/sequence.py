@@ -173,6 +173,12 @@ class Sequence:
     def maybe_get_hash_of_block(self, logical_index: int) -> Optional[int]:
         return self.logical_token_blocks[logical_index].maybe_get_content_hash()
 
+    def get_hash_of_block(self, logical_index: int) -> int:
+        maybe_block_hash = self.maybe_get_hash_of_block(logical_index)
+        if maybe_block_hash is None:
+            raise ValueError("Expected block hash to not be None")
+        return maybe_block_hash
+
     def hash_of_block(self, logical_idx: int) -> int:
         # Compute the number of tokens in the sequence
         # TODO: The current hashing function is O(L^2). We should optimize
