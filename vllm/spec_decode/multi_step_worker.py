@@ -5,7 +5,8 @@ import torch
 
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.worker import Worker
-from vllm.spec_decode.interfaces import SpeculativeProposals, SpeculativeProposer
+from vllm.spec_decode.interfaces import (SpeculativeProposals,
+                                         SpeculativeProposer)
 from vllm.spec_decode.util import sampler_output_to_torch
 
 
@@ -247,8 +248,9 @@ class DraftModelTop1Proposer(SpeculativeProposer):
         """
 
         # Split speculative- and non-speculative- sequences.
-        proposal_lens, nonzero_proposal_len_seqs, nonzero_proposal_len_indices = self._split_by_max_model_len(
-            seq_group_metadata_list, max_proposal_len)
+        (proposal_lens, nonzero_proposal_len_seqs,
+         nonzero_proposal_len_indices) = self._split_by_max_model_len(
+             seq_group_metadata_list, max_proposal_len)
 
         if nonzero_proposal_len_seqs:
             # Speculate tokens using the draft worker for the speculative
@@ -306,7 +308,8 @@ class DraftModelTop1Proposer(SpeculativeProposer):
             else:
                 proposal_lens.append(0)
 
-        return proposal_lens, nonzero_proposal_len_seqs, nonzero_proposal_len_indices
+        return (proposal_lens, nonzero_proposal_len_seqs,
+                nonzero_proposal_len_indices)
 
     def _merge_outputs(
         self,
@@ -356,7 +359,8 @@ class DraftModelTop1Proposer(SpeculativeProposer):
                                             device=self._device)
         entire_proposal_probs[nonzero_proposal_len_indices] = proposal_probs
 
-        proposal_tokens, proposal_probs = entire_proposal_tokens, entire_proposal_probs
+        proposal_tokens, proposal_probs = (entire_proposal_tokens,
+                                           entire_proposal_probs)
 
         proposal_lens = torch.zeros(batch_size,
                                     dtype=torch.long,

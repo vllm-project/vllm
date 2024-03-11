@@ -1,6 +1,8 @@
 import time
 from typing import Dict, Iterable, List, Optional, Tuple, Type, Union
 
+from transformers import PreTrainedTokenizer
+
 import vllm
 from vllm.lora.request import LoRARequest
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
@@ -75,7 +77,8 @@ class LLMEngine:
             f"download_dir={model_config.download_dir!r}, "
             f"load_format={model_config.load_format}, "
             f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
-            f"disable_custom_all_reduce={parallel_config.disable_custom_all_reduce}, "
+            f"disable_custom_all_reduce="
+            f"{parallel_config.disable_custom_all_reduce}, "
             f"quantization={model_config.quantization}, "
             f"enforce_eager={model_config.enforce_eager}, "
             f"kv_cache_dtype={cache_config.cache_dtype}, "
@@ -140,7 +143,11 @@ class LLMEngine:
         # the closure used to initialize Ray worker actors
         raise RuntimeError("LLMEngine should not be pickled!")
 
-    def get_tokenizer_for_seq(self, sequence: Sequence):
+    def get_tokenizer(self) -> "PreTrainedTokenizer":
+        return self.tokenizer.get_lora_tokenizer()
+
+    def get_tokenizer_for_seq(self,
+                              sequence: Sequence) -> "PreTrainedTokenizer":
         return self.tokenizer.get_lora_tokenizer(sequence.lora_request)
 
     def _init_tokenizer(self, **tokenizer_init_kwargs):
@@ -663,7 +670,8 @@ class LLMEngine:
             # Latency Timings.
             time_last_iters = []
             for seq_group in scheduler_outputs.scheduled_seq_groups:
-                # Time since last token. (n.b. updates seq_group.metrics.last_token_time)
+                # Time since last token.
+                # (n.b. updates seq_group.metrics.last_token_time)
                 time_last_iters.append(seq_group.get_last_latency(now))
                 # Time since arrival for all finished requests.
                 if seq_group.is_finished():
@@ -695,16 +703,17 @@ class LLMEngine:
         for token_id, sample_logprob in logprobs.items():
             if (sample_logprob.decoded_token is None and token_id != -1):
                 all_input_ids_with_logprob = all_input_ids[:-1] + [token_id]
-                _, new_text, prefix_offset, read_offset = detokenize_incrementally(
-                    self.get_tokenizer_for_seq(seq),
-                    all_input_ids=all_input_ids_with_logprob,
-                    prev_tokens=seq.tokens,
-                    prefix_offset=seq.prefix_offset,
-                    read_offset=seq.read_offset,
-                    skip_special_tokens=prms.skip_special_tokens,
-                    spaces_between_special_tokens=prms.
-                    spaces_between_special_tokens,
-                )
+                (_, new_text, prefix_offset,
+                 read_offset) = detokenize_incrementally(
+                     self.get_tokenizer_for_seq(seq),
+                     all_input_ids=all_input_ids_with_logprob,
+                     prev_tokens=seq.tokens,
+                     prefix_offset=seq.prefix_offset,
+                     read_offset=seq.read_offset,
+                     skip_special_tokens=prms.skip_special_tokens,
+                     spaces_between_special_tokens=prms.
+                     spaces_between_special_tokens,
+                 )
                 sample_logprob.decoded_token = new_text
 
     def _decode_sequence(self, seq: Sequence, prms: SamplingParams) -> None:

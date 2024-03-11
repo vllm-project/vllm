@@ -11,7 +11,8 @@ from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_group,
     is_cupy_nccl_enabled_for_all_reduce,
 )
-from vllm.model_executor.parallel_utils.custom_all_reduce import custom_all_reduce
+from vllm.model_executor.parallel_utils.custom_all_reduce import (
+    custom_all_reduce)
 
 
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:

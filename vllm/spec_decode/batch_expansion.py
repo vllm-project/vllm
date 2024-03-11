@@ -5,8 +5,12 @@ import torch
 
 from vllm.sequence import (SamplerOutput, SequenceGroupMetadata, SequenceData)
 from vllm.worker.worker import Worker
-from vllm.spec_decode.util import nvtx_range, sampler_output_to_torch, get_all_seq_ids, split_batch_by_proposal_len
-from vllm.spec_decode.interfaces import SpeculativeScorer, SpeculativeProposals, SpeculativeScores
+from vllm.spec_decode.util import (nvtx_range, sampler_output_to_torch,
+                                   get_all_seq_ids,
+                                   split_batch_by_proposal_len)
+from vllm.spec_decode.interfaces import (SpeculativeScorer,
+                                         SpeculativeProposals,
+                                         SpeculativeScores)
 
 SeqId = int
 TargetSeqId = int
@@ -68,11 +72,12 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         proposal_lens_list = proposals.proposal_lens.tolist()
         proposal_token_ids_list = proposals.proposal_token_ids.tolist()
 
-        spec_indices, non_spec_indices, target_seq_group_metadata_list, num_scoring_tokens = self._expand_batch(
-            seq_group_metadata_list=seq_group_metadata_list,
-            proposal_token_ids_list=proposal_token_ids_list,
-            proposal_lens_list=proposal_lens_list,
-        )
+        (spec_indices, non_spec_indices, target_seq_group_metadata_list,
+         num_scoring_tokens) = self._expand_batch(
+             seq_group_metadata_list=seq_group_metadata_list,
+             proposal_token_ids_list=proposal_token_ids_list,
+             proposal_lens_list=proposal_lens_list,
+         )
 
         target_sampler_output = self._scorer_worker.execute_model(
             seq_group_metadata_list=target_seq_group_metadata_list,
@@ -125,7 +130,8 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         num_scoring_tokens = len(target_seq_group_metadata_list)
         target_seq_group_metadata_list.extend(non_spec_seqs)
 
-        return spec_indices, non_spec_indices, target_seq_group_metadata_list, num_scoring_tokens
+        return (spec_indices, non_spec_indices, target_seq_group_metadata_list,
+                num_scoring_tokens)
 
     def _contract_batch(self, original_bs: int,
                         target_sampler_output: List[SamplerOutput],
@@ -306,10 +312,11 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         # Convert non-speculative output tokens to tensors.
         sampler_output.sampled_token_probs = non_spec_probs
         sampler_output.sampled_token_ids = non_spec_sampled_tokens
-        non_spec_target_token_ids, non_spec_target_probs = sampler_output_to_torch(
-            [sampler_output])
+        non_spec_target_token_ids, non_spec_target_probs = (
+            sampler_output_to_torch([sampler_output]))
 
-        return target_token_ids, target_probs, non_spec_target_token_ids, non_spec_target_probs
+        return (target_token_ids, target_probs, non_spec_target_token_ids,
+                non_spec_target_probs)
 
     def _create_target_seq_id_iterator(
             self, seq_ids: List[SeqId]) -> Iterator[TargetSeqId]:
