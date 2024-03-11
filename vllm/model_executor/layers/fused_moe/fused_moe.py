@@ -186,7 +186,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
                             expert_ids: torch.Tensor,
                             num_tokens_post_padded: torch.Tensor,
                             mul_routed_weight: bool, top_k: int,
-                            config: Dict[str, Any]) -> None:
+                            config: Dict[str, Any], compute_type: tl.dtype) -> None:
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
 
@@ -214,7 +214,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
         C.stride(2),
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         top_k=top_k,
-        compute_type=tl.float16,
+        compute_type=compute_type,
         **config,
     )
 
@@ -346,10 +346,10 @@ def fused_moe(
 
     intermediate_cache1 = torch.empty((M, topk_ids.shape[1], N),
                                       device=hidden_states.device,
-                                      dtype=torch.float16)
+                                      dtype=torch.float8_e4m3fn)
     intermediate_cache2 = torch.empty((M * topk_ids.shape[1], N // 2),
                                       device=hidden_states.device,
-                                      dtype=torch.float16)
+                                      dtype=torch.float8_e4m3fn)
     intermediate_cache3 = torch.empty((M, topk_ids.shape[1], w2.shape[1]),
                                       device=hidden_states.device,
                                       dtype=torch.float16)
@@ -363,17 +363,15 @@ def fused_moe(
                             w1, intermediate_cache1,
                             topk_weights, topk_ids, sorted_token_ids,
                             expert_ids, num_tokens_post_padded, False,
-                            topk_ids.shape[1], config)
+                            topk_ids.shape[1], config, compute_type=tl.float8e4nv)
 
-    ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
+    ops.scaled_silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N), s2)
 
-    intermediate_cache2_scaled = intermediate_cache2 / s2
-
-    invoke_fused_moe_kernel(intermediate_cache2_scaled.to(dtype=torch.float8_e4m3fn),
+    invoke_fused_moe_kernel(intermediate_cache2,
                             w2, intermediate_cache3,
                             topk_weights, topk_ids, sorted_token_ids,
                             expert_ids, num_tokens_post_padded, True, 1,
-                            config)
+                            config, compute_type=tl.float16)
 
     if inplace:
         return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
