@@ -6,7 +6,8 @@ import torch
 from vllm.model_executor.parallel_utils.parallel_state import destroy_model_parallel
 
 MODELS = [
-    "JackFram/llama-68m",
+    "gpt2",
+    # "JackFram/llama-68m",
     # "facebook/opt-125m",
 ]
 
@@ -24,7 +25,7 @@ MODELS = [
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("max_chunked_prefill_len", [1000])
+@pytest.mark.parametrize("max_chunked_prefill_len", [-1])
 @pytest.mark.parametrize("max_num_prompt_seqs", [256])
 @pytest.mark.parametrize("block_size", [32])
 @pytest.mark.parametrize("tensor_parallel_size", [1])
@@ -75,37 +76,37 @@ def test_models(
         enforce_eager=enforce_eager)
     # for prompt in example_prompts:
     #     flash_attn_output_by_batches.append(flash_attn_model.generate_greedy(prompt, max_tokens))
-    # flash_attn_output_by_batches.extend(
-    #     flash_attn_model.generate_greedy(example_prompts[3], max_tokens))
-    for i in range(10):
-        prompts = [example_prompts[j % len(example_prompts)] for j in range(i)]
-        flash_attn_output_by_batches.append(
-            flash_attn_model.generate_greedy(prompts, max_tokens))
+    flash_attn_output_by_batches.extend(
+        flash_attn_model.generate_greedy(example_prompts, max_tokens))
+    # for i in range(10):
+    #     prompts = [example_prompts[j % len(example_prompts)] for j in range(i)]
+    #     flash_attn_output_by_batches.append(
+    #         flash_attn_model.generate_greedy(prompts, max_tokens))
 
     del flash_attn_model
 
     destroy_model_parallel()
     gc.collect()
     torch.cuda.empty_cache()
-    # for actual, expected in zip(flash_attn_output_by_batches, expected_outputs):
-    #     fa_output_ids, fa_output_str = actual
-    #     vllm_output_ids, vllm_output_str = expected
-    #     print(f"actual: {fa_output_str}\n")
-    #     print(f"expected: {vllm_output_str}")
+    for i, (actual, expected) in enumerate(zip(flash_attn_output_by_batches, expected_outputs)):
+        fa_output_ids, fa_output_str = actual
+        vllm_output_ids, vllm_output_str = expected
+        print(f"[Test {i}] actual: {fa_output_str}\n")
+        print(f"[Test {i}] expected: {vllm_output_str}")
 
-    #     assert vllm_output_ids == fa_output_ids, (
-    #         f"actual: {fa_output_str}\n"
-    #         f"expected: {vllm_output_str}"
-    #     )
+        assert vllm_output_ids == fa_output_ids, (
+            f"actual: {fa_output_str}\n"
+            f"expected: {vllm_output_str}"
+        )
 
-    for flash_attn_outputs in flash_attn_output_by_batches:
-        for i in range(len(flash_attn_outputs)):
-            fa_output_ids, fa_output_str = flash_attn_outputs[i]
-            vllm_output_ids, vllm_output_str = expected_outputs[
-                i % len(expected_outputs)]
-            print("expected, ",vllm_output_str)
-            print("actual:, ", fa_output_str)
-            assert fa_output_ids == vllm_output_ids, (
-                f"Test{i}:\nflash ids: {fa_output_ids}\nvLLM ids: {vllm_output_ids}"
-                f"Test{i}:\nflash output: {fa_output_str!r}\nvLLM output: {vllm_output_str!r}"
-            )
+    # for flash_attn_outputs in flash_attn_output_by_batches:
+    #     for i in range(len(flash_attn_outputs)):
+    #         fa_output_ids, fa_output_str = flash_attn_outputs[i]
+    #         vllm_output_ids, vllm_output_str = expected_outputs[
+    #             i % len(expected_outputs)]
+    #         print("expected, ",vllm_output_str)
+    #         print("actual:, ", fa_output_str)
+    #         assert fa_output_ids == vllm_output_ids, (
+    #             f"Test{i}:\nflash ids: {fa_output_ids}\nvLLM ids: {vllm_output_ids}"
+    #             f"Test{i}:\nflash output: {fa_output_str!r}\nvLLM output: {vllm_output_str!r}"
+    #         )

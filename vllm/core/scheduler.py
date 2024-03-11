@@ -51,6 +51,7 @@ class TokenBudget:
         Padding is automatically recorded, so the
         `prefill_tokens` should not include paddings.
         """
+        # self.prefill_seqlen.append(prefill_tokens)
         self.num_prefill_tokens += prefill_tokens
 
     def record_decoding_tokens(self, decoding_tokens: int):
@@ -71,6 +72,7 @@ class TokenBudget:
     @property
     def num_batched_tokens(self):
         return self.num_prefill_tokens + self.num_decoding_tokens
+
 
 
 class SchedulerOutputs:
@@ -361,28 +363,32 @@ class Scheduler:
 
         # Step 2: Swap in the sequence groups in the SWAPPED state if possible.
         self.swapped = self.policy.sort_by_priority(now, self.swapped)
+        num_curr_seqs = sum(seq_group.get_max_num_running_seqs()
+                            for seq_group in self.running)
+        curr_loras = set(
+            seq_group.lora_int_id
+            for seq_group in self.running) if self.lora_enabled else None
 
-        if not preempted:
-            num_curr_seqs = sum(seq_group.get_max_num_running_seqs()
-                                for seq_group in self.running)
-            curr_loras = set(
-                seq_group.lora_int_id
-                for seq_group in self.running) if self.lora_enabled else None
+        leftover_swapped = deque()
 
-            leftover_swapped = deque()
+        while self.swapped:
+            if token_budget.get() < self.swapped[0].num_unfinished_seqs(
+            ) * self.num_decoding_tokens_per_seq:
+                break
 
-            while self.swapped:
-                seq_group = self.swapped[0]
-                lora_int_id = 0
-                if self.lora_enabled:
-                    lora_int_id = seq_group.lora_int_id
-                    if (lora_int_id > 0 and lora_int_id not in curr_loras
-                            and len(curr_loras) >= self.lora_config.max_loras):
-                        # We don't have a space for another LoRA, so
-                        # we ignore this request for now.
-                        leftover_swapped.appendleft(seq_group)
-                        self.swapped.popleft()
-                        continue
+            seq_group = self.swapped[0]
+            lora_int_id = 0
+            if self.lora_enabled:
+                lora_int_id = seq_group.lora_int_id
+                if (lora_int_id > 0 and curr_loras is not None
+                        and lora_int_id not in curr_loras
+                        and self.lora_config is not None
+                        and len(curr_loras) >= self.lora_config.max_loras):
+                    # We don't have a space for another LoRA, so
+                    # we ignore this request for now.
+                    leftover_swapped.appendleft(seq_group)
+                    self.swapped.popleft()
+                    continue
 
             # If the sequence group cannot be swapped in, stop.
             if not self.block_manager.can_swap_in(seq_group):
@@ -636,10 +642,6 @@ class Scheduler:
         # This function call changes the internal states of the scheduler
         # such as self.running, self.swapped, and self.waiting.
         scheduler_outputs = self._schedule()
-        print("SANG-TODO total: ", len(scheduler_outputs.scheduled_seq_groups))
-        print("SANG-TODO prompt: ", scheduler_outputs.num_prompt_groups)
-        print("SANG-TODO chunked: ", scheduler_outputs.num_chunked_prefill_groups)
-
         now = time.time()
 
         # Create input data structures.
