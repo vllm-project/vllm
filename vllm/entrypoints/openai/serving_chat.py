@@ -12,7 +12,8 @@ from vllm.entrypoints.openai.protocol import (
     UsageInfo)
 from vllm.outputs import RequestOutput
 from vllm.entrypoints.openai.serving_engine import OpenAIServing, LoRA
-from vllm.model_executor.guided_decoding import get_guided_decoding_logits_processor
+from vllm.model_executor.guided_decoding import (
+    get_guided_decoding_logits_processor)
 
 logger = init_logger(__name__)
 
@@ -37,8 +38,9 @@ class OpenAIServingChat(OpenAIServing):
                ChatCompletionResponse]:
         """Completion API similar to OpenAI's API.
 
-        See  https://platform.openai.com/docs/api-reference/chat/create
-        for the API specification. This API mimics the OpenAI ChatCompletion API.
+        See https://platform.openai.com/docs/api-reference/chat/create
+        for the API specification. This API mimics the OpenAI
+        ChatCompletion API.
 
         NOTE: Currently we do not support the following feature:
             - function_call (Users should implement this by themselves)
@@ -116,7 +118,8 @@ class OpenAIServingChat(OpenAIServing):
                 # the result_generator, it needs to be sent as the FIRST
                 # response (by the try...catch).
                 if first_iteration:
-                    # Send first response for each request.n (index) with the role
+                    # Send first response for each request.n (index) with
+                    # the role
                     role = self.get_chat_request_role(request)
                     for i in range(request.n):
                         choice_data = ChatCompletionResponseStreamChoice(
@@ -133,7 +136,8 @@ class OpenAIServingChat(OpenAIServing):
                         data = chunk.model_dump_json(exclude_unset=True)
                         yield f"data: {data}\n\n"
 
-                    # Send response to echo the input portion of the last message
+                    # Send response to echo the input portion of the
+                    # last message
                     if request.echo:
                         last_msg_content = ""
                         if request.messages and isinstance(
@@ -145,11 +149,12 @@ class OpenAIServingChat(OpenAIServing):
 
                         if last_msg_content:
                             for i in range(request.n):
-                                choice_data = ChatCompletionResponseStreamChoice(
-                                    index=i,
-                                    delta=DeltaMessage(
-                                        content=last_msg_content),
-                                    finish_reason=None)
+                                choice_data = (
+                                    ChatCompletionResponseStreamChoice(
+                                        index=i,
+                                        delta=DeltaMessage(
+                                            content=last_msg_content),
+                                        finish_reason=None))
                                 chunk = ChatCompletionStreamResponse(
                                     id=request_id,
                                     object=chunk_object_type,
