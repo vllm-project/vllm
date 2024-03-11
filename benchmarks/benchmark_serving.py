@@ -128,7 +128,16 @@ def sample_sonnet_requests(
         len(token_ids) for token_ids in poem_token_ids) / len(poem_token_ids)
 
     # Base prefix for all requests.
-    base_prompt = "Pick as many lines as you can from these poem lines:\n"
+    base_message = [
+        {
+            "role": "user",
+            "content":
+            "Pick as many lines as you can from these poem lines:\n",
+        },
+    ]
+    base_prompt = tokenizer.apply_chat_template(base_message,
+                                                add_generation_prompt=True,
+                                                tokenize=False)
     base_prompt_offset = len(tokenizer(base_prompt).input_ids)
 
     assert input_len > base_prompt_offset, f"input_len is too short, please specify a number higher than {base_prompt_offset}."
@@ -144,12 +153,22 @@ def sample_sonnet_requests(
 
     # Sample the rest of lines per request.
     sampled_requests: List[Tuple[str, int, int]] = []
-    for i in range(num_requests):
+    for _ in range(num_requests):
         sampled_lines = "".join(
             prefix_lines +
             random.sample(poem_lines, num_input_lines - num_prefix_lines))
 
-        prompt = f"{base_prompt}{sampled_lines}"
+        message = [
+            {
+                "role":
+                "user",
+                "content":
+                f"Pick as many lines as you can from these poem lines:\n{sampled_lines}",
+            },
+        ]
+        prompt = tokenizer.apply_chat_template(message,
+                                               add_generation_prompt=True,
+                                               tokenize=False)
         prompt_len = len(tokenizer(prompt).input_ids)
         sampled_requests.append((prompt, prompt_len, output_len))
 
@@ -326,6 +345,7 @@ def main(args: argparse.Namespace):
             tokenizer=tokenizer)
 
     elif args.dataset_name == "sonnet":
+        assert tokenizer.chat_template or tokenizer.default_chat_template, "Tokenizer/model must have chat template for sonnet dataset."
         input_requests = sample_sonnet_requests(
             dataset_path=args.dataset_path,
             num_requests=args.num_prompts,
