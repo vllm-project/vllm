@@ -23,6 +23,22 @@ __global__ void act_and_mul_kernel(
   }
 }
 
+template<typename T>
+__device__ __forceinline__ T silu_kernel(const T& x) {
+  // x * sigmoid(x)
+  return (T) (((float) x) / (1.0f + expf((float) -x)));
+}
+
+template<typename T>
+__device__ __forceinline__ T gelu_kernel(const T& x) {
+  // Equivalent to PyTorch GELU with 'none' approximation.
+  // Refer to:
+  // https://github.com/pytorch/pytorch/blob/8ac9b20d4b090c213799e81acf48a55ea8d437d6/aten/src/ATen/native/cuda/ActivationGeluKernel.cu#L38
+  const float f = (float) x;
+  constexpr float ALPHA = M_SQRT1_2;
+  return (T) (f * 0.5f * (1.0f + ::erf(f * ALPHA)));
+}
+
 // Scaled activation and gating kernel template.
 template<typename scalar_t>
 __global__ void scaled_silu_and_mul_kernel(
@@ -38,22 +54,6 @@ __global__ void scaled_silu_and_mul_kernel(
     float r = silu_kernel(x) * y / s
     out[token_idx * d + idx] = (scalar_t) r;
   }
-}
-
-template<typename T>
-__device__ __forceinline__ T silu_kernel(const T& x) {
-  // x * sigmoid(x)
-  return (T) (((float) x) / (1.0f + expf((float) -x)));
-}
-
-template<typename T>
-__device__ __forceinline__ T gelu_kernel(const T& x) {
-  // Equivalent to PyTorch GELU with 'none' approximation.
-  // Refer to:
-  // https://github.com/pytorch/pytorch/blob/8ac9b20d4b090c213799e81acf48a55ea8d437d6/aten/src/ATen/native/cuda/ActivationGeluKernel.cu#L38
-  const float f = (float) x;
-  constexpr float ALPHA = M_SQRT1_2;
-  return (T) (f * 0.5f * (1.0f + ::erf(f * ALPHA)));
 }
 
 } // namespace vllm
