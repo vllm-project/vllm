@@ -151,7 +151,6 @@ class ModelRunner:
         prefix_block_tables: List[List[int]] = []
         num_chunked_prefill = 0
         # Whether or not if any seq_group has prefix cached.
-        prefix_enabled = False
         # print("SANG-TODO # of requests (seq_group_metadata_list): ",
         #       len(seq_group_metadata_list))
         for seq_group_metadata in seq_group_metadata_list:
@@ -310,6 +309,7 @@ class ModelRunner:
             block_tables=block_tables,
             use_cuda_graph=False,
             kv_cache_dtype=self.kv_cache_dtype,
+            flash_style=self.flash_style,
         )
         return (input_tokens, input_positions, input_metadata, prompt_lens,
                 subquery_lens, lora_index_mapping, lora_prompt_mapping,
@@ -449,6 +449,7 @@ class ModelRunner:
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
             kv_cache_dtype=self.kv_cache_dtype,
+            flash_style=self.flash_style,
         )
         return (input_tokens, input_positions, input_metadata,
                 lora_index_mapping, lora_prompt_mapping, lora_requests)
@@ -594,7 +595,6 @@ class ModelRunner:
                 sampling_metadata.selected_token_indices,
                 "lora_requests": lora_requests,
                 "lora_mapping": lora_mapping,
-                "prefix_enabled": input_metadata.prefix_enabled
             }
             broadcast_tensor_dict(metadata_dict, src=0)
         else:
@@ -618,7 +618,7 @@ class ModelRunner:
                 use_cuda_graph=metadata_dict["use_cuda_graph"],
                 kv_cache_dtype=metadata_dict["kv_cache_dtype"],
                 flash_style=self.flash_style,
-                prefix_enabled=metadata_dict["prefix_enabled"])
+            )
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
                 seq_data=None,
@@ -818,8 +818,7 @@ class ModelRunner:
                     block_tables=block_tables[:batch_size],
                     use_cuda_graph=True,
                     kv_cache_dtype=self.kv_cache_dtype,
-                    flash_style=self.flash_style,
-                    prefix_enabled=False)
+                    flash_style=self.flash_style)
 
                 if self.lora_config:
                     lora_mapping = LoRAMapping(

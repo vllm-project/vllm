@@ -48,6 +48,7 @@ class InputMetadata:
         block_tables: Optional[torch.Tensor],
         use_cuda_graph: bool,
         kv_cache_dtype: str,
+        flash_style: bool,
     ) -> None:
         self.is_prompt = is_prompt
         self.prompt_lens = prompt_lens
@@ -70,7 +71,6 @@ class InputMetadata:
         self.use_cuda_graph = use_cuda_graph
         self.kv_cache_dtype = kv_cache_dtype
         self.flash_style = flash_style
-        self.prefix_enabled = prefix_enabled
 
         # Set during the execution of the first attention op.
         # FIXME(woosuk): This is a hack.
@@ -78,51 +78,6 @@ class InputMetadata:
         # Number of valid tokens. It includes paddings.
         # See attention.py for precise definition.
         self.num_valid_tokens = slot_mapping.shape[0]
-
-        # SANG-TODO
-        # # Prompt related metadata
-        # # This value might include padding if CudaGraph is enabled.
-        # self.num_prompts = len(prompt_lens)
-        # # This value is the source of truth.
-        # self.num_prompts_tensor = torch.cuda.IntTensor([self.num_prompts])
-        # # This value might include padding if CudaGraph is enabled.
-        # self.num_prompt_tokens = num_prompt_tokens
-        # self.prompt_lens_tensor = torch.cuda.IntTensor(self.prompt_lens)
-        # self.max_prompt_len = max(prompt_lens) if prompt_lens else 0
-
-        # # Cumulative prompt lengths for each prompt in the input
-        # # tensor.
-        # self.cum_prompt_query_lens = torch.zeros(
-        #     self.num_prompts + 1,
-        #     device=self.prompt_lens_tensor.device,
-        #     dtype=torch.int32)
-        # # Cumulative context lengths.
-        # self.cum_prompt_context_lens = torch.zeros(
-        #     self.num_prompts + 1,
-        #     device=self.prompt_lens_tensor.device,
-        #     dtype=torch.int32)
-
-        # torch.cumsum(self.prompt_lens_tensor,
-        #              dim=0,
-        #              dtype=self.cum_prompt_query_lens.dtype,
-        #              out=self.cum_prompt_query_lens[1:])
-        # torch.cumsum(self.context_lens[:self.num_prompts],
-        #              dim=0,
-        #              dtype=self.cum_prompt_context_lens.dtype,
-        #              out=self.cum_prompt_context_lens[1:])
-
-        # # TODO: this will be different once we support chunked prefills.
-        # self.cum_prompt_context_lens = self.cum_prompt_query_lens
-        # self.max_context_len = max_context_len
-
-        # # Generation related metadata
-        # # This value might include padding if CudaGraph is enabled.
-        # self.num_generation_tokens = num_generation_tokens
-        # # This is the source of truth for the number of generation tokens.
-        # self.num_generation_tokens_tensor = torch.tensor(
-        #     [self.num_generation_tokens],
-        #     dtype=torch.int32 if self.flash_style else torch.long,
-        #     device='cuda')
 
     def __repr__(self) -> str:
         return ("InputMetadata("

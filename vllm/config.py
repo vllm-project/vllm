@@ -80,6 +80,7 @@ class ModelConfig:
         quantization: Optional[str] = None,
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
+        max_logprobs: int = 5,
         flash_style: bool = False,
     ) -> None:
         self.model = model
