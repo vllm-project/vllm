@@ -262,10 +262,8 @@ class ModelRunner:
                 if i < start_idx:
                     slot_mapping.append(_PAD_SLOT_ID)
                     continue
-                try:
-                    block_number = block_table[i // self.block_size]
-                except Exception:
-                    breakpoint()
+
+                block_number = block_table[i // self.block_size]
                 block_offset = i % self.block_size
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
@@ -447,8 +445,6 @@ class ModelRunner:
 
         num_prompt_tokens = len(input_tokens)
         num_generation_tokens = len(input_tokens_decode)
-        # print("input_tokens decode size: ", len(input_tokens_decode))
-        # print("input_tokens size: ", len(input_tokens))
 
         # Concatenate inputs.
         input_tokens.extend(input_tokens_decode)
