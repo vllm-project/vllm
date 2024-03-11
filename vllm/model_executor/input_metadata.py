@@ -52,9 +52,9 @@ class InputMetadata:
     ) -> None:
         self.is_prompt = is_prompt
         self.prompt_lens = prompt_lens
+        self.num_chunked_prefill = num_chunked_prefill
         self.num_prompt_tokens = num_prompt_tokens
         self.num_generation_tokens = num_generation_tokens
-        self.num_chunked_prefill = num_chunked_prefill
         self.max_seq_len = max_seq_len
         self.start_loc = start_loc
         self.max_context_len = max_context_len

@@ -185,11 +185,7 @@ class ModelRunner:
                 prefix_block_tables.append(computed_block_nums)
                 context_len = computed_len
             else:
-                if seq_group_metadata.block_tables is None:
-                    prefix_block_tables.append([])
-                else:
-                    block_table = seq_group_metadata.block_tables[seq_id]
-                    prefix_block_tables.append(block_table)
+                prefix_block_tables.append([])
                 context_len = 0
             # actual prompt lens
             context_lens.append(context_len)
