@@ -6,16 +6,11 @@ import torch
 from torch import nn
 
 from vllm.config import DeviceConfig, ModelConfig
-from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.llava import LlavaForConditionalGeneration
 from vllm.model_executor.weight_utils import (get_quant_config,
                                               initialize_dummy_weights)
 from vllm.model_executor.tensorizer_loader import load_with_tensorizer, _is_vllm_model
-
-from torch import nn
-
-logger = init_logger(__name__)
 
 
 _VISION_MODEL_CLASSES = [

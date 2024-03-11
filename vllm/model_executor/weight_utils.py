@@ -242,14 +242,13 @@ def prepare_hf_model_weights(
 def hf_model_weights_iterator(
     model_name_or_path: str,
     cache_dir: Optional[str] = None,
-    dynamic_load_format: Union[Tuple, str] = "auto",
+    load_format: Union[Tuple, str] = "auto",
     revision: Optional[str] = None,
     fall_back_to_pt: Optional[bool] = True,
 ) -> Iterator[Tuple[str, torch.Tensor]]:
-    if isinstance(dynamic_load_format, tuple):
-        load_format, tensorizer_args = dynamic_load_format
+    if isinstance(load_format, tuple):
+        load_format, tensorizer_args = load_format
     else:
-        load_format = dynamic_load_format
         tensorizer_args = None
     hf_folder, hf_weights_files, use_safetensors = prepare_hf_model_weights(
         model_name_or_path,
@@ -296,8 +295,8 @@ def hf_model_weights_iterator(
                 "It is not recommended to download deserialized tensors locally. "
                 "Consider keeping `download_dir` as None next time.")
         deserializer_args = tensorizer_args.deserializer_params
-        credentials = tensorizer_args.credentials
-        stream = open_stream(tensorizer_args.tensorizer_uri, **credentials)
+        stream_params = tensorizer_args.stream_params
+        stream = open_stream(tensorizer_args.tensorizer_uri, **stream_params)
         with TensorDeserializer(stream, **deserializer_args,
                                 device="cpu") as state:
             for name, param in state.items():
