@@ -163,7 +163,6 @@ class ModelRunner:
         # seq_group_metadata_list. Note that the last chunked
         # is not considered as chunked prefill request.
         num_chunked_prefill = 0
-
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
