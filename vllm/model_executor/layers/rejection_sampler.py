@@ -21,8 +21,6 @@ class RejectionSampler(nn.Module):
                 nontrivial latency.
         """
         super().__init__()
-        self.probs_dtype = torch.float32
-        self.token_id_dtype = torch.int64
         self._strict_mode = strict_mode
 
         # NOTE: A "bonus token" is accepted iff all proposal tokens are
@@ -43,6 +41,14 @@ class RejectionSampler(nn.Module):
         self.num_emitted_tokens = torch.tensor(0,
                                                dtype=torch.long,
                                                device=device)
+
+    @property
+    def probs_dtype(self):
+        return torch.float32
+
+    @property
+    def token_id_dtype(self):
+        return torch.int64
 
     def forward(
         self,

@@ -1,7 +1,7 @@
 """Compare the outputs of a GPTQ model to a Marlin model.
 
-Note: GPTQ and Marlin do not have bitwise correctness. 
-As a result, in this test, we just confirm that the top selected tokens of the 
+Note: GPTQ and Marlin do not have bitwise correctness.
+As a result, in this test, we just confirm that the top selected tokens of the
 Marlin/GPTQ models are in the top 3 selections of each other.
 
 Note: Marlin internally uses locks to synchronize the threads. This can
@@ -14,7 +14,8 @@ Run `pytest tests/models/test_marlin.py --forked`.
 import pytest
 import torch
 from dataclasses import dataclass
-from vllm.model_executor.layers.quantization import _QUANTIZATION_CONFIG_REGISTRY
+from vllm.model_executor.layers.quantization import (
+    _QUANTIZATION_CONFIG_REGISTRY)
 
 capability = torch.cuda.get_device_capability()
 capability = capability[0] * 10 + capability[1]
@@ -87,11 +88,11 @@ def test_models(
             if marlin_output_id != gptq_output_id:
                 # Each predicted token must be in top 5 of the other's
                 assert gptq_output_id in marlin_logprobs[idx], (
-                    f"Test{prompt_idx}:\nGPTQ:\t{gptq_output_str!r}\nMarlin:\t{marlin_output_str!r}"
-                )
+                    f"Test{prompt_idx}:\nGPTQ:\t{gptq_output_str!r}\n"
+                    f"Marlin:\t{marlin_output_str!r}")
                 assert marlin_output_id in gptq_logprobs[idx], (
-                    f"Test{prompt_idx}:\nGPTQ:\t{gptq_output_str!r}\nMarlin:\t{marlin_output_str!r}"
-                )
+                    f"Test{prompt_idx}:\nGPTQ:\t{gptq_output_str!r}\n"
+                    f"Marlin:\t{marlin_output_str!r}")
 
                 # Break out since sequences will now diverge.
                 break

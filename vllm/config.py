@@ -45,7 +45,7 @@ class ModelConfig:
             a tag name, or a commit id. If unspecified, will use the default
             version.
         code_revision: The specific revision to use for the model code on
-            Hugging Face Hub. It can be a branch name, a tag name, or a 
+            Hugging Face Hub. It can be a branch name, a tag name, or a
             commit id. If unspecified, will use the default version.
         tokenizer_revision: The specific tokenizer version to use. It can be a
             branch name, a tag name, or a commit id. If unspecified, will use
@@ -189,8 +189,8 @@ class ModelConfig:
             if is_hip(
             ) and self.quantization in rocm_not_supported_quantization:
                 raise ValueError(
-                    f"{self.quantization} quantization is currently not supported "
-                    f"in ROCm.")
+                    f"{self.quantization} quantization is currently not "
+                    f"supported in ROCm.")
             if self.quantization != "marlin":
                 logger.warning(
                     f"{self.quantization} quantization is not fully "
@@ -321,7 +321,8 @@ class CacheConfig:
         self.num_cpu_blocks = None
 
     def metrics_info(self):
-        # convert cache_config to dict(key: str, value: str) for prometheus metrics info
+        # convert cache_config to dict(key: str, value: str) for prometheus
+        # metrics info
         return {key: str(value) for key, value in self.__dict__.items()}
 
     def _verify_args(self) -> None:
@@ -399,8 +400,9 @@ class ParallelConfig:
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         if is_neuron():
-            # For Neuron device support, here we assign TP=1 to avoid sharding within vLLM directly.
-            # Transformer-neuronx would take neuron_tp_degree attribute, and distribute the workload
+            # For Neuron device support, here we assign TP=1 to avoid sharding
+            # within vLLM directly. Transformer-neuronx would take
+            # neuron_tp_degree attribute, and distribute the workload
             # to multiple NeuronCores.
             self.tensor_parallel_size = 1
             self.neuron_tp_degree = tensor_parallel_size

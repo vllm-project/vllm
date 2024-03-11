@@ -6,7 +6,8 @@ import torch.nn as nn
 
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_gather)
-from vllm.model_executor.sampling_metadata import SamplingMetadata, SamplingTensors
+from vllm.model_executor.sampling_metadata import (SamplingMetadata,
+                                                   SamplingTensors)
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (Logprob, PromptLogprobs, SampleLogprobs,
                            SamplerOutput, SequenceData, SequenceGroupOutput,
@@ -587,4 +588,4 @@ def _build_sampler_output(
                 SequenceOutput(seq_ids[parent_id], next_token_id, logprobs))
         sampler_output.append(
             SequenceGroupOutput(seq_outputs, group_prompt_logprobs))
-    return sampler_output
+    return SamplerOutput(outputs=sampler_output)

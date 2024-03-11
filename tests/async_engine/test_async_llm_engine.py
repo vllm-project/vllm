@@ -89,3 +89,6 @@ async def test_new_requests_event():
     await asyncio.sleep(0.01)
     assert engine.engine.add_request_calls == 3
     assert engine.engine.step_calls == old_step_calls + 1
+
+    engine = MockAsyncLLMEngine(worker_use_ray=True, engine_use_ray=True)
+    assert engine.get_tokenizer() is not None
