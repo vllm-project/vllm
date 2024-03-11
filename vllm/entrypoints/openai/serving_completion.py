@@ -126,7 +126,7 @@ class OpenAIServingCompletion(OpenAIServing):
             lora_request = self._maybe_get_lora(request)
             guided_decode_logit_processor = (
                 await get_guided_decoding_logits_processor(
-                    request, self.engine.get_tokenizer()))
+                    request, await self.engine.get_tokenizer()))
             if guided_decode_logit_processor is not None:
                 if sampling_params.logits_processors is None:
                     sampling_params.logits_processors = []

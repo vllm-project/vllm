@@ -7,6 +7,8 @@ import importlib
 from typing import (TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple,
                     Union)
 
+from transformers import PreTrainedTokenizer
+
 import vllm
 from vllm.lora.request import LoRARequest
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
@@ -163,7 +165,11 @@ class LLMEngine:
         # the closure used to initialize Ray worker actors
         raise RuntimeError("LLMEngine should not be pickled!")
 
-    def get_tokenizer_for_seq(self, sequence: Sequence):
+    def get_tokenizer(self) -> "PreTrainedTokenizer":
+        return self.tokenizer.get_lora_tokenizer()
+
+    def get_tokenizer_for_seq(self,
+                              sequence: Sequence) -> "PreTrainedTokenizer":
         return self.tokenizer.get_lora_tokenizer(sequence.lora_request)
 
     def _dispatch_worker(self):
