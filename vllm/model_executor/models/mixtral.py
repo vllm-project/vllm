@@ -140,10 +140,10 @@ class MixtralMoE(nn.Module):
         if weight_name.endswith("w2.weight"):
             param_data[expert_id, :, :] = loaded_weight[:, shard]
         # For loading scales
-        if weight_name.endswith("scales.w1") or weight_name.endswith("scales.w2"):
+        if weight_name.endswith("scales.w1") or weight_name.endswith("scales.w3"):
             param_data[:] = loaded_weight[:]
             print("loaded scale", weight_name, loaded_weight.shape)
-        if weight_name.endswith("scales.w3"):
+        if weight_name.endswith("scales.w2"):
             param_data[:] = loaded_weight[shard]
             print("loaded scale", weight_name, loaded_weight.shape)
 
