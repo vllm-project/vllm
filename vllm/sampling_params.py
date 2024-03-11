@@ -74,8 +74,8 @@ class SamplingParams:
         stop_token_ids: List of tokens that stop the generation when they are
             generated. The returned output will contain the stop tokens unless
             the stop tokens are special tokens.
-        include_stop_str_in_output: Whether to include the stop strings in output
-            text. Defaults to False.
+        include_stop_str_in_output: Whether to include the stop strings in
+            output text. Defaults to False.
         ignore_eos: Whether to ignore the EOS token and continue generating
             tokens after the EOS token is generated.
         max_tokens: Maximum number of tokens to generate per output sequence.
