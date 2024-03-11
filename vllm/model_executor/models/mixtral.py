@@ -102,17 +102,13 @@ class MixtralMoE(nn.Module):
                         device="cuda",
                         dtype=torch.float8_e4m3fn))
 
-        # Scaling factors for fp8, s1 and s3 are actually the same
-        self.s1 = nn.Parameter(
+        # Scaling factors for fp8
+        self.s = nn.Parameter(
             torch.empty(self.hidden_size,
                         device="cuda",
                         dtype=torch.float16))
         self.s2 = nn.Parameter(
             torch.empty(self.intermediate_size,
-                        device="cuda",
-                        dtype=torch.float16))
-        self.s3 = nn.Parameter(
-            torch.empty(self.hidden_size,
                         device="cuda",
                         dtype=torch.float16))
 
@@ -123,14 +119,11 @@ class MixtralMoE(nn.Module):
             "weight_loader": self.weight_loader,
         })
 
-        set_weight_attrs(self.s1, {
-            "scale_loader": self.scale_loader,
+        set_weight_attrs(self.s, {
+            "weight_loader": self.weight_loader,
         })
         set_weight_attrs(self.s2, {
-            "scale_loader": self.scale_loader,
-        })
-        set_weight_attrs(self.s3, {
-            "scale_loader": self.scale_loader,
+            "weight_loader": self.weight_loader,
         })
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
@@ -146,17 +139,13 @@ class MixtralMoE(nn.Module):
                        shard_size:2 * shard_size, :] = loaded_weight[shard, :]
         if weight_name.endswith("w2.weight"):
             param_data[expert_id, :, :] = loaded_weight[:, shard]
-
-    def scale_loader(self, param: nn.Parameter, loaded_scale: torch.Tensor,
-                     scale_name: str):
-        tp_rank = get_tensor_model_parallel_rank()
-        shard_size = self.intermediate_size
-        shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
-        if scale_name.endswith("w2"):
-            param.data[:] = loaded_scale[shard]
-        else:
-            param.data[:] = loaded_scale[:]
-        print("loaded scale", scale_name, loaded_scale.shape)
+        # For loading scales
+        if weight_name.endswith("scales.w1") or weight_name.endswith("scales.w2"):
+            param_data[:] = loaded_weight[:]
+            print("loaded scale", weight_name, loaded_weight.shape)
+        if weight_name.endswith("scales.w3"):
+            param_data[:] = loaded_weight[shard]
+            print("loaded scale", weight_name, loaded_weight.shape)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, sequence_length, hidden_size = hidden_states.shape
@@ -443,10 +432,17 @@ class MixtralForCausalLM(nn.Module):
         ]
 
         expert_params_mapping = [
+            # These are the weights for the experts
             # (param_name, weight_name, expert_id)
             ("ws" if weight_name in ["w1", "w3"] else "w2s",
              f"experts.{expert_id}.{weight_name}.weight", expert_id)
             for expert_id in range(self.config.num_local_experts)
+            for weight_name in ["w1", "w2", "w3"]
+        ] + [
+            # These are the scales for the experts
+            # (param_name, weight_name, None)
+            ("s" if weight_name in ["w1", "w3"] else "s2",
+             f"scales.{weight_name}", None)
             for weight_name in ["w1", "w2", "w3"]
         ]
 
@@ -491,25 +487,3 @@ class MixtralForCausalLM(nn.Module):
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
-
-    # TODO: This can be unified with load_weights above once
-    # we know the scaling works and we have produced the model files.
-    def load_scales(self, model_name_or_path: str):
-
-        expert_scales_mapping = [
-            # (scale_name, weight_name)
-            (weight_name.replace("w", "s"), f"experts.{weight_name}") for weight_name in ["w1", "w2", "w3"]
-        ]
-
-        scale_data = torch.load("/home/ray/default/mixtral_scales_mean_sqrt.pth")
-
-        params_dict = dict(self.named_parameters())
-        for name, loaded_scale in scale_data.items():
-            for param_name, scale_name in expert_scales_mapping:
-                if scale_name not in name:
-                    continue
-                name = name.replace(scale_name, param_name)
-                param = params_dict[name]
-                scale_loader = param.scale_loader
-                scale_loader(param, loaded_scale, scale_name)
-                break
