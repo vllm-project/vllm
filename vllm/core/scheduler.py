@@ -42,7 +42,7 @@ class TokenBudget:
 
     def __init__(self, token_budget: int):
         self.token_budget = token_budget
-        self.prefill_seqlen = []
+        self.num_prefill_tokens = 0
         self.num_decoding_tokens = 0
 
     def record_prefill_tokens(self, prefill_tokens: int):
@@ -51,7 +51,7 @@ class TokenBudget:
         Padding is automatically recorded, so the
         `prefill_tokens` should not include paddings.
         """
-        self.prefill_seqlen.append(prefill_tokens)
+        self.num_prefill_tokens += prefill_tokens
 
     def record_decoding_tokens(self, decoding_tokens: int):
         """Record the decoding tokens.
@@ -65,27 +65,12 @@ class TokenBudget:
         """Get the remaining token budget."""
         # Each prefill requests are padded to the longest
         # seqlen.
-        longest_prefill_seqlen = (0 if len(self.prefill_seqlen) == 0 else max(
-            self.prefill_seqlen))
-        prefill_token_budgets = (longest_prefill_seqlen *
-                                 len(self.prefill_seqlen))
-        return (self.token_budget - prefill_token_budgets -
+        return (self.token_budget - self.num_prefill_tokens -
                 self.num_decoding_tokens)
 
     @property
     def num_batched_tokens(self):
-        longest_prefill_seqlen = (0 if len(self.prefill_seqlen) == 0 else max(
-            self.prefill_seqlen))
-        prefill_token_budgets = (longest_prefill_seqlen *
-                                 len(self.prefill_seqlen))
-        return prefill_token_budgets + self.num_decoding_tokens
-
-    @property
-    def num_prefill_paddings(self):
-        """Return a number of paddings in the prefill requests.
-        
-        NOTE: This doesn't include padding for decode requests."""
-        return self.num_batched_tokens - sum(self.prefill_seqlen)
+        return self.num_prefill_tokens + self.num_decoding_tokens
 
 
 class SchedulerOutputs:
@@ -485,6 +470,7 @@ class Scheduler:
         # This is called only if chunked prefilling is enabled.
         while self.chunked_prefilling and token_budget.get() > 0 \
             and num_prompting_seqs < self.scheduler_config.max_num_prompt_seqs:
+            assert False
 
             if not self.chunked_prefill_enabled:
                 raise AssertionError(

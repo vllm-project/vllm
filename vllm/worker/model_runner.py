@@ -197,7 +197,8 @@ class ModelRunner:
                 computed_len = len(computed_block_nums) * self.block_size
                 prompt_tokens = prompt_tokens[computed_len:]
                 block_tables.append(computed_block_nums)
-            elif self.scheduler_config.chunked_prefill_enabled:
+            # elif self.scheduler_config.chunked_prefill_enabled:
+            else:
                 # Update the block table so that KV cache location
                 # can be found. TODO(sang): Make it work with
                 # prefix caching.
@@ -208,12 +209,12 @@ class ModelRunner:
                     block_table = seq_group_metadata.block_tables[seq_id]
                     block_tables.append(block_table)
                 computed_len = prefill_start
-            else:
-                # Normal prefill. Don't update the block table because
-                # we don't need to use KV cacahe when running attentions.
-                block_tables.append([])
-                assert prefill_start == 0
-                computed_len = prefill_start
+            # else:
+            #     # Normal prefill. Don't update the block table because
+            #     # we don't need to use KV cacahe when running attentions.
+            #     block_tables.append([])
+            #     assert prefill_start == 0
+            #     computed_len = prefill_start
 
             context_lens.append(computed_len)
             subquery_lens.append(prefill_end - computed_len)

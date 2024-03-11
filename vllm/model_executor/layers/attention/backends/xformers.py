@@ -181,6 +181,7 @@ class XFormersBackend:
             else:
                 # prefix-enabled attention
                 print("SANG-TODO prefix prefill, num_prompt_tokens, ", num_prompt_tokens)
+                breakpoint()
                 output[:num_prompt_tokens] = PagedAttentionImpl.forward_prefix(
                     query,
                     key,

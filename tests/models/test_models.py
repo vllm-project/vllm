@@ -29,7 +29,7 @@ MODELS = [
 # @pytest.mark.parametrize("enforce_eager", [False, True])
 @pytest.mark.parametrize("enforce_eager", [False])
 # @pytest.mark.parametrize("max_chunked_prefill_len", [-1, 100000000])
-@pytest.mark.parametrize("max_chunked_prefill_len", [100000000])
+@pytest.mark.parametrize("max_chunked_prefill_len", [-1])
 def test_models(
     hf_runner,
     vllm_runner,
