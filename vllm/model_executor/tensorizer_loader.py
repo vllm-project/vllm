@@ -39,10 +39,11 @@ def _make_model_contiguous(model: nn.Module):
         param.data = param.data.contiguous()
 
 
+#
 @dataclass
 class TensorizerArgs:
     tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, typing.BinaryIO,
-                          str, bytes, os.PathLike, int, ]
+                          str, bytes, os.PathLike, int]
     device: Optional[Union[torch.device, str]] = None
     dtype: Optional[torch.dtype] = None
     lazy_load: bool = False
@@ -50,6 +51,31 @@ class TensorizerArgs:
     verify_hash: bool = False
     filter_func: Optional[Callable[[str], Union[bool, Any]]] = None
     deserializer_encryption_key: Optional[str] = None
+    """
+    Args for TensorizerAgent class. These are used to configure the behavior of the
+    TensorDeserializer when loading tensors from a serialized model.
+    
+    Args:
+        tensorizer_uri: Path to serialized model tensors. Can be a local file path
+            or a S3 URI.
+        device: The device to load the tensors onto. If None, the tensors will be
+            loaded onto the default device.
+        dtype: The dtype to cast the tensors to. If None, the tensors will be loaded
+            with their original dtype.
+        lazy_load: If True, tensors will be loaded and cached when keys are accessed.
+            If False, all tensors will be loaded into memory up front.
+        plaid_mode_buffers: The number of buffers to use in plaid mode. This is only
+            used if ``plaid_mode=True``. These buffers are used to pipeline the loading
+            and processing of tensors.
+        verify_hash: If True, the hashes of each tensor will be verified against the
+            hashes stored in the metadata. A `HashMismatchError` will be raised if any
+            of the hashes do not match.
+        filter_func: A function that takes a tensor key and returns True if the tensor
+            should be loaded and False if it should be skipped. If None, all tensors
+            will be loaded.
+        deserializer_encryption_key: A `DecryptionParams` object holding a password or
+            key to use for decryption. ``None`` (the default) means no decryption.
+    """
 
     def __post_init__(self):
         self.file_obj = self.tensorizer_uri
@@ -134,7 +160,14 @@ class TensorizerArgs:
 
 
 class TensorizerAgent:
-
+    """
+    A class for performing tensorizer deserializations specifically for
+    vLLM models using plaid_mode. Uses TensorizerArgs to configure the
+    behavior of the TensorDeserializer when loading tensors from a serialized
+    model. For deserializations of HuggingFace models, TensorDeserializer is
+    instead used as an iterator directly in the func hf_model_weights_iterator
+    in vllm/model_executor/weight_utils.py
+    """
     def __init__(
         self,
         model_cls: Type[nn.Module],
@@ -158,6 +191,19 @@ class TensorizerAgent:
                 f"file when load_format = tensorizer")
 
     def deserialize(self):
+        """
+        Deserialize the model using the TensorDeserializer. This method is
+        specifically for vLLM models using tensorizer's plaid_mode.
+
+        The deserializer makes use of tensorizer_args.stream_params
+        to configure the behavior of the stream when loading tensors from a
+        serialized model. The deserializer_params are used to configure the
+        behavior of the TensorDeserializer when loading tensors themselves.
+        Documentation on these params can be found in TensorizerArgs
+
+        Returns:
+            nn.Module: The deserialized model.
+        """
         before_mem = get_mem_usage()
         # Lazy load the tensors from S3 into the model.
         start = time.time()
