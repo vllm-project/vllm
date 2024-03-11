@@ -266,7 +266,8 @@ def test_sampler_mixed(seed: int, device: str):
                 continue
 
             for n, nth_output in enumerate(sequence_output.samples):
-                if (metadata.sampling_params.temperature == 0 or metadata.sampling_params.seed is not None):
+                if (metadata.sampling_params.temperature == 0
+                        or metadata.sampling_params.seed is not None):
                     # Ensure exact matches for greedy or random with seed
                     assert nth_output.output_token == expected_tokens[i][n]
                 else:
