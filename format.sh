@@ -95,13 +95,17 @@ echo 'vLLM yapf: Done'
 # echo 'vLLM mypy:'
 # mypy
 
+CODESPELL_EXCLUDES=(
+    '--skip' '*docs/source/_build/**'
+)
+
 # check spelling of specified files
 spell_check() {
     codespell "$@"
 }
 
 spell_check_all(){
-  codespell --toml pyproject.toml
+  codespell --toml pyproject.toml "${CODESPELL_EXCLUDES[@]}"
 }
 
 # Spelling  check of files that differ from main branch.
@@ -116,7 +120,7 @@ spell_check_changed() {
 
     if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
         git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs \
-             codespell
+             codespell "${CODESPELL_EXCLUDES[@]}"
     fi
 }
 

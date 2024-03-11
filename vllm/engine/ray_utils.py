@@ -1,6 +1,6 @@
 import pickle
 
-from typing import Optional, List, Tuple, TYPE_CHECKING
+from typing import Optional, List, Tuple
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
@@ -65,45 +65,38 @@ except ImportError as e:
     ray = None
     RayWorkerVllm = None
 
-if TYPE_CHECKING:
-    from ray.util.placement_group import PlacementGroup
 
-
-def initialize_cluster(
+def initialize_ray_cluster(
     parallel_config: ParallelConfig,
-    engine_use_ray: bool = False,
     ray_address: Optional[str] = None,
-) -> Optional["PlacementGroup"]:
-    """Initialize the distributed cluster probably with Ray.
+):
+    """Initialize the distributed cluster with Ray.
+
+    it will connect to the Ray cluster and create a placement group
+    for the workers, which includes the specification of the resources
+    for each distributed worker.
 
     Args:
         parallel_config: The configurations for parallel execution.
-        engine_use_ray: Whether to use Ray for async engine.
         ray_address: The address of the Ray cluster. If None, uses
             the default Ray cluster address.
-
-    Returns:
-        An optional `PlacementGroup`. It includes the specification
-        of the resources for each distributed worker. None if Ray is
-        not used.
     """
-    if parallel_config.worker_use_ray or engine_use_ray:
-        if ray is None:
-            raise ImportError(
-                "Ray is not installed. Please install Ray to use distributed "
-                "serving.")
-        # Connect to a ray cluster.
-        if is_hip():
-            ray.init(address=ray_address,
-                     ignore_reinit_error=True,
-                     num_gpus=parallel_config.world_size)
-        else:
-            ray.init(address=ray_address, ignore_reinit_error=True)
+    if ray is None:
+        raise ImportError(
+            "Ray is not installed. Please install Ray to use distributed "
+            "serving.")
 
-    if not parallel_config.worker_use_ray:
-        assert parallel_config.world_size == 1, (
-            "Ray is required if parallel_config.world_size > 1.")
-        return None
+    # Connect to a ray cluster.
+    if is_hip():
+        ray.init(address=ray_address,
+                 ignore_reinit_error=True,
+                 num_gpus=parallel_config.world_size)
+    else:
+        ray.init(address=ray_address, ignore_reinit_error=True)
+
+    if parallel_config.placement_group:
+        # Placement group is already set.
+        return
 
     # Create placement group for worker processes
     current_placement_group = ray.util.get_current_placement_group()
@@ -138,4 +131,5 @@ def initialize_cluster(
         # if they cannot be provisioned.
         ray.get(current_placement_group.ready(), timeout=1800)
 
-    return current_placement_group
+    # Set the placement group in the parallel config
+    parallel_config.placement_group = current_placement_group
