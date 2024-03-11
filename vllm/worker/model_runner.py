@@ -58,8 +58,6 @@ class ModelRunner:
         # FIXME(woosuk): This is a hack to make the tests work. Refactor this.
         self.sliding_window = (model_config.get_sliding_window()
                                if model_config is not None else None)
-        self.flash_style = (self.model_config.flash_style
-                            if model_config is not None else False)
 
         self.device_config = (device_config
                               if device_config is not None else DeviceConfig())
@@ -185,7 +183,12 @@ class ModelRunner:
                 prefix_block_tables.append(computed_block_nums)
                 context_len = computed_len
             else:
-                prefix_block_tables.append([])
+                # prefix_block_tables.append([])
+                if seq_group_metadata.block_tables is None:
+                    prefix_block_tables.append([])
+                else:
+                    block_table = seq_group_metadata.block_tables[seq_id]
+                    prefix_block_tables.append(block_table)
                 context_len = 0
             # actual prompt lens
             context_lens.append(context_len)
@@ -309,7 +312,6 @@ class ModelRunner:
             block_tables=block_tables,
             use_cuda_graph=False,
             kv_cache_dtype=self.kv_cache_dtype,
-            flash_style=self.flash_style,
         )
         return (input_tokens, input_positions, input_metadata, prompt_lens,
                 subquery_lens, lora_index_mapping, lora_prompt_mapping,
@@ -449,7 +451,6 @@ class ModelRunner:
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
             kv_cache_dtype=self.kv_cache_dtype,
-            flash_style=self.flash_style,
         )
         return (input_tokens, input_positions, input_metadata,
                 lora_index_mapping, lora_prompt_mapping, lora_requests)
@@ -616,8 +617,7 @@ class ModelRunner:
                 context_lens=metadata_dict["context_lens"],
                 block_tables=metadata_dict["block_tables"],
                 use_cuda_graph=metadata_dict["use_cuda_graph"],
-                kv_cache_dtype=metadata_dict["kv_cache_dtype"],
-                flash_style=self.flash_style)
+                kv_cache_dtype=metadata_dict["kv_cache_dtype"])
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
                 seq_data=None,
@@ -816,8 +816,7 @@ class ModelRunner:
                     context_lens=context_lens[:batch_size],
                     block_tables=block_tables[:batch_size],
                     use_cuda_graph=True,
-                    kv_cache_dtype=self.kv_cache_dtype,
-                    flash_style=self.flash_style)
+                    kv_cache_dtype=self.kv_cache_dtype)
 
                 if self.lora_config:
                     lora_mapping = LoRAMapping(
