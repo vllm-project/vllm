@@ -1,4 +1,4 @@
-from typing import Optional, Union, ClassVar
+from typing import TYPE_CHECKING, Optional, Union, ClassVar
 from dataclasses import dataclass
 import os
 from packaging.version import Version
@@ -9,6 +9,9 @@ from transformers import PretrainedConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config
 from vllm.utils import get_cpu_memory, is_hip, is_neuron, get_nvcc_cuda_version
+
+if TYPE_CHECKING:
+    from ray.util.placement_group import PlacementGroup
 
 logger = init_logger(__name__)
 
@@ -45,7 +48,7 @@ class ModelConfig:
             a tag name, or a commit id. If unspecified, will use the default
             version.
         code_revision: The specific revision to use for the model code on
-            Hugging Face Hub. It can be a branch name, a tag name, or a 
+            Hugging Face Hub. It can be a branch name, a tag name, or a
             commit id. If unspecified, will use the default version.
         tokenizer_revision: The specific tokenizer version to use. It can be a
             branch name, a tag name, or a commit id. If unspecified, will use
@@ -189,8 +192,8 @@ class ModelConfig:
             if is_hip(
             ) and self.quantization in rocm_not_supported_quantization:
                 raise ValueError(
-                    f"{self.quantization} quantization is currently not supported "
-                    f"in ROCm.")
+                    f"{self.quantization} quantization is currently not "
+                    f"supported in ROCm.")
             if self.quantization != "marlin":
                 logger.warning(
                     f"{self.quantization} quantization is not fully "
@@ -321,7 +324,8 @@ class CacheConfig:
         self.num_cpu_blocks = None
 
     def metrics_info(self):
-        # convert cache_config to dict(key: str, value: str) for prometheus metrics info
+        # convert cache_config to dict(key: str, value: str) for prometheus
+        # metrics info
         return {key: str(value) for key, value in self.__dict__.items()}
 
     def _verify_args(self) -> None:
@@ -396,11 +400,13 @@ class ParallelConfig:
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
         ray_workers_use_nsight: bool = False,
+        placement_group: Optional["PlacementGroup"] = None,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         if is_neuron():
-            # For Neuron device support, here we assign TP=1 to avoid sharding within vLLM directly.
-            # Transformer-neuronx would take neuron_tp_degree attribute, and distribute the workload
+            # For Neuron device support, here we assign TP=1 to avoid sharding
+            # within vLLM directly. Transformer-neuronx would take
+            # neuron_tp_degree attribute, and distribute the workload
             # to multiple NeuronCores.
             self.tensor_parallel_size = 1
             self.neuron_tp_degree = tensor_parallel_size
@@ -410,6 +416,7 @@ class ParallelConfig:
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
         self.ray_workers_use_nsight = ray_workers_use_nsight
+        self.placement_group = placement_group
 
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
         # Ray worker is not supported for Neuron backend.
