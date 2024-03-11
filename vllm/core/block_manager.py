@@ -250,12 +250,24 @@ class BlockSpaceManager:
         self,
         seq: Sequence,
     ) -> PhysicalTokenBlock:
+        # Called before a new block is appended.
+        # This is in charge of allocating a new physical block (to be appended).
+
+        # None if the last block is not full. Otherwise, we set it to the content hash.
         block_hash: Optional[int] = None
         if (self._is_last_block_full(seq)):
             block_hash = seq.hash_of_block(len(seq.logical_token_blocks) - 1)
         num_hashed_tokens = seq.num_hashed_tokens_of_block(
             len(seq.logical_token_blocks) - 1)
+
+        # num_hashed_tokens is used to compute future hashes
+        # (e.g. in the hashing function, it is used to ask the sequence for prefix tokens)
         new_block = self.gpu_allocator.allocate(block_hash, num_hashed_tokens)
+
+        # If the block has is None, then the block is not full.
+        # If the block is not full, then we expect it to have a refcount of 1.
+        # This doesn't feel quite justified but it's not the worst assertion..
+        # (I'm thinking of beam search / CoW)
         if block_hash is None:
             assert new_block.ref_count == 1
         return new_block
@@ -340,6 +352,10 @@ class BlockSpaceManager:
 
             for cpu_block in block_table:
                 if cpu_block in mapping:
+                    # This is an example of logic that should be subsumed by
+                    # prefix caching. If blocks are shared in a sequence group,
+                    # there is no need for refcounting logic -- should be handled
+                    # by layer below.
                     gpu_block = mapping[cpu_block]
                     gpu_block.ref_count += 1
                 else:
