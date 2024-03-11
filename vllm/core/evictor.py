@@ -1,5 +1,6 @@
 import enum
-from typing import Dict, List, Optional
+from typing import Dict
+# from typing import List, Optional
 from abc import ABC, abstractmethod, abstractproperty
 from vllm.utils import Device
 
@@ -67,37 +68,20 @@ class LRUEvictor(Evictor):
 
     # TODO: The performance of this evict function can be optimized further.
     def evict(self) -> PhysicalTokenBlock:
-        free_blocks: List[PhysicalTokenBlock] = list(self.free_table.values())
-        if len(free_blocks) == 0:
+        if len(self.free_table) == 0:
             raise ValueError("No usable cache memory left")
+        free_blocks = self.free_table.values()
 
-        # Find lowest timestamp
-        lowest_timestamp = free_blocks[0].last_accessed
+        # # Find lowest timestamp
+        # lowest_timestamp = next(iter(free_blocks)).last_accessed
+        # # Find highest prefix count per block
+        # highest_num_hashed_tokens = 0
+        # Get evicted block
+        evicted_block: PhysicalTokenBlock = next(iter(free_blocks))
+
         for block in free_blocks:
-            if block.last_accessed < lowest_timestamp:
-                lowest_timestamp = block.last_accessed
-
-        # Find all blocks with the lowest timestamp
-        least_recent: List[PhysicalTokenBlock] = []
-        for block in free_blocks:
-            if block.last_accessed == lowest_timestamp:
-                least_recent.append(block)
-
-        # Find highest prefix count per block
-        highest_num_hashed_tokens = 0
-        for block in least_recent:
-            if block.num_hashed_tokens > highest_num_hashed_tokens:
-                highest_num_hashed_tokens = block.num_hashed_tokens
-
-        evicted_block: Optional[PhysicalTokenBlock] = None
-
-        # Find the first block with the lowest timestamp
-        for block in least_recent:
-            if block.num_hashed_tokens == highest_num_hashed_tokens:
+            if block.last_accessed < evicted_block.last_accessed or block.last_accessed == evicted_block.last_accessed and block.num_hashed_tokens > evicted_block.num_hashed_tokens:
                 evicted_block = block
-                break
-
-        assert evicted_block is not None
 
         del self.free_table[evicted_block.block_hash]
 

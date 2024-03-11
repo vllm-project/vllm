@@ -3,6 +3,7 @@ import enum
 from itertools import count, takewhile
 from os.path import commonprefix
 from typing import Dict, List, Optional, Set, Tuple
+from abc import ABC, abstractmethod, abstractproperty
 
 from vllm.block import BlockTable, PhysicalTokenBlock
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
@@ -10,7 +11,46 @@ from vllm.utils import Device
 from vllm.core.evictor import Evictor, EvictionPolicy, make_evictor
 
 
-class BlockAllocator:
+class BlockAllocator(ABC):
+    """Manages free physical token blocks for a device.
+
+    The allocator maintains a list of free blocks and allocates a block when
+    requested. When a block is freed, its reference count is decremented. If
+    the reference count becomes zero, the block is added back to the free list.
+    """
+
+    @abstractmethod
+    def __init__(self,
+                 device: Device,
+                 block_size: int,
+                 num_blocks: int,
+                 eviction_policy: EvictionPolicy = EvictionPolicy.LRU):
+        pass
+
+    @abstractmethod
+    def allocate(self,
+                 block_hash: Optional[int] = None,
+                 num_hashed_tokens: int = 0) -> PhysicalTokenBlock:
+        pass
+
+    @abstractmethod
+    def free(self, block: PhysicalTokenBlock) -> None:
+        pass
+
+    @abstractproperty
+    def get_num_free_blocks(self) -> int:
+        pass
+
+    @abstractmethod
+    def contains_block(self, block_hash: int) -> bool:
+        pass
+
+    @abstractmethod
+    def update_hash(self, block_hash: int, block: PhysicalTokenBlock):
+        pass
+
+
+class CachedBlockAllocator:
     """Manages free physical token blocks for a device.
 
     The allocator maintains a list of free blocks and allocates a block when
@@ -22,20 +62,14 @@ class BlockAllocator:
                  device: Device,
                  block_size: int,
                  num_blocks: int,
-                 eviction_policy: EvictionPolicy = EvictionPolicy.LRU,
-                 enable_caching: bool = False) -> None:
+                 eviction_policy: EvictionPolicy = EvictionPolicy.LRU) -> None:
         self.device = device
         self.block_size = block_size
         self.num_blocks = num_blocks
-        self.enable_caching = enable_caching
 
         self.current_num_blocks = 0
         self.cached_blocks: Dict[int, PhysicalTokenBlock] = {}
 
-        # Switch over to FIFO eviction when caching is disabled
-        if not self.enable_caching:
-            eviction_policy = EvictionPolicy.FIFO
-            self.current_num_blocks = num_blocks
         self.evictor: Evictor = make_evictor(eviction_policy, device,
                                              block_size, num_blocks)
 
@@ -59,14 +93,6 @@ class BlockAllocator:
     def allocate(self,
                  block_hash: Optional[int] = None,
                  num_hashed_tokens: int = 0) -> PhysicalTokenBlock:
-        # If caching is disabled, just allocate a new block and return it
-        if not self.enable_caching:
-            block = self.evictor.evict()
-            block.block_hash = next(self.default_hash_ctr)
-            block.num_hashed_tokens = num_hashed_tokens
-            block.ref_count += 1
-            return block
-
         if block_hash is None:
             block_hash = next(self.default_hash_ctr)
         if block_hash in self.evictor:
@@ -90,29 +116,77 @@ class BlockAllocator:
             raise ValueError(f"Double free! {block} is already freed.")
         block.ref_count -= 1
         if block.ref_count == 0:
-            if self.enable_caching:
-                assert block.block_hash not in self.evictor
+            assert block.block_hash not in self.evictor
             self.evictor.add(block)
 
-            # If caching is enabled, remove the block from the cached_blocks
-            if self.enable_caching:
-                del self.cached_blocks[block.block_hash]
+            # Remove the block from the cached_blocks
+            del self.cached_blocks[block.block_hash]
 
     def get_num_free_blocks(self) -> int:
         return self.num_blocks - self.current_num_blocks + self.evictor.num_blocks
 
     def contains_block(self, block_hash: int) -> bool:
-        assert self.enable_caching
         return block_hash in self.cached_blocks or block_hash in self.evictor
 
     def update_hash(self, block_hash: int, block: PhysicalTokenBlock):
-        # If caching is enabled, update the hash of block and the cached_blocks dictionary.
-        if self.enable_caching:
-            assert not self.contains_block(block_hash)
-            old_hash = block.block_hash
-            block.block_hash = block_hash
-            del self.cached_blocks[old_hash]
-            self.cached_blocks[block_hash] = block
+        # Update the hash of block and the cached_blocks dictionary.
+        assert not self.contains_block(block_hash)
+        old_hash = block.block_hash
+        block.block_hash = block_hash
+        del self.cached_blocks[old_hash]
+        self.cached_blocks[block_hash] = block
+
+
+class UncachedBlockAllocator:
+    """Manages free physical token blocks for a device.
+
+    The allocator maintains a list of free blocks and allocates a block when
+    requested. When a block is freed, its reference count is decremented. If
+    the reference count becomes zero, the block is added back to the free list.
+    """
+
+    def __init__(
+        self,
+        device: Device,
+        block_size: int,
+        num_blocks: int,
+    ) -> None:
+        self.device = device
+        self.block_size = block_size
+        self.num_blocks = num_blocks
+
+        # Initialize the free blocks.
+        self.free_blocks: BlockTable = []
+        for i in range(num_blocks):
+            block = PhysicalTokenBlock(device=device,
+                                       block_number=i,
+                                       block_size=block_size)
+            self.free_blocks.append(block)
+
+    def allocate(self,
+                 block_hash: Optional[int] = None,
+                 num_hashed_tokens: int = 0) -> PhysicalTokenBlock:
+        if not self.free_blocks:
+            raise ValueError("Out of memory! No free blocks are available.")
+        block = self.free_blocks.pop()
+        block.ref_count = 1
+        return block
+
+    def free(self, block: PhysicalTokenBlock) -> None:
+        if block.ref_count == 0:
+            raise ValueError(f"Double free! {block} is already freed.")
+        block.ref_count -= 1
+        if block.ref_count == 0:
+            self.free_blocks.append(block)
+
+    def get_num_free_blocks(self) -> int:
+        return len(self.free_blocks)
+
+    def contains_block(self, block_hash: int) -> bool:
+        pass
+
+    def update_hash(self, block_hash: int, block: PhysicalTokenBlock):
+        pass
 
 
 class AllocStatus(enum.Enum):
@@ -157,14 +231,17 @@ class BlockSpaceManager:
         self.enable_caching = enable_caching
 
         self.watermark_blocks = int(watermark * num_gpu_blocks)
-        self.gpu_allocator = BlockAllocator(Device.GPU,
-                                            block_size,
-                                            num_gpu_blocks,
-                                            enable_caching=enable_caching)
-        self.cpu_allocator = BlockAllocator(Device.CPU,
-                                            block_size,
-                                            num_cpu_blocks,
-                                            enable_caching=enable_caching)
+
+        if self.enable_caching:
+            self.gpu_allocator = CachedBlockAllocator(Device.GPU, block_size,
+                                                      num_gpu_blocks)
+            self.cpu_allocator = CachedBlockAllocator(Device.CPU, block_size,
+                                                      num_cpu_blocks)
+        else:
+            self.gpu_allocator = UncachedBlockAllocator(
+                Device.GPU, block_size, num_gpu_blocks)
+            self.cpu_allocator = UncachedBlockAllocator(
+                Device.CPU, block_size, num_cpu_blocks)
         # Mapping: seq_id -> BlockTable.
         self.block_tables: Dict[int, BlockTable] = {}
 
@@ -201,12 +278,10 @@ class BlockSpaceManager:
             if (self.block_sliding_window is not None
                     and logical_idx >= self.block_sliding_window):
                 block = block_table[logical_idx % self.block_sliding_window]
-            elif self.enable_caching:
+            else:
                 block = self.gpu_allocator.allocate(
                     seq.hash_of_block(logical_idx),
                     seq.num_hashed_tokens_of_block(logical_idx))
-            else:
-                block = self.gpu_allocator.allocate()
             block_table.append(block)
 
         # Assign the block table for each sequence.
@@ -250,7 +325,7 @@ class BlockSpaceManager:
         seq: Sequence,
         last_block: PhysicalTokenBlock,
     ) -> PhysicalTokenBlock:
-        if self.enable_caching and self._is_last_block_full(seq):
+        if self._is_last_block_full(seq):
             return self._promote_last_block(seq, last_block)
         else:
             return last_block
@@ -354,12 +429,9 @@ class BlockSpaceManager:
                 if cpu_block in mapping:
                     gpu_block = mapping[cpu_block]
                     gpu_block.ref_count += 1
-                elif self.enable_caching:
+                else:
                     gpu_block = self.gpu_allocator.allocate(
                         cpu_block.block_hash, cpu_block.num_hashed_tokens)
-                    mapping[cpu_block] = gpu_block
-                else:
-                    gpu_block = self.gpu_allocator.allocate()
                     mapping[cpu_block] = gpu_block
                 new_block_table.append(gpu_block)
                 # Free the CPU block swapped in to GPU.
@@ -387,12 +459,9 @@ class BlockSpaceManager:
                 if gpu_block in mapping:
                     cpu_block = mapping[gpu_block]
                     cpu_block.ref_count += 1
-                elif self.enable_caching:
+                else:
                     cpu_block = self.cpu_allocator.allocate(
                         gpu_block.block_hash, gpu_block.num_hashed_tokens)
-                    mapping[gpu_block] = cpu_block
-                else:
-                    cpu_block = self.cpu_allocator.allocate()
                     mapping[gpu_block] = cpu_block
                 new_block_table.append(cpu_block)
                 # Free the GPU block swapped out to CPU.
