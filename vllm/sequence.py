@@ -101,7 +101,6 @@ class SequenceData:
         self._prefill_end: int = 0
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
-        print("SANG-TODO append token id result: ", token_id, logprob)
         self.output_token_ids.append(token_id)
         self.cumulative_logprob += logprob
 

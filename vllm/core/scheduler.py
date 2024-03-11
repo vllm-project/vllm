@@ -640,9 +640,9 @@ class Scheduler:
         # This function call changes the internal states of the scheduler
         # such as self.running, self.swapped, and self.waiting.
         scheduler_outputs = self._schedule()
-        print("SANG-TODO total: ", len(scheduler_outputs.scheduled_seq_groups))
-        print("SANG-TODO prompt: ", scheduler_outputs.num_prompt_groups)
-        print("SANG-TODO chunked: ", scheduler_outputs.num_chunked_prefill_groups)
+        # print("SANG-TODO total: ", len(scheduler_outputs.scheduled_seq_groups))
+        # print("SANG-TODO prompt: ", scheduler_outputs.num_prompt_groups)
+        # print("SANG-TODO chunked: ", scheduler_outputs.num_chunked_prefill_groups)
         assert scheduler_outputs.num_chunked_prefill_groups == 0
 
         now = time.time()

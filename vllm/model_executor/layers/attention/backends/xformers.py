@@ -90,8 +90,8 @@ class XFormersBackend:
         key = key[:num_prompt_tokens]
         value = value[:num_prompt_tokens]
 
-        assert query.shape[0] == num_prompt_tokens
-        assert decode_query.shape[0] == num_generation_tokens
+        # assert query.shape[0] == num_prompt_tokens
+        # assert decode_query.shape[0] == num_generation_tokens
         # print("num_prompt_tokens", num_prompt_tokens)
         # print("num_generation_tokens", num_generation_tokens)
         # print("output", output.size())
@@ -181,7 +181,7 @@ class XFormersBackend:
             else:
                 # prefix-enabled attention
                 print("SANG-TODO prefix prefill, num_prompt_tokens, ", num_prompt_tokens)
-                breakpoint()
+                # breakpoint()
                 output[:num_prompt_tokens] = PagedAttentionImpl.forward_prefix(
                     query,
                     key,

@@ -270,8 +270,6 @@ class ModelRunner:
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
 
-        max_prompt_len = max(subquery_lens, default=0)
-
         return (input_tokens, input_positions, slot_mapping,
                 lora_index_mapping, lora_prompt_mapping, lora_requests,
                 prompt_lens, context_lens, subquery_lens,
@@ -449,8 +447,8 @@ class ModelRunner:
 
         num_prompt_tokens = len(input_tokens)
         num_generation_tokens = len(input_tokens_decode)
-        print("input_tokens decode size: ", len(input_tokens_decode))
-        print("input_tokens size: ", len(input_tokens))
+        # print("input_tokens decode size: ", len(input_tokens_decode))
+        # print("input_tokens size: ", len(input_tokens))
 
         # Concatenate inputs.
         input_tokens.extend(input_tokens_decode)
