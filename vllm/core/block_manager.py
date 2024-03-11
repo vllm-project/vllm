@@ -1,6 +1,6 @@
 """A block manager that manages token blocks."""
 import enum
-from itertools import count
+from itertools import count, takewhile
 from os.path import commonprefix
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -95,13 +95,15 @@ class BlockAllocator:
                 del self.cached_blocks[block.block_hash]
 
     def get_num_free_blocks(self) -> int:
-        return self.num_blocks - self.current_num_blocks + self.evictor.num_blocks
+        return (self.num_blocks - self.current_num_blocks +
+                self.evictor.num_blocks)
 
     def contains_block(self, block_hash: int) -> bool:
         return block_hash in self.cached_blocks or block_hash in self.evictor
 
     def update_hash(self, block_hash: int, block: PhysicalTokenBlock):
-        # If caching is enabled, update the hash of block and the cached_blocks dictionary.
+        # If caching is enabled, update the hash of block and the
+        # cached_blocks dictionary.
         if self.enable_caching:
             assert not self.contains_block(block_hash)
             old_hash = block.block_hash
@@ -218,10 +220,12 @@ class BlockSpaceManager:
         seq: Sequence,
         last_block: PhysicalTokenBlock,
     ) -> PhysicalTokenBlock:
-        # Compute a new hash for the block so that it can be shared by other Sequences
+        # Compute a new hash for the block so that it can be shared by
+        # other Sequences
         new_hash = seq.hash_of_block(len(seq.logical_token_blocks) - 1)
 
-        # if new_hash is already in the cached table, then free last_block and return the cached version
+        # if new_hash is already in the cached table, then free last_block
+        # and return the cached version
         if self.gpu_allocator.contains_block(new_hash):
             self.gpu_allocator.free(last_block)
             return self.gpu_allocator.allocate(new_hash)
@@ -289,7 +293,8 @@ class BlockSpaceManager:
         assert last_block.device == Device.GPU
         if last_block.ref_count == 1:
             # Not shared with other sequences. Appendable.
-            # If the last block is now complete, promote it to a full block so that it can be shared
+            # If the last block is now complete, promote it to a full block so
+            # that it can be shared
             new_block = self._maybe_promote_last_block(seq, last_block)
             block_table[-1] = new_block
             return None
@@ -426,23 +431,29 @@ class BlockSpaceManager:
         for block in block_table:
             block.last_accessed = access_time
 
-    def compute_last_full_block_in_seq(self, seq: Sequence):
+    def compute_full_blocks_in_seq(self, seq: Sequence):
         if seq.seq_id not in self.block_tables:
             return
         max_full_block = seq.get_len() // self.block_size - 1
         block_table = self.block_tables[seq.seq_id]
         if max_full_block == -1:
             return
-        block_table[max_full_block].computed = True
+        for i in reversed(range(max_full_block)):
+            if block_table[i].computed:
+                break
+            block_table[i].computed = True
 
-    def get_all_block_ids_till_computed(self, seq: Sequence) -> List[int]:
+    def get_all_computed_blocks(self, seq: Sequence) -> List[int]:
         if seq.seq_id not in self.block_tables:
             return []
         block_table = self.block_tables[seq.seq_id]
-        for block_idx in reversed(range(len(block_table))):
-            if block_table[block_idx].computed:
-                return [b.block_number for b in block_table[:block_idx + 1]]
-        return []
+        # NOTE We exclude the last block to avoid the case where the entire
+        # prompt is cached. This would cause erroneous behavior in model
+        # runner.
+        return [
+            b.block_number
+            for b in takewhile(lambda b: b.computed, block_table[:-1])
+        ]
 
     def get_common_computed_block_ids(self,
                                       seq_group: SequenceGroup) -> List[int]:
@@ -451,14 +462,12 @@ class BlockSpaceManager:
             return []
 
         ids_list = [
-            self.get_all_block_ids_till_computed(seq)
+            self.get_all_computed_blocks(seq)
             for seq in iter(seq_group.seqs_dict.values())
         ]
         return commonprefix([ids for ids in ids_list if ids != []])
 
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
-        # NOTE: We only mark the last full block because with prefix caching,
-        # all blocks until the marked one are guaranteed to be computed.
         if self.enable_caching:
             for seq in seq_group.seqs_dict.values():
-                self.compute_last_full_block_in_seq(seq)
+                self.compute_full_blocks_in_seq(seq)
