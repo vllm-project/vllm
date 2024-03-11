@@ -126,7 +126,7 @@ def _fwd_kernel(
         # update acc
         v = tl.load(V_cache + off_v,
                     mask=(start_n + offs_n[:, None]) < cur_batch_ctx_len,
-                    other=0.0).to(k.dtype)
+                    other=0.0).to(q.dtype)
 
         p = p.to(v.dtype)
         acc += tl.dot(p, v)
@@ -286,7 +286,7 @@ def _fwd_kernel_flash_attn_v2(
                  (start_n + offs_n[:, None]) % block_size * stride_v_cache_bl)
         k = tl.load(K_cache + off_k,
                     mask=(start_n + offs_n[None, :]) < cur_batch_ctx_len,
-                    other=0.0)
+                    other=0.0).to(q.dtype)
 
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         qk += tl.dot(q, k)
@@ -312,7 +312,7 @@ def _fwd_kernel_flash_attn_v2(
         # update acc
         v = tl.load(V_cache + off_v,
                     mask=(start_n + offs_n[:, None]) < cur_batch_ctx_len,
-                    other=0.0)
+                    other=0.0).to(q.dtype)
 
         p = p.to(v.dtype)
         acc += tl.dot(p, v)
