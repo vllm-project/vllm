@@ -51,7 +51,7 @@ __global__ void scaled_silu_and_mul_kernel(
     const float x = (float) VLLM_LDG(&input[token_idx * 2 * d + idx]);
     const float y = (float) VLLM_LDG(&input[token_idx * 2 * d + d + idx]);
     const float s = (float) VLLM_LDG(&scales[idx]);
-    float r = silu_kernel(x) * y / s
+    float r = silu_kernel(x) * y / s;
     out[token_idx * d + idx] = (scalar_t) r;
   }
 }
