@@ -47,6 +47,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, narrow, 33024) \
     f(in_T, out_T, W_T, narrow, 36864) \
     f(in_T, out_T, W_T, narrow, 49152) \
+    f(in_T, out_T, W_T, narrow, 49408) \
 // Keep above in sync with vllm/lora/layers::SamplerWithLoRA
 
 // Keep this in sync with vllm/config::LoRAConfig
