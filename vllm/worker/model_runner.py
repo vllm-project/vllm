@@ -1060,8 +1060,6 @@ def _get_graph_batch_size(batch_size: int) -> int:
     Batch sizes are 1, 2, 4, _BATCH_SIZE_ALIGNMENT,
     2*_BATCH_SIZE_ALIGNMENT, 3*_BATCH_SIZE_ALIGNMENT...
     """
-    return ((batch_size + _BATCH_SIZE_ALIGNMENT - 1) //
-            _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
     if batch_size <= 2:
         return batch_size
     elif batch_size <= 4:

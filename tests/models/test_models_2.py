@@ -26,9 +26,9 @@ MODELS = [
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("max_chunked_prefill_len", [-1])
+@pytest.mark.parametrize("max_chunked_prefill_len", [16])
 @pytest.mark.parametrize("tensor_parallel_size", [1])
-@pytest.mark.parametrize("enforce_eager", [False])
+@pytest.mark.parametrize("enforce_eager", [True])
 @pytest.mark.parametrize("num", [3])
 def test_models(
     example_prompts,
@@ -48,13 +48,6 @@ def test_models(
             f"{torch.cuda.device_count()=} is smaller than {tensor_parallel_size=}"
         )
 
-    def cleanup():
-        torch.backends.cuda.matmul.allow_tf32 = False
-        torch.set_default_dtype(torch.float32)
-        destroy_model_parallel()
-        gc.collect()
-        torch.cuda.empty_cache()
-
     def evaluate(init_llm):
         llm = init_llm()
         outputs = llm.generate_greedy(example_prompts[num], max_tokens=max_tokens)
@@ -66,8 +59,15 @@ def test_models(
             output_str = outputs[i][1]
             token_ids_list.append(token_ids)
             output_str_list.append(output_str)
+
+        # clean up.
         del llm
-        cleanup()
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.set_default_dtype(torch.float32)
+        destroy_model_parallel()
+        gc.collect()
+        torch.cuda.empty_cache()
+
         return token_ids_list, output_str_list
 
     vllm_token_ids, vllm_str = evaluate(lambda: vllm_runner(model, dtype=dtype, enforce_eager=enforce_eager))
