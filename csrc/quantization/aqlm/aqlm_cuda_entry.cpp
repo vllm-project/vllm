@@ -181,21 +181,21 @@ torch::Tensor aqlm_gemm(
   int const nbooks = codebooks.size(0) / codebook_partition_sizes.size(0);
   int const entries = codebooks.size(1);
 
-    int4 cumulative_sizes;
-    auto cumulative_size = &cumulative_sizes.x;
-    int i =0;
-    int last = 0;
-    assert(codebook_partition_sizes.size(0) <= 4);
-    for (; i <  codebook_partition_sizes.size(0); ++i, ++cumulative_size)
-    {
-      *cumulative_size = codebook_partition_sizes[i].item<int>() + last;
-      last = *cumulative_size;
-    }
-    // fill in the rest with unreachable.
-    for (; i < 4; ++i, ++cumulative_size)
-    {
-      *cumulative_size = last*10;
-    }
+  int4 cumulative_sizes;
+  auto cumulative_size = &cumulative_sizes.x;
+  int i =0;
+  int last = 0;
+  assert(codebook_partition_sizes.size(0) <= 4);
+  for (; i <  codebook_partition_sizes.size(0); ++i, ++cumulative_size)
+  {
+    *cumulative_size = codebook_partition_sizes[i].item<int>() + last;
+    last = *cumulative_size;
+  }
+  // fill in the rest with unreachable.
+  for (; i < 4; ++i, ++cumulative_size)
+  {
+    *cumulative_size = last*10;
+  }
 
   if (nbooks == 1 && entries == (1 << 16))
   { 
