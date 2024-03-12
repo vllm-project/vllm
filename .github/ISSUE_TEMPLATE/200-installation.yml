@@ -28,7 +28,11 @@ body:
   attributes:
     label: How you are installing vllm
     description: |
-      Paste the full command you are trying to execute. e.g. `pip install -vvv vllm`
+      Paste the full command you are trying to execute.
+    value: |
+      ```sh
+      pip install -vvv vllm
+      ```
 - type: markdown
   attributes:
     value: >
