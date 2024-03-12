@@ -174,17 +174,13 @@ class XFormersBackend:
 
             else:
                 # prefix-enabled attention
-<<<<<<< HEAD
+                print("SANG-TODO prefix")
                 print(prefill_input_metadata.prompt_lens)
                 print(prefill_input_metadata.context_lens)
                 print(prefill_input_metadata.max_context_len)
                 print(prefill_input_metadata.start_loc)
                 print(prefill_input_metadata.max_seq_len)
                 output[:num_prompt_tokens] = PagedAttentionImpl.forward_prefix(
-=======
-                print("SANG-TODO prefix")
-                output = PagedAttentionImpl.forward_prefix(
->>>>>>> chunked-prefill-scheduler-2
                     query,
                     key,
                     value,

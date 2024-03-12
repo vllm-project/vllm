@@ -68,6 +68,7 @@ def test_models(
         dtype=dtype,
         block_size=block_size,
         tensor_parallel_size=tensor_parallel_size,
+        max_chunked_prefill_len=max_chunked_prefill_len,
         enforce_eager=enforce_eager)
     for i in range(5, 6):
         prompts = [example_prompts[j % len(example_prompts)] for j in range(i)]
