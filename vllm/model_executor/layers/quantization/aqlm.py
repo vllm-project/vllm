@@ -2,8 +2,10 @@
 
 from typing import Any, Dict, List, Optional
 
+import math
 import torch
 from torch.nn.parameter import Parameter
+import torch.nn.functional as F
 
 from vllm._C import ops
 from vllm.model_executor.layers.linear import LinearMethodBase, set_weight_attrs
@@ -20,6 +22,60 @@ def get_int_dtype(nbits: int) -> torch.dtype:
     if nbits <= 64:
         return torch.int64
     raise ValueError(f"No dtype available for {nbits}-bit codebooks")
+
+
+@torch.inference_mode()
+def unpack_int_data(data: torch.IntTensor, nbits: int) -> torch.IntTensor:
+    return data.to(torch.int64) % (2**nbits)
+
+
+def dequantize_weight(codes: torch.Tensor,
+                      codebooks: torch.Tensor,
+                      scales: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """
+    Decode float weights from quantization codes. Differentiable.
+    :param codes: tensor of integer quantization codes, shape [*dims, num_out_groups, num_in_groups, num_codebooks]
+    :param codebooks: tensor of vectors for each quantization code, [num_codebooks, codebook_size, out_group_size, in_group_size]
+    :param scales: weight will be multiplied by this factor, must be broadcastble with [*dims, out_groups, num_in_groups, out_group_size, in_group_size]
+    :return: reconstructed weight tensor of shape [*dims, num_in_groups*group_size]
+    """
+    num_out_groups, num_in_groups, num_codebooks = codes.shape[-3:]
+    num_codebooks, codebook_size, out_group_size, in_group_size = codebooks.shape
+    out_features = num_out_groups * out_group_size
+    in_features = num_in_groups * in_group_size
+    codebook_offsets = torch.arange(
+        0, num_codebooks * codebook_size, codebook_size,
+        device=codes.device)  # shape: [num_codebooks]
+    reconstructed_weight_flat = F.embedding_bag(
+        codes.flatten(0, -2) + codebook_offsets,
+        codebooks.flatten(0, 1).flatten(-2, -1),
+        mode="sum"
+    )  # [prod(dims) * num_out_groups * num_in_groups, out_group_size * in_group_size]
+
+    reconstructed_weight_groupwise = reconstructed_weight_flat.view(
+        list(codes.shape[:-3]) +
+        [num_out_groups, num_in_groups, out_group_size, in_group_size])
+    if scales is not None:
+        reconstructed_weight_groupwise = reconstructed_weight_groupwise.mul(
+            scales)
+    return reconstructed_weight_groupwise.swapaxes(
+        -3, -2).reshape(list(codes.shape[:-3]) + [out_features, in_features])
+
+
+def dequantize_gemm(
+    input: torch.Tensor,  #  [..., in_features]
+    codes: torch.IntTensor,  #  [num_out_groups, num_in_groups, num_codebooks]
+    codebooks: torch.
+    Tensor,  #  [num_codebooks, codebook_size, out_group_size, in_group_size]
+    scales: torch.Tensor,  #  [num_out_groups, 1, 1, 1]
+    bias: Optional[torch.Tensor],
+) -> torch.Tensor:
+    dequantized_weight = dequantize_weight(
+        unpack_int_data(codes, codebooks.shape[1].bit_length() - 1),
+        codebooks,
+        scales,
+    )
+    return F.linear(input, dequantized_weight, bias)
 
 
 class AQLMConfig(QuantizationConfig):
@@ -203,13 +259,42 @@ class AQLMLinearMethod(LinearMethodBase):
         output_partition_sizes = getattr(codebooks, "output_partition_sizes",
                                          None)
 
-        output = ops.aqlm_gemm(
-            x,
-            codes,
-            codebooks,
-            scales,
-            output_partition_sizes,
-            bias,
-        )
+        output = None
+
+        use_gemv = math.prod(x.shape[:-1]) <= 32
+
+        if not use_gemv:
+            output_shape = x.shape[:-1] + (scales.shape[0], )
+            output = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+            num_outputs = len(output_partition_sizes)
+
+            # break the inputs and codebooks apart then combine the outputs.
+            num_codebooks = codebooks.shape[0] // num_outputs
+            assert (scales.shape[0] == codes.shape[0])
+            assert (sum(output_partition_sizes) == scales.shape[0])
+            output_offset = 0
+            codebooks_offset = 0
+            for output_size in output_partition_sizes:
+                shard_output = dequantize_gemm(
+                    x, codes.narrow(0, output_offset, output_size),
+                    codebooks.narrow(0, codebooks_offset, num_codebooks),
+                    scales.narrow(0, output_offset, output_size),
+                    None if bias is None else bias.narrow(
+                        0, output_offset, output_size))
+
+                output_slice = output.narrow(-1, output_offset, output_size)
+                assert (output_slice.shape == shard_output.shape)
+                output_slice.copy_(shard_output)
+                output_offset += output_size
+                codebooks_offset += num_codebooks
+        else:
+            output = ops.aqlm_gemm(
+                x,
+                codes,
+                codebooks,
+                scales,
+                output_partition_sizes,
+                bias,
+            )
 
         return output
