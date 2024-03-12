@@ -21,7 +21,6 @@ from collections import OrderedDict
 from typing import Any, Hashable, Optional
 
 from vllm.logger import init_logger
-from vllm.device_utils import get_device_memory
 
 T = TypeVar("T")
 logger = init_logger(__name__)
@@ -320,7 +319,9 @@ class measure_device_memory:
 
     def current_memory_usage(self) -> float:
         # Return the memory usage in bytes.
-        mem = get_device_memory(self.device)
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats(self.device)
+            mem = torch.cuda.max_memory_allocated(self.device)
         return mem
 
     def __enter__(self):
