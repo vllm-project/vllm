@@ -101,6 +101,9 @@ elseif(HIP_FOUND)
     message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_ROCM_6X} "
       "expected for ROCMm 6.x build, saw ${Torch_VERSION} instead.")
   endif()
+elseif(BUILD_XPU_OPS)
+  message(STATUS "Building XPU")
+  set(VLLM_GPU_LANG "SYCL")
 else()
   message(FATAL_ERROR "Can't find CUDA or HIP installation.")
 endif()
@@ -136,17 +139,34 @@ endif()
 # _C extension
 #
 
-set(VLLM_EXT_SRC
-  "csrc/cache_kernels.cu"
-  "csrc/attention/attention_kernels.cu"
-  "csrc/pos_encoding_kernels.cu"
-  "csrc/activation_kernels.cu"
-  "csrc/layernorm_kernels.cu"
-  "csrc/quantization/squeezellm/quant_cuda_kernel.cu"
-  "csrc/quantization/gptq/q_gemm.cu"
-  "csrc/cuda_utils_kernels.cu"
-  "csrc/moe_align_block_size_kernels.cu"
-  "csrc/pybind.cpp")
+
+if(VLLM_GPU_LANG STREQUAL "SYCL")
+  append_cmake_prefix_path("intel_extension_for_pytorch" "intel_extension_for_pytorch.cmake_prefix_path")
+  find_package(IPEX REQUIRED)
+  include_directories(${IPEX_INCLUDE_DIRS})
+  set(CMPLR_ROOT $ENV{CMPLR_ROOT})
+  set(CMAKE_CXX_COMPILER icpx)
+  set(VLLM_EXTRA_INCLUDE_DIRECTORIES ${CMPLR_ROOT}/include/sycl)
+  message(STATUS "include path: ${VLLM_EXTRA_INCLUDE_DIRECTORIES}")
+  set(VLLM_EXT_SRC
+    "csrc/xpu/pos_encoding_xpu.cpp"
+    "csrc/xpu/utils.cpp"
+    "csrc/pybind.cpp")
+  #list(APPEND VLLM_GPU_FLAGS "-fsycl")
+  list(APPEND VLLM_LINK_LIBRARIES "sycl" "OpenCL" "pthread" "m" "dl" "dnnl" "intel-ext-pt-gpu")
+else()
+  set(VLLM_EXT_SRC
+    "csrc/cache_kernels.cu"
+    "csrc/attention/attention_kernels.cu"
+    "csrc/pos_encoding_kernels.cu"
+    "csrc/activation_kernels.cu"
+    "csrc/layernorm_kernels.cu"
+    "csrc/quantization/squeezellm/quant_cuda_kernel.cu"
+    "csrc/quantization/gptq/q_gemm.cu"
+    "csrc/cuda_utils_kernels.cu"
+    "csrc/moe_align_block_size_kernels.cu"
+    "csrc/pybind.cpp")
+endif()
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_EXT_SRC
@@ -162,6 +182,8 @@ define_gpu_extension_target(
   SOURCES ${VLLM_EXT_SRC}
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
   ARCHITECTURES ${VLLM_GPU_ARCHES}
+  INCLUDE_DIRECTORIES ${VLLM_EXTRA_INCLUDE_DIRECTORIES}
+  LIBRARIES ${VLLM_LINK_LIBRARIES}
   WITH_SOABI)
 
 #

@@ -115,7 +115,9 @@ function (get_torch_gpu_compiler_flags OUT_GPU_FLAGS GPU_LANG)
       "-U__HIP_NO_HALF_CONVERSIONS__"
       "-U__HIP_NO_HALF_OPERATORS__"
       "-fno-gpu-rdc")
-
+  elseif(${GPU_LANG} STREQUAL "SYCL")
+    list(APPEND GPU_FLAGS
+      " -fsycl")
   endif()
   set(${OUT_GPU_FLAGS} ${GPU_FLAGS} PARENT_SCOPE)
 endfunction()
@@ -322,7 +324,7 @@ function (define_gpu_extension_target GPU_MOD_NAME)
     $<$<COMPILE_LANGUAGE:${GPU_LANGUAGE}>:${GPU_COMPILE_FLAGS}>)
 
   target_compile_definitions(${GPU_MOD_NAME} PRIVATE
-    "-DTORCH_EXTENSION_NAME=${GPU_MOD_NAME}")
+    "-DTORCH_EXTENSION_NAME=${GPU_MOD_NAME}" ${GPU_COMPILE_FLAGS})
 
   target_include_directories(${GPU_MOD_NAME} PRIVATE csrc
     ${GPU_INCLUDE_DIRECTORIES})

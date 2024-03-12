@@ -21,6 +21,15 @@ assert sys.platform.startswith(
 MAIN_CUDA_VERSION = "12.1"
 
 
+BUILD_XPU_OPS = os.getenv('VLLM_BUILD_XPU_OPS', "0") == "1"
+
+
+def _is_xpu() -> bool:
+    return BUILD_XPU_OPS
+
+if _is_xpu():
+    import intel_extension_for_pytorch
+
 def is_sccache_available() -> bool:
     return which("sccache") is not None
 
@@ -60,13 +69,15 @@ class cmake_build_ext(build_ext):
             num_jobs = len(os.sched_getaffinity(0))
         except AttributeError:
             num_jobs = os.cpu_count()
-
-        nvcc_cuda_version = get_nvcc_cuda_version()
-        if nvcc_cuda_version >= Version("11.2"):
-            nvcc_threads = int(os.getenv("NVCC_THREADS", 8))
-            num_jobs = max(1, round(num_jobs / (nvcc_threads / 4)))
-        else:
+        if _is_xpu():
             nvcc_threads = None
+        else:            
+            nvcc_cuda_version = get_nvcc_cuda_version()
+            if nvcc_cuda_version >= Version("11.2"):
+                nvcc_threads = int(os.getenv("NVCC_THREADS", 8))
+                num_jobs = max(1, round(num_jobs / (nvcc_threads / 4)))
+            else:
+                nvcc_threads = None
 
         return num_jobs, nvcc_threads
 
@@ -98,6 +109,9 @@ class cmake_build_ext(build_ext):
         ]
 
         verbose = bool(int(os.getenv('VERBOSE', '0')))
+        if _is_xpu():
+            cmake_args += ['-DBUILD_XPU_OPS=ON']
+            
         if verbose:
             cmake_args += ['-DCMAKE_VERBOSE_MAKEFILE=ON']
 
@@ -182,6 +196,10 @@ def _is_neuron() -> bool:
     except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
         torch_neuronx_installed = False
     return torch_neuronx_installed
+
+
+def _is_cuda() -> bool:
+    return (torch.version.cuda is not None) and not _is_neuron() and not _is_xpu()
 
 
 def _install_punica() -> bool:
@@ -273,6 +291,9 @@ def get_vllm_version() -> str:
         if hipcc_version != MAIN_CUDA_VERSION:
             rocm_version_str = hipcc_version.replace(".", "")[:3]
             version += f"+rocm{rocm_version_str}"
+    elif _is_xpu():
+        xpu_version = "0.0.1"
+        version += f"+xpu{xpu_version}"
     elif _is_neuron():
         # Get the Neuron version
         neuron_version = str(get_neuronxcc_version())
