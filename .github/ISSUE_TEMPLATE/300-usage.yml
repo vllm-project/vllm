@@ -1,7 +1,7 @@
-name: 🛠️ Installation
-description: Report an issue here when you hit errors during installation.
-title: "[Installation]: "
-labels: ["installation"]
+name: 💻 Usage
+description: Raise an issue here if you don't know how to use vllm.
+title: "[Usage]: "
+labels: ["usage"]
 
 body:
 - type: markdown
@@ -26,13 +26,11 @@ body:
     required: true
 - type: textarea
   attributes:
-    label: How you are installing vllm
+    label: How would you like to use vllm
     description: |
-      Paste the full command you are trying to execute.
+      A detailed description of how you want to use vllm.
     value: |
-      ```sh
-      pip install -vvv vllm
-      ```
+      I want to run inference of a [specific model](put link here). I don't know how to integrate it with vllm.
 - type: markdown
   attributes:
     value: >
