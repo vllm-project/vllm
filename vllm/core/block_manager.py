@@ -70,8 +70,7 @@ class CachedBlockAllocator:
         self.current_num_blocks = 0
         self.cached_blocks: Dict[int, PhysicalTokenBlock] = {}
 
-        self.evictor: Evictor = make_evictor(eviction_policy, device,
-                                             block_size, num_blocks)
+        self.evictor: Evictor = make_evictor(eviction_policy)
 
         self.default_hash_ctr = count()
 
@@ -160,7 +159,9 @@ class UncachedBlockAllocator:
         for i in range(num_blocks):
             block = PhysicalTokenBlock(device=device,
                                        block_number=i,
-                                       block_size=block_size)
+                                       block_size=block_size,
+                                       block_hash=-1,
+                                       num_hashed_tokens=0)
             self.free_blocks.append(block)
 
     def allocate(self,
@@ -278,10 +279,12 @@ class BlockSpaceManager:
             if (self.block_sliding_window is not None
                     and logical_idx >= self.block_sliding_window):
                 block = block_table[logical_idx % self.block_sliding_window]
-            else:
+            elif self.enable_caching:
                 block = self.gpu_allocator.allocate(
                     seq.hash_of_block(logical_idx),
                     seq.num_hashed_tokens_of_block(logical_idx))
+            else:
+                block = self.gpu_allocator.allocate()
             block_table.append(block)
 
         # Assign the block table for each sequence.
