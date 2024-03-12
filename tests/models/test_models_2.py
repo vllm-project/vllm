@@ -1,9 +1,11 @@
 import gc
 
 import pytest
+from tests.conftest import example_prompts
 import torch
 
 from vllm.model_executor.parallel_utils.parallel_state import destroy_model_parallel
+from vllm import SamplingParams
 
 MODELS = [
     "JackFram/llama-68m",
@@ -24,22 +26,20 @@ MODELS = [
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("max_chunked_prefill_len", [500])
-@pytest.mark.parametrize("max_num_prompt_seqs", [256])
-@pytest.mark.parametrize("block_size", [32])
+@pytest.mark.parametrize("max_chunked_prefill_len", [-1])
 @pytest.mark.parametrize("tensor_parallel_size", [1])
 @pytest.mark.parametrize("enforce_eager", [False])
+@pytest.mark.parametrize("num", [3])
 def test_models(
-    vllm_runner,
     example_prompts,
+    vllm_runner,
     model: str,
     dtype: str,
     max_tokens: int,
     max_chunked_prefill_len: int,
-    max_num_prompt_seqs: int,
-    block_size: int,
     tensor_parallel_size: int,
     enforce_eager: bool,
+    num,
 ) -> None:
     """ verify the flash attention has the same output
     as page attention """
@@ -47,48 +47,41 @@ def test_models(
         pytest.skip(
             f"{torch.cuda.device_count()=} is smaller than {tensor_parallel_size=}"
         )
-    print("loading page attention models..")
-    pg_model = vllm_runner(model, dtype=dtype, enforce_eager=enforce_eager)
-    expected_outputs = []
 
-    print("generating tokens...")
-    expected_outputs.extend(
-        pg_model.generate_greedy(example_prompts, max_tokens))
-    print("generating tokens finished")
+    def cleanup():
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.set_default_dtype(torch.float32)
+        destroy_model_parallel()
+        gc.collect()
+        torch.cuda.empty_cache()
 
-    del pg_model
+    def evaluate(init_llm):
+        llm = init_llm()
+        outputs = llm.generate_greedy(example_prompts[num], max_tokens=max_tokens)
+        token_ids_list = []
+        output_str_list = []
 
-    destroy_model_parallel()
-    gc.collect()
-    torch.cuda.empty_cache()
+        for i in range(len(outputs)):
+            token_ids = outputs[i][0]
+            output_str = outputs[i][1]
+            token_ids_list.append(token_ids)
+            output_str_list.append(output_str)
+        del llm
+        cleanup()
+        return token_ids_list, output_str_list
 
-    flash_attn_output_by_batches = []
-    flash_attn_model = vllm_runner(
+    vllm_token_ids, vllm_str = evaluate(lambda: vllm_runner(model, dtype=dtype, enforce_eager=enforce_eager))
+    import os
+    os.environ["ENABLE"] = "1"
+    chunked_prefill_token_ids, chunked_str = evaluate(lambda: vllm_runner(
         model,
         dtype=dtype,
-        block_size=block_size,
         tensor_parallel_size=tensor_parallel_size,
-        enforce_eager=enforce_eager)
-    for i in range(5, 6):
-        prompts = [example_prompts[j % len(example_prompts)] for j in range(i)]
-        breakpoint()
-        flash_attn_output_by_batches.append(
-            flash_attn_model.generate_greedy(prompts, max_tokens))
+        enforce_eager=enforce_eager))
 
-    del flash_attn_model
+    for i in range(len(vllm_token_ids)):
+        print(f"TEST {i}")
+        print(f"{len(vllm_token_ids[i])=} {vllm_token_ids[i]=}\n{vllm_str[i]=}")
+        print(f"{len(chunked_prefill_token_ids[i])=} {chunked_prefill_token_ids[i]=}\n{chunked_str[i]=}\n")
+        assert vllm_token_ids[i] == chunked_prefill_token_ids[i]
 
-    destroy_model_parallel()
-    gc.collect()
-    torch.cuda.empty_cache()
-
-    for flash_attn_outputs in flash_attn_output_by_batches:
-        for i in range(len(flash_attn_outputs)):
-            fa_output_ids, fa_output_str = flash_attn_outputs[i]
-            vllm_output_ids, vllm_output_str = expected_outputs[
-                i % len(expected_outputs)]
-            # print("expected, ",vllm_output_str, "\n")
-            # print("actual:, ", fa_output_str, "\n")
-            assert fa_output_ids == vllm_output_ids, (
-                f"Test{i}:\nflash ids: {fa_output_ids}\nvLLM ids: {vllm_output_ids}"
-                f"Test{i}:\nflash output: {fa_output_str!r}\nvLLM output: {vllm_output_str!r}"
-            )
