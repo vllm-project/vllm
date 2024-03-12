@@ -50,7 +50,7 @@ def test_models(
 
     def evaluate(init_llm):
         llm = init_llm()
-        outputs = llm.generate_greedy(example_prompts[num], max_tokens=max_tokens)
+        outputs = llm.generate_greedy(example_prompts, max_tokens=max_tokens)
         token_ids_list = []
         output_str_list = []
 

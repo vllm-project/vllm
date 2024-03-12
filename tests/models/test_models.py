@@ -29,7 +29,7 @@ MODELS = [
 # @pytest.mark.parametrize("enforce_eager", [False, True])
 @pytest.mark.parametrize("enforce_eager", [False])
 # @pytest.mark.parametrize("max_chunked_prefill_len", [-1, 100000000])
-@pytest.mark.parametrize("max_chunked_prefill_len", [16])
+@pytest.mark.parametrize("max_chunked_prefill_len", [-1])
 def test_models(
     hf_runner,
     vllm_runner,
@@ -43,6 +43,9 @@ def test_models(
     hf_model = hf_runner(model, dtype=dtype)
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
     del hf_model
+
+    import os
+    os.environ["ENABLE"] = "1"
 
     vllm_model = vllm_runner(model, dtype=dtype, enforce_eager=enforce_eager, max_chunked_prefill_len=max_chunked_prefill_len)
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)

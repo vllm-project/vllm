@@ -270,7 +270,7 @@ class ModelRunner:
                 prompt_lens, context_lens, subquery_lens,
                 block_tables, num_chunked_prefill)
 
-    def _prepare_decode_v2(
+    def _prepare_decode_v2( 
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, List[int], List[int],
