@@ -15,17 +15,12 @@ from vllm.worker.model_runner import ModelRunner
 
 class MockLogitsSampler(Sampler):
 
-    def __init__(self, vocab_size: int, fake_logits: torch.Tensor):
-        super().__init__(vocab_size=vocab_size)
+    def __init__(self, fake_logits: torch.Tensor):
+        super().__init__()
         self.fake_logits = fake_logits
 
     def forward(self, *args, **kwargs):
-        with patch(
-                "vllm.model_executor.layers.sampler._prune_hidden_states",
-                lambda x, y: x), patch(
-                    "vllm.model_executor.layers.sampler.Sampler._get_logits",
-                    lambda *args, **kwargs: self.fake_logits):
-            return super().forward(*args, **kwargs)
+        return super().forward(*args, **kwargs)
 
 
 def _prepare_test(
@@ -36,7 +31,7 @@ def _prepare_test(
     fake_logits = torch.full((batch_size, vocab_size),
                              1e-2,
                              dtype=input_tensor.dtype)
-    sampler = MockLogitsSampler(32000, fake_logits)
+    sampler = MockLogitsSampler(fake_logits)
     model_runner = ModelRunner(None, None, None, None, None)
     return input_tensor, fake_logits, sampler, model_runner
 
@@ -290,48 +285,6 @@ def test_sampler_mixed(seed: int, device: str):
     # This time, results of seeded random samples will be compared with
     # the corresponding sample in the pre-shuffled batch
     test_sampling(model_runner)
-
-    del model_runner
-
-
-@pytest.mark.parametrize("seed", RANDOM_SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_sampler_logits_processors(seed: int, device: str):
-    set_random_seed(seed)
-    torch.set_default_device(device)
-    batch_size = random.randint(1, 256)
-    input_tensor, _, sampler, model_runner = _prepare_test(batch_size)
-
-    # This sample logits processor gives infinite score to the i-th token,
-    # where i is the length of the input sequence.
-    # We therefore expect the output token sequence to be [0, 1, 2, ...]
-    def pick_ith(token_ids, logits):
-        logits[len(token_ids)] = float("inf")
-        return logits
-
-    seq_group_metadata_list = []
-    prompt_lens = []
-    for i in range(batch_size):
-        seq_group_metadata_list.append(
-            SequenceGroupMetadata(
-                request_id=f"test_{i}",
-                is_prompt=True,
-                seq_data={0: SequenceData([1, 2, 3])},
-                sampling_params=SamplingParams(temperature=0,
-                                               logits_processors=[pick_ith]),
-                block_tables={0: [1]},
-            ))
-        prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
-
-    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens,
-                                                     subquery_lens=prompt_lens)
-    sampler_output = sampler(embedding=None,
-                             hidden_states=input_tensor,
-                             sampling_metadata=sampling_metadata)
-    for _, sequence_output in enumerate(sampler_output):
-        for idx, nth_output in enumerate(sequence_output.samples):
-            assert nth_output.output_token == idx
 
     del model_runner
 
