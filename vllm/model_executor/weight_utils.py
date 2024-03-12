@@ -290,11 +290,12 @@ def hf_model_weights_iterator(
                 param = np.load(f)
             yield name, torch.from_numpy(param)
     elif load_format == "tensorizer":
-        logger.warning("Deserializing HuggingFace models is not optimized for "
-                       "loading on vLLM, as tensorizer is forced to load to CPU. "
-                       "Consider deserializing a vLLM model instead for faster "
-                       "load times. See the examples/tensorize_vllm_model.py example "
-                       "script for serializing vLLM models.")
+        logger.warning(
+            "Deserializing HuggingFace models is not optimized for "
+            "loading on vLLM, as tensorizer is forced to load to CPU. "
+            "Consider deserializing a vLLM model instead for faster "
+            "load times. See the examples/tensorize_vllm_model.py example "
+            "script for serializing vLLM models.")
         deserializer_args = tensorizer_args.deserializer_params
         stream_params = tensorizer_args.stream_params
         stream = open_stream(tensorizer_args.tensorizer_uri, **stream_params)
