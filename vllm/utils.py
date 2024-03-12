@@ -21,6 +21,7 @@ from collections import OrderedDict
 from typing import Any, Hashable, Optional
 
 from vllm.logger import init_logger
+from device_utils import get_device_memory
 
 T = TypeVar("T")
 logger = init_logger(__name__)
@@ -312,15 +313,14 @@ def create_kv_caches_with_random(
     return key_caches, value_caches
 
 
-class measure_cuda_memory:
+class measure_device_memory:
 
     def __init__(self, device=None):
         self.device = device
 
     def current_memory_usage(self) -> float:
         # Return the memory usage in bytes.
-        torch.cuda.reset_peak_memory_stats(self.device)
-        mem = torch.cuda.max_memory_allocated(self.device)
+        mem = get_device_memory(self.device)
         return mem
 
     def __enter__(self):

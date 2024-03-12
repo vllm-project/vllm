@@ -21,7 +21,7 @@ from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
-from vllm.utils import measure_cuda_memory
+from vllm.utils import measure_device_memory
 from vllm.device_utils import device_synchronize, could_pin_memory
 
 logger = init_logger(__name__)
@@ -84,7 +84,7 @@ class ModelRunner:
             self.model_config.enforce_eager = True
 
     def load_model(self) -> None:
-        with measure_cuda_memory() as m:
+        with measure_device_memory() as m:
             self.model = get_model(self.model_config,
                                    self.device_config,
                                    lora_config=self.lora_config,

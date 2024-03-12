@@ -61,3 +61,11 @@ def could_pin_memory(target_device: Optional[torch.device]):
         return True
     else:
         return target_device.type == "cuda"
+
+
+def get_device_memory(device: Optional[torch.device]):
+    mem = 0
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats(device)
+        mem = torch.cuda.max_memory_allocated(device)
+    return mem
