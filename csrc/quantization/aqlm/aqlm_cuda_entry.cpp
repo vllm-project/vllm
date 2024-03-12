@@ -183,7 +183,7 @@ torch::Tensor aqlm_gemm(
 
   int4 cumulative_sizes;
   auto cumulative_size = &cumulative_sizes.x;
-  int i =0;
+  int i = 0;
   int last = 0;
   assert(codebook_partition_sizes.size(0) <= 4);
   for (; i <  codebook_partition_sizes.size(0); ++i, ++cumulative_size)
