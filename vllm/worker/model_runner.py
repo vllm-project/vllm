@@ -175,7 +175,7 @@ class ModelRunner:
             prompt_lens.append(prompt_len)
 
             computed_len = prefill_start
-
+            import os
             # NOTE: This only works for oooooooxxx style attention.
             computed_block_nums = seq_group_metadata.computed_block_nums
             prefix_caching_enabled = (computed_block_nums is not None
@@ -196,7 +196,7 @@ class ModelRunner:
                 prompt_tokens = prompt_tokens[computed_len:]
                 block_tables.append(computed_block_nums)
             # else:
-            elif self.scheduler_config.chunked_prefill_enabled:
+            elif self.scheduler_config.chunked_prefill_enabled or os.getenv("ENABLE") is not None:
                 # Update the block table so that KV cache location
                 # can be found. TODO(sang): Make it work with
                 # prefix caching.
