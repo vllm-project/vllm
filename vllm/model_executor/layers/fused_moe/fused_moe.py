@@ -376,6 +376,8 @@ def fused_moe(
     if inplace:
         return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
                          dim=1,
+                         dtype=torch.float16,
                          out=hidden_states)
     return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
+                     dtype=torch.float16,
                      dim=1)
