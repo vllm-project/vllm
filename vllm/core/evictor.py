@@ -69,10 +69,6 @@ class LRUEvictor(Evictor):
             raise ValueError("No usable cache memory left")
         free_blocks = self.free_table.values()
 
-        # # Find lowest timestamp
-        # lowest_timestamp = next(iter(free_blocks)).last_accessed
-        # # Find highest prefix count per block
-        # highest_num_hashed_tokens = 0
         # Get evicted block
         evicted_block: PhysicalTokenBlock = next(iter(free_blocks))
 

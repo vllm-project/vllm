@@ -184,10 +184,10 @@ class UncachedBlockAllocator:
         return len(self.free_blocks)
 
     def contains_block(self, block_hash: int) -> bool:
-        pass
+        raise ValueError("Invalid codepath for uncached block allocator.")
 
     def update_hash(self, block_hash: int, block: PhysicalTokenBlock):
-        pass
+        raise ValueError("Invalid codepath for uncached block allocator.")
 
 
 class AllocStatus(enum.Enum):
