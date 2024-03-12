@@ -63,8 +63,6 @@ class PagedAttentionImpl:
             max_num_partitions == 1 or num_seqs * num_heads > 512)
         if use_v1:
             # Run PagedAttention V1.
-            print("SANG-TODO V1!")
-            print(f"{input_metadata.block_tables} {input_metadata.context_lens} {input_metadata.max_context_len}")
             ops.paged_attention_v1(
                 output,
                 query,
@@ -93,8 +91,6 @@ class PagedAttentionImpl:
                 device=output.device,
             )
             max_logits = torch.empty_like(exp_sums)
-            print("SANG-TODO V2!")
-            print(f"{input_metadata.block_tables} {input_metadata.context_lens} {input_metadata.max_context_len}")
             ops.paged_attention_v2(
                 output,
                 exp_sums,
@@ -132,8 +128,12 @@ class PagedAttentionImpl:
         print(f"{input_metadata.context_lens=}")
         print(f"{input_metadata.max_seq_len=}")
         print(f"{query.size()=}")
-        print(f"{key.size()=}")
-        print(f"{value.size()=}")
+        print(f"{key[0][0][0]=}")
+        print(f"{key[-1][0][0]=}")
+        if key.shape[0] >= 16:
+            print(f"{key[15][0][0]=}")
+        print(f"{value[0][0][0]}=")
+        print(f"{value[-1][0][0]}=")
         context_attention_fwd(
             query,
             key,

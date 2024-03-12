@@ -508,6 +508,7 @@ class ModelRunner:
             num_prompt_tokens=num_prompt_tokens,
             num_generation_tokens=num_generation_tokens,
             start_loc=start_loc_tensor,
+            max_seq_len=max(subquery_lens, default=0),
             max_context_len=max(context_lens, default=0),
             context_lens=context_lens_tensor,
             block_tables=block_tables,
@@ -677,6 +678,7 @@ class ModelRunner:
                 num_prompt_tokens=metadata_dict["num_prompt_tokens"],
                 num_generation_tokens=metadata_dict["num_generation_tokens"],
                 start_loc=metadata_dict["start_loc"],
+                max_seq_len=metadata_dict["max_seq_len"],
                 max_context_len=metadata_dict["max_context_len"],
                 context_lens=metadata_dict["context_lens"],
                 block_tables=metadata_dict["block_tables"],
@@ -879,6 +881,7 @@ class ModelRunner:
                     # we can set this to num generation tokens.
                     num_generation_tokens=batch_size,
                     start_loc=None,
+                    max_seq_len=None,
                     max_context_len=self.max_context_len_to_capture,
                     context_lens=context_lens[:batch_size],
                     block_tables=block_tables[:batch_size],

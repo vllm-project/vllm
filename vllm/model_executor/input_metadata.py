@@ -49,6 +49,7 @@ class InputMetadata:
         num_prompt_tokens: int,
         num_generation_tokens: int,
         start_loc: Optional[torch.Tensor],
+        max_seq_len: Optional[int],
         max_context_len: Optional[int],
         context_lens: Optional[torch.Tensor],
         block_tables: Optional[torch.Tensor],
@@ -68,13 +69,11 @@ class InputMetadata:
         self.num_prompts = 0
         # The maximum sequence length from all requests.
         # None if there are only decoding requests.
-        self.max_seq_len = None
+        self.max_seq_len = max_seq_len
 
         # The requests contain prefill requests.
         if self.prompt_lens is not None:
             self.num_prompts = len(prompt_lens)
-            if len(prompt_lens) > 0:
-                self.max_seq_len = torch.max(prompt_lens).item()
 
         # This tensor only contains prompts.
         # [prompt_batch_size + 1]
@@ -130,6 +129,7 @@ class InputMetadata:
             0,
             # start_loc only contains prompts.
             self.start_loc,
+            self.max_seq_len,
             None,
             self.context_lens[:self.num_prompts],
             self.block_tables[:self.num_prompts],
@@ -147,6 +147,7 @@ class InputMetadata:
             0,
             0,
             self.num_generation_tokens,
+            None,
             None,
             self.max_context_len,
             self.context_lens[self.num_prompts:],

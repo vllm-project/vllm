@@ -178,11 +178,11 @@ class XFormersBackend:
             else:
                 # prefix-enabled attention
                 print("SANG-TODO prefix")
-                print(prefill_input_metadata.prompt_lens)
-                print(prefill_input_metadata.context_lens)
-                print(prefill_input_metadata.max_context_len)
-                print(prefill_input_metadata.start_loc)
-                print(prefill_input_metadata.max_seq_len)
+                # print(prefill_input_metadata.prompt_lens)
+                # print(prefill_input_metadata.context_lens)
+                # print(prefill_input_metadata.max_context_len)
+                # print(prefill_input_metadata.start_loc)
+                # print(prefill_input_metadata.max_seq_len)
                 output[:num_prompt_tokens] = PagedAttentionImpl.forward_prefix(
                     query,
                     key,
@@ -192,11 +192,11 @@ class XFormersBackend:
                     prefill_input_metadata,
                     self.alibi_slopes,
                 )
+                print("SANG-TODO prefix output: ", output)
 
         if num_generation_tokens > 0:
             decoding_input_metadata = input_metadata.decode_input_metadata()
             # Decoding run.
-            # print("SANG-TODO decoding, num_generation_tokens, ", num_generation_tokens)
             output[num_prompt_tokens:] = PagedAttentionImpl.forward_decode(
                 decode_query,
                 key_cache,

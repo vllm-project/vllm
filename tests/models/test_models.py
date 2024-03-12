@@ -10,7 +10,8 @@ MODELS = [
     # "mistralai/Mistral-7B-v0.1",
     # "Deci/DeciLM-7b",
     # "tiiuae/falcon-7b",
-    "gpt2",
+    # "gpt2",
+    "JackFram/llama-68m",
     # "bigcode/tiny_starcoder_py",
     # "EleutherAI/gpt-j-6b",
     # "EleutherAI/pythia-70m",
@@ -27,7 +28,7 @@ MODELS = [
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [128])
 # @pytest.mark.parametrize("enforce_eager", [False, True])
-@pytest.mark.parametrize("enforce_eager", [False])
+@pytest.mark.parametrize("enforce_eager", [True])
 # @pytest.mark.parametrize("max_chunked_prefill_len", [-1, 100000000])
 @pytest.mark.parametrize("max_chunked_prefill_len", [-1])
 def test_models(

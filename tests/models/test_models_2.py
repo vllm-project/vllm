@@ -24,7 +24,7 @@ MODELS = [
 # @pytest.mark.parametrize("tensor_parallel_size", [1, 2])
 # @pytest.mark.parametrize("enforce_eager", [True, False])
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("max_chunked_prefill_len", [16])
 @pytest.mark.parametrize("tensor_parallel_size", [1])
