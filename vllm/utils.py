@@ -23,7 +23,7 @@ from typing import Any, Hashable, Optional
 
 from vllm.logger import init_logger
 import warnings
-from device_utils import get_device_memory
+from vllm.device_utils import get_device_memory
 
 T = TypeVar("T")
 logger = init_logger(__name__)
