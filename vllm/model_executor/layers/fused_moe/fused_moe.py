@@ -253,7 +253,8 @@ def fused_topk(
     """Compute top-k indice and weights from gating logits
 
     Args:
-        gating_output (torch.Tensor): The output of the gating operation (before softmax).
+        gating_output (torch.Tensor): The output of the gating operation
+          (before softmax).
         topk (int): The number of top-k experts to select.
         renormalize (bool): If True, renormalize the top-k weights to sum to 1.
     """
