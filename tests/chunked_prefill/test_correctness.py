@@ -24,7 +24,7 @@ MODELS = [
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("max_chunked_prefill_len", [500])
+@pytest.mark.parametrize("max_chunked_prefill_len", [-1])
 @pytest.mark.parametrize("max_num_prompt_seqs", [256])
 @pytest.mark.parametrize("block_size", [32])
 @pytest.mark.parametrize("tensor_parallel_size", [1])
@@ -67,13 +67,12 @@ def test_models(
         model,
         dtype=dtype,
         block_size=block_size,
-        max_chunked_prefill_len=max_chunked_prefill_len,
+        max_chunked_prefill_len=-1,
         max_num_prompt_seqs=max_num_prompt_seqs,
         tensor_parallel_size=tensor_parallel_size,
         enforce_eager=enforce_eager)
-    for i in range(5, 6):
+    for i in range(10):
         prompts = [example_prompts[j % len(example_prompts)] for j in range(i)]
-        breakpoint()
         flash_attn_output_by_batches.append(
             flash_attn_model.generate_greedy(prompts, max_tokens))
 
