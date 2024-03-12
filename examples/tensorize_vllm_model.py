@@ -53,6 +53,7 @@ s3_secret_access_key = os.environ.get(
     "S3_SECRET_ACCESS_KEY") or None
 
 args = parse_args()
+tensorizer_args = TensorizerArgs.from_cli_args(args)
 
 MODEL_REF = args.model
 
@@ -113,7 +114,9 @@ def deserialize():
                                    s3_access_key_id=s3_access_key_id,
                                    s3_secret_access_key=s3_secret_access_key
     )
-    deserializer = TensorDeserializer(stream)
+    deserializer = TensorDeserializer(stream,
+                                      **tensorizer_args.deserializer_params
+                                      )
     deserializer.load_into_module(model)
     end = time.time()
 
