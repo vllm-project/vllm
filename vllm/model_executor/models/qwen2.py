@@ -303,7 +303,8 @@ class Qwen2ForCausalLM(nn.Module):
         if config.tie_word_embeddings:
             self.lm_head_weight = self.model.embed_tokens.weight
         else:
-            self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
+            self.lm_head = ParallelLMHead(config.vocab_size,
+                                          config.hidden_size)
 
         self.sampler = Sampler(config.vocab_size)
 
