@@ -19,7 +19,8 @@ from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
 from vllm.lora.request import LoRARequest
-from vllm.device_utils import device_empty_cache, device_synchronize, mem_get_info, get_distribute_backend
+from vllm.device_utils import (device_empty_cache, device_synchronize,
+                               mem_get_info, get_distribute_backend)
 
 
 class Worker:
