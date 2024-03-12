@@ -289,11 +289,12 @@ class ModelRunner:
 
         # Cumulative index of each prompt. [prompt_lens + 1]
         # [0, 0+1th, 0+1th+2nd, ...]
-        start_loc_tensor = torch.zeros(prompt_lens_tensor.shape[0] + 1,
+        subquery_lens_tensor = torch.tensor(subquery_lens, dtype=torch.long, device=self.device)
+        start_loc_tensor = torch.zeros(subquery_lens_tensor.shape[0],
                                        dtype=torch.long,
                                        device=self.device)
 
-        torch.cumsum(prompt_lens_tensor,
+        torch.cumsum(subquery_lens_tensor[:-1],
                      dim=0,
                      dtype=start_loc_tensor.dtype,
                      out=start_loc_tensor[1:])

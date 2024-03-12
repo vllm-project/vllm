@@ -40,6 +40,9 @@ def test_models(
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
     del hf_model
 
+    import os
+    os.environ["ENABLE"] = "1"
+
     vllm_model = vllm_runner(model, dtype=dtype, enforce_eager=enforce_eager)
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model

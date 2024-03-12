@@ -28,7 +28,7 @@ MODELS = [
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("max_chunked_prefill_len", [-1])
 @pytest.mark.parametrize("tensor_parallel_size", [1])
-@pytest.mark.parametrize("enforce_eager", [False])
+@pytest.mark.parametrize("enforce_eager", [True])
 @pytest.mark.parametrize("num", [3])
 def test_models(
     example_prompts,
@@ -57,7 +57,7 @@ def test_models(
 
     def evaluate(init_llm):
         llm = init_llm()
-        outputs = llm.generate_greedy(example_prompts[num], max_tokens=max_tokens)
+        outputs = llm.generate_greedy(example_prompts, max_tokens=max_tokens)
         token_ids_list = []
         output_str_list = []
 
