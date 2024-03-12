@@ -33,7 +33,7 @@ def main():
     ]
 
     model = LLM(args.model if args.model is not None else models[args.choice],
-                enforce_eager=True,
+                gpu_memory_utilization=.85,
                 tensor_parallel_size=args.tensor_parallel_size)
 
     sampling_params = SamplingParams(max_tokens=100, temperature=0)
