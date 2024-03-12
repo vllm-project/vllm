@@ -12,6 +12,10 @@ from vllm.utils import is_hpu
 
 import torch
 
+if is_hpu():
+    import habana_frameworks.torch as htorch
+
+
 class LLM:
     """An LLM for generating texts from given prompts and sampling parameters.
 
@@ -123,6 +127,7 @@ class LLM:
         sampling_params: Optional[SamplingParams] = None,
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
+        profiling: bool = False,
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -137,6 +142,7 @@ class LLM:
             prompt_token_ids: A list of token IDs for the prompts. If None, we
                 use the tokenizer to convert the prompts to token IDs.
             use_tqdm: Whether to use tqdm to display the progress bar.
+            profiling: Run generation with profiling enabled
 
         Returns:
             A list of `RequestOutput` objects containing the generated
@@ -164,7 +170,7 @@ class LLM:
             token_ids = None if prompt_token_ids is None else prompt_token_ids[
                 i]
             self._add_request(prompt, sampling_params, token_ids)
-        return self._run_engine(use_tqdm)
+        return self._run_engine(use_tqdm, profiling=profiling)
 
     def _add_request(
         self,
@@ -182,16 +188,18 @@ class LLM:
             num_requests = self.llm_engine.get_num_unfinished_requests()
             pbar = tqdm(total=num_requests, desc="Processed prompts")
         
-        if profiling and is_hpu():
+        if profiling:
+            activities = [torch.profiler.ProfilerActivity.CPU]
+            if is_hpu():
+                activities.append(torch.profiler.ProfilerActivity.HPU)
             prof = torch.profiler.profile(
-                schedule = torch.profiler.schedule(wait=6, warmup=0, active=2, repeat=1),
-                activities = [torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.HPU],
+                schedule = torch.profiler.schedule(wait=6, warmup=1, active=2, repeat=1),
+                activities = activities,
                 with_stack = True,
                 record_shapes = False,
                 on_trace_ready = torch.profiler.tensorboard_trace_handler("./", use_gzip = True)
             )
             prof.start()
-            count = 0
 
         # Run the engine.
         outputs: List[RequestOutput] = []
@@ -202,11 +210,11 @@ class LLM:
                     outputs.append(output)
                     if use_tqdm:
                         pbar.update(1)
-            if profiling and is_hpu():
-                htorch.core.mark_step()
+            if profiling:
                 prof.step()
-        if profiling and is_hpu():
-            htorch.hpu.synchronize()
+        if profiling:
+            if is_hpu():
+                htorch.hpu.synchronize()
             prof.stop()
         if use_tqdm:
             pbar.close()
