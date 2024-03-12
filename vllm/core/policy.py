@@ -35,11 +35,20 @@ class FCFS(Policy):
     ) -> float:
         return now - seq_group.metrics.arrival_time
 
+class MLFQ(Policy):
+
+    def get_priority(
+        self,
+        now: float,
+        seq_group: SequenceGroup,
+    ) -> float:
+        return now - seq_group.metrics.arrival_time
 
 class PolicyFactory:
 
     _POLICY_REGISTRY = {
         'fcfs': FCFS,
+        'mlfq': MLFQ,
     }
 
     @classmethod
