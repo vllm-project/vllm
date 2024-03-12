@@ -10,10 +10,13 @@ from transformers import AutoModelForCausalLM, AutoConfig, PretrainedConfig
 from vllm.model_executor.models import ModelRegistry
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.model_executor.tensorizer_loader import TensorizerArgs
+from vllm.config import _get_and_verify_dtype
 
 from vllm.model_executor.parallel_utils.parallel_state import \
     initialize_model_parallel
 
+
+## TODO: Generally clearn this up
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -59,6 +62,9 @@ s3_secret_access_key = os.environ.get("S3_SECRET_ACCESS_KEY") or None
 args = parse_args()
 tensorizer_args = TensorizerArgs.from_cli_args(args)
 
+dtype = args.dtype if args.dtype else "float16"
+print(dtype)
+
 MODEL_REF = args.model
 
 MODEL_NAME = MODEL_REF.split("/")[1]
@@ -75,14 +81,18 @@ initialize_model_parallel()
 
 def serialize():
     model = AutoModelForCausalLM.from_pretrained(MODEL_REF)
-
-    make_model_contiguous(model)
-    model.save_pretrained(DOWNLOAD_DIR)
     config = AutoConfig.from_pretrained(MODEL_REF)
+    make_model_contiguous(model)
+    to_dtype = _get_and_verify_dtype(config, dtype=dtype)
+    model = model.to(dtype=to_dtype)
+    print("model precision is now", {next(model.parameters()).dtype})
+    model.save_pretrained(DOWNLOAD_DIR)
+    del model
+
     model_class = _get_model_architecture(config)
-    model = model_class(config)
+    model = model_class(config).to(dtype=to_dtype)
     print(f"Loading from {DOWNLOAD_DIR}")
-    model.load_weights(MODEL_REF, DOWNLOAD_DIR)
+    model.load_weights(MODEL_REF)
 
     stream = stream_io.open_stream(S3_URI,
                                    "wb",
@@ -91,7 +101,7 @@ def serialize():
     serializer = TensorSerializer(stream)
 
     print(f"Writing serialized tensors for model {MODEL_REF} to {S3_URI}. "
-          "Type given as {next(model.parameters()).dtype}")
+          f"Type given as {next(model.parameters()).dtype}")
 
     serializer.write_module(model)
     serializer.close()
@@ -108,6 +118,8 @@ def deserialize():
     before_mem = get_mem_usage()
     # Lazy load the tensors from S3 into the model.
     start = time.time()
+
+    # TODO: Reconcile S3_URI naming with _is_vllm_model expecting vllm in name
     stream = stream_io.open_stream(S3_URI,
                                    "rb",
                                    s3_access_key_id=s3_access_key_id,

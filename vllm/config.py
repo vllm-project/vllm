@@ -14,7 +14,7 @@ from vllm.utils import get_cpu_memory, get_nvcc_cuda_version, is_hip, is_neuron
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
-    from vllm.model_executor.tensorizer_loading import TensorizerArgs
+    from vllm.model_executor.tensorizer_loader import TensorizerArgs
 
 logger = init_logger(__name__)
 
@@ -85,7 +85,7 @@ class ModelConfig:
         quantization: Optional[str] = None,
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
-        tensorizer_args: Optional[TensorizerArgs] = None,
+        tensorizer_args: Optional["TensorizerArgs"] = None,
         max_logprobs: int = 5,
     ) -> None:
         self.model = model
