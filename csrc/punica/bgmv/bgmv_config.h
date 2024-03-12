@@ -14,6 +14,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, narrow, 128) \
     f(in_T, out_T, W_T, narrow, 256) \
     f(in_T, out_T, W_T, narrow, 512) \
+    f(in_T, out_T, W_T, narrow, 768) \
     f(in_T, out_T, W_T, narrow, 1024) \
     f(in_T, out_T, W_T, narrow, 1280) \
     f(in_T, out_T, W_T, narrow, 1728) \
@@ -21,6 +22,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, narrow, 2048) \
     f(in_T, out_T, W_T, narrow, 2560) \
     f(in_T, out_T, W_T, narrow, 2752) \
+    f(in_T, out_T, W_T, narrow, 2816) \
     f(in_T, out_T, W_T, narrow, 3072) \
     f(in_T, out_T, W_T, narrow, 3456) \
     f(in_T, out_T, W_T, narrow, 3584) \
@@ -36,6 +38,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, narrow, 10240) \
     f(in_T, out_T, W_T, narrow, 11008) \
     f(in_T, out_T, W_T, narrow, 12288) \
+    f(in_T, out_T, W_T, narrow, 13696) \
     f(in_T, out_T, W_T, narrow, 13824) \
     f(in_T, out_T, W_T, narrow, 14336) \
     f(in_T, out_T, W_T, narrow, 16384) \
