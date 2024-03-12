@@ -154,7 +154,7 @@ class ModelRunner:
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
             computed_len = 0
-
+            import os
             # NOTE: This only works for oooooooxxx style attention.
             computed_block_nums = seq_group_metadata.computed_block_nums
             if computed_block_nums is not None and len(
@@ -164,13 +164,16 @@ class ModelRunner:
                 prompt_tokens = prompt_tokens[computed_len:]
                 prefix_block_tables.append(computed_block_nums)
                 context_len = computed_len
-            else:
+            if os.getenv("ENABLE") is not None:
                 if seq_group_metadata.block_tables is None:
                     prefix_block_tables.append([])
                 else:
                     block_table = seq_group_metadata.block_tables[seq_id]
                     prefix_block_tables.append(block_table)
                 # prefix_block_tables.append([])
+                context_len = 0
+            else:
+                prefix_block_tables.append([])
                 context_len = 0
             # actual prompt lens
             context_lens.append(context_len)
