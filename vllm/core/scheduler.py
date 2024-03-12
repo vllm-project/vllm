@@ -376,7 +376,6 @@ class Scheduler:
             ) * self.num_decoding_tokens_per_seq:
                 break
 
-            seq_group = self.swapped[0]
             lora_int_id = 0
             if self.lora_enabled:
                 lora_int_id = seq_group.lora_int_id
