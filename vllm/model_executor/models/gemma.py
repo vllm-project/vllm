@@ -60,8 +60,6 @@ class GemmaMLP(nn.Module):
                                            hidden_size,
                                            bias=False,
                                            linear_method=linear_method)
-        # TODO(woosuk): Change to `GeluAndMul(approximate="tanh")` once
-        # https://github.com/huggingface/transformers/pull/29402 is merged.
         self.act_fn = GeluAndMul()
 
     def forward(self, x):
