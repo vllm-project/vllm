@@ -10,7 +10,8 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.llava import LlavaForConditionalGeneration
 from vllm.model_executor.weight_utils import (get_quant_config,
                                               initialize_dummy_weights)
-from vllm.model_executor.tensorizer_loader import load_with_tensorizer, _is_vllm_model
+from vllm.model_executor.tensorizer_loader import (load_with_tensorizer,
+                                                   _is_vllm_model)
 
 
 _VISION_MODEL_CLASSES = [
@@ -107,7 +108,8 @@ def get_model(model_config: ModelConfig, device_config: DeviceConfig,
         else:
             # Load the weights from the cached or downloaded files.
             if model_config.load_format == "tensorizer":
-                # Provide a dynamic load format for `model.load_weights` to retain tensorizer args from CLI.
+                # Provide a dynamic load format for `model.load_weights`
+                # to retain tensorizer args from CLI.
                 model_config.load_format = ("tensorizer",
                                             model_config.tensorizer_args)
             model.load_weights(

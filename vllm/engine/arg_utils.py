@@ -431,7 +431,8 @@ class EngineArgs:
         })
         # Check if the tensorizer_args is in the CLI arguments
         if args.load_format == "tensorizer":
-            # Create an instance of TensorizerArgs using the from_cli_args method
+            # Create an instance of TensorizerArgs using the
+            # from_cli_args method
             engine_args.tensorizer_args = TensorizerArgs.from_cli_args(args)
         return engine_args
 
