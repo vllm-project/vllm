@@ -43,7 +43,7 @@ def _make_model_contiguous(model: nn.Module):
 @dataclass
 class TensorizerArgs:
     tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, typing.BinaryIO,
-                          str, bytes, os.PathLike, int]
+                          str, bytes, os.PathLike, int, ]
     device: Optional[Union[torch.device, str]] = None
     dtype: Optional[torch.dtype] = None
     lazy_load: bool = False
@@ -52,43 +52,44 @@ class TensorizerArgs:
     filter_func: Optional[Callable[[str], Union[bool, Any]]] = None
     deserializer_encryption_key: Optional[str] = None
     """
-    Args for TensorizerAgent class. These are used to configure the behavior of the
-    TensorDeserializer when loading tensors from a serialized model.
-    
-    Args:
-        tensorizer_uri: Path to serialized model tensors. Can be a local file path
-            or a S3 URI.
-        device: The device to load the tensors onto. If None, the tensors will be
-            loaded onto the default device.
-        dtype: The dtype to cast the tensors to. If None, the tensors will be loaded
-            with their original dtype.
-        lazy_load: If True, tensors will be loaded and cached when keys are accessed.
-            If False, all tensors will be loaded into memory up front.
-        plaid_mode_buffers: The number of buffers to use in plaid mode. This is only
-            used if ``plaid_mode=True``. These buffers are used to pipeline the loading
-            and processing of tensors.
-        verify_hash: If True, the hashes of each tensor will be verified against the
-            hashes stored in the metadata. A `HashMismatchError` will be raised if any
-            of the hashes do not match.
-        filter_func: A function that takes a tensor key and returns True if the tensor
-            should be loaded and False if it should be skipped. If None, all tensors
-            will be loaded.
-        deserializer_encryption_key: A `DecryptionParams` object holding a password or
-            key to use for decryption. ``None`` (the default) means no decryption.
-    """
+  Args for TensorizerAgent class. These are used to configure the behavior of 
+  the TensorDeserializer when loading tensors from a serialized model.
+  
+  Args:
+      tensorizer_uri: Path to serialized model tensors. Can be a local file 
+          path or a S3 URI.
+      device: The device to load the tensors onto. If None, the tensors will be
+          loaded onto the default device.
+      dtype: The dtype to cast the tensors to. If None, the tensors will be 
+          loaded with their original dtype.
+      lazy_load: If True, tensors will be loaded and cached when keys are 
+          accessed. If False, all tensors will be loaded into memory up front.
+      plaid_mode_buffers: The number of buffers to use in plaid mode. This is 
+          only used if ``plaid_mode=True``. These buffers are used to 
+          pipeline the loading and processing of tensors.
+      verify_hash: If True, the hashes of each tensor will be verified against 
+          the hashes stored in the metadata. A `HashMismatchError` will be 
+          raised if any of the hashes do not match.
+      filter_func: A function that takes a tensor key and returns True if the 
+          tensor should be loaded and False if it should be skipped. If None,
+          all tensors will be loaded.
+      deserializer_encryption_key: A `DecryptionParams` object holding a 
+          password or key to use for decryption. ``None`` (the default) means 
+          no decryption.
+  """
 
     def __post_init__(self):
         self.file_obj = self.tensorizer_uri
         self.s3_access_key_id = os.environ.get("S3_ACCESS_KEY_ID") or None
-        self.s3_secret_access_key = os.environ.get(
-            "S3_SECRET_ACCESS_KEY") or None
+        self.s3_secret_access_key = (os.environ.get("S3_SECRET_ACCESS_KEY")
+                                     or None)
         self.s3_endpoint = os.environ.get("S3_ENDPOINT_URL") or None
 
         self.stream_params = {
             "s3_access_key_id": self.s3_access_key_id,
             "s3_secret_access_key": self.s3_secret_access_key,
             "s3_endpoint": self.s3_endpoint,
-            "force_http": True
+            "force_http": True,
         }
 
         # Omitting self.dtype and self.device as this behaves weirdly
@@ -105,7 +106,7 @@ class TensorizerArgs:
 
     @staticmethod
     def add_cli_args(
-            parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        parser: argparse.ArgumentParser, ) -> argparse.ArgumentParser:
         """Tensorizer CLI arguments"""
         parser.add_argument(
             "--serializer-encryption",
@@ -142,8 +143,8 @@ class TensorizerArgs:
         parser.add_argument(
             "--deserializer-encryption-key",
             default=None,
-            help="A `DecryptionParams` object holding a password or key"
-            "to use for decryption. ``None`` (the default) means no decryption.",
+            help="A `DecryptionParams` object holding a password or key to"
+            "use for decryption. ``None`` (the default) means no decryption.",
         )
         return parser
 
@@ -188,8 +189,8 @@ class TensorizerAgent:
     def _verify_path_reachable(self):
         if not self.tensorizer_args.tensorizer_uri.endswith(".tensors"):
             raise ValueError(
-                f"download_dir {self.tensorizer_args.tensorizer_uri} must specify a .tensors "
-                f"file when load_format = tensorizer")
+                f"download_dir {self.tensorizer_args.tensorizer_uri} must "
+                f"specify a .tensors file when load_format = tensorizer")
 
     def deserialize(self):
         """
@@ -208,9 +209,11 @@ class TensorizerAgent:
         before_mem = get_mem_usage()
         # Lazy load the tensors from S3 into the model.
         start = time.time()
-        stream = stream_io.open_stream(self.tensorizer_args.tensorizer_uri,
-                                       mode="rb",
-                                       **self.tensorizer_args.stream_params)
+        stream = stream_io.open_stream(
+            self.tensorizer_args.tensorizer_uri,
+            mode="rb",
+            **self.tensorizer_args.stream_params,
+        )
         deserializer = TensorDeserializer(
             stream, **self.tensorizer_args.deserializer_params)
         deserializer.load_into_module(self.model)
@@ -222,9 +225,8 @@ class TensorizerAgent:
         per_second = convert_bytes(deserializer.total_tensor_bytes / duration)
         after_mem = get_mem_usage()
         deserializer.close()
-        logger.info(
-            f"Deserialized {total_bytes_str} in {end - start:0.2f}s, {per_second}/s"
-        )
+        logger.info(f"Deserialized {total_bytes_str} in "
+                    f"{end - start:0.2f}s, {per_second}/s")
         logger.info(f"Memory usage before: {before_mem}")
         logger.info(f"Memory usage after: {after_mem}")
 

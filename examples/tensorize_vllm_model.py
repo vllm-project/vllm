@@ -19,7 +19,8 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Arguments for serializing and deserializing models. "
         "in this example script.")
-    ## TODO: Decide if below two are worth including besides --model and --tensorizer-uri
+    ## TODO: Decide if below two are worth including besides --model and
+    ## --tensorizer-uri
     parser = AsyncEngineArgs.add_cli_args(parser)
     parser = TensorizerArgs.add_cli_args(parser)
     parser.add_argument("--serialize",
