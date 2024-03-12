@@ -160,6 +160,7 @@ class XFormersBackend:
 
             else:
                 # prefix-enabled attention
+                print("prefix!")
                 output = PagedAttentionImpl.forward_prefix(
                     query,
                     key,
