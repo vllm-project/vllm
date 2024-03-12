@@ -18,16 +18,18 @@ body:
       # For security purposes, please check the contents of collect_env.py before running it.
       python collect_env.py
       ```
+    value: |
+      <details>
+        <summary>current environment</summary>
+        The output of `python collect_env.py`
+      </details>
   validations:
     required: true
 - type: textarea
   attributes:
     label: How you are installing vllm
     description: |
-      Paste the full command you are trying to execute.
-      ```sh
-      pip install -vvv vllm
-      ```
+      Paste the full command you are trying to execute. e.g. `pip install -vvv vllm`
 - type: markdown
   attributes:
     value: >
