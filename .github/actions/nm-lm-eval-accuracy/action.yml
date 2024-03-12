@@ -1,0 +1,26 @@
+name: run lm-eval accuracy test
+description: 'run lm-eval accuracy test'
+inputs:
+  python:
+    description: 'python version, e.g. 3.10.12'
+    required: true
+  venv:
+    description: 'name for python virtual environment'
+    required: true
+runs:
+  using: composite
+  steps:
+  - id: lm-eval
+    run: |
+      COMMIT=${{ github.sha }}
+      VENV="${{ inputs.venv }}-${COMMIT:0:7}"
+      source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
+
+      pip3 install git+https://github.com/EleutherAI/lm-evaluation-harness.git
+      pip3 install optimum auto-gptq
+
+      SUCCESS=0
+      python .github/scripts/lm_eval_compare_hf_vs_vllm.py --hf_pretrained nm-testing/zephyr-beta-7b-gptq-g128 --vllm_pretrained nm-testing/zephyr-beta-7b-marlin-g128 || SUCCESS=$?
+      echo "test=${SUCCESS}" >> "$GITHUB_OUTPUT"
+      exit ${SUCCESS}
+    shell: bash
