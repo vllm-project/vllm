@@ -6,15 +6,17 @@ NOTE: This script is a modified version of benchmarks/benchmark_serving.py from
 """
 
 import argparse
-import json
 import random
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 from transformers import AutoTokenizer
-from .common import instantiate_benchmark_results_dict, generate_synthetic_requests, warmup_vllm_engine, num_available_gpus, print_request_outputs
+from .common import generate_synthetic_requests, warmup_vllm_engine, num_available_gpus, print_request_outputs
 from .datasets_registry import get_dataset, DatasetArgs
+from .benchmark_result import (BenchmarkResult,
+                               BenchmarkThroughputResultMetricTemplates as
+                               ResultMetricTemplates)
 
 
 def get_tensor_parallel_size(args: argparse.Namespace) -> int:
@@ -140,25 +142,28 @@ def main(args: argparse.Namespace):
     if save_result:
 
         # Setup
-        current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
-        result_json = instantiate_benchmark_results_dict(
-            benchmarking_script_name=Path(__file__).name,
+        current_dt = datetime.now()
+
+        result = BenchmarkResult(
+            date=current_dt,
+            script_name=Path(__file__).name,
+            script_args=vars(args),
             tensor_parallel_size=get_tensor_parallel_size(args),
             model=args.model,
             tokenizer=args.tokenizer,
             dataset=args.dataset)
-        result_json["date"] = current_dt
-        result_json["script_args"] = vars(args)
-        result_json["request_throughput"] = request_throughput
-        result_json["token_throughput"] = token_throughput
+        result.add_metric(ResultMetricTemplates.request_throughput,
+                          request_throughput)
+        result.add_metric(ResultMetricTemplates.token_throughput,
+                          token_throughput)
 
         model_id = args.model.replace('/', '_')
         # Save to file
+        current_dt_str = current_dt.strftime("%Y%m%d-%H%M%S")
         file_name = Path(
             args.save_directory
-        ) / f"benchmark_throughput-{args.backend}-{model_id}-{current_dt}.json"
-        with open(file_name, "w") as outfile:
-            json.dump(result_json, outfile, sort_keys=True, indent=4)
+        ) / f"benchmark_throughput-{args.backend}-{model_id}-{current_dt_str}.json"
+        result.store(file_name)
 
 
 if __name__ == "__main__":

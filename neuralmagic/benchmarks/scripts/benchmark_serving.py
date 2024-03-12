@@ -20,21 +20,24 @@ NOTE: This script is a modified version of benchmarks/benchmark_serving.py from
 """
 import argparse
 import asyncio
-import json
 import random
 import time
-from collections import namedtuple
 from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime
-from typing import AsyncGenerator, List, Tuple
+from typing import AsyncGenerator, List, Tuple, NamedTuple
 
 import numpy as np
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from .common import instantiate_benchmark_results_dict, generate_synthetic_requests, print_serving_request_io
+from .common import generate_synthetic_requests, print_serving_request_io
 from .datasets_registry import get_dataset, DatasetArgs
+from .benchmark_result import (BenchmarkResult,
+                               BenchmarkServingResultMetadataKeys as
+                               ResultMetadataKeys,
+                               BenchmarkServingResultMetricTemplates as
+                               ResultMetricTemplates)
 
 from neuralmagic.benchmarks.scripts.backend_request_func import (
     ASYNC_REQUEST_FUNCS,
@@ -45,23 +48,75 @@ from neuralmagic.benchmarks.scripts.backend_request_func import (
 
 @dataclass
 class BenchmarkMetrics:
-    completed: int
-    total_input: int
-    total_output: int
-    request_throughput: float
-    input_throughput: float
-    output_throughput: float
-    median_request_latency: float
-    p90_request_latency: float
-    p99_request_latency: float
-    mean_ttft_ms: float
-    median_ttft_ms: float
-    p90_ttft_ms: float
-    p99_ttft_ms: float
-    mean_tpot_ms: float
-    median_tpot_ms: float
-    p90_tpot_ms: float
-    p99_tpot_ms: float
+
+    @dataclass
+    class Metadata:
+        completed: int
+        duration: float
+        total_input: int
+        total_output: int
+
+    @dataclass
+    class Metrics:
+        request_throughput: float
+        input_throughput: float
+        output_throughput: float
+        median_request_latency: float
+        p90_request_latency: float
+        p99_request_latency: float
+        mean_ttft_ms: float
+        median_ttft_ms: float
+        p90_ttft_ms: float
+        p99_ttft_ms: float
+        mean_tpot_ms: float
+        median_tpot_ms: float
+        p90_tpot_ms: float
+        p99_tpot_ms: float
+
+    metadata: Metadata
+    metrics: Metrics
+
+    def update_benchmark_result_metadata(
+            self, result: BenchmarkResult) -> BenchmarkResult:
+        rmk = ResultMetadataKeys
+        metadata = {
+            rmk.completed: self.metadata.completed,
+            rmk.duration: self.metadata.duration,
+            rmk.total_input: self.metadata.total_input,
+            rmk.total_output: self.metadata.total_output
+        }
+        result[BenchmarkResult.METADATA_KEY_].update(metadata)
+        return result
+
+    def update_benchmark_result_metrics(
+            self, result: BenchmarkResult) -> BenchmarkResult:
+        rmt = ResultMetricTemplates
+        result.add_metric(rmt.request_throughput,
+                          self.metrics.request_throughput)
+        result.add_metric(rmt.input_throughput, self.metrics.input_throughput)
+        result.add_metric(rmt.output_throughput,
+                          self.metrics.output_throughput)
+        result.add_metric(rmt.median_request_latency,
+                          self.metrics.median_request_latency)
+        result.add_metric(rmt.p90_request_latency,
+                          self.metrics.p90_request_latency)
+        result.add_metric(rmt.p99_request_latency,
+                          self.metrics.p99_request_latency)
+        result.add_metric(rmt.mean_ttft_ms, self.metrics.mean_ttft_ms)
+        result.add_metric(rmt.median_ttft_ms, self.metrics.median_ttft_ms)
+        result.add_metric(rmt.p90_ttft_ms, self.metrics.p90_ttft_ms)
+        result.add_metric(rmt.p99_ttft_ms, self.metrics.p99_ttft_ms)
+        result.add_metric(rmt.mean_tpot_ms, self.metrics.mean_tpot_ms)
+        result.add_metric(rmt.median_tpot_ms, self.metrics.median_tpot_ms)
+        result.add_metric(rmt.p90_tpot_ms, self.metrics.p90_tpot_ms)
+        result.add_metric(rmt.p99_tpot_ms, self.metrics.p99_tpot_ms)
+        return result
+
+    def update_benchmark_result(self,
+                                result: BenchmarkResult) -> BenchmarkResult:
+        result = self.update_benchmark_result_metadata(result)
+        result = self.update_benchmark_result_metrics(result)
+        return result
 
 
 async def get_request(
@@ -106,24 +161,25 @@ def calculate_metrics(
             completed += 1
 
     metrics = BenchmarkMetrics(
-        completed=completed,
-        total_input=total_input,
-        total_output=total_output,
-        request_throughput=completed / dur_s,
-        input_throughput=total_input / dur_s,
-        output_throughput=total_output / dur_s,
-        median_request_latency=np.median(latencies) * 1000,
-        p90_request_latency=np.percentile(latencies, 90) * 1000,
-        p99_request_latency=np.percentile(latencies, 99) * 1000,
-        mean_ttft_ms=np.mean(ttfts) * 1000,
-        median_ttft_ms=np.median(ttfts) * 1000,
-        p90_ttft_ms=np.percentile(ttfts, 90) * 1000,
-        p99_ttft_ms=np.percentile(ttfts, 99) * 1000,
-        mean_tpot_ms=np.mean(tpots) * 1000,
-        median_tpot_ms=np.median(tpots) * 1000,
-        p90_tpot_ms=np.percentile(tpots, 90) * 1000,
-        p99_tpot_ms=np.percentile(tpots, 99) * 1000,
-    )
+        metadata=BenchmarkMetrics.Metadata(completed=completed,
+                                           duration=dur_s,
+                                           total_input=total_input,
+                                           total_output=total_output),
+        metrics=BenchmarkMetrics.Metrics(
+            request_throughput=completed / dur_s,
+            input_throughput=total_input / dur_s,
+            output_throughput=total_output / dur_s,
+            median_request_latency=np.median(latencies) * 1000,
+            p90_request_latency=np.percentile(latencies, 90) * 1000,
+            p99_request_latency=np.percentile(latencies, 99) * 1000,
+            mean_ttft_ms=np.mean(ttfts) * 1000,
+            median_ttft_ms=np.median(ttfts) * 1000,
+            p90_ttft_ms=np.percentile(ttfts, 90) * 1000,
+            p99_ttft_ms=np.percentile(ttfts, 99) * 1000,
+            mean_tpot_ms=np.mean(tpots) * 1000,
+            median_tpot_ms=np.median(tpots) * 1000,
+            p90_tpot_ms=np.percentile(tpots, 90) * 1000,
+            p99_tpot_ms=np.percentile(tpots, 99) * 1000))
 
     return metrics
 
@@ -132,7 +188,8 @@ async def benchmark(backend: str, api_url: str, model_id: str,
                     tokenizer: PreTrainedTokenizerBase,
                     input_requests: List[Tuple[str, int, int]], best_of: int,
                     use_beam_search: bool, request_rate: float,
-                    disable_tqdm: bool, log_model_io: bool):
+                    disable_tqdm: bool,
+                    log_model_io: bool) -> BenchmarkMetrics:
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS.get(backend)
     else:
@@ -177,46 +234,34 @@ async def benchmark(backend: str, api_url: str, model_id: str,
         tokenizer=tokenizer,
     )
 
-    print(f"Successful requests: {metrics.completed}")
-    print(f"Benchmark duration: {benchmark_duration:2f} s")
-    print(f"Total input tokens: {metrics.total_input}")
-    print(f"Total generated tokens: {metrics.total_output}")
-    print(f"Request throughput: {metrics.request_throughput:.2f} requests/s")
-    print(f"Input token throughput: {metrics.input_throughput:.2f} tokens/s")
-    print(f"Output token throughput: {metrics.output_throughput:.2f} tokens/s")
-    print(f"Median request latency: {metrics.median_request_latency:.2f} ms")
-    print(f"P90 request latency: {metrics.p90_request_latency:.2f} ms")
-    print(f"P99 request latency: {metrics.p99_request_latency:.2f} ms")
-    print(f"Mean TTFT: {metrics.mean_ttft_ms:.2f} ms")
-    print(f"Median TTFT: {metrics.median_ttft_ms:.2f} ms")
-    print(f"P90 TTFT: {metrics.p90_ttft_ms:.2f} ms")
-    print(f"P99 TTFT: {metrics.p99_ttft_ms:.2f} ms")
-    print(f"Mean TPOT: {metrics.mean_tpot_ms:.2f} ms")
-    print(f"Median TPOT: {metrics.median_tpot_ms:.2f} ms")
-    print(f"P90 TPOT: {metrics.p90_tpot_ms:.2f} ms")
-    print(f"P99 TPOT: {metrics.p99_tpot_ms:.2f} ms")
+    print(f"Successful requests: {metrics.metadata.completed}")
+    print(f"Benchmark duration: {metrics.metadata.duration:2f} s")
+    print(f"Total input tokens: {metrics.metadata.total_input}")
+    print(f"Total generated tokens: {metrics.metadata.total_output}")
+    print(
+        f"Request throughput: {metrics.metrics.request_throughput:.2f} requests/s"
+    )
+    print(
+        f"Input token throughput: {metrics.metrics.input_throughput:.2f} tokens/s"
+    )
+    print(
+        f"Output token throughput: {metrics.metrics.output_throughput:.2f} tokens/s"
+    )
+    print(
+        f"Median request latency: {metrics.metrics.median_request_latency:.2f} ms"
+    )
+    print(f"P90 request latency: {metrics.metrics.p90_request_latency:.2f} ms")
+    print(f"P99 request latency: {metrics.metrics.p99_request_latency:.2f} ms")
+    print(f"Mean TTFT: {metrics.metrics.mean_ttft_ms:.2f} ms")
+    print(f"Median TTFT: {metrics.metrics.median_ttft_ms:.2f} ms")
+    print(f"P90 TTFT: {metrics.metrics.p90_ttft_ms:.2f} ms")
+    print(f"P99 TTFT: {metrics.metrics.p99_ttft_ms:.2f} ms")
+    print(f"Mean TPOT: {metrics.metrics.mean_tpot_ms:.2f} ms")
+    print(f"Median TPOT: {metrics.metrics.median_tpot_ms:.2f} ms")
+    print(f"P90 TPOT: {metrics.metrics.p90_tpot_ms:.2f} ms")
+    print(f"P99 TPOT: {metrics.metrics.p99_tpot_ms:.2f} ms")
 
-    result = {
-        "duration": benchmark_duration,
-        "completed": metrics.completed,
-        "total_input_tokens": metrics.total_input,
-        "total_output_tokens": metrics.total_output,
-        "request_inthroughput": metrics.request_throughput,
-        "input_throughput": metrics.input_throughput,
-        "output_throughput": metrics.output_throughput,
-        "median_request_latency": metrics.median_request_latency,
-        "p90_request_latency": metrics.p90_request_latency,
-        "p99_request_latency": metrics.p99_request_latency,
-        "mean_ttft_ms": metrics.mean_ttft_ms,
-        "median_ttft_ms": metrics.median_ttft_ms,
-        "p90_ttft_ms": metrics.p90_ttft_ms,
-        "p99_ttft_ms": metrics.p99_ttft_ms,
-        "mean_tpot_ms": metrics.mean_tpot_ms,
-        "median_tpot_ms": metrics.median_tpot_ms,
-        "p90_tpot_ms": metrics.p90_tpot_ms,
-        "p99_tpot_ms": metrics.p99_tpot_ms,
-    }
-    return result
+    return metrics
 
 
 def main(args: argparse.Namespace):
@@ -228,10 +273,12 @@ def main(args: argparse.Namespace):
     model_id = args.model
     tokenizer_id = args.tokenizer if args.tokenizer is not None else args.model
 
-    num_prompts, request_rate = (
-        args.nr_qps_pair_.num_prompts,
-        args.nr_qps_pair_.request_rate) if args.nr_qps_pair_ else (
-            args.num_prompts_, args.request_rate_)
+    num_prompts, request_rate = (None, None)
+    if args.nr_qps_pair_:
+        num_prompts, request_rate = (args.nr_qps_pair_.num_prompts,
+                                     args.nr_qps_pair_.request_rate)
+    else:
+        num_prompts, request_rate = (args.num_prompts_, args.request_rate_)
     assert num_prompts is not None and request_rate is not None
 
     if args.base_url is not None:
@@ -258,7 +305,7 @@ def main(args: argparse.Namespace):
                                                      args.num_output_tokens,
                                                      num_prompts, tokenizer)
 
-    benchmark_result = asyncio.run(
+    metrics = asyncio.run(
         benchmark(backend=backend,
                   api_url=api_url,
                   model_id=model_id,
@@ -274,47 +321,64 @@ def main(args: argparse.Namespace):
     save_result = args.save_directory is not None
     if save_result:
 
-        current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
-        result_json = instantiate_benchmark_results_dict(
-            benchmarking_script_name=Path(__file__).name,
+        def script_args_as_json_dict(script_args: argparse.Namespace):
+            # JSON dumps a float("inf") value as INFINITY (no double-quotes).
+            # This makes the JSON invalid. The request rate argument can be a
+            # float("int") - the fix is to always treat it as a string.
+            import copy
+            script_args = copy.deepcopy(script_args)
+            if script_args.nr_qps_pair_:
+                script_args.nr_qps_pair_ = (
+                    script_args.nr_qps_pair_.num_prompts,
+                    str(script_args.nr_qps_pair_.request_rate))
+            if script_args.request_rate_:
+                script_args.request_rate_ = str(script_args.request_rate_)
+            return vars(script_args)
+
+        current_dt = datetime.now()
+        result = BenchmarkResult(
+            date=current_dt,
+            script_name=Path(__file__).name,
+            script_args=script_args_as_json_dict(args),
             tensor_parallel_size=args.server_tensor_parallel_size,
             model=args.model,
             tokenizer=args.tokenizer,
             dataset=args.dataset)
-        result_json["date"] = current_dt
-        result_json["script_args"] = vars(args)
 
-        # Populate derived-args for convenience
-        result_json["num_prompts"] = num_prompts
-        result_json["request_rate"] =  \
+        result = metrics.update_benchmark_result(result)
+
+        # Add information about the derived variables as metadata
+        result[BenchmarkResult.METADATA_KEY_][
+            ResultMetadataKeys.num_prompts] = num_prompts
+        result[BenchmarkResult.METADATA_KEY_][ResultMetadataKeys.request_rate] = \
             request_rate if request_rate < float("inf") else "inf"
-
-        # Merge with benchmark result
-        result_json = {**result_json, **benchmark_result}
 
         # Save to file
         base_model_id = model_id.split("/")[-1]
+        current_dt_str = current_dt.strftime("%Y%m%d-%H%M%S")
         file_name = (
             Path(args.save_directory) /
-            f"benchmark_serving-{backend}-{request_rate}qps-{base_model_id}-{current_dt}.json"
+            f"benchmark_serving-{backend}-{request_rate}qps-{base_model_id}-{current_dt_str}.json"
         )
-        with open(file_name, "w") as outfile:
-            json.dump(result_json, outfile, sort_keys=True, indent=4)
+        result.store(file_name)
 
 
-if __name__ == "__main__":
+class NumPrompts_RequestRate_T(NamedTuple):
+    num_prompts: int
+    request_rate: float
 
-    Num_Prompts_Request_Rate_T = namedtuple("Num_Prompts_Request_Rate_T",
-                                            ["num_prompts", "request_rate"])
-
-    def num_prompts_and_request_rate_t(arg) -> Num_Prompts_Request_Rate_T:
-        # The arg parser has a variant where num_prompts and request_rate can
+    @staticmethod
+    def from_str(arg: str):
+        # The arg_parser has a variant where num_prompts and request_rate can
         # passed in as a pair in the same argument.
         # Example: A string "1000,0.5" will be parsed into a tuple of
         # (int(1000), float(0.5))
         parts = arg.split(',')
         assert len(parts) == 2
-        return Num_Prompts_Request_Rate_T(int(parts[0]), float(parts[1]))
+        return NumPrompts_RequestRate_T(int(parts[0]), float(parts[1]))
+
+
+if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(
         description='''Benchmark the online serving throughput.''')
@@ -411,7 +475,7 @@ if __name__ == "__main__":
         "the request arrival times.",
     )
     parser.add_argument("--nr-qps-pair_",
-                        type=num_prompts_and_request_rate_t,
+                        type=NumPrompts_RequestRate_T.from_str,
                         help="""
                             First argument in the pair is num_prompts: Number of prompts to process.
                             Second argument in the pair is request_rate : Number of requests per second. If this is inf,

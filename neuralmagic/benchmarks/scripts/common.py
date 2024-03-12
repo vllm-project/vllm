@@ -4,11 +4,11 @@ Common functions used in all benchmarking scripts
 import json
 import random
 import asyncio
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 from pathlib import Path
 from transformers import PreTrainedTokenizerBase
 
-from vllm import LLM, SamplingParams
+from vllm import (LLM, SamplingParams, __version__ as __vllm_version__)
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from .datasets_registry import SHAREGPT_PATH, SHAREGPT_DOWNLOAD_STR
@@ -36,6 +36,7 @@ def get_benchmarking_context() -> dict:
     cuda_device_names = [cuda_device.name for cuda_device in cuda_devices]
 
     return {
+        "vllm_version": __vllm_version__,
         "python_version": f"{sys.version}",
         "torch_version": f"{torch.__version__}",
         "torch_cuda_version": f"{torch.version.cuda}",
@@ -182,26 +183,6 @@ def warmup_server(server_host: int,
                                num_input_tokens=num_input_tokens,
                                num_output_tokens=num_output_tokens)
     asyncio.run(process_requests(requests))
-
-
-def instantiate_benchmark_results_dict(benchmarking_script_name: str,
-                                       tensor_parallel_size: int, model: str,
-                                       tokenizer: Optional[str],
-                                       dataset: Optional[str]) -> dict:
-    """
-    instantiate_benchmark_results_dict populates an empty dict with all the must-have
-    key-value pairs. These are the key-value pairs that the scripts that process
-    the benchmark results rely on.
-    """
-    result_dict = {}
-    result_dict['script_name'] = benchmarking_script_name
-    result_dict['benchmarking_context'] = get_benchmarking_context()
-    result_dict['tensor_parallel_size'] = tensor_parallel_size
-    result_dict['model'] = model
-    result_dict['tokenizer'] = tokenizer if tokenizer is not None else model
-    result_dict['dataset'] = dataset if dataset is not None else "synthetic"
-
-    return result_dict
 
 
 def format_io_log(prompt: str, output_text: str, n_prompt_tokens: int,
