@@ -19,12 +19,9 @@ body:
       python collect_env.py
       ```
     value: |
-      <details>
-        <summary>current environment</summary>
-        ```text
-        The output of `python collect_env.py`
-        ```
-      </details>
+      ```text
+      The output of `python collect_env.py`
+      ```
   validations:
     required: true
 - type: textarea
