@@ -73,6 +73,7 @@ Documentation
    serving/run_on_sky
    serving/deploying_with_kserve
    serving/deploying_with_triton
+   serving/deploying_with_bentoml
    serving/deploying_with_docker
    serving/serving_with_langchain
    serving/metrics
