@@ -1,13 +1,16 @@
 import torch
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Iterable, Union
+from unittest.mock import MagicMock
 
 from vllm.worker.worker import Worker
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.engine.arg_utils import EngineArgs
-from vllm.sequence import SequenceGroupMetadata, SequenceData
+from vllm.sequence import (Logprob, SequenceGroupMetadata, SequenceData,
+                           SamplerOutput, SequenceGroupOutput, SequenceOutput)
 from vllm.sampling_params import SamplingParams
 from vllm.worker.cache_engine import CacheEngine
 from vllm.model_executor.utils import set_random_seed
+from itertools import count
 from dataclasses import dataclass, fields
 
 
@@ -23,6 +26,11 @@ class ExecuteModelData:
     def to_dict(self):
         return dict(
             (field.name, getattr(self, field.name)) for field in fields(self))
+
+    @classmethod
+    def from_dict(cls, d):
+        cleaned = dict((field.name, d[field.name]) for field in fields(cls))
+        return cls(**cleaned)
 
 
 def round_up_to_next_block(seq_len: int, block_size: int) -> int:
@@ -48,6 +56,21 @@ def create_execute_model_data(
         blocks_to_swap_out=blocks_to_swap_out,
         blocks_to_copy=blocks_to_copy,
     )
+
+
+def mock_worker(cls=None,
+                vocab_size: int = 30_000,
+                max_model_len: int = 2048,
+                rank: int = 0) -> MagicMock:
+    if cls is None:
+        cls = Worker
+
+    worker = MagicMock(spec=cls)
+    worker.vocab_size = vocab_size
+    worker.max_model_len = max_model_len
+    worker.rank = rank
+    worker.device = 'cuda:0'
+    return worker
 
 
 def patch_execute_model_with_seeds(worker: Worker, rand_seeds: List[int]):
@@ -117,24 +140,11 @@ def create_seq_group_metadata_from_prompts(
     block_size: int,
     final_seq_lens: List[int],
     continuations: Optional[List[List[int]]] = None,
-    num_tokens_processed: Optional[List[int]] = None,
     seq_ids: Optional[List[int]] = None,
 ) -> List[SequenceGroupMetadata]:
 
     if continuations is None:
         continuations = [[] for _ in prompts]
-
-    if num_tokens_processed is None:
-        # Default to 1 token missing from kv cache for generation sequences.
-        num_tokens_processed = []
-        for continuation, prompt in zip(continuations, prompts):
-            # If prefill, then default to zero tokens processed.
-            if not continuation:
-                num_tokens_processed.append(0)
-            else:
-                # If generation, then default to all but one tokens processed.
-                num_tokens_processed.append(
-                    len(continuation) + len(prompt) - 1)
 
     if seq_ids is None:
         seq_ids = list(i for i, _ in enumerate(prompts))
@@ -155,24 +165,93 @@ def create_seq_group_metadata_from_prompts(
             is_prompt=len(cont_token_ids) == 0,
             seq_data={
                 i:
-                SequenceData(prompt_token_ids=prompt_token_ids[:] +
-                             cont_token_ids[:])
+                SequenceData(
+                    prompt_token_ids=prompt_token_ids[:],
+                    output_token_ids=cont_token_ids[:],
+                ),
             },
             sampling_params=SamplingParams(temperature=0.0, ),
             block_tables={i: block_allocations[i][:]},
-        ) for i, (prompt_token_ids, cont_token_ids, num_tokens_saved) in
-        enumerate(zip(prompts, continuations, num_tokens_processed))
+        ) for i, (prompt_token_ids,
+                  cont_token_ids) in enumerate(zip(prompts, continuations))
     ]
 
 
 def assert_logprobs_dict_allclose(
-        actual_logprobs: List[Dict[int, float]],
-        expected_logprobs: List[Dict[int, float]]) -> None:
+        actual_logprobs: List[Dict[int, Logprob]],
+        expected_logprobs: List[Dict[int, Logprob]]) -> None:
     for single_step_actual_logprobs, single_step_expected_logprobs in zip(
             actual_logprobs, expected_logprobs):
         assert set(single_step_actual_logprobs.keys()) == set(
             single_step_expected_logprobs.keys())
         for token_id in single_step_actual_logprobs:
-            actual = torch.tensor(single_step_actual_logprobs[token_id])
-            expected = torch.tensor(single_step_expected_logprobs[token_id])
+            actual = torch.tensor(
+                single_step_actual_logprobs[token_id].logprob)
+            expected = torch.tensor(
+                single_step_expected_logprobs[token_id].logprob)
             assert torch.allclose(actual, expected)
+
+
+def create_sampler_output_list(
+        token_ids: torch.Tensor,
+        probs: Iterable[Optional[torch.Tensor]],
+        seq_ids: Optional[List[int]] = None) -> List[SamplerOutput]:
+    num_steps, batch_size = token_ids.shape
+    token_ids_by_step = token_ids.tolist()
+
+    if seq_ids is None:
+        seq_ids = list(range(batch_size))
+
+    return [
+        SamplerOutput(outputs=[
+            SequenceGroupOutput(
+                samples=[
+                    SequenceOutput(
+                        output_token=token_id,
+                        parent_seq_id=seq_ids[seq_index],
+                        logprobs={token_id: 0},
+                    )
+                ],
+                prompt_logprobs=None,
+            ) for seq_index, token_id in enumerate(token_ids_by_step[step])
+        ],
+                      sampled_token_probs=probs[step],
+                      sampled_token_ids=token_ids[step])
+        for step in range(num_steps)
+    ]
+
+
+def create_batch(batch_size,
+                 k,
+                 prompt_len: Union[int, List[int]] = 10,
+                 prev_output_token_len: int = 10,
+                 seq_ids: Optional[List[int]] = None,
+                 num_gpu_blocks: Optional[int] = None,
+                 block_size: Optional[int] = None):
+    if block_size is None:
+        block_size = 8
+
+    if num_gpu_blocks is None:
+        num_gpu_blocks = 2048 // block_size
+
+    iterator = count()
+
+    if isinstance(prompt_len, int):
+        prompt_lens = [prompt_len for _ in range(batch_size)]
+    else:
+        prompt_lens = prompt_len
+
+    prompts = [[next(iterator) for _ in range(p_len)] for p_len in prompt_lens]
+    prev_output_tokens = [[
+        next(iterator) for _ in range(prev_output_token_len)
+    ] for _ in range(batch_size)]
+    final_seq_lens = [
+        len(prompt) + len(prev_output_token) + k + 1
+        for prompt, prev_output_token in zip(prompts, prev_output_tokens)
+    ]
+
+    execute_model_data = create_execute_model_data(
+        create_seq_group_metadata_from_prompts(prompts, num_gpu_blocks,
+                                               block_size, final_seq_lens,
+                                               prev_output_tokens, seq_ids), )
+    return execute_model_data, prompts, prev_output_tokens

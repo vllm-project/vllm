@@ -3,6 +3,7 @@ import os
 import socket
 import subprocess
 import uuid
+import gc
 from platform import uname
 from typing import List, Tuple, Union
 from packaging.version import parse, Version
@@ -132,9 +133,10 @@ def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     # the Neuron-X backend does not have the `cuda_utils` module.
     from vllm._C import cuda_utils
 
-    max_shared_mem = cuda_utils.get_max_shared_memory_per_block_device_attribute(
-        gpu)
-    # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py will fail
+    max_shared_mem = (
+        cuda_utils.get_max_shared_memory_per_block_device_attribute(gpu))
+    # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py
+    # will fail
     assert max_shared_mem > 0, "max_shared_mem can not be zero"
     return int(max_shared_mem)
 
@@ -173,7 +175,7 @@ def get_ip() -> str:
     # try ipv4
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        s.connect(("dns.google", 80))  # Doesn't need to be reachable
+        s.connect(("8.8.8.8", 80))  # Doesn't need to be reachable
         return s.getsockname()[0]
     except OSError:
         # try ipv6
@@ -208,9 +210,8 @@ def get_nvcc_cuda_version() -> Optional[Version]:
     if not cuda_home:
         cuda_home = '/usr/local/cuda'
         if os.path.isfile(cuda_home + '/bin/nvcc'):
-            logger.info(
-                f'CUDA_HOME is not found in the environment. Using {cuda_home} as CUDA_HOME.'
-            )
+            logger.info(f'CUDA_HOME is not found in the environment. '
+                        f'Using {cuda_home} as CUDA_HOME.')
         else:
             logger.warning(
                 f'Not found nvcc in {cuda_home}. Skip cuda version check!')
@@ -309,3 +310,27 @@ def create_kv_caches_with_random(
                 f"Does not support value cache of type {cache_dtype}")
         value_caches.append(value_cache)
     return key_caches, value_caches
+
+
+class measure_cuda_memory:
+
+    def __init__(self, device=None):
+        self.device = device
+
+    def current_memory_usage(self) -> float:
+        # Return the memory usage in bytes.
+        torch.cuda.reset_peak_memory_stats(self.device)
+        mem = torch.cuda.max_memory_allocated(self.device)
+        return mem
+
+    def __enter__(self):
+        self.initial_memory = self.current_memory_usage()
+        # This allows us to call methods of the context manager if needed
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.final_memory = self.current_memory_usage()
+        self.consumed_memory = self.final_memory - self.initial_memory
+
+        # Force garbage collection
+        gc.collect()

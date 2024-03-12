@@ -74,7 +74,8 @@ def test_fused_moe(
                          [torch.float32, torch.float16, torch.bfloat16])
 @torch.inference_mode()
 def test_mixtral_moe(dtype: torch.dtype):
-    "Make sure our Mixtral MoE implementation agrees with the one from huggingface."
+    """Make sure our Mixtral MoE implementation agrees with the one from
+    huggingface."""
     # Initialize dist environment
     if not torch.distributed.is_initialized():
         temp_file = tempfile.mkstemp()[1]
@@ -144,9 +145,9 @@ def torch_moe_gptq(a, w1, w1_gidx, w1_scale, w1_zero, w2, w2_gidx, w2_scale,
         mask = topk_ids == i
         if mask.sum():
             dw1 = ops.dequant_gptq(w1[i], w1_zero[i], w1_scale[i], w1_gidx[i],
-                                   False)
+                                   4, False)
             dw2 = ops.dequant_gptq(w2[i], w2_zero[i], w2_scale[i], w2_gidx[i],
-                                   False)
+                                   4, False)
             r1 = SiluAndMul()(torch.matmul(a[mask], dw1))
             out[mask] = torch.matmul(r1, dw2)
     return (out.view(B, -1, w2.shape[2]) *
