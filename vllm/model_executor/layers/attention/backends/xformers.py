@@ -162,6 +162,7 @@ class XFormersBackend:
 
             else:
                 # prefix-enabled attention
+                print("SANG-TODO prefix")
                 output = PagedAttentionImpl.forward_prefix(
                     query,
                     key,
