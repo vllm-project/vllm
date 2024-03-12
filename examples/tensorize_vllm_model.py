@@ -88,13 +88,14 @@ def serialize():
                                    s3_access_key_id=s3_access_key_id,
                                    s3_secret_access_key=s3_secret_access_key)
     serializer = TensorSerializer(stream)
+
     print(
         f"Writing serialized tensors for model {MODEL_REF} to {S3_URI}. "
         "Type given as {next(model.parameters()).dtype}")
+
     serializer.write_module(model)
     serializer.close()
-    print("Serialization complete. It is recommended you restart the kernel "
-          "if deserializing.")
+    print("Serialization complete.")
 
 
 def deserialize():
