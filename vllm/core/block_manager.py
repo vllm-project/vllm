@@ -393,11 +393,9 @@ class BlockSpaceManager:
         return block_number_mapping
 
     def _free_block_table(self, block_table: BlockTable) -> None:
-        blocks_to_free = (
-            block_table[-self.block_sliding_window :]
-            if self.block_sliding_window is not None
-            else block_table
-        )
+        blocks_to_free = (block_table[-self.block_sliding_window:]
+                          if self.block_sliding_window is not None else
+                          block_table)
         for block in set(blocks_to_free):
             if block.device == Device.GPU:
                 self.gpu_allocator.free(block)

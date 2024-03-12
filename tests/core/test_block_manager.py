@@ -275,6 +275,7 @@ def test_reset():
     block_manager.reset()
     assert block_manager.get_num_free_gpu_blocks() == original_blocks
 
+
 def test_sliding_window_multi_seq():
     block_size = 1
     num_cpu_blocks = 8
@@ -286,18 +287,18 @@ def test_sliding_window_multi_seq():
                                       watermark=0)
 
     parent = Sequence(1, "one two three", [0, 1, 2], block_size)
-    seq_group = SequenceGroup("1", [parent], SamplingParams(),
-                              time.time(), None)
+    seq_group = SequenceGroup("1", [parent], SamplingParams(), time.time(),
+                              None)
     block_manager.allocate(seq_group)
 
     # Fork prompt and copy block tables.
     child = parent.fork(2)
     block_manager.fork(parent, child)
-    
+
     # assert both parent and child share all blocks
     assert block_manager.get_block_table(
         parent) == block_manager.get_block_table(child)
-    
+
     token_id = 4
     # Append token to child. Block is shared so copy on write occurs.
     child.append_token_id(token_id, {token_id: Logprob(0.0)})
@@ -317,5 +318,4 @@ def test_sliding_window_multi_seq():
 
     # assert freeing the sequences does not lead to a "double free" error
     block_manager.free(parent)
-    block_manager.free(child) 
-    
+    block_manager.free(child)
