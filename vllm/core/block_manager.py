@@ -312,7 +312,7 @@ class BlockSpaceManager:
         # Thus, it is always safe from OOM.
         src_block_table = self.block_tables[parent_seq.seq_id]
         self.block_tables[child_seq.seq_id] = src_block_table.copy()
-        for block in src_block_table:
+        for block in set(src_block_table):
             block.ref_count += 1
 
     def _get_physical_blocks(
@@ -393,7 +393,12 @@ class BlockSpaceManager:
         return block_number_mapping
 
     def _free_block_table(self, block_table: BlockTable) -> None:
-        for block in set(block_table):
+        blocks_to_free = (
+            block_table[-self.block_sliding_window :]
+            if self.block_sliding_window is not None
+            else block_table
+        )
+        for block in set(blocks_to_free):
             if block.device == Device.GPU:
                 self.gpu_allocator.free(block)
             else:

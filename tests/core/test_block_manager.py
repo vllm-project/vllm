@@ -274,3 +274,48 @@ def test_reset():
     # Resetting block manager frees all allocated blocks.
     block_manager.reset()
     assert block_manager.get_num_free_gpu_blocks() == original_blocks
+
+def test_sliding_window_multi_seq():
+    block_size = 1
+    num_cpu_blocks = 8
+    num_gpu_blocks = 8
+    block_manager = BlockSpaceManager(block_size,
+                                      num_cpu_blocks,
+                                      num_gpu_blocks,
+                                      sliding_window=2,
+                                      watermark=0)
+
+    parent = Sequence(1, "one two three", [0, 1, 2], block_size)
+    seq_group = SequenceGroup("1", [parent], SamplingParams(),
+                              time.time(), None)
+    block_manager.allocate(seq_group)
+
+    # Fork prompt and copy block tables.
+    child = parent.fork(2)
+    block_manager.fork(parent, child)
+    
+    # assert both parent and child share all blocks
+    assert block_manager.get_block_table(
+        parent) == block_manager.get_block_table(child)
+    
+    token_id = 4
+    # Append token to child. Block is shared so copy on write occurs.
+    child.append_token_id(token_id, {token_id: Logprob(0.0)})
+    block_manager.append_slot(child)
+
+    token_id = 5
+    parent.append_token_id(token_id, {token_id: Logprob(0.0)})
+    block_manager.append_slot(parent)
+
+    block_table_parent = block_manager.get_block_table(parent)
+    block_table_child = block_manager.get_block_table(child)
+
+    assert block_table_parent != block_table_child
+
+    # assert both blocks are sharing the second-last block
+    assert block_table_parent[-2] == block_table_child[-2]
+
+    # assert freeing the sequences does not lead to a "double free" error
+    block_manager.free(parent)
+    block_manager.free(child) 
+    
