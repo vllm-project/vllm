@@ -168,6 +168,7 @@ class TensorizerAgent:
     instead used as an iterator directly in the func hf_model_weights_iterator
     in vllm/model_executor/weight_utils.py
     """
+
     def __init__(
         self,
         model_cls: Type[nn.Module],
