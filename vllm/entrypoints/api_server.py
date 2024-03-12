@@ -1,7 +1,9 @@
 """
-NOTE: This API server is used only for demonstrating usage of AsyncEngine and simple performance benchmarks.
-It is not intended for production use. For production use, we recommend using our OpenAI compatible server.
-We are also not going to accept PRs modifying this file, please change `vllm/entrypoints/openai/api_server.py` instead.
+NOTE: This API server is used only for demonstrating usage of AsyncEngine
+and simple performance benchmarks. It is not intended for production use.
+For production use, we recommend using our OpenAI compatible server.
+We are also not going to accept PRs modifying this file, please
+change `vllm/entrypoints/openai/api_server.py` instead.
 """
 
 import argparse

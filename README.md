@@ -27,7 +27,7 @@ pip install -e .
 
 ## Quickstart
 
-Neural Magic maintains a variety of sparse models on our Hugging Face organization profiles, [neuralmagic](https://huggingface.co/neuralmagic) and [nm-testing](https://huggingface.co/nm-testing). 
+Neural Magic maintains a variety of sparse models on our Hugging Face organization profiles, [neuralmagic](https://huggingface.co/neuralmagic) and [nm-testing](https://huggingface.co/nm-testing).
 
 A collection of ready-to-use SparseGPT and GPTQ models in inference optimized marlin format are [available on Hugging Face](https://huggingface.co/collections/neuralmagic/compressed-llms-for-nm-vllm-65e73e3d51d3200e34b77431)
 
@@ -63,7 +63,7 @@ For a quick demonstration, here's how to run a small [50% sparse llama2-110M](ht
 from vllm import LLM, SamplingParams
 
 model = LLM(
-    "neuralmagic/llama2.c-stories110M-pruned50", 
+    "neuralmagic/llama2.c-stories110M-pruned50",
     sparsity="sparse_w16a16",   # If left off, model will be loaded as dense
 )
 

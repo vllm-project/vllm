@@ -21,7 +21,7 @@ jobs:
         uses: ./.github/workflows/build-test.yml
         with:
             label: aws-avx2-192G-4-a10g-96G
-            timeout: 180
+            timeout: 240
             gitref: '${{ github.ref }}'
             Gi_per_thread: 4
             python: ${{ matrix.python }}

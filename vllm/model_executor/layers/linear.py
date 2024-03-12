@@ -293,7 +293,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     shard_size = shard_size // param.pack_factor
                     shard_offset = shard_offset // param.pack_factor
 
-                    # If marlin, we need to adjust the offset and size to account for the tiling.
+                    # If marlin, we need to adjust the offset and size to
+                    # account for the tiling.
                     shard_size, shard_offset = adjust_marlin_shard(
                         param, shard_size, shard_offset)
 
@@ -315,7 +316,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 shard_size = shard_size // param.pack_factor
                 shard_offset = shard_offset // param.pack_factor
 
-                # If marlin, we need to adjust the offset and size to account for the tiling.
+                # If marlin, we need to adjust the offset and size to
+                # account for the tiling.
                 shard_size, shard_offset = adjust_marlin_shard(
                     param, shard_size, shard_offset)
 
@@ -431,7 +433,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                     shard_size = shard_size // param.pack_factor
                     shard_offset = shard_offset // param.pack_factor
 
-                    # If marlin, we need to adjust the offset and size to account for the tiling.
+                    # If marlin, we need to adjust the offset and size to
+                    # account for the tiling.
                     shard_size, shard_offset = adjust_marlin_shard(
                         param, shard_size, shard_offset)
 
@@ -460,7 +463,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                 shard_size = shard_size // param.pack_factor
                 shard_offset = shard_offset // param.pack_factor
 
-                # If marlin, we need to adjust the offset and size to account for the tiling.
+                # If marlin, we need to adjust the offset and size to
+                # account for the tiling.
                 shard_size, shard_offset = adjust_marlin_shard(
                     param, shard_size, shard_offset)
 

@@ -2,7 +2,8 @@
 
 from typing import Type
 
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.layers.quantization.squeezellm import SqueezeLLMConfig

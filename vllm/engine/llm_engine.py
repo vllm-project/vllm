@@ -9,6 +9,8 @@ import importlib
 from typing import (TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple,
                     Union)
 
+from transformers import PreTrainedTokenizer
+
 import vllm
 from vllm.lora.request import LoRARequest
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
@@ -100,7 +102,8 @@ class LLMEngine:
             f"download_dir={model_config.download_dir!r}, "
             f"load_format={model_config.load_format}, "
             f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
-            f"disable_custom_all_reduce={parallel_config.disable_custom_all_reduce}, "
+            f"disable_custom_all_reduce="
+            f"{parallel_config.disable_custom_all_reduce}, "
             f"quantization={model_config.quantization}, "
             f"sparsity={model_config.sparsity}, "
             f"enforce_eager={model_config.enforce_eager}, "
@@ -161,7 +164,16 @@ class LLMEngine:
         if USE_RAY_COMPILED_DAG:
             self.forward_dag = self._compiled_ray_dag()
 
-    def get_tokenizer_for_seq(self, sequence: Sequence):
+    def __reduce__(self):
+        # This is to ensure that the LLMEngine is not referenced in
+        # the closure used to initialize Ray worker actors
+        raise RuntimeError("LLMEngine should not be pickled!")
+
+    def get_tokenizer(self) -> "PreTrainedTokenizer":
+        return self.tokenizer.get_lora_tokenizer()
+
+    def get_tokenizer_for_seq(self,
+                              sequence: Sequence) -> "PreTrainedTokenizer":
         return self.tokenizer.get_lora_tokenizer(sequence.lora_request)
 
     def _dispatch_worker(self):
@@ -283,6 +295,8 @@ class LLMEngine:
         parallel_config = copy.deepcopy(self.parallel_config)
         scheduler_config = copy.deepcopy(self.scheduler_config)
         device_config = copy.deepcopy(self.device_config)
+        lora_config = copy.deepcopy(self.lora_config)
+        kv_cache_dtype = self.cache_config.cache_dtype
 
         for rank, (worker, (node_id,
                             _)) in enumerate(zip(self.workers,
@@ -298,22 +312,22 @@ class LLMEngine:
                     local_rank,
                     rank,
                     distributed_init_method,
-                    lora_config=self.lora_config,
-                    kv_cache_dtype=self.cache_config.cache_dtype,
+                    lora_config=lora_config,
+                    kv_cache_dtype=kv_cache_dtype,
                 ))
 
         driver_rank = 0
         driver_local_rank = node_workers[driver_node_id].index(driver_rank)
         self.driver_worker = Worker(
-            model_config,
-            parallel_config,
-            scheduler_config,
-            device_config,
+            self.model_config,
+            self.parallel_config,
+            self.scheduler_config,
+            self.device_config,
             driver_local_rank,
             driver_rank,
             distributed_init_method,
             lora_config=self.lora_config,
-            kv_cache_dtype=self.cache_config.cache_dtype,
+            kv_cache_dtype=kv_cache_dtype,
             is_driver_worker=True,
         )
 
@@ -494,8 +508,10 @@ class LLMEngine:
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
+        eos_token_id = self.tokenizer.get_lora_tokenizer(
+            lora_request).eos_token_id
         seq = Sequence(seq_id, prompt, prompt_token_ids, block_size,
-                       lora_request)
+                       eos_token_id, lora_request)
 
         # Defensive copy of SamplingParams, which are used by the sampler,
         # this doesn't deep-copy LogitsProcessor objects
@@ -551,15 +567,13 @@ class LLMEngine:
         if early_stopping is True:
             return True
 
-        current_worst_score = (current_worst_seq.get_beam_search_score(
+        current_worst_score = current_worst_seq.get_beam_search_score(
             length_penalty=length_penalty,
-            eos_token_id=self.get_tokenizer_for_seq(
-                current_worst_seq).eos_token_id))
+            eos_token_id=current_worst_seq.eos_token_id)
         if early_stopping is False:
-            highest_attainable_score = (best_running_seq.get_beam_search_score(
+            highest_attainable_score = best_running_seq.get_beam_search_score(
                 length_penalty=length_penalty,
-                eos_token_id=self.get_tokenizer_for_seq(
-                    best_running_seq).eos_token_id))
+                eos_token_id=best_running_seq.eos_token_id)
         else:
             assert early_stopping == "never"
             if length_penalty > 0.0:
@@ -573,8 +587,7 @@ class LLMEngine:
                 highest_attainable_score = (
                     best_running_seq.get_beam_search_score(
                         length_penalty=length_penalty,
-                        eos_token_id=self.get_tokenizer_for_seq(
-                            best_running_seq).eos_token_id,
+                        eos_token_id=best_running_seq.eos_token_id,
                         seq_len=max_possible_length))
             else:
                 # Otherwise, beam search will prefer shorter sequences. The
@@ -583,8 +596,7 @@ class LLMEngine:
                 highest_attainable_score = (
                     best_running_seq.get_beam_search_score(
                         length_penalty=length_penalty,
-                        eos_token_id=self.get_tokenizer_for_seq(
-                            best_running_seq).eos_token_id))
+                        eos_token_id=best_running_seq.eos_token_id))
         return current_worst_score >= highest_attainable_score
 
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
@@ -682,8 +694,7 @@ class LLMEngine:
         all_finished_seqs = existing_finished_seqs + new_finished_seqs
         # Sort the finished sequences by their scores.
         all_finished_seqs.sort(key=lambda x: x[0].get_beam_search_score(
-            length_penalty=length_penalty,
-            eos_token_id=self.get_tokenizer_for_seq(x[0]).eos_token_id),
+            length_penalty=length_penalty, eos_token_id=x[0].eos_token_id),
                                reverse=True)
         for seq, parent, is_new in all_finished_seqs[:beam_width]:
             if is_new:
@@ -710,8 +721,7 @@ class LLMEngine:
                               if not seq.is_finished()]
         # Sort the running sequences by their scores.
         running_child_seqs.sort(key=lambda x: x[0].get_beam_search_score(
-            length_penalty=length_penalty,
-            eos_token_id=self.get_tokenizer_for_seq(x[0]).eos_token_id),
+            length_penalty=length_penalty, eos_token_id=x[0].eos_token_id),
                                 reverse=True)
 
         # Check if we can stop the beam search.
@@ -923,7 +933,8 @@ class LLMEngine:
             # Latency Timings.
             time_last_iters = []
             for seq_group in scheduler_outputs.scheduled_seq_groups:
-                # Time since last token. (n.b. updates seq_group.metrics.last_token_time)
+                # Time since last token.
+                # (n.b. updates seq_group.metrics.last_token_time)
                 time_last_iters.append(seq_group.get_last_latency(now))
                 # Time since arrival for all finished requests.
                 if seq_group.is_finished():
@@ -955,16 +966,17 @@ class LLMEngine:
         for token_id, sample_logprob in logprobs.items():
             if (sample_logprob.decoded_token is None and token_id != -1):
                 all_input_ids_with_logprob = all_input_ids[:-1] + [token_id]
-                _, new_text, prefix_offset, read_offset = detokenize_incrementally(
-                    self.get_tokenizer_for_seq(seq),
-                    all_input_ids=all_input_ids_with_logprob,
-                    prev_tokens=seq.tokens,
-                    prefix_offset=seq.prefix_offset,
-                    read_offset=seq.read_offset,
-                    skip_special_tokens=prms.skip_special_tokens,
-                    spaces_between_special_tokens=prms.
-                    spaces_between_special_tokens,
-                )
+                (_, new_text, prefix_offset,
+                 read_offset) = detokenize_incrementally(
+                     self.get_tokenizer_for_seq(seq),
+                     all_input_ids=all_input_ids_with_logprob,
+                     prev_tokens=seq.tokens,
+                     prefix_offset=seq.prefix_offset,
+                     read_offset=seq.read_offset,
+                     skip_special_tokens=prms.skip_special_tokens,
+                     spaces_between_special_tokens=prms.
+                     spaces_between_special_tokens,
+                 )
                 sample_logprob.decoded_token = new_text
 
     def _decode_sequence(self, seq: Sequence, prms: SamplingParams) -> None:
@@ -1017,8 +1029,8 @@ class LLMEngine:
             return
 
         # Check if the sequence has generated the EOS token.
-        if ((not sampling_params.ignore_eos) and seq.get_last_token_id()
-                == self.get_tokenizer_for_seq(seq).eos_token_id):
+        if ((not sampling_params.ignore_eos)
+                and seq.get_last_token_id() == seq.eos_token_id):
             seq.status = SequenceStatus.FINISHED_STOPPED
             return
 
@@ -1122,3 +1134,23 @@ class LLMEngine:
                 for worker in self.workers
             ])
         return forward_dag.experimental_compile()
+
+    def check_health(self) -> None:
+        """Raises an error if engine is unhealthy."""
+        self._check_if_any_actor_is_dead()
+
+    def _check_if_any_actor_is_dead(self):
+        if not self.parallel_config.worker_use_ray:
+            return
+
+        if not self.workers:
+            return
+
+        dead_actors = []
+        for actor in self.workers:
+            actor_state = ray.state.actors(actor._ray_actor_id.hex())  # pylint: disable=protected-access
+            if actor_state["State"] == "DEAD":
+                dead_actors.append(actor)
+        if dead_actors:
+            raise RuntimeError("At least one Worker is dead. "
+                               f"Dead Workers: {dead_actors}. ")
