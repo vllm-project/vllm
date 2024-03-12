@@ -65,7 +65,7 @@ class GeluAndMul(nn.Module):
         if self.approximate == "none":
             ops.gelu_and_mul(out, x)
         elif self.approximate == "tanh":
-            ops.gelu_and_mul_tanh(out, x)
+            ops.gelu_tanh_and_mul(out, x)
         return out
 
 
