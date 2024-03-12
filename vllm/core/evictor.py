@@ -73,7 +73,9 @@ class LRUEvictor(Evictor):
         evicted_block: PhysicalTokenBlock = next(iter(free_blocks))
 
         for block in free_blocks:
-            if block.last_accessed < evicted_block.last_accessed or block.last_accessed == evicted_block.last_accessed and block.num_hashed_tokens > evicted_block.num_hashed_tokens:
+            if (block.last_accessed < evicted_block.last_accessed
+                    or block.last_accessed == evicted_block.last_accessed and
+                    block.num_hashed_tokens > evicted_block.num_hashed_tokens):
                 evicted_block = block
 
         del self.free_table[evicted_block.block_hash]
