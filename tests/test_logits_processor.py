@@ -5,13 +5,13 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm.model_executor.layers.logits_processor import LogitProcessor
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.worker.model_runner import ModelRunner
 
 
-class MockLogitsProcessor(LogitProcessor):
+class MockLogitsProcessor(LogitsProcessor):
 
     def __init__(self, vocab_size: int, scale: float,
                  fake_logits: torch.Tensor):
