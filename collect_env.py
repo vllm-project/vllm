@@ -44,6 +44,10 @@ SystemEnv = namedtuple('SystemEnv', [
     'caching_allocator_config',
     'is_xnnpack_available',
     'cpu_info',
+    'rocm_version',  # vllm specific field
+    'neuron_sdk_version', # vllm specific field
+    'vllm_version',  # vllm specific field
+    'vllm_build_flags',  # vllm specific field
 ])
 
 DEFAULT_CONDA_PATTERNS = {
@@ -222,6 +226,37 @@ def get_nvidia_smi():
                 smi = '"{}"'.format(candidate_smi)
                 break
     return smi
+
+
+def get_rocm_version(run_lambda):
+    """Returns the ROCm version if available, otherwise 'N/A'."""
+    return run_and_parse_first_match(run_lambda, 'hipcc --version', r'HIP version: (\S+)')
+
+
+def get_neuron_sdk_version(run_lambda):
+    # Adapted from your install script
+    try:
+        result = run_lambda(["neuron-ls"])
+        return result if result[0] == 0 else 'N/A'
+    except Exception:
+        return 'N/A'
+
+
+def get_vllm_version():
+    try:
+        import vllm
+        return vllm.__version__
+    except ImportError:
+        return 'N/A'
+
+
+def summarize_vllm_build_flags():
+    # This could be a static method if the flags are constant, or dynamic if you need to check environment variables, etc.
+    return 'CUDA Archs: {}; ROCm: {}; Neuron: {}'.format(
+        os.environ.get('TORCH_CUDA_ARCH_LIST', 'Not Set'),
+        'Enabled' if os.environ.get('ROCM_HOME') else 'Disabled',
+        'Enabled' if os.environ.get('NEURON_CORES') else 'Disabled',
+    )
 
 
 # example outputs of CPU infos
@@ -462,6 +497,11 @@ def get_env_info():
 
     conda_packages = get_conda_packages(run_lambda)
 
+    rocm_version = get_rocm_version(run_lambda)
+    neuron_sdk_version = get_neuron_sdk_version(run_lambda)
+    vllm_version = get_vllm_version()
+    vllm_build_flags = summarize_vllm_build_flags()
+
     return SystemEnv(
         torch_version=version_str,
         is_debug_build=debug_mode_str,
@@ -488,6 +528,10 @@ def get_env_info():
         caching_allocator_config=get_cachingallocator_config(),
         is_xnnpack_available=is_xnnpack_available(),
         cpu_info=get_cpu_info(run_lambda),
+        rocm_version=rocm_version,
+        neuron_sdk_version=neuron_sdk_version,
+        vllm_version=vllm_version,
+        vllm_build_flags=vllm_build_flags,
     )
 
 env_info_fmt = """
@@ -520,6 +564,14 @@ CPU:
 Versions of relevant libraries:
 {pip_packages}
 {conda_packages}
+""".strip()
+
+env_info_fmt += """
+ROCM Version: {rocm_version}
+Neuron SDK Version: {neuron_sdk_version}
+vLLM Version: {vllm_version}
+vLLM Build Flags:
+{vllm_build_flags}
 """.strip()
 
 
