@@ -379,6 +379,26 @@ class CacheConfig:
             logger.warning("Possibly too large swap space. " + msg)
 
 
+@dataclass
+class TokenizerPoolConfig:
+    """Configuration for the tokenizer pool.
+    
+    Args:
+        pool_size: Number of tokenizer workers in the pool.
+        pool_type: Type of the pool.
+        extra_config: Additional config for the pool.
+            The way the config will be used depends on the
+            pool type.
+    """
+    pool_size: int
+    pool_type: str
+    extra_config: dict
+
+    def __post_init__(self):
+        if self.pool_type not in ("ray"):
+            raise ValueError(f"Unknown pool type: {self.pool_type}")
+
+
 class ParallelConfig:
     """Configuration for the distributed execution.
 
@@ -393,10 +413,8 @@ class ParallelConfig:
             parallel and large models.
         disable_custom_all_reduce: Disable the custom all-reduce kernel and
             fall back to NCCL.
-        num_tokenizer_actors: Number of tokenizer actors to use for
-            asynchronous tokenization with Ray. If 0, will use
-            synchronous tokenization.
-        tokenizer_actor_options: Options for tokenizer Ray Actors.
+        tokenizer_pool_config: Config for the tokenizer pool.
+            If None, will use synchronous tokenization.
         ray_workers_use_nsight: Whether to profile Ray workers with nsight, see
             https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler.
     """
@@ -408,8 +426,7 @@ class ParallelConfig:
         worker_use_ray: bool,
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
-        num_tokenizer_actors: int = 0,
-        tokenizer_actor_options: Optional[dict] = None,
+        tokenizer_pool_config: Optional[TokenizerPoolConfig] = None,
         ray_workers_use_nsight: bool = False,
         placement_group: Optional["PlacementGroup"] = None,
     ) -> None:
@@ -426,8 +443,7 @@ class ParallelConfig:
         self.worker_use_ray = worker_use_ray
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
-        self.num_tokenizer_actors = num_tokenizer_actors
-        self.tokenizer_actor_options = tokenizer_actor_options
+        self.tokenizer_pool_config = tokenizer_pool_config
         self.ray_workers_use_nsight = ray_workers_use_nsight
         self.placement_group = placement_group
 
