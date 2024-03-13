@@ -296,12 +296,19 @@ class OPTForCausalLM(nn.Module):
         self.logit_processor = LogitProcessor(config.vocab_size)
         self.sampler = Sampler()
 
-    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
-                kv_caches: List[KVCache], input_metadata: InputMetadata,
-                sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[KVCache],
+        input_metadata: InputMetadata,
+    ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    input_metadata)
+        return hidden_states
 
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
         logits = self.logit_processor(self.lm_head_weight, hidden_states,
                                       sampling_metadata)
 

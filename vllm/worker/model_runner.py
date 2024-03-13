@@ -587,13 +587,15 @@ class ModelRunner:
             model_executable = self.graph_runners[graph_batch_size]
         else:
             model_executable = self.model
-        logits = model_executable(
+        hidden_states = model_executable(
             input_ids=input_tokens,
             positions=input_positions,
             kv_caches=kv_caches,
             input_metadata=input_metadata,
-            sampling_metadata=sampling_metadata,
         )
+
+        # Compute the logits.
+        logits = self.model.compute_logits(hidden_states, sampling_metadata)
 
         if not sampling_metadata.perform_sampling:
             return None
