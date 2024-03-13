@@ -293,9 +293,7 @@ class OPTForCausalLM(nn.Module):
         self.linear_method = linear_method
         self.model = OPTModel(config, linear_method)
         self.lm_head_weight = self.model.decoder.embed_tokens.weight
-        logit_scale = getattr(config, "logit_scale", 1.0)
-        self.logit_processor = LogitProcessor(self.unpadded_vocab_size,
-                                              config.vocab_size, logit_scale)
+        self.logit_processor = LogitProcessor(config.vocab_size)
         self.sampler = Sampler()
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
