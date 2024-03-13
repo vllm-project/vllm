@@ -117,10 +117,13 @@ def dummy_model_gate_up() -> nn.Module:
     model.config = MagicMock()
     return model
 
-
 @pytest.fixture(scope="session")
 def sql_lora_files():
     return snapshot_download(repo_id="yard1/llama-2-7b-sql-lora-test")
+
+@pytest.fixture(scope="session")
+def tinyllama_lora_files():
+    return snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
 
 
 @pytest.fixture(scope="session")
