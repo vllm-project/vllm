@@ -230,10 +230,13 @@ class GPTBigCodeModel(nn.Module):
 
 
 class GPTBigCodeForCausalLM(nn.Module):
-    packed_modules_mapping = {}
+    packed_modules_mapping = {
+        "c_attn": [
+            "c_attn"
+        ]
+    }
 
     supported_lora_modules = [
-        "c_attn",
         "c_fc",  
         "c_proj",
         "wte",
