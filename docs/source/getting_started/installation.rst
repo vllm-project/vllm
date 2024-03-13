@@ -58,6 +58,7 @@ You can also build and install vLLM from source:
 
     $ git clone https://github.com/vllm-project/vllm.git
     $ cd vllm
+    $ pip install -r requirements-build.txt
     $ pip install -e .  # This may take 5-10 minutes.
 
 .. tip::
