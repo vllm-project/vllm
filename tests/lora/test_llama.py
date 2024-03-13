@@ -121,7 +121,9 @@ def test_llama_lora(sql_lora_files, model, tp_size):
 
     def expect_match(output, expected_output):
         # Filter outputs and expected outputs where expected is not None
-        filtered_output = [o for o, e in zip(output, expected_output) if e is not None]
+        filtered_output = [
+            o for o, e in zip(output, expected_output) if e is not None
+        ]
         filtered_expected = [e for e in expected_output if e is not None]
         
         # Assert filtered lists are equal
