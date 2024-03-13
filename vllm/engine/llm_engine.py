@@ -103,7 +103,8 @@ class LLMEngine:
                                              parallel_config, scheduler_config,
                                              device_config, lora_config)
 
-        # Ping the tokenizer to ensure liveness if it runs in a different process.
+        # Ping the tokenizer to ensure liveness if it runs in a
+        # different process.
         self.tokenizer.ping()
 
         # Create the scheduler.

@@ -7,26 +7,30 @@ from transformers import PreTrainedTokenizer
 from vllm.config import TokenizerPoolConfig
 from vllm.lora.request import LoRARequest
 from vllm.engine.ray_utils import ray
-from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import BaseTokenizerGroup
-from vllm.transformers_utils.tokenizer_group.tokenizer_group import TokenizerGroup
+from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
+    BaseTokenizerGroup)
+from vllm.transformers_utils.tokenizer_group.tokenizer_group import (
+    TokenizerGroup)
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 RayTokenizerGroup = ray.remote(TokenizerGroup)
 
+
 class RayTokenizerGroupPool(BaseTokenizerGroup):
     """A Ray-based pool of TokenizerGroups for async tokenization."""
 
+    _ray_tokenizer_group_cls = RayTokenizerGroup
+
     @classmethod
-    def from_config(cls, tokenizer_pool_config: TokenizerPoolConfig, **init_kwargs) -> "RayTokenizerGroupPool":
-        ray_actor_options = (tokenizer_pool_config.extra_config
-                            or {
-                                "num_cpus": 0
-                            })
+    def from_config(cls, tokenizer_pool_config: TokenizerPoolConfig,
+                    **init_kwargs) -> "RayTokenizerGroupPool":
+        ray_actor_options = (tokenizer_pool_config.extra_config or {
+            "num_cpus": 0
+        })
         ray_actor_options.setdefault(
             "scheduling_strategy",
             NodeAffinitySchedulingStrategy(
-                node_id=ray.get_runtime_context().get_node_id(),
-                soft=True))
+                node_id=ray.get_runtime_context().get_node_id(), soft=True))
 
         # Carry over the env vars to the actors.
         # This is necessary for API keys and such.
@@ -36,11 +40,10 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
         env_vars.update(ray_actor_options["runtime_env"]["env_vars"])
         ray_actor_options["runtime_env"]["env_vars"] = env_vars
 
-        init_kwargs[
-            "num_actors"] = tokenizer_pool_config.pool_size
+        init_kwargs["num_actors"] = tokenizer_pool_config.pool_size
         init_kwargs["ray_actor_options"] = ray_actor_options
-        
-        return RayTokenizerGroupPool(**init_kwargs)
+
+        return cls(**init_kwargs)
 
     def __init__(  # pylint: disable=super-init-not-called
             self, tokenizer_id: str, enable_lora: bool, max_num_seqs: int,
@@ -53,14 +56,19 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
                                         **tokenizer_config)
         self.max_input_length = max_input_length
 
-        ray_tokenizer_cls = RayTokenizerGroup.options(**ray_actor_options)
+        ray_tokenizer_group_cls = self._ray_tokenizer_group_cls.options(
+            **ray_actor_options)
         self.tokenizer_actors = [
-            ray_tokenizer_cls.remote(tokenizer_id, enable_lora,
-                                        max_num_seqs, max_input_length,
-                                        **tokenizer_config)
+            ray_tokenizer_group_cls.remote(tokenizer_id, enable_lora,
+                                           max_num_seqs, max_input_length,
+                                           **tokenizer_config)
             for _ in range(num_actors)
         ]
         self._idle_actors: Optional[asyncio.Queue] = None
+
+    @property
+    def pool_size(self) -> int:
+        return len(self.tokenizer_actors)
 
     def ping(self):
         return ray.get(
@@ -73,9 +81,9 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
                 self._idle_actors.put_nowait(actor)
 
     def encode(self,
-                prompt: str,
-                request_id: Optional[str] = None,
-                lora_request: Optional[LoRARequest] = None) -> List[int]:
+               prompt: str,
+               request_id: Optional[str] = None,
+               lora_request: Optional[LoRARequest] = None) -> List[int]:
         """Encode a prompt using the tokenizer group.
 
         We pick an idle actor and use it to encode the prompt.

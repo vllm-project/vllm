@@ -7,6 +7,7 @@ from vllm.lora.request import LoRARequest
 from vllm.utils import LRUCache
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
+
 class BaseTokenizerGroup(ABC):
 
     def __init__(self, tokenizer_id: str, enable_lora: bool, max_num_seqs: int,
@@ -56,4 +57,3 @@ class BaseTokenizerGroup(ABC):
             lora_request: Optional[LoRARequest]) -> "PreTrainedTokenizer":
         """Get a tokenizer for a LoRA request."""
         return self.get_lora_tokenizer(lora_request)
-

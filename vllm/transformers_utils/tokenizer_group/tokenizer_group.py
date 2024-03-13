@@ -3,9 +3,10 @@ from typing import List, Optional
 from transformers import PreTrainedTokenizer
 
 from vllm.lora.request import LoRARequest
-from vllm.transformers_utils.tokenizer import get_lora_tokenizer, get_lora_tokenizer_async
-from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import BaseTokenizerGroup
-
+from vllm.transformers_utils.tokenizer import (get_lora_tokenizer,
+                                               get_lora_tokenizer_async)
+from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
+    BaseTokenizerGroup)
 
 
 class TokenizerGroup(BaseTokenizerGroup):
@@ -53,4 +54,3 @@ class TokenizerGroup(BaseTokenizerGroup):
             return tokenizer
         else:
             return self.lora_tokenizers.get(lora_request.lora_int_id)
-
