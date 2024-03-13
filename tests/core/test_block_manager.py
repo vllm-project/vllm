@@ -361,3 +361,208 @@ def test_sliding_window_multi_seq():
 
     # assert all blocks are free now
     assert block_manager.get_num_free_gpu_blocks() == num_gpu_blocks
+
+
+def test_seq_cached_blocks_num():
+    # Initialize the block manager
+    block_size = 16
+    num_gpu_blocks = 64
+    num_cpu_blocks = 32
+    block_manager = BlockSpaceManager(block_size,
+                                      num_gpu_blocks,
+                                      num_cpu_blocks,
+                                      enable_caching=True)
+    assert block_manager.get_num_free_gpu_blocks() == num_gpu_blocks
+    assert block_manager.get_num_free_cpu_blocks() == num_cpu_blocks
+
+    seq_prompt_length = 64
+    seq = Sequence(seq_id=0,
+                   prompt="zero to sixty three",
+                   block_size=block_size,
+                   prompt_token_ids=list(range(seq_prompt_length)))
+    seq_group = SequenceGroup(request_id=0,
+                              seqs=[seq],
+                              sampling_params=SamplingParams(),
+                              arrival_time=time.time())
+    block_manager.allocate(seq_group)
+
+    seq_num_cached_blocks = block_manager.get_num_cached_blocks(seq)
+    assert seq_num_cached_blocks == 4
+    # 64 - 4 = 60
+    assert block_manager.get_num_free_gpu_blocks() == 60
+
+    seq1_prompt_length = 32
+    seq1 = Sequence(seq_id=1,
+                    prompt="zero to thirty one",
+                    block_size=block_size,
+                    prompt_token_ids=list(range(seq1_prompt_length)))
+    seq1_num_cached_blocks = block_manager.get_num_cached_blocks(seq1)
+    assert seq1_num_cached_blocks == 2
+    seq1_group = SequenceGroup(request_id=1,
+                               seqs=[seq1],
+                               sampling_params=SamplingParams(),
+                               arrival_time=time.time())
+    block_manager.allocate(seq1_group)
+    # 64 - 4 - (2 - 2) = 60
+    assert block_manager.get_num_free_gpu_blocks() == 60
+
+    seq2_prompt_length = 47
+    seq2 = Sequence(seq_id=2,
+                    prompt="zero to forty six",
+                    block_size=block_size,
+                    prompt_token_ids=list(range(seq2_prompt_length)))
+    seq2_num_cached_blocks = block_manager.get_num_cached_blocks(seq2)
+    assert seq2_num_cached_blocks == 2
+    seq2_group = SequenceGroup(request_id=2,
+                               seqs=[seq2],
+                               sampling_params=SamplingParams(),
+                               arrival_time=time.time())
+    block_manager.allocate(seq2_group)
+    # 64 - 4 - (2 - 2) - (3 - 2) = 59
+    assert block_manager.get_num_free_gpu_blocks() == 59
+
+    seq3_prompt_length = 96
+    seq3 = Sequence(seq_id=3,
+                    prompt="zero to ninety five",
+                    block_size=block_size,
+                    prompt_token_ids=list(range(seq3_prompt_length)))
+    seq3_num_cached_blocks = block_manager.get_num_cached_blocks(seq3)
+    assert seq3_num_cached_blocks == 4
+    seq3_group = SequenceGroup(request_id=3,
+                               seqs=[seq3],
+                               sampling_params=SamplingParams(),
+                               arrival_time=time.time())
+    block_manager.allocate(seq3_group)
+    # 64 - 4 - (2 - 2) - (3 - 2) - (6 - 4) = 57
+    assert block_manager.get_num_free_gpu_blocks() == 57
+
+
+def test_seq_computed_blocks_num():
+    # Initialize the block manager
+    block_size = 16
+    num_gpu_blocks = 64
+    num_cpu_blocks = 32
+    block_manager = BlockSpaceManager(block_size,
+                                      num_gpu_blocks,
+                                      num_cpu_blocks,
+                                      enable_caching=True)
+    assert block_manager.get_num_free_gpu_blocks() == num_gpu_blocks
+    assert block_manager.get_num_free_cpu_blocks() == num_cpu_blocks
+
+    seq_prompt_length = 64
+    seq = Sequence(seq_id=0,
+                   prompt="zero to sixty three",
+                   block_size=block_size,
+                   prompt_token_ids=list(range(seq_prompt_length)))
+    seq_group = SequenceGroup(request_id=0,
+                              seqs=[seq],
+                              sampling_params=SamplingParams(),
+                              arrival_time=time.time())
+    block_manager.allocate(seq_group)
+    block_manager.mark_blocks_as_computed(seq_group)
+
+    seq_num_computed_blocks = block_manager.get_num_computed_blocks(seq)
+    assert seq_num_computed_blocks == 3
+    # Ensure the computed blocks number aligns with the real allocation behavior
+    seq_computed_blocks = block_manager.get_all_computed_blocks(seq)
+    assert seq_num_computed_blocks == len(seq_computed_blocks)
+
+    seq1_prompt_length = 48
+    seq1 = Sequence(seq_id=1,
+                    prompt="zero to forty seven",
+                    block_size=block_size,
+                    prompt_token_ids=list(range(seq1_prompt_length)))
+    seq1_num_computed_blocks = block_manager.get_num_computed_blocks(seq1)
+    assert seq1_num_computed_blocks == 2
+    seq1_group = SequenceGroup(request_id=1,
+                               seqs=[seq1],
+                               sampling_params=SamplingParams(),
+                               arrival_time=time.time())
+    # Ensure the computed blocks number aligns with the real allocation behavior
+    block_manager.allocate(seq1_group)
+    block_manager.mark_blocks_as_computed(seq1_group)
+    seq1_computed_blocks = block_manager.get_all_computed_blocks(seq1)
+    assert seq1_num_computed_blocks == len(seq1_computed_blocks)
+
+    seq2_prompt_length = 55
+    seq2 = Sequence(seq_id=2,
+                    prompt="zero to fifty four",
+                    block_size=block_size,
+                    prompt_token_ids=list(range(seq2_prompt_length)))
+    seq2_num_computed_blocks = block_manager.get_num_computed_blocks(seq2)
+    assert seq2_num_computed_blocks == 3
+    seq2_group = SequenceGroup(request_id=1,
+                               seqs=[seq2],
+                               sampling_params=SamplingParams(),
+                               arrival_time=time.time())
+    # Ensure the computed blocks number aligns with the real allocation behavior
+    block_manager.allocate(seq2_group)
+    block_manager.mark_blocks_as_computed(seq2_group)
+    seq2_computed_blocks = block_manager.get_all_computed_blocks(seq2)
+    assert seq2_num_computed_blocks == len(seq2_computed_blocks)
+
+    seq3_prompt_length = 81
+    seq3 = Sequence(seq_id=3,
+                    prompt="zero to eighty",
+                    block_size=block_size,
+                    prompt_token_ids=list(range(seq3_prompt_length)))
+    seq3_num_computed_blocks = block_manager.get_num_computed_blocks(seq3)
+    assert seq3_num_computed_blocks == 4
+    seq3_group = SequenceGroup(request_id=3,
+                               seqs=[seq3],
+                               sampling_params=SamplingParams(),
+                               arrival_time=time.time())
+    # Ensure the computed blocks number aligns with the real allocation behavior
+    block_manager.allocate(seq3_group)
+    block_manager.mark_blocks_as_computed(seq3_group)
+    seq3_computed_blocks = block_manager.get_all_computed_blocks(seq3)
+    assert seq3_num_computed_blocks == len(seq3_computed_blocks)
+
+    # Test the computed blocks num after the sequences are freed
+    # Free operation doesn't influence the computed blocks number
+    block_manager.free(seq)
+    block_manager.free(seq1)
+    block_manager.free(seq2)
+    block_manager.free(seq3)
+    seq_num_computed_blocks = block_manager.get_num_computed_blocks(seq)
+    assert seq_num_computed_blocks == 3
+    seq1_num_computed_blocks = block_manager.get_num_computed_blocks(seq1)
+    assert seq1_num_computed_blocks == 2
+    seq2_num_computed_blocks = block_manager.get_num_computed_blocks(seq2)
+    assert seq2_num_computed_blocks == 3
+    seq3_num_computed_blocks = block_manager.get_num_computed_blocks(seq3)
+    assert seq3_num_computed_blocks == 4
+
+    # Test the computed blocks num
+    # after the second block(token 15~31) are evicted
+    # Since the second block is evicted, the caches are not continuous
+    # from the second block. Therefore, all seqs' computed blocks numbers
+    # are reduced to 1.
+    evicted_block_hash = seq.hash_of_block(1)
+    evicted_block = block_manager.gpu_allocator.evictor.remove(
+        evicted_block_hash)
+    seq_num_computed_blocks = block_manager.get_num_computed_blocks(seq)
+    assert seq_num_computed_blocks == 1
+    seq1_num_computed_blocks = block_manager.get_num_computed_blocks(seq1)
+    assert seq1_num_computed_blocks == 1
+    seq2_num_computed_blocks = block_manager.get_num_computed_blocks(seq2)
+    assert seq2_num_computed_blocks == 1
+    seq3_num_computed_blocks = block_manager.get_num_computed_blocks(seq3)
+    assert seq3_num_computed_blocks == 1
+
+    # Test the computed blocks num
+    # after the second block(token 15~31) are marked as not computed
+    # Since the second block is marked as not computed, the caches are not
+    # continuous from the second block. Therefore, all seqs' computed blocks
+    # numbers are reduced to 1.
+    evicted_block.computed = False
+    block_manager.gpu_allocator.cached_blocks[
+        evicted_block.block_hash] = evicted_block
+    seq_num_computed_blocks = block_manager.get_num_computed_blocks(seq)
+    assert seq_num_computed_blocks == 1
+    seq1_num_computed_blocks = block_manager.get_num_computed_blocks(seq1)
+    assert seq1_num_computed_blocks == 1
+    seq2_num_computed_blocks = block_manager.get_num_computed_blocks(seq2)
+    assert seq2_num_computed_blocks == 1
+    seq3_num_computed_blocks = block_manager.get_num_computed_blocks(seq3)
+    assert seq3_num_computed_blocks == 1

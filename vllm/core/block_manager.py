@@ -98,6 +98,64 @@ class BlockAllocator:
         return (self.num_blocks - self.current_num_blocks +
                 self.evictor.num_blocks)
 
+    def get_num_cached_blocks(self, seq: Sequence) -> int:
+        # NOTE: cached blocks of a sequence means some logical blocks
+        # of the sequence map to the physical blocks which already
+        # have been stored in block manager's 'cached_blocks' dict.
+        # These cached blocks doesn't need allocate again, reducing
+        # the memory requirement during sequence allocation.
+        if not self.enable_caching:
+            return 0
+        num_cached_blocks = 0
+        for logical_idx in range(len(seq.logical_token_blocks)):
+            block_hash = seq.hash_of_block(logical_idx)
+            if block_hash in self.cached_blocks:
+                num_cached_blocks += 1
+        return num_cached_blocks
+
+    def get_num_computed_blocks(self, seq: Sequence) -> int:
+        # NOTE: computed blocks of a sequence means some logical blaocks
+        # of the sequence map to the physical blocks which:
+        # 1. stored in either 'cached blocks' or 'evictor'
+        # 2. 'block.computed' is true
+        # 3. these blocks should be continuous as prefix cache is continuous,
+        #    e.g. even if (0, 1, 2, 4) blocks are in `cached_blocks` and
+        #    marked as computed, but 4 is not continuous with (0, 1, 2).
+        #    Thus, the computed blocks are only (0, 1, 2).
+        # 4. The computed blocks should start at the very beginning of a
+        #    sequence's logical blocks.
+        # Only the blocks satisfy the above three conditions are computed
+        # blocks, which can be treated as prefix cache during prefilling
+        if not self.enable_caching:
+            return 0
+        num_computed_blocks = 0
+        # Align with https://github.com/vllm-project/vllm/pull/3239
+        # The last logical block always needs to be computed again
+        for logical_idx in range(len(seq.logical_token_blocks) - 1):
+            block_hash = seq.hash_of_block(logical_idx)
+            if block_hash in self.cached_blocks:
+                if self.cached_blocks[block_hash].computed:
+                    num_computed_blocks += 1
+                # Not computed, violate the "continuous" requirement, break
+                else:
+                    break
+            elif block_hash in self.evictor:
+                # First remove and then add is reasonable.
+                # Because if we check whether a block is computed,
+                # it means it's hot and should be evicted later
+                block = self.evictor.remove(block_hash)
+                self.evictor.add(block)
+                if block.computed:
+                    num_computed_blocks += 1
+                # Not computed, violate the "continuous" requirement, break
+                else:
+                    break
+            # Not in 'cached_blocks‘ or 'evictor', cannot be computed
+            # Not computed, violate the "continuous" requirement, break
+            else:
+                break
+        return num_computed_blocks
+
     def contains_block(self, block_hash: int) -> bool:
         return block_hash in self.cached_blocks or block_hash in self.evictor
 
@@ -174,7 +232,11 @@ class BlockSpaceManager:
         if self.block_sliding_window is not None:
             num_required_blocks = min(num_required_blocks,
                                       self.block_sliding_window)
-        num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
+        # Check the number of blocks which have been cached
+        num_cached_blocks = self.get_num_cached_blocks(seq)
+        num_required_blocks -= num_cached_blocks
+
+        num_free_gpu_blocks = self.get_num_free_gpu_blocks()
 
         # Use watermark to avoid frequent cache eviction.
         if (self.num_total_gpu_blocks - num_required_blocks <
@@ -435,6 +497,19 @@ class BlockSpaceManager:
     def get_num_free_cpu_blocks(self) -> int:
         return self.cpu_allocator.get_num_free_blocks()
 
+    def get_num_cached_blocks(self, seq: Sequence) -> int:
+        return self.gpu_allocator.get_num_cached_blocks(seq)
+
+    def get_num_computed_blocks(self, seq: Sequence) -> int:
+        return self.gpu_allocator.get_num_computed_blocks(seq)
+
+    def get_num_computed_tokens(self, seq: Sequence) -> int:
+        """Return the number of tokens that are already computed.
+
+        NOTE: This excludes tokens from the last blocks.
+        """
+        return self.block_size * self.get_num_computed_blocks(seq)
+
     def access_all_blocks_in_seq(
         self,
         seq: Sequence,
@@ -447,7 +522,11 @@ class BlockSpaceManager:
     def compute_full_blocks_in_seq(self, seq: Sequence):
         if seq.seq_id not in self.block_tables:
             return
-        max_full_block = seq.get_len() // self.block_size - 1
+        max_full_block = seq.get_len() // self.block_size
+        # If the last block is not full, then we need to reduce
+        # the max full block number by 1
+        if not self._is_last_block_full(seq):
+            max_full_block -= 1
         block_table = self.block_tables[seq.seq_id]
         if max_full_block == -1:
             return

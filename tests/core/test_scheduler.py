@@ -1,9 +1,11 @@
 from typing import List
 import pytest  # noqa
+import time
 
+from vllm import SamplingParams
 from vllm.config import CacheConfig, SchedulerConfig
 from vllm.core.scheduler import Scheduler
-from vllm.sequence import SequenceGroup, Logprob
+from vllm.sequence import Sequence, SequenceGroup, Logprob
 
 from .utils import create_dummy_prompt
 
@@ -168,3 +170,117 @@ def test_scheduler_max_seqs():
     # and one is prompting.
     _, out = scheduler.schedule()
     assert set(out.scheduled_seq_groups) == set([all_seq_groups[1]])
+
+
+def test_scheduler_with_cache():
+    # Initialize the scheduler
+    max_batched_tokens = 96
+    max_seq_group = 8
+    max_model_length = 96
+    max_paddings = 256
+    scheduler_config = SchedulerConfig(max_batched_tokens, max_seq_group,
+                                       max_model_length, max_paddings)
+
+    block_size = 16
+    cache_config = CacheConfig(block_size,
+                               1.0,
+                               1,
+                               "auto",
+                               enable_prefix_caching=True)
+    cache_config.num_gpu_blocks = 8
+    cache_config.num_cpu_blocks = 8
+
+    scheduler = Scheduler(scheduler_config, cache_config, None)
+
+    seq0_prompt_length = 64
+    seq0 = Sequence(seq_id=0,
+                    prompt="zero to sixty three",
+                    block_size=block_size,
+                    prompt_token_ids=list(range(seq0_prompt_length)))
+    seq0_group = SequenceGroup(request_id=0,
+                               seqs=[seq0],
+                               sampling_params=SamplingParams(),
+                               arrival_time=time.time())
+    # Allocate 4 blocks for caching
+    scheduler.block_manager.allocate(seq0_group)
+    # Mark the 4 blocks as computed
+    scheduler.block_manager.mark_blocks_as_computed(seq0_group)
+    # Requires 0 extra blocks, 16 batched tokens
+    scheduler.add_seq_group(seq0_group)
+    assert len(seq0.logical_token_blocks) -\
+        scheduler.block_manager.get_num_cached_blocks(seq0) == 0
+    assert seq0.get_len() -\
+        scheduler.block_manager.get_num_computed_tokens(seq0) == 16
+
+    seq1_prompt_length = 48
+    seq1 = Sequence(seq_id=1,
+                    prompt="zero to forty seven",
+                    block_size=block_size,
+                    prompt_token_ids=list(range(seq1_prompt_length)))
+    seq1_group = SequenceGroup(request_id=1,
+                               seqs=[seq1],
+                               sampling_params=SamplingParams(),
+                               arrival_time=time.time())
+    # Requires 0 extra block, 16 batched tokens
+    scheduler.add_seq_group(seq1_group)
+    assert len(seq1.logical_token_blocks) -\
+        scheduler.block_manager.get_num_cached_blocks(seq1) == 0
+    assert seq1.get_len() -\
+        scheduler.block_manager.get_num_computed_tokens(seq1) == 16
+
+    seq2_prompt_length = 56
+    seq2 = Sequence(seq_id=2,
+                    prompt="zero to fifty four",
+                    block_size=block_size,
+                    prompt_token_ids=list(range(seq2_prompt_length)))
+    seq2_group = SequenceGroup(request_id=2,
+                               seqs=[seq2],
+                               sampling_params=SamplingParams(),
+                               arrival_time=time.time())
+    # Requires 1 extra block, 8 batched tokens
+    scheduler.add_seq_group(seq2_group)
+    assert len(seq2.logical_token_blocks) -\
+        scheduler.block_manager.get_num_cached_blocks(seq2) == 1
+    assert seq2.get_len() -\
+        scheduler.block_manager.get_num_computed_tokens(seq2) == 8
+
+    seq3_prompt_length = 80
+    seq3 = Sequence(seq_id=3,
+                    prompt="zero to seventy nine",
+                    block_size=block_size,
+                    prompt_token_ids=list(range(seq3_prompt_length)))
+    seq3_group = SequenceGroup(request_id=3,
+                               seqs=[seq3],
+                               sampling_params=SamplingParams(),
+                               arrival_time=time.time())
+    # Requires 1 extra blocks, 16 batched tokens
+    scheduler.add_seq_group(seq3_group)
+    assert len(seq3.logical_token_blocks) -\
+        scheduler.block_manager.get_num_cached_blocks(seq3) == 1
+    assert seq3.get_len() -\
+        scheduler.block_manager.get_num_computed_tokens(seq3) == 16
+
+    seq4_prompt_length = 96
+    seq4 = Sequence(seq_id=4,
+                    prompt="zero to ninety five",
+                    block_size=block_size,
+                    prompt_token_ids=list(range(seq4_prompt_length)))
+    seq4_group = SequenceGroup(request_id=4,
+                               seqs=[seq4],
+                               sampling_params=SamplingParams(),
+                               arrival_time=time.time())
+    # Requires 2 extra block, 32 batched tokens
+    scheduler.add_seq_group(seq4_group)
+    assert len(seq4.logical_token_blocks) -\
+        scheduler.block_manager.get_num_cached_blocks(seq4) == 2
+    assert seq4.get_len() -\
+        scheduler.block_manager.get_num_computed_tokens(seq4) == 32
+
+    scheduler_outputs = scheduler._schedule()
+    scheduled_seq_groups_ids = []
+    for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
+        scheduled_seq_groups_ids.append(scheduled_seq_group.request_id)
+    scheduled_seq_groups_ids.sort()
+    # The seq4 cannot be scheduled because if it is added, then the
+    # batched tokens num will exceed the limitation
+    assert scheduled_seq_groups_ids == [0, 1, 2, 3]

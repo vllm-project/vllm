@@ -186,7 +186,8 @@ class Scheduler:
                 assert len(waiting_seqs) == 1, (
                     "Waiting sequence group should have only one prompt "
                     "sequence.")
-                num_prompt_tokens = waiting_seqs[0].get_len()
+                waiting_seq = waiting_seqs[0]
+                num_prompt_tokens = waiting_seq.get_len()
                 if num_prompt_tokens > self.prompt_limit:
                     logger.warning(
                         f"Input prompt ({num_prompt_tokens} tokens) is too long"
@@ -205,8 +206,7 @@ class Scheduler:
                     logger.warning(
                         f"Input prompt ({num_prompt_tokens} tokens) is too long"
                         f" and exceeds the capacity of block_manager")
-                    for seq in waiting_seqs:
-                        seq.status = SequenceStatus.FINISHED_IGNORED
+                    waiting_seq.status = SequenceStatus.FINISHED_IGNORED
                     ignored_seq_groups.append(seq_group)
                     self.waiting.popleft()
                     continue
@@ -223,7 +223,12 @@ class Scheduler:
                         continue
 
                 # If the number of batched tokens exceeds the limit, stop.
-                new_seq_lens = seq_lens + [num_prompt_tokens]
+                num_computed_tokens = self.block_manager \
+                    .get_num_computed_tokens(waiting_seq)
+                # Exclude the computed tokens
+                new_seq_lens = seq_lens + [
+                    num_prompt_tokens - num_computed_tokens
+                ]
                 num_batched_tokens = len(new_seq_lens) * max(new_seq_lens)
                 if (num_batched_tokens >
                         self.scheduler_config.max_num_batched_tokens):
