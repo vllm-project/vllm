@@ -49,7 +49,7 @@ __global__ void moe_align_block_size_kernel(scalar_t *__restrict__ topk_ids,
     __syncthreads();
 
     // For each expert we accumulate the token counts from the different threads.
-    tokens_cnts[0][threadIdx.x] = 0;
+    tokens_cnts[index(0, threadIdx.x)] = 0;
     for (int i = 1; i <= blockDim.x; ++i) {
         tokens_cnts[index(num_experts, i, threadIdx.x)] += tokens_cnts[index(num_experts, i-1, threadIdx.x)];
     }
