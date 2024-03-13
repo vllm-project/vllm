@@ -2,6 +2,7 @@ import contextlib
 import gc
 import tempfile
 from collections import OrderedDict
+from time import sleep
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -26,9 +27,10 @@ def cleanup():
     destroy_model_parallel()
     with contextlib.suppress(AssertionError):
         torch.distributed.destroy_process_group()
+    ray.shutdown()
+    sleep(1)
     gc.collect()
     torch.cuda.empty_cache()
-    ray.shutdown()
 
 
 @pytest.fixture(autouse=True)
