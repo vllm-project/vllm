@@ -103,7 +103,7 @@ class LLMEngine:
                                              parallel_config, scheduler_config,
                                              device_config, lora_config)
 
-        # Make sure the tokenizer actors are alive
+        # Ping the tokenizer to ensure liveness if it runs in a different process.
         self.tokenizer.ping()
 
         # Create the scheduler.
