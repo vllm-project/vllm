@@ -44,7 +44,7 @@ class EngineArgs:
     disable_custom_all_reduce: bool = False
     tokenizer_pool_size: int = 0
     tokenizer_pool_type: str = "ray"
-    tokenizer_pool_config: Optional[dict] = None
+    tokenizer_pool_extra_config: Optional[dict] = None
     enable_lora: bool = False
     max_loras: int = 1
     max_lora_rank: int = 16
@@ -266,10 +266,10 @@ class EngineArgs:
                             help='Type of tokenizer pool to use for '
                             'asynchronous tokenization. Ignored '
                             'if tokenizer_pool_size is 0.')
-        parser.add_argument('--tokenizer-pool-config',
+        parser.add_argument('--tokenizer-pool-extra-config',
                             type=str,
-                            default=EngineArgs.tokenizer_pool_config,
-                            help='Config for tokenizer pool. '
+                            default=EngineArgs.tokenizer_pool_extra_config,
+                            help='Extra config for tokenizer pool. '
                             'This should be a JSON string that will be '
                             'parsed into a dictionary. Ignored if '
                             'tokenizer_pool_size is 0.')
@@ -338,14 +338,15 @@ class EngineArgs:
                                    self.swap_space, self.kv_cache_dtype,
                                    model_config.get_sliding_window())
         if self.tokenizer_pool_size:
-            if isinstance(self.tokenizer_pool_config, str):
-                tokenizer_pool_config_parsed = json.loads(
-                    self.tokenizer_pool_config)
+            if isinstance(self.tokenizer_pool_extra_config, str):
+                tokenizer_pool_extra_config_parsed = json.loads(
+                    self.tokenizer_pool_extra_config)
             else:
-                tokenizer_pool_config_parsed = self.tokenizer_pool_config or {}
+                tokenizer_pool_extra_config_parsed = (
+                    self.tokenizer_pool_extra_config or {})
             tokenizer_pool_config = TokenizerPoolConfig(
                 self.tokenizer_pool_size, self.tokenizer_pool_type,
-                tokenizer_pool_config_parsed)
+                tokenizer_pool_extra_config_parsed)
         else:
             tokenizer_pool_config = None
         parallel_config = ParallelConfig(
