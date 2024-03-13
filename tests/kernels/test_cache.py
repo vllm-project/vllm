@@ -92,9 +92,17 @@ def test_copy_blocks(
 
     # Compare the results.
     for key_cache, cloned_key_cache in zip(key_caches, cloned_key_caches):
+        # NOTE: torch.allclose has not supported
+        # torch.fp8_e5m2/torch.fp8_e4m3fn dtypes.
+        if kv_cache_dtype == "fp8_e5m2":
+            key_cache = key_cache.view(torch.half)
+            cloned_key_cache = cloned_key_cache.view(torch.half)
         assert torch.allclose(key_cache, cloned_key_cache)
     for value_cache, cloned_value_cache in zip(value_caches,
                                                cloned_value_caches):
+        if kv_cache_dtype == "fp8_e5m2":
+            value_cache = value_cache.view(torch.half)
+            cloned_value_cache = cloned_value_cache.view(torch.half)
         assert torch.allclose(value_cache, cloned_value_cache)
 
 
