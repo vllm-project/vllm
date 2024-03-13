@@ -121,14 +121,26 @@ def sql_lora_files():
     return snapshot_download(repo_id="yard1/llama-2-7b-sql-lora-test")
 
 
+@pytest.fixture(scope="session")
+def mixtral_lora_files():
+    return snapshot_download(repo_id="terrysun/mixtral-lora-adapter")
+
+
+@pytest.fixture(scope="session")
+def gemma_lora_files():
+    return snapshot_download(repo_id="wskwon/gemma-7b-test-lora")
+
+
 @pytest.fixture
 def llama_2_7b_engine_extra_embeddings() -> nn.Module:
     cleanup()
     get_model_old = get_model
 
-    def get_model_patched(model_config, device_config, lora_config=None):
-        return get_model_old(model_config, device_config,
-                             LoRAConfig(max_loras=4, max_lora_rank=8))
+    def get_model_patched(model_config, device_config, **kwargs):
+        return get_model_old(model_config,
+                             device_config,
+                             lora_config=LoRAConfig(max_loras=4,
+                                                    max_lora_rank=8))
 
     with patch("vllm.worker.model_runner.get_model", get_model_patched):
         engine = vllm.LLM("meta-llama/Llama-2-7b-hf", enable_lora=False)
@@ -140,4 +152,5 @@ def llama_2_7b_engine_extra_embeddings() -> nn.Module:
 @pytest.fixture
 def llama_2_7b_model_extra_embeddings(
         llama_2_7b_engine_extra_embeddings) -> nn.Module:
-    yield llama_2_7b_engine_extra_embeddings.driver_worker.model_runner.model
+    yield (llama_2_7b_engine_extra_embeddings.model_executor.driver_worker.
+           model_runner.model)

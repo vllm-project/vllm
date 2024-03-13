@@ -23,10 +23,11 @@ from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
+from transformers import PretrainedConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention import PagedAttention
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                MergedColumnParallelLinear,
@@ -42,7 +43,6 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
-from vllm.transformers_utils.configs.baichuan import BaiChuanConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -151,10 +151,10 @@ class BaiChuanAttention(nn.Module):
             alibi_slopes = alibi_slopes[head_start:head_end].tolist()
 
             scaling = self.head_dim**-0.5
-            self.attn = PagedAttention(self.num_heads,
-                                       self.head_dim,
-                                       scaling,
-                                       alibi_slopes=alibi_slopes)
+            self.attn = Attention(self.num_heads,
+                                  self.head_dim,
+                                  scaling,
+                                  alibi_slopes=alibi_slopes)
         else:
             self.rotary_emb = get_rope(
                 self.head_dim,
@@ -163,8 +163,7 @@ class BaiChuanAttention(nn.Module):
                 base=self.rope_theta,
             )
             self.scaling = self.head_dim**-0.5
-            self.attn = PagedAttention(self.num_heads, self.head_dim,
-                                       self.scaling)
+            self.attn = Attention(self.num_heads, self.head_dim, self.scaling)
 
     def forward(
         self,
@@ -186,7 +185,7 @@ class BaiChuanAttention(nn.Module):
 class BaiChuanDecoderLayer(nn.Module):
 
     def __init__(self,
-                 config: BaiChuanConfig,
+                 config: PretrainedConfig,
                  position_embedding: str,
                  linear_method: Optional[LinearMethodBase] = None):
         super().__init__()
@@ -245,7 +244,7 @@ class BaiChuanDecoderLayer(nn.Module):
 class BaiChuanModel(nn.Module):
 
     def __init__(self,
-                 config: BaiChuanConfig,
+                 config: PretrainedConfig,
                  position_embedding: str,
                  linear_method: Optional[LinearMethodBase] = None):
         super().__init__()
@@ -334,7 +333,8 @@ class BaiChuanBaseForCausalLM(nn.Module):
             if "rotary_emb.inv_freq" in name:
                 continue
             if name == "lm_head.weight":
-                # Unlike Baichuan, Baichuan2 normalizes the head weights. Refer to:
+                # Unlike Baichuan, Baichuan2 normalizes the head weights.
+                # Refer to:
                 # https://huggingface.co/baichuan-inc/Baichuan2-7B-Chat/blob/84603cde5ebffb6084e476cfaeceaf0b8b91fe54/modeling_baichuan.py#L508
                 # Distinguish between Baichuan and Baichuan2 by checking the
                 # vocab size. This is suggested by

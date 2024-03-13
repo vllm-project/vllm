@@ -4,14 +4,14 @@ from typing import List, Optional, Type
 import torch.nn as nn
 
 from vllm.logger import init_logger
-from vllm.utils import is_hip
+from vllm.utils import is_hip, is_neuron
 
 logger = init_logger(__name__)
 
 # Architecture -> (module, class).
 _MODELS = {
-    "AquilaModel": ("aquila", "AquilaForCausalLM"),
-    "AquilaForCausalLM": ("aquila", "AquilaForCausalLM"),  # AquilaChat2
+    "AquilaModel": ("llama", "LlamaForCausalLM"),
+    "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
     "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),  # baichuan-7b
     "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),  # baichuan-13b
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
@@ -20,28 +20,32 @@ _MODELS = {
     "DeciLMForCausalLM": ("decilm", "DeciLMForCausalLM"),
     "DeepseekForCausalLM": ("deepseek", "DeepseekForCausalLM"),
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
+    "GemmaForCausalLM": ("gemma", "GemmaForCausalLM"),
     "GPT2LMHeadModel": ("gpt2", "GPT2LMHeadModel"),
     "GPTBigCodeForCausalLM": ("gpt_bigcode", "GPTBigCodeForCausalLM"),
     "GPTJForCausalLM": ("gpt_j", "GPTJForCausalLM"),
     "GPTNeoXForCausalLM": ("gpt_neox", "GPTNeoXForCausalLM"),
-    "InternLMForCausalLM": ("internlm", "InternLMForCausalLM"),
+    "InternLMForCausalLM": ("llama", "LlamaForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
     # For decapoda-research/llama-*
     "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
-    "MistralForCausalLM": ("mistral", "MistralForCausalLM"),
+    "MistralForCausalLM": ("llama", "LlamaForCausalLM"),
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
     "QuantMixtralForCausalLM": ("mixtral_quant", "MixtralForCausalLM"),
     # transformers's mpt class has lower case
     "MptForCausalLM": ("mpt", "MPTForCausalLM"),
     "MPTForCausalLM": ("mpt", "MPTForCausalLM"),
+    "OLMoForCausalLM": ("olmo", "OLMoForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
+    "OrionForCausalLM": ("orion", "OrionForCausalLM"),
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "RWForCausalLM": ("falcon", "FalconForCausalLM"),
     "StableLMEpochForCausalLM": ("stablelm", "StablelmForCausalLM"),
-    "YiForCausalLM": ("yi", "YiForCausalLM")
+    "StableLmForCausalLM": ("stablelm", "StablelmForCausalLM"),
+    "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
 }
 
 # Models not supported by ROCm.
@@ -56,6 +60,12 @@ _ROCM_PARTIALLY_SUPPORTED_MODELS = {
     "Sliding window attention is not yet supported in ROCm's flash attention",
     "MixtralForCausalLM":
     "Sliding window attention is not yet supported in ROCm's flash attention",
+}
+
+# Models supported by Neuron.
+_NEURON_SUPPORTED_MODELS = {
+    "LlamaForCausalLM": "neuron.llama",
+    "MistralForCausalLM": "neuron.mistral"
 }
 
 
@@ -74,8 +84,15 @@ class ModelRegistry:
                 logger.warning(
                     f"Model architecture {model_arch} is partially supported "
                     "by ROCm: " + _ROCM_PARTIALLY_SUPPORTED_MODELS[model_arch])
+        elif is_neuron():
+            if model_arch not in _NEURON_SUPPORTED_MODELS:
+                raise ValueError(
+                    f"Model architecture {model_arch} is not supported by "
+                    "Neuron for now.")
 
         module_name, model_cls_name = _MODELS[model_arch]
+        if is_neuron():
+            module_name = _NEURON_SUPPORTED_MODELS[model_arch]
         module = importlib.import_module(
             f"vllm.model_executor.models.{module_name}")
         return getattr(module, model_cls_name, None)

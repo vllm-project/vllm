@@ -62,6 +62,7 @@ Documentation
 
    getting_started/installation
    getting_started/amd-installation
+   getting_started/neuron-installation
    getting_started/quickstart
 
 .. toctree::
@@ -70,7 +71,9 @@ Documentation
 
    serving/distributed_serving
    serving/run_on_sky
+   serving/deploying_with_kserve
    serving/deploying_with_triton
+   serving/deploying_with_bentoml
    serving/deploying_with_docker
    serving/serving_with_langchain
    serving/metrics
@@ -82,18 +85,21 @@ Documentation
    models/supported_models
    models/adding_model
    models/engine_args
+   models/lora
 
 .. toctree::
    :maxdepth: 1
    :caption: Quantization
 
    quantization/auto_awq
+   quantization/fp8_e5m2_kv_cache
 
 .. toctree::
    :maxdepth: 2
    :caption: Developer Documentation
 
    dev/engine/engine_index
+   dev/kernel/paged_attention
 
 Indices and tables
 ==================
