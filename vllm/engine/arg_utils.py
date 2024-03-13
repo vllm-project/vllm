@@ -141,18 +141,21 @@ class EngineArgs:
             type=str,
             choices=['auto', 'fp8'],
             default='auto',
-            help='Data type for kv cache storage. If "auto", will use model data type. '
-            'FP8_E5M2 (without scaling) is only supported on cuda version greater than 11.8. '
-            'On ROCm (AMD GPU), FP8_E4M3 is instead supported for common inference criteria.')
+            help='Data type for kv cache storage. If "auto", will use model '
+            'data type. FP8_E5M2 (without scaling) is only supported on cuda ' 
+            'version greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead '
+            'supported for common inference criteria. ')
         parser.add_argument(
             '--scales-path',
             type=str,
             default=None,
-            help='Path to the JSON file containing the KV cache scaling factors. '
-            'This should generally be supplied, when KV cache dtype is FP8. Otherwise, '
-            'KV cache scaling factors default to 1.0, which may cause accuracy issues. '
-            'FP8_E5M2 (without scaling) is only supported on cuda version greater than 11.8. '
-            'On ROCm (AMD GPU), FP8_E4M3 is instead supported for common inference criteria.')
+            help='Path to the JSON file containing the KV cache '
+            'scaling factors. This should generally be supplied, when '
+            'KV cache dtype is FP8. Otherwise, KV cache scaling factors '
+            'default to 1.0, which may cause accuracy issues. '
+            'FP8_E5M2 (without scaling) is only supported on cuda version'
+            'greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead '
+            'supported for common inference criteria. ')
         parser.add_argument('--max-model-len',
                             type=int,
                             default=EngineArgs.max_model_len,
@@ -314,7 +317,8 @@ class EngineArgs:
         device_config = DeviceConfig(self.device)
         model_config = ModelConfig(
             self.model, self.tokenizer, self.tokenizer_mode,
-            self.trust_remote_code, self.download_dir, self.scales_path, self.load_format,
+            self.trust_remote_code, self.download_dir, 
+            self.scales_path, self.load_format,
             self.dtype, self.seed, self.revision, self.code_revision,
             self.tokenizer_revision, self.max_model_len, self.quantization,
             self.enforce_eager, self.max_context_len_to_capture,

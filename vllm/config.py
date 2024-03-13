@@ -33,8 +33,8 @@ class ModelConfig:
         scales_path: Path to JSON file containing scaling factors. Used to load
             KV cache scaling factors into the model when KV cache type
             is FP8_E4M3 on ROCm (AMD GPU). In the future these will also be used
-            to load activation and weight scaling factors when the model dtype is
-            FP8_E4M3 on ROCm.
+            to load activation and weight scaling factors when the model dtype
+            is FP8_E4M3 on ROCm.
         load_format: The format of the model weights to load:
             "auto" will try to load the weights in the safetensors format and
                 fall back to the pytorch bin format if safetensors format is
@@ -350,14 +350,16 @@ class CacheConfig:
                 nvcc_cuda_version = get_nvcc_cuda_version()
                 if nvcc_cuda_version < Version("11.8"):
                     raise ValueError(
-                        "FP8 is not supported when cuda version is lower than 11.8."
+                        "FP8 is not supported when cuda version is"
+                        "lower than 11.8."
                     )
             logger.info(
-                "Using fp8 data type to store kv cache. It reduces "
-                "the GPU memory footprint and boosts the performance. "
-                "But it may cause slight accuracy drop without scaling factors. "
-                "FP8_E5M2 (without scaling) is only supported on cuda version greater than 11.8."
-                "On ROCm (AMD GPU), FP8_E4M3 is instead supported for common inference criteria.")
+                "Using fp8 data type to store kv cache. It reduces the GPU "
+                "memory footprint and boosts the performance. "
+                "But it may cause slight accuracy drop without scaling "
+                "factors. FP8_E5M2 (without scaling) is only supported on "
+                "cuda version greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 "
+                "is instead supported for common inference criteria.")
         else:
             raise ValueError(f"Unknown kv cache dtype: {self.cache_dtype}")
 

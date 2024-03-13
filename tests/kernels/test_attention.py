@@ -143,6 +143,7 @@ def test_paged_attention(
     num_query_heads, num_kv_heads = num_heads
     query = torch.empty(num_seqs, num_query_heads, head_size, dtype=dtype)
     query.uniform_(-scale, scale)
+    gpu_id = f"cuda:{device}"
 
     assert num_query_heads % num_kv_heads == 0
     num_queries_per_kv = num_query_heads // num_kv_heads

@@ -10,7 +10,6 @@ from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention.ops.paged_attn import (
     PagedAttentionImpl)
-from vllm._C import ops
 from vllm.utils import is_hip
 
 
@@ -90,7 +89,8 @@ class XFormersBackend(nn.Module):
         # profiling run.
         if key_cache is not None and value_cache is not None:
             PagedAttentionImpl.reshape_and_cache(key, value, key_cache,
-                                                 value_cache, input_metadata, self.kv_cache_scaling_factor,)
+                                                 value_cache, input_metadata, 
+                                                 self.kv_cache_scaling_factor,)
         if input_metadata.is_prompt:
             # Prompt run.
             if (key_cache is None or value_cache is None
@@ -171,7 +171,8 @@ class XFormersBackend(nn.Module):
 
             else:
                 # prefix-enabled attention
-                # TODO(Hai) this triton kernel has regression issue with FP8 KVCache to handle mixed types
+                # TODO(Hai) this triton kernel has regression issue with 
+                # FP8 KVCache to handle mixed types
                 output = PagedAttentionImpl.forward_prefix(
                     query,
                     key,
@@ -267,67 +268,3 @@ def _ref_masked_attention(
     attn_weights = torch.softmax(attn_weights, dim=-1).to(value.dtype)
     out = torch.einsum("hqk,khd->qhd", attn_weights, value)
     return out
-    block_size = value_cache.shape[3]
-    num_seqs, num_heads, head_size = query.shape
-    max_num_partitions = (
-        (input_metadata.max_context_len + _PARTITION_SIZE - 1) //
-        _PARTITION_SIZE)
-    # NOTE(woosuk): We use a simple heuristic to decide whether to use
-    # PagedAttention V1 or V2. If the number of partitions is 1, we use
-    # V1 to avoid the overhead of reduction. Also, if the number of
-    # sequences or heads is large, we use V1 since there is enough work
-    # to parallelize.
-    # TODO(woosuk): Tune this heuristic.
-    # For context len > 8192, use V2 kernel to avoid shared memory shortage.
-    use_v1 = input_metadata.max_context_len <= 8192 and (
-        max_num_partitions == 1 or num_seqs * num_heads > 512)
-    if use_v1:
-        # Run PagedAttention V1.
-        ops.paged_attention_v1(
-            output,
-            query,
-            key_cache,
-            value_cache,
-            num_kv_heads,
-            scale,
-            input_metadata.block_tables,
-            input_metadata.context_lens,
-            block_size,
-            input_metadata.max_context_len,
-            alibi_slopes,
-            input_metadata.kv_cache_dtype,
-            kv_scale,
-        )
-    else:
-        # Run PagedAttention V2.
-        assert _PARTITION_SIZE % block_size == 0
-        tmp_output = torch.empty(
-            size=(num_seqs, num_heads, max_num_partitions, head_size),
-            dtype=output.dtype,
-            device=output.device,
-        )
-        exp_sums = torch.empty(
-            size=(num_seqs, num_heads, max_num_partitions),
-            dtype=torch.float32,
-            device=output.device,
-        )
-        max_logits = torch.empty_like(exp_sums)
-        ops.paged_attention_v2(
-            output,
-            exp_sums,
-            max_logits,
-            tmp_output,
-            query,
-            key_cache,
-            value_cache,
-            num_kv_heads,
-            scale,
-            input_metadata.block_tables,
-            input_metadata.context_lens,
-            block_size,
-            input_metadata.max_context_len,
-            alibi_slopes,
-            input_metadata.kv_cache_dtype,
-            kv_scale,
-        )
-    return output

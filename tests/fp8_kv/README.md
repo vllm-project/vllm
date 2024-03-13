@@ -36,7 +36,7 @@ The detailed quantization toolkit (AMMO) conversion guide for FP8 can be found [
 # prerequisites:
 # - Quantized HF LLaMa 2 model 
 python3 3rdparty/quantizer/extract_scales.py --help
-Useage: extract_scales.py [-h] --quantized_model QUANTIZED_MODEL [--load_format {auto,safetensors,npz,pt}] [--output_dir OUTPUT_DIR] [--output_name OUTPUT_NAME] [--tp_size TP_SIZE]
+Usage: extract_scales.py [-h] --quantized_model QUANTIZED_MODEL [--load_format {auto,safetensors,npz,pt}] [--output_dir OUTPUT_DIR] [--output_name OUTPUT_NAME] [--tp_size TP_SIZE]
 
 KV Scale Extraction Example
 

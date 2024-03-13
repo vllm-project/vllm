@@ -33,7 +33,7 @@ KV_CACHE_DTYPE = ["auto", "fp8"]
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
 @torch.inference_mode()
 def test_copy_blocks(
@@ -123,6 +123,8 @@ def test_reshape_and_cache(
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
     torch.set_default_device(device)
+    gpu_id = f"cuda:{device}"
+
     # Create a random slot mapping.
     num_slots = block_size * num_blocks
     slot_mapping = random.sample(range(num_slots), num_tokens)
@@ -133,8 +135,9 @@ def test_reshape_and_cache(
 
     # Create the KV caches.
     key_caches, value_caches = kv_cache_factory(num_blocks, block_size, 1,
-                                                num_heads, head_size, kv_cache_dtype,
-                                                dtype, seed, gpu_id)
+                                                num_heads, head_size, 
+                                                kv_cache_dtype, dtype, 
+                                                seed, gpu_id)
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Clone the KV caches.
@@ -173,8 +176,10 @@ def test_reshape_and_cache(
         cloned_value_cache[block_idx, :, :, block_offset] = value[i]
     
     if kv_cache_dtype == "fp8":
-        assert torch.allclose(result_key_cache, cloned_key_cache, atol=0.001, rtol=0.1)
-        assert torch.allclose(result_value_cache, cloned_value_cache, atol=0.001, rtol=0.1)
+        assert torch.allclose(result_key_cache, cloned_key_cache, 
+                              atol=0.001, rtol=0.1)
+        assert torch.allclose(result_value_cache, cloned_value_cache, 
+                              atol=0.001, rtol=0.1)
     else:
         assert torch.allclose(key_cache, cloned_key_cache)
         assert torch.allclose(value_cache, cloned_value_cache)
@@ -225,14 +230,18 @@ def test_swap_blocks(
     block_mapping = dict(zip(src_blocks, dst_blocks))
 
     # Create the KV caches on the first device.
-    src_key_caches, src_value_caches = kv_cache_factory(
-        num_blocks, block_size, 1, num_heads, head_size, kv_cache_dtype, dtype, seed,
-        src_device)
+    src_key_caches, src_value_caches = kv_cache_factory(num_blocks, 
+                                                        block_size, 1, 
+                                                        num_heads, head_size, 
+                                                        kv_cache_dtype, dtype, 
+                                                        seed, src_device)
 
     # Create the KV caches on the second device.
-    dist_key_caches, dist_value_caches = kv_cache_factory(
-        num_blocks, block_size, 1, num_heads, head_size, kv_cache_dtype, dtype, seed,
-        dst_device)
+    dist_key_caches, dist_value_caches = kv_cache_factory(num_blocks, 
+                                                          block_size, 1, 
+                                                          num_heads, head_size, 
+                                                          kv_cache_dtype, dtype,
+                                                          seed, dst_device)
 
     src_key_caches_clone = src_key_caches[0].clone()
     src_value_caches_clone = src_value_caches[0].clone()

@@ -118,14 +118,17 @@ class ModelRunner:
                 if callable(getattr(self.model, "load_kv_cache_scales", None)):
                     self.model.load_kv_cache_scales(self.model_config.scales_path)
                 else:
-                    raise RuntimeError("Using FP8 KV cache and scaling factors provided but "
-                                       f"model {self.model.__class__} does not support loading "
-                                       "scaling factors.")
+                    raise RuntimeError("Using FP8 KV cache and scaling "
+                                       "factors provided but model "
+                                       f"{self.model.__class__} does not "
+                                       "support loading scaling factors.")
             else:
-                logger.warn(f"Using FP8 KV cache but no scaling factors provided. Defaulting to "
-                            "scaling factors of 1.0, This may lead to less accurate results!")
+                logger.warn("Using FP8 KV cache but no scaling factors "
+                            "provided. Defaulting to scaling factors of 1.0. "
+                            "This may lead to less accurate results!")
         elif self.model_config.scales_path is not None:
-            logger.warn("KV cache scaling factors provided, but the KV cache data type is not FP8. "
+            logger.warn("KV cache scaling factors provided, " 
+                        "but the KV cache data type is not FP8. " 
                         "KV cache scaling factors will not be used.")
 
 
