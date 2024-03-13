@@ -31,7 +31,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.logit_processor import LogitProcessor
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
@@ -293,7 +293,7 @@ class OPTForCausalLM(nn.Module):
         self.linear_method = linear_method
         self.model = OPTModel(config, linear_method)
         self.lm_head_weight = self.model.decoder.embed_tokens.weight
-        self.logit_processor = LogitProcessor(config.vocab_size)
+        self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
     def forward(
@@ -309,9 +309,8 @@ class OPTForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logit_processor(self.lm_head_weight, hidden_states,
-                                      sampling_metadata)
-
+        logits = self.logits_processor(self.lm_head_weight, hidden_states,
+                                       sampling_metadata)
         return logits
 
     def sample(

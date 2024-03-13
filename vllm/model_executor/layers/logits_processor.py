@@ -11,7 +11,7 @@ from vllm.model_executor.parallel_utils.communication_op import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 
 
-class LogitProcessor(nn.Module):
+class LogitsProcessor(nn.Module):
     """Process logits and apply logits processors from sampling metadata.
 
     This layer does the following:

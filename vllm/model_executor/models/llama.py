@@ -37,7 +37,7 @@ from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.logit_processor import LogitProcessor
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, ParallelLMHead, DEFAULT_VOCAB_PADDING_SIZE)
@@ -328,8 +328,8 @@ class LlamaForCausalLM(nn.Module):
         )
 
         logit_scale = getattr(config, "logit_scale", 1.0)
-        self.logit_processor = LogitProcessor(self.unpadded_vocab_size,
-                                              config.vocab_size, logit_scale)
+        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                config.vocab_size, logit_scale)
         self.sampler = Sampler()
 
     def forward(
@@ -345,9 +345,8 @@ class LlamaForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logit_processor(self.lm_head.weight, hidden_states,
-                                      sampling_metadata)
-
+        logits = self.logits_processor(self.lm_head.weight, hidden_states,
+                                       sampling_metadata)
         return logits
 
     def sample(

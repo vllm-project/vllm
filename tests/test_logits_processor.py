@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm.model_executor.layers.logit_processor import LogitProcessor
+from vllm.model_executor.layers.logits_processor import LogitProcessor
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.worker.model_runner import ModelRunner
@@ -20,10 +20,10 @@ class MockLogitsProcessor(LogitProcessor):
 
     def forward(self, *args, **kwargs):
         with patch(
-                "vllm.model_executor.layers.logit_processor._prune_hidden_states",
+                "vllm.model_executor.layers.logits_processor._prune_hidden_states",
                 lambda x, y: x
         ), patch(
-                "vllm.model_executor.layers.logit_processor.LogitProcessor._get_logits",
+                "vllm.model_executor.layers.logits_processor.LogitsProcessor._get_logits",
                 lambda *args, **kwargs: self.fake_logits):
             return super().forward(*args, **kwargs)
 
@@ -36,9 +36,9 @@ def _prepare_test(
     fake_logits = torch.full((batch_size, vocab_size),
                              1e-2,
                              dtype=input_tensor.dtype)
-    logit_processor = MockLogitsProcessor(32000, 0.5, fake_logits)
+    logits_processor = MockLogitsProcessor(32000, 0.5, fake_logits)
     model_runner = ModelRunner(None, None, None, None, None)
-    return input_tensor, fake_logits, logit_processor, model_runner
+    return input_tensor, fake_logits, logits_processor, model_runner
 
 
 RANDOM_SEEDS = list(range(128))
@@ -53,7 +53,7 @@ def test_logits_processors(seed: int, device: str):
     set_random_seed(seed)
     torch.set_default_device(device)
     batch_size = random.randint(1, 256)
-    input_tensor, fake_logits, logit_processor, model_runner = _prepare_test(
+    input_tensor, fake_logits, logits_processor, model_runner = _prepare_test(
         batch_size)
 
     # This sample logits processor gives infinite score to the i-th token,
@@ -80,15 +80,15 @@ def test_logits_processors(seed: int, device: str):
     sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
                                                      prompt_lens,
                                                      subquery_lens=prompt_lens)
-    logit_processor_output = logit_processor(
+    logits_processor_output = logits_processor(
         embedding=None,
         hidden_states=input_tensor,
         sampling_metadata=sampling_metadata)
 
-    assert torch.isinf(logit_processor_output[:, 0]).all()
+    assert torch.isinf(logits_processor_output[:, 0]).all()
 
-    fake_logits *= logit_processor.scale
-    assert torch.allclose(logit_processor_output[:, 1], fake_logits[:, 1],
+    fake_logits *= logits_processor.scale
+    assert torch.allclose(logits_processor_output[:, 1], fake_logits[:, 1],
                           1e-4)
 
     del model_runner
