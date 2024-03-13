@@ -174,7 +174,6 @@ __global__ void reshape_and_cache_kernel(
   const int64_t block_idx = slot_idx / block_size;
   const int64_t block_offset = slot_idx % block_size;
 
-
   const int n = num_heads * head_size;
   for (int i = threadIdx.x; i < n; i += blockDim.x) {
     const int64_t src_key_idx = token_idx * key_stride + i;

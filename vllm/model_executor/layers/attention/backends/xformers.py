@@ -81,17 +81,16 @@ class XFormersBackend:
             PagedAttentionImpl.reshape_and_cache(key, value, key_cache,
                                                  value_cache, input_metadata)
 
-
         num_prompt_tokens = input_metadata.num_prompt_tokens
         num_generation_tokens = input_metadata.num_generation_tokens
 
-        print(f"original query: {query.size()}")
+        # print(f"SANG-TODO original query: {query.size()}")
         decode_query = query[num_prompt_tokens:]
         query = query[:num_prompt_tokens]
         key = key[:num_prompt_tokens]
         value = value[:num_prompt_tokens]
-        print(f"{num_prompt_tokens=} {num_generation_tokens=}")
-        print(f"{query.size()=} {decode_query.size()=}")
+        # print(f"SANG-TODO {num_prompt_tokens=} {num_generation_tokens=}")
+        # print(f"SANG-TODO {query.size()=} {decode_query.size()=}")
 
         assert query.shape[0] == num_prompt_tokens
         assert decode_query.shape[0] == num_generation_tokens
@@ -192,7 +191,11 @@ class XFormersBackend:
                     prefill_input_metadata,
                     self.alibi_slopes,
                 )
-                print("SANG-TODO prefix output: ", output)
+                # assert output.shape[0] == num_prompt_tokens
+                print("SANG-TODO prefix output: ")
+                for n in range(num_prompt_tokens):
+                    print(f"{n=}")
+                    print(output[n][0])
 
         if num_generation_tokens > 0:
             decoding_input_metadata = input_metadata.decode_input_metadata()

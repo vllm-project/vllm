@@ -35,7 +35,6 @@ _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
     _BATCH_SIZE_ALIGNMENT * i for i in range(1, 33)
 ]
 
-
 class ModelRunner:
 
     def __init__(
@@ -189,13 +188,11 @@ class ModelRunner:
                     raise RuntimeError(
                         "chunked prefill cannot be used with prefix caching now."
                     )
-
             if prefix_caching_enabled:
                 # Prefix is not supported with sliding_window
                 computed_len = len(computed_block_nums) * self.block_size
                 prompt_tokens = prompt_tokens[computed_len:]
                 block_tables.append(computed_block_nums)
-            # else:
             elif self.scheduler_config.chunked_prefill_enabled or os.getenv("ENABLE") is not None:
                 # Update the block table so that KV cache location
                 # can be found. TODO(sang): Make it work with
@@ -425,10 +422,11 @@ class ModelRunner:
             use_captured_graph = False
 
         # Pad prompt inputs. Align to batch size (8 by default) to utilize tensor cores.
-        input_tokens = _pad_to_batch_alignment(input_tokens, pad=0)
-        input_positions = _pad_to_batch_alignment(input_positions, pad=0)
-        slot_mapping = _pad_to_batch_alignment(slot_mapping, pad=-1)
-        lora_index_mapping = _pad_to_batch_alignment(lora_index_mapping, pad=0)
+        if use_captured_graph:
+            input_tokens = _pad_to_batch_alignment(input_tokens, pad=0)
+            input_positions = _pad_to_batch_alignment(input_positions, pad=0)
+            slot_mapping = _pad_to_batch_alignment(slot_mapping, pad=-1)
+            lora_index_mapping = _pad_to_batch_alignment(lora_index_mapping, pad=0)
 
         # Pad decode inputs if cuda graph is used so that we can use pre-cached
         # batch size.

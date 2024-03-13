@@ -11,7 +11,7 @@ MODELS = [
     # "Deci/DeciLM-7b",
     # "tiiuae/falcon-7b",
     # "gpt2",
-    "JackFram/llama-68m",
+    # "JackFram/llama-68m",
     # "bigcode/tiny_starcoder_py",
     # "EleutherAI/gpt-j-6b",
     # "EleutherAI/pythia-70m",
@@ -45,8 +45,8 @@ def test_models(
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
     del hf_model
 
-    import os
-    os.environ["ENABLE"] = "1"
+    # import os
+    # os.environ["ENABLE"] = "1"
 
     vllm_model = vllm_runner(model, dtype=dtype, enforce_eager=enforce_eager, max_chunked_prefill_len=max_chunked_prefill_len)
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)

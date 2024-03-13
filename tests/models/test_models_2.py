@@ -8,7 +8,8 @@ from vllm.model_executor.parallel_utils.parallel_state import destroy_model_para
 from vllm import SamplingParams
 
 MODELS = [
-    "JackFram/llama-68m",
+    "meta-llama/Llama-2-7b-hf",
+    # "JackFram/llama-68m",
     # "facebook/opt-125m",
 ]
 
@@ -24,7 +25,7 @@ MODELS = [
 # @pytest.mark.parametrize("tensor_parallel_size", [1, 2])
 # @pytest.mark.parametrize("enforce_eager", [True, False])
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("max_chunked_prefill_len", [16])
 @pytest.mark.parametrize("tensor_parallel_size", [1])
@@ -71,8 +72,8 @@ def test_models(
         return token_ids_list, output_str_list
 
     vllm_token_ids, vllm_str = evaluate(lambda: vllm_runner(model, dtype=dtype, enforce_eager=enforce_eager))
-    import os
-    os.environ["ENABLE"] = "1"
+    # import os
+    # os.environ["ENABLE"] = "1"
     chunked_prefill_token_ids, chunked_str = evaluate(lambda: vllm_runner(
         model,
         dtype=dtype,
