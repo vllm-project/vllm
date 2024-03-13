@@ -10,7 +10,7 @@ from vllm.sampling_params import SamplingParams
 def test_computed_prefix_blocks(model: str, block_size: int):
     # This test checks if we are able to run the engine to completion
     # without triggering asserts.
-    # We are in a scenario where all blocks from the second request's prompt
+    # We are in a scenario where all blocks from the first request's prompt
     # are full and already computed when the second request arrives.
     prompt = (
         "You are a helpful assistant. How do I build a car from cardboard and "
