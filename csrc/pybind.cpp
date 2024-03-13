@@ -25,7 +25,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   ops.def(
     "gelu_and_mul",
     &gelu_and_mul,
-    "Activation function used in GeGLU.");
+    "Activation function used in GeGLU with `none` approximation.");
+  ops.def(
+    "gelu_tanh_and_mul",
+    &gelu_tanh_and_mul,
+    "Activation function used in GeGLU with `tanh` approximation.");
   ops.def(
     "gelu_new",
     &gelu_new,
