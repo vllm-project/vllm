@@ -13,6 +13,9 @@ steps:
 
 - label: Basic Correctness Test
   command: pytest -v -s --forked basic_correctness
+  
+- label: Core Test
+  command: pytest -v -s core
 
 - label: Distributed Comm Ops Test
   command: pytest -v -s --forked test_comm_ops.py
@@ -25,7 +28,7 @@ steps:
   num_gpus: 2 # only support 1 or 2 for now.
 
 - label: Engine Test
-  command: pytest -v -s engine
+  command: pytest -v -s engine test_sequence.py
 
 - label: Entrypoints Test
   command: pytest -v -s entrypoints
@@ -48,6 +51,9 @@ steps:
 
 - label: Worker Test
   command: pytest -v -s worker
+
+- label: Speculative decoding tests
+  command: pytest -v -s spec_decode
 
 - label: LoRA Test
   command: pytest -v -s lora --forked
