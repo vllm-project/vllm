@@ -18,7 +18,7 @@ class EngineArgs:
     load_format: str = 'auto'
     dtype: str = 'auto'
     kv_cache_dtype: str = 'auto'
-    scales_path: str = None
+    scales_path: Optional[str] = None
     seed: int = 0
     max_model_len: Optional[int] = None
     worker_use_ray: bool = False
@@ -318,11 +318,11 @@ class EngineArgs:
         model_config = ModelConfig(
             self.model, self.tokenizer, self.tokenizer_mode,
             self.trust_remote_code, self.download_dir, 
-            self.scales_path, self.load_format,
-            self.dtype, self.seed, self.revision, self.code_revision,
+            self.load_format, self.dtype, self.seed,
+            self.revision, self.code_revision,
             self.tokenizer_revision, self.max_model_len, self.quantization,
             self.enforce_eager, self.max_context_len_to_capture,
-            self.max_logprobs)
+            self.scales_path, self.max_logprobs)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,

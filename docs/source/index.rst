@@ -92,7 +92,8 @@ Documentation
    :caption: Quantization
 
    quantization/auto_awq
-   quantization/fp8_e5m2_kv_cache
+   quantization/fp8_e5m2_kvcache
+   quantization/fp8/amd_detail
 
 .. toctree::
    :maxdepth: 2

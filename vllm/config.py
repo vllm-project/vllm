@@ -30,11 +30,6 @@ class ModelConfig:
             downloading the model and tokenizer.
         download_dir: Directory to download and load the weights, default to the
             default cache directory of huggingface.
-        scales_path: Path to JSON file containing scaling factors. Used to load
-            KV cache scaling factors into the model when KV cache type
-            is FP8_E4M3 on ROCm (AMD GPU). In the future these will also be used
-            to load activation and weight scaling factors when the model dtype
-            is FP8_E4M3 on ROCm.
         load_format: The format of the model weights to load:
             "auto" will try to load the weights in the safetensors format and
                 fall back to the pytorch bin format if safetensors format is
@@ -62,6 +57,11 @@ class ModelConfig:
             output). If None, will be derived from the model.
         quantization: Quantization method that was used to quantize the model
             weights. If None, we assume the model weights are not quantized.
+        scales_path: Path to JSON file containing scaling factors. Used to load
+            KV cache scaling factors into the model when KV cache type
+            is FP8_E4M3 on ROCm (AMD GPU). In the future these will also be used
+            to load activation and weight scaling factors when the model dtype
+            is FP8_E4M3 on ROCm.
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
@@ -77,7 +77,6 @@ class ModelConfig:
         tokenizer_mode: str,
         trust_remote_code: bool,
         download_dir: Optional[str],
-        scales_path: Optional[str],
         load_format: str,
         dtype: Union[str, torch.dtype],
         seed: int,
@@ -86,6 +85,7 @@ class ModelConfig:
         tokenizer_revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
+        scales_path: Optional[str] = None,
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
         max_logprobs: int = 5,
@@ -95,7 +95,6 @@ class ModelConfig:
         self.tokenizer_mode = tokenizer_mode
         self.trust_remote_code = trust_remote_code
         self.download_dir = download_dir
-        self.scales_path = scales_path
         self.load_format = load_format
         self.dtype = dtype
         self.seed = seed
@@ -103,6 +102,7 @@ class ModelConfig:
         self.code_revision = code_revision
         self.tokenizer_revision = tokenizer_revision
         self.quantization = quantization
+        self.scales_path = scales_path
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
         self.max_logprobs = max_logprobs

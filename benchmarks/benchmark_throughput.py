@@ -72,7 +72,7 @@ def run_vllm(
     max_model_len: Optional[int],
     enforce_eager: bool,
     kv_cache_dtype: str,
-    kv_cache_scales_path: Optional[str],
+    scales_path: Optional[str],
     device: str,
     enable_prefix_caching: bool,
     gpu_memory_utilization: float = 0.9,
@@ -89,7 +89,7 @@ def run_vllm(
               gpu_memory_utilization=gpu_memory_utilization,
               enforce_eager=enforce_eager,
               kv_cache_dtype=kv_cache_dtype,
-              scales_path=kv_cache_scales_path,
+              scales_path=scales_path,
               device=device,
               enable_prefix_caching=enable_prefix_caching)
 
