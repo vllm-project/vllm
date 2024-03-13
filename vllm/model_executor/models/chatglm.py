@@ -7,24 +7,30 @@ from typing import List, Optional, Tuple
 import torch
 from torch import nn
 from torch.nn import LayerNorm
-
+from vllm.config import LoRAConfig
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               MergedColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    LinearMethodBase,
+    RefMergedColumnParallelLinear,
+    RefQKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding, ParallelLMHead)
+    VocabParallelEmbedding,
+    ParallelLMHead,
+)
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_world_size)
+    get_tensor_model_parallel_world_size, )
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
+from vllm.model_executor.weight_utils import (
+    default_weight_loader,
+    hf_model_weights_iterator,
+)
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs import ChatGLMConfig
 
@@ -62,7 +68,7 @@ class GLMAttention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
 
-        self.query_key_value = QKVParallelLinear(
+        self.query_key_value = RefQKVParallelLinear(
             self.hidden_size,
             self.head_dim,
             self.total_num_heads,
@@ -135,7 +141,7 @@ class GLMMLP(nn.Module):
         self.add_bias = config.add_bias_linear
 
         # Project to 4h.
-        self.dense_h_to_4h = MergedColumnParallelLinear(
+        self.dense_h_to_4h = RefMergedColumnParallelLinear(
             config.hidden_size,
             [config.ffn_hidden_size] * 2,
             bias=config.add_bias_linear,
@@ -322,10 +328,22 @@ class ChatGLMModel(nn.Module):
 
 class ChatGLMForCausalLM(nn.Module):
 
+    packed_modules_mapping = {}
+    # LoRA specific attributes
+    supported_lora_modules = [
+        "query_key_value",
+        "dense",
+        "dense_h_to_4h",
+        "dense_4h_to_h",
+    ]
+    embedding_modules = {}
+    embedding_padding_modules = []
+
     def __init__(
         self,
         config: ChatGLMConfig,
         linear_method: Optional[LinearMethodBase] = None,
+        lora_config: Optional[LoRAConfig] = None,
     ):
         super().__init__()
         self.config: ChatGLMConfig = config
@@ -354,11 +372,13 @@ class ChatGLMForCausalLM(nn.Module):
                                    sampling_metadata)
         return next_tokens
 
-    def load_weights(self,
-                     model_name_or_path: str,
-                     cache_dir: Optional[str] = None,
-                     load_format: str = "auto",
-                     revision: Optional[str] = None):
+    def load_weights(
+        self,
+        model_name_or_path: str,
+        cache_dir: Optional[str] = None,
+        load_format: str = "auto",
+        revision: Optional[str] = None,
+    ):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):

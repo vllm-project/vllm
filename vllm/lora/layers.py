@@ -16,16 +16,23 @@ from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_reduce,
     tensor_model_parallel_gather,
 )
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               RowParallelLinear,
-                                               QKVParallelLinear,
-                                               MergedColumnParallelLinear)
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    RowParallelLinear,
+    QKVParallelLinear,
+    RefQKVParallelLinear,
+    MergedColumnParallelLinear,
+    RefMergedColumnParallelLinear,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding, ParallelLMHead)
+    VocabParallelEmbedding,
+    ParallelLMHead,
+)
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.utils import (
-    split_tensor_along_last_dim)
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
+from vllm.model_executor.parallel_utils.utils import split_tensor_along_last_dim
 
 if TYPE_CHECKING:
     pass
@@ -95,9 +102,17 @@ def _apply_lora_packed_nslice(
     indices = indices.view(-1)
     offset_left = 0
     for slice_idx in range(len(output_slices)):
-        add_lora_slice(output, x, lora_a_stacked[slice_idx],
-                       lora_b_stacked[slice_idx], indices, 0, 1.0, offset_left,
-                       output_slices[slice_idx])
+        add_lora_slice(
+            output,
+            x,
+            lora_a_stacked[slice_idx],
+            lora_b_stacked[slice_idx],
+            indices,
+            0,
+            1.0,
+            offset_left,
+            output_slices[slice_idx],
+        )
         offset_left += output_slices[slice_idx]
     return output.view_as(org_output)
 
@@ -116,8 +131,12 @@ class LoRAMapping:
 
 class BaseLayerWithLoRA(nn.Module):
 
-    def create_lora_weights(self, max_loras: int, lora_config: LoRAConfig,
-                            model_config: PretrainedConfig) -> None:
+    def create_lora_weights(
+        self,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: PretrainedConfig,
+    ) -> None:
         """Initializes lora matrices."""
         ...
 
@@ -154,22 +173,23 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         self.base_layer = base_layer
 
     def create_lora_weights(
-            self,
-            max_loras: int,
-            lora_config: LoRAConfig,
-            model_config: Optional[PretrainedConfig] = None) -> None:
-
+        self,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: Optional[PretrainedConfig] = None,
+    ) -> None:
         lora_vocab_start_idx = self.base_layer.org_vocab_size
         weights_idx = None
         if self.base_layer.vocab_end_index > lora_vocab_start_idx:
             # We can start adding lora weights
             weights_idx = max(
                 lora_vocab_start_idx - self.base_layer.vocab_start_index, 0)
-            self.embeddings_slice = (self.base_layer.vocab_start_index -
-                                     self.base_layer.org_vocab_size +
-                                     weights_idx,
-                                     self.base_layer.vocab_end_index -
-                                     self.base_layer.org_vocab_size)
+            self.embeddings_slice = (
+                self.base_layer.vocab_start_index -
+                self.base_layer.org_vocab_size + weights_idx,
+                self.base_layer.vocab_end_index -
+                self.base_layer.org_vocab_size,
+            )
             self.embeddings_weights = self.base_layer.weight.data[weights_idx:]
             self.embeddings_weights.fill_(0)
         else:
@@ -234,14 +254,14 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         if embeddings_tensor is not None:
             self.embeddings_tensors[
                 index, :embeddings_tensor.shape[0], :embeddings_tensor.
-                shape[1]].copy_(embeddings_tensor, non_blocking=True)
+                shape[1], ].copy_(embeddings_tensor, non_blocking=True)
             if self.embeddings_slice is not None:
                 # TODO(yard1): Optimize this copy, we don't need to copy
                 # everything, just the modified part
                 embeddings = self.embeddings_tensors.view(
                     self.embeddings_tensors.shape[0] *
                     self.embeddings_tensors.shape[1],
-                    self.embeddings_tensors.shape[2]
+                    self.embeddings_tensors.shape[2],
                 )[self.embeddings_slice[0]:self.embeddings_slice[1]]
                 self.embeddings_weights[:embeddings.shape[0]].copy_(embeddings)
 
@@ -275,9 +295,17 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         if full_lora_a_embeddings.ndim == 3:
             full_lora_a_embeddings = full_lora_a_embeddings.view(
                 full_lora_a_embeddings.shape[0] *
-                full_lora_a_embeddings.shape[1], -1)
-        bgmv(full_output, full_lora_a_embeddings, self.lora_b_stacked,
-             self.indices[:self.indices_len[0]], 0, 1.0)
+                full_lora_a_embeddings.shape[1],
+                -1,
+            )
+        bgmv(
+            full_output,
+            full_lora_a_embeddings,
+            self.lora_b_stacked,
+            self.indices[:self.indices_len[0]],
+            0,
+            1.0,
+        )
         return full_output.view_as(full_output_org)
 
 
@@ -288,10 +316,11 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
         self.base_layer = base_layer
 
     def create_lora_weights(
-            self,
-            max_loras: int,
-            lora_config: LoRAConfig,
-            model_config: Optional[PretrainedConfig] = None) -> None:
+        self,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: Optional[PretrainedConfig] = None,
+    ) -> None:
         self.lora_a_stacked = torch.zeros(
             max_loras,
             1,
@@ -311,7 +340,7 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
 
         self.indices: Optional[torch.Tensor] = None
         self.indices_len: Optional[List[int]] = None
-        self.output_dim = self.lora_b_stacked.shape[1]
+        self.output_dim = self.lora_b_stacked.shape[2]
 
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
@@ -399,10 +428,11 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         super().__init__(base_layer)
 
     def create_lora_weights(
-            self,
-            max_loras: int,
-            lora_config: LoRAConfig,
-            model_config: Optional[PretrainedConfig] = None) -> None:
+        self,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: Optional[PretrainedConfig] = None,
+    ) -> None:
         n_slices = 2
         if not (len(self.base_layer.output_sizes) == n_slices
                 and self.base_layer.output_sizes[0]
@@ -454,9 +484,10 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             shard_size = self.output_dim
             start_idx = tensor_model_parallel_rank * shard_size
             end_idx = (tensor_model_parallel_rank + 1) * shard_size
-            lora_b = lora_b[0][:,
-                               start_idx:end_idx], lora_b[1][:,
-                                                             start_idx:end_idx]
+            lora_b = (
+                lora_b[0][:, start_idx:end_idx],
+                lora_b[1][:, start_idx:end_idx],
+            )
 
         if lora_a[0] is not None:
             self.lora_a_stacked[0][
@@ -488,6 +519,34 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         return output
 
 
+class RefMergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
+
+    def __init__(self, base_layer: RefMergedColumnParallelLinear) -> None:
+        super().__init__(base_layer)
+        self.tp_size = get_tensor_model_parallel_world_size()
+
+    def set_lora(
+        self,
+        index: int,
+        lora_a: torch.Tensor,
+        lora_b: torch.Tensor,
+        embeddings_tensor: Optional[torch.Tensor],
+    ):
+        self.reset_lora(index)
+        if self.tp_size > 1:
+            tensor_model_parallel_rank = get_tensor_model_parallel_rank()
+            shard_size = self.output_dim
+            start_idx = tensor_model_parallel_rank * shard_size
+            end_idx = (tensor_model_parallel_rank + 1) * shard_size
+            lora_b = lora_b[:, start_idx:end_idx]
+        self.lora_a_stacked[index,
+                            0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
+                                lora_a.T, non_blocking=True)
+        self.lora_b_stacked[index,
+                            0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
+                                lora_b.T, non_blocking=True)
+
+
 class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
     """ColumnParallelLinear layer that is composed of 3 sublayers (slices)
     packed together in qkv proj fashion
@@ -503,10 +562,11 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
         super().__init__(base_layer)
 
     def create_lora_weights(
-            self,
-            max_loras: int,
-            lora_config: LoRAConfig,
-            model_config: Optional[PretrainedConfig] = None) -> None:
+        self,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: Optional[PretrainedConfig] = None,
+    ) -> None:
         self.tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
         self.q_proj_shard_size = (self.base_layer.num_heads *
@@ -570,8 +630,11 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
             ),
         )
 
-        self.output_slices = (self.q_proj_shard_size, self.kv_proj_shard_size,
-                              self.kv_proj_shard_size)
+        self.output_slices = (
+            self.q_proj_shard_size,
+            self.kv_proj_shard_size,
+            self.kv_proj_shard_size,
+        )
         self.packed_indices: Optional[torch.Tensor] = None
         self.standard_indices: Optional[torch.Tensor] = None
         self.indices_len: Optional[List[int]] = None
@@ -597,21 +660,21 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
             if lora_b[0] is not None:
                 lora_b_q = lora_b[0][:, self.q_proj_shard_size *
                                      self.q_shard_id:self.q_proj_shard_size *
-                                     (self.q_shard_id + 1)]
+                                     (self.q_shard_id + 1), ]
                 self.lora_b_stacked[0][
                     index, 0, :lora_b_q.shape[1], :lora_b_q.shape[0]].copy_(
                         lora_b_q.T, non_blocking=True)
             if lora_b[1] is not None:
                 lora_b_k = lora_b[1][:, self.kv_proj_shard_size *
                                      self.kv_shard_id:self.kv_proj_shard_size *
-                                     (self.kv_shard_id + 1)]
+                                     (self.kv_shard_id + 1), ]
                 self.lora_b_stacked[1][
                     index, 0, :lora_b_k.shape[1], :lora_b_k.shape[0]].copy_(
                         lora_b_k.T, non_blocking=True)
             if lora_b[2] is not None:
                 lora_b_v = lora_b[2][:, self.kv_proj_shard_size *
                                      self.kv_shard_id:self.kv_proj_shard_size *
-                                     (self.kv_shard_id + 1)]
+                                     (self.kv_shard_id + 1), ]
                 self.lora_b_stacked[2][
                     index, 0, :lora_b_v.shape[1], :lora_b_v.shape[0]].copy_(
                         lora_b_v.T, non_blocking=True)
@@ -657,6 +720,55 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
         return output
 
 
+class RefQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
+
+    def __init__(self, base_layer: RefQKVParallelLinear) -> None:
+        super().__init__(base_layer)
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.q_proj_total_size = (self.base_layer.total_num_heads *
+                                  self.base_layer.head_size)
+        self.q_proj_shard_size = (self.base_layer.num_heads *
+                                  self.base_layer.head_size)
+        self.kv_proj_shard_size = (self.base_layer.num_kv_heads *
+                                   self.base_layer.head_size)
+        self.kv_proj_total_size = (self.base_layer.total_num_kv_heads *
+                                   self.base_layer.head_size)
+
+    def set_lora(
+        self,
+        index: int,
+        lora_a: torch.Tensor,
+        lora_b: torch.Tensor,
+        embeddings_tensor: Optional[torch.Tensor],
+    ):
+        self.reset_lora(index)
+        if self.tp_size > 1:
+            tp_rank = get_tensor_model_parallel_rank()
+            self.q_shard_id = tp_rank
+            self.kv_shard_id = tp_rank // self.base_layer.num_kv_head_replicas
+            lora_b_q = lora_b[:, self.q_proj_shard_size *
+                              self.q_shard_id:self.q_proj_shard_size *
+                              (self.q_shard_id + 1), ]
+            k_offset = self.q_proj_total_size
+            lora_b_k = lora_b[:, k_offset + self.kv_proj_shard_size *
+                              self.kv_shard_id:k_offset +
+                              self.kv_proj_shard_size *
+                              (self.kv_shard_id + 1), ]
+            v_offset = k_offset + self.kv_proj_total_size
+            lora_b_v = lora_b[:, v_offset + self.kv_proj_shard_size *
+                              self.kv_shard_id:v_offset +
+                              self.kv_proj_shard_size *
+                              (self.kv_shard_id + 1), ]
+            lora_b = torch.cat([lora_b_q, lora_b_k, lora_b_v], dim=1)
+
+        self.lora_a_stacked[index,
+                            0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
+                                lora_a.T, non_blocking=True)
+        self.lora_b_stacked[index,
+                            0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
+                                lora_b.T, non_blocking=True)
+
+
 class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
 
     def __init__(self, base_layer: RowParallelLinear) -> None:
@@ -664,10 +776,11 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
         self.base_layer = base_layer
 
     def create_lora_weights(
-            self,
-            max_loras: int,
-            lora_config: LoRAConfig,
-            model_config: Optional[PretrainedConfig] = None) -> None:
+        self,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: Optional[PretrainedConfig] = None,
+    ) -> None:
         self.lora_a_stacked = torch.zeros(
             (
                 max_loras,
@@ -929,7 +1042,7 @@ class SamplerWithLoRA(BaseLayerWithLoRA):
                            neginf=float("-inf")))
         logits[:,
                self.base_layer.org_vocab_size:self.base_layer.org_vocab_size +
-               lora_logits.shape[1]] = lora_logits
+               lora_logits.shape[1], ] = lora_logits
 
         _apply_lora(
             hidden_states,
@@ -949,14 +1062,17 @@ class SamplerWithLoRA(BaseLayerWithLoRA):
 
 
 def from_layer(
-        layer: nn.Module,
-        max_loras: int,
-        lora_config: LoRAConfig,
-        model_config: Optional[PretrainedConfig] = None) -> BaseLayerWithLoRA:
+    layer: nn.Module,
+    max_loras: int,
+    lora_config: LoRAConfig,
+    model_config: Optional[PretrainedConfig] = None,
+) -> BaseLayerWithLoRA:
     supported_layer_types = {
         VocabParallelEmbedding: VocabParallelEmbeddingWithLoRA,
         ColumnParallelLinear: ColumnParallelLinearWithLoRA,
+        RefMergedColumnParallelLinear: RefMergedColumnParallelLinearWithLoRA,
         QKVParallelLinear: QKVParallelLinearWithLora,
+        RefQKVParallelLinear: RefQKVParallelLinearWithLora,
         MergedColumnParallelLinear: MergedColumnParallelLinearWithLoRA,
         RowParallelLinear: RowParallelLinearWithLoRA,
     }
@@ -975,7 +1091,11 @@ def from_layer_sampler(
     lora_config: LoRAConfig,
     model_config: Optional[PretrainedConfig] = None,
 ) -> SamplerWithLoRA:
-    ret = SamplerWithLoRA(layer, lm_head.embedding_dim, lm_head.weight.dtype,
-                          lm_head.weight.device)
+    ret = SamplerWithLoRA(
+        layer,
+        lm_head.embedding_dim,
+        lm_head.weight.dtype,
+        lm_head.weight.device,
+    )
     ret.create_lora_weights(max_loras, lora_config, model_config)
     return ret
