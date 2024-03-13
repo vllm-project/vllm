@@ -51,16 +51,11 @@ class LogitProcessor(nn.Module):
             # Get the logits for the next tokens.
             logits = self._get_logits(hidden_states, embedding, embedding_bias)
 
+        if logits is not None:
             logits *= self.scale
 
-        # Only perform sampling in the driver worker.
-        # Note: `_get_logits` is still distributed across TP workers because
-        # the `embedding` weight is distributed across TP workers.
-        if not sampling_metadata.perform_sampling:
-            return None
-
-        # Apply logits processors (if any).
-        logits = _apply_logits_processors(logits, sampling_metadata)
+            # Apply logits processors (if any).
+            logits = _apply_logits_processors(logits, sampling_metadata)
 
         return logits
 

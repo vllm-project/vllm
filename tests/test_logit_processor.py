@@ -13,9 +13,10 @@ from vllm.worker.model_runner import ModelRunner
 
 class MockLogitsProcessor(LogitProcessor):
 
-    def __init__(self, vocab_size: int, fake_logits: torch.Tensor):
-        super().__init__(vocab_size=vocab_size)
-        self.fake_logits = fake_logits
+    def __init__(self, vocab_size: int, scale: float,
+                 fake_logits: torch.Tensor):
+        super().__init__(vocab_size=vocab_size, scale=scale)
+        self.fake_logits = fake_logits.clone()
 
     def forward(self, *args, **kwargs):
         with patch(
@@ -35,7 +36,7 @@ def _prepare_test(
     fake_logits = torch.full((batch_size, vocab_size),
                              1e-2,
                              dtype=input_tensor.dtype)
-    logit_processor = MockLogitsProcessor(32000, fake_logits)
+    logit_processor = MockLogitsProcessor(32000, 0.5, fake_logits)
     model_runner = ModelRunner(None, None, None, None, None)
     return input_tensor, fake_logits, logit_processor, model_runner
 
@@ -83,6 +84,11 @@ def test_logits_processors(seed: int, device: str):
         embedding=None,
         hidden_states=input_tensor,
         sampling_metadata=sampling_metadata)
-    assert logit_processor_output == fake_logits
+
+    assert torch.isinf(logit_processor_output[:, 0]).all()
+
+    fake_logits *= logit_processor.scale
+    assert torch.allclose(logit_processor_output[:, 1], fake_logits[:, 1],
+                          1e-4)
 
     del model_runner
