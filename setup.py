@@ -308,7 +308,7 @@ def get_requirements() -> List[str]:
     if _is_cuda():
         with open(get_path("requirements.txt")) as f:
             requirements = f.read().strip().split("\n")
-        if nvcc_cuda_version <= Version("11.8"):
+        if get_nvcc_cuda_version() <= Version("11.8"):
             # replace cupy-cuda12x with cupy-cuda11x for cuda 11.x
             for i in range(len(requirements)):
                 if requirements[i].startswith("cupy-cuda12x"):
