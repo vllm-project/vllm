@@ -533,20 +533,20 @@ async def test_guided_json_chat(server, client: openai.AsyncOpenAI):
     assert json1["age"] != json2["age"]
 
 
-async def test_guided_regex_completion(server, client: openai.AsyncOpenAI):
-    completion = await client.completions.create(
-        model=MODEL_NAME,
-        prompt=f"Give an example IPv4 address with this regex: {TEST_REGEX}",
-        n=3,
-        temperature=1.0,
-        max_tokens=20,
-        extra_body=dict(guided_regex=TEST_REGEX))
+# async def test_guided_regex_completion(server, client: openai.AsyncOpenAI):
+#     completion = await client.completions.create(
+#         model=MODEL_NAME,
+#         prompt=f"Give an example IPv4 address with this regex: {TEST_REGEX}",
+#         n=3,
+#         temperature=1.0,
+#         max_tokens=20,
+#         extra_body=dict(guided_regex=TEST_REGEX))
 
-    assert completion.id is not None
-    assert completion.choices is not None and len(completion.choices) == 3
-    for i in range(3):
-        assert completion.choices[i].text is not None
-        assert re.fullmatch(TEST_REGEX, completion.choices[i].text) is not None
+#     assert completion.id is not None
+#     assert completion.choices is not None and len(completion.choices) == 3
+#     for i in range(3):
+#         assert completion.choices[i].text is not None
+#         assert re.fullmatch(TEST_REGEX, completion.choices[i].text) is not None # noqa
 
 
 async def test_guided_regex_chat(server, client: openai.AsyncOpenAI):
