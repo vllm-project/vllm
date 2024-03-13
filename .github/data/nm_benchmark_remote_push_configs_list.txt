@@ -1,0 +1,1 @@
+neuralmagic/benchmarks/configs/benchmark_remote_push.json
