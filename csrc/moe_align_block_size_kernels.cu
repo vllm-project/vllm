@@ -12,8 +12,8 @@
 namespace vllm {
 
 namespace {
-__device__ int32_t 2d_to_1d(int32_t row, int32_t col) {
-    return row * col + col;
+__device__ int32_t index(int32_t total_col, int32_t row, int32_t col) {
+    return row * total_col + col;
 }
 }
 
@@ -34,7 +34,7 @@ __global__ void moe_align_block_size_kernel(scalar_t *__restrict__ topk_ids,
     int32_t* cumsum = shared_mem + (num_experts + 1) * num_experts; // 1d tensor with shape (num_experts + 1)
 
     for (int i = 0; i < num_experts; ++i) {
-        tokens_cnts[2d_to_1d(threadIdx.x + 1, i)] = 0;
+        tokens_cnts[index(num_experts, threadIdx.x + 1, i)] = 0;
     }
 
     /**
@@ -43,7 +43,7 @@ __global__ void moe_align_block_size_kernel(scalar_t *__restrict__ topk_ids,
     * to expert expert_index.
     */
     for (int i = start_idx; i < numel && i < start_idx + tokens_per_thread; ++i) {
-        ++tokens_cnts[2d_to_1d(threadIdx.x + 1, topk_ids[i])]; 
+        ++tokens_cnts[index(num_experts, threadIdx.x + 1, topk_ids[i])]; 
     }
 
     __syncthreads();
@@ -51,7 +51,7 @@ __global__ void moe_align_block_size_kernel(scalar_t *__restrict__ topk_ids,
     // For each expert we accumulate the token counts from the different threads.
     tokens_cnts[0][threadIdx.x] = 0;
     for (int i = 1; i <= blockDim.x; ++i) {
-        tokens_cnts[2d_to_1d(i, threadIdx.x)] += tokens_cnts[2d_to_1d(i-1, threadIdx.x)];
+        tokens_cnts[index(num_experts, i, threadIdx.x)] += tokens_cnts[index(num_experts, i-1, threadIdx.x)];
     }
 
     __syncthreads();
@@ -60,7 +60,7 @@ __global__ void moe_align_block_size_kernel(scalar_t *__restrict__ topk_ids,
     if (threadIdx.x == 0) {
         cumsum[0] = 0;
         for (int i = 1; i <= num_experts; ++i) {
-            cumsum[i] = cumsum[i-1] + CEILDIV(tokens_cnts[2d_to_1d(blockDim.x, i - 1)], block_size) * block_size;
+            cumsum[i] = cumsum[i-1] + CEILDIV(tokens_cnts[index(num_experts, blockDim.x, i - 1)], block_size) * block_size;
         }
         *total_tokens_post_pad = cumsum[num_experts];
     }
@@ -88,9 +88,9 @@ __global__ void moe_align_block_size_kernel(scalar_t *__restrict__ topk_ids,
         * stores the indices of the tokens processed by the expert with expert_id within
         * the current thread's token shard.
         */
-        int32_t rank_post_pad = tokens_cnts[2d_to_1d(threadIdx.x, expert_id)] + cumsum[expert_id];
+        int32_t rank_post_pad = tokens_cnts[index(num_experts, threadIdx.x, expert_id)] + cumsum[expert_id];
         sorted_token_ids[rank_post_pad] = i;
-        ++tokens_cnts[2d_to_1d(threadIdx.x, expert_id)];
+        ++tokens_cnts[index(num_experts, threadIdx.x, expert_id)];
     }
 }
 }
