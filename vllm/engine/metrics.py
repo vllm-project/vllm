@@ -128,8 +128,8 @@ class Metrics:
 
 def build_1_2_5_buckets(max_value: int):
     """
-    Builds a list of buckets with increasing powers of 10 multiplied by mantissa 
-    values (1, 2, 5) until the value exceeds the specified maximum.
+    Builds a list of buckets with increasing powers of 10 multiplied by 
+    mantissa values (1, 2, 5) until the value exceeds the specified maximum.
 
     Example:
     >>> build_1_2_5_buckets(100)
