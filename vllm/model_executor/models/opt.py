@@ -31,6 +31,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.logit_processor import LogitProcessor
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
@@ -292,26 +293,28 @@ class OPTForCausalLM(nn.Module):
         self.linear_method = linear_method
         self.model = OPTModel(config, linear_method)
         self.lm_head_weight = self.model.decoder.embed_tokens.weight
-        self.sampler = Sampler(config.vocab_size)
+        logit_scale = getattr(config, "logit_scale", 1.0)
+        self.logit_processor = LogitProcessor(self.unpadded_vocab_size,
+                                              config.vocab_size, logit_scale)
+        self.sampler = Sampler()
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[KVCache],
-        input_metadata: InputMetadata,
-    ) -> torch.Tensor:
+    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
+                kv_caches: List[KVCache], input_metadata: InputMetadata,
+                sampling_metadata: SamplingMetadata) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    input_metadata)
-        return hidden_states
+
+        logits = self.logit_processor(self.lm_head_weight, hidden_states,
+                                      sampling_metadata)
+
+        return logits
 
     def sample(
         self,
-        hidden_states: torch.Tensor,
+        logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(self.lm_head_weight, hidden_states,
-                                   sampling_metadata)
+        next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
     def load_weights(self,
