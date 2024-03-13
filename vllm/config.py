@@ -232,7 +232,11 @@ class ModelConfig:
                 f"({pipeline_parallel_size}).")
 
     def get_sliding_window(self) -> Optional[int]:
-        return getattr(self.hf_config, "sliding_window", None)
+        return (getattr(self.hf_config, "sliding_window", None)
+                if self.get_use_sliding_window() else None)
+
+    def get_use_sliding_window(self) -> bool:
+        return getattr(self.hf_config, "use_sliding_window", False)
 
     def get_vocab_size(self) -> int:
         return self.hf_config.vocab_size
