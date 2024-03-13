@@ -6,7 +6,8 @@ from transformers import AutoTokenizer
 def test_cached_tokenizer():
     reference_tokenizer = AutoTokenizer.from_pretrained("gpt2")
     reference_tokenizer.add_special_tokens({"cls_token": "<CLS>"})
-    reference_tokenizer.add_special_tokens({"additional_special_tokens": ["<SEP>"]})
+    reference_tokenizer.add_special_tokens(
+        {"additional_special_tokens": ["<SEP>"]})
     cached_tokenizer = _get_cached_tokenizer(deepcopy(reference_tokenizer))
 
     assert reference_tokenizer.encode("prompt") == cached_tokenizer.encode(

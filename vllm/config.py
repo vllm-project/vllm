@@ -397,6 +397,8 @@ class TokenizerPoolConfig:
     def __post_init__(self):
         if self.pool_type not in ("ray"):
             raise ValueError(f"Unknown pool type: {self.pool_type}")
+        if not isinstance(self.extra_config, dict):
+            raise ValueError("extra_config must be a dictionary.")
 
 
 class ParallelConfig:

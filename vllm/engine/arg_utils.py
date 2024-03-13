@@ -9,19 +9,6 @@ from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          TokenizerPoolConfig)
 
 
-class _StoreJsonAction(argparse._StoreAction):
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        json_values = []
-        for value in values:
-            try:
-                json_values.append(json.loads(value))
-            except json.JSONDecodeError as e:
-                raise argparse.ArgumentTypeError(
-                    f'Invalid JSON string: {value}') from e
-        setattr(namespace, self.dest, json_values)
-
-
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
@@ -282,7 +269,6 @@ class EngineArgs:
         parser.add_argument('--tokenizer-pool-config',
                             type=str,
                             default=EngineArgs.tokenizer_pool_config,
-                            action=_StoreJsonAction,
                             help='Config for tokenizer pool. '
                             'This should be a JSON string that will be '
                             'parsed into a dictionary. Ignored if '
@@ -352,9 +338,14 @@ class EngineArgs:
                                    self.swap_space, self.kv_cache_dtype,
                                    model_config.get_sliding_window())
         if self.tokenizer_pool_size:
+            if isinstance(self.tokenizer_pool_config, str):
+                tokenizer_pool_config_parsed = json.loads(
+                    self.tokenizer_pool_config)
+            else:
+                tokenizer_pool_config_parsed = self.tokenizer_pool_config or {}
             tokenizer_pool_config = TokenizerPoolConfig(
                 self.tokenizer_pool_size, self.tokenizer_pool_type,
-                self.tokenizer_pool_config or {})
+                tokenizer_pool_config_parsed)
         else:
             tokenizer_pool_config = None
         parallel_config = ParallelConfig(
