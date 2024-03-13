@@ -776,11 +776,10 @@ class LLMEngine:
                            stop_string: str) -> None:
         if sampling_params.include_stop_str_in_output:
             return
-
-        if stop_string and seq.output_text.endswith(stop_string):
-            # Truncate the output text so that the stop string is
-            # not included in the output.
-            seq.output_text = seq.output_text[:-len(stop_string)]
+        if stop_string:
+            index = seq.output_text.find(stop_string)
+            if index >= 0:
+                seq.output_text = seq.output_text[:index]
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)
