@@ -2,11 +2,15 @@
 import copy
 import enum
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, TYPE_CHECKING
 
 from vllm.block import LogicalTokenBlock
 from vllm.sampling_params import SamplingParams
 from vllm.lora.request import LoRARequest
+
+if TYPE_CHECKING:
+    import torch
+    from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 
 @dataclass
@@ -81,6 +85,8 @@ class SequenceData:
 
     Args:
         prompt_token_ids: The token IDs of the prompt.
+        output_token_ids: The token IDs of the output. Set to an empty list if
+            None.
 
     Attributes:
         prompt_token_ids: The token IDs of the prompt.
@@ -91,9 +97,13 @@ class SequenceData:
     def __init__(
         self,
         prompt_token_ids: List[int],
+        output_token_ids: Optional[List[int]] = None,
     ) -> None:
+        if output_token_ids is None:
+            output_token_ids = []
+
         self.prompt_token_ids = prompt_token_ids
-        self.output_token_ids: List[int] = []
+        self.output_token_ids = output_token_ids
         self.cumulative_logprob = 0.0
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
@@ -116,6 +126,12 @@ class SequenceData:
         if not self.output_token_ids:
             return self.prompt_token_ids[-1]
         return self.output_token_ids[-1]
+
+    def get_prompt_token_ids(self) -> int:
+        return self.prompt_token_ids
+
+    def get_output_token_ids(self) -> int:
+        return self.output_token_ids
 
     def __repr__(self) -> str:
         return (f"SequenceData("
@@ -142,11 +158,13 @@ class Sequence:
         prompt: str,
         prompt_token_ids: List[int],
         block_size: int,
+        eos_token_id: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> None:
         self.seq_id = seq_id
         self.prompt = prompt
         self.block_size = block_size
+        self.eos_token_id = eos_token_id
         self.lora_request = lora_request
 
         self.data = SequenceData(prompt_token_ids)
@@ -173,7 +191,8 @@ class Sequence:
         # TODO: The current hashing function is O(L^2). We should optimize
         # this in the future.
         num_tokens = self.num_hashed_tokens_of_block(logical_idx)
-        return hash(tuple(self.data.get_token_ids()[0:num_tokens]))
+        return hash(
+            (tuple(self.data.get_token_ids()[0:num_tokens]), self.lora_int_id))
 
     def num_hashed_tokens_of_block(self, logical_idx: int):
         return logical_idx * self.block_size + self.block_size
@@ -332,7 +351,8 @@ class SequenceGroup:
             self.metrics.first_token_time = time
 
     def maybe_set_first_scheduled_time(self, time: float) -> None:
-        """Sets the first scheduled time and time in queue for Request level timings."""
+        """Sets the first scheduled time and time in queue for Request
+        level timings."""
         if self.metrics.first_scheduled_time is None:
             self.metrics.first_scheduled_time = time
             self.metrics.time_in_queue = time - self.metrics.arrival_time
@@ -362,12 +382,9 @@ class SequenceGroup:
         self,
         status: Optional[SequenceStatus] = None,
     ) -> List[Sequence]:
-        if status is None:
-            return list(self.seqs_dict.values())
-        else:
-            return [
-                seq for seq in self.seqs_dict.values() if seq.status == status
-            ]
+        return list(self.seqs_dict.values()) if status is None else [
+            seq for seq in self.seqs_dict.values() if seq.status == status
+        ]
 
     def get_unfinished_seqs(self) -> List[Sequence]:
         return [
@@ -506,6 +523,35 @@ class SequenceGroupOutput:
                 and self.prompt_logprobs == other.prompt_logprobs)
 
 
-# For each sequence group, we generate a list of SequenceOutput object,
-# each of which contains one possible candidate for the next token.
-SamplerOutput = List[SequenceGroupOutput]
+@dataclass
+class SamplerOutput:
+    """For each sequence group, we generate a list of SequenceOutput object,
+    each of which contains one possible candidate for the next token.
+
+    This datastructure implements methods so it can be used like a list, but
+    also has optional fields for device tensors.
+    """
+
+    outputs: List[SequenceGroupOutput]
+
+    # On-device tensor containing probabilities of each token.
+    sampled_token_probs: Optional["torch.Tensor"] = None
+
+    # On-device tensor containing the sampled token ids.
+    sampled_token_ids: Optional["torch.Tensor"] = None
+
+    # Spec decode metrics populated by workers.
+    spec_decode_worker_metrics: Optional["SpecDecodeWorkerMetrics"] = None
+
+    def __getitem__(self, idx: int):
+        return self.outputs[idx]
+
+    def __setitem__(self, idx: int, value):
+        self.outputs[idx] = value
+
+    def __len__(self):
+        return len(self.outputs)
+
+    def __eq__(self, other: object):
+        return isinstance(other,
+                          self.__class__) and self.outputs == other.outputs

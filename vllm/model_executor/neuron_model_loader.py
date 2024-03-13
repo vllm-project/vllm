@@ -34,7 +34,8 @@ def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
 
 def get_model(model_config: ModelConfig, device_config: DeviceConfig,
               **kwargs) -> nn.Module:
-    from transformers_neuronx.config import NeuronConfig, ContinuousBatchingConfig
+    from transformers_neuronx.config import (NeuronConfig,
+                                             ContinuousBatchingConfig)
 
     parallel_config = kwargs.get("parallel_config")
     scheduler_config = kwargs.get("scheduler_config")
