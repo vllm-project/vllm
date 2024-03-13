@@ -29,7 +29,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
     "bfloat16": torch.bfloat16,
     "float": torch.float,
-    "fp8_e5m2": torch.uint8,
+    "fp8_e5m2": torch.float8_e5m2,
 }
 
 
@@ -270,7 +270,7 @@ def create_kv_caches_with_random(
         elif cache_dtype in ["half", "bfloat16", "float"]:
             torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
         elif cache_dtype == "fp8_e5m2":
-            torch_dtype = torch.uint8
+            torch_dtype = torch.float8_e5m2
         else:
             raise ValueError(f"Invalid kv cache dtype: {cache_dtype}")
     elif isinstance(cache_dtype, torch.dtype):

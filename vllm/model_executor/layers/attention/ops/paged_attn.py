@@ -121,10 +121,6 @@ class PagedAttentionImpl:
         alibi_slopes: Optional[torch.Tensor],
     ) -> torch.Tensor:
         output = torch.empty_like(query)
-        if input_metadata.kv_cache_dtype == "fp8_e5m2":
-            # Convert cache from uint8 to float8_e5m2.
-            key_cache = key_cache.view(dtype=torch.float8_e5m2)
-            value_cache = value_cache.view(dtype=torch.float8_e5m2)
         context_attention_fwd(
             query,
             key,
