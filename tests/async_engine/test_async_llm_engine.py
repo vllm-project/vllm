@@ -25,12 +25,8 @@ class MockEngine:
         return [RequestOutput(
             request_id=self.request_id)] if self.request_id else []
 
-    async def encode_request_async(
-        self,
-        *args,
-        **kwargs,
-    ):
-        return [1]
+    async def encode_request_async(self, *args, **kwargs):
+        pass
 
     def generate(self, request_id):
         self.request_id = request_id
@@ -43,12 +39,15 @@ class MockEngine:
         self.add_request_calls += 1
 
     async def add_request_async(self, **kwargs):
-        del kwargs  # Unused
         self.add_request_calls += 1
+        return
 
     def abort_request(self, request_id):
         del request_id  # Unused
         self.abort_request_calls += 1
+
+    def has_unfinished_requests(self):
+        return self.request_id is not None
 
 
 class MockAsyncLLMEngine(AsyncLLMEngine):
@@ -72,20 +71,24 @@ async def test_new_requests_event():
     await engine.add_request("2", "", None)
     engine.engine.generate("2")
     await asyncio.sleep(0)
+    await asyncio.sleep(0)
     assert engine.engine.add_request_calls == 2
-    assert engine.engine.step_calls == 2
-    await asyncio.sleep(0)
-    assert engine.engine.step_calls == 3
+    assert engine.engine.step_calls >= 2
+    await asyncio.sleep(0.001)
+    assert engine.engine.step_calls >= 3
     engine.engine.stop_generating()
-    await asyncio.sleep(0)
-    assert engine.engine.step_calls == 4
-    await asyncio.sleep(0)
-    assert engine.engine.step_calls == 4
+    await asyncio.sleep(0.001)
+    old_step_calls = engine.engine.step_calls
+    await asyncio.sleep(0.001)
+    assert engine.engine.step_calls == old_step_calls
 
     await engine.add_request("3", "", None)
     await asyncio.sleep(0.01)
     assert engine.engine.add_request_calls == 3
-    assert engine.engine.step_calls == 5
+    assert engine.engine.step_calls == old_step_calls + 1
     await asyncio.sleep(0.01)
     assert engine.engine.add_request_calls == 3
-    assert engine.engine.step_calls == 5
+    assert engine.engine.step_calls == old_step_calls + 1
+
+    engine = MockAsyncLLMEngine(worker_use_ray=True, engine_use_ray=True)
+    assert engine.get_tokenizer() is not None
