@@ -98,6 +98,13 @@ class BlockAllocator:
         return (self.num_blocks - self.current_num_blocks +
                 self.evictor.num_blocks)
 
+    def contain_blocks(self, blocks_hash: List[int]) -> bool:
+        if self.enable_caching:
+            return all([
+                self.contains_block(block_hash) for block_hash in blocks_hash
+            ])
+        return False
+
     def contains_block(self, block_hash: int) -> bool:
         return block_hash in self.cached_blocks or block_hash in self.evictor
 
@@ -176,6 +183,11 @@ class BlockSpaceManager:
                                       self.block_sliding_window)
         num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
 
+        if (self.gpu_allocator.contain_blocks([
+                seq.hash_of_block(logical_idx)
+                for logical_idx in range(num_required_blocks)
+        ])):
+            return AllocStatus.OK
         # Use watermark to avoid frequent cache eviction.
         if (self.num_total_gpu_blocks - num_required_blocks <
                 self.watermark_blocks):
