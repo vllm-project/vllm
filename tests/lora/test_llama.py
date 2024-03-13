@@ -1,4 +1,3 @@
-import json
 import pytest
 import ray
 from dataclasses import dataclass
@@ -30,7 +29,10 @@ def do_sample(llm, lora_path: str, lora_id: int, max_tokens=256):
         "Give me an orange-ish brown color",
         "Give me a neon pink color",
     ]
-    format_prompt_tuples = lambda prompt: f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+
+    def format_prompt_tuples(prompt):
+        return f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+
     prompts = [format_prompt_tuples(p) for p in raw_prompts]
 
     sampling_params = vllm.SamplingParams(temperature=0,
@@ -49,6 +51,7 @@ def do_sample(llm, lora_path: str, lora_id: int, max_tokens=256):
         generated_texts.append(generated_text)
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     return generated_texts
+
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tp_size", [1])
@@ -94,30 +97,45 @@ def test_llama_lora(tinyllama_lora_files, model, tp_size):
         ]
 
     def expect_match(output, expected_output):
-        # HACK: GPTQ lora outputs are just incredibly unstable. Assert that the outputs changed.
-        if model.quantization == "GPTQ" and expected_output is expected_lora_output:
+        # HACK: GPTQ lora outputs are just incredibly unstable.
+        # Assert that the outputs changed.
+        if (model.quantization == "GPTQ"
+                and expected_output is expected_lora_output):
             assert output != expected_no_lora_output
             for i, o in enumerate(output):
-                assert o.startswith('#'), f"Expected example {i} to start with # but got {o}"
+                assert o.startswith(
+                    '#'), f"Expected example {i} to start with # but got {o}"
             return
         assert output == expected_output
 
     max_tokens = 10
 
     print("lora adapter created")
-    output = do_sample(llm, tinyllama_lora_files, lora_id=0, max_tokens=max_tokens) 
+    output = do_sample(llm,
+                       tinyllama_lora_files,
+                       lora_id=0,
+                       max_tokens=max_tokens)
     expect_match(output, expected_no_lora_output)
 
     print("lora 1")
-    output = do_sample(llm, tinyllama_lora_files, lora_id=1, max_tokens=max_tokens) 
+    output = do_sample(llm,
+                       tinyllama_lora_files,
+                       lora_id=1,
+                       max_tokens=max_tokens)
     expect_match(output, expected_lora_output)
 
     print("no lora")
-    output = do_sample(llm, tinyllama_lora_files, lora_id=0, max_tokens=max_tokens) 
+    output = do_sample(llm,
+                       tinyllama_lora_files,
+                       lora_id=0,
+                       max_tokens=max_tokens)
     expect_match(output, expected_no_lora_output)
 
     print("lora 2")
-    output = do_sample(llm, tinyllama_lora_files, lora_id=2, max_tokens=max_tokens) 
+    output = do_sample(llm,
+                       tinyllama_lora_files,
+                       lora_id=2,
+                       max_tokens=max_tokens)
     expect_match(output, expected_lora_output)
 
     print("removing lora")
