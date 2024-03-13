@@ -7,7 +7,7 @@ from transformers import PretrainedConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention import PagedAttention
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                MergedColumnParallelLinear,
@@ -114,10 +114,10 @@ class InternLM2Attention(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
         )
-        self.attn = PagedAttention(self.num_heads,
-                                   self.head_dim,
-                                   self.scaling,
-                                   num_kv_heads=self.num_kv_heads)
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              self.scaling,
+                              num_kv_heads=self.num_kv_heads)
 
     def forward(
         self,
@@ -305,7 +305,8 @@ class InternLM2ForCausalLM(nn.Module):
                 param = params_dict[name]
                 if "wqkv" in name:
                     config = self.config
-                    kv_groups = config.num_attention_heads // config.num_key_value_heads
+                    kv_groups = (config.num_attention_heads //
+                                 config.num_key_value_heads)
                     head_dim = config.hidden_size // config.num_attention_heads
                     loaded_weight = loaded_weight.view(-1, 2 + kv_groups,
                                                        head_dim,
