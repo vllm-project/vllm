@@ -51,7 +51,9 @@ def get_model(model_config: ModelConfig, device_config: DeviceConfig,
     get_model_fn = imported_model_loader.get_model
     return get_model_fn(model_config, device_config, **kwargs)
 
-def get_architecture(model_config: ModelConfig, device_config: DeviceConfig) -> str:
+
+def get_architecture(model_config: ModelConfig,
+                     device_config: DeviceConfig) -> str:
     model_loader_module = DEVICE_TO_MODEL_LOADER_MAP[device_config.device_type]
     imported_model_loader = importlib.import_module(
         f"vllm.model_executor.{model_loader_module}")

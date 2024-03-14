@@ -20,7 +20,8 @@ def _set_default_torch_dtype(dtype: torch.dtype):
     torch.set_default_dtype(old_dtype)
 
 
-def _get_model_architecture(model_config: ModelConfig) -> Tuple[Type[nn.Module],str]:
+def _get_model_architecture(
+        model_config: ModelConfig) -> Tuple[Type[nn.Module], str]:
     architectures = getattr(model_config.hf_config, "architectures", [])
     # Special handling for quantized Mixtral.
     # FIXME(woosuk): This is a temporary hack.
@@ -36,9 +37,10 @@ def _get_model_architecture(model_config: ModelConfig) -> Tuple[Type[nn.Module],
         f"Model architectures {architectures} are not supported for now. "
         f"Supported architectures: {ModelRegistry.get_supported_archs()}")
 
+
 def get_architecture(model_config: ModelConfig) -> str:
     return _get_model_architecture(model_config)[1]
-    
+
 
 def get_model(model_config: ModelConfig, device_config: DeviceConfig,
               **kwargs) -> nn.Module:

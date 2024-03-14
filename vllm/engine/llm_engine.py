@@ -101,14 +101,14 @@ class LLMEngine:
         self._init_tokenizer()
         self.seq_counter = Counter()
 
-
         self.model_executor = executor_class(model_config, cache_config,
                                              parallel_config, scheduler_config,
                                              device_config, lora_config)
-        
+
         #If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
-            usage_message.report_usage(self.model_executor.architecture, usage_context)
+            usage_message.report_usage(self.model_executor.architecture,
+                                       usage_context)
 
         # Create the scheduler.
         # NOTE: the cache_config here have been updated with the numbers of

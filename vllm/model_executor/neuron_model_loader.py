@@ -21,7 +21,8 @@ TORCH_DTYPE_TO_NEURON_AMP = {
 }
 
 
-def _get_model_architecture(config: PretrainedConfig) -> Tuple[Type[nn.Module], str]:
+def _get_model_architecture(
+        config: PretrainedConfig) -> Tuple[Type[nn.Module], str]:
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
         model_cls = ModelRegistry.load_model_cls(arch)
@@ -31,8 +32,10 @@ def _get_model_architecture(config: PretrainedConfig) -> Tuple[Type[nn.Module], 
         f"Model architectures {architectures} are not supported for now. "
         f"Supported architectures: {ModelRegistry.get_supported_archs()}")
 
+
 def get_architecture(model_config: ModelConfig) -> str:
     return _get_model_architecture(model_config.hf_config)[1]
+
 
 def get_model(model_config: ModelConfig, device_config: DeviceConfig,
               **kwargs) -> nn.Module:
