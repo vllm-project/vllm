@@ -50,7 +50,7 @@ class BlockAllocator(ABC):
         pass
 
 
-class CachedBlockAllocator:
+class CachedBlockAllocator(BlockAllocatorBase):
     """Manages free physical token blocks for a device.
 
     The allocator maintains a list of free blocks and allocates a block when
