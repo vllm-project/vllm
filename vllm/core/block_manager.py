@@ -11,7 +11,7 @@ from vllm.utils import Device
 from vllm.core.evictor import Evictor, EvictionPolicy, make_evictor
 
 
-class BlockAllocator(ABC):
+class BlockAllocatorBase(ABC):
     """Manages free physical token blocks for a device.
 
     The allocator maintains a list of free blocks and allocates a block when
