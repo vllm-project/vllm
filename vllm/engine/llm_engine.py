@@ -20,12 +20,8 @@ from vllm.sequence import (Logprob, SamplerOutput, Sequence, SequenceGroup,
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                TokenizerGroup)
 from vllm.utils import Counter
-from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
-if ray:
-    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-
-if TYPE_CHECKING:
-    from ray.util.placement_group import PlacementGroup
+from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
+                                  usage_message)
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -126,7 +122,11 @@ class LLMEngine:
             self.stat_logger.info("cache_config", self.cache_config)
 
     @classmethod
-    def from_engine_args(cls, engine_args: EngineArgs) -> "LLMEngine":
+    def from_engine_args(
+        cls,
+        engine_args: EngineArgs,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT
+    ) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.
         engine_configs = engine_args.create_engine_configs()
@@ -146,7 +146,8 @@ class LLMEngine:
         # Create the LLM engine.
         engine = cls(*engine_configs,
                      executor_class=executor_class,
-                     log_stats=not engine_args.disable_log_stats)
+                     log_stats=not engine_args.disable_log_stats,
+                     usage_context=usage_context)
         return engine
 
     def __reduce__(self):
