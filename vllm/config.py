@@ -102,8 +102,7 @@ class ModelConfig:
         if os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true":
             # download model from ModelScope hub,
             # lazy import so that modelscope is not required for normal use.
-            from modelscope.hub.snapshot_download import (
-                snapshot_download, )  # pylint: disable=C
+            from modelscope.hub.snapshot_download import snapshot_download  # pylint: disable=C
 
             if not os.path.exists(model):
                 model_path = snapshot_download(model_id=model,
