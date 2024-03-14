@@ -99,13 +99,25 @@ torch::Tensor awq_dequantize(
     int thx,
     int thy);
 
+torch::Tensor awq_group_gemm(
+    torch::Tensor _in_feats,
+    torch::Tensor _kernel,
+    torch::Tensor _scaling_factors,
+    torch::Tensor _zeros,
+    torch::Tensor _topk_weights,
+    torch::Tensor _sorted_token_ids_ptr,
+    torch::Tensor _expert_ids_ptr,
+    torch::Tensor _num_tokens_post_padded,
+    bool mul_weights,
+    int split_k_iters);
+
 torch::Tensor marlin_gemm(
-    torch::Tensor& a, 
+    torch::Tensor& a,
     torch::Tensor& b_q_weight,
-    torch::Tensor& b_scales, 
+    torch::Tensor& b_scales,
     torch::Tensor& workspace,
-    int64_t size_m, 
-    int64_t size_n, 
+    int64_t size_m,
+    int64_t size_n,
     int64_t size_k);
 #endif
 
@@ -128,6 +140,29 @@ void gptq_shuffle(
   torch::Tensor q_weight,
   torch::Tensor q_perm,
   int bit);
+
+torch::Tensor group_gptq_gemm(
+    torch::Tensor a,
+    torch::Tensor b_q_weight,
+    torch::Tensor b_gptq_qzeros,
+    torch::Tensor b_gptq_scales,
+    torch::Tensor b_g_idx,
+    torch::Tensor topk_weights,
+    torch::Tensor sorted_token_ids_ptr,
+    torch::Tensor expert_ids_ptr,
+    torch::Tensor num_tokens_post_padded,
+    bool mul_weights,
+    bool use_exllama
+);
+
+torch::Tensor dequant_gptq(
+    torch::Tensor b_q_weight,
+    torch::Tensor b_gptq_qzeros,
+    torch::Tensor b_gptq_scales,
+    torch::Tensor b_g_idx,
+    int bits,
+    bool use_exllama
+);
 
 void moe_align_block_size(
   torch::Tensor topk_ids,

@@ -77,6 +77,9 @@ class MarlinConfig(QuantizationConfig):
     def get_scaled_act_names(self) -> List[str]:
         return []
 
+    def support_fused_moe(self) -> bool:
+        return False
+
 
 class MarlinLinearMethod(LinearMethodBase):
     """Linear method for Marlin.
@@ -217,3 +220,10 @@ class MarlinLinearMethod(LinearMethodBase):
             output.add_(bias)  # In-place add
 
         return output
+
+    def apply_moe_weights(self, w1: Dict[str,
+                                         torch.Tensor], w2: Dict[str,
+                                                                 torch.Tensor],
+                          x: torch.Tensor, gating_output: torch.Tensor,
+                          topk: int, renormalize: bool) -> torch.Tensor:
+        raise NotImplementedError
