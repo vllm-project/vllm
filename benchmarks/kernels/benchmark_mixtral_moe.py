@@ -2,12 +2,12 @@ import json
 import os
 import sys
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-
 from vllm.model_executor.layers.fused_moe import fused_moe, get_config_file_name
 import torch
 import torch.nn.functional as F
 import triton
+
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 
 def main():
@@ -64,7 +64,7 @@ def run_grid(bs, method):
         print(f'{tp_size=} {bs=}')
         print(f'{config}')
         # warmup
-        print(f'warming up')
+        print('warming up')
         try:
             for _ in range(num_warmup_trials):
                 run_timing(
@@ -82,7 +82,7 @@ def run_grid(bs, method):
             continue
 
         # trial
-        print(f'benchmarking')
+        print('benchmarking')
         for _ in range(num_trials):
             kernel_dur_ms = run_timing(
                 num_calls=num_calls,
@@ -111,7 +111,8 @@ def run_grid(bs, method):
     print("best_config", best_config)
 
     # holds Dict[str, Dict[str, int]]
-    filename = get_config_file_name(num_total_experts, model_intermediate_size // tp_size)
+    filename = get_config_file_name(num_total_experts,
+                                    model_intermediate_size // tp_size)
     print(f"writing config to file {filename}")
     existing_content = {}
     if os.path.exists(filename):

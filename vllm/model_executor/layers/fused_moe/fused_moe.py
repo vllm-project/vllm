@@ -266,8 +266,7 @@ def get_moe_configs(E: int, N: int) -> Optional[Dict[int, Any]]:
     json_file_name = get_config_file_name(E, N)
 
     config_file_path = os.path.join(
-        os.path.dirname(os.path.realpath(__file__)), "configs",
-        json_file_name)
+        os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name)
     if os.path.exists(config_file_path):
         with open(config_file_path) as f:
             logger.info(
