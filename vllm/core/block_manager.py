@@ -137,7 +137,7 @@ class CachedBlockAllocator(BlockAllocatorBase):
         self.cached_blocks[block_hash] = block
 
 
-class UncachedBlockAllocator:
+class UncachedBlockAllocator(BlockAllocatorBase):
     """Manages free physical token blocks for a device.
 
     The allocator maintains a list of free blocks and allocates a block when
