@@ -7,8 +7,6 @@ from transformers import PreTrainedTokenizer
 from vllm.config import TokenizerPoolConfig
 from vllm.lora.request import LoRARequest
 from vllm.engine.ray_utils import ray
-from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
-    BaseTokenizerGroup)
 from vllm.transformers_utils.tokenizer_group.tokenizer_group import (
     TokenizerGroup)
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
@@ -16,7 +14,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 RayTokenizerGroup = ray.remote(TokenizerGroup)
 
 
-class RayTokenizerGroupPool(BaseTokenizerGroup):
+class RayTokenizerGroupPool(TokenizerGroup):
     """A Ray-based pool of TokenizerGroups for async tokenization."""
 
     _ray_tokenizer_group_cls = RayTokenizerGroup
@@ -51,10 +49,8 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
             ray_actor_options: dict, **tokenizer_config):
         # Store a local copy of the TokenizerGroup for quick access
         # to underlying HF tokenizers.
-        self.tokenizer = TokenizerGroup(tokenizer_id, enable_lora,
-                                        max_num_seqs, max_input_length,
-                                        **tokenizer_config)
-        self.max_input_length = max_input_length
+        super().__init__(tokenizer_id, enable_lora, max_num_seqs,
+                            max_input_length, **tokenizer_config)
 
         ray_tokenizer_group_cls = self._ray_tokenizer_group_cls.options(
             **ray_actor_options)
@@ -135,13 +131,3 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
             # is raised.
             self._idle_actors.put_nowait(actor)
         return ret
-
-    def get_lora_tokenizer(
-            self,
-            lora_request: Optional[LoRARequest]) -> "PreTrainedTokenizer":
-        return self.tokenizer.get_lora_tokenizer(lora_request)
-
-    async def get_lora_tokenizer_async(
-            self,
-            lora_request: Optional[LoRARequest]) -> "PreTrainedTokenizer":
-        return await self.tokenizer.get_lora_tokenizer_async(lora_request)

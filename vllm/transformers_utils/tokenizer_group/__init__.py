@@ -17,17 +17,16 @@ def get_tokenizer_group(tokenizer_pool_config: Optional[TokenizerPoolConfig],
                         **init_kwargs) -> BaseTokenizerGroup:
     if tokenizer_pool_config is None:
         return TokenizerGroup(**init_kwargs)
+    if tokenizer_pool_config.pool_type == "ray":
+        if RayTokenizerGroupPool is None:
+            raise ImportError(
+                "RayTokenizerGroupPool is not available. Please install "
+                "the ray package to use the Ray tokenizer group pool.")
+        return RayTokenizerGroupPool.from_config(tokenizer_pool_config,
+                                                    **init_kwargs)
     else:
-        if tokenizer_pool_config.pool_type == "ray":
-            if RayTokenizerGroupPool is None:
-                raise ImportError(
-                    "RayTokenizerGroupPool is not available. Please install "
-                    "the ray package to use the Ray tokenizer group pool.")
-            return RayTokenizerGroupPool.from_config(tokenizer_pool_config,
-                                                     **init_kwargs)
-        else:
-            raise ValueError(
-                f"Unknown pool type: {tokenizer_pool_config.pool_type}")
+        raise ValueError(
+            f"Unknown pool type: {tokenizer_pool_config.pool_type}")
 
 
 __all__ = ["get_tokenizer_group", "BaseTokenizerGroup"]
