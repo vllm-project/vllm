@@ -34,6 +34,7 @@ def test_sliding_window_value():
         ("In Qwen1.5, sliding_window should be "
          f"{default_sliding_window}, because use_sliding_window is True")
 
+
 def test_sliding_window_with_other_model():
     facebook = LLM(model="facebook/opt-125m")
 
