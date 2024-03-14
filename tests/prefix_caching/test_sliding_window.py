@@ -8,10 +8,11 @@ from vllm import LLM, SamplingParams
 # 2. whether the return value of get_sliding_window function is right when using other model
 def test_sliding_window_value():
     qwen = LLM(
-        model="Qwen/Qwen-1.8B",
+        model="Qwen/Qwen-0.5B",
         trust_remote_code=True,
         enforce_eager=True,
         download_dir=None,
+        dtype="float16",
         tokenizer_mode='auto'
     )
 
@@ -32,11 +33,13 @@ def test_sliding_window_value():
     assert get_sliding_window == default_sliding_window, (f"In Qwen1.5, sliding_window should be "
                                                         "{default_sliding_window}, because use_sliding_window is True")
 
+def test_sliding_window_with_other_model():
     facebook = LLM(
         model="facebook/opt-125m",
         trust_remote_code=True,
         enforce_eager=True,
         download_dir=None,
+        dtype="float16",
         tokenizer_mode='auto'
     )
 
@@ -49,7 +52,6 @@ def test_sliding_window_value():
     facebook.llm_engine.model_config.hf_config.sliding_window = sliding_window
     get_sliding_window = facebook.llm_engine.model_config.get_sliding_window()
     assert get_sliding_window == sliding_window, (f"In facebook/opt-125m, sliding_window should be {sliding_window}, ")
-
 
 if __name__ == "__main__":
     import pytest
