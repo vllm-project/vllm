@@ -1,7 +1,6 @@
 import os
 import pytest
 import asyncio
-import ray
 from unittest.mock import patch
 
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
@@ -71,15 +70,14 @@ async def test_tokenizer_group_ray_pool_env_var_propagation(
     tokenizer Ray actors."""
     env_var = "MY_ENV_VAR"
 
-    @ray.remote
-    class EnvVarCheckerRayTokenizerGroup(TokenizerGroup):
+    class EnvVarCheckerTokenizerGroup(TokenizerGroup):
 
         def ping(self):
             assert os.environ.get(env_var) == "1"
             return super().ping()
 
     class EnvVarCheckerRayTokenizerGroupPool(RayTokenizerGroupPool):
-        _ray_tokenizer_group_cls = EnvVarCheckerRayTokenizerGroup
+        _worker_cls = EnvVarCheckerTokenizerGroup
 
     tokenizer_pool_config = get_tokenizer_pool_config(tokenizer_group_type)
     tokenizer_pool = EnvVarCheckerRayTokenizerGroupPool.from_config(

@@ -2,20 +2,37 @@ import asyncio
 import os
 from typing import List, Optional
 
+from transformers import PreTrainedTokenizer
+
 from vllm.config import TokenizerPoolConfig
 from vllm.lora.request import LoRARequest
 from vllm.engine.ray_utils import ray
+from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
+    BaseTokenizerGroup)
 from vllm.transformers_utils.tokenizer_group.tokenizer_group import (
     TokenizerGroup)
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
-RayTokenizerGroup = ray.remote(TokenizerGroup)
+
+def _carry_over_env_vars_to_runtime_env(runtime_env: dict) -> dict:
+    """Copy over all current process environment variables to the runtime_env.
+
+    The variables in runtime_env will take precedence over the current process
+    environment variables.
+
+    runtime_env will be modified in place."""
+    env_vars = os.environ.copy()
+    runtime_env.setdefault("env_vars", {})
+    env_vars.update(runtime_env["env_vars"])
+    runtime_env["env_vars"] = env_vars
+    return runtime_env
 
 
-class RayTokenizerGroupPool(TokenizerGroup):
+class RayTokenizerGroupPool(BaseTokenizerGroup):
     """A Ray-based pool of TokenizerGroups for async tokenization."""
 
-    _ray_tokenizer_group_cls = RayTokenizerGroup
+    # Class to use for workers making up the pool.
+    _worker_cls = TokenizerGroup
 
     @classmethod
     def from_config(cls, tokenizer_pool_config: TokenizerPoolConfig,
@@ -31,27 +48,28 @@ class RayTokenizerGroupPool(TokenizerGroup):
         # Carry over the env vars to the actors.
         # This is necessary for API keys and such.
         ray_actor_options.setdefault("runtime_env", {})
-        env_vars = os.environ.copy()
-        ray_actor_options["runtime_env"].setdefault("env_vars", {})
-        env_vars.update(ray_actor_options["runtime_env"]["env_vars"])
-        ray_actor_options["runtime_env"]["env_vars"] = env_vars
+        ray_actor_options["runtime_env"] = _carry_over_env_vars_to_runtime_env(
+            ray_actor_options["runtime_env"])
 
         init_kwargs["num_actors"] = tokenizer_pool_config.pool_size
         init_kwargs["ray_actor_options"] = ray_actor_options
 
         return cls(**init_kwargs)
 
-    def __init__(  # pylint: disable=super-init-not-called
-            self, tokenizer_id: str, enable_lora: bool, max_num_seqs: int,
-            max_input_length: Optional[int], num_actors: int,
-            ray_actor_options: dict, **tokenizer_config):
+    def __init__(self, tokenizer_id: str, enable_lora: bool, max_num_seqs: int,
+                 max_input_length: Optional[int], num_actors: int,
+                 ray_actor_options: dict, **tokenizer_config):
         # Store a local copy of the TokenizerGroup for quick access
         # to underlying HF tokenizers.
-        super().__init__(tokenizer_id, enable_lora, max_num_seqs,
-                            max_input_length, **tokenizer_config)
+        self._local_tokenizer_group = self._worker_cls(
+            tokenizer_id=tokenizer_id,
+            enable_lora=enable_lora,
+            max_num_seqs=max_num_seqs,
+            max_input_length=max_input_length,
+        )
 
-        ray_tokenizer_group_cls = self._ray_tokenizer_group_cls.options(
-            **ray_actor_options)
+        ray_tokenizer_group_cls = ray.remote(
+            self._worker_cls).options(**ray_actor_options)
         self.tokenizer_actors = [
             ray_tokenizer_group_cls.remote(tokenizer_id, enable_lora,
                                            max_num_seqs, max_input_length,
@@ -68,7 +86,7 @@ class RayTokenizerGroupPool(TokenizerGroup):
         return ray.get(
             [actor.ping.remote() for actor in self.tokenizer_actors])
 
-    def _maybe_init_queue(self):
+    def _ensure_queue_initialized(self):
         if self._idle_actors is None:
             self._idle_actors = asyncio.Queue()
             for actor in self.tokenizer_actors:
@@ -84,7 +102,7 @@ class RayTokenizerGroupPool(TokenizerGroup):
         The actor is then put back in the queue for future use.
         This is blocking.
         """
-        self._maybe_init_queue()
+        self._ensure_queue_initialized()
 
         if self._idle_actors.empty():
             raise RuntimeError("No idle actors available.")
@@ -115,7 +133,7 @@ class RayTokenizerGroupPool(TokenizerGroup):
         The actor is then put back in the queue for future use.
         This is non-blocking.
         """
-        self._maybe_init_queue()
+        self._ensure_queue_initialized()
 
         actor = await self._idle_actors.get()
         try:
@@ -129,3 +147,22 @@ class RayTokenizerGroupPool(TokenizerGroup):
             # is raised.
             self._idle_actors.put_nowait(actor)
         return ret
+
+    def get_max_input_len(self,
+                          lora_request: Optional[LoRARequest] = None
+                          ) -> Optional[int]:
+        """Get the maximum input length for the LoRA request."""
+        return self._local_tokenizer_group.get_max_input_len(lora_request)
+
+    def get_lora_tokenizer(
+            self,
+            lora_request: Optional[LoRARequest] = None
+    ) -> "PreTrainedTokenizer":
+        return self._local_tokenizer_group.get_lora_tokenizer(lora_request)
+
+    async def get_lora_tokenizer_async(
+            self,
+            lora_request: Optional[LoRARequest] = None
+    ) -> "PreTrainedTokenizer":
+        return await self._local_tokenizer_group.get_lora_tokenizer_async(
+            lora_request)

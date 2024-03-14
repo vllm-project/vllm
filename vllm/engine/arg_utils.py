@@ -1,5 +1,4 @@
 import argparse
-import json
 import dataclasses
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -337,23 +336,15 @@ class EngineArgs:
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
                                    model_config.get_sliding_window())
-        if self.tokenizer_pool_size:
-            if isinstance(self.tokenizer_pool_extra_config, str):
-                tokenizer_pool_extra_config_parsed = json.loads(
-                    self.tokenizer_pool_extra_config)
-            else:
-                tokenizer_pool_extra_config_parsed = (
-                    self.tokenizer_pool_extra_config or {})
-            tokenizer_pool_config = TokenizerPoolConfig(
-                self.tokenizer_pool_size, self.tokenizer_pool_type,
-                tokenizer_pool_extra_config_parsed)
-        else:
-            tokenizer_pool_config = None
         parallel_config = ParallelConfig(
             self.pipeline_parallel_size, self.tensor_parallel_size,
             self.worker_use_ray, self.max_parallel_loading_workers,
-            self.disable_custom_all_reduce, tokenizer_pool_config,
-            self.ray_workers_use_nsight)
+            self.disable_custom_all_reduce,
+            TokenizerPoolConfig.create_config(
+                self.tokenizer_pool_size,
+                self.tokenizer_pool_type,
+                self.tokenizer_pool_extra_config,
+            ), self.ray_workers_use_nsight)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
                                            model_config.max_model_len,

@@ -23,7 +23,7 @@ def get_tokenizer_group(tokenizer_pool_config: Optional[TokenizerPoolConfig],
                 "RayTokenizerGroupPool is not available. Please install "
                 "the ray package to use the Ray tokenizer group pool.")
         return RayTokenizerGroupPool.from_config(tokenizer_pool_config,
-                                                    **init_kwargs)
+                                                 **init_kwargs)
     else:
         raise ValueError(
             f"Unknown pool type: {tokenizer_pool_config.pool_type}")
