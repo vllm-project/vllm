@@ -133,7 +133,10 @@ def calculate_metrics(
             output_len = len(tokenizer.encode(outputs[i].generated_text))
             total_output += output_len
             total_input += input_requests[i][1]
-            per_token_latencies.append(outputs[i].latency / output_len)
+            if outputs[i].latency == 0 or output_len == 0:
+                print("output length cannot be zero!")
+            else:
+                per_token_latencies.append(outputs[i].latency / output_len)
             ttfts.append(outputs[i].ttft)
             completed += 1
 
