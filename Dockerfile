@@ -63,7 +63,7 @@ FROM dev as flash-attn-builder
 ARG max_jobs=2
 ENV MAX_JOBS=${max_jobs}
 # flash attention version
-ARG flash_attn_version=v2.5.2
+ARG flash_attn_version=v2.5.6
 ENV FLASH_ATTN_VERSION=${flash_attn_version}
 
 WORKDIR /usr/src/flash-attention-v2
