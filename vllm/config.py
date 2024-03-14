@@ -1,4 +1,4 @@
-from typing import Optional, Union, ClassVar
+from typing import TYPE_CHECKING, Optional, Union, ClassVar
 from dataclasses import dataclass
 import os
 from packaging.version import Version
@@ -9,6 +9,9 @@ from transformers import PretrainedConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config
 from vllm.utils import get_cpu_memory, is_hip, is_neuron, get_nvcc_cuda_version
+
+if TYPE_CHECKING:
+    from ray.util.placement_group import PlacementGroup
 
 logger = init_logger(__name__)
 
@@ -45,7 +48,7 @@ class ModelConfig:
             a tag name, or a commit id. If unspecified, will use the default
             version.
         code_revision: The specific revision to use for the model code on
-            Hugging Face Hub. It can be a branch name, a tag name, or a 
+            Hugging Face Hub. It can be a branch name, a tag name, or a
             commit id. If unspecified, will use the default version.
         tokenizer_revision: The specific tokenizer version to use. It can be a
             branch name, a tag name, or a commit id. If unspecified, will use
@@ -79,6 +82,7 @@ class ModelConfig:
         quantization: Optional[str] = None,
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
+        max_logprobs: int = 5,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -93,6 +97,7 @@ class ModelConfig:
         self.quantization = quantization
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
+        self.max_logprobs = max_logprobs
 
         if os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true":
             # download model from ModelScope hub,
@@ -163,13 +168,18 @@ class ModelConfig:
         # Parse quantization method from the HF model config, if available.
         hf_quant_config = getattr(self.hf_config, "quantization_config", None)
         if hf_quant_config is not None:
-
             hf_quant_method = str(hf_quant_config["quant_method"]).lower()
+
             # If the GPTQ model is serialized in marlin format, use marlin.
             if (hf_quant_method == "gptq"
                     and "is_marlin_format" in hf_quant_config
                     and hf_quant_config["is_marlin_format"]):
+                logger.info("The model is serialized in Marlin format. "
+                            "Using Marlin kernel.")
                 hf_quant_method = "marlin"
+                if self.quantization == "gptq":
+                    self.quantization = hf_quant_method
+
             if self.quantization is None:
                 self.quantization = hf_quant_method
             elif self.quantization != hf_quant_method:
@@ -187,8 +197,8 @@ class ModelConfig:
             if is_hip(
             ) and self.quantization in rocm_not_supported_quantization:
                 raise ValueError(
-                    f"{self.quantization} quantization is currently not supported "
-                    f"in ROCm.")
+                    f"{self.quantization} quantization is currently not "
+                    f"supported in ROCm.")
             if self.quantization != "marlin":
                 logger.warning(
                     f"{self.quantization} quantization is not fully "
@@ -319,7 +329,8 @@ class CacheConfig:
         self.num_cpu_blocks = None
 
     def metrics_info(self):
-        # convert cache_config to dict(key: str, value: str) for prometheus metrics info
+        # convert cache_config to dict(key: str, value: str) for prometheus
+        # metrics info
         return {key: str(value) for key, value in self.__dict__.items()}
 
     def _verify_args(self) -> None:
@@ -382,6 +393,8 @@ class ParallelConfig:
             parallel and large models.
         disable_custom_all_reduce: Disable the custom all-reduce kernel and
             fall back to NCCL.
+        ray_workers_use_nsight: Whether to profile Ray workers with nsight, see
+            https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler.
     """
 
     def __init__(
@@ -391,11 +404,14 @@ class ParallelConfig:
         worker_use_ray: bool,
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
+        ray_workers_use_nsight: bool = False,
+        placement_group: Optional["PlacementGroup"] = None,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         if is_neuron():
-            # For Neuron device support, here we assign TP=1 to avoid sharding within vLLM directly.
-            # Transformer-neuronx would take neuron_tp_degree attribute, and distribute the workload
+            # For Neuron device support, here we assign TP=1 to avoid sharding
+            # within vLLM directly. Transformer-neuronx would take
+            # neuron_tp_degree attribute, and distribute the workload
             # to multiple NeuronCores.
             self.tensor_parallel_size = 1
             self.neuron_tp_degree = tensor_parallel_size
@@ -404,6 +420,8 @@ class ParallelConfig:
         self.worker_use_ray = worker_use_ray
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
+        self.ray_workers_use_nsight = ray_workers_use_nsight
+        self.placement_group = placement_group
 
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
         # Ray worker is not supported for Neuron backend.
@@ -426,6 +444,9 @@ class ParallelConfig:
                 logger.info(
                     "Disabled the custom all-reduce kernel because it is not "
                     "supported with pipeline parallelism.")
+        if self.ray_workers_use_nsight and not self.worker_use_ray:
+            raise ValueError("Unable to use nsight profiling unless workers "
+                             "run with Ray.")
 
         # FIXME(woosuk): Fix the stability issues and re-enable the custom
         # all-reduce kernel.
