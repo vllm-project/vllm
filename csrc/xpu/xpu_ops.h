@@ -68,6 +68,17 @@ inline torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
   TORCH_CHECK(false, "awq_gemm is not supported on XPU.");                            
 }
 
+inline torch::Tensor marlin_gemm(
+    torch::Tensor& a, 
+    torch::Tensor& b_q_weight,
+    torch::Tensor& b_scales, 
+    torch::Tensor& workspace,
+    int64_t size_m, 
+    int64_t size_n, 
+    int64_t size_k) {
+  TORCH_CHECK(false, "marlin_gemm is not supported on XPU.");                            
+}
+
 inline torch::Tensor awq_dequantize(torch::Tensor _kernel, 
     torch::Tensor _scaling_factors,
     torch::Tensor _zeros,
@@ -84,12 +95,14 @@ inline torch::Tensor gptq_gemm(
   torch::Tensor b_gptq_qzeros,
   torch::Tensor b_gptq_scales,
   torch::Tensor b_g_idx,
-  bool use_exllama) {
+  bool use_exllama,
+  int bit) {
   TORCH_CHECK(false, "gptq_gemm is not supported on XPU.");
 }
 
 inline void gptq_shuffle(
   torch::Tensor q_weight,
-  torch::Tensor q_perm) {
+  torch::Tensor q_perm,
+  int bit) {
   TORCH_CHECK(false, "gptq_shuffle is not supported on XPU.");
 }

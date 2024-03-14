@@ -356,6 +356,9 @@ class measure_device_memory:
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats(self.device)
             mem = torch.cuda.max_memory_allocated(self.device)
+        if torch.xpu.is_available():
+            torch.xpu.reset_peak_memory_stats(self.device)
+            mem = torch.xpu.max_memory_allocated(self.device)            
         return mem
 
     def __enter__(self):

@@ -10,7 +10,7 @@ from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention.ops.paged_attn import (
     PagedAttentionImpl)
-from vllm.utils import is_hip
+from vllm.utils import is_hip, is_xpu
 
 
 class XFormersBackend:
@@ -145,18 +145,33 @@ class XFormersBackend:
                     query = query.unflatten(0, (batch_size, seq_len))
                     key = key.unflatten(0, (batch_size, seq_len))
                     value = value.unflatten(0, (batch_size, seq_len))
+                if is_xpu():
+                    attn_mask = input_metadata.attn_bias.materialize(
+                        (1, seq_len * batch_size, seq_len * batch_size),
+                        dtype=query.dtype,
+                        device=query.device)
 
-                out = xops.memory_efficient_attention_forward(
-                    query,
-                    key,
-                    value,
-                    attn_bias=input_metadata.attn_bias,
-                    p=0.0,
-                    scale=self.scale,
-                    op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if
-                    (is_hip()) else None,
+                    out = torch.nn.functional.scaled_dot_product_attention(
+                        query.movedim(1,
+                                      query.dim() - 2),
+                        key.movedim(1,
+                                    query.dim() - 2),
+                        value.movedim(1,
+                                      value.dim() - 2), attn_mask,
+                        0.0).movedim(query.dim() - 2, 1).contiguous()
+
+                else:
+                    out = xops.memory_efficient_attention_forward(
+                        query,
+                        key,
+                        value,
+                        attn_bias=input_metadata.attn_bias,
+                        p=0.0,
+                        scale=self.scale,
+                        op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if
+                        (is_hip()) else None,
                 )
-                output = out.view_as(query)
+                output = out.view_as(query).to(query.dtype)
 
             else:
                 # prefix-enabled attention
