@@ -2,8 +2,6 @@ import asyncio
 import os
 from typing import List, Optional
 
-from transformers import PreTrainedTokenizer
-
 from vllm.config import TokenizerPoolConfig
 from vllm.lora.request import LoRARequest
 from vllm.engine.ray_utils import ray
