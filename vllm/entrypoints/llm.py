@@ -10,6 +10,7 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.utils import Counter
 
+
 class LLM:
     """An LLM for generating texts from given prompts and sampling parameters.
 
@@ -118,15 +119,13 @@ class LLM:
     ) -> None:
         self.llm_engine.tokenizer.tokenizer = tokenizer
 
-    def generate(
-        self,
-        prompts: Optional[Union[str, List[str]]] = None,
-        sampling_params: Optional[SamplingParams] = None,
-        prompt_token_ids: Optional[List[List[int]]] = None,
-        use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
-        stream: bool = False
-    ) -> List[RequestOutput]:
+    def generate(self,
+                 prompts: Optional[Union[str, List[str]]] = None,
+                 sampling_params: Optional[SamplingParams] = None,
+                 prompt_token_ids: Optional[List[List[int]]] = None,
+                 use_tqdm: bool = True,
+                 lora_request: Optional[LoRARequest] = None,
+                 stream: bool = False) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
         NOTE: This class automatically batches the given prompts, considering
@@ -196,7 +195,7 @@ class LLM:
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
                 yield output
-                    
+
     def _run_engine(self, use_tqdm: bool) -> List[RequestOutput]:
         # Initialize tqdm.
         if use_tqdm:
