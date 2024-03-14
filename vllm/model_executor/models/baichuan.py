@@ -31,7 +31,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                MergedColumnParallelLinear,
-                                               RefQKVParallelLinear,
+                                               QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
@@ -128,7 +128,7 @@ class BaiChuanAttention(nn.Module):
         self.max_position_embeddings = max_position_embeddings
 
         # pylint: disable=invalid-name
-        self.W_pack = RefQKVParallelLinear(
+        self.W_pack = QKVParallelLinear(
             hidden_size,
             self.head_dim,
             self.total_num_heads,
