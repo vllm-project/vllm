@@ -491,7 +491,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
 
 class RefMergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
 
-    def __init__(self, base_layer: RefMergedColumnParallelLinear) -> None:
+    def __init__(self, base_layer: MergedColumnParallelLinear) -> None:
         super().__init__(base_layer)
         self.tp_size = get_tensor_model_parallel_world_size()
 
