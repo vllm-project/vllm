@@ -12,7 +12,6 @@ from vllm import LLM
 def test_sliding_window_value():
     qwen = LLM(
         model="Qwen/Qwen-0.5B",
-        trust_remote_code=True,
         enforce_eager=True,
         download_dir=None,
         dtype="float16",
@@ -45,7 +44,6 @@ def test_sliding_window_value():
 def test_sliding_window_with_other_model():
     facebook = LLM(
         model="facebook/opt-125m",
-        trust_remote_code=True,
         enforce_eager=True,
         download_dir=None,
         dtype="float16",
