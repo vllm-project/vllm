@@ -10,7 +10,7 @@ from vllm import LLM
 # 2. whether the return value of get_sliding_window function is right
 #    when using other model
 def test_sliding_window_value():
-    qwen = LLM(model="Qwen/Qwen-0.5B")
+    qwen = LLM(model="Qwen/Qwen1.5-0.5B")
 
     # verify default values
     hf_config = qwen.llm_engine.model_config.hf_config
