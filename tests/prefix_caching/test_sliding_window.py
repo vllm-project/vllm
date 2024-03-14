@@ -34,7 +34,22 @@ def test_sliding_window_value():
         ("In Qwen1.5, sliding_window should be "
          f"{default_sliding_window}, because use_sliding_window is True")
 
+def test_sliding_window_with_other_model():
+    facebook = LLM(model="facebook/opt-125m")
+
+    # verify the return value of get_sliding_window function
+    get_sliding_window = facebook.llm_engine.model_config.get_sliding_window()
+    assert get_sliding_window is None, \
+        ("In facebook/opt-125m, sliding_window should be None, "
+         "because the default value of sliding_window is None")
+
+    sliding_window = 4096
+    facebook.llm_engine.model_config.hf_config.sliding_window = sliding_window
+    get_sliding_window = facebook.llm_engine.model_config.get_sliding_window()
+    assert get_sliding_window == sliding_window, \
+        (f"In facebook/opt-125m, sliding_window should be {sliding_window}, ")
+
+
 if __name__ == "__main__":
     import pytest
-
     pytest.main([__file__])
