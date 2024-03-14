@@ -3,7 +3,7 @@ import enum
 from itertools import count, takewhile
 from os.path import commonprefix
 from typing import Dict, List, Optional, Set, Tuple
-from abc import ABC, abstractmethod, abstractproperty
+from abc import ABC, abstractmethod
 
 from vllm.block import BlockTable, PhysicalTokenBlock
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
@@ -37,7 +37,7 @@ class BlockAllocatorBase(ABC):
     def free(self, block: PhysicalTokenBlock) -> None:
         pass
 
-    @abstractproperty
+    @abstractmethod
     def get_num_free_blocks(self) -> int:
         pass
 
@@ -280,12 +280,16 @@ class BlockSpaceManager:
             if (self.block_sliding_window is not None
                     and logical_idx >= self.block_sliding_window):
                 block = block_table[logical_idx % self.block_sliding_window]
+                # Set the reference counts of the token blocks.
+                block.ref_count = seq_group.num_seqs()
             elif self.enable_caching:
                 block = self.gpu_allocator.allocate(
                     seq.hash_of_block(logical_idx),
                     seq.num_hashed_tokens_of_block(logical_idx))
             else:
                 block = self.gpu_allocator.allocate()
+                # Set the reference counts of the token blocks.
+                block.ref_count = seq_group.num_seqs()
             block_table.append(block)
 
         # Assign the block table for each sequence.
