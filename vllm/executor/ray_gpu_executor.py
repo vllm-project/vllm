@@ -3,7 +3,6 @@ import copy
 from collections import defaultdict
 import os
 import pickle
-import importlib
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,

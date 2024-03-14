@@ -1,4 +1,3 @@
-import importlib
 from typing import Dict, List, Optional
 
 from vllm.lora.request import LoRARequest

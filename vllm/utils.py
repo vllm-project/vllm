@@ -314,12 +314,15 @@ def create_kv_caches_with_random(
 
 _PIN_MEMORY_WARNING_PRINTED = False
 
+
 def pin_memory_available() -> bool:
+
     def print_warning_once(msg: str) -> None:
         global _PIN_MEMORY_WARNING_PRINTED
         if not _PIN_MEMORY_WARNING_PRINTED:
             _PIN_MEMORY_WARNING_PRINTED = True
             logger.warning(msg)
+
     if in_wsl():
         # Pinning memory in WSL is not supported.
         # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications

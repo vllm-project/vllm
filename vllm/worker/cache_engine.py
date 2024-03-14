@@ -5,7 +5,8 @@ import torch
 
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import (is_neuron, pin_memory_available, STR_DTYPE_TO_TORCH_DTYPE)
+from vllm.utils import (is_neuron, pin_memory_available,
+                        STR_DTYPE_TO_TORCH_DTYPE)
 
 logger = init_logger(__name__)
 
