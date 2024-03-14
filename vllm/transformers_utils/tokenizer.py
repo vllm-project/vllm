@@ -16,6 +16,8 @@ def get_cached_tokenizer(
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     """Get tokenizer with cached properties.
 
+    This will patch the tokenizer object in place.
+
     By default, transformers will recompute multiple tokenizer properties
     each time they are called, leading to a significant slowdown. This
     function caches these properties for faster access."""
