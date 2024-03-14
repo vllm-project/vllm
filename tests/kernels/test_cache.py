@@ -257,7 +257,7 @@ def test_swap_blocks(
         assert torch.allclose(src_value_caches_clone[src].cpu(),
                               dist_value_caches[0][dst].cpu())
 
-
+@pytest.mark.skipif(not is_hip(), reason="FP8 conversion test requires e4m3")
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
