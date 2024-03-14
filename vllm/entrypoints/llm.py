@@ -10,7 +10,6 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.utils import Counter
 
-
 class LLM:
     """An LLM for generating texts from given prompts and sampling parameters.
 
@@ -126,6 +125,7 @@ class LLM:
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
+        stream: bool = False
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -171,7 +171,10 @@ class LLM:
                               sampling_params,
                               token_ids,
                               lora_request=lora_request)
-        return self._run_engine(use_tqdm)
+        if stream:
+            return self._stream_engine()
+        else:
+            return self._run_engine(use_tqdm)
 
     def _add_request(
         self,
@@ -187,6 +190,13 @@ class LLM:
                                     prompt_token_ids,
                                     lora_request=lora_request)
 
+    def _stream_engine(self):
+        # Run the engine.
+        while self.llm_engine.has_unfinished_requests():
+            step_outputs = self.llm_engine.step()
+            for output in step_outputs:
+                yield output
+                    
     def _run_engine(self, use_tqdm: bool) -> List[RequestOutput]:
         # Initialize tqdm.
         if use_tqdm:
