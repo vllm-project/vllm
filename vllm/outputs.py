@@ -87,32 +87,33 @@ class RequestOutput:
 
     @classmethod
     def from_seq_group(cls, seq_group: SequenceGroup) -> "RequestOutput":
-        # Get the top-n sequences.
-        n = seq_group.sampling_params.n
         seqs = seq_group.get_seqs()
-        if seq_group.sampling_params.use_beam_search:
-            sorting_key = lambda seq: seq.get_beam_search_score(
-                seq_group.sampling_params.length_penalty)
+        if len(seqs) == 1:
+            top_n_seqs = seqs
         else:
-            sorting_key = lambda seq: seq.get_cumulative_logprob()
-        sorted_seqs = sorted(seqs, key=sorting_key, reverse=True)
-        top_n_seqs = sorted_seqs[:n]
+            # Get the top-n sequences.
+            n = seq_group.sampling_params.n
+            if seq_group.sampling_params.use_beam_search:
+                sorting_key = lambda seq: seq.get_beam_search_score(
+                    seq_group.sampling_params.length_penalty)
+            else:
+                sorting_key = lambda seq: seq.get_cumulative_logprob()
+            sorted_seqs = sorted(seqs, key=sorting_key, reverse=True)
+            top_n_seqs = sorted_seqs[:n]
 
         # Create the outputs.
-        outputs: List[CompletionOutput] = []
-        for seq in top_n_seqs:
-            logprobs = seq.output_logprobs
-            if seq_group.sampling_params.logprobs is None:
-                # NOTE: We need to take care of this case because the sequence
-                # always has the logprobs of the sampled tokens even if the
-                # logprobs are not requested.
-                logprobs = None
-            finshed_reason = SequenceStatus.get_finished_reason(seq.status)
-            output = CompletionOutput(seqs.index(seq), seq.output_text,
-                                      seq.get_output_token_ids(),
-                                      seq.get_cumulative_logprob(), logprobs,
-                                      finshed_reason)
-            outputs.append(output)
+        # NOTE: We need omit logprobs here explicitly because the sequence
+        # always has the logprobs of the sampled tokens even if the
+        # logprobs are not requested.
+        include_logprobs = seq_group.sampling_params.logprobs
+        outputs = [
+            CompletionOutput(seqs.index(seq), seq.output_text,
+                             seq.get_output_token_ids(),
+                             seq.get_cumulative_logprob(),
+                             seq.output_logprobs if include_logprobs else None,
+                             SequenceStatus.get_finished_reason(seq.status))
+            for seq in top_n_seqs
+        ]
 
         # Every sequence in the sequence group should have the same prompt.
         prompt = seq_group.prompt
