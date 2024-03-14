@@ -11,7 +11,7 @@ from vllm.transformers_utils.tokenizers import *
 logger = init_logger(__name__)
 
 
-def _get_cached_tokenizer(
+def get_cached_tokenizer(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     """Get tokenizer with cached properties.
@@ -98,7 +98,7 @@ def get_tokenizer(
         logger.warning(
             "Using a slow tokenizer. This might cause a significant "
             "slowdown. Consider using a fast tokenizer instead.")
-    return _get_cached_tokenizer(tokenizer)
+    return get_cached_tokenizer(tokenizer)
 
 
 def get_lora_tokenizer(lora_request: LoRARequest, *args,
