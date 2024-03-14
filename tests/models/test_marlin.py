@@ -17,6 +17,7 @@ Run `pytest tests/models/test_marlin.py`.
 
 import pytest
 import torch
+import gc
 from compare_utils import check_logprobs_close
 from dataclasses import dataclass
 from vllm.model_executor.layers.quantization import _QUANTIZATION_CONFIG_REGISTRY
@@ -45,7 +46,6 @@ model_pairs = [
 ]
 
 
-@pytest.mark.skip(reason="out of memory")
 @pytest.mark.flaky(reruns=2)
 @pytest.mark.skipif(marlin_not_supported,
                     reason="Marlin is not supported on this GPU type.")
@@ -67,11 +67,13 @@ def test_models(
     marlin_outputs = marlin_model.generate_greedy_logprobs(
         example_prompts, max_tokens, num_logprobs)
 
-    # Note: not sure why, but deleting just the model on Ada Lovelace
-    #   does not free the GPU memory. On Ampere, deleting the just model
-    #   frees the memory.
+    # vllm memory cleanup is poor. This seems to fix things.
+    # NOTE: upstream sync should use downstream version.
     del marlin_model.model.llm_engine.driver_worker
     del marlin_model
+
+    gc.collect()
+    torch.cuda.empty_cache()
 
     gptq_model = vllm_runner_nm(model_pair.model_gptq,
                                 dtype=dtype,
@@ -80,11 +82,12 @@ def test_models(
                                                        max_tokens,
                                                        num_logprobs)
 
-    # Note: not sure why, but deleting just the model on Ada Lovelace
-    #   does not free the GPU memory. On Ampere, deleting the just model
-    #   frees the memory.
+    # vllm memory cleanup is poor. This seems to fix things.
+    # NOTE: upstream sync should use downstream version.
     del gptq_model.model.llm_engine.driver_worker
     del gptq_model
+    gc.collect()
+    torch.cuda.empty_cache()
 
     # loop through the prompts
     # use logprobs or else this will consistently run out of memory
