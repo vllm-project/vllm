@@ -143,7 +143,6 @@ def test_paged_attention(
     num_query_heads, num_kv_heads = num_heads
     query = torch.empty(num_seqs, num_query_heads, head_size, dtype=dtype)
     query.uniform_(-scale, scale)
-    gpu_id = f"cuda:{device}"
 
     assert num_query_heads % num_kv_heads == 0
     num_queries_per_kv = num_query_heads // num_kv_heads
@@ -238,14 +237,14 @@ def test_paged_attention(
                            block_size, x)
         dequantized_key_cache = torch.empty(size=key_cache_shape,
                                             dtype=dtype,
-                                            device=gpu_id)
+                                            device=device)
         cache_ops.convert_fp8(key_cache, dequantized_key_cache)
         key_cache = dequantized_key_cache
 
         value_cache_shape = value_cache.shape
         dequantized_value_cache = torch.empty(size=value_cache_shape,
                                               dtype=dtype,
-                                              device=gpu_id)
+                                              device=device)
         cache_ops.convert_fp8(value_cache, dequantized_value_cache)
         value_cache = dequantized_value_cache
 
