@@ -120,6 +120,7 @@ def run_grid(bs, method):
     existing_content[str(bs)] = best_config
     with open(filename, "w") as f:
         json.dump(existing_content, f, indent=4)
+        f.write("\n")
 
 
 def run_timing(num_calls: int, bs: int, d_model: int, num_total_experts: int,
