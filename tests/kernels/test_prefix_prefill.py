@@ -359,6 +359,7 @@ def test_contexted_kv_attention_xformer(
                           b_subquery_start_loc, b_seq_len, b_ctx_len, max_input_len)
     torch.cuda.synchronize()
 
+    # Full query
     attn_bias = BlockDiagonalCausalMask.from_seqlens(seq_lens)
     scale = float(1.0 / (head_size**0.5))
     output_ref = xformer_attention(query, key, value, attn_bias, scale,
@@ -368,7 +369,7 @@ def test_contexted_kv_attention_xformer(
     atol = get_default_atol(context_subquery_output)
     rtol = get_default_rtol(context_subquery_output)
 
-    # attn_bias = LowerTriangularFromBottomRightMask()
+    # Attention with subquery.
     attn_bias = BlockDiagonalCausalFromBottomRightMask.from_seqlens(subquery_lens, seq_lens)
     scale = float(1.0 / (head_size**0.5))
     xformer_subquery_output = xformer_attention(subquery, key, value, attn_bias, scale,

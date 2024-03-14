@@ -7,10 +7,10 @@ import pytest
 MODELS = [
     # "facebook/opt-125m",
     # "meta-llama/Llama-2-7b-hf",
-    # "mistralai/Mistral-7B-v0.1",
+    "mistralai/Mistral-7B-v0.1",
     # "Deci/DeciLM-7b",
     # "tiiuae/falcon-7b",
-    "gpt2",
+    # "gpt2",
     # "JackFram/llama-68m",
     # "bigcode/tiny_starcoder_py",
     # "EleutherAI/gpt-j-6b",
@@ -30,7 +30,7 @@ MODELS = [
 # @pytest.mark.parametrize("enforce_eager", [False, True])
 @pytest.mark.parametrize("enforce_eager", [False])
 # @pytest.mark.parametrize("max_chunked_prefill_len", [-1, 100000000])
-@pytest.mark.parametrize("max_chunked_prefill_len", [-1])
+@pytest.mark.parametrize("max_chunked_prefill_len", [16])
 def test_models(
     hf_runner,
     vllm_runner,
@@ -50,7 +50,7 @@ def test_models(
     torch.cuda.empty_cache()
 
     vllm_model = vllm_runner(
-        model, dtype=dtype,
+        model, dtype=dtype, 
         enforce_eager=enforce_eager,
         max_chunked_prefill_len=max_chunked_prefill_len)
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)

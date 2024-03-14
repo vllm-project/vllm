@@ -172,7 +172,8 @@ class XFormersBackend:
                     op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if
                     (is_hip()) else None,
                 )
-                output[:num_prompt_tokens] = out.view_as(query)
+
+                output[:num_prompt_tokens] = out.view_as(output)
 
             else:
                 # prefix-enabled attention
