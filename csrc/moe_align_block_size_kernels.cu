@@ -12,7 +12,7 @@
 namespace vllm {
 
 namespace {
-__device__ int32_t index(int32_t total_col, int32_t row, int32_t col) {
+__device__ __forceinline__ int32_t index(int32_t total_col, int32_t row, int32_t col) {
     return row * total_col + col;
 }
 }
@@ -110,7 +110,7 @@ void moe_align_block_size(
 
         // set dynamic shared mem
         auto kernel = vllm::moe_align_block_size_kernel<scalar_t>;
-        TORCH_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem) == cudaSuccess);
+        TORCH_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem));
         kernel<<<1, num_experts, shared_mem, stream>>>(
             topk_ids.data_ptr<scalar_t>(),
             sorted_token_ids.data_ptr<int32_t>(), 
