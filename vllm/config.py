@@ -232,11 +232,14 @@ class ModelConfig:
                 f"({pipeline_parallel_size}).")
 
     def get_sliding_window(self) -> Optional[int]:
+        # The use_sliding_window is a new configuration option introduced in Qwen 1.5 that
+        # controls whether to use a sliding window and its default value is false.
+        # The default value of the sliding_window is no longer None
+        # Add this judgment to avoid
+        # 'AssertionError: Prefix caching is currently not supported with sliding window attention'
+        # when using prefix caching with qwen1.5 and use_sliding_window is false
         return (getattr(self.hf_config, "sliding_window", None)
-                if self.get_use_sliding_window() else None)
-
-    def get_use_sliding_window(self) -> bool:
-        return getattr(self.hf_config, "use_sliding_window", False)
+                if getattr(self.hf_config, "use_sliding_window", True) else None)
 
     def get_vocab_size(self) -> int:
         return self.hf_config.vocab_size
