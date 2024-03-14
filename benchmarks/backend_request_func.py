@@ -3,8 +3,8 @@ import os
 import sys
 import time
 import traceback
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Optional, List
 
 import aiohttp
 from tqdm.asyncio import tqdm
@@ -28,7 +28,9 @@ class RequestFuncOutput:
     generated_text: str = ""
     success: bool = False
     latency: float = 0
-    ttft: float = 0
+    ttft: float = 0  # Time to first token
+    itl: List[float] = field(
+        default_factory=list)  # List of inter-token latencies
     prompt_len: int = 0
     error: str = ""
 
@@ -61,20 +63,30 @@ async def async_request_tgi(
         try:
             async with session.post(url=api_url, json=payload) as response:
                 if response.status == 200:
-                    async for data in response.content.iter_any():
-                        if "data" in data.decode("utf-8"):
-                            if ttft == 0:
-                                ttft = time.perf_counter() - st
-                                output.ttft = ttft
-                            body = data.decode("utf-8")
-                    output.latency = time.perf_counter() - st
+                    async for chunk in response.content:
+                        chunk = chunk.strip()
+                        if not chunk:
+                            continue
 
-                    body = data.decode("utf-8").lstrip("data:")
-                    output.generated_text = json.loads(body)["generated_text"]
+                        chunk = chunk.decode("utf-8").lstrip("data:")
+
+                        body = json.loads(chunk)
+                        timestamp = time.perf_counter()
+                        # First token
+                        if ttft == 0:
+                            ttft = time.perf_counter() - st
+                            output.ttft = ttft
+
+                        # Decoding phase
+                        else:
+                            output.itl.append(timestamp -
+                                              most_recent_timestamp)
+
+                        most_recent_timestamp = timestamp
+
+                    output.latency = most_recent_timestamp - st
                     output.success = True
-                else:
-                    output.error = response.reason
-                    output.success = False
+                    output.generated_text = body["generated_text"]
         except:
             output.success = False
             exc_info = sys.exc_info()
@@ -157,19 +169,34 @@ async def async_request_trt_llm(
         }
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
-        ttft = 0
 
+        ttft = 0
         st = time.perf_counter()
         try:
             async with session.post(url=api_url, json=payload) as response:
                 if response.status == 200:
-                    async for data in response.content.iter_any():
+                    async for chunk in response.content:
+                        chunk = chunk.strip()
+                        if not chunk:
+                            continue
+
+                        chunk = chunk.decode("utf-8").lstrip("data:")
+
+                        body = json.loads(chunk)
+                        timestamp = time.perf_counter()
+                        # First token
                         if ttft == 0:
                             ttft = time.perf_counter() - st
                             output.ttft = ttft
-                    output.latency = time.perf_counter() - st
 
-                    body = data.decode("utf-8").lstrip("data:")
+                        # Decoding phase
+                        else:
+                            output.itl.append(timestamp -
+                                              most_recent_timestamp)
+
+                        most_recent_timestamp = timestamp
+
+                    output.latency = most_recent_timestamp - st
                     output.generated_text = json.loads(body)["text_output"]
                     output.success = True
 
@@ -206,8 +233,9 @@ async def async_request_deepspeed_mii(
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
 
-        # DeepSpeed-MII doesn't support streaming as of Jan 28 2024, will use 0 as placeholder.
-        # https://github.com/microsoft/DeepSpeed-MII/pull/311
+        # NOTE: DeepSpeed-MII doesn't support streaming as of Jan 28 2024,
+        # will use 0 as placeholder.
+        # See https://github.com/microsoft/DeepSpeed-MII/pull/311
         output.ttft = 0
 
         st = time.perf_counter()
@@ -264,27 +292,37 @@ async def async_request_openai_completions(
                                     headers=headers) as response:
                 if response.status == 200:
                     async for chunk in response.content:
-                        if ttft == 0:
-                            ttft = time.perf_counter() - st
-                            output.ttft = ttft
-
                         chunk = chunk.strip()
                         if not chunk:
                             continue
 
                         chunk = chunk.decode("utf-8").lstrip("data: ")
                         if chunk == "[DONE]":
-                            latency = time.perf_counter() - st
+                            continue
                         else:
                             body = json.loads(chunk)
+                            timestamp = time.perf_counter()
+                            # First token
+                            if ttft == 0:
+                                ttft = time.perf_counter() - st
+                                output.ttft = ttft
+
+                            # Decoding phase
+                            # NOTE: completion API has a last usage summary response
+                            # wihout a token so we do not want to include in e2e latency
+                            elif body.get("usage", None) is None:
+                                output.itl.append(timestamp -
+                                                  most_recent_timestamp)
+
+                            else:
+                                latency = most_recent_timestamp - st
+
+                            most_recent_timestamp = timestamp
                             generated_text += body["choices"][0]["text"]
 
                     output.generated_text = generated_text
                     output.success = True
                     output.latency = latency
-                else:
-                    output.error = response.reason
-                    output.success = False
         except:
             output.success = False
             exc_info = sys.exc_info()
@@ -334,10 +372,6 @@ async def async_request_openai_chat_completions(
                                     headers=headers) as response:
                 if response.status == 200:
                     async for chunk in response.content:
-                        if ttft == 0:
-                            ttft = time.perf_counter() - st
-                            output.ttft = ttft
-
                         chunk = chunk.strip()
                         if not chunk:
                             continue
@@ -346,10 +380,24 @@ async def async_request_openai_chat_completions(
                         if chunk == "[DONE]":
                             latency = time.perf_counter() - st
                         else:
+                            timestamp = time.perf_counter()
                             body = json.loads(chunk)
+
                             if "content" in body["choices"][0]["delta"]:
+                                # First token
+                                if ttft == 0:
+                                    ttft = time.perf_counter() - st
+                                    output.ttft = ttft
+
+                                # Decoding phase
+                                else:
+                                    output.itl.append(timestamp -
+                                                      most_recent_timestamp)
+
                                 generated_text += body["choices"][0]["delta"][
                                     "content"]
+
+                            most_recent_timestamp = timestamp
 
                     output.generated_text = generated_text
                     output.success = True

@@ -114,7 +114,7 @@ def sample_sonnet_requests(
     output_len: int,
     prefix_len: int,
     tokenizer: PreTrainedTokenizerBase,
-) -> List[Tuple[str, int, int]]:
+) -> List[Tuple[str, str, int, int]]:
 
     assert input_len > prefix_len, "input_len must be greater than prefix_len."
 
@@ -128,17 +128,16 @@ def sample_sonnet_requests(
         len(token_ids) for token_ids in poem_token_ids) / len(poem_token_ids)
 
     # Base prefix for all requests.
+    base_prompt = "Pick as many lines as you can from these poem lines:\n",
     base_message = [
         {
             "role": "user",
-            "content":
-            "Pick as many lines as you can from these poem lines:\n",
+            "content": base_prompt,
         },
     ]
-    base_prompt = tokenizer.apply_chat_template(base_message,
-                                                add_generation_prompt=True,
-                                                tokenize=False)
-    base_prompt_offset = len(tokenizer(base_prompt).input_ids)
+    base_prompt_formatted = tokenizer.apply_chat_template(
+        base_message, add_generation_prompt=True, tokenize=False)
+    base_prompt_offset = len(tokenizer(base_prompt_formatted).input_ids)
 
     assert input_len > base_prompt_offset, f"input_len is too short, please specify a number higher than {base_prompt_offset}."
     num_input_lines = round(
@@ -158,19 +157,18 @@ def sample_sonnet_requests(
             prefix_lines +
             random.sample(poem_lines, num_input_lines - num_prefix_lines))
 
+        prompt = f"{base_prompt}{sampled_lines}"
         message = [
             {
-                "role":
-                "user",
-                "content":
-                f"Pick as many lines as you can from these poem lines:\n{sampled_lines}",
+                "role": "user",
+                "content": prompt,
             },
         ]
-        prompt = tokenizer.apply_chat_template(message,
-                                               add_generation_prompt=True,
-                                               tokenize=False)
-        prompt_len = len(tokenizer(prompt).input_ids)
-        sampled_requests.append((prompt, prompt_len, output_len))
+        prompt_formatted = tokenizer.apply_chat_template(
+            message, add_generation_prompt=True, tokenize=False)
+        prompt_len = len(tokenizer(prompt_formatted).input_ids)
+        sampled_requests.append(
+            (prompt, prompt_formatted, prompt_len, output_len))
 
     return sampled_requests
 
@@ -205,7 +203,15 @@ def calculate_metrics(
     ttfts = []
     for i in range(len(outputs)):
         if outputs[i].success:
-            output_len = len(tokenizer.encode(outputs[i].generated_text))
+
+            # NOTE: we use the number of stream responses as output length if
+            # the backend supports streaming, else count output tokens by tokenizing
+            # the generated text.
+            if len(outputs[i].itl):
+                output_len = len(outputs[i].itl)
+            else:
+                output_len = len(
+                    tokenizer(outputs[i].generated_text).input_ids)
             actual_output_lens.append(output_len)
             total_input += input_requests[i][1]
             if output_len > 1:
@@ -315,6 +321,8 @@ async def benchmark(
         "p99_tpot_ms": metrics.p99_tpot_ms,
         "input_lens": [output.prompt_len for output in outputs],
         "output_lens": actual_output_lens,
+        "ttfts": [output.ttft for output in outputs],
+        "itls": [output.itl for output in outputs],
         "generated_texts": [output.generated_text for output in outputs],
         "errors": [output.error for output in outputs],
     }
@@ -345,15 +353,33 @@ def main(args: argparse.Namespace):
             tokenizer=tokenizer)
 
     elif args.dataset_name == "sonnet":
-        assert tokenizer.chat_template or tokenizer.default_chat_template, "Tokenizer/model must have chat template for sonnet dataset."
-        input_requests = sample_sonnet_requests(
-            dataset_path=args.dataset_path,
-            num_requests=args.num_prompts,
-            input_len=args.input_len,
-            output_len=args.output_len,
-            prefix_len=args.prefix_len,
-            tokenizer=tokenizer,
-        )
+
+        # Do not format the prompt, pass to message directly
+        if args.backend == "openai-chat":
+            input_requests = sample_sonnet_requests(
+                dataset_path=args.dataset_path,
+                num_requests=args.num_prompts,
+                input_len=args.input_len,
+                output_len=args.output_len,
+                prefix_len=args.prefix_len,
+                tokenizer=tokenizer,
+            )
+            input_requests = [(prompt, prompt_len, output_len)
+                              for prompt, prompt_formatted, prompt_len,
+                              output_len in input_requests]
+        else:
+            assert tokenizer.chat_template or tokenizer.default_chat_template, "Tokenizer/model must have chat template for sonnet dataset."
+            input_requests = sample_sonnet_requests(
+                dataset_path=args.dataset_path,
+                num_requests=args.num_prompts,
+                input_len=args.input_len,
+                output_len=args.output_len,
+                prefix_len=args.prefix_len,
+                tokenizer=tokenizer,
+            )
+            input_requests = [(prompt_formatted, prompt_len, output_len)
+                              for prompt, prompt_formatted, prompt_len,
+                              output_len in input_requests]
 
     else:
         raise ValueError(f"Unknown dataset: {args.dataset_name}")
@@ -387,8 +413,8 @@ def main(args: argparse.Namespace):
         result_json["num_prompts"] = args.num_prompts
 
         # Traffic
-        result_json["request_rate"] = (
-            args.request_rate if args.request_rate < float("inf") else "inf")
+        result_json["request_rate"] = (args.request_rate if args.request_rate
+                                       < float("inf") else "inf")
 
         # Merge with benchmark result
         result_json = {**result_json, **benchmark_result}
