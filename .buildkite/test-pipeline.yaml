@@ -13,7 +13,7 @@ steps:
 
 - label: Basic Correctness Test
   command: pytest -v -s --forked basic_correctness
-  
+
 - label: Core Test
   command: pytest -v -s core
 
