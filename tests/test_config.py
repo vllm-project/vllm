@@ -4,7 +4,8 @@ from vllm.config import ModelConfig
 def test_get_sliding_window():
     TEST_SLIDING_WINDOW = 4096
     # Test that the sliding window is correctly computed.
-    # For Qwen1.5/Qwen2, get_sliding_window() should be None when use_sliding_window is False.
+    # For Qwen1.5/Qwen2, get_sliding_window() should be None
+    # when use_sliding_window is False.
     qwen2_model_config = ModelConfig(
         "Qwen/Qwen1.5-7B",
         "Qwen/Qwen1.5-7B",
@@ -36,7 +37,7 @@ def test_get_sliding_window():
         revision=None,
     )
     mistral_model_config.hf_config.sliding_window = None
-    assert mistral_model_config.get_sliding_window() == None
+    assert mistral_model_config.get_sliding_window() is None
 
     mistral_model_config.hf_config.sliding_window = TEST_SLIDING_WINDOW
     assert mistral_model_config.get_sliding_window() == TEST_SLIDING_WINDOW
