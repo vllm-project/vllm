@@ -48,6 +48,7 @@ def device_synchronize(device_config: DeviceConfig):
     else:
         pass
 
+
 def get_total_xpu_memory(xpu: int = 0) -> int:
     """Returns the total memory of the XPU in bytes."""
     if is_xpu():
@@ -72,7 +73,7 @@ def get_distribute_backend(device_config: DeviceConfig):
     elif is_xpu() and device_config.device_type == "xpu":
         backend = "ccl"
         try:
-            import oneccl_bindings_for_pytorch
+            import oneccl_bindings_for_pytorch  # noqa: F401
         except ImportError:
             pass
     else:

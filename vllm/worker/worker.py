@@ -20,7 +20,8 @@ from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
 from vllm.lora.request import LoRARequest
 from vllm.utils import is_xpu
-from vllm.device_utils import device_empty_cache, device_synchronize, mem_get_info, get_distribute_backend
+from vllm.device_utils import (device_empty_cache, device_synchronize,
+                               mem_get_info, get_distribute_backend)
 
 
 class Worker:
@@ -92,7 +93,7 @@ class Worker:
             self.device = torch.device(f"xpu:{self.local_rank}")
             torch.xpu.set_device(self.device)
             device_empty_cache(self.device_config)
-            self.init_gpu_memory = mem_get_info(self.device_config)[0]            
+            self.init_gpu_memory = mem_get_info(self.device_config)[0]
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")

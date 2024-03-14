@@ -133,7 +133,7 @@ def is_neuron() -> bool:
 
 def is_xpu() -> bool:
     try:
-        import intel_extension_for_pytorch
+        import intel_extension_for_pytorch  # noqa: F401
     except ImportError:
         return False
     return hasattr(torch, "xpu") and torch.xpu.is_available()
@@ -358,7 +358,7 @@ class measure_device_memory:
             mem = torch.cuda.max_memory_allocated(self.device)
         if torch.xpu.is_available():
             torch.xpu.reset_peak_memory_stats(self.device)
-            mem = torch.xpu.max_memory_allocated(self.device)            
+            mem = torch.xpu.max_memory_allocated(self.device)
         return mem
 
     def __enter__(self):

@@ -21,7 +21,7 @@ from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
-from vllm.utils import measure_device_memory
+from vllm.utils import measure_device_memory, is_xpu
 from vllm.device_utils import device_synchronize, could_pin_memory
 
 logger = init_logger(__name__)
@@ -212,6 +212,13 @@ class ModelRunner:
 
         max_prompt_len = max(subquery_lens)
         assert max_prompt_len > 0
+        # for PVC, sdpa kernel requires 8 bytes aligned on leading dimension
+        if is_xpu():
+
+            def align_to_8(len):
+                return (len + 8 - 1) & (~0b111)
+
+            max_prompt_len = align_to_8(max_prompt_len)
         input_tokens = _make_tensor_with_pad(input_tokens,
                                              max_prompt_len,
                                              pad=0,

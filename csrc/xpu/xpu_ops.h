@@ -3,6 +3,17 @@
 void rotary_embedding(torch::Tensor &positions, torch::Tensor &query,
                           torch::Tensor &key, int head_size,
                           torch::Tensor &cos_sin_cache, bool is_neox);
+void batched_rotary_embedding(
+  torch::Tensor& positions,
+  torch::Tensor& query,
+  torch::Tensor& key,
+  int head_size,
+  torch::Tensor& cos_sin_cache,
+  bool is_neox,
+  int rot_dim,
+  torch::Tensor& cos_sin_cache_offsets) {
+  TORCH_CHECK(false, "batched_rotary_embedding is not supported on XPU.");
+}
 
 void silu_and_mul(torch::Tensor &out, torch::Tensor &input);
 void gelu_and_mul(torch::Tensor &out, torch::Tensor &input);
@@ -10,6 +21,13 @@ void gelu_and_mul(torch::Tensor &out, torch::Tensor &input);
 void gelu_new(torch::Tensor &out, torch::Tensor &input);
 
 void gelu_fast(torch::Tensor &out, torch::Tensor &input);
+
+
+void gelu_tanh_and_mul(
+  torch::Tensor& out,
+  torch::Tensor& input) {
+  TORCH_CHECK(false, "gelu_tanh_and_mul is not supported on XPU.");
+}
 
 void paged_attention_v1(
     torch::Tensor &out, torch::Tensor &query, torch::Tensor &key_cache,
