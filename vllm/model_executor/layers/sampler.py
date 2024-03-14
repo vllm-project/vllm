@@ -164,7 +164,7 @@ def _apply_min_tokens_penalty(
         start_idx += len(seq_ids)
 
     # use zip to split pairs into a list for each dimension for indexing
-    logits[tuple(zip(*coords_to_penalize))]
+    logits[tuple(zip(*coords_to_penalize))] = -float("inf")
 
     return logits
 
