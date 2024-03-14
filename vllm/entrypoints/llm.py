@@ -189,7 +189,7 @@ class LLM:
                                     prompt_token_ids,
                                     lora_request=lora_request)
 
-    def _stream_engine(self) -> Generator[RequestOutput]:
+    def _stream_engine(self) -> Generator[RequestOutput, any, None]:
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
