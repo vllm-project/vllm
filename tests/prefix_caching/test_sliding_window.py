@@ -25,7 +25,7 @@ def test_sliding_window_value():
     default_use_sliding_window = hf_config.use_sliding_window
     assert default_sliding_window is not None, \
         ("In Qwen1.5, sliding_window default value should not be None")
-    assert default_use_sliding_window == False, \
+    assert default_use_sliding_window is False, \
         ("In Qwen1.5, use_sliding_window default value should be True")
 
     # verify the return value of get_sliding_window function
@@ -38,8 +38,8 @@ def test_sliding_window_value():
     qwen.llm_engine.model_config.hf_config.use_sliding_window = True
     get_sliding_window = qwen.llm_engine.model_config.get_sliding_window()
     assert get_sliding_window == default_sliding_window, \
-        (f"In Qwen1.5, sliding_window should be "
-         "{default_sliding_window}, because use_sliding_window is True")
+        ("In Qwen1.5, sliding_window should be "
+         f"{default_sliding_window}, because use_sliding_window is True")
 
 
 def test_sliding_window_with_other_model():
