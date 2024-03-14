@@ -85,7 +85,7 @@ def dummy_model() -> nn.Module:
             ("outact", nn.Sigmoid()),
             # Special handling for lm_head & sampler
             ("lm_head", ParallelLMHead(512, 10)),
-            ("sampler", Sampler(512))
+            ("sampler", Sampler())
         ]))
     model.config = MagicMock()
     return model
@@ -110,7 +110,7 @@ def dummy_model_gate_up() -> nn.Module:
             ("outact", nn.Sigmoid()),
             # Special handling for lm_head & sampler
             ("lm_head", ParallelLMHead(512, 10)),
-            ("sampler", Sampler(512))
+            ("sampler", Sampler())
         ]))
     model.config = MagicMock()
     return model
