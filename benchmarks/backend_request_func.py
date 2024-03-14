@@ -309,7 +309,7 @@ async def async_request_openai_completions(
 
                             # Decoding phase
                             # NOTE: completion API has a last usage summary response
-                            # wihout a token so we do not want to include in e2e latency
+                            # without a token so we do not want to include in e2e latency
                             elif body.get("usage", None) is None:
                                 output.itl.append(timestamp -
                                                   most_recent_timestamp)
