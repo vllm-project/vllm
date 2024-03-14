@@ -73,7 +73,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         weight = weights["weight"]
         if self.separate_bias_add:
-            if bias is not None:
+            if bias :
                 return F.linear(x, weight) + bias
             return F.linear(x, weight)
         return F.linear(x, weight, bias)
@@ -356,7 +356,7 @@ class RefMergedColumnParallelLinear(MergedColumnParallelLinear):
             linear_method,
         )
 
-        
+
 class QKVParallelLinear(ColumnParallelLinear):
     """Linear layers for the attention's QKV transformation.
 
