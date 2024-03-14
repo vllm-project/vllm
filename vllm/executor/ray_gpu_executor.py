@@ -430,8 +430,7 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
                 "blocks_to_swap_in": blocks_to_swap_in,
                 "blocks_to_swap_out": blocks_to_swap_out,
                 "blocks_to_copy": blocks_to_copy,
-            },
-            use_ray_compiled_dag=USE_RAY_COMPILED_DAG)
+            })
 
         # Only the driver worker returns the sampling results.
         output = all_outputs[0]
