@@ -11,11 +11,7 @@ from vllm import LLM
 #    when using other model
 def test_sliding_window_value():
     qwen = LLM(
-        model="Qwen/Qwen-0.5B",
-        enforce_eager=True,
-        download_dir=None,
-        dtype="float16",
-        tokenizer_mode='auto'
+        model="Qwen/Qwen-0.5B"
     )
 
     # verify default values
@@ -43,11 +39,7 @@ def test_sliding_window_value():
 
 def test_sliding_window_with_other_model():
     facebook = LLM(
-        model="facebook/opt-125m",
-        enforce_eager=True,
-        download_dir=None,
-        dtype="float16",
-        tokenizer_mode='auto'
+        model="facebook/opt-125m"
     )
 
     # verify the return value of get_sliding_window function
