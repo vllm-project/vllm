@@ -48,7 +48,6 @@ class RayGPUExecutor(ExecutorBase):
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
     ) -> None:
-        self.architecture = None
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config

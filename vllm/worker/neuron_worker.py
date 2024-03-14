@@ -51,8 +51,6 @@ class Worker:
                                         device_config,
                                         lora_config=self.lora_config,
                                         is_driver_worker=is_driver_worker)
-        #Available after call to load_model()
-        self.architecture = None
         # Uninitialized cache engine. Will be initialized by
         # self.init_cache_engine().
         self.cache_config = None
@@ -72,7 +70,6 @@ class Worker:
 
     def load_model(self):
         self.model_runner.load_model()
-        self.architecture = self.model_runner.architecture
 
     @torch.inference_mode()
     def profile_num_available_blocks(

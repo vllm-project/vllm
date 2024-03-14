@@ -11,6 +11,7 @@ from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.executor.executor_base import ExecutorBase
 from vllm.engine.metrics import StatLogger, Stats
+from vllm.model_executor import get_architecture
 from vllm.engine.ray_utils import initialize_ray_cluster
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -107,8 +108,8 @@ class LLMEngine:
 
         #If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
-            usage_message.report_usage(self.model_executor.architecture,
-                                       usage_context)
+            usage_message.report_usage(
+                get_architecture(model_config, device_config), usage_context)
 
         # Create the scheduler.
         # NOTE: the cache_config here have been updated with the numbers of
