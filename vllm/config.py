@@ -416,8 +416,7 @@ class ParallelConfig:
         self.placement_group = placement_group
 
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
-        if self.world_size > 1 and not is_neuron():
-            # Neuron worker uses threading instead of ray for parallelism.
+        if self.world_size > 1:
             self.worker_use_ray = True
         self._verify_args()
 
