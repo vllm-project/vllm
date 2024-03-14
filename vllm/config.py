@@ -103,6 +103,7 @@ class ModelConfig:
             # download model from ModelScope hub,
             # lazy import so that modelscope is not required for normal use.
             from modelscope.hub.snapshot_download import snapshot_download  # pylint: disable=C
+
             if not os.path.exists(model):
                 model_path = snapshot_download(model_id=model,
                                                cache_dir=download_dir,
@@ -139,7 +140,7 @@ class ModelConfig:
                 if (f not in rocm_not_supported_load_format)
             ]
             raise ValueError(
-                f"load format \'{load_format}\' is not supported in ROCm. "
+                f"load format '{load_format}' is not supported in ROCm. "
                 f"Supported load format are "
                 f"{rocm_supported_load_format}")
 
@@ -232,6 +233,15 @@ class ModelConfig:
                 f"({pipeline_parallel_size}).")
 
     def get_sliding_window(self) -> Optional[int]:
+        """Get the sliding window size, or None if disabled.
+        """
+
+        # Some models, like Qwen2 and Qwen1.5, use `use_sliding_window` in
+        # addition to sliding window size. We check if that field is present
+        # and if it's False, return None.
+        if (hasattr(self.hf_config, "use_sliding_window")
+                and not self.hf_config.use_sliding_window):
+            return None
         return getattr(self.hf_config, "sliding_window", None)
 
     def get_vocab_size(self) -> int:
@@ -624,7 +634,7 @@ def _get_and_verify_dtype(
             k for k, v in _STR_DTYPE_TO_TORCH_DTYPE.items()
             if (k not in _ROCM_NOT_SUPPORTED_DTYPE)
         ]
-        raise ValueError(f"dtype \'{dtype}\' is not supported in ROCm. "
+        raise ValueError(f"dtype '{dtype}' is not supported in ROCm. "
                          f"Supported dtypes are {rocm_supported_dtypes}")
 
     # Verify the dtype.
