@@ -805,6 +805,10 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
     @property
     def vocab_size(self):
         return self.base_layer.vocab_size
+    
+    @property
+    def scale(self):
+        return self.base_layer.scale
 
     @property
     def org_vocab_size(self):
