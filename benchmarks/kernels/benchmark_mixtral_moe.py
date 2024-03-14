@@ -103,9 +103,9 @@ def run_grid(bs, method):
                 best_config = config
                 best_time_us = kernel_dur_us
 
-            print(
-                f'{kernel_dur_us=:.1f} {model_dur_ms=:.1f} {bs=} {tp_size=} {top_k=} {num_total_experts=} {d_model=} {model_intermediate_size=} {num_layers=}'
-            )
+            print(f'{kernel_dur_us=:.1f} {model_dur_ms=:.1f}'
+                  f' {bs=} {tp_size=} {top_k=} {num_total_experts=} '
+                  f'{d_model=} {model_intermediate_size=} {num_layers=}')
 
     print("best_time_us", best_time_us)
     print("best_config", best_config)
