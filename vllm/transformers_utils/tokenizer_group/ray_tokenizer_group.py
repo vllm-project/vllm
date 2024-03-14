@@ -14,19 +14,6 @@ from vllm.transformers_utils.tokenizer_group.tokenizer_group import (
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 
-def _carry_over_env_vars_to_runtime_env(runtime_env: dict) -> None:
-    """Copy over all current process environment variables to the runtime_env.
-
-    The variables in runtime_env will take precedence over the current process
-    environment variables.
-
-    runtime_env will be modified in place."""
-    env_vars = os.environ.copy()
-    runtime_env.setdefault("env_vars", {})
-    env_vars.update(runtime_env["env_vars"])
-    runtime_env["env_vars"] = env_vars
-
-
 class RayTokenizerGroupPool(BaseTokenizerGroup):
     """A Ray-based pool of TokenizerGroups for async tokenization."""
 
@@ -164,3 +151,16 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
     ) -> "PreTrainedTokenizer":
         return await self._local_tokenizer_group.get_lora_tokenizer_async(
             lora_request)
+
+
+def _carry_over_env_vars_to_runtime_env(runtime_env: dict) -> None:
+    """Copy over all current process environment variables to the runtime_env.
+
+    The variables in runtime_env will take precedence over the current process
+    environment variables.
+
+    runtime_env will be modified in place."""
+    env_vars = os.environ.copy()
+    runtime_env.setdefault("env_vars", {})
+    env_vars.update(runtime_env["env_vars"])
+    runtime_env["env_vars"] = env_vars

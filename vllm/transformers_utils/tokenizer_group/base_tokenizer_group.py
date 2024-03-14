@@ -37,7 +37,6 @@ class BaseTokenizerGroup(ABC):
     def get_lora_tokenizer(
             self,
             lora_request: Optional[LoRARequest]) -> "PreTrainedTokenizer":
-        ...
         """Get a tokenizer for a LoRA request."""
         pass
 
