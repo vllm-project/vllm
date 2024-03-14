@@ -42,8 +42,7 @@ def test_models(
     enforce_eager: bool,
     num,
 ) -> None:
-    """ verify the flash attention has the same output
-    as page attention """
+    """ verify the chunked prefill attention has the same output as vLLM."""
     if torch.cuda.device_count() < tensor_parallel_size:
         pytest.skip(
             f"{torch.cuda.device_count()=} is smaller than {tensor_parallel_size=}"
@@ -72,8 +71,6 @@ def test_models(
         return token_ids_list, output_str_list
 
     vllm_token_ids, vllm_str = evaluate(lambda: vllm_runner(model, dtype=dtype, enforce_eager=enforce_eager))
-    # import os
-    # os.environ["ENABLE"] = "1"
     chunked_prefill_token_ids, chunked_str = evaluate(lambda: vllm_runner(
         model,
         dtype=dtype,
