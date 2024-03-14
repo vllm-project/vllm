@@ -329,34 +329,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         param_data.copy_(loaded_weight)
 
 
-class RefMergedColumnParallelLinear(MergedColumnParallelLinear):
-    """
-    This class is the same as `MergedColumnParallelLinear`, but it 
-    is used to differentiate from the `MergedColumnParallelLinear` when
-    using `LoRA`.
-    """
-
-    def __init__(
-        self,
-        input_size: int,
-        output_sizes: List[int],
-        bias: bool = True,
-        gather_output: bool = False,
-        skip_bias_add: bool = False,
-        params_dtype: Optional[torch.dtype] = None,
-        linear_method: Optional[LinearMethodBase] = None,
-    ):
-        super().__init__(
-            input_size,
-            output_sizes,
-            bias,
-            gather_output,
-            skip_bias_add,
-            params_dtype,
-            linear_method,
-        )
-
-
 class QKVParallelLinear(ColumnParallelLinear):
     """Linear layers for the attention's QKV transformation.
 
@@ -497,34 +469,6 @@ class QKVParallelLinear(ColumnParallelLinear):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
-
-class RefQKVParallelLinear(QKVParallelLinear):
-    """
-    This class is the same as `QKVParallelLinear`, but it is used to 
-    differentiate from the `QKVParallelLinear` when using `LoRA`.
-    """
-
-    def __init__(
-        self,
-        hidden_size: int,
-        head_size: int,
-        total_num_heads: int,
-        total_num_kv_heads: Optional[int] = None,
-        bias: bool = True,
-        skip_bias_add: bool = False,
-        params_dtype: Optional[torch.dtype] = None,
-        linear_method: Optional[LinearMethodBase] = None,
-    ):
-        super().__init__(
-            hidden_size,
-            head_size,
-            total_num_heads,
-            total_num_kv_heads,
-            bias,
-            skip_bias_add,
-            params_dtype,
-            linear_method,
-        )
 
 class RowParallelLinear(torch.nn.Module):
     """Linear layer with row parallelism.

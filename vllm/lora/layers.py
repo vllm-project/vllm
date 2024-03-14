@@ -19,7 +19,6 @@ from vllm.model_executor.parallel_utils.communication_op import (
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear,
                                                QKVParallelLinear,
-                                               RefQKVParallelLinear,
                                                MergedColumnParallelLinear,
                                                RefMergedColumnParallelLinear)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -689,7 +688,7 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
 
 class RefQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
 
-    def __init__(self, base_layer: RefQKVParallelLinear) -> None:
+    def __init__(self, base_layer: QKVParallelLinear) -> None:
         super().__init__(base_layer)
         self.tp_size = get_tensor_model_parallel_world_size()
         self.q_proj_total_size = (self.base_layer.total_num_heads *
@@ -1029,19 +1028,29 @@ def from_layer(
         layer: nn.Module,
         max_loras: int,
         lora_config: LoRAConfig,
+        packed_modules_list: List,
         model_config: Optional[PretrainedConfig] = None) -> BaseLayerWithLoRA:
     supported_layer_types = {
-        VocabParallelEmbedding: VocabParallelEmbeddingWithLoRA,
-        ColumnParallelLinear: ColumnParallelLinearWithLoRA,
-        RefMergedColumnParallelLinear: RefMergedColumnParallelLinearWithLoRA,
-        QKVParallelLinear: QKVParallelLinearWithLora,
-        RefQKVParallelLinear: RefQKVParallelLinearWithLora,
-        MergedColumnParallelLinear: MergedColumnParallelLinearWithLoRA,
-        RowParallelLinear: RowParallelLinearWithLoRA,
+        VocabParallelEmbedding:
+        VocabParallelEmbeddingWithLoRA,
+        ColumnParallelLinear:
+        ColumnParallelLinearWithLoRA,
+        QKVParallelLinear:
+        (QKVParallelLinearWithLora, RefQKVParallelLinearWithLora),
+        MergedColumnParallelLinear: (MergedColumnParallelLinearWithLoRA,
+                                     RefMergedColumnParallelLinearWithLoRA),
+        RowParallelLinear:
+        RowParallelLinearWithLoRA
     }
     for src_layer_type, lora_layer_type in supported_layer_types.items():
         if type(layer) is src_layer_type:  # pylint: disable=unidiomatic-typecheck
-            ret = lora_layer_type(layer)
+            if isinstance(lora_layer_type, tuple):
+                if len(packed_modules_list) > 1:
+                    ret = lora_layer_type[0](layer)
+                else:
+                    ret = lora_layer_type[1](layer)
+            else:
+                ret = lora_layer_type(layer)
             ret.create_lora_weights(max_loras, lora_config, model_config)
             return ret
     return layer
