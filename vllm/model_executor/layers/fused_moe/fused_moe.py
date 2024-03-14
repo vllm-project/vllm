@@ -245,6 +245,11 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
     )
 
 
+def get_config_file_name(E: int, N: int) -> str:
+    device_name = torch.cuda.get_device_name().replace(" ", "_")
+    return f"E={E},N={N},device_name={device_name}.json"
+
+
 @functools.lru_cache
 def get_moe_configs(E: int, N: int) -> Optional[Dict[int, Any]]:
     """
@@ -258,11 +263,10 @@ def get_moe_configs(E: int, N: int) -> Optional[Dict[int, Any]]:
 
     # First look up if an optimized configuration is available in the configs
     # directory
-    device_name = torch.cuda.get_device_name().replace(" ", "_")
+    json_file_name = get_config_file_name(E, N)
 
     config_file_path = os.path.join(
-        os.path.dirname(os.path.realpath(__file__)), "configs",
-        f"E={E},N={N},device_name={device_name}.json")
+        os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name)
     if os.path.exists(config_file_path):
         with open(config_file_path) as f:
             logger.info(
