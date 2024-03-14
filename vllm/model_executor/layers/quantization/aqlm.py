@@ -78,6 +78,41 @@ def dequantize_gemm(
     return F.linear(input, dequantized_weight, bias)
 
 
+def dequantize_partioned_gemm(
+    input: torch.Tensor,  #  [..., in_features]
+    codes: torch.IntTensor,  #  [num_out_groups, num_in_groups, num_codebooks]
+    codebooks: torch.
+    Tensor,  #  [num_codebooks, codebook_size, out_group_size, in_group_size]
+    scales: torch.Tensor,  #  [num_out_groups, 1, 1, 1]
+    output_partition_sizes: torch.IntTensor,
+    bias: Optional[torch.Tensor],
+) -> torch.Tensor:
+    output_shape = input.shape[:-1] + (scales.shape[0], )
+    output = torch.empty(output_shape, dtype=input.dtype, device=input.device)
+    num_outputs = len(output_partition_sizes)
+
+    # break the inputs and codebooks apart then combine the outputs.
+    # Surprisingly (to me) this is faster than doing 3 de-quants and 1 big multiply at the end.
+    num_codebooks = codebooks.shape[0] // num_outputs
+    assert (scales.shape[0] == codes.shape[0])
+    assert (sum(output_partition_sizes) == scales.shape[0])
+    output_offset = 0
+    codebooks_offset = 0
+    for output_size in output_partition_sizes:
+        shard_output = dequantize_gemm(
+            input, codes.narrow(0, output_offset, output_size),
+            codebooks.narrow(0, codebooks_offset, num_codebooks),
+            scales.narrow(0, output_offset, output_size), None
+            if bias is None else bias.narrow(0, output_offset, output_size))
+
+        output_slice = output.narrow(-1, output_offset, output_size)
+        assert (output_slice.shape == shard_output.shape)
+        output_slice.copy_(shard_output)
+        output_offset += output_size
+        codebooks_offset += num_codebooks
+    return output
+
+
 class AQLMConfig(QuantizationConfig):
     """Config class for AQLM.
 
@@ -259,42 +294,23 @@ class AQLMLinearMethod(LinearMethodBase):
         output_partition_sizes = getattr(codebooks, "output_partition_sizes",
                                          None)
 
-        output = None
+        use_gemv = math.prod(
+            x.shape[:-1]) <= 32 or output_partition_sizes is None
 
-        use_gemv = math.prod(x.shape[:-1]) <= 32
-
-        if not use_gemv:
-            output_shape = x.shape[:-1] + (scales.shape[0], )
-            output = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-            num_outputs = len(output_partition_sizes)
-
-            # break the inputs and codebooks apart then combine the outputs.
-            num_codebooks = codebooks.shape[0] // num_outputs
-            assert (scales.shape[0] == codes.shape[0])
-            assert (sum(output_partition_sizes) == scales.shape[0])
-            output_offset = 0
-            codebooks_offset = 0
-            for output_size in output_partition_sizes:
-                shard_output = dequantize_gemm(
-                    x, codes.narrow(0, output_offset, output_size),
-                    codebooks.narrow(0, codebooks_offset, num_codebooks),
-                    scales.narrow(0, output_offset, output_size),
-                    None if bias is None else bias.narrow(
-                        0, output_offset, output_size))
-
-                output_slice = output.narrow(-1, output_offset, output_size)
-                assert (output_slice.shape == shard_output.shape)
-                output_slice.copy_(shard_output)
-                output_offset += output_size
-                codebooks_offset += num_codebooks
-        else:
-            output = ops.aqlm_gemm(
-                x,
-                codes,
-                codebooks,
-                scales,
-                output_partition_sizes,
-                bias,
-            )
+        output = ops.aqlm_gemm(
+            x,
+            codes,
+            codebooks,
+            scales,
+            output_partition_sizes,
+            bias,
+        ) if use_gemv else dequantize_partioned_gemm(
+            x,
+            codes,
+            codebooks,
+            scales,
+            output_partition_sizes,
+            bias,
+        )
 
         return output
