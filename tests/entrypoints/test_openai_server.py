@@ -121,7 +121,7 @@ def server(zephyr_lora_files):
         "--model",
         MODEL_NAME,
         "--dtype",
-        "bfloat16",  # use half precision for speed and memory savings in CI environment
+        "half",  # use half precision for speed and memory savings in CI environment
         "--max-model-len",
         "8192",
         "--enforce-eager",

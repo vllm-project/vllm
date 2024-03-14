@@ -421,6 +421,13 @@ class AsyncLLMEngine:
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> AsyncStream:
+
+        curr_queue_len = len(self.engine.scheduler.waiting)
+        max_queue_len = self.engine.scheduler.scheduler_config.get_max_queue_length()
+        if max_queue_len > -1 and curr_queue_len >= max_queue_len:
+            raise ValueError(
+                f"Request {request_id} would exceed the indicated maximum "
+                f"queue length of {max_queue_len}")
         if self.log_requests:
             shortened_prompt = prompt
             shortened_token_ids = prompt_token_ids

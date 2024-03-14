@@ -6,7 +6,7 @@ from vllm.logger import init_logger
 from vllm import EngineArgs, LLMEngine, SamplingParams, RequestOutput
 
 # init variables
-max_wait_q_len = 3
+max_wait_q_len = 2
 
 logger = init_logger(__name__)
 
@@ -19,25 +19,29 @@ def create_test_prompts() -> List[Tuple[str, SamplingParams]]:
     """Create a list of test prompts with their sampling parameters."""
     return [
         ("A robot may not injure a human being",
-         SamplingParams(temperature=0.0,
-                        logprobs=1,
-                        prompt_logprobs=1,
-                        ignore_eos=True)),
+         SamplingParams(temperature=0.8,
+                        top_k=5,
+                        presence_penalty=0.2,
+                        ignore_eos=True,
+                        max_tokens=1000)),
         ("To be or not to be,",
          SamplingParams(temperature=0.8,
                         top_k=5,
                         presence_penalty=0.2,
-                        ignore_eos=True)),
+                        ignore_eos=True,
+                        max_tokens=1000)),
         ("What is the meaning of life?",
-         SamplingParams(n=2,
-                        best_of=5,
-                        temperature=0.8,
-                        top_p=0.95,
-                        frequency_penalty=0.1,
-                        ignore_eos=True)),
+         SamplingParams(temperature=0.8,
+                        top_k=5,
+                        presence_penalty=0.2,
+                        ignore_eos=True,
+                        max_tokens=1000)),
         ("It is only with the heart that one can see rightly",
-         SamplingParams(n=3, best_of=3, use_beam_search=True,
-                        temperature=0.0)),
+         SamplingParams(temperature=0.8,
+                        top_k=5,
+                        presence_penalty=0.2,
+                        ignore_eos=True,
+                        max_tokens=1000)),
     ]
 
 
@@ -82,6 +86,7 @@ def main(args: argparse.Namespace):
         process_requests(engine, test_prompts)
 
 
+# def test_max_queue_length():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='Demo on using the LLMEngine class directly')
@@ -93,3 +98,6 @@ if __name__ == '__main__':
     ]
     args = parser.parse_args(args_to_test)
     main(args)
+
+
+
