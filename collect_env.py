@@ -48,6 +48,7 @@ SystemEnv = namedtuple('SystemEnv', [
     'neuron_sdk_version', # vllm specific field
     'vllm_version',  # vllm specific field
     'vllm_build_flags',  # vllm specific field
+    'gpu_topo',  # vllm specific field
 ])
 
 DEFAULT_CONDA_PATTERNS = {
@@ -257,6 +258,12 @@ def summarize_vllm_build_flags():
         'Enabled' if os.environ.get('ROCM_HOME') else 'Disabled',
         'Enabled' if os.environ.get('NEURON_CORES') else 'Disabled',
     )
+
+
+def get_gpu_topo(run_lambda):
+    if get_platform() == 'linux':
+        return run_and_read_all(run_lambda, 'nvidia-smi topo -m')
+    return None
 
 
 # example outputs of CPU infos
@@ -501,6 +508,7 @@ def get_env_info():
     neuron_sdk_version = get_neuron_sdk_version(run_lambda)
     vllm_version = get_vllm_version()
     vllm_build_flags = summarize_vllm_build_flags()
+    gpu_topo = get_gpu_topo(run_lambda)
 
     return SystemEnv(
         torch_version=version_str,
@@ -532,6 +540,7 @@ def get_env_info():
         neuron_sdk_version=neuron_sdk_version,
         vllm_version=vllm_version,
         vllm_build_flags=vllm_build_flags,
+        gpu_topo=gpu_topo,
     )
 
 env_info_fmt = """
@@ -572,6 +581,8 @@ Neuron SDK Version: {neuron_sdk_version}
 vLLM Version: {vllm_version}
 vLLM Build Flags:
 {vllm_build_flags}
+GPU Topology:
+{gpu_topo}
 """.strip()
 
 
