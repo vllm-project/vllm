@@ -102,17 +102,9 @@ def _apply_lora_packed_nslice(
     indices = indices.view(-1)
     offset_left = 0
     for slice_idx in range(len(output_slices)):
-        add_lora_slice(
-            output,
-            x,
-            lora_a_stacked[slice_idx],
-            lora_b_stacked[slice_idx],
-            indices,
-            0,
-            1.0,
-            offset_left,
-            output_slices[slice_idx],
-        )
+        add_lora_slice(output, x, lora_a_stacked[slice_idx],
+                       lora_b_stacked[slice_idx], indices, 0, 1.0, offset_left,
+                       output_slices[slice_idx])
         offset_left += output_slices[slice_idx]
     return output.view_as(org_output)
 
@@ -131,12 +123,8 @@ class LoRAMapping:
 
 class BaseLayerWithLoRA(nn.Module):
 
-    def create_lora_weights(
-        self,
-        max_loras: int,
-        lora_config: LoRAConfig,
-        model_config: PretrainedConfig,
-    ) -> None:
+    def create_lora_weights(self, max_loras: int, lora_config: LoRAConfig,
+                            model_config: PretrainedConfig) -> None:
         """Initializes lora matrices."""
         ...
 
