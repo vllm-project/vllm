@@ -239,8 +239,9 @@ class ModelConfig:
         # 'AssertionError: Prefix caching is currently not supported
         # with sliding window attention' when using prefix caching with
         # qwen1.5 and use_sliding_window is false
+        use_sliding_window = getattr(self.hf_config, "use_sliding_window", True)
         return (getattr(self.hf_config, "sliding_window", None)
-                if getattr(self.hf_config, "use_sliding_window", True) else None)
+                if use_sliding_window else None)
 
     def get_vocab_size(self) -> int:
         return self.hf_config.vocab_size
