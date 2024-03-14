@@ -25,12 +25,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# A map between the device type (in device config) to its worker module.
-DEVICE_TO_WORKER_MODULE_MAP = {
-    "cuda": "vllm.worker.worker",
-    "neuron": "vllm.worker.neuron_worker",
-}
-
 # If the env var is set, it uses the Ray's compiled DAG API
 # which optimizes the control plane overhead.
 # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
@@ -72,13 +66,6 @@ class RayGPUExecutor(ExecutorBase):
         self.forward_dag = None
         if USE_RAY_COMPILED_DAG:
             self.forward_dag = self._compiled_ray_dag()
-
-    def _dispatch_worker(self):
-        worker_module = DEVICE_TO_WORKER_MODULE_MAP[
-            self.device_config.device_type]
-        imported_worker = importlib.import_module(worker_module)
-        Worker = imported_worker.Worker
-        return Worker
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
@@ -155,7 +142,7 @@ class RayGPUExecutor(ExecutorBase):
 
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
-        Worker = self._dispatch_worker()
+        from vllm.worker.worker import Worker
 
         model_config = copy.deepcopy(self.model_config)
         parallel_config = copy.deepcopy(self.parallel_config)

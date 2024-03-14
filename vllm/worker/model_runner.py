@@ -80,7 +80,7 @@ class ModelRunner:
         self.kv_cache_dtype = kv_cache_dtype
 
         # Set enforce_eager to True for Neuron backend, to avoid capturing graph
-        if self.device_config.is_neuron:
+        if self.device_config.device_type == "neuron":
             self.model_config.enforce_eager = True
 
     def load_model(self) -> None:
