@@ -33,26 +33,18 @@ def _is_vllm_model(model_config: ModelConfig = None,
         return "vllm" in model_config.tensorizer_args.tensorizer_uri
 
 
-def _make_model_contiguous(model: nn.Module):
-    # Ensure tensors are saved in memory contiguously
-    for param in model.parameters():
-        param.data = param.data.contiguous()
 
-
-#
 @dataclass
 class TensorizerArgs:
     tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, typing.BinaryIO,
-                          str, bytes, os.PathLike, int, ]
+                          str, bytes, os.PathLike, int]
     device: Optional[Union[torch.device, str]] = None
     dtype: Optional[torch.dtype] = None
-    lazy_load: bool = False
-    plaid_mode_buffers: Optional[int] = None
     verify_hash: bool = False
     filter_func: Optional[Callable[[str], Union[bool, Any]]] = None
     deserializer_encryption_key: Optional[str] = None
     """
-  Args for TensorizerAgent class. These are used to configure the behavior of 
+  Args for the TensorizerAgent class. These are used to configure the behavior of 
   the TensorDeserializer when loading tensors from a serialized model.
   
   Args:
@@ -62,11 +54,6 @@ class TensorizerArgs:
           loaded onto the default device.
       dtype: The dtype to cast the tensors to. If None, the tensors will be 
           loaded with their original dtype.
-      lazy_load: If True, tensors will be loaded and cached when keys are 
-          accessed. If False, all tensors will be loaded into memory up front.
-      plaid_mode_buffers: The number of buffers to use in plaid mode. This is 
-          only used if ``plaid_mode=True``. These buffers are used to 
-          pipeline the loading and processing of tensors.
       verify_hash: If True, the hashes of each tensor will be verified against 
           the hashes stored in the metadata. A `HashMismatchError` will be 
           raised if any of the hashes do not match.
@@ -89,15 +76,12 @@ class TensorizerArgs:
             "s3_access_key_id": self.s3_access_key_id,
             "s3_secret_access_key": self.s3_secret_access_key,
             "s3_endpoint": self.s3_endpoint,
-            "force_http": True,
+            "force_http": True, ## TODO: Deal with this
         }
 
         # Omitting self.dtype and self.device as this behaves weirdly
         self.deserializer_params = {
             "filter_func": self.filter_func,
-            "lazy_load": self.lazy_load,
-            "plaid_mode": bool(_is_vllm_model(file_uri=self.file_obj)),
-            "plaid_mode_buffers": self.plaid_mode_buffers,
             "verify_hash": self.verify_hash,
             "encryption": self.deserializer_encryption_key,
             # "dtype":self.dtype,
@@ -109,36 +93,16 @@ class TensorizerArgs:
         parser: argparse.ArgumentParser, ) -> argparse.ArgumentParser:
         """Tensorizer CLI arguments"""
         parser.add_argument(
-            "--serializer-encryption",
-            action="store_true",
-            help="An `EncryptionParams` object holding a password or key"
-            "to use for encryption. If None, no encryption will be used.",
-        )
-        parser.add_argument(
-            "--lazy-load",
-            action="store_true",
-            help="If True, tensors will be loaded and cached when keys are"
-            "accessed. If False, all tensors will be loaded into memory up"
-            "front.",
-        )
-        parser.add_argument(
             "--tensorizer-uri",
-            help="Path to serialized model tensors. Can be a local file path"
-            "or a S3 URI.",
-        )
-        parser.add_argument(
-            "--plaid-mode-buffers",
-            default=None,
-            help="The number of buffers to use in plaid mode."
-            "This is only used if ``plaid_mode=True``. These buffers"
-            "are used to pipeline the loading and processing of tensors.",
+            help="Path to serialized model tensors. Can be a local file path,"
+            " or an HTTP(S) or S3 URI.",
         )
         parser.add_argument(
             "--verify-hash",
             action="store_true",
-            help="If True, the hashes of each tensor will be verified"
-            "against the hashes stored in the metadata. A `HashMismatchError`"
-            "will be raised if any of the hashes do not match.",
+            help="If enabled, the hashes of each tensor will be verified"
+            " against the hashes stored in the file metadata. An exception"
+            " will be raised if any of the hashes do not match.",
         )
         parser.add_argument(
             "--deserializer-encryption-key",
