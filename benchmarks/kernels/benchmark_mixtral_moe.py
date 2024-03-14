@@ -4,7 +4,7 @@ import sys
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_moe, get_config_file_name
+from vllm.model_executor.layers.fused_moe import fused_moe, get_config_file_name
 import torch
 import torch.nn.functional as F
 import triton
