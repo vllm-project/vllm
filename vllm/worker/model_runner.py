@@ -21,7 +21,7 @@ from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
-from vllm.utils import in_wsl, measure_cuda_memory
+from vllm.utils import CudaMemoryMeasurer, pin_memory_available
 
 logger = init_logger(__name__)
 
@@ -76,8 +76,7 @@ class ModelRunner:
         # The shape of the cached block table will be
         # (max batch size to capture, max context len to capture / block size).
         self.graph_block_tables = None  # Set after initial profiling.
-        # cache in_wsl result
-        self.in_wsl = in_wsl()
+        self.pin_memory = pin_memory_available()
         self.kv_cache_dtype = kv_cache_dtype
 
         # Set enforce_eager to True for Neuron backend, to avoid capturing graph
@@ -85,7 +84,7 @@ class ModelRunner:
             self.model_config.enforce_eager = True
 
     def load_model(self) -> None:
-        with measure_cuda_memory() as m:
+        with CudaMemoryMeasurer() as m:
             self.model = get_model(self.model_config,
                                    self.device_config,
                                    lora_config=self.lora_config,
@@ -408,7 +407,6 @@ class ModelRunner:
         selected_token_start_idx = 0
         categorized_sample_indices = {t: [] for t in SamplingType}
         categorized_sample_indices_start_idx = 0
-        pin_memory = not self.in_wsl and not self.device_config.is_neuron
 
         max_subquery_len = max(subquery_lens) if subquery_lens else 1
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
@@ -459,12 +457,12 @@ class ModelRunner:
         selected_token_indices = _async_h2d(selected_token_indices,
                                             dtype=torch.long,
                                             target_device=self.device,
-                                            pin_memory=pin_memory)
+                                            pin_memory=self.pin_memory)
         categorized_sample_indices = {
             t: _async_h2d(seq_ids,
                           dtype=torch.int,
                           target_device=self.device,
-                          pin_memory=pin_memory)
+                          pin_memory=self.pin_memory)
             for t, seq_ids in categorized_sample_indices.items()
         }
 

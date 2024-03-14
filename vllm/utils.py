@@ -312,12 +312,35 @@ def create_kv_caches_with_random(
     return key_caches, value_caches
 
 
-class measure_cuda_memory:
+_PIN_MEMORY_WARNING_PRINTED = False
+
+def pin_memory_available() -> bool:
+    def print_warning_once(msg: str) -> None:
+        global _PIN_MEMORY_WARNING_PRINTED
+        if not _PIN_MEMORY_WARNING_PRINTED:
+            _PIN_MEMORY_WARNING_PRINTED = True
+            logger.warning(msg)
+    if in_wsl():
+        # Pinning memory in WSL is not supported.
+        # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
+        print_warning_once("Using 'pin_memory=False' as WSL is detected. "
+                           "This may slow down the performance.")
+        return False
+    elif is_neuron():
+        print_warning_once("Pin memory is not supported on Neuron.")
+        return False
+    return True
+
+
+class CudaMemoryMeasurer:
 
     def __init__(self, device=None):
         self.device = device
+        self.is_neuron = is_neuron()
 
     def current_memory_usage(self) -> float:
+        if self.is_neuron:
+            return 0.0
         # Return the memory usage in bytes.
         torch.cuda.reset_peak_memory_stats(self.device)
         mem = torch.cuda.max_memory_allocated(self.device)
