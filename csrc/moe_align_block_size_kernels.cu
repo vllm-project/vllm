@@ -13,6 +13,7 @@ namespace vllm {
 
 namespace {
 __device__ __forceinline__ int32_t index(int32_t total_col, int32_t row, int32_t col) {
+    // don't worry about overflow because num_experts is relatively small
     return row * total_col + col;
 }
 }
