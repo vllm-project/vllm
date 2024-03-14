@@ -30,6 +30,7 @@ class LogitsProcessor(nn.Module):
         """
         super().__init__()
         self.scale = scale
+        self.vocab_size = vocab_size
         # Transformers-neuronx generate outputs as logits directly.
         self.logits_as_hidden_states = is_neuron()
         # original vocabulary size (without LoRA).
