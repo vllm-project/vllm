@@ -111,7 +111,7 @@ void moe_align_block_size(
 
         // set dynamic shared mem
         auto kernel = vllm::moe_align_block_size_kernel<scalar_t>;
-        TORCH_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem));
+        AT_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem));
         kernel<<<1, num_experts, shared_mem, stream>>>(
             topk_ids.data_ptr<scalar_t>(),
             sorted_token_ids.data_ptr<int32_t>(), 
