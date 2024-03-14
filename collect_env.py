@@ -1,3 +1,4 @@
+# code borrowed from https://github.com/pytorch/pytorch/blob/main/torch/utils/collect_env.py
 
 # Unlike the rest of the PyTorch this file must be python2 compliant.
 # This script outputs relevant system environment info
