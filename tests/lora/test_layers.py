@@ -20,7 +20,6 @@ from vllm.lora.layers import (
 from vllm.lora.models import (LoRALayerWeights, convert_mapping,
                               PackedLoRALayerWeights)
 from vllm.config import LoRAConfig
-from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
@@ -395,7 +394,7 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device) -> None:
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_lm_head_sampler(dist_init, num_loras, device) -> None:
+def test_lm_head_logits_processor(dist_init, num_loras, device) -> None:
 
     torch.set_default_device(device)
     max_loras = 8
@@ -403,14 +402,15 @@ def test_lm_head_sampler(dist_init, num_loras, device) -> None:
                              max_lora_rank=8,
                              lora_dtype=torch.float16)
 
-    def create_random_lora_logits_processor_layer():
+    def _pretest():
         linear = ParallelLMHead(32000 + lora_config.lora_extra_vocab_size,
                                 1024, 32000)
         linear.weight.data = torch.rand_like(linear.weight.data)
         linear.weight.data[:, 32000:] = 0
-        logits_processor = LogitsProcessor(32000 + lora_config.lora_extra_vocab_size, 32000)
-        lora_logits_processor = LogitsProcessorWithLoRA(logits_processor, 1024, linear.weight.dtype,
-                                       linear.weight.device)
+        logits_processor = LogitsProcessor(
+            32000 + lora_config.lora_extra_vocab_size, 32000)
+        lora_logits_processor = LogitsProcessorWithLoRA(
+            logits_processor, 1024, linear.weight.dtype, linear.weight.device)
         lora_logits_processor.create_lora_weights(max_loras, lora_config)
 
         return linear, logits_processor, lora_logits_processor
@@ -419,7 +419,7 @@ def test_lm_head_sampler(dist_init, num_loras, device) -> None:
         set_random_seed(i)
 
         id_to_index = get_random_id_to_index(num_loras, max_loras)
-        linear, logits_processor, lora_logits_processor = create_random_lora_logits_processor_layer()
+        linear, logits_processor, lora_logits_processor = _pretest()
 
         # NOTE: all the generated loras share the same embeddings tensor.
         lora_dict, _ = populate_loras(
@@ -450,22 +450,25 @@ def test_lm_head_sampler(dist_init, num_loras, device) -> None:
         )
         lora_logits_processor.set_mapping(*mapping_info, )
 
-        lora_result = lora_logits_processor._get_logits(hidden_states=torch.cat(inputs),
-                                               embedding=linear.weight,
-                                               embedding_bias=None)
+        lora_result = lora_logits_processor._get_logits(
+            hidden_states=torch.cat(inputs),
+            embedding=linear.weight,
+            embedding_bias=None)
 
         original_weight = linear.weight.clone()
 
-        linear.weight[logits_processor.org_vocab_size:logits_processor.org_vocab_size +
+        linear.weight[logits_processor.
+                      org_vocab_size:logits_processor.org_vocab_size +
                       embeddings_tensor_len] = embeddings_tensor
 
-        logits_processor.org_vocab_size = 32000 + lora_config.lora_extra_vocab_size
+        logits_processor.org_vocab_size = (32000 +
+                                           lora_config.lora_extra_vocab_size)
         expected_results = []
         for input_, lora_id in zip(inputs, prompt_mapping):
             lora = lora_dict[lora_id]
             result = logits_processor._get_logits(hidden_states=input_,
-                                         embedding=linear.weight,
-                                         embedding_bias=None)
+                                                  embedding=linear.weight,
+                                                  embedding_bias=None)
             result[:, 32000 + embeddings_tensor_len:] = float("-inf")
             result += input_ @ lora.lora_a @ lora.lora_b * lora.scaling
             expected_results.append(result)
@@ -491,12 +494,14 @@ def test_lm_head_sampler(dist_init, num_loras, device) -> None:
                                        lora_config.lora_extra_vocab_size)
         lora_logits_processor.set_mapping(*mapping_info, )
 
-        lora_result = lora_logits_processor._get_logits(hidden_states=torch.cat(inputs),
-                                               embedding=original_weight,
-                                               embedding_bias=None)[:, :32000]
-        expected_result = logits_processor._get_logits(hidden_states=torch.cat(inputs),
-                                              embedding=original_weight,
-                                              embedding_bias=None)
+        lora_result = lora_logits_processor._get_logits(
+            hidden_states=torch.cat(inputs),
+            embedding=original_weight,
+            embedding_bias=None)[:, :32000]
+        expected_result = logits_processor._get_logits(
+            hidden_states=torch.cat(inputs),
+            embedding=original_weight,
+            embedding_bias=None)
 
         rtol, atol = TOLERANCES[lora_result.dtype]
         assert torch.allclose(lora_result,
