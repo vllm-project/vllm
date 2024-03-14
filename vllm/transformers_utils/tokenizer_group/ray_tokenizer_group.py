@@ -14,7 +14,7 @@ from vllm.transformers_utils.tokenizer_group.tokenizer_group import (
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 
-def _carry_over_env_vars_to_runtime_env(runtime_env: dict) -> dict:
+def _carry_over_env_vars_to_runtime_env(runtime_env: dict) -> None:
     """Copy over all current process environment variables to the runtime_env.
 
     The variables in runtime_env will take precedence over the current process
@@ -25,7 +25,6 @@ def _carry_over_env_vars_to_runtime_env(runtime_env: dict) -> dict:
     runtime_env.setdefault("env_vars", {})
     env_vars.update(runtime_env["env_vars"])
     runtime_env["env_vars"] = env_vars
-    return runtime_env
 
 
 class RayTokenizerGroupPool(BaseTokenizerGroup):
@@ -48,8 +47,7 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
         # Carry over the env vars to the actors.
         # This is necessary for API keys and such.
         ray_actor_options.setdefault("runtime_env", {})
-        ray_actor_options["runtime_env"] = _carry_over_env_vars_to_runtime_env(
-            ray_actor_options["runtime_env"])
+        _carry_over_env_vars_to_runtime_env(ray_actor_options["runtime_env"])
 
         init_kwargs["num_actors"] = tokenizer_pool_config.pool_size
         init_kwargs["ray_actor_options"] = ray_actor_options
