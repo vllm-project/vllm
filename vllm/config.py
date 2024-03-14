@@ -235,10 +235,10 @@ class ModelConfig:
     def get_sliding_window(self) -> Optional[int]:
         """Get the sliding window size, or None if disabled.
         """
-        
-        # Some models, like Qwen2 and Qwen1.5, use `use_sliding_window` in addition
-        # to sliding window size. We check if that field is present and if it's False, return
-        # None.
+
+        # Some models, like Qwen2 and Qwen1.5, use `use_sliding_window` in
+        # addition to sliding window size. We check if that field is present
+        # and if it's False, return None.
         if (hasattr(self.hf_config, "use_sliding_window")
                 and not self.hf_config.use_sliding_window):
             return None
