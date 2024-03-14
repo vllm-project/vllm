@@ -47,7 +47,7 @@ class MarlinConfig(QuantizationConfig):
         self.perm_len = 1024
 
     def __repr__(self) -> str:
-        return f"MarlinConfig(group_size={self.group_size}"
+        return f"MarlinConfig(group_size={self.group_size})"
 
     @classmethod
     def get_name(cls) -> str:
