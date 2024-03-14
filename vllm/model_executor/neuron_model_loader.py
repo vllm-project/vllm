@@ -1,5 +1,5 @@
 """Utilities for selecting and loading models."""
-from typing import Type
+from typing import Type, Tuple
 
 import torch
 import torch.nn as nn
@@ -21,16 +21,18 @@ TORCH_DTYPE_TO_NEURON_AMP = {
 }
 
 
-def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
+def _get_model_architecture(config: PretrainedConfig) -> Tuple[Type[nn.Module], str]:
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
         model_cls = ModelRegistry.load_model_cls(arch)
         if model_cls is not None:
-            return model_cls
+            return (model_cls, arch)
     raise ValueError(
         f"Model architectures {architectures} are not supported for now. "
         f"Supported architectures: {ModelRegistry.get_supported_archs()}")
 
+def get_architecture(model_config: ModelConfig) -> str:
+    return _get_model_architecture(model_config.hf_config)[1]
 
 def get_model(model_config: ModelConfig, device_config: DeviceConfig,
               **kwargs) -> nn.Module:
@@ -40,7 +42,7 @@ def get_model(model_config: ModelConfig, device_config: DeviceConfig,
     parallel_config = kwargs.get("parallel_config")
     scheduler_config = kwargs.get("scheduler_config")
 
-    model_class = _get_model_architecture(model_config.hf_config)
+    model_class = _get_model_architecture(model_config.hf_config)[0]
     linear_method = None
 
     # Create a model instance.

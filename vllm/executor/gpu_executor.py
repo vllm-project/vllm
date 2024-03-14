@@ -37,7 +37,8 @@ class GPUExecutor(ExecutorBase):
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
-
+        # Available after calling _init_worker()
+        self.architecture = None
         # Instantiate the worker and load the model to GPU.
         self._init_worker()
 
@@ -75,6 +76,7 @@ class GPUExecutor(ExecutorBase):
         )
         self.driver_worker.init_model()
         self.driver_worker.load_model()
+        self.architecture = self.driver_worker.architecture
 
     def _init_cache(self) -> None:
         """Profiles the memory usage and initializes the KV cache.

@@ -9,7 +9,7 @@ import torch.nn as nn
 from vllm.config import (DeviceConfig, ModelConfig, LoRAConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.logger import init_logger
-from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
+from vllm.model_executor import get_architecture, get_model, InputMetadata, SamplingMetadata
 from vllm.model_executor.parallel_utils import cupy_utils
 from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
@@ -91,7 +91,7 @@ class ModelRunner:
                                    lora_config=self.lora_config,
                                    parallel_config=self.parallel_config,
                                    scheduler_config=self.scheduler_config)
-
+        self.architecture = get_architecture(self.model_config, self.device_config)
         self.model_memory_usage = m.consumed_memory
         logger.info(f"Loading model weights took "
                     f"{self.model_memory_usage / float(2**30):.4f} GB")
