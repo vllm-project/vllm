@@ -534,6 +534,7 @@ async def test_guided_json_chat(server, client: openai.AsyncOpenAI):
     assert json1["name"] != json2["name"]
     assert json1["age"] != json2["age"]
 
+
 async def test_guided_regex_completion(server, client: openai.AsyncOpenAI):
     completion = await client.completions.create(
         model=MODEL_NAME,
@@ -550,6 +551,12 @@ async def test_guided_regex_completion(server, client: openai.AsyncOpenAI):
         assert re.fullmatch(TEST_REGEX, completion.choices[i].text) is not None
 
 
+# *** UPSTREAM SYNC ***
+# This test covers an experimental feature in vLLM, guided generation.
+# Currently, there is an upstream issue being debugged
+# See: https://github.com/vllm-project/vllm/pull/3383
+# Once this is resolved upstream, turn the test back on.
+@pytest.mark.skip("Issue upstream, currently being resolved.")
 async def test_guided_regex_chat(server, client: openai.AsyncOpenAI):
     messages = [{
         "role": "system",
