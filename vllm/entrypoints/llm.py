@@ -1,4 +1,4 @@
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Generator
 
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -189,8 +189,7 @@ class LLM:
                                     prompt_token_ids,
                                     lora_request=lora_request)
 
-    def _stream_engine(self):
-        # Run the engine.
+    def _stream_engine(self) -> Generator[RequestOutput]:
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
