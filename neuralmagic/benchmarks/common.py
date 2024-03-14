@@ -26,7 +26,7 @@ def max_model_length_from_model_id(model: str,
     return _get_and_verify_max_len(config, max_model_len=None)
 
 
-def script_args_to_cla(config: NamedTuple) -> Iterable[list[str]]:
+def script_args_to_cla(config: NamedTuple) -> Iterable[dict]:
     #config is a NamedTuple constructed from some JSON in neuralmagic/benchmarks/configs
 
     kv = vars(config.script_args)
@@ -41,7 +41,7 @@ def script_args_to_cla(config: NamedTuple) -> Iterable[list[str]]:
         if len(v) == 0:
             key_args.append(k)
 
-    key_args_cla = list(map(lambda k: f"--{k}", key_args))
+    key_args_cla = {f"{k}": "" for k in key_args}
 
     # Remove empty lists from arg_lists and remove key args from keys
     arg_lists = list(filter(lambda arg_list: len(arg_list) != 0, arg_lists))
@@ -49,9 +49,9 @@ def script_args_to_cla(config: NamedTuple) -> Iterable[list[str]]:
     assert len(keys) == len(arg_lists)
 
     for args in itertools.product(*arg_lists):
-        cla = key_args_cla
-        for name, value in zip(keys, args):
-            cla.extend([f"--{name}", f"{value}"])
+        args_dict = dict(zip(keys, args))
+        cla = key_args_cla.copy()
+        cla.update(args_dict)
         yield cla
 
 

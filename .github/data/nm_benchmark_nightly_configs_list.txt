@@ -1,2 +1,3 @@
 neuralmagic/benchmarks/configs/benchmark_serving.json
 neuralmagic/benchmarks/configs/benchmark_throughput.json
+neuralmagic/benchmarks/configs/benchmark_remote_push.json

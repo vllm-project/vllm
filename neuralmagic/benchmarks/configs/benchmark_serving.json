@@ -1,7 +1,7 @@
 {
 	"configs": [
 		{
-			"description": "Benchmark vllm serving",
+			"description": "VLLM Serving",
 			"models": [
 				"facebook/opt-125m",
 				"TinyLlama/TinyLlama-1.1B-Chat-v1.0",

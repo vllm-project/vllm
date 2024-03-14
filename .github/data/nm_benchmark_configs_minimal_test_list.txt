@@ -1,0 +1,1 @@
+neuralmagic/benchmarks/configs/minimal_test.json

@@ -1,7 +1,7 @@
 {
 	"configs": [
 		{
-			"description": "Benchmark vllm engine throughput - with dataset",
+			"description": "VLLM Engine throughput (with dataset)",
 			"models": [
 				"facebook/opt-125m",
 				"TinyLlama/TinyLlama-1.1B-Chat-v1.0",
@@ -36,7 +36,7 @@
 			}
 		},
 		{
-			"description": "Benchmark vllm engine prefill throughput - synthetic",
+			"description": "VLLM Engine prefill throughput (synthetic)",
 			"models": [
 				"facebook/opt-125m",
 				"TinyLlama/TinyLlama-1.1B-Chat-v1.0",
@@ -46,9 +46,6 @@
 			"max_model_lens" : [4096],
 			"script_name": "benchmark_throughput",
 			"script_args": {
-				"backend": [
-					"vllm"
-				],
 				"input-len": [
 					1,
 					16,
@@ -62,23 +59,14 @@
 				"output-len": [
 					1
 				],
-				"n": [
-					1
-				],
 				"num-prompts": [
 					1
-				],
-				"seed": [
-					0
-				],
-				"dtype": [
-					"auto"
 				],
 				"use-all-available-gpus_" : []
 			}
 		},
 		{
-			"description": "Benchmark vllm engine decode throughput - synthetic",
+			"description": "VLLM Engine decode throughput (synthetic)",
 			"models": [
 				"facebook/opt-125m",
 				"TinyLlama/TinyLlama-1.1B-Chat-v1.0",
@@ -88,17 +76,11 @@
 			"max_model_lens" : [4096],
 			"script_name": "benchmark_throughput",
 			"script_args": {
-				"backend": [
-					"vllm"
-				],
 				"input-len": [
 					2
 				],
 				"output-len": [
 					128
-				],
-				"n": [
-					1
 				],
 				"num-prompts": [
 					1,
@@ -107,12 +89,6 @@
 					16,
 					32,
 					64
-				],
-				"seed": [
-					0
-				],
-				"dtype": [
-					"auto"
 				],
 				"use-all-available-gpus_" : []
 			}

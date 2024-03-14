@@ -41,7 +41,7 @@ def get_benchmarking_context() -> dict:
         "torch_version": f"{torch.__version__}",
         "torch_cuda_version": f"{torch.version.cuda}",
         "cuda_devices": f"{cuda_devices}",
-        "cuda_device_names": f"{cuda_device_names}"
+        "cuda_device_names": cuda_device_names
     }
 
 

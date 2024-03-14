@@ -33,11 +33,11 @@ from transformers import PreTrainedTokenizerBase
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from .common import generate_synthetic_requests, print_serving_request_io
 from .datasets_registry import get_dataset, DatasetArgs
-from .benchmark_result import (BenchmarkResult,
-                               BenchmarkServingResultMetadataKeys as
-                               ResultMetadataKeys,
-                               BenchmarkServingResultMetricTemplates as
-                               ResultMetricTemplates)
+from .logging.benchmark_result import (BenchmarkResult,
+                                       BenchmarkServingResultMetadataKeys as
+                                       ResultMetadataKeys,
+                                       BenchmarkServingResultMetricTemplates as
+                                       ResultMetricTemplates)
 
 from neuralmagic.benchmarks.scripts.backend_request_func import (
     ASYNC_REQUEST_FUNCS,
@@ -337,6 +337,7 @@ def main(args: argparse.Namespace):
 
         current_dt = datetime.now()
         result = BenchmarkResult(
+            description=args.description,
             date=current_dt,
             script_name=Path(__file__).name,
             script_args=script_args_as_json_dict(args),
@@ -382,6 +383,13 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(
         description='''Benchmark the online serving throughput.''')
+    parser.add_argument(
+        "--description",
+        type=str,
+        default="benchmark-serving",
+        help=
+        "Benchmark description. This is primarily useful when we log the benchmark results and process them for plotting charts"
+    )
     parser.add_argument(
         "--backend",
         type=str,

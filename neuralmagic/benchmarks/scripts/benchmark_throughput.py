@@ -14,9 +14,9 @@ from typing import List, Optional, Tuple
 from transformers import AutoTokenizer
 from .common import generate_synthetic_requests, warmup_vllm_engine, num_available_gpus, print_request_outputs
 from .datasets_registry import get_dataset, DatasetArgs
-from .benchmark_result import (BenchmarkResult,
-                               BenchmarkThroughputResultMetricTemplates as
-                               ResultMetricTemplates)
+from .logging.benchmark_result import (BenchmarkResult,
+                                       BenchmarkThroughputResultMetricTemplates
+                                       as ResultMetricTemplates)
 
 
 def get_tensor_parallel_size(args: argparse.Namespace) -> int:
@@ -145,6 +145,7 @@ def main(args: argparse.Namespace):
         current_dt = datetime.now()
 
         result = BenchmarkResult(
+            description=args.description,
             date=current_dt,
             script_name=Path(__file__).name,
             script_args=vars(args),
@@ -168,6 +169,13 @@ def main(args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Benchmark the throughput.")
+    parser.add_argument(
+        "--description",
+        type=str,
+        default="benchmark-throughput",
+        help=
+        "Benchmark description. This is primarily useful when we log the benchmark results and process them for plotting charts"
+    )
     parser.add_argument("--backend",
                         type=str,
                         choices=["vllm"],

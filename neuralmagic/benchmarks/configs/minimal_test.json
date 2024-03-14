@@ -1,0 +1,43 @@
+{
+	"configs": [
+		{
+			"description": "Benchmark vllm serving",
+			"models": [
+                          "mistralai/Mistral-7B-Instruct-v0.2"
+			],
+			"use_all_available_gpus" : "",
+			"max_model_lens": [
+				4096
+			],
+			"sparsity": [],
+			"script_name": "benchmark_serving",
+			"script_args": {
+                                "nr-qps-pair_" : ["5,inf"],
+				"dataset": [
+					"sharegpt"
+				]
+			}
+		},
+		{
+			"description": "Benchmark vllm engine throughput - with dataset",
+			"models": [
+                                "mistralai/Mistral-7B-Instruct-v0.2"
+			],
+			"max_model_lens" : [4096],
+			"script_name": "benchmark_throughput",
+			"script_args": {
+				"output-len": [
+					128
+				],
+				"num-prompts": [
+					100
+				],
+                                "dataset" : [
+                                  "sharegpt"
+                                ],
+                                "max-model-len" : [4096],
+				"use-all-available-gpus_" : []
+			}
+		}
+	]
+}
