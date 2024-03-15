@@ -135,9 +135,9 @@ def test_reshape_and_cache(
 
     # Create the KV caches.
     key_caches, value_caches = kv_cache_factory(num_blocks, block_size, 1,
-                                                num_heads, head_size, 
-                                                kv_cache_dtype, dtype, 
-                                                seed, gpu_id)
+                                                num_heads, head_size,
+                                                kv_cache_dtype, dtype, seed,
+                                                gpu_id)
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Clone the KV caches.
@@ -156,7 +156,7 @@ def test_reshape_and_cache(
     # Call the reshape_and_cache kernel.
     cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
                                 slot_mapping, kv_cache_dtype, kv_scale)
-    
+
     if kv_cache_dtype == "fp8":
         result_key_cache = torch.empty_like(key_cache, dtype=torch.float16)
         cache_ops.convert_fp8(key_cache, result_key_cache)
@@ -174,12 +174,16 @@ def test_reshape_and_cache(
         block_offset = block_offsets[i]
         cloned_key_cache[block_idx, :, :, block_offset, :] = reshaped_key[i]
         cloned_value_cache[block_idx, :, :, block_offset] = value[i]
-    
+
     if kv_cache_dtype == "fp8":
-        assert torch.allclose(result_key_cache, cloned_key_cache, 
-                              atol=0.001, rtol=0.1)
-        assert torch.allclose(result_value_cache, cloned_value_cache, 
-                              atol=0.001, rtol=0.1)
+        assert torch.allclose(result_key_cache,
+                              cloned_key_cache,
+                              atol=0.001,
+                              rtol=0.1)
+        assert torch.allclose(result_value_cache,
+                              cloned_value_cache,
+                              atol=0.001,
+                              rtol=0.1)
     else:
         assert torch.allclose(key_cache, cloned_key_cache)
         assert torch.allclose(value_cache, cloned_value_cache)
@@ -230,18 +234,14 @@ def test_swap_blocks(
     block_mapping = dict(zip(src_blocks, dst_blocks))
 
     # Create the KV caches on the first device.
-    src_key_caches, src_value_caches = kv_cache_factory(num_blocks, 
-                                                        block_size, 1, 
-                                                        num_heads, head_size, 
-                                                        kv_cache_dtype, dtype, 
-                                                        seed, src_device)
+    src_key_caches, src_value_caches = kv_cache_factory(
+        num_blocks, block_size, 1, num_heads, head_size, kv_cache_dtype, dtype,
+        seed, src_device)
 
     # Create the KV caches on the second device.
-    dist_key_caches, dist_value_caches = kv_cache_factory(num_blocks, 
-                                                          block_size, 1, 
-                                                          num_heads, head_size, 
-                                                          kv_cache_dtype, dtype,
-                                                          seed, dst_device)
+    dist_key_caches, dist_value_caches = kv_cache_factory(
+        num_blocks, block_size, 1, num_heads, head_size, kv_cache_dtype, dtype,
+        seed, dst_device)
 
     src_key_caches_clone = src_key_caches[0].clone()
     src_value_caches_clone = src_value_caches[0].clone()
@@ -256,6 +256,7 @@ def test_swap_blocks(
                               dist_key_caches[0][dst].cpu())
         assert torch.allclose(src_value_caches_clone[src].cpu(),
                               dist_value_caches[0][dst].cpu())
+
 
 @pytest.mark.skipif(not is_hip(), reason="FP8 conversion test requires e4m3")
 @pytest.mark.parametrize("num_heads", NUM_HEADS)

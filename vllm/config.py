@@ -356,8 +356,7 @@ class CacheConfig:
                 if nvcc_cuda_version < Version("11.8"):
                     raise ValueError(
                         "FP8 is not supported when cuda version is"
-                        "lower than 11.8."
-                    )
+                        "lower than 11.8.")
             logger.info(
                 "Using fp8 data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "

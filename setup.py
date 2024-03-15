@@ -24,7 +24,10 @@ MAIN_CUDA_VERSION = "12.1"
 
 # Supported NVIDIA GPU architectures.
 NVIDIA_SUPPORTED_ARCHS = {"7.0", "7.5", "8.0", "8.6", "8.9", "9.0"}
-ROCM_SUPPORTED_ARCHS = {"gfx90a", "gfx908", "gfx906", "gfx940", "gfx941", "gfx942", "gfx1030", "gfx1100"}
+ROCM_SUPPORTED_ARCHS = {
+    "gfx90a", "gfx908", "gfx906", "gfx940", "gfx941", "gfx942", "gfx1030",
+    "gfx1100"
+}
 # SUPPORTED_ARCHS = NVIDIA_SUPPORTED_ARCHS.union(ROCM_SUPPORTED_ARCHS)
 
 
@@ -67,6 +70,7 @@ ABI = 1 if torch._C._GLIBCXX_USE_CXX11_ABI else 0
 CXX_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
 NVCC_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
 
+
 def get_amdgpu_offload_arch():
     command = "/opt/rocm/llvm/bin/amdgpu-offload-arch"
     try:
@@ -81,6 +85,7 @@ def get_amdgpu_offload_arch():
         raise RuntimeError(error_message) from e
 
     return None
+
 
 def get_hipcc_rocm_version():
     # Run the hipcc --version command

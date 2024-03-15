@@ -291,8 +291,8 @@ def create_kv_caches_with_random(
         elif cache_dtype == 'fp8':
             _generate_random_fp8(key_cache, -scale, scale)
         else:
-             raise ValueError(
-                 f"Does not support key cache of type {cache_dtype}")
+            raise ValueError(
+                f"Does not support key cache of type {cache_dtype}")
         key_caches.append(key_cache)
 
     value_cache_shape = (num_blocks, num_heads, head_size, block_size)

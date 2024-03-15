@@ -142,7 +142,7 @@ class EngineArgs:
             choices=['auto', 'fp8'],
             default='auto',
             help='Data type for kv cache storage. If "auto", will use model '
-            'data type. FP8_E5M2 (without scaling) is only supported on cuda ' 
+            'data type. FP8_E5M2 (without scaling) is only supported on cuda '
             'version greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead '
             'supported for common inference criteria. ')
         parser.add_argument(
@@ -317,9 +317,8 @@ class EngineArgs:
         device_config = DeviceConfig(self.device)
         model_config = ModelConfig(
             self.model, self.tokenizer, self.tokenizer_mode,
-            self.trust_remote_code, self.download_dir, 
-            self.load_format, self.dtype, self.seed,
-            self.revision, self.code_revision,
+            self.trust_remote_code, self.download_dir, self.load_format,
+            self.dtype, self.seed, self.revision, self.code_revision,
             self.tokenizer_revision, self.max_model_len, self.quantization,
             self.scales_path, self.enforce_eager,
             self.max_context_len_to_capture, self.max_logprobs)

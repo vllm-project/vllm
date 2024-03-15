@@ -112,11 +112,12 @@ class ModelRunner:
                 self.lora_config, self.device, self.model.embedding_modules,
                 self.model.embedding_padding_modules)
             self.model = self.lora_manager.create_lora_manager(self.model)
-        
+
         if self.kv_cache_dtype == "fp8":
             if self.model_config.scales_path is not None:
                 if callable(getattr(self.model, "load_kv_cache_scales", None)):
-                    self.model.load_kv_cache_scales(self.model_config.scales_path)
+                    self.model.load_kv_cache_scales(
+                        self.model_config.scales_path)
                 else:
                     raise RuntimeError("Using FP8 KV cache and scaling "
                                        "factors provided but model "
@@ -127,10 +128,9 @@ class ModelRunner:
                             "provided. Defaulting to scaling factors of 1.0. "
                             "This may lead to less accurate results!")
         elif self.model_config.scales_path is not None:
-            logger.warn("KV cache scaling factors provided, " 
-                        "but the KV cache data type is not FP8. " 
+            logger.warn("KV cache scaling factors provided, "
+                        "but the KV cache data type is not FP8. "
                         "KV cache scaling factors will not be used.")
-
 
     def set_block_size(self, block_size: int) -> None:
         self.block_size = block_size

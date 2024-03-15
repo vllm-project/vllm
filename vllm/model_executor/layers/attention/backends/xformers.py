@@ -33,7 +33,7 @@ class XFormersBackend(nn.Module):
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.register_buffer("alibi_slopes", alibi_slopes, persistent=False)
-        
+
         # This will be set to a float by model initialization per attention,
         # if and only if we are using it. N.B. currently we only support per
         # tensor scalar scaling factors & only applicable to ROCm (AMD GPU).
@@ -88,9 +88,14 @@ class XFormersBackend(nn.Module):
         # vectors will not be cached. This happens during the initial memory
         # profiling run.
         if key_cache is not None and value_cache is not None:
-            PagedAttentionImpl.reshape_and_cache(key, value, key_cache,
-                                                 value_cache, input_metadata, 
-                                                 self.kv_cache_scaling_factor,)
+            PagedAttentionImpl.reshape_and_cache(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                input_metadata,
+                self.kv_cache_scaling_factor,
+            )
         if input_metadata.is_prompt:
             # Prompt run.
             if (key_cache is None or value_cache is None
@@ -171,7 +176,7 @@ class XFormersBackend(nn.Module):
 
             else:
                 # prefix-enabled attention
-                # TODO(Hai) this triton kernel has regression issue with 
+                # TODO(Hai) this triton kernel has regression issue with
                 # FP8 KVCache to handle mixed types
                 output = PagedAttentionImpl.forward_prefix(
                     query,

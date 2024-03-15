@@ -264,7 +264,8 @@ def main(args):
         if args.qformat in QUANT_CFG_CHOICES:
             quant_cfg = QUANT_CFG_CHOICES[args.qformat]
         else:
-            raise ValueError(f"Unsupported quantization format: {args.qformat}")
+            raise ValueError(
+                f"Unsupported quantization format: {args.qformat}")
 
         if "awq" in args.qformat:
             quant_cfg = copy.deepcopy(QUANT_CFG_CHOICES[args.qformat])
@@ -302,15 +303,16 @@ def main(args):
             ])
 
             # export safetensors
-            export_model_config(model,
-                                model_type,
-                                getattr(torch, args.dtype),
-                                export_dir=export_path,
-                                inference_tensor_parallel=args.tp_size,
-                                inference_pipeline_parallel=args.pp_size,
-                                # export_tensorrt_llm_config=(not export_npz),
-                                export_tensorrt_llm_config=False,
-                                export_npz=export_npz)
+            export_model_config(
+                model,
+                model_type,
+                getattr(torch, args.dtype),
+                export_dir=export_path,
+                inference_tensor_parallel=args.tp_size,
+                inference_pipeline_parallel=args.pp_size,
+                # export_tensorrt_llm_config=(not export_npz),
+                export_tensorrt_llm_config=False,
+                export_npz=export_npz)
 
             # Workaround for wo quantization
             if args.qformat in ["int8_wo", "int4_wo", "full_prec"]:
@@ -326,9 +328,8 @@ def main(args):
                     json.dump(tensorrt_llm_config, f, indent=4)
 
         end_time = time.time()
-        print(
-            "Quantized model exported to {} \nTotal time used {:.2f} s.".format(
-                export_path, end_time - start_time))
+        print("Quantized model exported to {} \nTotal time used {:.2f} s.".
+              format(export_path, end_time - start_time))
 
 
 if __name__ == "__main__":

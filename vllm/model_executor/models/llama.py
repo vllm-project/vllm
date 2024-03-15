@@ -41,8 +41,7 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, ParallelLMHead, DEFAULT_VOCAB_PADDING_SIZE)
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size)
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator,
@@ -392,7 +391,7 @@ class LlamaForCausalLM(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
-    
+
     # Should not be called unless the KV cache dtype is FP8 on ROCm (AMD GPU)
     # If this function is called, it should always initialize KV cache scale
     # factors (or else raise an exception). Thus, handled exceptions should
@@ -401,13 +400,10 @@ class LlamaForCausalLM(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
         for layer_idx, scaling_factor in kv_cache_scales_loader(
-                                            scales_path, tp_rank, tp_size,
-                                            self.config.num_hidden_layers,
-                                            self.config.__class__.model_type):
+                scales_path, tp_rank, tp_size, self.config.num_hidden_layers,
+                self.config.__class__.model_type):
             layer_paged_attn = (
-                    self.model.layers[layer_idx].
-                    self_attn.attn.backend
-            )
+                self.model.layers[layer_idx].self_attn.attn.backend)
 
             if is_hip():
                 # The scaling factor convention we are assuming is
