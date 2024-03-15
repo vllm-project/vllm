@@ -1,6 +1,5 @@
 name: 🤗 Support request for a new model from huggingface
 description: Submit a proposal/request for a new model from huggingface
-title: "[New Model]: "
 labels: ["new model"]
 
 body:

@@ -1,6 +1,5 @@
 name: ⚡ Discussion on the performance of vllm
 description: Submit a proposal/discussion about the performance of vllm
-title: "[Performance]: "
 labels: ["performance"]
 
 body:

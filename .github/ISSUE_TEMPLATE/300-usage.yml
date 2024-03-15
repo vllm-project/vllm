@@ -1,6 +1,5 @@
 name: 💻 Usage
 description: Raise an issue here if you don't know how to use vllm.
-title: "[Usage]: "
 labels: ["usage"]
 
 body:

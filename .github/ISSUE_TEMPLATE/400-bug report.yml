@@ -1,6 +1,5 @@
 name: 🐛 Bug report
 description: Raise an issue here if you find a bug.
-title: "[Bug]: "
 labels: ["bug"]
 
 body:

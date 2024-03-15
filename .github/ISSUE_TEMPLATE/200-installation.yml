@@ -1,6 +1,5 @@
 name: 🛠️ Installation
 description: Report an issue here when you hit errors during installation.
-title: "[Installation]: "
 labels: ["installation"]
 
 body:
