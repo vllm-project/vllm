@@ -1,23 +1,25 @@
 {
 	"configs": [
 		{
-			"description": "Benchmark vllm engine throughput - synthetic",
+			"description": "VLLM Engine throughput - synthetic",
 			"models": [
 				"NousResearch/Llama-2-7b-chat-hf"
 			],
-			"max_model_lens" : [4096],
+			"max_model_lens": [
+				4096
+			],
 			"script_name": "benchmark_throughput",
 			"script_args": {
-                                "input-len" : [
-                                        256
-                                ],
+				"input-len": [
+					256
+				],
 				"output-len": [
 					128
 				],
 				"num-prompts": [
 					1000
 				],
-				"use-all-available-gpus_" : []
+				"use-all-available-gpus_": []
 			}
 		}
 	]

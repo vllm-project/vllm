@@ -37,7 +37,7 @@ jobs:
         with:
             label: aws-avx2-192G-4-a10g-96G
             benchmark_config_list_file:  ./.github/data/nm_benchmark_nightly_configs_list.txt
-            timeout: 240
+            timeout: 480
             gitref: '${{ github.ref }}'
             Gi_per_thread: 4
             python: "3.10.12"
@@ -49,7 +49,7 @@ jobs:
         with:
             label: aws-avx2-32G-a10g-24G
             benchmark_config_list_file:  ./.github/data/nm_benchmark_nightly_configs_list.txt
-            timeout: 240
+            timeout: 720
             gitref: '${{ github.ref }}'
             Gi_per_thread: 12
             python: "3.10.12"
