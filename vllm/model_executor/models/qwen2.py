@@ -348,9 +348,8 @@ class Qwen2ForCausalLM(nn.Module):
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
                 continue
-            if self.config.tie_word_embeddings:
-                if "lm_head.weight" in name:
-                    continue
+            if self.config.tie_word_embeddings and "lm_head.weight" in name:
+                continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
