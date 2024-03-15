@@ -10,6 +10,7 @@
     <li><code>[Bugfix]</code> for bug fixes.</li>
     <li><code>[CI/Build]</code> for build or continuous integration improvements.</li>
     <li><code>[Model]</code> for adding a new model or improving an existing model. Model name should appear in the title.</li>
+    <li><code>[Core]</code> for changes in the core vLLM (e.g., <code>LLMEngine</code>, <code>Scheduler</code>, etc.)</li>
     <li><code>[Kernel]</code> for changes affecting computation kernels.</li>
     <li><code>[Hardware][Vendor]</code> for hardware-specific changes. Vendor name should appear in the prefix, e.g., <code>[Hardware][AMD]</code>.</li>
     <li><code>[Misc]</code> for PRs that do not fit the above categories. Please use this sparingly.</li>
