@@ -1,5 +1,5 @@
 import enum
-from typing import Dict, List, Optional
+from typing import Dict
 from abc import ABC, abstractmethod, abstractproperty
 from sortedcontainers import SortedList
 
