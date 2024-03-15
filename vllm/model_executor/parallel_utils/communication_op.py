@@ -177,7 +177,7 @@ def broadcast_tensor_dict(
         for key, value in metadata_list:
             if isinstance(value, TensorMetadata):
                 tensor = tensor_dict[key]
-                torch.distributed.broadcast(tensor, src=src)
+                torch.distributed.broadcast(tensor, src=src, group=group)
     else:
         recv_metadata_list = [None]
         torch.distributed.broadcast_object_list(recv_metadata_list,
