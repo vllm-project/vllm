@@ -1,6 +1,6 @@
 <details>
 <!-- inside this <details> section, markdown rendering does not work, so we have to use raw html here. -->
-<summary><h2> PR Checklist (Please do have a look before submitting a PR!) </h2></summary>
+<summary><h2> PR Checklist (Click to expand. Please do have a look before submitting a PR!) </h2></summary>
 <p>Before submitting your pull request, please ensure you have met the following criteria. This helps us maintain quality and efficiency in our review process.</p>
 
 <h3>PR Title And Classification</h3>
