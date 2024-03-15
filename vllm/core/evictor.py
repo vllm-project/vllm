@@ -49,6 +49,7 @@ class Evictor(ABC):
     def num_blocks(self) -> int:
         pass
 
+
 class LRUEvictor(Evictor):
     """Evicts in a least-recently-used order using the last_accessed timestamp
     that's recorded in the PhysicalTokenBlock. If there are multiple blocks with
