@@ -72,19 +72,6 @@ class TorchSDPABackend:
         if input_metadata.is_prompt:
             if (key_cache is None or value_cache is None
                     or input_metadata.block_tables.numel() == 0):
-                if self.num_kv_heads != self.num_heads:
-                    query = query.view(query.shape[0], self.num_kv_heads,
-                                       self.num_queries_per_kv,
-                                       query.shape[-1])
-                    key = key[:, :,
-                              None, :].expand(key.shape[0], self.num_kv_heads,
-                                              self.num_queries_per_kv,
-                                              key.shape[-1])
-                    value = value[:, :,
-                                  None, :].expand(value.shape[0],
-                                                  self.num_kv_heads,
-                                                  self.num_queries_per_kv,
-                                                  value.shape[-1])
 
                 if self.need_mask and input_metadata.attn_bias is None:
                     if self.alibi_slopes is not None:
