@@ -3,7 +3,8 @@ import json
 from pathlib import Path
 from typing import NamedTuple, Optional
 
-from .common import script_args_to_cla, benchmark_configs, max_model_length_from_model_id
+from .common import (script_args_to_cla, benchmark_configs,
+                     max_model_length_from_model_id)
 from ..tools.call_cmd import call_cmd
 
 
@@ -19,14 +20,14 @@ def run_benchmark_throughput_script(config: NamedTuple,
 
         supported_max_model_len = max_model_length_from_model_id(model)
 
-        # If the requested model-len is too big, try running with the maximum supported for this model.
+        # If the requested model-len is too big, try running with
+        # the maximum supported for this model.
         max_model_lens = set(
             map(lambda v: min(v, supported_max_model_len),
                 config.max_model_lens))
         if (config.max_model_lens != list(max_model_lens)):
-            print(
-                f"WARNING: max_model_len modified to {max_model_lens} from {config.max_model_lens} for model {model}"
-            )
+            print(f"WARNING: max_model_len modified to {max_model_lens} "
+                  f"from {config.max_model_lens} for model {model}")
 
         for max_model_len in max_model_lens:
             for script_args in script_args_to_cla(config):

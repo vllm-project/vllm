@@ -76,7 +76,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         weight = weights["weight"]
         if self.separate_bias_add:
-            if bias:
+            if bias is not None:
                 return F.linear(x, weight) + bias
             return F.linear(x, weight)
         return F.linear(x, weight, bias)
@@ -338,9 +338,10 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
-        # This is super hacky for now but we basically want to only compress once all
-        # of the shards are loaded, right now we just check if the number of shards
-        # loaded matches the number of outputs expected, assuming one shard per output
+        # This is super hacky for now but we basically want to only compress
+        # once all of the shards are loaded, right now we just check if the
+        # number of shards loaded matches the number of outputs expected,
+        # assuming one shard per output
         all_shards_loaded = (len(self.loaded_shards) == len(self.output_sizes))
         if all_shards_loaded and isinstance(param, LazyCompressedParameter):
             param.compress()
@@ -489,9 +490,9 @@ class QKVParallelLinear(ColumnParallelLinear):
 
         self.loaded_shards.add(loaded_shard_id)
 
-        # This is super hacky for now but we basically want to only compress once
-        # all of the shards are loaded, for the QKV matrix this means
-        # loading shards "q", "k" and "v"
+        # This is super hacky for now but we basically want to only
+        # compress once all of the shards are loaded, for the QKV matrix
+        # this means loading shards "q", "k" and "v"
         all_shards_loaded = (self.loaded_shards == set(["q", "k", "v"]))
         if all_shards_loaded and isinstance(param, LazyCompressedParameter):
             param.compress()

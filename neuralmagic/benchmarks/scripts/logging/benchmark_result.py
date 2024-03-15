@@ -1,5 +1,5 @@
 """
-Defines a BenchmarkResult class that all the benchmarks use store the benchmark results.
+Defines a BenchmarkResult class that all the benchmarks use to save results.
 """
 
 import json
@@ -16,9 +16,9 @@ from enum import Enum
 # NOTE - PLEASE READ:
 # Any modifications that adds/removes the keys in the JSON that BenchmarkResult
 # produces should also update the BENCHMARK_RESULTS_SCHEMA_VERSION.
-# The primary use case is to establish a set of keys that can be queried against reliably.
-# TODO (varun) : Initial version is named 0.0.0 as things are under development. Update it
-# when things are stable.
+# The primary use case is to establish a set of keys that can be queried.
+# TODO (varun) : Initial version is named 0.0.0 as things are under development.
+# Update it when things are stable.
 BENCHMARK_RESULTS_SCHEMA_VERSION = "0.0.0"
 
 
@@ -158,7 +158,7 @@ class BenchmarkResult:
             dataset if dataset is not None else "synthetic",
             self.SCRIPT_ARGS_KEY_:
             script_args,
-            # Any metadata that the caller script wants to store should be stored here.
+            # Any metadata that the caller script wants to store.
             self.METADATA_KEY_: {},
             # Any benchmarking metrics should be stored here.
             self.METRICS_KEY_: {}

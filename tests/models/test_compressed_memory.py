@@ -36,10 +36,9 @@ def test_models(
                                  sparsity=None,
                                  dtype=dtype,
                                  max_model_len=1024)
-    dense_num_kv_blocks = dense_model.model.llm_engine.scheduler.block_manager.gpu_allocator.num_blocks
+    dense_num_kv_blocks = (dense_model.model.llm_engine.scheduler.
+                           block_manager.gpu_allocator.num_blocks)
 
-    # Note: deleting just the model does not always free the GPU memory, not sure why.
-    del dense_model.model.llm_engine.driver_worker
     del dense_model
     torch.cuda.empty_cache()
     gc.collect()
@@ -48,10 +47,9 @@ def test_models(
                                   sparsity=sparsity,
                                   dtype=dtype,
                                   max_model_len=1024)
-    sparse_num_kv_blocks = sparse_model.model.llm_engine.scheduler.block_manager.gpu_allocator.num_blocks
+    sparse_num_kv_blocks = (sparse_model.model.llm_engine.scheduler.
+                            block_manager.gpu_allocator.num_blocks)
 
-    # Note: deleting just the model does not always free the GPU memory, not sure why.
-    del sparse_model.model.llm_engine.driver_worker
     del sparse_model
     torch.cuda.empty_cache()
     gc.collect()

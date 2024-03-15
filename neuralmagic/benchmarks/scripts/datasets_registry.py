@@ -63,8 +63,8 @@ def get_ultrachat(tokenizer: PreTrainedTokenizerBase,
     prompts = []
     completions = []
     system_message = {
-        "content":
-        "You are a chatbot with the explicit goal of helping the user as best as possible",
+        "content": "You are a chatbot with the explicit goal of "
+        "helping the user as best as possible",
         "role": "system",
     }
     for messages in ds["messages"]:

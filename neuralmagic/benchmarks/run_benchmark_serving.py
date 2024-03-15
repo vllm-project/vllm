@@ -8,7 +8,8 @@ import itertools
 from typing import NamedTuple, Optional
 from pathlib import Path
 
-from .common import download_model, max_model_length_from_model_id, script_args_to_cla, benchmark_configs
+from .common import (download_model, max_model_length_from_model_id,
+                     script_args_to_cla, benchmark_configs)
 from .scripts.common import warmup_server, num_available_gpus
 from ..tools.call_cmd import call_cmd
 
@@ -67,8 +68,8 @@ def run_benchmark_serving_script(config: NamedTuple,
             server_process = subprocess.Popen("exec " + server_cmd, shell=True)
             if not is_server_running(BENCH_SERVER_HOST, BENCH_SERVER_PORT):
                 raise ValueError(
-                    f"Aborting bench run with : server-cmd {server_cmd} , bench-cmd {bench_cmd}. Reason: Cannot start Server"
-                )
+                    f"Aborting bench run with : server-cmd {server_cmd} , "
+                    f"bench-cmd {bench_cmd}. Reason: Cannot start Server")
 
             # server warmup
             warmup_server(server_host=BENCH_SERVER_HOST,
@@ -96,14 +97,14 @@ def run_benchmark_serving_script(config: NamedTuple,
 
         supported_max_model_len = max_model_length_from_model_id(model)
 
-        # If the requested model-len is too big, try running with the maximum supported for this model.
+        # If the requested model-len is too big, try running with the
+        # maximum supported for this model.
         max_model_lens = set(
             map(lambda v: min(v, supported_max_model_len),
                 config.max_model_lens))
         if (config.max_model_lens != list(max_model_lens)):
-            print(
-                f"WARNING: max_model_len modified to {max_model_lens} from {config.max_model_lens} for model {model}"
-            )
+            print(f"WARNING: max_model_len modified to {max_model_lens} "
+                  f"from {config.max_model_lens} for model {model}")
 
         for max_model_len in max_model_lens:
 
@@ -120,7 +121,8 @@ def run_benchmark_serving_script(config: NamedTuple,
                 server_args["sparsity"] = sparsity
 
             server_cmd = "python3 -m vllm.entrypoints.api_server " + \
-                            " ".join([f"--{k} {v}" for k, v in server_args.items()])
+                            " ".join([f"--{k} {v}"
+                                      for k, v in server_args.items()])
 
             for script_args in script_args_to_cla(config):
 

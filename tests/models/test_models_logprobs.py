@@ -51,7 +51,6 @@ def test_models(
                                                        max_tokens,
                                                        num_logprobs)
 
-    del vllm_model.model.llm_engine.driver_worker
     del vllm_model
 
     # loop through the prompts

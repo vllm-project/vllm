@@ -1,4 +1,4 @@
-"""Compare the outputs of a sparse model running sparse vs sparse model running dense.
+"""Compare the outputs of a sparse model vs sparse model running dense.
 Note: sparse kernels do not have bitwise correctness vs the dense models. 
 As a result, in this test, we just confirm that the top selected tokens of the 
 sparse models are in the top N selections of same model running dense.
@@ -41,8 +41,6 @@ def test_models(
     sparse_outputs = sparse_model.generate_greedy_logprobs(
         example_prompts, max_tokens, num_logprobs)
 
-    # Note: deleting just the model does not always free the GPU memory, not sure why.
-    del sparse_model.model.llm_engine.driver_worker
     del sparse_model
     gc.collect()
 
@@ -53,8 +51,6 @@ def test_models(
     dense_outputs = dense_model.generate_greedy_logprobs(
         example_prompts, max_tokens, num_logprobs)
 
-    # Note: deleting just the model does not always free the GPU memory, not sure why.
-    del dense_model.model.llm_engine.driver_worker
     del dense_model
     gc.collect()
 

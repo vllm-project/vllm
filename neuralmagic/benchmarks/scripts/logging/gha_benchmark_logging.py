@@ -10,7 +10,8 @@ from functools import reduce
 from dataclasses import dataclass
 from typing import List, Iterable, NamedTuple
 
-from .benchmark_result import GHABenchmarkToolName, BenchmarkResult, MetricTemplate
+from .benchmark_result import (GHABenchmarkToolName, BenchmarkResult,
+                               MetricTemplate)
 
 
 @dataclass
@@ -123,29 +124,29 @@ if __name__ == '__main__':
         Reference : https://github.com/benchmark-action/github-action-benchmark
         """)
 
-    parser.add_argument("-i",
-                        "--input-json-directory",
-                        required=True,
-                        type=str,
-                        help="""
-            Path to the directory containing BenchmarkResult jsons.
-            This is typically the output directory passed to the benchmark
-            runner scripts like neuralmagic/benchmarks/run_benchmarks.py.
-        """)
+    parser.add_argument(
+        "-i",
+        "--input-json-directory",
+        required=True,
+        type=str,
+        help="""Path to the directory containing BenchmarkResult 
+                jsons. This is typically the output directory passed 
+                to the benchmark runner scripts like 
+                neuralmagic/benchmarks/run_benchmarks.py.""")
 
-    parser.add_argument("--bigger-is-better-output-file-path",
-                        type=str,
-                        required=True,
-                        help="""
-            An output file path, where the GHABenchmarkToolName BiggerIsBetter metrics are to be stored.
-                        """)
+    parser.add_argument(
+        "--bigger-is-better-output-file-path",
+        type=str,
+        required=True,
+        help="""An output file path, where the GHABenchmarkToolName 
+                BiggerIsBetter metrics are to be stored.""")
 
-    parser.add_argument("--smaller-is-better-output-file-path",
-                        type=str,
-                        required=True,
-                        help="""
-            An output file path, where the GHABenchmarkToolName SmallerIsBetter metrics are to be stored
-                        """)
+    parser.add_argument(
+        "--smaller-is-better-output-file-path",
+        type=str,
+        required=True,
+        help="""An output file path, where the GHABenchmarkToolName 
+                SmallerIsBetter metrics are to be stored""")
 
     args = parser.parse_args()
 

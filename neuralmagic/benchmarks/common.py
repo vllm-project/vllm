@@ -27,8 +27,8 @@ def max_model_length_from_model_id(model: str,
 
 
 def script_args_to_cla(config: NamedTuple) -> Iterable[dict]:
-    #config is a NamedTuple constructed from some JSON in neuralmagic/benchmarks/configs
-
+    # config is a NamedTuple constructed from some JSON
+    # in neuralmagic/benchmarks/configs
     kv = vars(config.script_args)
 
     keys = kv.keys()
@@ -57,8 +57,8 @@ def script_args_to_cla(config: NamedTuple) -> Iterable[dict]:
 
 def benchmark_configs(config_file_path: Path) -> Iterable[NamedTuple]:
     """
-    Give a path to a config file in `neuralmagic/benchmarks/configs/*` return an Iterable of
-    (sub)configs in the file
+    Give a path to a config file in `neuralmagic/benchmarks/configs/*` 
+    return an Iterable of (sub)configs in the file
     """
     assert config_file_path.exists()
 

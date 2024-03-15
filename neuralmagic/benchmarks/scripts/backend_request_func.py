@@ -135,7 +135,7 @@ async def async_request_vllm(
                         data = part_data
                     output.latency = time.perf_counter() - st
 
-                    # When streaming, '\0' is appended to the end of the response.
+                    # When streaming, '\0' is appended to the end.
                     body = trim_suffix(data.decode('utf-8'), "\0")
                     output.generated_text = json.loads(
                         body)["text"][0][len(request_func_input.prompt):]
@@ -220,7 +220,8 @@ async def async_request_deepspeed_mii(
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
 
-        # DeepSpeed-MII doesn't support streaming as of Jan 28 2024, will use 0 as placeholder.
+        # DeepSpeed-MII doesn't support streaming as of Jan 28 2024,
+        # will use 0 as placeholder.
         # https://github.com/microsoft/DeepSpeed-MII/pull/311
         output.ttft = 0
 

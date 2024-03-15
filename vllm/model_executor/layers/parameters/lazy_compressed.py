@@ -66,7 +66,8 @@ class LazyCompressedParameter(torch.Tensor):
         def unwrap(e):
             nonlocal ret_storage_format_cls
             if isinstance(e, LazyCompressedParameter):
-                assert ret_storage_format_cls is None or ret_storage_format_cls == e.storage_format_cls
+                assert (ret_storage_format_cls is None
+                        or ret_storage_format_cls == e.storage_format_cls)
                 ret_storage_format_cls = e.storage_format_cls
 
                 if e.is_empty:
@@ -86,7 +87,8 @@ class LazyCompressedParameter(torch.Tensor):
                           torch.Tensor) and ret_storage_format_cls is not None:
                 return LazyCompressedParameter(
                     e,
-                    # Here, "e" is the output of "func" so it is real data and we store it
+                    # Here, "e" is the output of "func" so it is real
+                    # data and we store it
                     is_empty=False,
                     storage_format_cls=ret_storage_format_cls)
             return e
@@ -98,9 +100,10 @@ class LazyCompressedParameter(torch.Tensor):
         from magic_wand import SparseSemiStructuredStorageFormat
 
         if self.storage_format_cls == SparseSemiStructuredStorageFormat:
-            # Semi-structured sparsity assumes a 2:4 pattern, where each 4 elements
-            # have at minimum 2 zeros. We need to validate this pattern exists, so
-            # we check the whole tensor before committing to compression.
+            # Semi-structured sparsity assumes a 2:4 pattern, where
+            # each 4 elements have at minimum 2 zeros. We need to validate
+            # this pattern exists, so we check the whole tensor
+            # before committing to compression.
 
             # Count zeros in each group of 4
             reshaped_tensor = self.uncompressed_data.view(-1, 4)
@@ -112,8 +115,8 @@ class LazyCompressedParameter(torch.Tensor):
 
             if not has_semi_structured_sparsity:
                 logger.warning(
-                    f"Called compress() on tensor of shape {self.shape} but does not "
-                    "have 2:4 sparsity, skipping compression")
+                    f"Called compress() on tensor of shape {self.shape} but "
+                    "does not have 2:4 sparsity, skipping compression")
                 return
 
         else:
@@ -123,8 +126,8 @@ class LazyCompressedParameter(torch.Tensor):
             # Only compress if we have sufficient sparsity (>=40%)
             if sparsity < 0.4:
                 logger.warning(
-                    f"Called compress() on tensor of shape {self.shape} but only has "
-                    f"{sparsity:.2}% sparsity, skipping compression")
+                    f"Called compress() on tensor of shape {self.shape}, but "
+                    f"only has {sparsity:.2}% sparsity, skipping compression")
                 return
 
         if self.uncompressed_data is None:

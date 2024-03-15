@@ -12,7 +12,8 @@ from vllm import (LLM, SamplingParams, __version__ as __vllm_version__)
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from .datasets_registry import SHAREGPT_PATH, SHAREGPT_DOWNLOAD_STR
-from .backend_request_func import RequestFuncInput, RequestFuncOutput, async_request_vllm
+from .backend_request_func import (RequestFuncInput, RequestFuncOutput,
+                                   async_request_vllm)
 from ...tools.call_cmd import call_cmd
 
 
@@ -23,7 +24,7 @@ def num_available_gpus() -> int:
 
 def get_benchmarking_context() -> dict:
     """
-    Return the current python version, pytorch version and CUDA version as a dict
+    Return the current python, pytorch and CUDA version as a dict
     """
     import sys
     import torch
@@ -100,7 +101,7 @@ def warmup_requests(tokenizer: PreTrainedTokenizerBase,
                     num_input_tokens: int = 128,
                     num_output_tokens: int = 1) -> List[Tuple[str, int, int]]:
     """
-    Given a tokenizer, generate `num_requests` requests that would be used for vllm engine warmup 
+    Given a tokenizer, generate `num_requests` requests used for warmup
     """
     words = list(tokenizer.get_vocab().keys())
     requests = []
@@ -187,7 +188,7 @@ def warmup_server(server_host: int,
 
 def format_io_log(prompt: str, output_text: str, n_prompt_tokens: int,
                   n_output_tokens: int) -> str:
-    return f"\n=== Prompt ({n_prompt_tokens}) ==\n{prompt}\n==== output({n_output_tokens}) ==\n{output_text}\n"
+    return f"\n=== Prompt ({n_prompt_tokens}) ==\n{prompt}\n==== output({n_output_tokens}) ==\n{output_text}\n"  # noqa: E501
 
 
 def print_request_outputs(results: List[RequestOutput]) -> None:
@@ -202,8 +203,8 @@ def print_request_outputs(results: List[RequestOutput]) -> None:
 def print_serving_request_io(inputs: List[Tuple[str, int, int]],
                              outputs: List[RequestFuncOutput]) -> None:
     """
-        inputs: list of tuples where the tuple is [prompt, prompt_length, output_length],
-        outputs: list of RequestFuncOutput that is the output from the serving case (benchmark_serving.py)
+        inputs: list of tuples of form [prompt, prompt_length, output_length],
+        outputs: list of RequestFuncOutput output from benchmark_serving.py
         Format and print the inputs and outputs.
     """
     for i, o in zip(inputs, outputs):
