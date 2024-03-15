@@ -190,7 +190,7 @@ def get_ip() -> str:
     # try ipv6
     try:
         s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
-        s.connect(("dns.google", 80))
+        s.connect(("2001:4860:4860::8888", 80))
         return s.getsockname()[0]
     except Exception:
         pass
