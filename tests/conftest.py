@@ -7,6 +7,7 @@ from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
 from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.config import TokenizerPoolConfig
 
 _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
@@ -258,3 +259,13 @@ class VllmRunner:
 @pytest.fixture
 def vllm_runner():
     return VllmRunner
+
+
+def get_tokenizer_pool_config(tokenizer_group_type):
+    if tokenizer_group_type is None:
+        return None
+    if tokenizer_group_type == "ray":
+        return TokenizerPoolConfig(pool_size=1,
+                                   pool_type="ray",
+                                   extra_config={})
+    raise ValueError(f"Unknown tokenizer_group_type: {tokenizer_group_type}")
