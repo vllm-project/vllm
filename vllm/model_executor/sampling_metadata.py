@@ -180,7 +180,6 @@ class SamplingTensors:
             for seq_id in seq_ids:
                 seq_data = sampling_metadata.seq_data[seq_id]
                 extra_entropy = extra_entropy or ()
-                # extra_entropy = extra_entropy + (seq_id, )
                 seq_seeds = cls._get_sequence_seeds(
                     seed,
                     seq_data.get_len(),
