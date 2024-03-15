@@ -19,8 +19,7 @@ from vllm.model_executor.parallel_utils.communication_op import (
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear,
                                                QKVParallelLinear,
-                                               MergedColumnParallelLinear,
-                                               RefMergedColumnParallelLinear)
+                                               MergedColumnParallelLinear)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, ParallelLMHead)
 from vllm.model_executor.parallel_utils.parallel_state import (
