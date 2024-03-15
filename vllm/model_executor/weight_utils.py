@@ -24,8 +24,6 @@ from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
 from vllm.model_executor.layers.quantization.schema import QuantParamSchema
 
-if os.getenv('TENSORIZER_IGNORE_WARNINGS'):
-    warnings.filterwarnings("ignore")
 
 logger = init_logger(__name__)
 
@@ -296,7 +294,7 @@ def hf_model_weights_iterator(
             "loading on vLLM, as tensorizer is forced to load to CPU. "
             "Consider deserializing a vLLM model instead for faster "
             "load times. See the examples/tensorize_vllm_model.py example "
-            "script for serializing vLLM models.")
+            "script for serializing vLLM models.", category=PerformanceWarning)
         deserializer_args = tensorizer_args.deserializer_params
         stream_params = tensorizer_args.stream_params
         stream = open_stream(tensorizer_args.tensorizer_uri, **stream_params)
