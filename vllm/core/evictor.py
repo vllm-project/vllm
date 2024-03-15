@@ -1,6 +1,7 @@
 import enum
 from typing import Dict, List, Optional
 from abc import ABC, abstractmethod, abstractproperty
+from sortedcontainers import SortedList
 
 from vllm.block import PhysicalTokenBlock
 
@@ -50,6 +51,35 @@ class Evictor(ABC):
         pass
 
 
+class BlockMetaInfo:
+    """PhysicalTokenBlock's block_hash & num_hashed_tokens & last_accessed
+    are stored in class BlockMetaInfo and sorted by SortedList
+    """
+
+    def __init__(
+        self,
+        block_hash,
+        num_hashed_tokens,
+        last_accessed,
+    ) -> None:
+        self.block_hash = block_hash
+        self.num_hashed_tokens = num_hashed_tokens
+        self.last_accessed = last_accessed
+
+    def __lt__(self, other):
+        if self.last_accessed == other.last_accessed:
+            return self.num_hashed_tokens > other.num_hashed_tokens
+        return self.last_accessed < other.last_accessed
+
+    def __eq__(self, other):
+        return self.block_hash == other.block_hash
+
+    def __repr__(self) -> str:
+        return (f'BlockMetaInfo(block_hash={self.block_hash}, '
+                f'num_hashed_tokens={self.num_hashed_tokens}, '
+                f'last_accessed={self.last_accessed}')
+
+
 class LRUEvictor(Evictor):
     """Evicts in a least-recently-used order using the last_accessed timestamp
     that's recorded in the PhysicalTokenBlock. If there are multiple blocks with
@@ -60,41 +90,17 @@ class LRUEvictor(Evictor):
 
     def __init__(self):
         self.free_table: Dict[int, PhysicalTokenBlock] = {}
+        self.sorted_list: SortedList[BlockMetaInfo] = SortedList()
 
     def __contains__(self, block_hash: int) -> bool:
         return block_hash in self.free_table
 
-    # TODO: The performance of this evict function can be optimized further.
     def evict(self) -> PhysicalTokenBlock:
-        free_blocks: List[PhysicalTokenBlock] = list(self.free_table.values())
-        if len(free_blocks) == 0:
+        if len(self.free_table) == 0:
             raise ValueError("No usable cache memory left")
 
-        # Find lowest timestamp
-        lowest_timestamp = free_blocks[0].last_accessed
-        for block in free_blocks:
-            if block.last_accessed < lowest_timestamp:
-                lowest_timestamp = block.last_accessed
-
-        # Find all blocks with the lowest timestamp
-        least_recent: List[PhysicalTokenBlock] = []
-        for block in free_blocks:
-            if block.last_accessed == lowest_timestamp:
-                least_recent.append(block)
-
-        # Find highest prefix count per block
-        highest_num_hashed_tokens = 0
-        for block in least_recent:
-            if block.num_hashed_tokens > highest_num_hashed_tokens:
-                highest_num_hashed_tokens = block.num_hashed_tokens
-
-        evicted_block: Optional[PhysicalTokenBlock] = None
-
-        # Find the first block with the lowest timestamp
-        for block in least_recent:
-            if block.num_hashed_tokens == highest_num_hashed_tokens:
-                evicted_block = block
-                break
+        evicted_block_metainfo = self.sorted_list.pop(0)
+        evicted_block = self.free_table[evicted_block_metainfo.block_hash]
 
         assert evicted_block is not None
 
@@ -105,6 +111,10 @@ class LRUEvictor(Evictor):
 
     def add(self, block: PhysicalTokenBlock):
         self.free_table[block.block_hash] = block
+        self.sorted_list.add(
+            BlockMetaInfo(block_hash=block.block_hash,
+                          num_hashed_tokens=block.num_hashed_tokens,
+                          last_accessed=block.last_accessed))
 
     def remove(self, block_hash: int) -> PhysicalTokenBlock:
         if block_hash not in self.free_table:
@@ -112,6 +122,10 @@ class LRUEvictor(Evictor):
                 "Attempting to remove block that's not in the evictor")
         block: PhysicalTokenBlock = self.free_table[block_hash]
         del self.free_table[block_hash]
+        self.sorted_list.remove(
+            BlockMetaInfo(block_hash=block.block_hash,
+                          num_hashed_tokens=block.num_hashed_tokens,
+                          last_accessed=block.last_accessed))
         return block
 
     @property
