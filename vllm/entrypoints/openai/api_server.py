@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 import os
 import importlib
 import inspect
+import ssl
 
 from prometheus_client import make_asgi_app
 import fastapi
@@ -124,6 +125,16 @@ def parse_args():
                         type=str,
                         default=None,
                         help="The file path to the SSL cert file")
+    parser.add_argument("--ssl-ca-certs",
+                        type=str,
+                        default=None,
+                        help="The CA certificates file")
+    parser.add_argument(
+        "--ssl-cert-reqs",
+        type=int,
+        default=int(ssl.CERT_NONE),
+        help="Whether client certificate is required (see stdlib ssl module's)"
+    )
     parser.add_argument(
         "--root-path",
         type=str,
@@ -262,4 +273,6 @@ if __name__ == "__main__":
                 log_level=args.uvicorn_log_level,
                 timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
                 ssl_keyfile=args.ssl_keyfile,
-                ssl_certfile=args.ssl_certfile)
+                ssl_certfile=args.ssl_certfile,
+                ssl_ca_certs=args.ssl_ca_certs,
+                ssl_cert_reqs=args.ssl_cert_reqs)
