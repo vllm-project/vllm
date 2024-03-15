@@ -1,0 +1,31 @@
+name: produce GHA benchmark JSONs for UI
+description: 'produce GHA benchmark JSONs for UI'
+inputs:
+  vllm_benchmark_jsons_path:
+    description: 'Path to a directory containing a list of BenchmarkResult JSONs'
+    required: true
+  bigger_is_better_output_file_path:
+    description: 'Path to a file where the GHA CustomBiggerIsBetter JSON is to be stored'
+    required: true
+  smaller_is_better_output_file_path:
+    description: 'Path to a file where the GHA CustomSmallerIsBetter JSON is to be stored'
+    required: true
+  python:
+    description: 'python version, e.g. 3.10.12'
+    required: true
+  venv:
+    description: 'name for python virtual environment'
+    required: true
+runs:
+  using: composite
+  steps:
+  - id: produce_gha_benchmark_jsons 
+    run: |
+      COMMIT=${{ github.sha }}
+      VENV="${{ inputs.venv }}-${COMMIT:0:7}"
+      source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
+      SUCCESS=0
+      python3 -m neuralmagic.benchmarks.scripts.logging.gha_benchmark_logging -i ${{inputs.vllm_benchmark_jsons_path}} --bigger-is-better-output-file-path ${{ inputs.bigger_is_better_output_file_path }} --smaller-is-better-output-file-path ${{ inputs.smaller_is_better_output_file_path }} || SUCCESS=$?
+      echo "test=${SUCCESS}" >> "$GITHUB_OUTPUT"
+      exit ${SUCCESS}
+    shell: bash

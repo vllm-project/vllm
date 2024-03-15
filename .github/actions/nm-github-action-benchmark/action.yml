@@ -1,0 +1,52 @@
+name: nm github-action benchmark
+description: 'Use github-action-benchmark to visualize input json'
+inputs:
+  gh_action_benchmark_json_file_path:
+    description: "Path to the benchmark json file to upload (Note that this JSON should be in a `github-action-benchmark` consumable format - This is typically the output of  neuralmagic/benchmarks/scripts/logging/gha_benchmark_logging.py)"
+    type: string
+    required: true
+  gh_action_benchmark_tool:
+    description: "A string that is input to the `tool` argument of  `github-action-benchmark`. This should be either `customBiggerIsBetter` or `customSmallerIsBetter`"
+    type: choice
+    options:
+        - 'customBiggerIsBetter'
+        - 'customSmallerIsBetter'
+    required: true
+  gh_pages_branch:
+    description: "Github branch where the `github-action-benchmark` creates its index.html and data.js"
+    type: string
+    required: true
+  auto_push:
+    description: "When set to true, pushes the benchmark results to the `nm-gh-pages` branch."
+    type: choice
+    options:
+        - 'true'
+        - 'false'
+    required: true
+  github_token:
+    description: "secrets.GITHUB_TOKEN from the caller"
+    required: true
+          
+runs: 
+  using: composite
+  steps:
+    - name: push to gh pages
+      uses: benchmark-action/github-action-benchmark@v1
+      with:
+        output-file-path: ${{ inputs.gh_action_benchmark_json_file_path }}
+        tool: ${{ inputs.gh_action_benchmark_tool }}
+        gh-pages-branch: ${{ inputs.gh_pages_branch }}
+        # Token required for pushing to nm-gh-pages branch 
+        github-token: ${{ inputs.github_token}}
+        # Push and deploy to Github pages automatically
+        auto-push: ${{ inputs.auto_push == 'true' }}
+        # Add a commit comment comparing the current benchmark with the previous.
+        comment-always: true
+        # Create an alert when some value has regressed more than 10% 
+        alert-threshold: "10%"
+        # Mark the workflow as a failure when some alert is triggered
+        fail-on-alert: true
+        # Add a commit comment describing what triggered the alert
+        comment-on-alert: true
+        # TODO (varun): Is this a reasonable number ? 
+        max-items-in-chart: 50

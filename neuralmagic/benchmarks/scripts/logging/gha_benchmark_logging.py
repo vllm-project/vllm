@@ -29,29 +29,39 @@ class GHARecord:
     extra: str
 
     @staticmethod
-    def extra_from_benchmark_result(br: BenchmarkResult) -> str:
-        extra_as_dict = {
+    def extra_from_benchmark_result(br: BenchmarkResult) -> dict:
+        extra = {
             BenchmarkResult.DESCRIPTION_KEY_:
             br.get(BenchmarkResult.DESCRIPTION_KEY_),
             BenchmarkResult.BENCHMARKING_CONTEXT_KEY_:
             br.get(BenchmarkResult.BENCHMARKING_CONTEXT_KEY_),
+            BenchmarkResult.GPU_DESCRIPTION_KEY_:
+            br.get(BenchmarkResult.GPU_DESCRIPTION_KEY_),
             BenchmarkResult.SCRIPT_NAME_KEY_:
             br.get(BenchmarkResult.SCRIPT_NAME_KEY_),
             BenchmarkResult.SCRIPT_ARGS_KEY_:
             br.get(BenchmarkResult.SCRIPT_ARGS_KEY_),
-            BenchmarkResult.GPU_DESCRIPTION_KEY_:
-            br.get(BenchmarkResult.GPU_DESCRIPTION_KEY_)
         }
-
-        return f"{json.dumps(extra_as_dict, indent=2)}"
+        return extra
 
     @staticmethod
-    def from_metric_template(metric_template: MetricTemplate, extra: str = ""):
-        return GHARecord(
-            name=f"{metric_template.key} ({metric_template.unit})",
-            unit=metric_template.unit,
-            value=metric_template.value,
-            extra=extra)
+    def from_metric_template(metric_template: MetricTemplate, extra: dict):
+        # Unique names map to unique charts / benchmarks. Pass it as a JSON
+        # string with enough information so we may deconstruct it at the UI.
+        name = {
+            "name":
+            metric_template.key,
+            BenchmarkResult.DESCRIPTION_KEY_:
+            extra.get(BenchmarkResult.DESCRIPTION_KEY_),
+            BenchmarkResult.GPU_DESCRIPTION_KEY_:
+            extra.get(BenchmarkResult.GPU_DESCRIPTION_KEY_),
+            BenchmarkResult.BENCHMARKING_CONTEXT_KEY_:
+            extra.get(BenchmarkResult.BENCHMARKING_CONTEXT_KEY_)
+        }
+        return GHARecord(name=f"{json.dumps(name)}",
+                         unit=metric_template.unit,
+                         value=metric_template.value,
+                         extra=f"{json.dumps(extra, indent=2)}")
 
 
 class Tool_Record_T(NamedTuple):
@@ -70,7 +80,7 @@ def process(json_file_path: Path) -> Iterable[Tool_Record_T]:
 
     print(f"processing file : {json_file_path}")
 
-    hover_data = GHARecord.extra_from_benchmark_result(json_data)
+    hover_data: dict = GHARecord.extra_from_benchmark_result(json_data)
     metrics: Iterable[dict] = json_data.get(BenchmarkResult.METRICS_KEY_)
     metrics: Iterable[MetricTemplate] = map(
         lambda md: MetricTemplate.from_dict(md), metrics.values())
