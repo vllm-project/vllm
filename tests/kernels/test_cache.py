@@ -119,7 +119,7 @@ def test_reshape_and_cache(
     kv_cache_dtype: str,
 ) -> None:
     if not is_hip() and kv_cache_dtype == "fp8":
-        pytest.skip() # This test is not tuned for e5m2 cuda precision
+        pytest.skip()  # This test is not tuned for e5m2 cuda precision
     random.seed(seed)
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
@@ -218,7 +218,7 @@ def test_swap_blocks(
     if kv_cache_dtype == "fp8" and "cpu" in direction:
         pytest.skip()
     if not is_hip() and kv_cache_dtype == "fp8":
-        pytest.skip() # This test is not tuned for e5m2 cuda precision
+        pytest.skip()  # This test is not tuned for e5m2 cuda precision
     random.seed(seed)
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
