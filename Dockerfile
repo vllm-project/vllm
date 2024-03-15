@@ -57,6 +57,22 @@ ENV VLLM_INSTALL_PUNICA_KERNELS=1
 RUN python3 setup.py build_ext --inplace
 #################### EXTENSION Build IMAGE ####################
 
+#################### FLASH_ATTENTION Build IMAGE ####################
+FROM dev as flash-attn-builder
+# max jobs used for build
+ARG max_jobs=2
+ENV MAX_JOBS=${max_jobs}
+# flash attention version
+ARG flash_attn_version=v2.5.6
+ENV FLASH_ATTN_VERSION=${flash_attn_version}
+
+WORKDIR /usr/src/flash-attention-v2
+
+# Download the wheel or build it if a pre-compiled release doesn't exist
+RUN pip --verbose wheel flash-attn==${FLASH_ATTN_VERSION} \
+    --no-build-isolation --no-deps --no-cache-dir
+
+#################### FLASH_ATTENTION Build IMAGE ####################
 
 #################### TEST IMAGE ####################
 # image to run unit testing suite
@@ -68,6 +84,9 @@ WORKDIR /vllm-workspace
 # ADD is used to preserve directory structure
 ADD . /vllm-workspace/
 COPY --from=build /workspace/vllm/*.so /vllm-workspace/vllm/
+# Install flash attention (from pre-built wheel)
+RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,target=/usr/src/flash-attention-v2 \
+    pip install /usr/src/flash-attention-v2/*.whl --no-cache-dir
 # ignore build dependencies installation because we are using pre-complied extensions
 RUN rm pyproject.toml
 RUN --mount=type=cache,target=/root/.cache/pip VLLM_USE_PRECOMPILED=1 pip install . --verbose
@@ -88,6 +107,11 @@ WORKDIR /workspace
 COPY requirements.txt requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.txt
+
+# Install flash attention (from pre-built wheel)
+RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,target=/usr/src/flash-attention-v2 \
+    pip install /usr/src/flash-attention-v2/*.whl --no-cache-dir
+
 #################### RUNTIME BASE IMAGE ####################
 
 
@@ -96,7 +120,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 FROM vllm-base AS vllm-openai
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install accelerate
+    pip install accelerate hf_transfer
 
 COPY --from=build /workspace/vllm/*.so /workspace/vllm/
 COPY vllm vllm
