@@ -244,7 +244,7 @@ class LLMEngine:
             raise ValueError(f"Cannot request more than "
                              f"{max_logprobs} logprobs.")
         if arrival_time is None:
-            arrival_time = time.monotonic()
+            arrival_time = time.time()
         prompt_token_ids = self.encode_request(
             request_id=request_id,
             prompt=prompt,
@@ -628,7 +628,7 @@ class LLMEngine:
     def _get_stats(self,
                    scheduler_outputs: Optional[SchedulerOutputs]) -> Stats:
         """Get Stats to be Logged to Prometheus."""
-        now = time.monotonic()
+        now = time.time()
 
         # KV Cache Usage in %.
         num_total_gpu = self.cache_config.num_gpu_blocks
