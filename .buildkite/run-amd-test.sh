@@ -8,6 +8,6 @@ trap remove_docker_container EXIT
 
 remove_docker_container
 
-docker run -d --network host -n rocm rocm
+docker run --detached --network host --name rocm rocm
 while [ "$(curl -s -o /dev/null -w ''%{http_code}'' localhost:8000)" != "200" ]; do sleep 1; done
 python examples/openai_completion_client.py
