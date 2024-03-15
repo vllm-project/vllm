@@ -9,11 +9,16 @@ from typing import List, Set
 
 from packaging.version import parse, Version
 import setuptools
+import sys
 import torch
 import torch.utils.cpp_extension as torch_cpp_ext
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME, ROCM_HOME
 
 ROOT_DIR = os.path.dirname(__file__)
+
+# vLLM only supports Linux platform
+assert sys.platform.startswith(
+    "linux"), "vLLM only supports Linux platform (including WSL)."
 
 # If you are developing the C++ backend of vLLM, consider building vLLM with
 # `python setup.py develop` since it will give you incremental builds.
@@ -402,11 +407,13 @@ def get_vllm_version() -> str:
         if neuron_version != MAIN_CUDA_VERSION:
             neuron_version_str = neuron_version.replace(".", "")[:3]
             version += f"+neuron{neuron_version_str}"
-    else:
+    elif _is_cuda():
         cuda_version = str(nvcc_cuda_version)
         if cuda_version != MAIN_CUDA_VERSION:
             cuda_version_str = cuda_version.replace(".", "")[:3]
             version += f"+cu{cuda_version_str}"
+    else:
+        raise RuntimeError("Unknown runtime environment.")
 
     return version
 
