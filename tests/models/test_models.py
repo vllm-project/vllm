@@ -6,8 +6,8 @@ import pytest
 
 MODELS = [
     # "facebook/opt-125m",
-    # "meta-llama/Llama-2-7b-hf",
-    "mistralai/Mistral-7B-v0.1",
+    "meta-llama/Llama-2-7b-hf",
+    # "mistralai/Mistral-7B-v0.1",
     # "Deci/DeciLM-7b",
     # "tiiuae/falcon-7b",
     # "gpt2",

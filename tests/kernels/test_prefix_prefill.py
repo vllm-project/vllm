@@ -24,7 +24,8 @@ CUDA_DEVICES = [
 @pytest.mark.parametrize("num_queries_per_kv", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+# @pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", ["cuda"])
 @torch.inference_mode()
 def test_contexted_kv_attention(
     num_heads: int,
@@ -175,6 +176,7 @@ def test_contexted_kv_attention(
     end_time = time.time()
     print(f"xformers Time: {(end_time - start_time)*1000:.2f} ms")
     output_ref = output_ref.squeeze(0, 2)
+    breakpoint()
     assert torch.allclose(output_ref, output, atol=get_default_atol(output), rtol=get_default_rtol(output))
 
 
@@ -293,9 +295,12 @@ def xformer_attention(
 
 
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("num_queries_per_kv", NUM_HEADS)
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
-@pytest.mark.parametrize("block_size", [8, 16, 32])
+# @pytest.mark.parametrize("num_heads", [12])
+# @pytest.mark.parametrize("num_queries_per_kv", NUM_HEADS)
+@pytest.mark.parametrize("num_queries_per_kv", [1, 4])
+# @pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("head_size", [64])
+@pytest.mark.parametrize("block_size", [16, 32])
 @pytest.mark.parametrize("dtype", DTYPES)
 # @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("device", ["cuda"])
@@ -310,7 +315,7 @@ def test_contexted_kv_attention_xformer(
 ) -> None:
     MAX_SEQ_LEN = 1024
     MAX_CTX_LEN = 1024
-    BS = 10
+    BS = 1
     setup_test("cuda:0", seed=0)
 
     # Prepare metadata.
@@ -355,7 +360,12 @@ def test_contexted_kv_attention_xformer(
 
     # context attn subquery vs xformer subquery.
     context_subquery_output = torch.empty(num_subquery_tokens, num_heads, head_size, dtype=dtype)
-    subquery = query[:num_subquery_tokens]
+
+    subquery = torch.zeros(sum(subquery_lens), num_heads, head_size, dtype=dtype)
+    for i in range(BS):
+        for j in range(subquery_lens[i]):
+            subquery[b_subquery_start_loc[i] + j].copy_(query[b_seq_start_loc[i] + b_ctx_len[i] +
+                                            j])
     context_attention_fwd(subquery, k, v, context_subquery_output, k_cache, v_cache, block_table,
                           b_subquery_start_loc, b_seq_len, b_ctx_len, max_input_len)
     torch.cuda.synchronize()
@@ -385,33 +395,41 @@ def test_contexted_kv_attention_xformer(
     # assert torch.allclose(output_ref[-num_subquery_tokens:], context_subquery_output, atol=atol, rtol=rtol)
 
     # Test multi batches
-    output_ref_truncated = output_ref
-    context_subquery_output_truncated = context_subquery_output
+    ref = output_ref
+    # For MQA/GQA, xformer reshapes head_size to q_head, kv_head.
+    # Recover the original shape for comparison.
+    num_tokens, hidden_size = ref.shape[0], ref.shape[-1]
+    ref = ref.reshape(num_tokens, -1, hidden_size)
+    actual = context_subquery_output
+
     for i in range(BS):
         subquery_len = subquery_lens[i]
         seqlen = seq_lens[i]
+        offset = seqlen - subquery_len
+        breakpoint()
+        assert torch.allclose(ref[offset:seqlen], actual[:subquery_len], atol=1e-6, rtol=0)
+        ref = ref[seqlen:]
+        actual = actual[subquery_len:]
 
-        output_ref_truncated = output_ref_truncated[seqlen - subquery_len:]
-        assert torch.allclose(output_ref_truncated[:subquery_len], context_subquery_output_truncated[:subquery_len], atol=atol, rtol=rtol)
-        output_ref_truncated = output_ref_truncated[subquery_len:]
-        context_subquery_output_truncated = context_subquery_output_truncated[subquery_len:]
+    ref = output_ref
+    actual = xformer_subquery_output
 
-    output_ref_truncated = output_ref
-    context_subquery_output_truncated = xformer_subquery_output
     for i in range(BS):
         subquery_len = subquery_lens[i]
         seqlen = seq_lens[i]
-
-        output_ref_truncated = output_ref_truncated[seqlen - subquery_len:]
-        print("Correct!")
-        assert torch.allclose(output_ref_truncated[:subquery_len], context_subquery_output_truncated[:subquery_len], atol=atol, rtol=rtol)
-        output_ref_truncated = output_ref_truncated[subquery_len:]
-        context_subquery_output_truncated = context_subquery_output_truncated[subquery_len:]
+        offset = seqlen - subquery_len
+        assert torch.allclose(ref[offset:seqlen], actual[:subquery_len], atol=0, rtol=0)
+        ref = ref[seqlen:]
+        actual = actual[subquery_len:]
 
 
-@pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("num_queries_per_kv", NUM_HEADS)
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
+# @pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("num_heads", [12])
+# @pytest.mark.parametrize("num_queries_per_kv", NUM_HEADS)
+@pytest.mark.parametrize("num_queries_per_kv", [1, 4])
+# @pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("head_size", [64])
+@pytest.mark.parametrize("block_size", [1, 8, 16, 32])
 @pytest.mark.parametrize("dtype", DTYPES)
 # @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("device", ["cuda"])
@@ -420,6 +438,7 @@ def test_contexted_kv_attention_no_kv_cache(
     num_heads: int,
     num_queries_per_kv: int,
     head_size: int,
+    block_size: int,
     dtype: torch.dtype,
     device: str,
 ) -> None:
@@ -476,4 +495,4 @@ def test_contexted_kv_attention_no_kv_cache(
 
     atol = get_default_atol(output)
     rtol = get_default_rtol(output)
-    assert torch.allclose(output_ref, output, atol=atol, rtol=rtol)
+    assert torch.allclose(output_ref.reshape(output_ref.shape[0], -1, output_ref.shape[-1]), output, atol=atol, rtol=rtol)

@@ -146,20 +146,20 @@ class PagedAttentionImpl:
         alibi_slopes: Optional[torch.Tensor],
     ) -> torch.Tensor:
         output = torch.empty_like(query)
-        print("SANG-TODO prefix attention!")
-        print(f"{input_metadata.block_tables=}")
-        print(f"{input_metadata.start_loc=}")
-        print(f"{input_metadata.prompt_lens=}")
-        print(f"{input_metadata.context_lens=}")
-        print(f"{input_metadata.max_seq_len=}")
-        print(f"{input_metadata.slot_mapping=}")
-        print(f"{query.size()=}")
-        for i in range(query.shape[0]):
-            print(f"{i}th key")
-            print(f"{key[i][0][0]=}")
-        for i in range(query.shape[0]):
-            print(f"{i}th value")
-            print(f"{value[i][0][0]=}")
+        # print("SANG-TODO prefix attention!")
+        # print(f"{input_metadata.block_tables=}")
+        # print(f"{input_metadata.start_loc=}")
+        # print(f"{input_metadata.prompt_lens=}")
+        # print(f"{input_metadata.context_lens=}")
+        # print(f"{input_metadata.max_seq_len=}")
+        # print(f"{input_metadata.slot_mapping=}")
+        # print(f"{query.size()=}")
+        # for i in range(query.shape[0]):
+        #     print(f"{i}th key")
+        #     print(f"{key[i][0][0]=}")
+        # for i in range(query.shape[0]):
+        #     print(f"{i}th value")
+        #     print(f"{value[i][0][0]=}")
 
         # verify kv cache correctness.
         # for token_idx, i in enumerate(input_metadata.slot_mapping):

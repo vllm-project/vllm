@@ -177,7 +177,7 @@ class XFormersBackend:
 
             else:
                 # prefix-enabled attention
-                print("SANG-TODO prefix")
+                # print("SANG-TODO prefix")
                 # print(prefill_input_metadata.prompt_lens)
                 # print(prefill_input_metadata.context_lens)
                 # print(prefill_input_metadata.max_context_len)
@@ -193,7 +193,7 @@ class XFormersBackend:
                     self.alibi_slopes,
                 )
                 # assert output.shape[0] == num_prompt_tokens
-                print("SANG-TODO prefix output: ")
+                # print("SANG-TODO prefix output: ")
                 for n in range(num_prompt_tokens):
                     print(f"{n=}")
                     print(output[n][0])
