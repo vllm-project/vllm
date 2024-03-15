@@ -300,9 +300,7 @@ class Qwen2ForCausalLM(nn.Module):
         self.linear_method = linear_method
         self.model = Qwen2Model(config, linear_method)
 
-        if config.tie_word_embeddings:
-            self.lm_head_weight = self.model.embed_tokens.weight
-        else:
+        if not config.tie_word_embeddings:
             self.lm_head = ParallelLMHead(config.vocab_size,
                                           config.hidden_size)
 
@@ -325,7 +323,7 @@ class Qwen2ForCausalLM(nn.Module):
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
         if self.config.tie_word_embeddings:
-            lm_head_weight = self.lm_head_weight
+            lm_head_weight = self.model.embed_tokens.weight
         else:
             lm_head_weight = self.lm_head.weight
         next_tokens = self.sampler(lm_head_weight, hidden_states,
@@ -353,8 +351,6 @@ class Qwen2ForCausalLM(nn.Module):
             if self.config.tie_word_embeddings:
                 if "lm_head.weight" in name:
                     continue
-                if name == "model.embed_tokens.weight":
-                    name = "lm_head_weight"
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
