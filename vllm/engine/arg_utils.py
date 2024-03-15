@@ -429,7 +429,6 @@ class EngineArgs:
         # Set the tensorizer_args attribute from the parsed arguments.
         if args.load_format == 'tensorizer':
             tensorizer_args = TensorizerArgs.from_cli_args(args)
-            print(tensorizer_args)
             engine_args.tensorizer_args = tensorizer_args
         return engine_args
 
