@@ -17,7 +17,7 @@
 <p><strong>Note:</strong> If my PR spans more than one category, I will include all relevant prefixes.</p>
 
 <h3>Coding Standards</h3>
-<p><strong>I understand that</strong> I must run <code>./format.sh</code> <strong>before submitting the PR and after any new commits</strong> to ensure compliance with linter checks. PRs failing to meet linter standards will not be reviewed or merged.</p>
+<p><strong>I understand that</strong> I must run <code>./format.sh</code> <strong>before submitting the PR and after any new commits</strong> to ensure compliance with linter checks. PRs failing to meet linter standards will not be merged.</p>
 
 <h3>Code Quality</h3>
 <p><strong>I understand that</strong> my code must be well-commented and include sufficient tests, ensuring future contributors can easily understand and modify the codebase.</p>
