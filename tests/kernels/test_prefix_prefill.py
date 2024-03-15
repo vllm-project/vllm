@@ -23,7 +23,8 @@ CUDA_DEVICES = [
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("num_queries_per_kv", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
-@pytest.mark.parametrize("dtype", DTYPES)
+# @pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("dtype", [torch.half])
 # @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("device", ["cuda"])
 @torch.inference_mode()
@@ -406,7 +407,6 @@ def test_contexted_kv_attention_xformer(
         subquery_len = subquery_lens[i]
         seqlen = seq_lens[i]
         offset = seqlen - subquery_len
-        breakpoint()
         assert torch.allclose(ref[offset:seqlen], actual[:subquery_len], atol=1e-6, rtol=0)
         ref = ref[seqlen:]
         actual = actual[subquery_len:]

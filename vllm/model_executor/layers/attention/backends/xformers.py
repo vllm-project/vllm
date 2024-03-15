@@ -194,9 +194,9 @@ class XFormersBackend:
                 )
                 # assert output.shape[0] == num_prompt_tokens
                 # print("SANG-TODO prefix output: ")
-                for n in range(num_prompt_tokens):
-                    print(f"{n=}")
-                    print(output[n][0])
+                # for n in range(num_prompt_tokens):
+                #     print(f"{n=}")
+                #     print(output[n][0])
 
         if num_generation_tokens > 0:
             decoding_input_metadata = input_metadata.decode_input_metadata()
