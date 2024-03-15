@@ -118,7 +118,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
         model_name = request.model
         request_id = f"cmpl-{random_uuid()}"
-        created_time = int(time.monotonic())
+        created_time = int(time.time())
 
         # Schedule the request and get the result generator.
         generators = []
