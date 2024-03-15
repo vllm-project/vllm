@@ -295,6 +295,7 @@ def xformer_attention(
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("num_queries_per_kv", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", [8, 16, 32])
 @pytest.mark.parametrize("dtype", DTYPES)
 # @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("device", ["cuda"])
@@ -303,6 +304,7 @@ def test_contexted_kv_attention_xformer(
     num_heads: int,
     num_queries_per_kv: int,
     head_size: int,
+    block_size: int,
     dtype: torch.dtype,
     device: str,
 ) -> None:
@@ -314,7 +316,6 @@ def test_contexted_kv_attention_xformer(
     # Prepare metadata.
     num_kv_heads = num_heads // num_queries_per_kv
     cache_size = 640
-    block_size = 32
     max_block_per_request = 64
     max_input_len = MAX_SEQ_LEN
 
