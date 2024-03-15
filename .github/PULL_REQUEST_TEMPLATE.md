@@ -27,3 +27,13 @@
 <p>Thank you for your contribution!</p>
 
 </details>
+
+## PR Justification
+
+Please provide a brief explanation of the motivation behind the PR and the changes it introduces. This helps reviewers understand the context and rationale for the contribution.
+
+If possible, please link existing issues this PR will resolve.
+
+## Note for large changes
+
+For major architectural changes (>500 LOC excluding kernel/data/config/test), we would expect a GitHub issue discussing the technical design and justification. Otherwise, we will tag it with `rfc-required` and might not take a look at the PR.
