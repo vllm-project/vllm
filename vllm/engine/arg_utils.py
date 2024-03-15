@@ -417,23 +417,20 @@ class EngineArgs:
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace) -> 'EngineArgs':
-        # Get the list of attributes of this dataclass.
-        attrs = [attr.name for attr in dataclasses.fields(cls)]
-        # Set the attributes from the parsed arguments.
+        # Get the list of attributes of this dataclass that are not
+        # TensorizerArgs.
+        engine_attrs = [attr.name for attr in dataclasses.fields(cls)
+                        if attr.name != 'tensorizer_args']
+        attrs = [attr for attr in engine_attrs]
 
-        # tensorizer_args are not part of the CLI arguments, so we need to
-        # allow for CLI args and EngineArgs parameter incongruency so that
-        # we can instantiate TensorizerArgs if load_format = tensorizer
-        # by not populating engine_args one-to-one with the CLI arguments.
-        engine_args = cls(**{
-            attr: getattr(args, attr)
-            for attr in attrs if hasattr(args, attr)
-        })
-        # Check if the tensorizer_args is in the CLI arguments
-        if args.load_format == "tensorizer":
-            # Create an instance of TensorizerArgs using the
-            # from_cli_args method
-            engine_args.tensorizer_args = TensorizerArgs.from_cli_args(args)
+        # Set the attributes from the parsed arguments.
+        engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
+
+        # Set the tensorizer_args attribute from the parsed arguments.
+        if args.load_format == 'tensorizer':
+            tensorizer_args = TensorizerArgs.from_cli_args(args)
+            print(tensorizer_args)
+            engine_args.tensorizer_args = tensorizer_args
         return engine_args
 
     def create_engine_config(self, ) -> EngineConfig:

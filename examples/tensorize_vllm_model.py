@@ -61,16 +61,16 @@ def parse_args():
              "For serialization, model tensors will be saved to this "
              "directory under a directory given by the model ref set "
              "in --model and a unique identifier. For instance, if "
-             "serializing EleutherAI/pythia-1.4b, in S3 bucket "
+             "serializing EleutherAI/pythia-1.4b in S3 bucket "
              "BUCKET, tensors and encryption key if applicable will "
              "be saved to "
-             "s3://BUCKET/EleutherAI/pythia-1.4b/HASH/model.tensors. "
+             "s3://BUCKET/vllm/EleutherAI/pythia-1.4b/HASH/model.tensors. "
              "for this reason, --input-dir is recommended to specify "
              "a bucket name if using object storage rather than a "
              "local dir. If deserializing, model.tensors and "
              "model.key will be looked for in --input-dir. In the "
              "previous example, the --input-dir to use would be "
-             "s3://BUCKET/EleutherAI/pythia-1.4b/HASH"
+             "s3://BUCKET/vllm/EleutherAI/pythia-1.4b/UUID"
 
     )
 
@@ -142,7 +142,6 @@ def serialize():
     if keyfile:
         with _write_stream(keyfile_path) as stream:
             stream.write(encryption_params.key)
-    print("Is encryption being used?", encryption_params is not None)
 
     with _write_stream(model_path) as stream:
         serializer = TensorSerializer(stream, encryption=encryption_params)
@@ -212,7 +211,7 @@ initialize_model_parallel()
 
 keyfile = args.keyfile if args.keyfile else None
 
-base_path = f"{input_dir}/{model_ref}/{uuid.uuid4().hex}" \
+base_path = f"{input_dir}/vllm/{model_ref}/{uuid.uuid4().hex}" \
     if args.command == "serialize" else input_dir
 model_path = f"{base_path}/model.tensors"
 keyfile_path = f"{base_path}/{keyfile}"

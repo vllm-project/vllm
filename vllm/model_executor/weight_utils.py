@@ -4,6 +4,7 @@ import glob
 import hashlib
 import json
 import os
+import warnings
 from collections import defaultdict
 from typing import Any, Iterable, Iterator, List, Optional, Tuple, Union
 
@@ -22,6 +23,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
 from vllm.model_executor.layers.quantization.schema import QuantParamSchema
+
+if os.getenv('TENSORIZER_IGNORE_WARNINGS'):
+    warnings.filterwarnings("ignore")
 
 logger = init_logger(__name__)
 
@@ -246,10 +250,6 @@ def hf_model_weights_iterator(
     revision: Optional[str] = None,
     fall_back_to_pt: Optional[bool] = True,
 ) -> Iterator[Tuple[str, torch.Tensor]]:
-    if isinstance(load_format, tuple):
-        load_format, tensorizer_args = load_format
-    else:
-        tensorizer_args = None
     hf_folder, hf_weights_files, use_safetensors = prepare_hf_model_weights(
         model_name_or_path,
         cache_dir=cache_dir,
@@ -290,7 +290,8 @@ def hf_model_weights_iterator(
                 param = np.load(f)
             yield name, torch.from_numpy(param)
     elif load_format == "tensorizer":
-        logger.warning(
+        tensorizer_args = load_format.params
+        warnings.warn(
             "Deserializing HuggingFace models is not optimized for "
             "loading on vLLM, as tensorizer is forced to load to CPU. "
             "Consider deserializing a vLLM model instead for faster "
