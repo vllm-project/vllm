@@ -2,6 +2,7 @@ import argparse
 import dataclasses
 import io
 import os
+import warnings
 import time
 import typing
 from typing import Optional
@@ -51,10 +52,26 @@ class ParameterizedLoadFormat(str):
     __slots__ = "params"
 
 
+class PerformanceWarning(UserWarning):
+    def __str__(self):
+        return (
+            f"{super().__str__()}"
+            " (set the VLLM_SILENCE_PERFORMANCE_WARNINGS"
+            " environment variable to hide this)"
+        )
+
+
+if (
+        os.getenv("VLLM_SILENCE_PERFORMANCE_WARNINGS", "").lower()
+        not in ("", "0", "n", "no", "off", "disable")
+):
+    warnings.simplefilter("ignore", category=PerformanceWarning)
+
+
 @dataclass
 class TensorizerArgs:
     tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, typing.BinaryIO,
-                          str, bytes, os.PathLike, int]
+    str, bytes, os.PathLike, int]
     verify_hash: bool = False
     filter_func: Optional[Callable[[str], Union[bool, Any]]] = None
     encryption_keyfile: Optional[str] = None
@@ -124,28 +141,28 @@ class TensorizerArgs:
         group.add_argument(
             "--tensorizer-uri",
             help="Path to serialized model tensors. Can be a local file path,"
-            " or an HTTP(S) or S3 URI.",
+                 " or an HTTP(S) or S3 URI.",
         )
         group.add_argument(
             "--verify-hash",
             action="store_true",
             help="If enabled, the hashes of each tensor will be verified"
-            " against the hashes stored in the file metadata. An exception"
-            " will be raised if any of the hashes do not match.",
+                 " against the hashes stored in the file metadata. An exception"
+                 " will be raised if any of the hashes do not match.",
         )
         group.add_argument(
             "--encryption-keyfile",
             default=None,
             help="A `DecryptionParams` object holding a password or key to"
-            " use for decryption. ``None`` (the default) means no "
-            "decryption.",
+                 " use for decryption. ``None`` (the default) means no "
+                 "decryption.",
         )
         group.add_argument(
             "--force-http",
             action="store_true",
             help="If enabled, `tensorizer` will force a HTTP connection to "
-            "tensorizer-uri, if applicable, instead of HTTPS. This is"
-            " slightly faster, but less secure.",
+                 "tensorizer-uri, if applicable, instead of HTTPS. This is"
+                 " slightly faster, but less secure.",
         )
 
         return parser
@@ -173,9 +190,9 @@ class TensorizerAgent:
     """
 
     def __init__(
-        self,
-        model_cls: Type[nn.Module],
-        model_config: ModelConfig,
+            self,
+            model_cls: Type[nn.Module],
+            model_config: ModelConfig,
     ):
         self.model_cls = model_cls
         self.model_config = model_config
@@ -210,9 +227,9 @@ class TensorizerAgent:
                 mode="rb",
                 **self.tensorizer_args.stream_params,
         ) as stream, TensorDeserializer(
-                stream,
-                dtype=self.model_config.dtype,
-                **self.tensorizer_args.deserializer_params) as deserializer:
+            stream,
+            dtype=self.model_config.dtype,
+            **self.tensorizer_args.deserializer_params) as deserializer:
             deserializer.load_into_module(self.model)
             end = time.perf_counter()
 
