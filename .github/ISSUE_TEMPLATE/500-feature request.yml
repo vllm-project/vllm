@@ -1,6 +1,7 @@
 name: 🚀 Feature request
 description: Submit a proposal/request for a new vllm feature
-labels: ["enhancement"]
+title: "[Feature]: "
+labels: ["feature request"]
 
 body:
 - type: markdown
