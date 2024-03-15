@@ -95,13 +95,15 @@ class BlockAllocator:
                 del self.cached_blocks[block.block_hash]
 
     def get_num_free_blocks(self) -> int:
-        return self.num_blocks - self.current_num_blocks + self.evictor.num_blocks
+        return (self.num_blocks - self.current_num_blocks +
+                self.evictor.num_blocks)
 
     def contains_block(self, block_hash: int) -> bool:
         return block_hash in self.cached_blocks or block_hash in self.evictor
 
     def update_hash(self, block_hash: int, block: PhysicalTokenBlock):
-        # If caching is enabled, update the hash of block and the cached_blocks dictionary.
+        # If caching is enabled, update the hash of block and the
+        # cached_blocks dictionary.
         if self.enable_caching:
             assert not self.contains_block(block_hash)
             old_hash = block.block_hash
@@ -218,10 +220,12 @@ class BlockSpaceManager:
         seq: Sequence,
         last_block: PhysicalTokenBlock,
     ) -> PhysicalTokenBlock:
-        # Compute a new hash for the block so that it can be shared by other Sequences
+        # Compute a new hash for the block so that it can be shared by
+        # other Sequences
         new_hash = seq.hash_of_block(len(seq.logical_token_blocks) - 1)
 
-        # if new_hash is already in the cached table, then free last_block and return the cached version
+        # if new_hash is already in the cached table, then free last_block
+        # and return the cached version
         if self.gpu_allocator.contains_block(new_hash):
             self.gpu_allocator.free(last_block)
             return self.gpu_allocator.allocate(new_hash)
@@ -289,7 +293,8 @@ class BlockSpaceManager:
         assert last_block.device == Device.GPU
         if last_block.ref_count == 1:
             # Not shared with other sequences. Appendable.
-            # If the last block is now complete, promote it to a full block so that it can be shared
+            # If the last block is now complete, promote it to a full block so
+            # that it can be shared
             new_block = self._maybe_promote_last_block(seq, last_block)
             block_table[-1] = new_block
             return None
@@ -307,7 +312,12 @@ class BlockSpaceManager:
         # Thus, it is always safe from OOM.
         src_block_table = self.block_tables[parent_seq.seq_id]
         self.block_tables[child_seq.seq_id] = src_block_table.copy()
-        for block in src_block_table:
+        # When using a sliding window, blocks will be eventually reused.
+        # In this case the block tables will contain repeated blocks.
+        # When forking, we must make sure that each block's `ref_count`
+        # is only incremented by one, so we deduplicate them by wrapping
+        # them in a set.
+        for block in set(src_block_table):
             block.ref_count += 1
 
     def _get_physical_blocks(
@@ -388,7 +398,15 @@ class BlockSpaceManager:
         return block_number_mapping
 
     def _free_block_table(self, block_table: BlockTable) -> None:
-        for block in set(block_table):
+        # when using a sliding window, each seq will only use up
+        # to `self.block_sliding_window` blocks. When freeing
+        # the block table, we must make sure to not free blocks more
+        # than once. If no sliding window is used, there is no block
+        # reuse in the block table, so we must free all blocks.
+        blocks_to_free = (block_table[-self.block_sliding_window:]
+                          if self.block_sliding_window is not None else
+                          block_table)
+        for block in set(blocks_to_free):
             if block.device == Device.GPU:
                 self.gpu_allocator.free(block)
             else:

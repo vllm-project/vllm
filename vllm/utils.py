@@ -21,6 +21,7 @@ from collections import OrderedDict
 from typing import Any, Hashable, Optional
 
 from vllm.logger import init_logger
+import warnings
 
 T = TypeVar("T")
 logger = init_logger(__name__)
@@ -133,9 +134,10 @@ def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     # the Neuron-X backend does not have the `cuda_utils` module.
     from vllm._C import cuda_utils
 
-    max_shared_mem = cuda_utils.get_max_shared_memory_per_block_device_attribute(
-        gpu)
-    # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py will fail
+    max_shared_mem = (
+        cuda_utils.get_max_shared_memory_per_block_device_attribute(gpu))
+    # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py
+    # will fail
     assert max_shared_mem > 0, "max_shared_mem can not be zero"
     return int(max_shared_mem)
 
@@ -171,16 +173,35 @@ def make_async(func: Callable[..., T]) -> Callable[..., Awaitable[T]]:
 
 
 def get_ip() -> str:
+    host_ip = os.environ.get("HOST_IP")
+    if host_ip:
+        return host_ip
+
+    # IP is not set, try to get it from the network interface
+
     # try ipv4
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80))  # Doesn't need to be reachable
         return s.getsockname()[0]
-    except OSError:
-        # try ipv6
+    except Exception:
+        pass
+
+    # try ipv6
+    try:
         s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
-        s.connect(("dns.google", 80))
+        # Google's public DNS server, see
+        # https://developers.google.com/speed/public-dns/docs/using#addresses
+        s.connect(("2001:4860:4860::8888", 80))  # Doesn't need to be reachable
         return s.getsockname()[0]
+    except Exception:
+        pass
+
+    warnings.warn(
+        "Failed to get the IP address, using 0.0.0.0 by default."
+        "The value can be set by the environment variable HOST_IP.",
+        stacklevel=2)
+    return "0.0.0.0"
 
 
 def get_distributed_init_method(ip: str, port: int) -> str:
@@ -209,9 +230,8 @@ def get_nvcc_cuda_version() -> Optional[Version]:
     if not cuda_home:
         cuda_home = '/usr/local/cuda'
         if os.path.isfile(cuda_home + '/bin/nvcc'):
-            logger.info(
-                f'CUDA_HOME is not found in the environment. Using {cuda_home} as CUDA_HOME.'
-            )
+            logger.info(f'CUDA_HOME is not found in the environment. '
+                        f'Using {cuda_home} as CUDA_HOME.')
         else:
             logger.warning(
                 f'Not found nvcc in {cuda_home}. Skip cuda version check!')

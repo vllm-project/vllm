@@ -17,14 +17,16 @@ from vllm.lora.layers import (
     LoRAMapping,
     BaseLayerWithLoRA,
 )
-from vllm.lora.models import LoRALayerWeights, convert_mapping, PackedLoRALayerWeights
+from vllm.lora.models import (LoRALayerWeights, convert_mapping,
+                              PackedLoRALayerWeights)
 from vllm.config import LoRAConfig
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                RowParallelLinear,
                                                QKVParallelLinear)
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding, ParallelLMHead
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding, ParallelLMHead)
 from vllm.model_executor.utils import set_random_seed
 
 from .utils import DummyLoRAManager
@@ -258,7 +260,8 @@ def test_embeddings(dist_init, num_loras, device) -> None:
 
 
 @torch.inference_mode()
-# @pytest.mark.skip(reason="Fails when loras are in any slot other than the first.")
+# @pytest.mark.skip(
+#     reason="Fails when loras are in any slot other than the first.")
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_embeddings_with_new_embeddings(dist_init, num_loras, device) -> None:
@@ -674,9 +677,9 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, device) -> None:
             result = linear(input_)[0]
             subloras = sublora_dict[lora_id]
             for i, sublora in enumerate(subloras):
-                result[:, sublora.lora_b.shape[1] * i:sublora.lora_b.shape[1] * (
-                    i + 1
-                )] += input_ @ sublora.lora_a @ sublora.lora_b * sublora.scaling
+                result[:, sublora.lora_b.shape[1] * i:sublora.lora_b.shape[1] *
+                       (i + 1)] += (input_ @ sublora.lora_a @ sublora.lora_b *
+                                    sublora.scaling)
             expected_results.append(result)
         expected_result = torch.cat(expected_results)
 
