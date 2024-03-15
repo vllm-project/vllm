@@ -298,27 +298,26 @@ async def async_request_openai_completions(
 
                         chunk = chunk.decode("utf-8").lstrip("data: ")
                         if chunk == "[DONE]":
-                            continue
+                            latency = time.perf_counter() - st
                         else:
                             body = json.loads(chunk)
-                            timestamp = time.perf_counter()
-                            # First token
-                            if ttft == 0:
-                                ttft = time.perf_counter() - st
-                                output.ttft = ttft
 
-                            # Decoding phase
-                            # NOTE: completion API has a last usage summary response
-                            # without a token so we do not want to include in e2e latency
-                            elif body.get("usage", None) is None:
-                                output.itl.append(timestamp -
-                                                  most_recent_timestamp)
+                            if body["choices"][0]["text"]:
+                                timestamp = time.perf_counter()
+                                # First token
+                                if ttft == 0:
+                                    ttft = time.perf_counter() - st
+                                    output.ttft = ttft
 
-                            else:
-                                latency = most_recent_timestamp - st
+                                # Decoding phase
+                                # NOTE: Some completion API might have a last usage summary response
+                                # without a token so we do not want to include as inter-token-latency
+                                elif body.get("usage", None) is None:
+                                    output.itl.append(timestamp -
+                                                      most_recent_timestamp)
 
-                            most_recent_timestamp = timestamp
-                            generated_text += body["choices"][0]["text"]
+                                most_recent_timestamp = timestamp
+                                generated_text += body["choices"][0]["text"]
 
                     output.generated_text = generated_text
                     output.success = True
