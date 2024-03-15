@@ -4,3 +4,4 @@ packaging
 setuptools>=49.4.0
 torch==2.1.2
 wheel
+sortedcontainers
