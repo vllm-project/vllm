@@ -128,15 +128,15 @@ def sample_sonnet_requests(
         len(token_ids) for token_ids in poem_token_ids) / len(poem_token_ids)
 
     # Base prefix for all requests.
-    base_prompt = "Pick as many lines as you can from these poem lines:\n",
+    base_prompt = "Pick as many lines as you can from these poem lines:\n"
     base_message = [
         {
             "role": "user",
             "content": base_prompt,
-        },
+        }
     ]
-    base_prompt_formatted = tokenizer.apply_chat_template(base_message,
-                                                          tokenize=False)
+    base_prompt_formatted = tokenizer.apply_chat_template(
+        base_message, add_generation_prompt=True, tokenize=False)
     base_prompt_offset = len(tokenizer(base_prompt_formatted).input_ids)
 
     assert input_len > base_prompt_offset, f"input_len is too short, please specify a number higher than {base_prompt_offset}."
@@ -164,8 +164,8 @@ def sample_sonnet_requests(
                 "content": prompt,
             },
         ]
-        prompt_formatted = tokenizer.apply_chat_template(message,
-                                                         tokenize=False)
+        prompt_formatted = tokenizer.apply_chat_template(
+            message, add_generation_prompt=True, tokenize=False)
         prompt_len = len(tokenizer(prompt_formatted).input_ids)
         sampled_requests.append(
             (prompt, prompt_formatted, prompt_len, output_len))
