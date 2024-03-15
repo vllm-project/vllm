@@ -52,7 +52,6 @@ class AWQConfig(QuantizationConfig):
                 f"AWQ, but got {self.weight_bits} bits.")
         self.pack_factor_int32 = 32 // self.weight_bits
         self.pack_factor_int16 = 16 // self.weight_bits
-        
         self.interleave = 4
 
     def __repr__(self) -> str:
@@ -146,7 +145,6 @@ class AWQLinearMethod(LinearMethodBase):
                 qzeros, {
                     "input_dim": 0,
                     "output_dim": 1,
-                    "packed_dim": 0,
                 })
             scales = Parameter(
                 torch.empty(
@@ -160,7 +158,6 @@ class AWQLinearMethod(LinearMethodBase):
                 scales, {
                     "input_dim": 0,
                     "output_dim": 1,
-                    "packed_dim": 0,
                 })
         else:
             qweight = Parameter(
