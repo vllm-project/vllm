@@ -2,12 +2,21 @@
 from typing import List, Optional
 
 # NOTE(woosuk): This imports flash_attn under vllm/thirdparty_files/.
-from flash_attn import flash_attn_func
+from vllm.utils import is_hip
+try:
+    from flash_attn import flash_attn_func
+except ImportError:
+    if is_hip():
+        pass
+    else:
+        raise
+
 import torch
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention.ops.paged_attn import (
     PagedAttentionImpl)
+from vllm.model_executor.layers.attention.ops.flash_attention_triton import attention
 
 
 class FlashAttentionBackend:
@@ -86,15 +95,26 @@ class FlashAttentionBackend:
                 query = query.unflatten(0, (batch_size, seq_len))
                 key = key.unflatten(0, (batch_size, seq_len))
                 value = value.unflatten(0, (batch_size, seq_len))
-                output = flash_attn_func(
-                    query,
-                    key,
-                    value,
-                    softmax_scale=self.scale,
-                    causal=True,
-                    window_size=self.sliding_window,
-                    alibi_slopes=self.alibi_slopes,
-                )
+                if is_hip():
+                    output, _ = attention(
+                                query,
+                                key,
+                                value,
+                                None,
+                                input_metadata,
+                                True,
+                                self.scale,
+                            )
+                else:
+                    output = flash_attn_func(
+                        query,
+                        key,
+                        value,
+                        softmax_scale=self.scale,
+                        causal=True,
+                        window_size=self.sliding_window,
+                        alibi_slopes=self.alibi_slopes,
+                    )
             else:
                 # prefix-enabled attention
                 output = PagedAttentionImpl.forward_prefix(

@@ -30,7 +30,7 @@ class Attention(nn.Module):
         sliding_window: Optional[int] = None,
     ) -> None:
         super().__init__()
-        if (not is_hip() and torch.cuda.get_device_capability()[0] >= 8 and
+        if (torch.cuda.get_device_capability()[0] >= 8 and
                 torch.get_default_dtype() in (torch.float16, torch.bfloat16)):
             # Ampere or later NVIDIA GPUs.
             # NOTE(woosuk): FlashAttention does not support FP32.
