@@ -5,7 +5,7 @@ sentencepiece  # Required for LLaMA tokenizer.
 numpy
 torch == 2.2.0
 transformers >= 4.38.0  # Required for Gemma.
-xformers == 0.0.24  # Required for PyTorch 2.2.0.
+xformers == 0.0.24  # Requires PyTorch 2.2.0.
 fastapi
 uvicorn[standard]
 pydantic >= 2.0  # Required for OpenAI server.
