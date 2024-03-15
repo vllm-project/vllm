@@ -22,87 +22,72 @@ s3_access_key_id = os.environ.get("S3_ACCESS_KEY_ID") or None
 s3_secret_access_key = os.environ.get("S3_SECRET_ACCESS_KEY") or None
 s3_endpoint = os.environ.get("S3_ENDPOINT_URL") or None
 
-
-_read_stream, _write_stream = (
-    partial(
-        stream_io.open_stream,
-        mode=mode,
-        s3_access_key_id=s3_access_key_id,
-        s3_secret_access_key=s3_secret_access_key,
-        s3_endpoint=s3_endpoint,
-    )
-    for mode in ("rb", "wb+")
-)
+_read_stream, _write_stream = (partial(
+    stream_io.open_stream,
+    mode=mode,
+    s3_access_key_id=s3_access_key_id,
+    s3_secret_access_key=s3_secret_access_key,
+    s3_endpoint=s3_endpoint,
+) for mode in ("rb", "wb+"))
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Arguments for serializing and deserializing vLLM "
-                    "models. These models can be loaded using "
-                    "tensorizer directly to the GPU extremely quickly")
+        "models. These models can be loaded using "
+        "tensorizer directly to the GPU extremely quickly")
     parser = TensorizerArgs.add_cli_args(parser)
     parser.add_argument(
         "--model",
         type=str,
         required=True,
-        help="The model reference name to serialize or deserialize"
-    )
-    parser.add_argument(
-        "--dtype",
-        type=str,
-        required=False,
-        help="The dtype to use for the model"
-    )
+        help="The model reference name to serialize or deserialize")
+    parser.add_argument("--dtype",
+                        type=str,
+                        required=False,
+                        help="The dtype to use for the model")
     parser.add_argument(
         "--input-dir",
         type=str,
         required=True,
         help="The directory to serialize or deserialize the model to. "
-             "For serialization, model tensors will be saved to this "
-             "directory under a directory given by the model ref set "
-             "in --model and a unique identifier. For instance, if "
-             "serializing EleutherAI/pythia-1.4b in S3 bucket "
-             "BUCKET, tensors and encryption key if applicable will "
-             "be saved to "
-             "s3://BUCKET/vllm/EleutherAI/pythia-1.4b/HASH/model.tensors. "
-             "for this reason, --input-dir is recommended to specify "
-             "a bucket name if using object storage rather than a "
-             "local dir. If deserializing, model.tensors and "
-             "model.key will be looked for in --input-dir. In the "
-             "previous example, the --input-dir to use would be "
-             "s3://BUCKET/vllm/EleutherAI/pythia-1.4b/UUID"
-
-    )
+        "For serialization, model tensors will be saved to this "
+        "directory under a directory given by the model ref set "
+        "in --model and a unique identifier. For instance, if "
+        "serializing EleutherAI/pythia-1.4b in S3 bucket "
+        "BUCKET, tensors and encryption key if applicable will "
+        "be saved to "
+        "s3://BUCKET/vllm/EleutherAI/pythia-1.4b/HASH/model.tensors. "
+        "for this reason, --input-dir is recommended to specify "
+        "a bucket name if using object storage rather than a "
+        "local dir. If deserializing, model.tensors and "
+        "model.key will be looked for in --input-dir. In the "
+        "previous example, the --input-dir to use would be "
+        "s3://BUCKET/vllm/EleutherAI/pythia-1.4b/UUID")
 
     subparsers = parser.add_subparsers(dest='command')
 
     serialize_parser = subparsers.add_parser(
-        'serialize',
-        help="Serialize a model to `--input-dir`")
+        'serialize', help="Serialize a model to `--input-dir`")
 
     serialize_parser.add_argument(
         "--keyfile",
         type=str,
         required=False,
-        help=("File to write 32 bytes of randomly-generated binary data used as"
-              " an encryption key"
-              )
-    )
+        help=(
+            "File to write 32 bytes of randomly-generated binary data used as"
+            " an encryption key"))
 
     deserialize_parser = subparsers.add_parser(
         'deserialize',
-        help=(
-            "Deserialize a model from `--input-dir`"
-            " to verify it can be loaded and used."
-        )
-    )
+        help=("Deserialize a model from `--input-dir`"
+              " to verify it can be loaded and used."))
 
     deserialize_parser.add_argument(
         "--keyfile",
         type=str,
         required=True,
-        help="Decryption keyfile to use to decrypt the model"
-    )
+        help="Decryption keyfile to use to decrypt the model")
 
     return parser.parse_args()
 
@@ -169,11 +154,8 @@ def deserialize():
             tensorizer_args.deserializer_params['encryption'] = \
                 decryption_params
 
-    with (_read_stream(
-            model_path,
-    )) as stream, TensorDeserializer(
-        stream,
-        **tensorizer_args.deserializer_params) as deserializer:
+    with (_read_stream(model_path, )) as stream, TensorDeserializer(
+            stream, **tensorizer_args.deserializer_params) as deserializer:
         deserializer.load_into_module(model)
         end = time.time()
 
@@ -190,9 +172,9 @@ def deserialize():
 
     return model
 
+
 args = parse_args()
 tensorizer_args = TensorizerArgs.from_cli_args(args)
-
 
 dtype = args.dtype if args.dtype else "float16"
 

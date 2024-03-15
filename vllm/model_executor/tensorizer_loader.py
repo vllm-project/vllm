@@ -17,6 +17,7 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+
 def load_with_tensorizer(model_cls: Type[nn.Module],
                          model_config: ModelConfig) -> nn.Module:
     tensorizer = TensorizerAgent(model_cls, model_config)
@@ -45,20 +46,22 @@ def _validate_keyfile_path(keyfile: str = None,
     else:
         return None
 
+
 class ParameterizedLoadFormat(str):
     __slots__ = "params"
+
 
 @dataclass
 class TensorizerArgs:
     tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, typing.BinaryIO,
-    str, bytes, os.PathLike, int]
+                          str, bytes, os.PathLike, int]
     verify_hash: bool = False
     filter_func: Optional[Callable[[str], Union[bool, Any]]] = None
     encryption_keyfile: Optional[str] = None
     force_http: bool = False
     """
-  Args for the TensorizerAgent class. These are used to configure the behavior of 
-  the TensorDeserializer when loading tensors from a serialized model.
+  Args for the TensorizerAgent class. These are used to configure the behavior 
+  of the TensorDeserializer when loading tensors from a serialized model.
   
   Args:
       tensorizer_uri: Path to serialized model tensors. Can be a local file 
@@ -84,9 +87,7 @@ class TensorizerArgs:
                                      or None)
         self.s3_endpoint = os.environ.get("S3_ENDPOINT_URL") or None
         self.encryption_keyfile = _validate_keyfile_path(
-            self.encryption_keyfile,
-            self.file_obj
-        )
+            self.encryption_keyfile, self.file_obj)
         self.stream_params = {
             "s3_access_key_id": self.s3_access_key_id,
             "s3_secret_access_key": self.s3_secret_access_key,
@@ -118,34 +119,33 @@ class TensorizerArgs:
             'Tensorizer Options',
             description=('Options for configuring the behavior of the '
                          'TensorDeserializer'
-                         ' when loading tensors from a serialized model.')
-        )
+                         ' when loading tensors from a serialized model.'))
 
         group.add_argument(
             "--tensorizer-uri",
             help="Path to serialized model tensors. Can be a local file path,"
-                 " or an HTTP(S) or S3 URI.",
+            " or an HTTP(S) or S3 URI.",
         )
         group.add_argument(
             "--verify-hash",
             action="store_true",
             help="If enabled, the hashes of each tensor will be verified"
-                 " against the hashes stored in the file metadata. An exception"
-                 " will be raised if any of the hashes do not match.",
+            " against the hashes stored in the file metadata. An exception"
+            " will be raised if any of the hashes do not match.",
         )
         group.add_argument(
             "--encryption-keyfile",
             default=None,
             help="A `DecryptionParams` object holding a password or key to"
-                 " use for decryption. ``None`` (the default) means no "
-                 "decryption.",
+            " use for decryption. ``None`` (the default) means no "
+            "decryption.",
         )
         group.add_argument(
             "--force-http",
             action="store_true",
             help="If enabled, `tensorizer` will force a HTTP connection to "
-                 "tensorizer-uri, if applicable, instead of HTTPS. This is"
-                 " slightly faster, but less secure.",
+            "tensorizer-uri, if applicable, instead of HTTPS. This is"
+            " slightly faster, but less secure.",
         )
 
         return parser
@@ -173,9 +173,9 @@ class TensorizerAgent:
     """
 
     def __init__(
-            self,
-            model_cls: Type[nn.Module],
-            model_config: ModelConfig,
+        self,
+        model_cls: Type[nn.Module],
+        model_config: ModelConfig,
     ):
         self.model_cls = model_cls
         self.model_config = model_config
@@ -210,10 +210,9 @@ class TensorizerAgent:
                 mode="rb",
                 **self.tensorizer_args.stream_params,
         ) as stream, TensorDeserializer(
-            stream,
-            dtype=self.model_config.dtype,
-            **self.tensorizer_args.deserializer_params
-        ) as deserializer:
+                stream,
+                dtype=self.model_config.dtype,
+                **self.tensorizer_args.deserializer_params) as deserializer:
             deserializer.load_into_module(self.model)
             end = time.perf_counter()
 

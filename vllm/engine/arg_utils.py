@@ -419,8 +419,10 @@ class EngineArgs:
     def from_cli_args(cls, args: argparse.Namespace) -> 'EngineArgs':
         # Get the list of attributes of this dataclass that are not
         # TensorizerArgs.
-        engine_attrs = [attr.name for attr in dataclasses.fields(cls)
-                        if attr.name != 'tensorizer_args']
+        engine_attrs = [
+            attr.name for attr in dataclasses.fields(cls)
+            if attr.name != 'tensorizer_args'
+        ]
         attrs = [attr for attr in engine_attrs]
 
         # Set the attributes from the parsed arguments.
