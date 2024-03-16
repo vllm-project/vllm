@@ -16,30 +16,60 @@
 import json
 import math
 from collections import defaultdict
-from typing import Union, DefaultDict, Dict, List, Optional
+from typing import Union, DefaultDict, Dict, List, Optional, Callable
 
 import torch
 from pydantic import BaseModel
-from outlines.fsm.fsm import RegexFSM
+from transformers import PreTrainedTokenizerBase
+from outlines.fsm.fsm import RegexFSM, CFGFSM
 from outlines.fsm.json_schema import build_regex_from_schema
 
 
-class RegexLogitsProcessor:
+class BaseLogitsProcessor:
 
-    def __init__(self, regex_string: str, tokenizer):
-        """Compile the FSM that drives the regex-structured generation.
+    def adapt_tokenizer(self, tokenizer: PreTrainedTokenizerBase):
+        """Adapt vLLM's tokenizer to use to compile the FSM.
 
-        Parameters
-        ----------
-        regex_string
-            A string that represents a regular expression
-        tokenizer
-            The model's tokenizer
+        The API of Outlines tokenizers is slightly different to that of
+        `transformers`. The decoder of outlines, returns a list whereas
+        the decode of vLLM returns an str. To sync the vLLM decoder with
+        outlines internal api, the decoder should be adapted. In addition
+        we need to handle the missing spaces to Llama's tokenizer to be
+        able to compile FSMs for this model.
 
         """
-        tokenizer = self.adapt_tokenizer(tokenizer)
-        fsm = RegexFSM(regex_string, tokenizer)
-        self.fsm = fsm
+        if getattr(tokenizer, "_outlines_adapted", False):
+            return tokenizer
+
+        tokenizer.vocabulary = tokenizer.get_vocab()
+        tokenizer.special_tokens = set(tokenizer.all_special_tokens)
+
+        def convert_token_to_string(token: str) -> str:
+            from transformers.file_utils import SPIECE_UNDERLINE
+
+            string = tokenizer.convert_tokens_to_string([token])
+
+            # A hack to handle missing spaces to HF's Llama tokenizers
+            if token.startswith(SPIECE_UNDERLINE) or token == "<0x20>":
+                return " " + string
+
+            return string
+
+        def change_decoder(
+            decoder: Callable[[List[int]], str]
+        ) -> Callable[[List[int]], List[str]]:
+            """Sync vLLM's decoder with the outlines by returning list."""
+
+            def new_decoder(inp_tokens: List[int]) -> List[str]:
+                return [decoder(inp_tokens)]
+
+            return new_decoder
+
+        tokenizer.convert_token_to_string = convert_token_to_string
+        tokenizer.decode = change_decoder(tokenizer.decode)
+        setattr(tokenizer, "_outlines_adapted", True)  # noqa: B010
+
+        return tokenizer
 
     def init_state(self):
         """Initialize the FSM states."""
@@ -69,38 +99,30 @@ class RegexLogitsProcessor:
 
         return scores
 
-    def adapt_tokenizer(self, tokenizer):
-        """Adapt vLLM's tokenizer to use to compile the FSM.
 
-        The API of Outlines tokenizers is slightly different to that of
-        `transformers`. In addition we need to handle the missing spaces to
-        Llama's tokenizer to be able to compile FSMs for this model.
+class RegexLogitsProcessor(BaseLogitsProcessor):
+
+    def __init__(self, regex_string: str, tokenizer: PreTrainedTokenizerBase):
+        """Compile the FSM that drives the regex-structured generation.
+
+        Parameters
+        ----------
+        regex_string
+            A string that represents a regular expression
+        tokenizer
+            The model's tokenizer
 
         """
-        tokenizer.vocabulary = tokenizer.get_vocab()
-        tokenizer.special_tokens = set(tokenizer.all_special_tokens)
-
-        def convert_token_to_string(token: str) -> str:
-            from transformers.file_utils import SPIECE_UNDERLINE
-
-            string = tokenizer.convert_tokens_to_string([token])
-
-            # A hack to handle missing spaces to HF's Llama tokenizers
-            if token.startswith(SPIECE_UNDERLINE) or token == "<0x20>":
-                return " " + string
-
-            return string
-
-        tokenizer.convert_token_to_string = convert_token_to_string
-
-        return tokenizer
+        tokenizer = self.adapt_tokenizer(tokenizer)
+        fsm = RegexFSM(regex_string, tokenizer)
+        self.fsm = fsm
 
 
 class JSONLogitsProcessor(RegexLogitsProcessor):
 
     def __init__(self,
                  schema: Union[str, Dict, BaseModel],
-                 tokenizer,
+                 tokenizer: PreTrainedTokenizerBase,
                  whitespace_pattern: Optional[str] = None):
         """Compile the FSM that drives the JSON-guided generation.
 
@@ -130,3 +152,21 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
                 f"the JSON Schema specification")
         regex_string = build_regex_from_schema(schema_str, whitespace_pattern)
         super().__init__(regex_string, tokenizer)
+
+
+class CFGLogitsProcessor(BaseLogitsProcessor):
+
+    def __init__(self, cfg: str, tokenizer: PreTrainedTokenizerBase):
+        """Compile the FSM that drives the context free grammar generation.
+
+        Parameters
+        ----------
+        cfg
+            A string that represents a context-free grammar
+        tokenizer
+            The model's tokenizer
+
+        """
+        tokenizer = self.adapt_tokenizer(tokenizer)
+        fsm = CFGFSM(cfg, tokenizer)
+        self.fsm = fsm
