@@ -1,4 +1,4 @@
-# OpenAI Compatbile Server
+# OpenAI Compatible Server
 
 vLLM provides an HTTP server that implements OpenAI's [Completions](https://platform.openai.com/docs/api-reference/completions) and [Chat](https://platform.openai.com/docs/api-reference/chat) API.
 
@@ -106,10 +106,9 @@ vLLM community provides a set of chat templates for popular models. You can find
 directory [here](https://github.com/vllm-project/vllm/tree/main/examples/)
 
 ## Command line arguments for the server
-<!-- :filename: ../../../vllm/entrypoints/openai/api_server.py -->
 
 ```{argparse}
-:module: vllm.entrypoints.openai.api_server
+:module: vllm.entrypoints.openai.cli_args
 :func: make_arg_parser
 :prog: vllm-openai-server
 ```

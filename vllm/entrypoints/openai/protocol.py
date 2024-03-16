@@ -99,7 +99,7 @@ class ChatCompletionRequest(BaseModel):
         default=True,
         description=
         ("If true, the generation prompt will be added to the chat template. "
-         "This is a parameter uesd by chat template in tokenizer config of the "
+         "This is a parameter used by chat template in tokenizer config of the "
          "model."),
     )
     include_stop_str_in_output: Optional[bool] = Field(
