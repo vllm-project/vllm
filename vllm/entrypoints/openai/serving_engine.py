@@ -96,27 +96,32 @@ class OpenAIServing:
         last_token_len = 0
         if num_output_top_logprobs:
             logprobs.top_logprobs = []
+        
         for i, token_id in enumerate(token_ids):
-            step_top_logprobs = top_logprobs[i]
-            if step_top_logprobs is not None:
-                token_logprob = step_top_logprobs[token_id].logprob
+            if top_logprobs is None or top_logprobs[i] is None:
+                token = self.tokenizer.decode(token_id)
+                logprobs.tokens.append(self.tokenizer.decode(token_id))
+                logprobs.token_logprobs.append(None)
+                logprobs.top_logprobs.append(None)
             else:
-                token_logprob = None
-            token = step_top_logprobs[token_id].decoded_token
-            logprobs.tokens.append(token)
-            logprobs.token_logprobs.append(token_logprob)
+                step_top_logprobs = top_logprobs[i]
+                token_logprob = step_top_logprobs[token_id].logprob
+                token = step_top_logprobs[token_id].decoded_token
+                logprobs.tokens.append(token)
+                logprobs.token_logprobs.append(token_logprob)
+
+                if num_output_top_logprobs:
+                    logprobs.top_logprobs.append({
+                        p.decoded_token: p.logprob
+                        for i, p in step_top_logprobs.items()
+                    } if step_top_logprobs else None)
+
             if len(logprobs.text_offset) == 0:
                 logprobs.text_offset.append(initial_text_offset)
             else:
                 logprobs.text_offset.append(logprobs.text_offset[-1] +
-                                            last_token_len)
+                                        last_token_len)
             last_token_len = len(token)
-
-            if num_output_top_logprobs:
-                logprobs.top_logprobs.append({
-                    p.decoded_token: p.logprob
-                    for i, p in step_top_logprobs.items()
-                } if step_top_logprobs else None)
         return logprobs
 
     def create_error_response(
@@ -173,6 +178,7 @@ class OpenAIServing:
 
         input_ids = prompt_ids if prompt_ids is not None else self.tokenizer(
             prompt).input_ids
+        input_text = prompt if prompt is not None else self.tokenizer.decode(prompt_ids)
         token_num = len(input_ids)
 
         if request.max_tokens is None:
@@ -187,4 +193,4 @@ class OpenAIServing:
                 f"{request.max_tokens} in the completion). "
                 f"Please reduce the length of the messages or completion.", )
         else:
-            return input_ids
+            return input_ids, input_text
