@@ -691,7 +691,7 @@ number: "1" | "2"
 
     completion = await client.completions.create(
         model=MODEL_NAME,
-        prompt=("Generte a sql state that select col_1 from "
+        prompt=("Generate a sql state that select col_1 from "
                 "table_1 where it is equals to 1"),
         temperature=1.0,
         max_tokens=500,
