@@ -432,7 +432,29 @@ if __name__ == "__main__":
         "--version",
         type=str,
         default="N/A",
-        help="Version of the serving backend/engine.",
+        help=
+        "Version of the serving backend/engine, if known. Only used in result json for record keeping purposes.",
+    )
+    parser.add_argument(
+        "--tp-size",
+        type=str,
+        default="N/A",
+        help=
+        "Size of tensor parallelism of the model server, if known. Only used in result json for record keeping purposes.",
+    )
+    parser.add_argument(
+        "--pp-size",
+        type=str,
+        default="N/A",
+        help=
+        "Size of pipeline parallelism of the model server, if known. Only used in result json for record keeping purposes.",
+    )
+    parser.add_argument(
+        "--device-name",
+        type=str,
+        default="N/A",
+        help=
+        "Device name, if known. Only used in result json for record keeping purposes.",
     )
     parser.add_argument(
         "--base-url",
