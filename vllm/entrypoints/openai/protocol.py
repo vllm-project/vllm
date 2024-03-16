@@ -110,6 +110,39 @@ class ChatCompletionNamedToolChoiceParam(BaseModel):
     function: ChatCompletionNamedFunction
     type: Optional[Literal["function"]] = None
 
+
+class VllmToolsTemplate(BaseModel):
+    # Extension to define the tools template. The strings may be empty but not None
+    call_token_start: str = "<tool_call>"
+    call_token_end: str = "</tool_call>"
+    tool_token_start: str = "<tool>"
+    tool_token_end: str = "</tool>"
+    response_token_start: str = "<tool_response>"
+    response_token_end: str = "</tool_response>"
+
+    tool_call_notif_noarg_start: str = ""
+    tool_call_notif_noarg_end: str = "was called with no argument"
+    tool_call_notif_args_start: str = ""
+    tool_call_notif_args_end: str = "was called with arguments"
+
+    function_guided: str = "You must call the following function at least one time to answer the question. You may call it multiple times if needed:"
+
+    function_list_start: str = """The following is a list of external functions that may be called to complete certain tasks:"""
+
+    function_list_end: str = """End of list
+
+* Whenever the user asks you something, you can either respond directly or invoke a function if it is present in the previous list.
+* The decision to invoke a function is yours, only invoke a function if it is necessary to answer the user's question
+* If you need to call at least one function, your message should contain only a list of function calls and nothing else; the function calls are the response."""
+
+    function_call_instruct: str = """For each function call return a valid json object (using quotes) with function name and arguments within <tool_call>{ }</tool_call> XML tags as follows::
+* With arguments:
+<tool_call>{ "name": "function_name", "arguments": {"argument_name": "value"} }</tool_call>
+* Without arguments:
+<tool_call>{ "name": "function_name", "arguments": null }</tool_call>
+End of functions instructions
+"""
+
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[Union[ChatCompletionToolMessage,
@@ -132,6 +165,7 @@ class ChatCompletionRequest(BaseModel):
     tools: Optional[List[ChatCompletionToolParam]] = None
     tool_choice: Optional[Union[Literal["auto", "none"], ChatCompletionNamedToolChoiceParam]] = "auto"
     # Additional parameters supported by vLLM
+    tool_params: Optional[VllmToolsTemplate] = None
     best_of: Optional[int] = None
     top_k: Optional[int] = -1
     ignore_eos: Optional[bool] = False

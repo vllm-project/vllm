@@ -1,6 +1,7 @@
 import time
 import codecs
 import asyncio
+import logging
 from fastapi import Request
 from typing import AsyncGenerator, AsyncIterator, Optional, List, Union
 from vllm.logger import init_logger
@@ -8,7 +9,7 @@ from vllm.utils import random_uuid
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest, ChatCompletionResponse,
-    ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
+    ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice, VllmToolsTemplate,
     ChatCompletionAssistantMessage, ChatCompletionToolMessage, ChatCompletionNamedToolChoiceParam,
     ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse,
     UsageInfo)
@@ -35,6 +36,7 @@ class OpenAIServingChat(OpenAIServing):
                          lora_modules=lora_modules)
         self.privileged = privileged
         self.response_role = response_role
+        self.default_tools_template = VllmToolsTemplate()
         self.openai_tools_prompter = openai_tools_prompter
 
         try:
@@ -62,6 +64,12 @@ class OpenAIServingChat(OpenAIServing):
             return error_check_ret
 
         if self.openai_tools_prompter is not None:
+            if isinstance(request.tool_params, VllmToolsTemplate):
+                if len(request.tool_params.call_token_start) == 0:
+                    raise ValueError("Error, the tool_params.call_token_start can't be empty !")
+            else:
+                # No need to allocate it for each requests, if this param is not set, we use the default value.
+                request.tool_params = self.default_tools_template
             self.openai_tools_prompter.inject_prompt(request)
 
             # FIXME : As on dec 2023, the tokenizer only accept "role" and "content" attributes.
@@ -70,10 +78,10 @@ class OpenAIServingChat(OpenAIServing):
                 if isinstance(m, ChatCompletionAssistantMessage
                               ) and m.tool_calls is not None:
                     m.content = self.openai_tools_prompter.content_from_assistant(
-                        m)
+                        m, request.tool_params)
                 elif isinstance(m, ChatCompletionToolMessage
                                 ) and m.tool_call_id is not None:
-                    m.content = self.openai_tools_prompter.content_from_tool(m)
+                    m.content = self.openai_tools_prompter.content_from_tool(m, request.tool_params)
 
         try:
             prompt = self.tokenizer.apply_chat_template(
@@ -142,12 +150,12 @@ class OpenAIServingChat(OpenAIServing):
         first_iteration = True
 
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):  # Guided function call
-            tools_capture_texts = [ChatPromptCapture() for i in range(request.n)]
+            tools_capture_texts = [ChatPromptCapture(self.openai_tools_prompter, request.tool_params) for i in range(request.n)]
             is_tools_guided_generation = True
         else:
             is_tools_guided_generation = False
             if self.openai_tools_prompter is not None and (isinstance(request.tool_choice, str) and request.tool_choice == "auto"):
-                tools_capture_texts = [ChatPromptCapture() for i in range(request.n)]
+                tools_capture_texts = [ChatPromptCapture(self.openai_tools_prompter, request.tool_params) for i in range(request.n)]
             else:
                 tools_capture_texts = None
 
@@ -245,11 +253,10 @@ class OpenAIServingChat(OpenAIServing):
                         current_token: str = output.text[len(previous_texts[i]):]
                         if len(current_token):
                             current_capture.content += current_token
-                            if current_capture.checkBracketsFunctionCall():  # We have the complete call block
+                            if current_capture.checkBracketsFunctionCall(request.tool_params):  # We have the complete call block
                                 previous_texts[i] = output.text
                                 current_capture.closeNamedFunction()
-                                current_capture.make_calls_list(
-                                    self.openai_tools_prompter)
+                                current_capture.make_calls_list()
                                 current_capture.reset(False)
                                 current_capture.after_new_function_call = True
                     else:  # Manage tools calling when request.tool_choice is "auto"
@@ -260,11 +267,10 @@ class OpenAIServingChat(OpenAIServing):
                             if len(current_capture.content) == 0:
                                 current_token: str = output.text[
                                     len(previous_texts[i]):]
-                                if self.openai_tools_prompter.func_call_token_pre(
+                                if current_capture.func_call_token_pre(
                                 ) in current_token:
                                     start_pos: int = current_token.index(
-                                        self.openai_tools_prompter.
-                                        func_call_token_pre())
+                                        current_capture.func_call_token_pre())
                                     current_capture.content = current_token[
                                         start_pos:]  # With some models the completion may start by a space.
                                     current_capture.prefix_size = len(
@@ -277,21 +283,19 @@ class OpenAIServingChat(OpenAIServing):
                                 current_capture.content += current_token
                                 if len(
                                         current_capture.content
-                                ) < self.openai_tools_prompter.func_call_token_size(
+                                ) < current_capture.func_call_token_size(
                                 ):
                                     pass
                                 elif not current_capture.is_function_call:
                                     if current_capture.content.startswith(
-                                            self.openai_tools_prompter.
-                                            func_call_token()):  # Function call !
+                                            current_capture.func_call_token()):  # Function call !
                                         current_capture.is_function_call = True
                                     else:  # This is not a function call...
                                         current_capture.reset(False)
                                 else:  # Currently extracting the function call
-                                    if current_capture.checkBracketsFunctionCall():  # We have the complete call block
+                                    if current_capture.checkBracketsFunctionCall(request.tool_params):  # We have the complete call block
                                         previous_texts[i] = output.text
-                                        current_capture.make_calls_list(
-                                            self.openai_tools_prompter)
+                                        current_capture.make_calls_list()
                                         current_capture.reset(False)
                                         current_capture.after_new_function_call = True
                                     else:
@@ -301,7 +305,6 @@ class OpenAIServingChat(OpenAIServing):
                     if current_capture is None or (
                             isinstance(current_capture, ChatPromptCapture) and not current_capture.maybe_function_call):
                         delta_text = output.text[len(previous_texts[i]):]
-                        logger.info("Appels de fonction (1) (%s:%s) : %s" % (output.finish_reason, delta_text, str(current_capture.calls_list)))
                         previous_texts[i] = output.text
                         previous_num_tokens[i] = len(output.token_ids)
                         if output.finish_reason is None:
@@ -321,12 +324,15 @@ class OpenAIServingChat(OpenAIServing):
                                 data = chunk.model_dump_json(exclude_unset=True)
                                 yield f"data: {data}\n\n"
                         else:
-                            logger.info("Appels de fonction (2) (%s) : %s" % (output.finish_reason, str(current_capture.calls_list)))
                             if output.finish_reason == "stop" and (
                                     isinstance(current_capture, ChatPromptCapture) and
                                     (current_capture.num_calls() > 0)):
                                 tools_calls_list = current_capture.to_ChoiceDeltaToolCallList(
                                 )
+
+                                if self.privileged:
+                                    for t in tools_calls_list:
+                                        logger.warning("Calling tools: %s" % str(t.model_dump_json()))
 
                                 choice_data = ChatCompletionResponseStreamChoice(
                                     index=i,
@@ -418,20 +424,19 @@ class OpenAIServingChat(OpenAIServing):
             # Manage tools calling
             if self.openai_tools_prompter is not None and \
                     request.tools is not None:
-                current_capture = ChatPromptCapture()
+                current_capture = ChatPromptCapture(self.openai_tools_prompter, request.tool_params)
 
                 if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):  # Guided function call
                     current_capture.startNamedFunction(request.tool_choice)
                     current_capture.content += output.text
                     current_capture.closeNamedFunction()
-                    current_capture.make_calls_list(
-                        self.openai_tools_prompter)
+                    current_capture.make_calls_list()
                     current_capture.reset(False)
                 else:
                     start_pos = 0
                     while True:
                         pos = output.text.find(
-                            self.openai_tools_prompter.func_call_token(),
+                            current_capture.func_call_token(),
                             start_pos, -1)
                         if pos < 0:
                             break
@@ -440,7 +445,7 @@ class OpenAIServingChat(OpenAIServing):
                             break
                         if (start_bloc -
                             (pos +
-                             self.openai_tools_prompter.func_call_token_size())
+                             current_capture.func_call_token_size())
                             ) > 1:
                             break
                         count = 1
@@ -455,8 +460,7 @@ class OpenAIServingChat(OpenAIServing):
                             if count == 0:  # We have the complete call block
                                 current_capture.content = output.text[
                                     start_bloc:bloc_end]
-                                current_capture.make_calls_list(
-                                    self.openai_tools_prompter)
+                                current_capture.make_calls_list()
                                 current_capture.reset(False)
                                 break
                         start_pos = bloc_end + 1

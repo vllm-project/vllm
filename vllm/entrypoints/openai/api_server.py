@@ -116,10 +116,6 @@ def parse_args():
                         help="The file path to the chat template, "
                         "or the template in single-line form "
                         "for the specified model")
-    parser.add_argument("--tools-template",
-                        type=str,
-                        default=None,
-                        help="The file path to alternative tools template")
     parser.add_argument("--enable-api-tools",
                         action="store_true",
                         help="Enable OpenAI-like tools API "
@@ -175,8 +171,7 @@ def _loadServingServices():
     if openai_serving_completion is not None:
         del openai_serving_completion
 
-    openai_tools_prompter = OpenAIToolsPrompter(
-        template_path=args.tools_template) if args.enable_api_tools else None
+    openai_tools_prompter = OpenAIToolsPrompter() if args.enable_api_tools else None
     openai_serving_chat = OpenAIServingChat(
         engine=vllm_engine,
         served_model=served_model,
