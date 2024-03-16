@@ -236,6 +236,13 @@ class CompletionRequest(BaseModel):
             "Whether to include the stop string in the output. "
             "This is only applied when the stop or stop_token_ids is set."),
     )
+    response_format: Optional[ResponseFormat] = Field(
+        default=None,
+        description=
+        ("Similar to chat completion, this parameter specifies the format of "
+         "output. Only {'type': 'json_object'} or {'type': 'text' } is "
+         "supported."),
+    )
     guided_json: Optional[Union[str, dict, BaseModel]] = Field(
         default=None,
         description=("If specified, the output will follow the JSON schema."),
