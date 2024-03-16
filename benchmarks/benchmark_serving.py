@@ -399,6 +399,9 @@ def main(args: argparse.Namespace):
         result_json["date"] = current_dt
         result_json["backend"] = backend
         result_json["version"] = args.version
+        result_json['tp_size'] = args.tp_size
+        result_json['pp_size'] = args.pp_size
+        result_json['device_name'] = args.device_name
         result_json["model_id"] = model_id
         result_json["tokenizer_id"] = tokenizer_id
         result_json["best_of"] = args.best_of
@@ -415,6 +418,9 @@ def main(args: argparse.Namespace):
         # Save to file
         base_model_id = model_id.split("/")[-1]
         file_name = f"{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
+
+        if args.result_dir:
+            file_name = f"{args.result_dir}/{file_name}"
         with open(file_name, "w") as outfile:
             json.dump(result_json, outfile)
 
@@ -550,6 +556,13 @@ if __name__ == "__main__":
         "--save-result",
         action="store_true",
         help="Specify to save benchmark results to a json file",
+    )
+    parser.add_argument(
+        "--result-dir",
+        type=str,
+        default=None,
+        help="Specify directory to save benchmark json results."
+        "If not specified, results are saved in the current directory.",
     )
 
     args = parser.parse_args()
