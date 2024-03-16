@@ -10,8 +10,11 @@ from typing import Union, Tuple
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest
-from vllm.model_executor.guided_logits_processors import JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor
+from vllm.entrypoints.openai.protocol import (CompletionRequest,
+                                              ChatCompletionRequest)
+from vllm.model_executor.guided_logits_processors import (JSONLogitsProcessor,
+                                                          RegexLogitsProcessor,
+                                                          CFGLogitsProcessor)
 
 
 class GuidedDecodingMode(Enum):

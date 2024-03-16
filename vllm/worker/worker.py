@@ -130,8 +130,8 @@ class Worker:
         # GPU did not change their memory usage during the profiling.
         peak_memory = self.init_gpu_memory - free_gpu_memory
 
-        cache_block_size = CacheEngine.get_cache_block_size(
-            block_size, cache_dtype, self.model_config, self.parallel_config)
+        cache_block_size = self.get_cache_block_size_bytes(
+            block_size, cache_dtype)
         num_gpu_blocks = int(
             (total_gpu_memory * gpu_memory_utilization - peak_memory) //
             cache_block_size)
@@ -231,6 +231,22 @@ class Worker:
 
     def list_loras(self) -> Set[int]:
         return self.model_runner.list_loras()
+
+    @property
+    def max_model_len(self) -> int:
+        return self.model_config.max_model_len
+
+    @property
+    def vocab_size(self) -> int:
+        return self.model_runner.vocab_size
+
+    def get_cache_block_size_bytes(self, block_size: int,
+                                   cache_dtype: str) -> int:
+        """Get the size of the KV cache block size in bytes.
+        """
+        return CacheEngine.get_cache_block_size(block_size, cache_dtype,
+                                                self.model_config,
+                                                self.parallel_config)
 
 
 def init_distributed_environment(
