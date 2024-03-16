@@ -192,7 +192,7 @@ def calculate_metrics(
     actual_output_lens = []
     total_input = 0
     completed = 0
-    inter_token_latencies = []
+    tpots = []
     ttfts = []
     for i in range(len(outputs)):
         if outputs[i].success:
@@ -208,7 +208,7 @@ def calculate_metrics(
             actual_output_lens.append(output_len)
             total_input += input_requests[i][1]
             if output_len > 1:
-                inter_token_latencies.append(
+                tpots.append(
                     (outputs[i].latency - outputs[i].ttft) / (output_len - 1))
             ttfts.append(outputs[i].ttft)
             completed += 1
@@ -222,12 +222,13 @@ def calculate_metrics(
         request_throughput=completed / dur_s,
         input_throughput=total_input / dur_s,
         output_throughput=sum(actual_output_lens) / dur_s,
-        mean_ttft_ms=np.mean(ttfts) * 1000,
-        median_ttft_ms=np.median(ttfts) * 1000,
-        p99_ttft_ms=np.percentile(ttfts, 99) * 1000,
-        mean_tpot_ms=np.mean(inter_token_latencies) * 1000,
-        median_tpot_ms=np.median(inter_token_latencies) * 1000,
-        p99_tpot_ms=np.percentile(inter_token_latencies, 99) * 1000,
+        mean_ttft_ms=np.mean(ttfts or 0) *
+        1000,  # ttfts is empty if streaming is not supported by backend
+        median_ttft_ms=np.median(ttfts or 0) * 1000,
+        p99_ttft_ms=np.percentile(ttfts or 0, 99) * 1000,
+        mean_tpot_ms=np.mean(tpots) * 1000,
+        median_tpot_ms=np.median(tpots) * 1000,
+        p99_tpot_ms=np.percentile(tpots, 99) * 1000,
     )
 
     return metrics, actual_output_lens
