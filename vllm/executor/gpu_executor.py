@@ -59,7 +59,7 @@ class GPUExecutor(ExecutorBase):
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )
-        self.driver_worker.init_model()
+        self.driver_worker.init_device()
         self.driver_worker.load_model()
 
     def _init_cache(self) -> None:

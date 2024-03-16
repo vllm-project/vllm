@@ -187,7 +187,7 @@ class RayGPUExecutor(ExecutorBase):
 
         # FIXME(woosuk): We are not properly initializing cupy NCCL when
         # we have multiple nodes.
-        self._run_workers("init_model",
+        self._run_workers("init_device",
                           cupy_port=get_open_port()
                           if not model_config.enforce_eager else None)
         self._run_workers(

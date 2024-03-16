@@ -31,18 +31,11 @@ class LlamaForCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[KVCache],
-        input_metadata: InputMetadata,
+        input_block_ids: torch.Tensor,
     ) -> torch.Tensor:
-        with torch.inference_mode():
-            block_size = self.model.context_buckets[-1]
-            if input_metadata.is_prompt:
-                seq_ids = input_metadata.slot_mapping[:, 0] // block_size
-            else:
-                seq_ids = input_metadata.block_tables
-            logits = self.model(input_ids,
-                                cache_ids=positions,
-                                start_ids=seq_ids.flatten())
+        logits = self.model(input_ids,
+                            cache_ids=positions,
+                            start_ids=input_block_ids)
         return logits
 
     def sample(

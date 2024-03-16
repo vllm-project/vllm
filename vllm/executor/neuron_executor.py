@@ -6,7 +6,6 @@ from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
-from vllm.utils import get_ip, get_open_port, get_distributed_init_method
 
 logger = init_logger(__name__)
 
@@ -47,7 +46,7 @@ class NeuronExecutor(ExecutorBase):
             self.scheduler_config,
             self.device_config,
         )
-        self.driver_worker.init_model()
+        self.driver_worker.init_device()
         self.driver_worker.load_model()
 
     def execute_model(self,
@@ -55,12 +54,12 @@ class NeuronExecutor(ExecutorBase):
                       blocks_to_swap_in: Dict[int, int],
                       blocks_to_swap_out: Dict[int, int],
                       blocks_to_copy: Dict[int, List[int]]) -> SamplerOutput:
+        assert (blocks_to_swap_in == {} and blocks_to_swap_out == {}
+                and blocks_to_copy == {}), (
+                    "Cache operations are not supported for Neuron backend.")
+
         output = self.driver_worker.execute_model(
-            seq_group_metadata_list=seq_group_metadata_list,
-            blocks_to_swap_in=blocks_to_swap_in,
-            blocks_to_swap_out=blocks_to_swap_out,
-            blocks_to_copy=blocks_to_copy,
-        )
+            seq_group_metadata_list=seq_group_metadata_list, )
         return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
