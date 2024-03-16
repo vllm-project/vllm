@@ -15,7 +15,7 @@ docker run --device /dev/kfd --device /dev/dri --network host --name rocm rocm p
 timeout=300
 counter=0
 
-while [ "$(curl -s -o /dev/null -w ''%{http_code}'' localhost:8000)" != "200" ]; do
+while [ "$(curl -s -o /dev/null -w ''%{http_code}'' localhost:8000/health)" != "200" ]; do
     sleep 1
     counter=$((counter+1))
     if [ $counter -ge $timeout ]; then
