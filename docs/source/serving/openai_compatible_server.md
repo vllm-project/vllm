@@ -28,7 +28,7 @@ print(completion.choices[0].message)
 
 ## API Reference
 Please see the [OpenAI API Reference](https://platform.openai.com/docs/api-reference) for more information on the API. We support all parameters except:
-- Chat: `tools`, `tool_choice`, and `response_format`.
+- Chat: `tools`, and `tool_choice`.
 - Completions: `suffix`.
 
 ## Extra Parameters

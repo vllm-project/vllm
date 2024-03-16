@@ -55,6 +55,11 @@ class UsageInfo(BaseModel):
     completion_tokens: Optional[int] = 0
 
 
+class ResponseFormat(BaseModel):
+    # type must be "json_object" or "text"
+    type: str = Literal["text", "json_object"]
+
+
 class ChatCompletionRequest(BaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
@@ -67,6 +72,7 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: Optional[int] = None
     n: Optional[int] = 1
     presence_penalty: Optional[float] = 0.0
+    response_format: Optional[ResponseFormat] = None
     seed: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
@@ -121,6 +127,11 @@ class ChatCompletionRequest(BaseModel):
         default=None,
         description=(
             "If specified, the output will be exactly one of the choices."),
+    )
+    guided_grammar: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, the output will follow the context free grammar."),
     )
 
     # doc: end-chat-completion-extra-params
@@ -238,6 +249,11 @@ class CompletionRequest(BaseModel):
         default=None,
         description=(
             "If specified, the output will be exactly one of the choices."),
+    )
+    guided_grammar: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, the output will follow the context free grammar."),
     )
 
     # doc: end-completion-extra-params
