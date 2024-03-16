@@ -38,7 +38,12 @@ def _is_hip() -> bool:
 
 
 def _is_neuron() -> bool:
-    return shutil.which("neuron-ls") is not None
+    torch_neuronx_installed = True
+    try:
+        subprocess.run(["neuron-ls"], capture_output=True, check=True)
+    except subprocess.CalledProcessError:
+        torch_neuronx_installed = False
+    return torch_neuronx_installed
 
 
 # Compiler flags.
@@ -425,6 +430,9 @@ def get_requirements() -> List[str]:
     elif _is_neuron():
         with open(get_path("requirements-neuron.txt")) as f:
             requirements = f.read().strip().split("\n")
+    else:
+        raise ValueError(
+            "Unsupported platform, please use CUDA, ROCM or Neuron.")
     return requirements
 
 
