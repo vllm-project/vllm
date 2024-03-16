@@ -1,13 +1,8 @@
 """Benchmark online serving throughput.
 
 On the server side, run one of the following commands:
-    (Recommended - vLLM OpenAI API server)
+    vLLM OpenAI API server
     python -m vllm.entrypoints.openai.api_server \
-        --model <your_model> --swap-space 16 \
-        --disable-log-requests
-
-    (Deprecated - vLLM Demo API server)
-    python -m vllm.entrypoints.api_server \
         --model <your_model> --swap-space 16 \
         --disable-log-requests
 

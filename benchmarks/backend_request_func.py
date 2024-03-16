@@ -97,58 +97,6 @@ async def async_request_tgi(
         return output
 
 
-async def async_request_vllm(
-    request_func_input: RequestFuncInput,
-    pbar: Optional[tqdm] = None,
-) -> RequestFuncOutput:
-    api_url = request_func_input.api_url
-    assert api_url.endswith("generate")
-
-    async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
-        payload = {
-            "prompt": request_func_input.prompt,
-            "n": 1,
-            "best_of": request_func_input.best_of,
-            "use_beam_search": request_func_input.use_beam_search,
-            "temperature": 0.0 if request_func_input.use_beam_search else 1.0,
-            "top_p": 1.0,
-            "max_tokens": request_func_input.output_len,
-            "ignore_eos": True,
-            "stream": True,
-        }
-        output = RequestFuncOutput()
-        output.prompt_len = request_func_input.prompt_len
-
-        ttft = 0
-        st = time.perf_counter()
-        try:
-            async with session.post(url=api_url, json=payload) as response:
-                if response.status == 200:
-                    async for data in response.content.iter_any():
-                        if ttft == 0:
-                            ttft = time.perf_counter() - st
-                            output.ttft = ttft
-                    output.latency = time.perf_counter() - st
-
-                    # When streaming, '\0' is appended to the end of the response.
-                    body = data.decode("utf-8").strip("\0")
-                    output.generated_text = json.loads(
-                        body)["text"][0][len(request_func_input.prompt):]
-                    output.success = True
-
-                else:
-                    output.error = response.reason
-                    output.success = False
-        except:
-            output.success = False
-            exc_info = sys.exc_info()
-            output.error = "".join(traceback.format_exception(*exc_info))
-
-        if pbar:
-            pbar.update(1)
-        return output
-
-
 async def async_request_trt_llm(
     request_func_input: RequestFuncInput,
     pbar: Optional[tqdm] = None,
@@ -265,7 +213,9 @@ async def async_request_openai_completions(
     pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
-    assert api_url.endswith("v1/completions")
+    assert api_url.endswith(
+        "v1/completions"
+    ), "OpenAI Completions API URL must end with 'v1/completions'."
 
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         assert not request_func_input.use_beam_search
@@ -339,7 +289,7 @@ async def async_request_openai_chat_completions(
     api_url = request_func_input.api_url
     assert api_url.endswith(
         "v1/chat/completions"
-    ), "OpenAI Chat API URL must end with 'v1/chat/completions'."
+    ), "OpenAI Chat Completions API URL must end with 'v1/chat/completions'."
 
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         assert not request_func_input.use_beam_search
@@ -423,7 +373,8 @@ def remove_prefix(text: str, prefix: str) -> str:
 
 ASYNC_REQUEST_FUNCS = {
     "tgi": async_request_tgi,
-    "vllm": async_request_vllm,
+    "vllm": async_request_openai_completions,
+    "lmdeploy": async_request_openai_completions,
     "deepspeed-mii": async_request_deepspeed_mii,
     "openai": async_request_openai_completions,
     "openai-chat": async_request_openai_chat_completions,
