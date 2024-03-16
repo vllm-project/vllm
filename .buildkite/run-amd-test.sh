@@ -1,6 +1,8 @@
 set -e
 set -x
 
+rocminfo
+
 docker build -t rocm -f Dockerfile.rocm .
 
 remove_docker_container() { docker rm -f rocm || true; }
