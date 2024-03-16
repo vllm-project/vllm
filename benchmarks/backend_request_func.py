@@ -171,7 +171,7 @@ async def async_request_deepspeed_mii(
 
         payload = {
             "prompts": request_func_input.prompt,
-            "max_new_tokens": request_func_input.output_len,
+            "max_tokens": request_func_input.output_len,
             "ignore_eos": True,
             "do_sample": True,
             "temperature":
