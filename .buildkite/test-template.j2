@@ -8,9 +8,6 @@ steps:
       queue: amd
     command: bash .buildkite/run-amd-test.sh
 
-
-{# Ignoring CUDA build for now
-
   - label: ":docker: build image"
     commands:
       - "docker build --build-arg max_jobs=16 --tag {{ docker_image }} --target test --progress plain ."
@@ -62,5 +59,3 @@ steps:
                   - mountPath: /dev/shm
                     name: dshm
   {% endfor %}
-
-#}
