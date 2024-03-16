@@ -666,8 +666,8 @@ async def test_response_format_json_object(server, client: openai.AsyncOpenAI):
         messages=[{
             "role":
             "user",
-            "content":
-            'what is 1+1? please respond with a JSON object, the format is {"result": 2}'
+            "content": ('what is 1+1? please respond with a JSON object, '
+                        'the format is {"result": 2}')
         }],
         response_format={"type": "json_object"})
 
@@ -691,8 +691,8 @@ number: "1" | "2"
 
     completion = await client.completions.create(
         model=MODEL_NAME,
-        prompt=
-        "Generate a sql state that select col_1 from table_1 where it is equals to 1",
+        prompt=("Generte a sql state that select col_1 from "
+                "table_1 where it is equals to 1"),
         temperature=1.0,
         max_tokens=500,
         extra_body=dict(guided_grammar=simple_sql_grammar))

@@ -25,9 +25,10 @@ class GuidedDecodingMode(Enum):
 
 
 # https://github.com/outlines-dev/outlines/blob/main/outlines/grammars/json.lark
-# the main difference is that we changed the start: value to start: object | array
-# so we are denying scalar values as the root of the JSON. Starting with scalars as the root
-# seems to cause llama to generate without stop.
+# the main difference is that we changed the start: value to
+# start: object | array, so we are denying scalar values as the root of the
+# JSON. Starting with scalars as the root seems to cause llama to generate
+# without stop.
 JSON_GRAMMAR = r"""
 ?start: object | array
 
@@ -107,7 +108,8 @@ def _get_guide_and_mode(
         return choices_regex, GuidedDecodingMode.CHOICE
     elif request.guided_grammar:
         return request.guided_grammar, GuidedDecodingMode.GRAMMAR
-    elif request.response_format is not None and request.response_format.type == "json_object":
+    elif (request.response_format is not None
+          and request.response_format.type == "json_object"):
         return JSON_GRAMMAR, GuidedDecodingMode.GRAMMAR
     else:
         return None, None
