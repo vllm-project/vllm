@@ -170,10 +170,8 @@ async def async_request_deepspeed_mii(
         assert not request_func_input.use_beam_search
 
         payload = {
-            "prompts": request_func_input.prompt,
+            "prompt": request_func_input.prompt,
             "max_tokens": request_func_input.output_len,
-            "ignore_eos": True,
-            "do_sample": True,
             "temperature":
             0.01,  # deepspeed-mii does not accept 0.0 temperature.
             "top_p": 1.0,
