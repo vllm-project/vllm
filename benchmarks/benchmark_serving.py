@@ -129,12 +129,10 @@ def sample_sonnet_requests(
 
     # Base prefix for all requests.
     base_prompt = "Pick as many lines as you can from these poem lines:\n"
-    base_message = [
-        {
-            "role": "user",
-            "content": base_prompt,
-        }
-    ]
+    base_message = [{
+        "role": "user",
+        "content": base_prompt,
+    }]
     base_prompt_formatted = tokenizer.apply_chat_template(
         base_message, add_generation_prompt=True, tokenize=False)
     base_prompt_offset = len(tokenizer(base_prompt_formatted).input_ids)
