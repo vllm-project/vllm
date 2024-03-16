@@ -280,7 +280,7 @@ class OpenAIServingCompletion(OpenAIServing):
                             )
                         ]).model_dump_json()
                     yield f"data: {response_json}\n\n"
-        
+
                     if output.finish_reason is not None:  # return final usage
                         logprobs = LogProbs(
                         ) if request.logprobs is not None else None
@@ -348,8 +348,8 @@ class OpenAIServingCompletion(OpenAIServing):
 
                 if request.logprobs is not None:
                     assert top_logprobs is not None, (
-                            "top_logprobs must be provided when logprobs "
-                            "is requested")
+                        "top_logprobs must be provided when logprobs "
+                        "is requested")
                     logprobs = self._create_logprobs(
                         token_ids=token_ids,
                         top_logprobs=top_logprobs,

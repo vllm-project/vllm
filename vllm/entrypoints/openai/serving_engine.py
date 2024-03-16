@@ -96,7 +96,7 @@ class OpenAIServing:
         last_token_len = 0
         if num_output_top_logprobs:
             logprobs.top_logprobs = []
-        
+
         for i, token_id in enumerate(token_ids):
             if top_logprobs is None or top_logprobs[i] is None:
                 token = self.tokenizer.decode(token_id)
@@ -120,7 +120,7 @@ class OpenAIServing:
                 logprobs.text_offset.append(initial_text_offset)
             else:
                 logprobs.text_offset.append(logprobs.text_offset[-1] +
-                                        last_token_len)
+                                            last_token_len)
             last_token_len = len(token)
         return logprobs
 
@@ -178,7 +178,8 @@ class OpenAIServing:
 
         input_ids = prompt_ids if prompt_ids is not None else self.tokenizer(
             prompt).input_ids
-        input_text = prompt if prompt is not None else self.tokenizer.decode(prompt_ids)
+        input_text = prompt if prompt is not None else self.tokenizer.decode(
+            prompt_ids)
         token_num = len(input_ids)
 
         if request.max_tokens is None:

@@ -61,8 +61,8 @@ class OpenAIServingChat(OpenAIServing):
 
         request_id = f"cmpl-{random_uuid()}"
         try:
-            prompt_ids, prompt_text = self._validate_prompt_and_tokenize(request,
-                                                           prompt=prompt)
+            prompt_ids, prompt_text = self._validate_prompt_and_tokenize(
+                request, prompt=prompt)
             sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
             guided_decode_logits_processor = (
