@@ -2,7 +2,7 @@ import asyncio
 import json
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Tuple, Optional, Union
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -100,7 +100,7 @@ class OpenAIServing:
         for i, token_id in enumerate(token_ids):
             if top_logprobs is None or top_logprobs[i] is None:
                 token = self.tokenizer.decode(token_id)
-                logprobs.tokens.append(self.tokenizer.decode(token_id))
+                logprobs.tokens.append(token)
                 logprobs.token_logprobs.append(None)
                 logprobs.top_logprobs.append(None)
             else:
@@ -169,7 +169,7 @@ class OpenAIServing:
             self,
             request: Union[ChatCompletionRequest, CompletionRequest],
             prompt: Optional[str] = None,
-            prompt_ids: Optional[List[int]] = None) -> List[int]:
+            prompt_ids: Optional[List[int]] = None) -> Tuple[List[int], str]:
         if not (prompt or prompt_ids):
             raise ValueError("Either prompt or prompt_ids should be provided.")
         if (prompt and prompt_ids):
