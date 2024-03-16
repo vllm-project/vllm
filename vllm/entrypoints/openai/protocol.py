@@ -103,8 +103,10 @@ class ChatCompletionToolMessage(BaseModel):
     content: str
     tool_call_id: str
 
+
 class ChatCompletionNamedFunction(BaseModel):
     name: str
+
 
 class ChatCompletionNamedToolChoiceParam(BaseModel):
     function: ChatCompletionNamedFunction
@@ -143,6 +145,7 @@ class VllmToolsTemplate(BaseModel):
 End of functions instructions
 """
 
+
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[Union[ChatCompletionToolMessage,
@@ -163,7 +166,8 @@ class ChatCompletionRequest(BaseModel):
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
     tools: Optional[List[ChatCompletionToolParam]] = None
-    tool_choice: Optional[Union[Literal["auto", "none"], ChatCompletionNamedToolChoiceParam]] = "auto"
+    tool_choice: Optional[Union[Literal["auto", "none"],
+                                ChatCompletionNamedToolChoiceParam]] = "auto"
     # Additional parameters supported by vLLM
     tool_params: Optional[VllmToolsTemplate] = None
     best_of: Optional[int] = None
@@ -379,6 +383,7 @@ class ChatMessage(BaseModel):
     role: str
     content: Optional[str] = None
     tool_calls: Optional[List[ChatCompletionMessageToolCall]] = None
+
 
 class ChatCompletionResponseChoice(BaseModel):
     index: int

@@ -171,7 +171,8 @@ def _loadServingServices():
     if openai_serving_completion is not None:
         del openai_serving_completion
 
-    openai_tools_prompter = OpenAIToolsPrompter() if args.enable_api_tools else None
+    openai_tools_prompter = OpenAIToolsPrompter(
+    ) if args.enable_api_tools else None
     openai_serving_chat = OpenAIServingChat(
         engine=vllm_engine,
         served_model=served_model,
