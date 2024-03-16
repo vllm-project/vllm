@@ -20,9 +20,10 @@ import torch
 from torch import nn
 from transformers import GemmaConfig
 
+from vllm.config import LoRAConfig
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import GeluAndMul
-from vllm.model_executor.layers.attention import PagedAttention
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                MergedColumnParallelLinear,
@@ -122,10 +123,10 @@ class GemmaAttention(nn.Module):
             base=self.rope_theta,
             is_neox_style=True,
         )
-        self.attn = PagedAttention(self.num_heads,
-                                   self.head_dim,
-                                   self.scaling,
-                                   num_kv_heads=self.num_kv_heads)
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              self.scaling,
+                              num_kv_heads=self.num_kv_heads)
 
     def forward(
         self,
@@ -246,12 +247,36 @@ class GemmaModel(nn.Module):
 
 
 class GemmaForCausalLM(nn.Module):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+
+    # LoRA specific attributes
+    supported_lora_modules = [
+        "qkv_proj",
+        "o_proj",
+        "gate_up_proj",
+        "down_proj",
+    ]
+    # Gemma does not apply LoRA to the embedding layer.
+    embedding_modules = {}
+    embedding_padding_modules = []
 
     def __init__(
         self,
         config: GemmaConfig,
         linear_method: Optional[LinearMethodBase] = None,
+        lora_config: Optional[LoRAConfig] = None,
     ) -> None:
+        del lora_config  # Unused.
         super().__init__()
         self.config = config
         self.linear_method = linear_method
@@ -300,13 +325,16 @@ class GemmaForCausalLM(nn.Module):
                 if shard_name not in name:
                     continue
                 name = name.replace(shard_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                # Skip loading extra layer for lora models.
-                if "lm_head" in name:
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
                     continue
                 # GemmaRMSNorm is different from Llama's in that it multiplies
                 # (1 + weight) to the output, instead of just weight.

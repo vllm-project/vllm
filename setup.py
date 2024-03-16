@@ -10,11 +10,16 @@ from typing import List, Set
 
 from packaging.version import parse, Version
 import setuptools
+import sys
 import torch
 import torch.utils.cpp_extension as torch_cpp_ext
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME, ROCM_HOME
 
 ROOT_DIR = os.path.dirname(__file__)
+
+# vLLM only supports Linux platform
+assert sys.platform.startswith(
+    "linux"), "vLLM only supports Linux platform (including WSL)."
 
 # If you are developing the C++ backend of vLLM, consider building vLLM with
 # `python setup.py develop` since it will give you incremental builds.
@@ -41,7 +46,7 @@ def _is_neuron() -> bool:
     torch_neuronx_installed = True
     try:
         subprocess.run(["neuron-ls"], capture_output=True, check=True)
-    except subprocess.CalledProcessError:
+    except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
         torch_neuronx_installed = False
     return torch_neuronx_installed
 
@@ -143,8 +148,8 @@ def get_pytorch_rocm_arch() -> Set[str]:
     # If we don't have PYTORCH_ROCM_ARCH specified pull the list from rocm_agent_enumerator
     if env_arch_list is None:
         command = "rocm_agent_enumerator"
-        env_arch_list = subprocess.check_output([command]).decode('utf-8')\
-                        .strip().replace("\n", ";")
+        env_arch_list = (subprocess.check_output(
+            [command]).decode('utf-8').strip().replace("\n", ";"))
         arch_source_str = "rocm_agent_enumerator"
     else:
         arch_source_str = "PYTORCH_ROCM_ARCH env variable"
@@ -343,6 +348,8 @@ vllm_extension_sources = [
 
 if _is_cuda():
     vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
+    vllm_extension_sources.append(
+        "csrc/quantization/marlin/marlin_cuda_kernel.cu")
     vllm_extension_sources.append("csrc/custom_all_reduce.cu")
 
     # Add MoE kernels.
@@ -406,6 +413,8 @@ def get_vllm_version() -> str:
         if neuron_version != MAIN_CUDA_VERSION:
             neuron_version_str = neuron_version.replace(".", "")[:3]
             version += f"+neuron{neuron_version_str}"
+    else:
+        raise RuntimeError("Unknown runtime environment")
 
     return version
 
@@ -424,6 +433,12 @@ def get_requirements() -> List[str]:
     if _is_cuda():
         with open(get_path("requirements.txt")) as f:
             requirements = f.read().strip().split("\n")
+        if nvcc_cuda_version <= Version("11.8"):
+            # replace cupy-cuda12x with cupy-cuda11x for cuda 11.x
+            for i in range(len(requirements)):
+                if requirements[i].startswith("cupy-cuda12x"):
+                    requirements[i] = "cupy-cuda11x"
+                    break
     elif _is_hip():
         with open(get_path("requirements-rocm.txt")) as f:
             requirements = f.read().strip().split("\n")
@@ -433,6 +448,7 @@ def get_requirements() -> List[str]:
     else:
         raise ValueError(
             "Unsupported platform, please use CUDA, ROCM or Neuron.")
+
     return requirements
 
 

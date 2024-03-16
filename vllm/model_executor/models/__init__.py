@@ -45,6 +45,7 @@ _MODELS = {
     "RWForCausalLM": ("falcon", "FalconForCausalLM"),
     "StableLMEpochForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "StableLmForCausalLM": ("stablelm", "StablelmForCausalLM"),
+    "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
 }
 
 # Models not supported by ROCm.
@@ -61,8 +62,11 @@ _ROCM_PARTIALLY_SUPPORTED_MODELS = {
     "Sliding window attention is not yet supported in ROCm's flash attention",
 }
 
-# Models not supported by Neuron.
-_NEURON_SUPPORTED_MODELS = {"LlamaForCausalLM": "neuron.llama"}
+# Models supported by Neuron.
+_NEURON_SUPPORTED_MODELS = {
+    "LlamaForCausalLM": "neuron.llama",
+    "MistralForCausalLM": "neuron.mistral"
+}
 
 
 class ModelRegistry:

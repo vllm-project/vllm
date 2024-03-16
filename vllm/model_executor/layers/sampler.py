@@ -6,10 +6,12 @@ import torch.nn as nn
 
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_gather)
-from vllm.model_executor.sampling_metadata import SamplingMetadata, SamplingTensors
+from vllm.model_executor.sampling_metadata import (SamplingMetadata,
+                                                   SamplingTensors)
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.sequence import (PromptLogprobs, SampleLogprobs, SamplerOutput,
-                           SequenceData, SequenceGroupOutput, SequenceOutput)
+from vllm.sequence import (Logprob, PromptLogprobs, SampleLogprobs,
+                           SamplerOutput, SequenceData, SequenceGroupOutput,
+                           SequenceOutput)
 from vllm.utils import is_neuron
 
 
@@ -515,7 +517,6 @@ def _get_logprobs(
         if (i < sampling_metadata.num_prompts
                 and sampling_params.prompt_logprobs is not None):
             num_logprobs = sampling_params.prompt_logprobs
-            prompt_len = sampling_metadata.prompt_lens[i]
             prompt_tokens = sampling_metadata.seq_data[
                 seq_ids[0]].prompt_token_ids
             group_prompt_logprobs: PromptLogprobs = [None]
@@ -528,7 +529,10 @@ def _get_logprobs(
                     prompt_logprobs_dict.update(
                         zip(top_token_ids[sample_idx, :num_logprobs].tolist(),
                             top_logprobs[sample_idx, :num_logprobs].tolist()))
-                group_prompt_logprobs.append(prompt_logprobs_dict)
+                group_prompt_logprobs.append({
+                    token_id: Logprob(logprob)
+                    for token_id, logprob in prompt_logprobs_dict.items()
+                })
                 sample_idx += 1
                 query_result_idx += 1
             result_prompt_logprobs.append(group_prompt_logprobs)
@@ -553,7 +557,10 @@ def _get_logprobs(
                                       parent_id, :num_logprobs].tolist(),
                         top_logprobs[sample_idx +
                                      parent_id, :num_logprobs].tolist()))
-            group_sample_logprobs.append(sample_logprobs_dict)
+            group_sample_logprobs.append({
+                token_id: Logprob(logprob)
+                for token_id, logprob in sample_logprobs_dict.items()
+            })
         result_sample_logprobs.append(group_sample_logprobs)
         sample_idx += len(seq_ids)
 
@@ -581,4 +588,4 @@ def _build_sampler_output(
                 SequenceOutput(seq_ids[parent_id], next_token_id, logprobs))
         sampler_output.append(
             SequenceGroupOutput(seq_outputs, group_prompt_logprobs))
-    return sampler_output
+    return SamplerOutput(outputs=sampler_output)
