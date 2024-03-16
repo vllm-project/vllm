@@ -6,3 +6,5 @@ sphinx-argparse
 
 # packages to install to build the documentation
 pydantic
+-f https://download.pytorch.org/whl/cpu
+torch
