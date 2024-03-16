@@ -20,6 +20,7 @@ On the client side, run:
 import argparse
 import asyncio
 import json
+import os
 import random
 import time
 from dataclasses import dataclass
@@ -421,7 +422,7 @@ def main(args: argparse.Namespace):
         file_name = f"{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
 
         if args.result_dir:
-            file_name = f"{args.result_dir}/{file_name}"
+            file_name = os.path.join(args.result_dir, file_name)
         with open(file_name, "w") as outfile:
             json.dump(result_json, outfile)
 
