@@ -20,13 +20,14 @@ from typing import Union, DefaultDict, Dict, List, Optional, Callable
 
 import torch
 from pydantic import BaseModel
+from transformers import PreTrainedTokenizerBase
 from outlines.fsm.fsm import RegexFSM, CFGFSM
 from outlines.fsm.json_schema import build_regex_from_schema
 
 
 class BaseLogitsProcessor:
 
-    def adapt_tokenizer(self, tokenizer):
+    def adapt_tokenizer(self, tokenizer: PreTrainedTokenizerBase):
         """Adapt vLLM's tokenizer to use to compile the FSM.
 
         The API of Outlines tokenizers is slightly different to that of
@@ -101,7 +102,7 @@ class BaseLogitsProcessor:
 
 class RegexLogitsProcessor(BaseLogitsProcessor):
 
-    def __init__(self, regex_string: str, tokenizer):
+    def __init__(self, regex_string: str, tokenizer: PreTrainedTokenizerBase):
         """Compile the FSM that drives the regex-structured generation.
 
         Parameters
@@ -121,7 +122,7 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
 
     def __init__(self,
                  schema: Union[str, Dict, BaseModel],
-                 tokenizer,
+                 tokenizer: PreTrainedTokenizerBase,
                  whitespace_pattern: Optional[str] = None):
         """Compile the FSM that drives the JSON-guided generation.
 
@@ -155,7 +156,7 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
 
 class CFGLogitsProcessor(BaseLogitsProcessor):
 
-    def __init__(self, cfg: str, tokenizer):
+    def __init__(self, cfg: str, tokenizer: PreTrainedTokenizerBase):
         """Compile the FSM that drives the context free grammar generation.
 
         Parameters
