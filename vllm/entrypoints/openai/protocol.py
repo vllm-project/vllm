@@ -55,6 +55,11 @@ class UsageInfo(BaseModel):
     completion_tokens: Optional[int] = 0
 
 
+class ResponseFormat(BaseModel):
+    # type must be "json_object" or "text"
+    type: str = Literal["text", "json_object"]
+
+
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[Dict[str, str]]
@@ -89,6 +94,8 @@ class ChatCompletionRequest(BaseModel):
     guided_json: Optional[Union[str, dict, BaseModel]] = None
     guided_regex: Optional[str] = None
     guided_choice: Optional[List[str]] = None
+    guided_grammar: Optional[str] = None
+    response_format: Optional[ResponseFormat] = None
 
     def to_sampling_params(self) -> SamplingParams:
         if self.logprobs and not self.top_logprobs:
@@ -183,6 +190,8 @@ class CompletionRequest(BaseModel):
     guided_json: Optional[Union[str, dict, BaseModel]] = None
     guided_regex: Optional[str] = None
     guided_choice: Optional[List[str]] = None
+    guided_grammar: Optional[str] = None
+    response_format: Optional[ResponseFormat] = None
 
     def to_sampling_params(self):
         echo_without_generation = self.echo and self.max_tokens == 0
