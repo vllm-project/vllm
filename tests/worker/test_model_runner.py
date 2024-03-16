@@ -7,9 +7,8 @@ from vllm.config import ModelConfig
 
 
 # Make sure the result is aligned.
-def round_up_to_next_multiple_of_batch_size(n):
-    batch_size = _BATCH_SIZE_ALIGNMENT
-    return ((n + 7) // batch_size) * batch_size
+def round_up_to_next_multiple_of_batch_size(batch_size):
+    return ((batch_size + _BATCH_SIZE_ALIGNMENT -1) // _BATCH_SIZE_ALIGNMENT) * _BATCH_SIZE_ALIGNMENT
 
 
 def test_prepare_prompt():

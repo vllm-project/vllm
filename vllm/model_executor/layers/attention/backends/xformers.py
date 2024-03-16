@@ -143,10 +143,6 @@ class XFormersBackend:
                     query = query.unsqueeze(0)
                     key = key.unsqueeze(0)
                     value = value.unsqueeze(0)
-                else:
-                    query = query.unflatten(0, (num_tokens))
-                    key = key.unflatten(0, (num_tokens))
-                    value = value.unflatten(0, (num_tokens))
 
                 out = xops.memory_efficient_attention_forward(
                     query,

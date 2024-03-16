@@ -19,7 +19,7 @@ class Attention(nn.Module):
     can either contain prompt tokens or generation tokens.
 
 
-    If the input tensors contain prompt tokens, the layout is as follows:	
+    If the input tensors contain prompt tokens, the layout is as follows:
     |<---------------------- num_valid_tokens ---------------------->|	
     |<--------------- num_prompt_tokens -------------->|	
     |<--prompt_0-->|<--prompt_1-->|...|<--prompt_N-1-->|<--padding-->|	

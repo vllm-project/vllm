@@ -92,8 +92,8 @@ def test_same_output_for_single_step():
         num_gpu_blocks,
         seed,
     )
-    # multi_step_worker.model_runner = worker.model_runner
-    # multi_step_worker.cache_engine = worker.cache_engine
+    multi_step_worker.model_runner = worker.model_runner
+    multi_step_worker.cache_engine = worker.cache_engine
 
     num_steps = 1
 
@@ -418,4 +418,3 @@ def test_draft_proposals_mixed_k():
     assert proposals.proposal_lens.tolist() == [
         k for _ in range(expected_num_proposal_seqs - 1)
     ] + [0 for _ in range(expected_num_no_proposal_seqs)] + [k]
->>>>>>> main:tests/spec_decode/test_multi_step_worker.py
