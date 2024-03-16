@@ -2,6 +2,7 @@ import contextlib
 import io
 import os
 import re
+import shutil
 import subprocess
 import warnings
 from pathlib import Path
@@ -38,6 +39,10 @@ ROCM_SUPPORTED_ARCHS = {"gfx908", "gfx90a", "gfx942", "gfx1100"}
 # SUPPORTED_ARCHS = NVIDIA_SUPPORTED_ARCHS.union(ROCM_SUPPORTED_ARCHS)
 
 
+def _is_cuda() -> bool:
+    return torch.version.cuda is not None
+
+
 def _is_hip() -> bool:
     return torch.version.hip is not None
 
@@ -46,13 +51,9 @@ def _is_neuron() -> bool:
     torch_neuronx_installed = True
     try:
         subprocess.run(["neuron-ls"], capture_output=True, check=True)
-    except (FileNotFoundError, PermissionError):
+    except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
         torch_neuronx_installed = False
     return torch_neuronx_installed
-
-
-def _is_cuda() -> bool:
-    return (torch.version.cuda is not None) and not _is_neuron()
 
 
 # Compiler flags.
@@ -400,7 +401,12 @@ def find_version(filepath: str) -> str:
 def get_vllm_version() -> str:
     version = find_version(get_path("vllm", "__init__.py"))
 
-    if _is_hip():
+    if _is_cuda():
+        cuda_version = str(nvcc_cuda_version)
+        if cuda_version != MAIN_CUDA_VERSION:
+            cuda_version_str = cuda_version.replace(".", "")[:3]
+            version += f"+cu{cuda_version_str}"
+    elif _is_hip():
         # Get the HIP version
         hipcc_version = get_hipcc_rocm_version()
         if hipcc_version != MAIN_CUDA_VERSION:
@@ -412,13 +418,8 @@ def get_vllm_version() -> str:
         if neuron_version != MAIN_CUDA_VERSION:
             neuron_version_str = neuron_version.replace(".", "")[:3]
             version += f"+neuron{neuron_version_str}"
-    elif _is_cuda():
-        cuda_version = str(nvcc_cuda_version)
-        if cuda_version != MAIN_CUDA_VERSION:
-            cuda_version_str = cuda_version.replace(".", "")[:3]
-            version += f"+cu{cuda_version_str}"
     else:
-        raise RuntimeError("Unknown runtime environment.")
+        raise RuntimeError("Unknown runtime environment")
 
     return version
 
@@ -434,13 +435,7 @@ def read_readme() -> str:
 
 def get_requirements() -> List[str]:
     """Get Python package dependencies from requirements.txt."""
-    if _is_hip():
-        with open(get_path("requirements-rocm.txt")) as f:
-            requirements = f.read().strip().split("\n")
-    elif _is_neuron():
-        with open(get_path("requirements-neuron.txt")) as f:
-            requirements = f.read().strip().split("\n")
-    else:
+    if _is_cuda():
         with open(get_path("requirements.txt")) as f:
             requirements = f.read().strip().split("\n")
         if nvcc_cuda_version <= Version("11.8"):
@@ -449,6 +444,16 @@ def get_requirements() -> List[str]:
                 if requirements[i].startswith("cupy-cuda12x"):
                     requirements[i] = "cupy-cuda11x"
                     break
+    elif _is_hip():
+        with open(get_path("requirements-rocm.txt")) as f:
+            requirements = f.read().strip().split("\n")
+    elif _is_neuron():
+        with open(get_path("requirements-neuron.txt")) as f:
+            requirements = f.read().strip().split("\n")
+    else:
+        raise ValueError(
+            "Unsupported platform, please use CUDA, ROCM or Neuron.")
+
     return requirements
 
 
