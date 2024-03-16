@@ -9,11 +9,16 @@ from typing import List, Set
 
 from packaging.version import parse, Version
 import setuptools
+import sys
 import torch
 import torch.utils.cpp_extension as torch_cpp_ext
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME, ROCM_HOME
 
 ROOT_DIR = os.path.dirname(__file__)
+
+# vLLM only supports Linux platform
+assert sys.platform.startswith(
+    "linux"), "vLLM only supports Linux platform (including WSL)."
 
 # If you are developing the C++ backend of vLLM, consider building vLLM with
 # `python setup.py develop` since it will give you incremental builds.
@@ -402,11 +407,13 @@ def get_vllm_version() -> str:
         if neuron_version != MAIN_CUDA_VERSION:
             neuron_version_str = neuron_version.replace(".", "")[:3]
             version += f"+neuron{neuron_version_str}"
-    else:
+    elif _is_cuda():
         cuda_version = str(nvcc_cuda_version)
         if cuda_version != MAIN_CUDA_VERSION:
             cuda_version_str = cuda_version.replace(".", "")[:3]
             version += f"+cu{cuda_version_str}"
+    else:
+        raise RuntimeError("Unknown runtime environment.")
 
     return version
 
@@ -431,6 +438,12 @@ def get_requirements() -> List[str]:
     else:
         with open(get_path("requirements.txt")) as f:
             requirements = f.read().strip().split("\n")
+        if nvcc_cuda_version <= Version("11.8"):
+            # replace cupy-cuda12x with cupy-cuda11x for cuda 11.x
+            for i in range(len(requirements)):
+                if requirements[i].startswith("cupy-cuda12x"):
+                    requirements[i] = "cupy-cuda11x"
+                    break
     return requirements
 
 

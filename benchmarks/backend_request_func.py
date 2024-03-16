@@ -64,7 +64,7 @@ async def async_request_tgi(
                             output.ttft = ttft
                     output.latency = time.perf_counter() - st
 
-                    body = data.decode("utf-8").lstrip("data:")
+                    body = remove_prefix(data.decode("utf-8"), "data:")
                     output.generated_text = json.loads(body)["generated_text"]
                     output.success = True
                 else:
@@ -158,7 +158,7 @@ async def async_request_trt_llm(
                             output.ttft = ttft
                     output.latency = time.perf_counter() - st
 
-                    body = data.decode("utf-8").lstrip("data:")
+                    body = remove_prefix(data.decode("utf-8"), "data:")
                     output.generated_text = json.loads(body)["text_output"]
                     output.success = True
 
@@ -255,7 +255,7 @@ async def async_request_openai_completions(
                         if not chunk:
                             continue
 
-                        chunk = chunk.decode("utf-8").lstrip("data: ")
+                        chunk = remove_prefix(chunk.decode("utf-8"), "data: ")
                         if chunk == "[DONE]":
                             latency = time.perf_counter() - st
                         else:
@@ -322,7 +322,7 @@ async def async_request_openai_chat_completions(
                         if not chunk:
                             continue
 
-                        chunk = chunk.decode("utf-8").lstrip("data: ")
+                        chunk = remove_prefix(chunk.decode("utf-8"), "data: ")
                         if chunk == "[DONE]":
                             latency = time.perf_counter() - st
                         else:
@@ -342,6 +342,13 @@ async def async_request_openai_chat_completions(
     if pbar:
         pbar.update(1)
     return output
+
+
+# Since vllm must support Python 3.8, we can't use str.removeprefix(prefix) introduced in Python 3.9
+def remove_prefix(text: str, prefix: str) -> str:
+    if text.startswith(prefix):
+        return text[len(prefix):]
+    return text
 
 
 ASYNC_REQUEST_FUNCS = {
