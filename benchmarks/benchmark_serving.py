@@ -6,7 +6,7 @@ On the server side, run one of the following commands:
         --model <your_model> --swap-space 16 \
         --disable-log-requests
 
-    (vLLM Demo API server)
+    (Deprecated - vLLM Demo API server)
     python -m vllm.entrypoints.api_server \
         --model <your_model> --swap-space 16 \
         --disable-log-requests

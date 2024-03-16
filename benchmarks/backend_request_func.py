@@ -312,7 +312,7 @@ async def async_request_openai_completions(
                                 # Decoding phase
                                 # NOTE: Some completion API might have a last usage summary response
                                 # without a token so we do not want to include as inter-token-latency
-                                elif body.get("usage", None) is None:
+                                elif data.get("usage", None) is None:
                                     output.itl.append(timestamp -
                                                       most_recent_timestamp)
 
