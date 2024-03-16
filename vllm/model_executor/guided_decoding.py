@@ -6,7 +6,9 @@ from functools import lru_cache
 from json import dumps as json_dumps
 from re import escape as regex_escape
 from typing import Union, Tuple
+
 from pydantic import BaseModel
+from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest
 from vllm.model_executor.guided_logits_processors import JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor
@@ -16,14 +18,14 @@ class GuidedDecodingMode(Enum):
     JSON = "json"
     REGEX = "regex"
     CHOICE = "choice"
-    CFG = "cfg"
+    GRAMMAR = "grammar"
 
 
 # https://github.com/outlines-dev/outlines/blob/main/outlines/grammars/json.lark
 # the main difference is that we changed the start: value to start: object | array
 # so we are denying scalar values as the root of the JSON. Starting with scalars as the root
 # seems to cause llama to generate without stop.
-JSON_CFG_GRAMMAR = r"""
+JSON_GRAMMAR = r"""
 ?start: object | array
 
 ?value: object
@@ -100,22 +102,23 @@ def _get_guide_and_mode(
         ]
         choices_regex = "(" + "|".join(choices) + ")"
         return choices_regex, GuidedDecodingMode.CHOICE
-    elif request.guided_cfg:
-        return request.guided_cfg, GuidedDecodingMode.CFG
+    elif request.guided_grammar:
+        return request.guided_grammar, GuidedDecodingMode.GRAMMAR
     elif request.response_format is not None and request.response_format.type == "json_object":
-        return JSON_CFG_GRAMMAR, GuidedDecodingMode.CFG
+        return JSON_GRAMMAR, GuidedDecodingMode.GRAMMAR
     else:
         return None, None
 
 
 @lru_cache(maxsize=32)
-def _get_cached_logits_processor(guide: str, tokenizer,
+def _get_cached_logits_processor(guide: str,
+                                 tokenizer: PreTrainedTokenizerBase,
                                  mode: GuidedDecodingMode):
     if mode == GuidedDecodingMode.JSON:
         return JSONLogitsProcessor(guide, tokenizer)
     elif mode == GuidedDecodingMode.REGEX or mode == GuidedDecodingMode.CHOICE:
         return RegexLogitsProcessor(guide, tokenizer)
-    elif mode == GuidedDecodingMode.CFG:
+    elif mode == GuidedDecodingMode.GRAMMAR:
         return CFGLogitsProcessor(guide, tokenizer)
     else:
         raise ValueError(f"Unknown guided decoding mode {mode}")

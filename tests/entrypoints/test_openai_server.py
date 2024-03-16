@@ -685,7 +685,7 @@ number: "1" | "2"
         "Generate a sql state that select col_1 from table_1 where it is equals to 1",
         temperature=1.0,
         max_tokens=500,
-        extra_body=dict(guided_cfg=simple_sql_grammar))
+        extra_body=dict(guided_grammar=simple_sql_grammar))
 
     content = completion.choices[0].text
 

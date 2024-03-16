@@ -153,7 +153,7 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
 class CFGLogitsProcessor(BaseLogitsProcessor):
 
     def __init__(self, cfg: str, tokenizer):
-        """Compile the FSM that drives the CFG-structured generation.
+        """Compile the FSM that drives the context free grammar generation.
 
         Parameters
         ----------

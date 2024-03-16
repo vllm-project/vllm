@@ -94,7 +94,7 @@ class ChatCompletionRequest(BaseModel):
     guided_json: Optional[Union[str, dict, BaseModel]] = None
     guided_regex: Optional[str] = None
     guided_choice: Optional[List[str]] = None
-    guided_cfg: Optional[str] = None
+    guided_grammar: Optional[str] = None
     response_format: Optional[ResponseFormat] = None
 
     def to_sampling_params(self) -> SamplingParams:
@@ -190,7 +190,7 @@ class CompletionRequest(BaseModel):
     guided_json: Optional[Union[str, dict, BaseModel]] = None
     guided_regex: Optional[str] = None
     guided_choice: Optional[List[str]] = None
-    guided_cfg: Optional[str] = None
+    guided_grammar: Optional[str] = None
     response_format: Optional[ResponseFormat] = None
 
     def to_sampling_params(self):
