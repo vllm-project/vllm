@@ -45,31 +45,9 @@ pytest tests/
 If you encounter a bug or have a feature request, please check our issues page first to see if someone else has already reported it.
 If not, please file a new issue, providing as much relevant information as possible.
 
-### Coding Style Guide
+### Pull Requests & Code Reviews
 
-In general, we adhere to [Google Python style guide](https://google.github.io/styleguide/pyguide.html) and [Google C++ style guide](https://google.github.io/styleguide/cppguide.html).
-
-We include a formatting script [`format.sh`](./format.sh) to format the code.
-
-### Pull Requests
-
-When submitting a pull request:
-
-1. Make sure your code has been rebased on top of the latest commit on the main branch.
-2. Ensure code is properly formatted by running [`format.sh`](./format.sh).
-3. Include a detailed description of the changes in the pull request.
-Explain why you made the changes you did.
-If your pull request fixes an open issue, please include a reference to it in the description.
-
-### Code Reviews
-
-All submissions, including submissions by project members, require a code review.
-To make the review process as smooth as possible, please:
-
-1. Keep your changes as concise as possible.
-If your pull request involves multiple unrelated changes, consider splitting it into separate pull requests.
-2. Respond to all comments within a reasonable time frame.
-If a comment isn't clear or you disagree with a suggestion, feel free to ask for clarification or discuss the suggestion.
+Please check the PR checklist in the [PR template](.github/PULL_REQUEST_TEMPLATE.md) for detailed guide for contribution.
 
 ### Thank You
 
