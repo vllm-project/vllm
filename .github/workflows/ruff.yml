@@ -31,4 +31,4 @@ jobs:
         ruff vllm tests
     - name: Spelling check with codespell
       run: |
-         codespell --toml pyproject.toml
+        codespell --toml pyproject.toml
