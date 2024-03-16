@@ -95,6 +95,7 @@ Documentation
    :maxdepth: 2
    :caption: Developer Documentation
 
+   dev/sampling_params
    dev/engine/engine_index
    dev/kernel/paged_attention
 

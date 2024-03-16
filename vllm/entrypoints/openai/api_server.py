@@ -61,7 +61,7 @@ class LoRAParserAction(argparse.Action):
         setattr(namespace, self.dest, lora_list)
 
 
-def parse_args():
+def make_arg_parser():
     parser = argparse.ArgumentParser(
         description="vLLM OpenAI-Compatible RESTful API server.")
     parser.add_argument("--host", type=str, default=None, help="host name")
@@ -154,6 +154,11 @@ def parse_args():
         "using app.add_middleware(). ")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
+    return parser
+
+
+def parse_args():
+    parser = make_arg_parser()
     return parser.parse_args()
 
 
