@@ -68,9 +68,9 @@ async def async_request_tgi(
                         if not chunk:
                             continue
 
-                        chunk = chunk.decode("utf-8").lstrip("data:")
+                        chunk = remove_prefix(chunk.decode("utf-8"), "data:")
 
-                        body = json.loads(chunk)
+                        data = json.loads(chunk)
                         timestamp = time.perf_counter()
                         # First token
                         if ttft == 0:
@@ -86,7 +86,7 @@ async def async_request_tgi(
 
                     output.latency = most_recent_timestamp - st
                     output.success = True
-                    output.generated_text = body["generated_text"]
+                    output.generated_text = data["generated_text"]
         except:
             output.success = False
             exc_info = sys.exc_info()
@@ -180,9 +180,9 @@ async def async_request_trt_llm(
                         if not chunk:
                             continue
 
-                        chunk = chunk.decode("utf-8").lstrip("data:")
+                        chunk = remove_prefix(chunk.decode("utf-8"), "data:")
 
-                        body = json.loads(chunk)
+                        data = json.loads(chunk)
                         timestamp = time.perf_counter()
                         # First token
                         if ttft == 0:
@@ -197,7 +197,7 @@ async def async_request_trt_llm(
                         most_recent_timestamp = timestamp
 
                     output.latency = most_recent_timestamp - st
-                    output.generated_text = json.loads(body)["text_output"]
+                    output.generated_text = json.loads(data)["text_output"]
                     output.success = True
 
                 else:
@@ -296,13 +296,13 @@ async def async_request_openai_completions(
                         if not chunk:
                             continue
 
-                        chunk = chunk.decode("utf-8").lstrip("data: ")
+                        chunk = remove_prefix(chunk.decode("utf-8"), "data: ")
                         if chunk == "[DONE]":
                             latency = time.perf_counter() - st
                         else:
-                            body = json.loads(chunk)
+                            data = json.loads(chunk)
 
-                            if body["choices"][0]["text"]:
+                            if data["choices"][0]["text"]:
                                 timestamp = time.perf_counter()
                                 # First token
                                 if ttft == 0:
@@ -317,7 +317,7 @@ async def async_request_openai_completions(
                                                       most_recent_timestamp)
 
                                 most_recent_timestamp = timestamp
-                                generated_text += body["choices"][0]["text"]
+                                generated_text += data["choices"][0]["text"]
 
                     output.generated_text = generated_text
                     output.success = True
@@ -375,14 +375,14 @@ async def async_request_openai_chat_completions(
                         if not chunk:
                             continue
 
-                        chunk = chunk.decode("utf-8").lstrip("data: ")
+                        chunk = remove_prefix(chunk.decode("utf-8"), "data: ")
                         if chunk == "[DONE]":
                             latency = time.perf_counter() - st
                         else:
                             timestamp = time.perf_counter()
-                            body = json.loads(chunk)
+                            data = json.loads(chunk)
 
-                            if "content" in body["choices"][0]["delta"]:
+                            if "content" in data["choices"][0]["delta"]:
                                 # First token
                                 if ttft == 0:
                                     ttft = time.perf_counter() - st
@@ -393,7 +393,7 @@ async def async_request_openai_chat_completions(
                                     output.itl.append(timestamp -
                                                       most_recent_timestamp)
 
-                                generated_text += body["choices"][0]["delta"][
+                                generated_text += data["choices"][0]["delta"][
                                     "content"]
 
                             most_recent_timestamp = timestamp
@@ -412,6 +412,13 @@ async def async_request_openai_chat_completions(
     if pbar:
         pbar.update(1)
     return output
+
+
+# Since vllm must support Python 3.8, we can't use str.removeprefix(prefix) introduced in Python 3.9
+def remove_prefix(text: str, prefix: str) -> str:
+    if text.startswith(prefix):
+        return text[len(prefix):]
+    return text
 
 
 ASYNC_REQUEST_FUNCS = {
