@@ -10,6 +10,6 @@ trap remove_docker_container EXIT
 
 remove_docker_container
 
-docker run --network host --name rocm rocm python3 -m vllm.entrypoints.openai.api_server &
+docker run --network host --name rocm rocm python3 -m vllm.entrypoints.api_server &
 while [ "$(curl -s -o /dev/null -w ''%{http_code}'' localhost:8000)" != "200" ]; do sleep 1; done
-python examples/openai_completion_client.py
+python examples/api_client.py
