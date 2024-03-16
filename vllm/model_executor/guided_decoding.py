@@ -53,7 +53,7 @@ async def get_guided_decoding_logits_processor(
 def _get_guide_and_mode(
     request: Union[CompletionRequest, ChatCompletionRequest]
 ) -> Tuple[str, GuidedDecodingMode]:
-    if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
+    if isinstance(request, ChatCompletionRequest) and isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
         # Guided generation for tools/functions parameters
         if request.tool_choice.type == "function":
             for tool in request.tools:
