@@ -24,4 +24,6 @@ while [ "$(curl -s -o /dev/null -w ''%{http_code}'' localhost:8000/health)" != "
     fi
 done
 
-python examples/api_client.py
+curl -X POST -H "Content-Type: application/json"
+    localhost:8000/generate
+    -d '{"prompt": "San Francisco is a"}'
