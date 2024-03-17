@@ -120,14 +120,6 @@ class BaseGuidedLogitsProcessor:
 
         return scores
 
-    def __deepcopy__(self, memo):
-        logits_processor = self.__class__(
-            copy.deepcopy(self.fsm.cfg_string, memo),
-            copy.deepcopy(self.fsm.tokenizer, memo),
-        )
-        logits_processor.fsm = self.fsm.copy()
-        return logits_processor
-
 
 class RegexLogitsProcessor(BaseGuidedLogitsProcessor):
 
@@ -201,3 +193,11 @@ class CFGLogitsProcessor(BaseGuidedLogitsProcessor):
         tokenizer = self.adapt_tokenizer(tokenizer)
         fsm = CFGFSM(cfg, tokenizer)
         self.fsm = fsm
+
+    def __deepcopy__(self, memo):
+        logits_processor = self.__class__(
+            copy.deepcopy(self.fsm.cfg_string, memo),
+            copy.deepcopy(self.fsm.tokenizer, memo),
+        )
+        logits_processor.fsm = self.fsm.copy()
+        return logits_processor
