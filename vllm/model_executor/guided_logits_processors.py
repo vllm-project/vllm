@@ -26,7 +26,7 @@ from outlines.fsm.fsm import RegexFSM, CFGFSM
 from outlines.fsm.json_schema import build_regex_from_schema
 
 
-class BaseLogitsProcessor:
+class BaseGuidedLogitsProcessor:
 
     def adapt_tokenizer(self, tokenizer: PreTrainedTokenizerBase):
         """Adapt vLLM's tokenizer to use to compile the FSM.
@@ -109,7 +109,7 @@ class BaseLogitsProcessor:
         return logits_processor
 
 
-class RegexLogitsProcessor(BaseLogitsProcessor):
+class RegexLogitsProcessor(BaseGuidedLogitsProcessor):
 
     def __init__(self, regex_string: str, tokenizer: PreTrainedTokenizerBase):
         """Compile the FSM that drives the regex-structured generation.
@@ -163,7 +163,7 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
         super().__init__(regex_string, tokenizer)
 
 
-class CFGLogitsProcessor(BaseLogitsProcessor):
+class CFGLogitsProcessor(BaseGuidedLogitsProcessor):
 
     def __init__(self, cfg: str, tokenizer: PreTrainedTokenizerBase):
         """Compile the FSM that drives the context free grammar generation.

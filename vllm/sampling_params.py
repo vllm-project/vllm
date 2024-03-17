@@ -3,6 +3,7 @@ import copy
 from enum import IntEnum
 from functools import cached_property
 from typing import Callable, List, Optional, Union
+from vllm.model_executor.guided_decoding import BaseGuidedLogitsProcessor
 
 import torch
 
@@ -247,8 +248,7 @@ class SamplingParams:
         """
 
         logit_processor_refs = None if self.logits_processors is None else {
-            id(lp): lp
-            for lp in self.logits_processors
+            id(lp): lp for lp in self.logits_processors if not isinstance(lp, BaseGuidedLogitsProcessor)
         }
         return copy.deepcopy(self, memo=logit_processor_refs)
 
