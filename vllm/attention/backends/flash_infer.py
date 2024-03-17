@@ -4,11 +4,12 @@ from typing import List, Optional
 from flash_attn import flash_attn_func
 import torch
 
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.attention.ops.paged_attn import PagedAttentionImpl
 
 
-class FlashAttentionBackend:
+class FlashInferBackend(AttentionBackend):
 
     def __init__(
         self,
