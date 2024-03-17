@@ -17,7 +17,8 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (Logprob, SamplerOutput, Sequence, SequenceGroup,
                            SequenceGroupOutput, SequenceOutput, SequenceStatus)
-from vllm.transformers_utils.tokenizer import detokenize_incrementally
+from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
+                                               convert_prompt_ids_to_tokens)
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
 from vllm.utils import Counter
@@ -358,14 +359,8 @@ class LLMEngine:
         # Process prompt logprobs
         prompt_logprobs = outputs.prompt_logprobs
         if prompt_logprobs is not None:
-            # We can pick any sequence for the prompt.
-            seq = next(iter(seq_group.seqs_dict.values()))
-            all_token_ids = seq.get_token_ids()
-            for i, prompt_logprobs_for_token in enumerate(prompt_logprobs):
-                self._decode_logprobs(seq, seq_group.sampling_params,
-                                      prompt_logprobs_for_token,
-                                      all_token_ids[:i])
-            seq_group.prompt_logprobs = prompt_logprobs
+            seq_group.prompt_logprobs = self._decode_prompt_logprobs(
+                seq_group, prompt_logprobs)
 
         # Process samples
         samples = outputs.samples
@@ -702,36 +697,97 @@ class LLMEngine:
             time_e2e_requests=time_e2e_requests,
         )
 
-    def _decode_logprobs(self, seq: Sequence, prms: SamplingParams,
-                         logprobs: Dict[int, Logprob],
-                         all_input_ids: List[int]) -> None:
+    def _decode_logprobs(
+            self,
+            seq: Sequence,
+            prms: SamplingParams,
+            logprobs: Dict[int, Logprob],
+            all_input_ids: List[int],
+            generated_token_id_and_text: Optional[Tuple[int,
+                                                        str]] = None) -> None:
         if not logprobs:
             return
+        tokenizer = self.get_tokenizer_for_seq(seq)
+        previous_tokens = all_input_ids[:-1]
         for token_id, sample_logprob in logprobs.items():
+            if (generated_token_id_and_text is not None
+                    and token_id == generated_token_id_and_text[0]):
+                sample_logprob.decoded_token = generated_token_id_and_text[1]
+                continue
             if (sample_logprob.decoded_token is None and token_id != -1):
-                all_input_ids_with_logprob = all_input_ids[:-1] + [token_id]
-                (_, new_text, prefix_offset,
-                 read_offset) = detokenize_incrementally(
-                     self.get_tokenizer_for_seq(seq),
-                     all_input_ids=all_input_ids_with_logprob,
-                     prev_tokens=seq.tokens,
-                     prefix_offset=seq.prefix_offset,
-                     read_offset=seq.read_offset,
-                     skip_special_tokens=prms.skip_special_tokens,
-                     spaces_between_special_tokens=prms.
-                     spaces_between_special_tokens,
-                 )
+                all_input_ids_with_logprob = previous_tokens + [token_id]
+                (_, new_text, _, _) = detokenize_incrementally(
+                    tokenizer=tokenizer,
+                    all_input_ids=all_input_ids_with_logprob,
+                    prev_tokens=seq.tokens,
+                    prefix_offset=seq.prefix_offset,
+                    read_offset=seq.read_offset,
+                    skip_special_tokens=prms.skip_special_tokens,
+                    spaces_between_special_tokens=prms.
+                    spaces_between_special_tokens,
+                )
                 sample_logprob.decoded_token = new_text
+
+    def _decode_prompt_logprobs(
+            self, seq_group: SequenceGroup,
+            prompt_logprobs: List[Dict[int,
+                                       Logprob]]) -> List[Dict[int, Logprob]]:
+        prms = seq_group.sampling_params
+        # We can pick any sequence for the prompt.
+        seq = next(iter(seq_group.seqs_dict.values()))
+        # Only prompt, without the generated token.
+        prompt_token_ids = seq.get_token_ids()[:-1]
+        tokenizer = self.get_tokenizer_for_seq(seq)
+        prefix_offset = 0
+        read_offset = 0
+        prev_tokens = None
+        first_non_none_index = 0
+        for i, prompt_logprobs_for_token in enumerate(prompt_logprobs):
+            if not prompt_logprobs_for_token:
+                first_non_none_index = i + 1
+                continue
+            for token_id, sample_logprob in prompt_logprobs_for_token.items():
+                if (sample_logprob.decoded_token is None and token_id != -1):
+                    prompt_token_ids_with_token = prompt_token_ids[:i] + [
+                        token_id
+                    ]
+                    (new_tokens, new_text, prefix_offset,
+                     read_offset) = detokenize_incrementally(
+                         tokenizer=tokenizer,
+                         all_input_ids=prompt_token_ids_with_token,
+                         prev_tokens=prev_tokens,
+                         prefix_offset=prefix_offset,
+                         read_offset=read_offset,
+                         skip_special_tokens=prms.skip_special_tokens,
+                         spaces_between_special_tokens=prms.
+                         spaces_between_special_tokens,
+                     )
+                    if prev_tokens is None:
+                        prev_tokens = new_tokens
+                    else:
+                        prev_tokens += new_tokens
+                    sample_logprob.decoded_token = new_text
+        return prompt_logprobs[first_non_none_index:]
 
     def _decode_sequence(self, seq: Sequence, prms: SamplingParams) -> None:
         """Decodes the new token for a sequence."""
         all_input_ids = seq.get_token_ids()
-        self._decode_logprobs(seq, prms, seq.output_logprobs[-1],
-                              all_input_ids)
+        tokenizer = self.get_tokenizer_for_seq(seq)
+
+        # Convert prompt token IDs to tokens if necessary.
+        # Do it here so that we don't have to repeat this
+        # computation for each logprob.
+        if seq.tokens is None:
+            (seq.tokens, seq.prefix_offset,
+             seq.read_offset) = convert_prompt_ids_to_tokens(
+                 tokenizer=tokenizer,
+                 prompt_ids=all_input_ids[:-1],
+                 skip_special_tokens=prms.skip_special_tokens,
+             )
 
         (new_tokens, new_output_text, prefix_offset,
          read_offset) = detokenize_incrementally(
-             self.get_tokenizer_for_seq(seq),
+             tokenizer=tokenizer,
              all_input_ids=all_input_ids,
              prev_tokens=seq.tokens,
              prefix_offset=seq.prefix_offset,
@@ -739,6 +795,14 @@ class LLMEngine:
              skip_special_tokens=prms.skip_special_tokens,
              spaces_between_special_tokens=prms.spaces_between_special_tokens,
          )
+
+        self._decode_logprobs(seq,
+                              prms,
+                              seq.output_logprobs[-1],
+                              all_input_ids,
+                              generated_token_id_and_text=(all_input_ids[-1],
+                                                           new_output_text))
+
         if seq.tokens is None:
             seq.tokens = new_tokens
         else:
