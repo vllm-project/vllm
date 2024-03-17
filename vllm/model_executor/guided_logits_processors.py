@@ -82,7 +82,7 @@ class BaseGuidedLogitsProcessor:
 
         seq_id = hash(tuple(input_ids))
 
-        if not hasattr(self, "fsm_state"):
+        if len(input_ids) == 0:
             self.init_state()
         else:
             if not hasattr(self, "fsm_state"):
