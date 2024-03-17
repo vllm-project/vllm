@@ -2,7 +2,7 @@
 import copy
 from enum import IntEnum
 from functools import cached_property
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Optional, Union, Sequence
 
 import torch
 
@@ -256,7 +256,8 @@ class SamplingParams:
         logit_processor_refs = (None if self.logits_processors is None else {
             id(lp): lp
             for lp in self.logits_processors
-            if (not hasattr(lp[0], "fsm") if lp is not None else True)
+            if (not hasattr(lp[0] if isinstance(lp, Sequence) else lp, "fsm")
+                if lp is not None else True)
         })
         return copy.deepcopy(self, memo=logit_processor_refs)
 
