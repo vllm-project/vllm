@@ -5,18 +5,18 @@ from flash_attn import flash_attn_func
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend, AttentionImpl
-from vllm.attention.ops.paged_attn import PagedAttentionImpl
+from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.model_executor.input_metadata import InputMetadata
 
 
-class FlashInferBackend(AttentionBackend):
+class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod
-    def get_attention_impl_cls() -> Type["FlashInferImpl"]:
-        return FlashInferImpl
+    def get_attention_impl_cls() -> Type["FlashAttentionImpl"]:
+        return FlashAttentionImpl
 
 
-class FlashInferImpl(AttentionImpl):
+class FlashAttentionImpl(AttentionImpl):
 
     def __init__(
         self,
@@ -31,21 +31,20 @@ class FlashInferImpl(AttentionImpl):
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
-        self.sliding_window = sliding_window
+        self.sliding_window = ((sliding_window, sliding_window) if
+                               sliding_window is not None else (-1, -1))
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-        suppored_head_sizes = PagedAttentionImpl.get_supported_head_sizes()
+
+        suppored_head_sizes = PagedAttention.get_supported_head_sizes()
         if head_size not in suppored_head_sizes:
             raise ValueError(
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {suppored_head_sizes}.")
-
-        self.sliding_window = ((self.sliding_window, self.sliding_window) if
-                               self.sliding_window is not None else (-1, -1))
 
     def forward(
         self,
