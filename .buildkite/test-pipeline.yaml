@@ -33,9 +33,9 @@ steps:
 - label: Entrypoints Test
   command: pytest -v -s entrypoints
 
-- label: Kernels Test
-  command: pytest -v -s kernels
-  soft_fail: true
+- label: Kernels Test %N
+  command: pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 4
 
 - label: Models Test
   commands:
@@ -55,8 +55,9 @@ steps:
 - label: Speculative decoding tests
   command: pytest -v -s spec_decode
 
-- label: LoRA Test
-  command: pytest -v -s lora --forked
+- label: LoRA Test %N
+  command: pytest -v -s lora --forked --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 4
 
 - label: Metrics Test
   command: pytest -v -s metrics
