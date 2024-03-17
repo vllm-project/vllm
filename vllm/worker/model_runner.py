@@ -91,6 +91,7 @@ class ModelRunner:
                                    lora_config=self.lora_config,
                                    parallel_config=self.parallel_config,
                                    scheduler_config=self.scheduler_config)
+
         self.model_memory_usage = m.consumed_memory
         logger.info(f"Loading model weights took "
                     f"{self.model_memory_usage / float(2**30):.4f} GB")

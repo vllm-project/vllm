@@ -59,16 +59,17 @@ class LLMEngine:
     """
 
     def __init__(
-            self,
-            model_config: ModelConfig,
-            cache_config: CacheConfig,
-            parallel_config: ParallelConfig,
-            scheduler_config: SchedulerConfig,
-            device_config: DeviceConfig,
-            lora_config: Optional[LoRAConfig],
-            executor_class: Type[ExecutorBase],
-            log_stats: bool,
-            usage_context: UsageContext = UsageContext.ENGINE_CONTEXT) -> None:
+        self,
+        model_config: ModelConfig,
+        cache_config: CacheConfig,
+        parallel_config: ParallelConfig,
+        scheduler_config: SchedulerConfig,
+        device_config: DeviceConfig,
+        lora_config: Optional[LoRAConfig],
+        executor_class: Type[ExecutorBase],
+        log_stats: bool,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+    ) -> None:
         logger.info(
             f"Initializing an LLM engine (v{vllm.__version__}) with config: "
             f"model={model_config.model!r}, "
@@ -110,7 +111,33 @@ class LLMEngine:
         #If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
             usage_message.report_usage(
-                get_architecture(model_config, device_config), usage_context)
+                get_architecture(model_config, device_config),
+                usage_context,
+                extra_kvs={
+                    # Common configuration
+                    "dtype":
+                    str(model_config.dtype),
+                    "tensor_parallel_size":
+                    parallel_config.tensor_parallel_size,
+                    "block_size":
+                    cache_config.block_size,
+                    "gpu_memory_utilization":
+                    cache_config.gpu_memory_utilization,
+                    # Quantization
+                    "quantization":
+                    model_config.quantization,
+                    "kv_cache_dtype":
+                    cache_config.cache_dtype,
+                    # Feature flags
+                    "enable_lora":
+                    bool(lora_config),
+                    "enable_prefix_caching":
+                    cache_config.enable_prefix_caching,
+                    "enforce_eager":
+                    model_config.enforce_eager,
+                    "disable_custom_all_reduce":
+                    parallel_config.disable_custom_all_reduce,
+                })
 
         # Ping the tokenizer to ensure liveness if it runs in a
         # different process.

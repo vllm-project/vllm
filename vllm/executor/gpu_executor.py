@@ -37,6 +37,7 @@ class GPUExecutor(ExecutorBase):
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
+
         # Instantiate the worker and load the model to GPU.
         self._init_worker()
 
