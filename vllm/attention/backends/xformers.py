@@ -1,18 +1,49 @@
 """Attention layer with xFormers and PagedAttention."""
-import importlib
-from typing import List, Optional
+from typing import List, Optional, Type
 
 import torch
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
                                          LowerTriangularMaskWithTensorBias)
 
-from vllm.model_executor.input_metadata import InputMetadata
-from vllm.attention.ops.paged_attn import PagedAttentionImpl
+from vllm.attention.backends.abstract import (
+    AttentionBackend, AttentionImpl, AttentionMetadata)
+from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.utils import is_hip
 
 
-class XFormersBackend:
+class XFormersBackend(AttentionBackend):
+
+    @staticmethod
+    def get_attention_impl_cls() -> Type["XFormersImpl"]:
+        return XFormersImpl
+
+    @staticmethod
+    def get_attention_metadata_cls() -> Type["XFormersMetadata"]:
+        return XFormersMetadata
+
+    @staticmethod
+    def make_metadata(
+        is_prompt: bool,
+        
+    ) -> "XFormersMetadata":
+        return XFormersMetadata()
+
+
+class XFormersMetadata(AttentionMetadata):
+
+    is_prompt: bool
+    slot_mapping: torch.Tensor
+    prompt_lens: Optional[torch.Tensor]
+    max_seq_len: Optional[int]
+    start_loc: Optional[torch.Tensor]
+    max_context_len: Optional[int]
+    context_lens: Optional[torch.Tensor]
+    block_tables: Optional[torch.Tensor]
+    kv_cache_dtype: str
+
+
+class XFormersImpl(AttentionImpl):
 
     def __init__(
         self,
@@ -34,22 +65,20 @@ class XFormersBackend:
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-        suppored_head_sizes = PagedAttentionImpl.get_supported_head_sizes()
+
+        suppored_head_sizes = PagedAttention.get_supported_head_sizes()
         if head_size not in suppored_head_sizes:
             raise ValueError(
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {suppored_head_sizes}.")
-
-        self.use_ref_attention = _check_use_ref_attention()
 
     def forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        key_cache: Optional[torch.Tensor],
-        value_cache: Optional[torch.Tensor],
-        input_metadata: InputMetadata,
+        kv_cache: Optional[torch.Tensor],
+        attn_metadata: XFormersMetadata,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
@@ -57,6 +86,7 @@ class XFormersBackend:
             query: shape = [batch_size, seq_len, num_heads * head_size]
             key: shape = [batch_size, seq_len, num_kv_heads * head_size]
             value: shape = [batch_size, seq_len, num_kv_heads * head_size]
+            kv_cache = [2 * num_blocks * block_size * num_kv_heads * head_size]
             key_cache: shape = [num_blocks, num_kv_heads, head_size/x,
                 block_size, x]
             value_cache: shape = [num_blocks, num_kv_heads, head_size,
@@ -71,18 +101,18 @@ class XFormersBackend:
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
-        # Reshape the keys and values and store them in the cache.
         # If key_cache and value_cache are not provided, the new key and value
         # vectors will not be cached. This happens during the initial memory
         # profiling run.
-        if key_cache is not None and value_cache is not None:
-            PagedAttentionImpl.reshape_and_cache(key, value, key_cache,
-                                                 value_cache, input_metadata)
+        if kv_cache is not None:
+            kv_cache = kv_cache.view(2, )
+            # Reshape the keys and values and store them in the cache.
+            PagedAttention.reshape_and_cache(
+                key, value, key_cache, value_cache, input_metadata)
 
         if input_metadata.is_prompt:
             # Prompt run.
-            if (key_cache is None or value_cache is None
-                    or input_metadata.block_tables.numel() == 0):
+            if kv_cache is None or input_metadata.block_tables.numel() == 0:
                 # normal attention
                 if self.num_kv_heads != self.num_heads:
                     # As of Nov 2023, xformers only supports MHA. For MQA/GQA,
@@ -118,22 +148,6 @@ class XFormersBackend:
                             self.alibi_slopes, self.num_kv_heads, batch_size,
                             seq_len, query.dtype)
 
-                if self.use_ref_attention:
-                    output = _ref_masked_attention(
-                        query,
-                        key,
-                        value,
-                        self.num_heads,
-                        self.num_kv_heads,
-                        self.head_size,
-                        self.scale,
-                    )
-                    # Using view got RuntimeError: view size is not compatible
-                    # with input tensor's size and stride (at least one
-                    # dimension spans across two contiguous subspaces).
-                    # Use reshape instead.
-                    return output.reshape(batch_size, seq_len, hidden_size)
-
                 # TODO(woosuk): Too many view operations. Let's try to reduce
                 # them in the future for code readability.
                 if self.alibi_slopes is None:
@@ -159,7 +173,7 @@ class XFormersBackend:
 
             else:
                 # prefix-enabled attention
-                output = PagedAttentionImpl.forward_prefix(
+                output = PagedAttention.forward_prefix(
                     query,
                     key,
                     value,
@@ -170,7 +184,7 @@ class XFormersBackend:
                 )
         else:
             # Decoding run.
-            output = PagedAttentionImpl.forward_decode(
+            output = PagedAttention.forward_decode(
                 query,
                 key_cache,
                 value_cache,
@@ -216,39 +230,3 @@ def _make_alibi_bias(
         bias = bias.unflatten(1, (num_kv_heads, num_heads // num_kv_heads))
     attn_bias = LowerTriangularMaskWithTensorBias(bias)
     return attn_bias
-
-
-def _check_use_ref_attention() -> bool:
-    if not is_hip():
-        return False
-    # For ROCm, check whether flash attention is installed or not.
-    # if not, use_ref_attention needs to be True
-    return importlib.util.find_spec("flash_attn") is None
-
-
-def _ref_masked_attention(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    num_heads: int,
-    num_kv_heads: int,
-    head_size: int,
-    scale: float,
-) -> torch.Tensor:
-    query = query.view(-1, num_heads, head_size)
-    key = key.view(-1, num_kv_heads, head_size)
-    value = value.view(-1, num_kv_heads, head_size)
-
-    seq_len, _, _ = query.shape
-    attn_mask = torch.triu(torch.ones(seq_len,
-                                      seq_len,
-                                      dtype=query.dtype,
-                                      device=query.device),
-                           diagonal=1)
-    attn_mask = attn_mask * torch.finfo(query.dtype).min
-
-    attn_weights = scale * torch.einsum("qhd,khd->hqk", query, key).float()
-    attn_weights = attn_weights + attn_mask.float()
-    attn_weights = torch.softmax(attn_weights, dim=-1).to(value.dtype)
-    out = torch.einsum("hqk,khd->qhd", attn_weights, value)
-    return out
