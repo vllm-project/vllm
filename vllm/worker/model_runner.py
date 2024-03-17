@@ -1,4 +1,5 @@
 import contextlib
+import dataclasses
 import time
 from typing import Dict, List, Optional, Tuple, Set, Union
 
@@ -526,7 +527,7 @@ class ModelRunner:
                 "lora_requests": lora_requests,
                 "lora_mapping": lora_mapping,
             }
-            metadata_dict.update(input_metadata.to_dict())
+            metadata_dict.update(dataclasses.asdict(input_metadata))
             broadcast_tensor_dict(metadata_dict, src=0)
         else:
             metadata_dict = broadcast_tensor_dict(src=0)
@@ -534,7 +535,7 @@ class ModelRunner:
             input_positions = metadata_dict["input_positions"]
             lora_mapping = metadata_dict["lora_mapping"]
             lora_requests = metadata_dict["lora_requests"]
-            input_metadata = InputMetadata.from_dict(metadata_dict)
+            input_metadata = InputMetadata(**metadata_dict)
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
                 seq_data=None,
