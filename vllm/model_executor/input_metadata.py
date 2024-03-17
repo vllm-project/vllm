@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import torch
 
@@ -42,6 +42,35 @@ class InputMetadata:
         # Set during the execution of the first attention op.
         # FIXME(woosuk): This is a hack.
         self.attn_bias = None
+
+    @classmethod
+    def from_dict(cls, dict: Dict[str, Any]) -> "InputMetadata":
+        return cls(
+            is_prompt=dict["is_prompt"],
+            slot_mapping=dict["slot_mapping"],
+            prompt_lens=dict["prompt_lens"],
+            max_seq_len=dict["max_seq_len"],
+            start_loc=dict["start_loc"],
+            max_context_len=dict["max_context_len"],
+            context_lens=dict["context_lens"],
+            block_tables=dict["block_tables"],
+            use_cuda_graph=dict["use_cuda_graph"],
+            kv_cache_dtype=dict["kv_cache_dtype"],
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "is_prompt": self.is_prompt,
+            "slot_mapping": self.slot_mapping,
+            "prompt_lens": self.prompt_lens,
+            "max_seq_len": self.max_seq_len,
+            "start_loc": self.start_loc,
+            "max_context_len": self.max_context_len,
+            "context_lens": self.context_lens,
+            "block_tables": self.block_tables,
+            "use_cuda_graph": self.use_cuda_graph,
+            "kv_cache_dtype": self.kv_cache_dtype,
+        }
 
     def __repr__(self) -> str:
         return ("InputMetadata("
