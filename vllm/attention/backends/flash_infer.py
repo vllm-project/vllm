@@ -1,15 +1,22 @@
 """Attention layer with Flash and PagedAttention."""
-from typing import List, Optional
+from typing import List, Optional, Type
 
 from flash_attn import flash_attn_func
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend
-from vllm.model_executor.input_metadata import InputMetadata
+from vllm.attention.backends.abstract import AttentionBackend, AttentionImpl
 from vllm.attention.ops.paged_attn import PagedAttentionImpl
+from vllm.model_executor.input_metadata import InputMetadata
 
 
 class FlashInferBackend(AttentionBackend):
+
+    @staticmethod
+    def get_attention_impl_cls() -> Type["FlashInferImpl"]:
+        return FlashInferImpl
+
+
+class FlashInferImpl(AttentionImpl):
 
     def __init__(
         self,
@@ -45,8 +52,7 @@ class FlashInferBackend(AttentionBackend):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        key_cache: Optional[torch.Tensor],
-        value_cache: Optional[torch.Tensor],
+        kv_cache: torch.Tensor,
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
