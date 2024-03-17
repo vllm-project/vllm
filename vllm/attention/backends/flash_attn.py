@@ -5,8 +5,7 @@ from flash_attn import flash_attn_func
 import torch
 
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.attention.ops.paged_attn import (
-    PagedAttentionImpl)
+from vllm.attention.ops.paged_attn import PagedAttentionImpl
 
 
 class FlashAttentionBackend:

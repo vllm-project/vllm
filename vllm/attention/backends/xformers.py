@@ -8,8 +8,7 @@ from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
                                          LowerTriangularMaskWithTensorBias)
 
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.attention.ops.paged_attn import (
-    PagedAttentionImpl)
+from vllm.attention.ops.paged_attn import PagedAttentionImpl
 from vllm.utils import is_hip
 
 

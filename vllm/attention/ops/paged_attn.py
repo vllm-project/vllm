@@ -4,9 +4,8 @@ import torch
 
 from vllm._C import cache_ops
 from vllm._C import ops
+from vllm.attention.ops.prefix_prefill import context_attention_fwd
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.attention.ops.prefix_prefill import (
-    context_attention_fwd)
 
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
