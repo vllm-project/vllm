@@ -2,7 +2,7 @@
 # Adapted from
 # https://github.com/THUDM/ChatGLM2-6B
 """Inference-only ChatGLM model compatible with THUDM weights."""
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import torch
 from torch import nn
@@ -27,8 +27,6 @@ from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs import ChatGLMConfig
-
-KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class GLMAttention(nn.Module):
@@ -98,19 +96,17 @@ class GLMAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.Tensor,
-        kv_cache: KVCache,
+        kv_cache: torch.Tensor,
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.query_key_value(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(position_ids, q, k)
-        key_cache, value_cache = kv_cache
         context_layer = self.attn(
             q,
             k,
             v,
-            key_cache,
-            value_cache,
+            kv_cache,
             input_metadata,
         )
         attn_output, _ = self.dense(context_layer)
@@ -199,7 +195,7 @@ class GLMBlock(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.Tensor,
-        kv_cache: KVCache,
+        kv_cache: torch.Tensor,
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
         # hidden_states: [num_tokens, h]
@@ -263,7 +259,7 @@ class GLMTransformer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.Tensor,
-        kv_caches: List[KVCache],
+        kv_caches: List[torch.Tensor],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
         for i in range(self.num_layers):
@@ -305,7 +301,7 @@ class ChatGLMModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
-        kv_caches: List[KVCache],
+        kv_caches: List[torch.Tensor],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
         inputs_embeds = self.embedding(input_ids)
@@ -338,7 +334,7 @@ class ChatGLMForCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[KVCache],
+        kv_caches: List[torch.Tensor],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,

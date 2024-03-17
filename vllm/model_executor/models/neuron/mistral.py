@@ -11,7 +11,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 import os
 
-KVCache = Tuple[torch.Tensor, torch.Tensor]
+[torch.Tensor, torch.Tensor]
 
 
 class MistralForCausalLM(nn.Module):
@@ -32,7 +32,7 @@ class MistralForCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[KVCache],
+        kv_caches: List[torch.Tensor],
         input_metadata: InputMetadata,
     ) -> SamplerOutput:
         with torch.inference_mode():

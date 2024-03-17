@@ -66,8 +66,6 @@ from vllm.sequence import SamplerOutput
 # this model must need this dependency
 from hf_olmo import OLMoConfig
 
-KVCache = Tuple[torch.Tensor, torch.Tensor]
-
 
 class SwiGLU(nn.Module):
 
@@ -145,7 +143,7 @@ class OlmoAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: KVCache,
+        kv_cache: torch.Tensor,
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
         hidden_states = self.attn_norm(hidden_states)
@@ -153,8 +151,7 @@ class OlmoAttention(nn.Module):
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         if self.config.rope:
             q, k = self.rotary_emb(positions, q, k)
-        k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
+        attn_output = self.attn(q, k, v, kv_cache, input_metadata)
         output, _ = self.attn_out(attn_output)
         return output
 
@@ -240,7 +237,7 @@ class OlmoBlock(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: KVCache,
+        kv_cache: torch.Tensor,
         input_metadata: InputMetadata,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         # Attention block.
@@ -295,7 +292,7 @@ class OlmoModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[KVCache],
+        kv_caches: List[torch.Tensor],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
         """
@@ -342,7 +339,7 @@ class OLMoForCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[KVCache],
+        kv_caches: List[torch.Tensor],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
         hidden_states = self.model(
