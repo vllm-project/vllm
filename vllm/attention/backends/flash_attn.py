@@ -4,7 +4,8 @@ from typing import List, Optional, Type
 from flash_attn import flash_attn_func
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend, AttentionImpl
+from vllm.attention.backends.abstract import (
+    AttentionBackend, AttentionImpl, AttentionMetadata)
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.model_executor.input_metadata import InputMetadata
 
@@ -14,6 +15,11 @@ class FlashAttentionBackend(AttentionBackend):
     @staticmethod
     def get_attention_impl_cls() -> Type["FlashAttentionImpl"]:
         return FlashAttentionImpl
+
+
+class FlashAttentionMetadata(AttentionMetadata):
+
+    pass
 
 
 class FlashAttentionImpl(AttentionImpl):
@@ -78,8 +84,8 @@ class FlashAttentionImpl(AttentionImpl):
         # If key_cache and value_cache are not provided, the new key and value
         # vectors will not be cached. This happens during the initial memory
         # profiling run.
-        if key_cache is not None and value_cache is not None:
-            PagedAttentionImpl.reshape_and_cache(key, value, key_cache,
+        if kv_cache is not None:
+            PagedAttention.reshape_and_cache(key, value, key_cache,
                                                  value_cache, input_metadata)
 
         if input_metadata.is_prompt:
@@ -101,7 +107,7 @@ class FlashAttentionImpl(AttentionImpl):
                 )
             else:
                 # prefix-enabled attention
-                output = PagedAttentionImpl.forward_prefix(
+                output = PagedAttention.forward_prefix(
                     query,
                     key,
                     value,
@@ -112,7 +118,7 @@ class FlashAttentionImpl(AttentionImpl):
                 )
         else:
             # Decoding run.
-            output = PagedAttentionImpl.forward_decode(
+            output = PagedAttention.forward_decode(
                 query,
                 key_cache,
                 value_cache,
