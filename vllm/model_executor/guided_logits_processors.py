@@ -82,7 +82,7 @@ class BaseGuidedLogitsProcessor:
 
         seq_id = hash(tuple(input_ids))
 
-        if len(input_ids) == 0:
+        if not hasattr(self, "fsm_state"):
             self.init_state()
         else:
             last_token = input_ids[-1]
