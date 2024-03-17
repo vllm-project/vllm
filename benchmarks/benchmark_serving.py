@@ -305,7 +305,7 @@ async def benchmark(
         "completed": metrics.completed,
         "total_input_tokens": metrics.total_input,
         "total_output_tokens": metrics.total_output,
-        "request_inthroughput": metrics.request_throughput,
+        "request_throughput": metrics.request_throughput,
         "input_throughput": metrics.input_throughput,
         "output_throughput": metrics.output_throughput,
         "mean_ttft_ms": metrics.mean_ttft_ms,
