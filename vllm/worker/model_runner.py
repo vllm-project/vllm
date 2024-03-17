@@ -531,16 +531,18 @@ class ModelRunner:
             broadcast_tensor_dict(metadata_dict, src=0)
         else:
             metadata_dict = broadcast_tensor_dict(src=0)
-            input_tokens = metadata_dict["input_tokens"]
-            input_positions = metadata_dict["input_positions"]
-            lora_mapping = metadata_dict["lora_mapping"]
-            lora_requests = metadata_dict["lora_requests"]
+            input_tokens = metadata_dict.pop("input_tokens")
+            input_positions = metadata_dict.pop("input_positions")
+            lora_mapping = metadata_dict.pop("lora_mapping")
+            lora_requests = metadata_dict.pop("lora_requests")
+            selected_token_indices = metadata_dict.pop(
+                "selected_token_indices")
             input_metadata = InputMetadata(**metadata_dict)
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
                 seq_data=None,
                 prompt_lens=None,
-                selected_token_indices=metadata_dict["selected_token_indices"],
+                selected_token_indices=selected_token_indices,
                 categorized_sample_indices=None,
                 generators=None,
                 perform_sampling=False,
