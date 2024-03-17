@@ -164,8 +164,6 @@ class ModelRunner:
             subquery_lens.append(prompt_len - computed_len)
 
             input_tokens.append(prompt_tokens)
-            # NOTE(woosuk): Here we assume that the first token in the prompt
-            # is always the first token in the sequence.
             input_positions.append(
                 list(range(computed_len, computed_len + len(prompt_tokens))))
 
@@ -437,7 +435,7 @@ class ModelRunner:
 
                 if sampling_params.seed is not None:
                     seq_group_metadata.state.generator = torch.Generator(
-                        device="cuda").manual_seed(sampling_params.seed)
+                        device=self.device).manual_seed(sampling_params.seed)
             else:
                 num_seqs = len(seq_ids)
                 selected_token_indices.extend(

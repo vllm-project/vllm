@@ -64,8 +64,6 @@ class NeuronModelRunner:
         input_block_ids: List[int] = []
 
         prompt_lens: List[int] = []
-        context_lens: List[int] = []
-        subquery_lens: List[int] = []
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -76,23 +74,16 @@ class NeuronModelRunner:
             prompt_tokens = seq_data.get_token_ids()
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
-            computed_len = 0
-            # actual prompt lens
-            context_lens.append(computed_len)
-            subquery_lens.append(prompt_len - computed_len)
 
             input_tokens.append(prompt_tokens)
-            # NOTE(woosuk): Here we assume that the first token in the prompt
-            # is always the first token in the sequence.
-            input_positions.append(
-                list(range(computed_len, computed_len + len(prompt_tokens))))
+            input_positions.append(list(range(prompt_len)))
 
             assert seq_group_metadata.block_tables is not None
             block_table = seq_group_metadata.block_tables[seq_id]
             assert len(block_table) == 1
             input_block_ids.append(block_table[0])
 
-        max_prompt_len = max(subquery_lens)
+        max_prompt_len = max(prompt_lens)
         assert max_prompt_len > 0
         input_tokens = _make_tensor_with_pad(input_tokens,
                                              max_prompt_len,
@@ -108,8 +99,7 @@ class NeuronModelRunner:
                                        dtype=torch.long,
                                        device=self.device)
 
-        return (input_tokens, input_positions, input_block_ids, prompt_lens,
-                subquery_lens)
+        return input_tokens, input_positions, input_block_ids, prompt_lens
 
     def _prepare_decode(
         self,
@@ -159,16 +149,15 @@ class NeuronModelRunner:
                                     dtype=torch.int,
                                     device=self.device)
         input_block_ids = torch.tensor(input_block_ids,
-                                        dtype=torch.long,
-                                        device=self.device)
+                                       dtype=torch.long,
+                                       device=self.device)
 
-        return (input_tokens, input_positions, input_block_ids)
+        return input_tokens, input_positions, input_block_ids
 
     def _prepare_sample(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         prompt_lens: List[int],
-        subquery_lens: Optional[List[int]],
     ) -> SamplingMetadata:
         seq_groups: List[Tuple[List[int], SamplingParams]] = []
         selected_token_indices: List[int] = []
@@ -177,7 +166,7 @@ class NeuronModelRunner:
         categorized_sample_indices = {t: [] for t in SamplingType}
         categorized_sample_indices_start_idx = 0
 
-        max_subquery_len = max(subquery_lens) if subquery_lens else 1
+        max_prompt_len = max(prompt_lens) if prompt_lens else 1
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             seq_ids = list(seq_group_metadata.seq_data.keys())
             sampling_params = seq_group_metadata.sampling_params
@@ -185,11 +174,11 @@ class NeuronModelRunner:
 
             if seq_group_metadata.is_prompt:
                 assert len(seq_ids) == 1
-                assert subquery_lens is not None
-                subquery_len = subquery_lens[i]
+                assert prompt_lens is not None
+                prompt_len = prompt_lens[i]
                 if sampling_params.prompt_logprobs is not None:
                     # NOTE: prompt token positions do not need sample, skip
-                    categorized_sample_indices_start_idx += subquery_len - 1
+                    categorized_sample_indices_start_idx += prompt_len - 1
 
                 categorized_sample_indices[
                     sampling_params.sampling_type].append(
@@ -199,14 +188,14 @@ class NeuronModelRunner:
                 if sampling_params.prompt_logprobs is not None:
                     selected_token_indices.extend(
                         range(selected_token_start_idx,
-                              selected_token_start_idx + subquery_len - 1))
+                              selected_token_start_idx + prompt_len - 1))
                 selected_token_indices.append(selected_token_start_idx +
-                                              subquery_len - 1)
-                selected_token_start_idx += max_subquery_len
+                                              prompt_len - 1)
+                selected_token_start_idx += max_prompt_len
 
                 if sampling_params.seed is not None:
                     seq_group_metadata.state.generator = torch.Generator(
-                        device="cuda").manual_seed(sampling_params.seed)
+                        device=self.device).manual_seed(sampling_params.seed)
             else:
                 num_seqs = len(seq_ids)
                 selected_token_indices.extend(
@@ -259,15 +248,14 @@ class NeuronModelRunner:
         is_prompt = seq_group_metadata_list[0].is_prompt
         # Prepare input tensors.
         if is_prompt:
-            (input_tokens, input_positions, input_block_ids, prompt_lens,
-             subquery_lens) = self._prepare_prompt(seq_group_metadata_list)
+            (input_tokens, input_positions, input_block_ids,
+             prompt_lens) = self._prepare_prompt(seq_group_metadata_list)
         else:
             (input_tokens, input_positions,
              input_block_ids) = self._prepare_decode(seq_group_metadata_list)
             prompt_lens = []
-            subquery_lens = None
         sampling_metadata = self._prepare_sample(seq_group_metadata_list,
-                                                 prompt_lens, subquery_lens)
+                                                 prompt_lens)
 
         return (input_tokens, input_positions, input_block_ids,
                 sampling_metadata)
