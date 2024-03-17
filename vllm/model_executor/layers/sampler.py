@@ -155,7 +155,7 @@ def _apply_logits_processors(
     logits_row_idx = 0
     found_logits_processors = False
     for seq_ids, sampling_params in sampling_metadata.seq_groups:
-        logits_processors = sampling_params.logits_processors
+        logits_processors = sampling_params.logits_processors[logits_row_idx]
         if logits_processors:
             found_logits_processors = True
             for seq_id in seq_ids:

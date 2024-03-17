@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import copy
 import json
 import math
 from collections import defaultdict
@@ -98,6 +99,14 @@ class BaseLogitsProcessor:
         scores.add_(mask)
 
         return scores
+    
+    def __deepcopy__(self, memo):
+        logits_processor = self.__class__(
+            copy.deepcopy(self.fsm.cfg_string, memo), 
+            copy.deepcopy(self.fsm.tokenizer, memo)
+        )
+        logits_processor.fsm = self.fsm.copy()
+        return logits_processor
 
 
 class RegexLogitsProcessor(BaseLogitsProcessor):
