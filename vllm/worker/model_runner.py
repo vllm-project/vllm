@@ -533,10 +533,10 @@ class ModelRunner:
             metadata_dict = broadcast_tensor_dict(src=0)
             input_tokens = metadata_dict.pop("input_tokens")
             input_positions = metadata_dict.pop("input_positions")
-            lora_mapping = metadata_dict.pop("lora_mapping")
-            lora_requests = metadata_dict.pop("lora_requests")
             selected_token_indices = metadata_dict.pop(
                 "selected_token_indices")
+            lora_mapping = metadata_dict.pop("lora_mapping")
+            lora_requests = metadata_dict.pop("lora_requests")
             input_metadata = InputMetadata(**metadata_dict)
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
