@@ -255,7 +255,7 @@ class SamplingParams:
 
         logit_processor_refs = (None if self.logits_processors is None else {
             id(lp): lp
-            for lp in self.logits_processors 
+            for lp in self.logits_processors
             if (not hasattr(lp[0], "fsm") if lp is not None else True)
         })
         return copy.deepcopy(self, memo=logit_processor_refs)
