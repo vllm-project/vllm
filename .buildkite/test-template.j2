@@ -20,6 +20,9 @@ steps:
     agents:
       queue: kubernetes
     soft_fail: {{ step.soft_fail or false }}
+    {% if step.parallelism %}
+    parallelism: {{ step.parallelism }}
+    {% endif %}
     retry:
       automatic:
         - exit_status: -1  # Agent was lost
