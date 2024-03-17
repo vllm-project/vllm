@@ -11,7 +11,7 @@ from vllm.model_executor.input_metadata import InputMetadata
 _PARTITION_SIZE = 512
 
 
-class PagedAttentionImpl:
+class PagedAttention:
 
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
