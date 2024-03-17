@@ -2,7 +2,6 @@ import contextlib
 import io
 import os
 import re
-import shutil
 import subprocess
 import warnings
 from pathlib import Path
