@@ -19,18 +19,6 @@ import uuid
 from vllm.model_executor.parallel_utils.parallel_state import \
     initialize_model_parallel
 
-s3_access_key_id = os.environ.get("S3_ACCESS_KEY_ID") or None
-s3_secret_access_key = os.environ.get("S3_SECRET_ACCESS_KEY") or None
-s3_endpoint = os.environ.get("S3_ENDPOINT_URL") or None
-
-_read_stream, _write_stream = (partial(
-    stream_io.open_stream,
-    mode=mode,
-    s3_access_key_id=s3_access_key_id,
-    s3_secret_access_key=s3_secret_access_key,
-    s3_endpoint=s3_endpoint,
-) for mode in ("rb", "wb+"))
-
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -166,6 +154,8 @@ def serialize():
         serializer.close()
 
     print("Serialization complete. Model tensors saved to", model_path)
+    if keyfile:
+        print("Key saved to", keyfile)
 
 
 def deserialize():
@@ -204,8 +194,24 @@ def deserialize():
 
     return model
 
-
 args = parse_args()
+
+s3_access_key_id = (args.s3_access_key_id or os.environ.get("S3_ACCESS_KEY_ID")
+                    or None)
+s3_secret_access_key = (args.s3_secret_access_key or os.environ.get(
+    "S3_SECRET_ACCESS_KEY") or None)
+
+s3_endpoint = (args.s3_endpoint or os.environ.get("S3_ENDPOINT_URL")
+               or None)
+
+_read_stream, _write_stream = (partial(
+    stream_io.open_stream,
+    mode=mode,
+    s3_access_key_id=s3_access_key_id,
+    s3_secret_access_key=s3_secret_access_key,
+    s3_endpoint=s3_endpoint,
+) for mode in ("rb", "wb+"))
+
 
 dtype = args.dtype
 
