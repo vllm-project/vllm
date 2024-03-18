@@ -46,25 +46,35 @@ def test_prepare_prompt():
     # Verify input metadata is correct for prompts.
     device = model_runner.device
     assert input_metadata.is_prompt is True
-    assert torch.allclose(input_metadata.prompt_lens,
+    assert torch.allclose(input_metadata.prompt_lens_tensor,
                           torch.tensor(prompt_lens, device=device))
+    assert input_metadata.prompt_lens == prompt_lens
     assert input_metadata.num_prompt_tokens == sum(prompt_lens)
     assert input_metadata.num_generation_tokens == 0
     assert input_metadata.max_seq_len == max(prompt_lens)
-    # build start_loc
+
+    # Test subquery start locs.
     start_idx = 0
     start_loc = [start_idx]
-    # start_loc is padded.
     for prompt_len in prompt_lens:
         start_idx += prompt_len
         start_loc.append(start_idx)
     assert torch.allclose(
-        input_metadata.start_loc,
-        torch.tensor(start_loc, dtype=torch.long, device=device))
+        input_metadata.subquery_start_loc,
+        torch.tensor(start_loc, dtype=torch.int32, device=device))
+
+    # Test seq start locs. Note that for normal prefill it is
+    # equivalent to subquery_start_loc.
+    start_idx = 0
+    seq_start_loc = [start_idx]
+    for prompt_len in prompt_lens:
+        start_idx += prompt_len
+        seq_start_loc.append(start_idx)
+
+    assert torch.allclose(
+        input_metadata.seq_start_loc,
+        torch.tensor(start_loc, dtype=torch.int32, device=device))
     assert input_metadata.max_context_len is None
-    # TODO(sang): The current definition of context_lens is the
-    # number of k/v that are already cached (before this run).
-    # It is inconsistent with decoding.
     assert torch.allclose(
         input_metadata.context_lens,
         torch.zeros(input_metadata.context_lens.shape[0],
@@ -78,18 +88,16 @@ def test_prepare_prompt():
     # Cuda graph should not be used for prerill.
     assert input_metadata.use_cuda_graph is False
     assert input_metadata.kv_cache_dtype == "auto"
-    assert input_metadata.num_valid_tokens == _get_aligned_size(
-        sum(prompt_lens))
 
-    assert input_tokens.shape == (get_aligned_size(sum(prompt_lens)), )
-    assert input_positions.shape == (get_aligned_size(sum(prompt_lens)), )
+    assert input_tokens.shape == (sum(prompt_lens), )
+    assert input_positions.shape == (sum(prompt_lens), )
     torch.testing.assert_close(input_tokens, input_positions)
 
     sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
                                                      prompt_lens,
                                                      subquery_lens=prompt_lens)
-    assert input_tokens.shape == (get_aligned_size(sum(prompt_lens)), )
-    assert input_positions.shape == (get_aligned_size(sum(prompt_lens)), )
+    assert input_tokens.shape == (sum(prompt_lens), )
+    assert input_positions.shape == (sum(prompt_lens), )
     actual = sampling_metadata.selected_token_indices
     expected = torch.tensor(expected_selected_token_indices,
                             device=actual.device,
@@ -120,11 +128,6 @@ def test_prepare_decode_cuda_graph():
     model_runner = ModelRunner(model_config, None, None, None, None)
     model_runner.set_block_size(16)
 
-    # Make sure the result is aligned.
-    def get_aligned_size(n):
-        batch_size = _BATCH_SIZE_ALIGNMENT
-        return ((n + 7) // batch_size) * batch_size
-
     batch_size = random.randint(1, 256)
     prompt_lens = []
     seq_group_metadata_list = []
@@ -153,7 +156,8 @@ def test_prepare_decode_cuda_graph():
     assert input_metadata.num_generation_tokens == (get_aligned_size(
         len(seq_group_metadata_list)))
     assert input_metadata.max_seq_len is None
-    assert input_metadata.start_loc is None
+    assert input_metadata.subquery_start_loc is None
+    assert input_metadata.seq_start_loc is None
     assert input_metadata.max_context_len == max(prompt_lens)
     assert torch.allclose(
         input_metadata.context_lens[:len(prompt_lens)],
@@ -169,8 +173,6 @@ def test_prepare_decode_cuda_graph():
     # Cuda graph should not be used for prerill.
     assert input_metadata.use_cuda_graph is True
     assert input_metadata.kv_cache_dtype == "auto"
-    assert input_metadata.num_valid_tokens == (get_aligned_size(
-        len(seq_group_metadata_list)))
 
     assert input_tokens.shape == (get_aligned_size(
         len(seq_group_metadata_list)), )
