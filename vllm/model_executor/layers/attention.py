@@ -1,13 +1,11 @@
 """Attention layer."""
-from functools import lru_cache
 from typing import List, Optional
 
 import torch
 import torch.nn as nn
 
+from vllm.attention.selector import get_attn_backend
 from vllm.logger import init_logger
-from vllm.model_executor.input_metadata import InputMetadata
-from vllm.utils import is_hip
 
 logger = init_logger(__name__)
 
@@ -34,51 +32,18 @@ class Attention(nn.Module):
         sliding_window: Optional[int] = None,
     ) -> None:
         super().__init__()
-        if _use_flash_attn():
-            from vllm.attention.backends.flash_attn import FlashAttentionBackend
-            self.backend = FlashAttentionBackend(num_heads, head_size, scale,
-                                                 num_kv_heads, alibi_slopes,
-                                                 sliding_window)
-        else:
-            from vllm.attention.backends.xformers import XFormersBackend
-            self.backend = XFormersBackend(num_heads, head_size, scale,
-                                           num_kv_heads, alibi_slopes,
-                                           sliding_window)
+        self.backend = get_attn_backend(torch.get_default_dtype())
+        impl_cls = self.backend.get_attention_impl_cls()
+        self.impl = impl_cls(
+            num_heads, head_size, scale, num_kv_heads, alibi_slopes,
+            sliding_window)
 
     def forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        key_cache: Optional[torch.Tensor],
-        value_cache: Optional[torch.Tensor],
-        input_metadata: InputMetadata,
+        kv_cache: Optional[torch.Tensor],
+        attn_metadata,
     ) -> torch.Tensor:
-        return self.backend.forward(query, key, value, key_cache, value_cache,
-                                    input_metadata)
-
-
-@lru_cache(maxsize=1)
-def _use_flash_attn() -> bool:
-    try:
-        import flash_attn  # noqa: F401
-    except ImportError:
-        logger.info("flash_attn is not found. Using xformers backend.")
-        return False
-
-    if is_hip():
-        # AMD GPUs.
-        return False
-    if torch.cuda.get_device_capability()[0] < 8:
-        # Volta and Turing NVIDIA GPUs.
-        logger.info("flash_attn is not supported on Turing or older GPUs. "
-                    "Using xformers backend.")
-        return False
-    if torch.get_default_dtype() not in (torch.float16, torch.bfloat16):
-        logger.info(
-            "flash_attn only supports torch.float16 or torch.bfloat16. "
-            "Using xformers backend.")
-        return False
-
-    logger.info("Using flash_attn backend.")
-    return True
+        return self.impl.forward(query, key, value, kv_cache, attn_metadata)

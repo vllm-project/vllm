@@ -1,8 +1,9 @@
 """CacheEngine class for managing the KV cache."""
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import torch
 
+from vllm.attention.selector import get_attn_backend
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
 from vllm.utils import in_wsl, is_neuron, STR_DTYPE_TO_TORCH_DTYPE
@@ -45,15 +46,19 @@ class CacheEngine:
         else:
             self.dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
+        # Attention backend.
+        self.attn_backend = get_attn_backend(model_config.dtype)
+
         # Initialize the cache.
         self.gpu_cache = self.allocate_gpu_cache()
         self.cpu_cache = self.allocate_cpu_cache()
 
     def allocate_gpu_cache(self) -> List[torch.Tensor]:
-        kv_cache_size = (2 * self.num_gpu_blocks * self.block_size *
-                         self.num_heads * self.head_size)
+        kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+            self.num_gpu_blocks, self.block_size, self.num_heads,
+            self.head_size)
         gpu_cache = [
-            torch.empty(kv_cache_size, dtype=self.dtype, device="cuda")
+            torch.empty(kv_cache_shape, dtype=self.dtype, device="cuda")
             for _ in range(self.num_layers)
         ]
         return gpu_cache
@@ -66,24 +71,26 @@ class CacheEngine:
             logger.warning("Using 'pin_memory=False' as WSL is detected. "
                            "This may slow down the performance.")
 
-        kv_cache_size = (2 * self.num_cpu_blocks * self.block_size *
-                         self.num_heads * self.head_size)
+        kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+            self.num_cpu_blocks, self.block_size, self.num_heads,
+            self.head_size)
         cpu_cache: List[torch.Tensor] = []
         for _ in range(self.num_layers):
             cpu_cache.append(
-                torch.empty(kv_cache_size,
+                torch.empty(kv_cache_shape,
                             dtype=self.dtype,
                             pin_memory=pin_memory,
                             device="cpu"))
         return cpu_cache
 
-    # FIXME(woosuk)
     def _swap(
         self,
         src: List[torch.Tensor],
         dst: List[torch.Tensor],
         src_to_dst: Dict[int, int],
     ) -> None:
+        # FIXME(woosuk)
+        return
         from vllm._C import cache_ops
 
         for i in range(self.num_layers):
@@ -100,8 +107,9 @@ class CacheEngine:
     def swap_out(self, src_to_dst: Dict[int, int]) -> None:
         self._swap(self.gpu_cache, self.cpu_cache, src_to_dst)
 
-    # FIXME(woosuk)
     def copy(self, src_to_dsts: Dict[int, List[int]]) -> None:
+        # FIXME(woosuk)
+        return
         from vllm._C import cache_ops
 
         key_caches = [key_cache for key_cache, _ in self.gpu_cache]

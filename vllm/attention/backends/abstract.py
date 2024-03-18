@@ -8,30 +8,31 @@ import torch
 class AttentionBackend(ABC):
     """Abstract class for attention backends."""
 
-    @abstractmethod
     @staticmethod
+    @abstractmethod
     def get_attention_impl_cls() -> Type["AttentionImpl"]:
         raise NotImplementedError
 
-    @abstractmethod
     @staticmethod
+    @abstractmethod
     def get_attention_metadata_cls() -> Type["AttentionMetadata"]:
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+    ) -> Tuple[int, ...]:
         raise NotImplementedError
 
 
 @dataclass
-class AttentionMetadata:
+class AttentionMetadata(ABC):
 
-    is_prompt: bool
-    slot_mapping: torch.Tensor
-    prompt_lens: Optional[torch.Tensor]
-    max_seq_len: Optional[int]
-    start_loc: Optional[torch.Tensor]
-    max_context_len: Optional[int]
-    context_lens: Optional[torch.Tensor]
-    block_tables: Optional[torch.Tensor]
-    use_cuda_graph: bool
-    kv_cache_dtype: str
+    ...
 
 
 class AttentionImpl(ABC):

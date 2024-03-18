@@ -1,5 +1,6 @@
 """Attention layer with xFormers and PagedAttention."""
-from typing import List, Optional, Type
+from dataclasses import dataclass
+from typing import List, Optional, Tuple, Type
 
 import torch
 from xformers import ops as xops
@@ -23,13 +24,16 @@ class XFormersBackend(AttentionBackend):
         return XFormersMetadata
 
     @staticmethod
-    def make_metadata(
-        is_prompt: bool,
-        
-    ) -> "XFormersMetadata":
-        return XFormersMetadata()
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+    ) -> Tuple[int, ...]:
+        return (2, num_blocks, block_size * num_kv_heads * head_size)
 
 
+@dataclass
 class XFormersMetadata(AttentionMetadata):
 
     is_prompt: bool
@@ -40,7 +44,12 @@ class XFormersMetadata(AttentionMetadata):
     max_context_len: Optional[int]
     context_lens: Optional[torch.Tensor]
     block_tables: Optional[torch.Tensor]
+    use_cuda_graph: bool
     kv_cache_dtype: str
+
+    def __post_init__(self):
+        # will not appear in the __repr__ and __init__
+        self.attn_bias = None
 
 
 class XFormersImpl(AttentionImpl):
@@ -86,12 +95,8 @@ class XFormersImpl(AttentionImpl):
             query: shape = [batch_size, seq_len, num_heads * head_size]
             key: shape = [batch_size, seq_len, num_kv_heads * head_size]
             value: shape = [batch_size, seq_len, num_kv_heads * head_size]
-            kv_cache = [2 * num_blocks * block_size * num_kv_heads * head_size]
-            key_cache: shape = [num_blocks, num_kv_heads, head_size/x,
-                block_size, x]
-            value_cache: shape = [num_blocks, num_kv_heads, head_size,
-                block_size]
-            input_metadata: metadata for the inputs.
+            kv_cache = [2, num_blocks, block_size * num_kv_heads * head_size]
+            attn_metadata: Metadata for attention.
         Returns:
             shape = [batch_size, seq_len, num_heads * head_size]
         """
@@ -101,18 +106,26 @@ class XFormersImpl(AttentionImpl):
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
-        # If key_cache and value_cache are not provided, the new key and value
-        # vectors will not be cached. This happens during the initial memory
-        # profiling run.
         if kv_cache is not None:
-            kv_cache = kv_cache.view(2, )
-            # Reshape the keys and values and store them in the cache.
-            PagedAttention.reshape_and_cache(
-                key, value, key_cache, value_cache, input_metadata)
+            x = 16 // kv_cache.element_size()
+            num_blocks = kv_cache.shape[1]
 
-        if input_metadata.is_prompt:
+            key_cache = kv_cache[0]
+            key_cache = key_cache.view(num_blocks, self.num_kv_heads,
+                                       self.head_size // x, -1, x)
+            value_cache = kv_cache[1]
+            value_cache = value_cache.view(num_blocks, self.num_kv_heads,
+                                           self.head_size, -1)
+
+            # Reshape the input keys and values and store them in the cache.
+            # If kv_cache is not provided, the new key and value tensors are
+            # not cached. This happens during the initial memory profiling run.
+            PagedAttention.reshape_and_cache(
+                key, value, key_cache, value_cache, attn_metadata)
+
+        if attn_metadata.is_prompt:
             # Prompt run.
-            if kv_cache is None or input_metadata.block_tables.numel() == 0:
+            if kv_cache is None or attn_metadata.block_tables.numel() == 0:
                 # normal attention
                 if self.num_kv_heads != self.num_heads:
                     # As of Nov 2023, xformers only supports MHA. For MQA/GQA,
@@ -135,16 +148,16 @@ class XFormersImpl(AttentionImpl):
                 # Set attention bias if not provided. This typically happens at
                 # the very attention layer of every iteration.
                 # FIXME(woosuk): This is a hack.
-                if input_metadata.attn_bias is None:
+                if attn_metadata.attn_bias is None:
                     if self.alibi_slopes is None:
                         attn_bias = BlockDiagonalCausalMask.from_seqlens(
                             [seq_len] * batch_size)
                         if self.sliding_window is not None:
                             attn_bias = attn_bias.make_local_attention(
                                 self.sliding_window)
-                        input_metadata.attn_bias = attn_bias
+                        attn_metadata.attn_bias = attn_bias
                     else:
-                        input_metadata.attn_bias = _make_alibi_bias(
+                        attn_metadata.attn_bias = _make_alibi_bias(
                             self.alibi_slopes, self.num_kv_heads, batch_size,
                             seq_len, query.dtype)
 
@@ -163,7 +176,7 @@ class XFormersImpl(AttentionImpl):
                     query,
                     key,
                     value,
-                    attn_bias=input_metadata.attn_bias,
+                    attn_bias=attn_metadata.attn_bias,
                     p=0.0,
                     scale=self.scale,
                     op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if
@@ -179,7 +192,7 @@ class XFormersImpl(AttentionImpl):
                     value,
                     key_cache,
                     value_cache,
-                    input_metadata,
+                    attn_metadata,
                     self.alibi_slopes,
                 )
         else:
@@ -188,7 +201,7 @@ class XFormersImpl(AttentionImpl):
                 query,
                 key_cache,
                 value_cache,
-                input_metadata,
+                attn_metadata,
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
