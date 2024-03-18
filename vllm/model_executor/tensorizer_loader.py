@@ -32,22 +32,6 @@ def _is_vllm_model(model_config: ModelConfig = None,
     else:
         return "vllm" in model_config.tensorizer_args.tensorizer_uri
 
-
-def _validate_keyfile_path(keyfile: str = None,
-                           tensorizer_uri: str = None) \
-        -> Union[None, str]:
-    if keyfile is not None:
-        # Check if the keyfile is a relative path
-        if keyfile.count('/') == 0:
-            tensorizer_dir = os.path.dirname(tensorizer_uri)
-            keyfile = os.path.join(tensorizer_dir, keyfile)
-            return keyfile
-        else:
-            return keyfile
-    else:
-        return None
-
-
 class ParameterizedLoadFormat(str):
     __slots__ = "params"
 
@@ -73,9 +57,10 @@ class TensorizerArgs:
     tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, typing.BinaryIO,
     str, bytes, os.PathLike, int]
     verify_hash: bool = False
-    filter_func: Optional[Callable[[str], Union[bool, Any]]] = None
     encryption_keyfile: Optional[str] = None
     force_http: bool = False
+    s3_access_key_id: Optional[str] = None
+    s3_secret_access_key: Optional[str] = None
     """
   Args for the TensorizerAgent class. These are used to configure the behavior 
   of the TensorDeserializer when loading tensors from a serialized model.
@@ -89,22 +74,28 @@ class TensorizerArgs:
       filter_func: A function that takes a tensor key and returns True if the 
           tensor should be loaded and False if it should be skipped. If None,
           all tensors will be loaded.
-      encryption-keyfile: File path to a binary file containing a  
-          password or key to use for decryption. ``None`` (the default) means 
-          no decryption. The file must be created a priori using 
-          DecryptionParams. See the example script in 
-          examples/tensorize_vllm_model.py. A relative path within the 
-          tensorizer_uri directory can also be used, or an absolute path.
+      encryption_keyfile: File path to a binary file containing a  
+          binary key to use for decryption. `None` (the default) means 
+          no decryption. See the example script in 
+          examples/tensorize_vllm_model.py. 
+      force_http: If True, `tensorizer` will force a HTTP connection to 
+          tensorizer_uri, if applicable, instead of HTTPS. This is slightly 
+          faster, but less secure. Keep in mind it is NOT recommended to force 
+          HTTP for security and data integrity reasons.
+      s3_access_key_id: The access key for the S3 bucket. Can also be set via
+          the S3_ACCESS_KEY_ID environment variable.
+      s3_secret_access_key: The secret access key for the S3 bucket. Can also
+          be set via the S3_SECRET_ACCESS_KEY environment variable.
+        
   """
 
     def __post_init__(self):
         self.file_obj = self.tensorizer_uri
-        self.s3_access_key_id = os.environ.get("S3_ACCESS_KEY_ID") or None
-        self.s3_secret_access_key = (os.environ.get("S3_SECRET_ACCESS_KEY")
-                                     or None)
+        self.s3_access_key_id = self.s3_access_key_id or os.environ.get(
+            "S3_ACCESS_KEY_ID")
+        self.s3_secret_access_key = self.s3_secret_access_key or os.environ.get(
+            "S3_SECRET_ACCESS_KEY")
         self.s3_endpoint = os.environ.get("S3_ENDPOINT_URL") or None
-        self.encryption_keyfile = _validate_keyfile_path(
-            self.encryption_keyfile, self.file_obj)
         self.stream_params = {
             "s3_access_key_id": self.s3_access_key_id,
             "s3_secret_access_key": self.s3_secret_access_key,
@@ -114,7 +105,6 @@ class TensorizerArgs:
 
         # Omitting self.dtype and self.device as this behaves weirdly
         self.deserializer_params = {
-            "filter_func": self.filter_func,
             "verify_hash": self.verify_hash,
             "encryption": self.encryption_keyfile,
         }
@@ -133,10 +123,12 @@ class TensorizerArgs:
 
         # Create the argument group
         group = parser.add_argument_group(
-            'Tensorizer Options',
-            description=('Options for configuring the behavior of the '
-                         'TensorDeserializer'
-                         ' when loading tensors from a serialized model.'))
+            'tensorizer options',
+            description=('Options for configuring the behavior of the'
+                         ' tensorizer deserializer when '
+                         '--load-format=tensorizer'
+                         )
+        )
 
         group.add_argument(
             "--tensorizer-uri",
@@ -153,16 +145,29 @@ class TensorizerArgs:
         group.add_argument(
             "--encryption-keyfile",
             default=None,
-            help="A `DecryptionParams` object holding a password or key to"
-                 " use for decryption. ``None`` (the default) means no "
-                 "decryption.",
+            help="The file path to a binary file containing a binary key to "
+                 "use for decryption. Can be a file path or network URI."
         )
         group.add_argument(
             "--force-http",
             action="store_true",
             help="If enabled, `tensorizer` will force a HTTP connection to "
-                 "tensorizer-uri, if applicable, instead of HTTPS. This is"
-                 " slightly faster, but less secure.",
+                 "tensorizer-uri, if applicable, instead of HTTPS. This is "
+                 "slightly faster, but less secure. Keep in mind it is NOT "
+                 "recommended to force HTTP for security and data integrity "
+                 "reasons.",
+        )
+        group.add_argument(
+            "--s3-access-key-id",
+            default=None,
+            help="The access key for the S3 bucket. Can also be set via the "
+                 "S3_ACCESS_KEY_ID environment variable.",
+        )
+        group.add_argument(
+            "--s3-secret-access-key",
+            default=None,
+            help="The secret access key for the S3 bucket. Can also be set via "
+                 "the S3_SECRET_ACCESS_KEY environment variable.",
         )
 
         return parser

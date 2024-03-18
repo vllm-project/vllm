@@ -1,5 +1,6 @@
 import os
 import time
+import tempfile
 from typing import Type
 import argparse
 import torch
@@ -33,61 +34,91 @@ _read_stream, _write_stream = (partial(
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Arguments for serializing and deserializing vLLM "
-        "models. These models can be loaded using "
-        "tensorizer directly to the GPU extremely quickly")
+        description="An example script that can be used to serialize and "
+                    "deserialize vLLM models. These models "
+                    "can be loaded using tensorizer directly to the GPU "
+                    "extremely quickly. Tensor encryption and decryption is "
+                    "also supported, although libsodium must be installed to "
+                    "use it.")
     parser = TensorizerArgs.add_cli_args(parser)
     parser.add_argument(
         "--model",
         type=str,
         required=True,
-        help="The model reference name to serialize or deserialize")
+        help="The model reference name to serialize or deserialize. "
+             "This should be a HuggingFace ID for the model, e.g. "
+             "EleutherAI/gpt-j-6B.")
     parser.add_argument("--dtype",
                         type=str,
+                        default="float16",
                         required=False,
-                        help="The dtype to use for the model")
-    parser.add_argument(
-        "--input-dir",
-        type=str,
-        required=True,
-        help="The directory to serialize or deserialize the model to. "
-        "For serialization, model tensors will be saved to this "
-        "directory under a directory given by the model ref set "
-        "in --model and a unique identifier. For instance, if "
-        "serializing EleutherAI/pythia-1.4b in S3 bucket "
-        "BUCKET, tensors and encryption key if applicable will "
-        "be saved to "
-        "s3://BUCKET/vllm/EleutherAI/pythia-1.4b/HASH/model.tensors. "
-        "for this reason, --input-dir is recommended to specify "
-        "a bucket name if using object storage rather than a "
-        "local dir. If deserializing, model.tensors and "
-        "model.key will be looked for in --input-dir. In the "
-        "previous example, the --input-dir to use would be "
-        "s3://BUCKET/vllm/EleutherAI/pythia-1.4b/UUID")
+                        help="The dtype to cast the tensors to. "
+    )
 
     subparsers = parser.add_subparsers(dest='command')
 
     serialize_parser = subparsers.add_parser(
-        'serialize', help="Serialize a model to `--input-dir`")
+        'serialize', help="Serialize a model to `--serialized-directory`")
+
+    serialize_parser.add_argument(
+        "--suffix",
+        type=str,
+        required=False,
+        help=(
+            "The suffix to append to the serialized model directory, which is "
+            "used to construct the location of the serialized model tensors, "
+            "e.g. if `--serialized-directory` is `s3://my-bucket/` and "
+            "`--suffix` is `v1`, the serialized model tensors will be "
+            "saved to "
+            "`s3://my-bucket/vllm/EleutherAI/gpt-j-6B/v1/model.tensors`. "
+            "If none is provided, a random UUID will be used."
+        )
+    )
+    serialize_parser.add_argument(
+        "--serialized-directory",
+        type=str,
+        required=True,
+        help="The directory to serialize the model to. "
+        "This can be a local directory or S3 URI. The path to where the "
+        "tensors are saved is a combination of the supplied `dir` and model "
+        "reference ID. For instance, if `dir` is the serialized directory, "
+        "and the model HuggingFace ID is `EleutherAI/gpt-j-6B`, tensors will "
+        "be saved to `dir/vllm/EleutherAI/gpt-j-6B/suffix/model.tensors`, "
+        "where `suffix` is given by `--suffix` or a random UUID if not "
+        "provided."
+    )
 
     serialize_parser.add_argument(
         "--keyfile",
         type=str,
         required=False,
         help=(
-            "File to write 32 bytes of randomly-generated binary data used as"
-            " an encryption key"))
+            "Encrypt the model weights with a randomly-generated binary key,"
+            " and save the key at this path"
+        )
+    )
 
     deserialize_parser = subparsers.add_parser(
         'deserialize',
-        help=("Deserialize a model from `--input-dir`"
+        help=("Deserialize a model from `--path-to-tensors`"
               " to verify it can be loaded and used."))
+
+    deserialize_parser.add_argument(
+        "--path-to-tensors",
+        type=str,
+        required=True,
+        help="The local path or S3 URI to the model tensors to deserialize. "
+    )
 
     deserialize_parser.add_argument(
         "--keyfile",
         type=str,
-        required=True,
-        help="Decryption keyfile to use to decrypt the model")
+        required=False,
+        help=(
+            "Path to a binary key to use to decrypt the model weights,"
+            " if the model was serialized with encryption"
+        )
+    )
 
     return parser.parse_args()
 
@@ -115,17 +146,18 @@ def serialize():
     make_model_contiguous(model)
     to_dtype = _get_and_verify_dtype(config, dtype=dtype)
     model = model.to(dtype=to_dtype)
-    model.save_pretrained(DOWNLOAD_DIR)
-    del model
-
-    model_class = _get_model_architecture(config)
-    model = model_class(config).to(dtype=to_dtype)
-    print(f"Loading from {DOWNLOAD_DIR}")
-    model.load_weights(model_ref)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        DOWNLOAD_DIR = os.path.join(tmpdir, model_name)
+        model.save_pretrained(DOWNLOAD_DIR)
+        del model
+        model_class = _get_model_architecture(config)
+        model = model_class(config).to(dtype=to_dtype)
+        print(f"Loading from {DOWNLOAD_DIR}")
+        model.load_weights(model_ref, cache_dir=DOWNLOAD_DIR)
 
     encryption_params = EncryptionParams.random() if keyfile else None
     if keyfile:
-        with _write_stream(keyfile_path) as stream:
+        with _write_stream(keyfile) as stream:
             stream.write(encryption_params.key)
 
     with _write_stream(model_path) as stream:
@@ -133,7 +165,7 @@ def serialize():
         serializer.write_module(model)
         serializer.close()
 
-    print("Serialization complete.")
+    print("Serialization complete. Model tensors saved to", model_path)
 
 
 def deserialize():
@@ -148,7 +180,7 @@ def deserialize():
     start = time.time()
 
     if keyfile:
-        with _read_stream(keyfile_path) as stream:
+        with _read_stream(keyfile) as stream:
             key = stream.read()
             decryption_params = DecryptionParams.from_key(key)
             tensorizer_args.deserializer_params['encryption'] = \
@@ -174,18 +206,14 @@ def deserialize():
 
 
 args = parse_args()
-tensorizer_args = TensorizerArgs.from_cli_args(args)
 
-dtype = args.dtype if args.dtype else "float16"
+dtype = args.dtype
 
 model_ref = args.model
 
 model_name = model_ref.split("/")[1]
-input_dir = args.input_dir.rstrip('/')
 
-DOWNLOAD_DIR = f"/tmp/{model_name}"
-
-os.environ["MASTER_ADDR"] = "0.0.0.0"
+os.environ["MASTER_ADDR"] = "127.0.0.1"
 os.environ["MASTER_PORT"] = "8080"
 
 torch.distributed.init_process_group(world_size=1, rank=0)
@@ -193,12 +221,13 @@ initialize_model_parallel()
 
 keyfile = args.keyfile if args.keyfile else None
 
-base_path = f"{input_dir}/vllm/{model_ref}/{uuid.uuid4().hex}" \
-    if args.command == "serialize" else input_dir
-model_path = f"{base_path}/model.tensors"
-keyfile_path = f"{base_path}/{keyfile}"
-
 if args.command == "serialize":
+    input_dir = args.serialized_directory.rstrip('/')
+    suffix = args.suffix if args.suffix else uuid.uuid4().hex
+    base_path = f"{input_dir}/vllm/{model_ref}/{suffix}"
+    model_path = f"{base_path}/model.tensors"
+    args.tensorizer_uri = args.serialized_directory
+    tensorizer_args = TensorizerArgs.from_cli_args(args)
     serialize()
 elif args.command == "deserialize":
     deserialize()
