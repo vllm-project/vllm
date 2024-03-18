@@ -294,7 +294,8 @@ def hf_model_weights_iterator(
             "Consider deserializing a vLLM model instead for faster "
             "load times. See the examples/tensorize_vllm_model.py example "
             "script for serializing vLLM models.",
-            category=PerformanceWarning)
+            category=PerformanceWarning,
+            stacklevel=2)
         deserializer_args = tensorizer_args.deserializer_params
         stream_params = tensorizer_args.stream_params
         stream = open_stream(tensorizer_args.tensorizer_uri, **stream_params)
