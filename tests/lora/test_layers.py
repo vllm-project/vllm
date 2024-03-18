@@ -605,7 +605,7 @@ def test_linear_parallel(dist_init, num_loras, orientation, device) -> None:
 
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
-@pytest.mark.parametrize("repeats", [1,2, 3])
+@pytest.mark.parametrize("repeats", [1, 2, 3])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_column_parallel_packed(dist_init, num_loras, repeats, device) -> None:
 
@@ -621,7 +621,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, device) -> None:
                                                 bias=False)
             linear.weight.data = torch.rand_like(linear.weight.data)
             lora_linear = MergedColumnParallelLinearWithLoRA(linear)
-        elif repeats==3:
+        elif repeats == 3:
             linear = QKVParallelLinear(4096, 64, 32, bias=False)
             linear.weight.data = torch.rand_like(linear.weight.data)
             lora_linear = MergedQKVParallelLinearWithLora(linear)
@@ -629,7 +629,6 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, device) -> None:
             linear = QKVParallelLinear(4096, 64, 32, bias=False)
             linear.weight.data = torch.rand_like(linear.weight.data)
             lora_linear = QKVParallelLinearWithLora(linear)
-
 
         @dataclass
         class FakeConfig:
