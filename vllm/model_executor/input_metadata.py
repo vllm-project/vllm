@@ -1,9 +1,11 @@
+from dataclasses import dataclass
 from typing import Optional, List
 from xformers.ops.fmha.attn_bias import AttentionBias
 
 import torch
 
 
+@dataclass
 class InputMetadata:
     """Metadata for input sequences. Used in PagedAttention.
 
@@ -28,61 +30,32 @@ class InputMetadata:
         block_tables: The block tables. (Seq id -> list of physical block)
         kv_cache_dtype: Data type to store kv cache.
     """
+    is_prompt: bool
+    slot_mapping: torch.Tensor
+    prompt_lens: Optional[List]
+    num_prompt_tokens: int
+    num_generation_tokens: int
+    max_seq_len: Optional[int]
+    start_loc: Optional[torch.Tensor]
+    max_context_len: Optional[int]
+    # [batch_size]. Each index means each sequence, and the value means the length of tokens stored in the kv cache.
+    # NOTE(sang): When it is prefill/decoding, the definition is different. For prefill, it means the the length of KV that are cached excluding the new KVs. In decoding, this includes a new KV.
+    context_lens: Optional[torch.Tensor]
+    block_tables: Optional[torch.Tensor]
+    use_cuda_graph: bool
+    kv_cache_dtype: str
 
-    def __init__(
-        self,
-        is_prompt: bool,
-        slot_mapping: torch.Tensor,
-        prompt_lens: Optional[List],
-        num_prompt_tokens: int,
-        num_generation_tokens: int,
-        max_seq_len: Optional[int],
-        start_loc: Optional[torch.Tensor],
-        max_context_len: Optional[int],
-        context_lens: Optional[torch.Tensor],
-        block_tables: Optional[torch.Tensor],
-        use_cuda_graph: bool,
-        kv_cache_dtype: str,
-    ) -> None:
-        self.is_prompt = is_prompt
-        self.prompt_lens = prompt_lens
-        self.num_prompt_tokens = num_prompt_tokens
-        self.num_generation_tokens = num_generation_tokens
-        self.max_seq_len = max_seq_len
-        self.start_loc = start_loc
-        self.max_context_len = max_context_len
-        self.slot_mapping = slot_mapping
-        # [batch_size]. Each index means each sequence, and the value means the length of tokens stored in the kv cache.
-        # NOTE(sang): When it is prefill/decoding, the definition is different. For prefill, it means the the length of KV that are cached excluding the new KVs. In decoding, this includes a new KV.
-        self.context_lens = context_lens
-        self.block_tables = block_tables
-        self.use_cuda_graph = use_cuda_graph
-        self.kv_cache_dtype = kv_cache_dtype
+    # Fields below are initialiezd in post init.
+    prompt_lens_tensor: Optional[torch.Tensor] = None
 
+    def __post_init__(self):
         # Set during the execution of the first attention op.
         # It is a list because it is needed to set per prompt
         # when alibi slopes is used. It is because of the limitation
         # from xformer API.
-        # FIXME(woosuk): This is a hack.
+        # will not appear in the __repr__ and __init__
         self.attn_bias: Optional[List[AttentionBias]] = None
-        # Number of valid tokens. It includes paddings.
-        # See attention.py for precise definition.
-        self.num_valid_tokens = slot_mapping.shape[0]
-        self.prompt_lens_tensor = None
         if self.prompt_lens is not None:
             self.prompt_lens_tensor = torch.tensor(self.prompt_lens,
                                                    dtype=torch.long,
-                                                   device=slot_mapping.device)
-
-    def __repr__(self) -> str:
-        return ("InputMetadata("
-                f"is_prompt={self.is_prompt}, "
-                f"max_context_len={self.max_context_len}, "
-                f"num_generation_tokens={self.num_generation_tokens}, "
-                f"num_prompt_tokens={self.num_prompt_tokens}, "
-                f"slot_mapping={self.slot_mapping}, "
-                f"context_lens={self.context_lens}, "
-                f"block_tables={self.block_tables}, "
-                f"use_cuda_graph={self.use_cuda_graph} "
-                f"kv_cache_dtype={self.kv_cache_dtype} "
-                f"num_valid_tokens={self.num_valid_tokens})")
+                                                   device=self.slot_mapping.device)
