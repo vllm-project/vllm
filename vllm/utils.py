@@ -312,6 +312,11 @@ def create_kv_caches_with_random(
     return key_caches, value_caches
 
 
+def _get_aligned_size(batch_size: int, alignment: int) -> int:
+    """Returns the padded batch based on an alignment."""
+    return ((batch_size + alignment - 1) // alignment * alignment)
+
+
 class measure_cuda_memory:
 
     def __init__(self, device=None):

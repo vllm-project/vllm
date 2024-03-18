@@ -21,7 +21,7 @@ from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
-from vllm.utils import in_wsl, measure_cuda_memory
+from vllm.utils import in_wsl, measure_cuda_memory, _get_aligned_size
 
 logger = init_logger(__name__)
 
@@ -258,13 +258,12 @@ class ModelRunner:
             dtype=torch.int,
             device=self.device,
         )
-        prompt_lens_tensor = torch.tensor(prompt_lens,
-                                          dtype=torch.long,
-                                          device=self.device)
 
         # Cumulative index of each prompt. [prompt_lens + 1]
         # [0, 0+1th, 0+1th+2nd, ...]
-        subquery_lens_tensor = torch.tensor(subquery_lens, dtype=torch.long, device=self.device)
+        subquery_lens_tensor = torch.tensor(subquery_lens,
+                                            dtype=torch.long,
+                                            device=self.device)
         start_loc_tensor = torch.zeros(subquery_lens_tensor.shape[0],
                                        dtype=torch.long,
                                        device=self.device)
@@ -277,7 +276,7 @@ class ModelRunner:
         input_metadata = InputMetadata(
             is_prompt=True,
             slot_mapping=slot_mapping,
-            prompt_lens=prompt_lens_tensor,
+            prompt_lens=prompt_lens,
             num_prompt_tokens=num_prompt_tokens,
             num_generation_tokens=0,
             max_seq_len=max_prompt_len,
@@ -961,8 +960,7 @@ def _get_graph_batch_size(batch_size: int) -> int:
     elif batch_size <= 4:
         return 4
     else:
-        return ((batch_size + _BATCH_SIZE_ALIGNMENT - 1) //
-                _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
+        return _get_aligned_size(batch_size, _BATCH_SIZE_ALIGNMENT)
 
 
 def _async_h2d(

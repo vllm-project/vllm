@@ -75,7 +75,7 @@ class FlashAttentionBackend:
         # profiling run.
         if key_cache is not None and value_cache is not None:
             PagedAttentionImpl.reshape_and_cache(key, value, key_cache,
-                                                value_cache, input_metadata)
+                                                 value_cache, input_metadata)
 
         if input_metadata.is_prompt:
             # Prompt run.
@@ -85,14 +85,13 @@ class FlashAttentionBackend:
                 query = query.unflatten(0, (num_tokens, ))
                 key = key.unflatten(0, (num_tokens, ))
                 value = value.unflatten(0, (num_tokens, ))
-                output = flash_attn_func(
-                    query,
-                    key,
-                    value,
-                    softmax_scale=self.scale,
-                    causal=True,
-                    window_size=self.sliding_window,
-                    alibi_slopes=self.alibi_slopes)
+                output = flash_attn_func(query,
+                                         key,
+                                         value,
+                                         softmax_scale=self.scale,
+                                         causal=True,
+                                         window_size=self.sliding_window,
+                                         alibi_slopes=self.alibi_slopes)
             else:
                 # prefix-enabled attention
                 output = PagedAttentionImpl.forward_prefix(

@@ -10,7 +10,7 @@ from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention.ops.paged_attn import (
     PagedAttentionImpl)
-from vllm.utils import is_hip
+from vllm.utils import is_hip, _get_aligned_size
 
 
 class XFormersBackend:
@@ -55,7 +55,7 @@ class XFormersBackend:
         """Forward pass with xFormers and PagedAttention.
 
         Args:
-            query: shape = [num_tokens num_heads * head_size]
+            query: shape = [num_tokens, num_heads * head_size]
             key: shape = [num_tokens, num_kv_heads * head_size]
             value: shape = [num_tokens, num_kv_heads * head_size]
             key_cache: shape = [num_blocks, num_kv_heads, head_size/x,
@@ -67,11 +67,9 @@ class XFormersBackend:
             shape = [num_tokens, num_heads * head_size]
         """
         num_tokens, hidden_size = query.shape
-        # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
-        output = torch.empty_like(query)
 
         # Reshape the keys and values and store them in the cache.
         # If key_cache and value_cache are not provided, the new key and value
@@ -83,10 +81,10 @@ class XFormersBackend:
 
         if input_metadata.is_prompt:
             # Prompt run.
-            # Unless there's a prefix, context lens is all 0 for prefill.
+            # key_cache and value_cache is None when it is a profiling run.
+            # block tables are empty if the prompt has never been computed.
             if (key_cache is None or value_cache is None
                     or input_metadata.block_tables.numel() == 0):
-                # normal attention
                 if self.num_kv_heads != self.num_heads:
                     # As of Nov 2023, xformers only supports MHA. For MQA/GQA,
                     # project the key and value tensors to the desired number of
@@ -105,22 +103,6 @@ class XFormersBackend:
                                                   self.num_queries_per_kv,
                                                   value.shape[-1])
 
-                # Set attention bias if not provided. This typically happens at
-                # the very attention layer of every iteration.
-                # FIXME(woosuk): This is a hack.
-                if input_metadata.attn_bias is None:
-                    if self.alibi_slopes is None:
-                        attn_bias = BlockDiagonalCausalMask.from_seqlens(
-                            input_metadata.prompt_lens.tolist())
-                        if self.sliding_window is not None:
-                            attn_bias = attn_bias.make_local_attention(
-                                self.sliding_window)
-                        input_metadata.attn_bias = attn_bias
-                    else:
-                        input_metadata.attn_bias = _make_alibi_bias(
-                            self.alibi_slopes, self.num_kv_heads, query.dtype,
-                            input_metadata)
-
                 if self.use_ref_attention:
                     output = _ref_masked_attention(
                         query,
@@ -137,28 +119,10 @@ class XFormersBackend:
                     # Use reshape instead.
                     return output.reshape(num_tokens, hidden_size)
 
-                # TODO(woosuk): Too many view operations. Let's try to reduce
-                # them in the future for code readability.
-                if self.alibi_slopes is None:
-                    query = query.unsqueeze(0)
-                    key = key.unsqueeze(0)
-                    value = value.unsqueeze(0)
-
-                out = xops.memory_efficient_attention_forward(
-                    query,
-                    key,
-                    value,
-                    attn_bias=input_metadata.attn_bias,
-                    p=0.0,
-                    scale=self.scale,
-                    op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if
-                    (is_hip()) else None,
-                )
-                output = out.view_as(query)
-
+                output = self._multi_query_kv_attention(
+                    query, key, value, input_metadata)
             else:
                 # prefix-enabled attention
-                print("SANG-TODO prefix")
                 output = PagedAttentionImpl.forward_prefix(
                     query,
                     key,
@@ -183,6 +147,81 @@ class XFormersBackend:
         # Reshape the output tensor.
         return output.view(-1, self.num_heads * self.head_size)
 
+    def _multi_query_kv_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        input_metadata: InputMetadata,
+    ) -> torch.Tensor:
+        """Attention for 1D query of multiple prompts. Multiple prompt
+        tokens are flattened in to `query` input.
+
+        Args:
+            output: shape = [num_prompt_tokens, num_heads, head_size]
+            query: shape = [num_prompt_tokens, num_heads, head_size]
+            key: shape = [num_prompt_tokens, num_kv_heads, head_size]
+            value: shape = [num_prompt_tokens, num_kv_heads, head_size]
+            input_metadata: metadata for paged attention.
+        """
+        # Set attention bias if not provided. This typically happens at
+        # the very attention layer of every iteration.
+        # FIXME(woosuk): This is a hack.
+        if input_metadata.attn_bias is None:
+            if self.alibi_slopes is None:
+                attn_bias = BlockDiagonalCausalMask.from_seqlens(
+                    input_metadata.prompt_lens)
+                if self.sliding_window is not None:
+                    attn_bias = attn_bias.make_local_attention(
+                        self.sliding_window)
+                input_metadata.attn_bias = [attn_bias]
+            else:
+                input_metadata.attn_bias = _make_alibi_bias(
+                    self.alibi_slopes, self.num_kv_heads, query.dtype,
+                    input_metadata)
+
+        op = xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if (
+            is_hip()) else None
+        # No alibi slopes.
+        # TODO(woosuk): Too many view operations. Let's try to reduce
+        # them in the future for code readability.
+        if self.alibi_slopes is None:
+            query = query.unsqueeze(0)
+            key = key.unsqueeze(0)
+            value = value.unsqueeze(0)
+            out = xops.memory_efficient_attention_forward(
+                query,
+                key,
+                value,
+                attn_bias=input_metadata.attn_bias[0],
+                p=0.0,
+                scale=self.scale,
+                op=op)
+
+            return out.view_as(query)
+
+        # Attention with alibi slopes.
+        # FIXME(woosuk): Because xformers does not support dynamic sequence
+        # lengths with custom attention bias, we process each prompt one by
+        # one. This is inefficient, especially when we have many short prompts.
+        print("SANG-TODO alibi slopes.")
+        output = torch.empty_like(query)
+        start = 0
+        for i, prompt_len in enumerate(input_metadata.prompt_lens):
+            end = start + prompt_len
+            out = xops.memory_efficient_attention_forward(
+                query[None, start:end],
+                key[None, start:end],
+                value[None, start:end],
+                attn_bias=input_metadata.attn_bias[i],
+                p=0.0,
+                scale=self.scale,
+                op=op)
+            # TODO(woosuk): Unnecessary copy. Optimize.
+            output[start:end].copy_(out.squeeze(0))
+            start += prompt_len
+        return output
+
 
 def _make_alibi_bias(
     alibi_slopes: torch.Tensor,
@@ -190,6 +229,7 @@ def _make_alibi_bias(
     dtype: torch.dtype,
     input_metadata: InputMetadata,
 ) -> LowerTriangularMaskWithTensorBias:
+    attn_biases = []
     for prompt_len in input_metadata.prompt_lens:
         bias = torch.arange(prompt_len, dtype=dtype)
         # NOTE(zhuohan): HF uses
@@ -197,9 +237,10 @@ def _make_alibi_bias(
         # here. We find that both biases give the same results, but
         # the bias below more accurately follows the original ALiBi
         # paper.
+        # Calculate a matrix where each element represents ith element - jth element.
         bias = bias[None, :] - bias[:, None]
 
-        padded_len = (prompt_len + 7) // 8 * 8
+        padded_len = _get_aligned_size(prompt_len, 8)
         num_heads = alibi_slopes.shape[0]
         bias = torch.empty(
             1,  # batch size
@@ -212,8 +253,9 @@ def _make_alibi_bias(
         bias.mul_(alibi_slopes[:, None, None])
         if num_heads != num_kv_heads:
             bias = bias.unflatten(1, (num_kv_heads, num_heads // num_kv_heads))
-        attn_bias = LowerTriangularMaskWithTensorBias(bias)
-        return attn_bias
+        attn_biases.append(LowerTriangularMaskWithTensorBias(bias))
+
+    return attn_biases
 
 
 def _check_use_ref_attention() -> bool:

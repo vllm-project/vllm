@@ -10,11 +10,11 @@ MODELS = [
     # "mistralai/Mistral-7B-v0.1",
     # "Deci/DeciLM-7b",
     # "tiiuae/falcon-7b",
-    "gpt2",
+    # "gpt2",
     # "bigcode/tiny_starcoder_py",
     # "EleutherAI/gpt-j-6b",
     # "EleutherAI/pythia-70m",
-    # "bigscience/bloom-560m",
+    "bigscience/bloom-560m",
     # "mosaicml/mpt-7b",
     # "microsoft/phi-2",
     # "stabilityai/stablelm-3b-4e1t",
@@ -38,7 +38,7 @@ def test_models(
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
     del hf_model
 
-    vllm_model = vllm_runner(model, dtype=dtype, enforce_eager=enforce_eager)
+    vllm_model = vllm_runner(model, dtype=dtype)
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
 

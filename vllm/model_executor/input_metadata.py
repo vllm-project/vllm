@@ -1,4 +1,5 @@
-from typing import Optional
+from typing import Optional, List
+from xformers.ops.fmha.attn_bias import AttentionBias
 
 import torch
 
@@ -12,7 +13,7 @@ class InputMetadata:
     updated from `CUDAGraphRunner.forward` API.
 
     Args:
-        prompt_lens: Lengths of prompts.
+        prompt_lens: Lengths of prompts per sequence.
         slot_mapping: The indices of the token slots that input tokens will be stored into.
 	        E.g., if `slot_mapping` is [35, 2, 17] and the block size is 16, the three tokens
 	        are stored in the 3rd slot in block 2, 2nd slot in block 0, and 1st slot in block 1,
@@ -32,7 +33,7 @@ class InputMetadata:
         self,
         is_prompt: bool,
         slot_mapping: torch.Tensor,
-        prompt_lens: Optional[torch.Tensor],
+        prompt_lens: Optional[List],
         num_prompt_tokens: int,
         num_generation_tokens: int,
         max_seq_len: Optional[int],
@@ -59,11 +60,19 @@ class InputMetadata:
         self.kv_cache_dtype = kv_cache_dtype
 
         # Set during the execution of the first attention op.
+        # It is a list because it is needed to set per prompt
+        # when alibi slopes is used. It is because of the limitation
+        # from xformer API.
         # FIXME(woosuk): This is a hack.
-        self.attn_bias = None
+        self.attn_bias: Optional[List[AttentionBias]] = None
         # Number of valid tokens. It includes paddings.
         # See attention.py for precise definition.
         self.num_valid_tokens = slot_mapping.shape[0]
+        self.prompt_lens_tensor = None
+        if self.prompt_lens is not None:
+            self.prompt_lens_tensor = torch.tensor(self.prompt_lens,
+                                                   dtype=torch.long,
+                                                   device=slot_mapping.device)
 
     def __repr__(self) -> str:
         return ("InputMetadata("
