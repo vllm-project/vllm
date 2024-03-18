@@ -27,7 +27,7 @@ class ThreadPoolTokenizerGroup(TokenizerGroup):
             initializer=init_tokenizer,
         )
 
-        self.encode_async = make_async(self._encode_local, self.executor)
+        self._encode_async = make_async(self._encode_local, self.executor)
 
     def _encode_local(self, *args, **kwargs):
         return self.local.tokenizer.encode(*args, **kwargs)
@@ -35,3 +35,6 @@ class ThreadPoolTokenizerGroup(TokenizerGroup):
     def encode(self, *args, **kwargs):
         return self.executor.submit(self._encode_local, *args,
                                     **kwargs).result()
+
+    async def encode_async(self, *args, **kwargs):
+        return await self._encode_async(*args, **kwargs)

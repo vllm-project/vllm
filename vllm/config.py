@@ -18,6 +18,10 @@ logger = init_logger(__name__)
 
 _GB = 1 << 30
 
+# A cap on the number of async tokenizer worker pool size when computing
+# based on the number of available CPU cores
+MAX_TOKENIZER_WORKERS = 16
+
 
 class ModelConfig:
     """Configuration for the model.
@@ -437,7 +441,7 @@ class TokenizerPoolConfig:
         if tokenizer_pool_size is None:
             # Default based on CPU count
             tokenizer_pool_size = min(
-                16,
+                MAX_TOKENIZER_WORKERS,
                 os.cpu_count() - tensor_parallel_size - 1)
             tokenizer_pool_size = max(1, tokenizer_pool_size)
 
