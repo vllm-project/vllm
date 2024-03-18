@@ -140,7 +140,6 @@ def serialize():
         del model
         model_class = _get_model_architecture(config)
         model = model_class(config).to(dtype=to_dtype)
-        print(f"Loading from {DOWNLOAD_DIR}")
         model.load_weights(model_ref, cache_dir=DOWNLOAD_DIR)
 
     encryption_params = EncryptionParams.random() if keyfile else None
@@ -176,7 +175,7 @@ def deserialize():
             tensorizer_args.deserializer_params['encryption'] = \
                 decryption_params
 
-    with (_read_stream(model_path, )) as stream, TensorDeserializer(
+    with (_read_stream(model_path)) as stream, TensorDeserializer(
             stream, **tensorizer_args.deserializer_params) as deserializer:
         deserializer.load_into_module(model)
         end = time.time()
@@ -236,6 +235,8 @@ if args.command == "serialize":
     tensorizer_args = TensorizerArgs.from_cli_args(args)
     serialize()
 elif args.command == "deserialize":
+    tensorizer_args = TensorizerArgs.from_cli_args(args)
+    model_path = args.path_to_tensors
     deserialize()
 else:
     raise ValueError("Either serialize or deserialize must be specified.")
