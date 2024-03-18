@@ -10,7 +10,7 @@ TEMPLATE = """
 #include "bgmv_impl.cuh"
 
 FOR_BGMV_WIDE_NARROW(INST_BGMV_TWOSIDE, {input_dtype}, {output_dtype}, {weight_dtype})
-""".lstrip()
+""".lstrip()  # noqa: E501
 
 for input_dtype in DTYPES:
     for output_dtype in DTYPES:

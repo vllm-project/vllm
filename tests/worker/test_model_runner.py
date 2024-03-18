@@ -4,12 +4,11 @@ import torch
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.worker.model_runner import ModelRunner, _BATCH_SIZE_ALIGNMENT
 from vllm.config import ModelConfig
+from vllm.utils import _get_aligned_size
 
 
-# Make sure the result is aligned.
-def round_up_to_next_multiple_of_batch_size(n):
-    batch_size = _BATCH_SIZE_ALIGNMENT
-    return ((n + 7) // batch_size) * batch_size
+def get_aligned_size(batch_size):
+    return _get_aligned_size(batch_size, _BATCH_SIZE_ALIGNMENT)
 
 
 def test_prepare_prompt():
@@ -41,8 +40,8 @@ def test_prepare_prompt():
         expected_selected_token_indices.append(selected_token_start_idx +
                                                prompt_len - 1)
         selected_token_start_idx += prompt_len
-    input_tokens, input_positions, input_metadata, return_prompt_lens, _, _, _, _ = (
-        model_runner._prepare_prompt(seq_group_metadata_list))
+    (input_tokens, input_positions, input_metadata, return_prompt_lens, _, _,
+     _, _) = (model_runner._prepare_prompt(seq_group_metadata_list))
     assert return_prompt_lens == prompt_lens
 
     # Verify input metadata is correct for prompts.
@@ -80,22 +79,18 @@ def test_prepare_prompt():
     # Cuda graph should not be used for prerill.
     assert input_metadata.use_cuda_graph is False
     assert input_metadata.kv_cache_dtype == "auto"
-    assert input_metadata.num_valid_tokens == round_up_to_next_multiple_of_batch_size(
+    assert input_metadata.num_valid_tokens == _get_aligned_size(
         sum(prompt_lens))
 
-    assert input_tokens.shape == (round_up_to_next_multiple_of_batch_size(
-        sum(prompt_lens)), )
-    assert input_positions.shape == (round_up_to_next_multiple_of_batch_size(
-        sum(prompt_lens)), )
+    assert input_tokens.shape == (get_aligned_size(sum(prompt_lens)), )
+    assert input_positions.shape == (get_aligned_size(sum(prompt_lens)), )
     torch.testing.assert_close(input_tokens, input_positions)
 
     sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
                                                      prompt_lens,
                                                      subquery_lens=prompt_lens)
-    assert input_tokens.shape == (round_up_to_next_multiple_of_batch_size(
-        sum(prompt_lens)), )
-    assert input_positions.shape == (round_up_to_next_multiple_of_batch_size(
-        sum(prompt_lens)), )
+    assert input_tokens.shape == (get_aligned_size(sum(prompt_lens)), )
+    assert input_positions.shape == (get_aligned_size(sum(prompt_lens)), )
     actual = sampling_metadata.selected_token_indices
     expected = torch.tensor(expected_selected_token_indices,
                             device=actual.device,
@@ -127,7 +122,7 @@ def test_prepare_decode_cuda_graph():
     model_runner.set_block_size(16)
 
     # Make sure the result is aligned.
-    def round_up_to_next_multiple_of_batch_size(n):
+    def get_aligned_size(n):
         batch_size = _BATCH_SIZE_ALIGNMENT
         return ((n + 7) // batch_size) * batch_size
 
@@ -156,8 +151,8 @@ def test_prepare_decode_cuda_graph():
     assert input_metadata.is_prompt is False
     assert input_metadata.prompt_lens is None
     assert input_metadata.num_prompt_tokens == 0
-    assert input_metadata.num_generation_tokens == (
-        round_up_to_next_multiple_of_batch_size(len(seq_group_metadata_list)))
+    assert input_metadata.num_generation_tokens == (get_aligned_size(
+        len(seq_group_metadata_list)))
     assert input_metadata.max_seq_len is None
     assert input_metadata.start_loc is None
     assert input_metadata.max_context_len == max(prompt_lens)
@@ -175,12 +170,12 @@ def test_prepare_decode_cuda_graph():
     # Cuda graph should not be used for prerill.
     assert input_metadata.use_cuda_graph is True
     assert input_metadata.kv_cache_dtype == "auto"
-    assert input_metadata.num_valid_tokens == (
-        round_up_to_next_multiple_of_batch_size(len(seq_group_metadata_list)))
+    assert input_metadata.num_valid_tokens == (get_aligned_size(
+        len(seq_group_metadata_list)))
 
-    assert input_tokens.shape == (round_up_to_next_multiple_of_batch_size(
+    assert input_tokens.shape == (get_aligned_size(
         len(seq_group_metadata_list)), )
-    assert input_positions.shape == (round_up_to_next_multiple_of_batch_size(
+    assert input_positions.shape == (get_aligned_size(
         len(seq_group_metadata_list)), )
     torch.testing.assert_close(input_tokens, input_positions)
 
