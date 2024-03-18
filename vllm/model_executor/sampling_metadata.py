@@ -185,6 +185,7 @@ class SamplingTensors:
                     seed,
                     seq_data.get_len(),
                     *extra_entropy,
+                    seq_id,
                     seeds_to_generate=seeds_to_generate,
                     is_greedy=is_greedy)
                 sampling_seeds.append(seq_seeds)
@@ -332,8 +333,6 @@ class SamplingTensors:
         is_greedy: bool,
     ):
         """Get `seeds_to_generate` child seeds from `seed` and extra entropy."""
-        # TODO(yard1): make sure sequences in the same group with
-        # best_of > 1 have different seeds (not trivial...)
         if not is_greedy:
             if seed is None:
                 randint_fn = random.randint

@@ -409,17 +409,17 @@ def _sample_with_torch(
             greedy_samples = torch.argmax(logprobs[sample_indices.long()],
                                           dim=-1)
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
-            max_best_of = 1
+            max_best_of_in_batch = 1
             for seq_group, is_prompt in zip(seq_groups, is_prompts):
                 if is_prompt:
                     _, sampling_params = seq_group
-                    max_best_of = max(max_best_of, sampling_params.best_of)
+                    max_best_of_in_batch = max(max_best_of_in_batch, sampling_params.best_of)
             seeded_args = {} if sampling_type == SamplingType.RANDOM else {
                 "seq_groups": seq_groups,
                 "generators": sampling_metadata.generators,
             }
             multinomial_samples[sampling_type] = _multinomial(
-                probs[sample_indices.long()], max_best_of, **seeded_args)
+                probs[sample_indices.long()], max_best_of_in_batch, **seeded_args)
         elif sampling_type == SamplingType.BEAM:
             beam_search_logprobs = logprobs[sample_indices]
         else:
@@ -465,7 +465,7 @@ def _sample_with_triton_kernel(
 
     sample_results_dict: Dict[int, Tuple[List[int], List[int]]] = {}
     sample_metadata = {}
-    max_best_of = 1
+    max_best_of_in_batch = 1
 
     # Counterintiutively, having two loops here is actually faster.
     # The first loop can run without waiting on GPU<->CPU sync.
@@ -486,7 +486,7 @@ def _sample_with_triton_kernel(
             for seq_group, is_prompt in zip(seq_groups, is_prompts):
                 if is_prompt:
                     _, sampling_params = seq_group
-                    max_best_of = max(max_best_of, sampling_params.best_of)
+                    max_best_of_in_batch = max(max_best_of_in_batch, sampling_params.best_of)
         elif sampling_type == SamplingType.BEAM:
             beam_search_logprobs = logprobs[sample_indices]
         else:
@@ -495,7 +495,7 @@ def _sample_with_triton_kernel(
     sampled_tokens, _, _ = sample_triton(
         probs=probs,
         seeds=sampling_tensors.sampling_seeds,
-        max_best_of=max_best_of,
+        max_best_of=max_best_of_in_batch,
         sample_indices=sampling_tensors.sample_indices,
         logprobs=logprobs,
         # don't save logprobs because we have logic for that below
@@ -536,6 +536,8 @@ def _sample(
     sampling_tensors: SamplingTensors,
 ) -> List[Tuple[List[int], List[int]]]:
     return _sample_with_torch(probs, logprobs, sampling_metadata)
+
+    # TODO: Enable once Triton kernel & associated code is faster.
     # return _sample_with_triton_kernel(probs, logprobs, sampling_metadata,
     #                                   sampling_tensors)
 

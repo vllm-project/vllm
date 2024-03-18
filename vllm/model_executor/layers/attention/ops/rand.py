@@ -104,7 +104,8 @@ def _seeded_uniform_triton(
     n_slices: tl.constexpr,
     block_size: tl.constexpr,
 ):
-    """Generate a random number in [0, 1) for each element in the output
+    """
+    Generate a random float32 number in [0, 1) for each element in the output
     tensor. The random numbers in a row generated using the seed for that row.
 
     Args:
