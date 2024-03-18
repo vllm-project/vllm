@@ -12,6 +12,7 @@ _CONFIG_REGISTRY: Dict[str, PretrainedConfig] = {
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
     "jais": JAISConfig,
+    "jurassic3": Jurassic3Config
 }
 
 
