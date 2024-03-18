@@ -307,10 +307,8 @@ class ModelRunner:
         input_metadata = InputMetadata(
             is_prompt=True,
             slot_mapping=slot_mapping,
-            prompt_lens=prompt_lens_tensor,
-            num_chunked_prefill=num_chunked_prefill,
             prompt_lens=prompt_lens,
-            prompt_lens_tensor=prompt_lens_tensor,
+            prompt_lens=prompt_lens_tensor,
             num_chunked_prefill=num_chunked_prefill,
             num_prompt_tokens=num_prompt_tokens,
             num_generation_tokens=0,
