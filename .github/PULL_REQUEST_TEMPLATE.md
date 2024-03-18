@@ -1,6 +1,14 @@
+FILL IN THE PR DESCRIPTION HERE
+
+FIX #xxxx (*link existing issues this PR will resolve*)
+
+**BEFORE SUBMITTING, PLEASE READ THE CHECKLIST BELOW AND FILL IN THE DESCRIPTION ABOVE**
+
+---
+
 <details>
 <!-- inside this <details> section, markdown rendering does not work, so we use raw html here. -->
-<summary><b> PR Checklist (Click to expand. Please read before submitting.) </b></summary>
+<summary><b> PR Checklist (Click to Expand) </b></summary>
 
 <p>Thank you for your contribution to vLLM! Before submitting the pull request, please ensure the PR meets the following criteria. This helps vLLM maintain the code quality and improve the efficiency of the review process.</p>
 
@@ -52,9 +60,5 @@
 
 
 </details>
-
----
-
-Please provide a brief explanation of the motivation behind the PR and the changes it introduces. This helps reviewers understand the context and rationale for the contribution. If possible, please link existing issues this PR will resolve.
 
 
