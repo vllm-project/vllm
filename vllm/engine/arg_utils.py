@@ -55,7 +55,6 @@ class EngineArgs:
     lora_extra_vocab_size: int = 256
     lora_dtype = 'auto'
     max_cpu_loras: Optional[int] = None
-    tensorizer_args: Optional[TensorizerArgs] = None
     device: str = 'auto'
     ray_workers_use_nsight: bool = False
     forced_num_gpu_blocks: Optional[int] = None
@@ -417,21 +416,14 @@ class EngineArgs:
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace) -> 'EngineArgs':
-        # Get the list of attributes of this dataclass that are not
-        # TensorizerArgs.
-        engine_attrs = [
-            attr.name for attr in dataclasses.fields(cls)
-            if attr.name != 'tensorizer_args'
-        ]
-        attrs = [attr for attr in engine_attrs]
-
+        # Get the list of attributes of this dataclass.
+        attrs = [attr.name for attr in dataclasses.fields(cls)]
         # Set the attributes from the parsed arguments.
         engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
 
-        # Set the tensorizer_args attribute from the parsed arguments.
-        if args.load_format == 'tensorizer':
-            tensorizer_args = TensorizerArgs.from_cli_args(args)
-            engine_args.tensorizer_args = tensorizer_args
+        engine_args.tensorizer_args = TensorizerArgs.from_cli_args(args) if (
+                engine_args.load_format == "tensorizer") else None
+
         return engine_args
 
     def create_engine_config(self, ) -> EngineConfig:
