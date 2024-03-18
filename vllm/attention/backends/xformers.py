@@ -44,7 +44,7 @@ class XFormersMetadata(AttentionMetadata):
     max_context_len: Optional[int]
     context_lens: Optional[torch.Tensor]
     block_tables: Optional[torch.Tensor]
-    use_cuda_graph: bool
+    use_cuda_graph: bool  # FIXME(woosuk): Remove this.
     kv_cache_dtype: str
 
     def __post_init__(self):
