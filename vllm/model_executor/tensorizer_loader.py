@@ -58,7 +58,6 @@ class TensorizerArgs:
     str, bytes, os.PathLike, int]
     verify_hash: bool = False
     encryption_keyfile: Optional[str] = None
-    force_http: bool = False
     s3_access_key_id: Optional[str] = None
     s3_secret_access_key: Optional[str] = None
     s3_endpoint: Optional[str] = None
@@ -76,10 +75,6 @@ class TensorizerArgs:
           binary key to use for decryption. `None` (the default) means 
           no decryption. See the example script in 
           examples/tensorize_vllm_model.py. 
-      force_http: If True, `tensorizer` will force a HTTP connection to 
-          tensorizer_uri, if applicable, instead of HTTPS. This is slightly 
-          faster, but less secure. Keep in mind it is NOT recommended to force 
-          HTTP for security and data integrity reasons.
       s3_access_key_id: The access key for the S3 bucket. Can also be set via
           the S3_ACCESS_KEY_ID environment variable.
       s3_secret_access_key: The secret access key for the S3 bucket. Can also
@@ -102,7 +97,6 @@ class TensorizerArgs:
             "s3_access_key_id": self.s3_access_key_id,
             "s3_secret_access_key": self.s3_secret_access_key,
             "s3_endpoint": self.s3_endpoint,
-            "force_http": self.force_http
         }
 
         # Omitting self.dtype and self.device as this behaves weirdly
@@ -149,15 +143,6 @@ class TensorizerArgs:
             default=None,
             help="The file path to a binary file containing a binary key to "
                  "use for decryption. Can be a file path or S3 network URI."
-        )
-        group.add_argument(
-            "--force-http",
-            action="store_true",
-            help="If enabled, `tensorizer` will force a HTTP connection to "
-                 "tensorizer-uri, if applicable, instead of HTTPS. This is "
-                 "slightly faster, but less secure. Keep in mind it is NOT "
-                 "recommended to force HTTP for security and data integrity "
-                 "reasons.",
         )
         group.add_argument(
             "--s3-access-key-id",
