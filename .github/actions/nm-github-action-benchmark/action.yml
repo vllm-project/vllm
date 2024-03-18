@@ -1,6 +1,8 @@
 name: nm github-action benchmark
 description: 'Use github-action-benchmark to visualize input json'
 inputs:
+  gh_action_benchmark_name:
+    description: "Name of the benchmark. Metrics are grouped by benchmark names. github_action_benchmark alert-trigger looks for the previous benchmark value in the benchmark-name group on the previous commit"
   gh_action_benchmark_json_file_path:
     description: "Path to the benchmark json file to upload (Note that this JSON should be in a `github-action-benchmark` consumable format - This is typically the output of  neuralmagic/benchmarks/scripts/logging/gha_benchmark_logging.py)"
     type: string
@@ -33,6 +35,7 @@ runs:
     - name: push to gh pages
       uses: benchmark-action/github-action-benchmark@v1
       with:
+        name: ${{ inputs.gh_action_benchmark_name }}
         output-file-path: ${{ inputs.gh_action_benchmark_json_file_path }}
         tool: ${{ inputs.gh_action_benchmark_tool }}
         gh-pages-branch: ${{ inputs.gh_pages_branch }}
@@ -43,7 +46,7 @@ runs:
         # Add a commit comment comparing the current benchmark with the previous.
         comment-always: true
         # Create an alert when some value has regressed more than 10% 
-        alert-threshold: "10%"
+        alert-threshold: "110%"
         # Mark the workflow as a failure when some alert is triggered
         fail-on-alert: true
         # Add a commit comment describing what triggered the alert

@@ -41,6 +41,12 @@ class GHARecord:
             br.get(BenchmarkResult.SCRIPT_NAME_KEY_),
             BenchmarkResult.SCRIPT_ARGS_KEY_:
             br.get(BenchmarkResult.SCRIPT_ARGS_KEY_),
+            BenchmarkResult.DATE_KEY_:
+            br.get(BenchmarkResult.DATE_KEY_),
+            BenchmarkResult.MODEL_KEY_:
+            br.get(BenchmarkResult.MODEL_KEY_),
+            BenchmarkResult.DATASET_KEY_:
+            br.get(BenchmarkResult.DATASET_KEY_)
         }
         return extra
 
@@ -48,6 +54,10 @@ class GHARecord:
     def from_metric_template(metric_template: MetricTemplate, extra: dict):
         # Unique names map to unique charts / benchmarks. Pass it as a JSON
         # string with enough information so we may deconstruct it at the UI.
+        # TODO (varun) : Convert all additional information in name into a hash
+        # if this becomes too cumbersome.
+        benchmarking_context = \
+                extra.get(BenchmarkResult.BENCHMARKING_CONTEXT_KEY_)
         name = {
             "name":
             metric_template.key,
@@ -55,9 +65,14 @@ class GHARecord:
             extra.get(BenchmarkResult.DESCRIPTION_KEY_),
             BenchmarkResult.GPU_DESCRIPTION_KEY_:
             extra.get(BenchmarkResult.GPU_DESCRIPTION_KEY_),
-            BenchmarkResult.BENCHMARKING_CONTEXT_KEY_:
-            extra.get(BenchmarkResult.BENCHMARKING_CONTEXT_KEY_)
+            "vllm_version":
+            benchmarking_context.get("vllm_version"),
+            "python_version":
+            benchmarking_context.get("python_version"),
+            "torch_version":
+            benchmarking_context.get("torch_version")
         }
+
         return GHARecord(name=f"{json.dumps(name)}",
                          unit=metric_template.unit,
                          value=metric_template.value,

@@ -182,7 +182,9 @@ jobs:
 
       - name: nm-github-action-benchmark(bigger_is_better.json)
         uses: ./.github/actions/nm-github-action-benchmark
+        if: success() || failure()
         with:
+          gh_action_benchmark_name: "bigger_is_better"
           gh_action_benchmark_json_file_path:  "downloads/bigger_is_better.json"
           gh_action_benchmark_tool: "customBiggerIsBetter"
           gh_pages_branch: "nm-gh-pages"
@@ -191,7 +193,9 @@ jobs:
 
       - name: nm-github-action-benchmark(smaller_is_better.json)
         uses: ./.github/actions/nm-github-action-benchmark
+        if: success() || failure()
         with:
+          gh_action_benchmark_name: "smaller_is_better"
           gh_action_benchmark_json_file_path:  "downloads/smaller_is_better.json"
           gh_action_benchmark_tool: "customSmallerIsBetter"
           gh_pages_branch: "nm-gh-pages"
