@@ -19,6 +19,7 @@ class AttentionBackend(ABC):
         raise NotImplementedError
 
 
+@dataclass
 class AttentionMetadata:
 
     is_prompt: bool
