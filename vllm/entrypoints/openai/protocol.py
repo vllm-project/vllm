@@ -137,12 +137,12 @@ class VllmToolsTemplate(BaseModel):
 * The decision to invoke a function is yours, only invoke a function if it is necessary to answer the user's question
 * If you need to call at least one function, your message should contain only a list of function calls and nothing else; the function calls are the response."""
 
-    function_call_instruct: str = """For each function call return a valid json object (using quotes) with function name and arguments within <tool_call>{ }</tool_call> XML tags as follows::
+    function_call_instruct: str = """For each function call return a valid json object (using quotes) with function name and arguments within <tool_call> { } </tool_call> XML tags as follows::
 * With arguments:
 <tool_call>{ "name": "function_name", "arguments": {"argument_name": "value"} }</tool_call>
 * Without arguments:
 <tool_call>{ "name": "function_name", "arguments": null }</tool_call>
-End of functions instructions
+End of functions instructions.
 """
 
 

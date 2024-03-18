@@ -1,5 +1,5 @@
 import json
-from typing import List, Union
+from typing import List, Dict, Union
 from vllm.logger import init_logger
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest, ChatCompletionToolParam, VllmToolsTemplate,
@@ -195,12 +195,7 @@ class ChatPromptCapture:
     def make_calls_list(self):
         """ Convert the extracted text to json function calls. """
         if self.named_function_call:
-            try:
-                call_dict = json.loads(self.content)
-                if "name" in call_dict:
-                    self.calls_list.append(call_dict)
-            except json.decoder.JSONDecodeError as exc:
-                # Simply ignore invalid functions calls...
+            if self._add_calls_list(self.content) == 0:
                 logger.warning(
                     "Error in parsing the function call. This should not happen since it's guided generation : %s"
                     % str(exc))
@@ -211,13 +206,25 @@ class ChatPromptCapture:
                     content = v_call.split(self.tool_params.call_token_end)[0]
                 else:
                     content = v_call
-                try:
-                    call_dict = json.loads(content)
-                    if "name" in call_dict:
-                        self.calls_list.append(call_dict)
-                except json.decoder.JSONDecodeError:
-                    # Simply ignore invalid functions calls...
-                    pass
+                self._add_calls_list(content)
+
+    def _add_calls_list(self, content: str) -> int:
+        count = len(self.calls_list)
+        if len(content) > 1:
+            try:
+                call_data = json.loads(content)
+            except json.decoder.JSONDecodeError:
+                # Simply ignore invalid functions calls...
+                return 0
+            if isinstance(call_data, List):
+                for call_elem in call_data:
+                    if isinstance(call_elem, Dict):
+                        if "name" in call_elem:
+                            self.calls_list.append(call_elem)
+            elif isinstance(call_data, Dict):
+                if "name" in call_data:
+                    self.calls_list.append(call_data)
+        return len(self.calls_list) - count
 
     def to_ChatCompletionMessageToolCall(
             self, call_id: int) -> Union[ChatCompletionMessageToolCall, None]:
