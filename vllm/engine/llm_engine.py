@@ -17,8 +17,9 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (Logprob, SamplerOutput, Sequence, SequenceGroup,
                            SequenceGroupOutput, SequenceOutput, SequenceStatus)
-from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
-                                               TokenizerGroup)
+from vllm.transformers_utils.tokenizer import detokenize_incrementally
+from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
+                                                     get_tokenizer_group)
 from vllm.utils import Counter
 
 logger = init_logger(__name__)
@@ -102,6 +103,10 @@ class LLMEngine:
                                              parallel_config, scheduler_config,
                                              device_config, lora_config)
 
+        # Ping the tokenizer to ensure liveness if it runs in a
+        # different process.
+        self.tokenizer.ping()
+
         # Create the scheduler.
         # NOTE: the cache_config here have been updated with the numbers of
         # GPU and CPU blocks, which are profiled in the distributed executor.
@@ -152,6 +157,7 @@ class LLMEngine:
 
     def _init_tokenizer(self, **tokenizer_init_kwargs):
         init_kwargs = dict(
+            tokenizer_id=self.model_config.tokenizer,
             enable_lora=bool(self.lora_config),
             max_num_seqs=self.scheduler_config.max_num_seqs,
             max_input_length=None,
@@ -159,8 +165,9 @@ class LLMEngine:
             trust_remote_code=self.model_config.trust_remote_code,
             revision=self.model_config.tokenizer_revision)
         init_kwargs.update(tokenizer_init_kwargs)
-        self.tokenizer: TokenizerGroup = TokenizerGroup(
-            self.model_config.tokenizer, **init_kwargs)
+
+        self.tokenizer: BaseTokenizerGroup = get_tokenizer_group(
+            self.parallel_config.tokenizer_pool_config, **init_kwargs)
 
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
