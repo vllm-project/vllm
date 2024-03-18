@@ -30,6 +30,9 @@ def main(args: argparse.Namespace):
         trust_remote_code=args.trust_remote_code,
         dtype=args.dtype,
         enforce_eager=args.enforce_eager,
+        kv_cache_dtype=args.kv_cache_dtype,
+        device=args.device,
+        ray_workers_use_nsight=args.ray_workers_use_nsight,
     )
 
     for batch_size in args.batch_size:
@@ -181,6 +184,17 @@ if __name__ == '__main__':
         default=None,
         help=('path to save the pytorch profiler output. Can be visualized '
               'with ui.perfetto.dev or Tensorboard.'))
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda",
+        choices=["cuda"],
+        help='device type for vLLM execution, supporting CUDA only currently.')
+    parser.add_argument(
+        "--ray-workers-use-nsight",
+        action='store_true',
+        help="If specified, use nsight to profile ray workers",
+    )
     parser.add_argument(
         '--rpd',
         action='store_true',

@@ -15,6 +15,11 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME, 
 
 ROOT_DIR = os.path.dirname(__file__)
 
+# If you are developing the C++ backend of vLLM, consider building vLLM with
+# `python setup.py develop` since it will give you incremental builds.
+# The downside is that this method is deprecated, see
+# https://github.com/pypa/setuptools/issues/917
+
 MAIN_CUDA_VERSION = "12.1"
 
 # Supported NVIDIA GPU architectures.
@@ -33,7 +38,7 @@ def _is_neuron() -> bool:
     torch_neuronx_installed = True
     try:
         subprocess.run(["neuron-ls"], capture_output=True, check=True)
-    except FileNotFoundError:
+    except (FileNotFoundError, PermissionError):
         torch_neuronx_installed = False
     return torch_neuronx_installed
 
@@ -53,8 +58,8 @@ if _is_hip():
             "Cannot find ROCM_HOME. ROCm must be available to build the package."
         )
     NVCC_FLAGS += ["-DUSE_ROCM"]
-    NVCC_FLAGS += [f"-U__HIP_NO_HALF_CONVERSIONS__"]
-    NVCC_FLAGS += [f"-U__HIP_NO_HALF_OPERATORS__"]
+    NVCC_FLAGS += ["-U__HIP_NO_HALF_CONVERSIONS__"]
+    NVCC_FLAGS += ["-U__HIP_NO_HALF_OPERATORS__"]
 
 if _is_cuda() and CUDA_HOME is None:
     raise RuntimeError(
@@ -139,8 +144,8 @@ def get_pytorch_rocm_arch() -> Set[str]:
     # If we don't have PYTORCH_ROCM_ARCH specified pull the list from rocm_agent_enumerator
     if env_arch_list is None:
         command = "rocm_agent_enumerator"
-        env_arch_list = subprocess.check_output([command]).decode('utf-8')\
-                        .strip().replace("\n", ";")
+        env_arch_list = (subprocess.check_output(
+            [command]).decode('utf-8').strip().replace("\n", ";"))
         arch_source_str = "rocm_agent_enumerator"
     else:
         arch_source_str = "PYTORCH_ROCM_ARCH env variable"
@@ -288,6 +293,9 @@ if _is_cuda():
         num_threads = min(os.cpu_count(), nvcc_threads)
         NVCC_FLAGS += ["--threads", str(num_threads)]
 
+    if nvcc_cuda_version >= Version("11.8"):
+        NVCC_FLAGS += ["-DENABLE_FP8_E5M2"]
+
     # changes for punica kernels
     NVCC_FLAGS += torch_cpp_ext.COMMON_NVCC_FLAGS
     REMOVE_NVCC_FLAGS = [
@@ -318,7 +326,6 @@ if _is_cuda():
                     "nvcc": NVCC_FLAGS_PUNICA,
                 },
             ))
-
 elif _is_neuron():
     neuronxcc_version = get_neuronxcc_version()
 
@@ -331,11 +338,26 @@ vllm_extension_sources = [
     "csrc/quantization/squeezellm/quant_cuda_kernel.cu",
     "csrc/quantization/gptq/q_gemm.cu",
     "csrc/cuda_utils_kernels.cu",
+    "csrc/moe_align_block_size_kernels.cu",
     "csrc/pybind.cpp",
 ]
 
 if _is_cuda():
     vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
+    vllm_extension_sources.append(
+        "csrc/quantization/marlin/marlin_cuda_kernel.cu")
+    vllm_extension_sources.append("csrc/custom_all_reduce.cu")
+
+    # Add MoE kernels.
+    ext_modules.append(
+        CUDAExtension(
+            name="vllm._moe_C",
+            sources=glob("csrc/moe/*.cu") + glob("csrc/moe/*.cpp"),
+            extra_compile_args={
+                "cxx": CXX_FLAGS,
+                "nvcc": NVCC_FLAGS,
+            },
+        ))
 
 if not _is_neuron():
     vllm_extension = CUDAExtension(
@@ -345,6 +367,7 @@ if not _is_neuron():
             "cxx": CXX_FLAGS,
             "nvcc": NVCC_FLAGS,
         },
+        libraries=["cuda"] if _is_cuda() else [],
     )
     ext_modules.append(vllm_extension)
 
@@ -416,10 +439,18 @@ def get_requirements() -> List[str]:
     else:
         with open(get_path("requirements.txt")) as f:
             requirements = f.read().strip().split("\n")
+        if nvcc_cuda_version <= Version("11.8"):
+            # replace cupy-cuda12x with cupy-cuda11x for cuda 11.x
+            for i in range(len(requirements)):
+                if requirements[i].startswith("cupy-cuda12x"):
+                    requirements[i] = "cupy-cuda11x"
+                    break
     return requirements
 
 
-package_data = {"vllm": ["py.typed"]}
+package_data = {
+    "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
+}
 if os.environ.get("VLLM_USE_PRECOMPILED"):
     ext_modules = []
     package_data["vllm"].append("*.so")

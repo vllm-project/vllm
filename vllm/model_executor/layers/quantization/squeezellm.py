@@ -6,7 +6,8 @@ from torch.nn.parameter import Parameter
 from vllm._C import ops
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.utils import is_hip
 
 
@@ -80,7 +81,6 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
             torch.empty(
                 input_size_per_partition // self.quant_config.pack_factor,
                 output_size_per_partition,
-                device="cuda",
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -96,7 +96,6 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
             torch.empty(
                 output_size,
                 self.quant_config.weight_bits**2,
-                device="cuda",
                 dtype=params_dtype,
             ),
             requires_grad=False,
@@ -118,12 +117,12 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
         out_shape = x.shape[:-1] + (qweight.shape[-1], )
         reshaped_x = x.reshape(-1, x.shape[-1])
         if is_hip():
-            out_f = torch.zeros(out_shape, device="cuda", dtype=torch.float)
+            out_f = torch.zeros(out_shape, dtype=torch.float)
             ops.squeezellm_gemm(reshaped_x, qweight, out_f, lookup_table)
             out = out_f.to(dtype=torch.float16)
         else:
             # NOTE: The output tensor should be zero-initialized.
-            out = torch.zeros(out_shape, device="cuda", dtype=torch.float16)
+            out = torch.zeros(out_shape, dtype=torch.float16)
             ops.squeezellm_gemm(reshaped_x, qweight, out, lookup_table)
 
         if bias is not None:

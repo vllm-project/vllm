@@ -17,14 +17,16 @@ from vllm.lora.layers import (
     LoRAMapping,
     BaseLayerWithLoRA,
 )
-from vllm.lora.models import LoRALayerWeights, convert_mapping, PackedLoRALayerWeights
+from vllm.lora.models import (LoRALayerWeights, convert_mapping,
+                              PackedLoRALayerWeights)
 from vllm.config import LoRAConfig
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                RowParallelLinear,
                                                QKVParallelLinear)
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding, ParallelLMHead
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding, ParallelLMHead)
 from vllm.model_executor.utils import set_random_seed
 
 from .utils import DummyLoRAManager
@@ -34,6 +36,9 @@ TOLERANCES = {
     torch.float32: (5e-3, 5e-3),
     torch.bfloat16: (3e-2, 2e-2),
 }
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
+]
 
 
 def get_random_id_to_index(num_loras: int,
@@ -151,14 +156,10 @@ def create_random_inputs(
     for _ in range(num_inputs):
         if input_type == torch.int:
             inputs.append(
-                torch.randint(low=int(low),
-                              high=int(high),
-                              size=input_size,
-                              device="cuda"))
+                torch.randint(low=int(low), high=int(high), size=input_size))
         else:
             inputs.append(
-                torch.rand(size=input_size, dtype=input_type, device="cuda") *
-                high + low)
+                torch.rand(size=input_size, dtype=input_type) * high + low)
 
         lora_id = random.choice(active_lora_ids)
         index_mapping += [lora_id] * input_size[0]
@@ -169,8 +170,10 @@ def create_random_inputs(
 
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
-def test_embeddings(dist_init, num_loras) -> None:
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_embeddings(dist_init, num_loras, device) -> None:
 
+    torch.set_default_device(device)
     max_loras = 8
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
@@ -257,10 +260,13 @@ def test_embeddings(dist_init, num_loras) -> None:
 
 
 @torch.inference_mode()
-# @pytest.mark.skip(reason="Fails when loras are in any slot other than the first.")
+# @pytest.mark.skip(
+#     reason="Fails when loras are in any slot other than the first.")
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
-def test_embeddings_with_new_embeddings(dist_init, num_loras) -> None:
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_embeddings_with_new_embeddings(dist_init, num_loras, device) -> None:
 
+    torch.set_default_device(device)
     max_loras = 8
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
@@ -276,7 +282,7 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras) -> None:
             256,
             org_num_embeddings=512)
         expanded_embedding.weight.data[:512, :] = embedding_data
-        # We need to deepcopy the embedding as it will be modifed
+        # We need to deepcopy the embedding as it will be modified
         # in place
         lora_embedding = VocabParallelEmbeddingWithLoRA(
             deepcopy(expanded_embedding))
@@ -305,8 +311,7 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras) -> None:
 
         # Add empty embeddings_tensors for unoccupied lora slots.
         for _ in range(max_loras - len(embeddings_tensors)):
-            embeddings_tensors.append(
-                torch.zeros(embeddings_tensors[0].shape, device="cuda"))
+            embeddings_tensors.append(torch.zeros(embeddings_tensors[0].shape))
 
         inputs, index_mapping, prompt_mapping = create_random_inputs(
             active_lora_ids=list(lora_dict.keys()),
@@ -388,8 +393,10 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras) -> None:
 
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
-def test_lm_head_sampler(dist_init, num_loras) -> None:
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_lm_head_sampler(dist_init, num_loras, device) -> None:
 
+    torch.set_default_device(device)
     max_loras = 8
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
@@ -432,7 +439,7 @@ def test_lm_head_sampler(dist_init, num_loras) -> None:
         )
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping)
 
-        input_ = torch.rand(20, 1024, device="cuda")
+        input_ = torch.rand(20, 1024)
         mapping_info = convert_mapping(
             lora_mapping,
             id_to_index,
@@ -500,8 +507,10 @@ def test_lm_head_sampler(dist_init, num_loras) -> None:
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
 @pytest.mark.parametrize("orientation", ["row", "column"])
-def test_linear_parallel(dist_init, num_loras, orientation) -> None:
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_linear_parallel(dist_init, num_loras, orientation, device) -> None:
 
+    torch.set_default_device(device)
     max_loras = 8
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
@@ -597,8 +606,10 @@ def test_linear_parallel(dist_init, num_loras, orientation) -> None:
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
 @pytest.mark.parametrize("repeats", [2, 3])
-def test_column_parallel_packed(dist_init, num_loras, repeats) -> None:
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_column_parallel_packed(dist_init, num_loras, repeats, device) -> None:
 
+    torch.set_default_device(device)
     max_loras = 8
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
@@ -666,9 +677,9 @@ def test_column_parallel_packed(dist_init, num_loras, repeats) -> None:
             result = linear(input_)[0]
             subloras = sublora_dict[lora_id]
             for i, sublora in enumerate(subloras):
-                result[:, sublora.lora_b.shape[1] * i:sublora.lora_b.shape[1] * (
-                    i + 1
-                )] += input_ @ sublora.lora_a @ sublora.lora_b * sublora.scaling
+                result[:, sublora.lora_b.shape[1] * i:sublora.lora_b.shape[1] *
+                       (i + 1)] += (input_ @ sublora.lora_a @ sublora.lora_b *
+                                    sublora.scaling)
             expected_results.append(result)
         expected_result = torch.cat(expected_results)
 
