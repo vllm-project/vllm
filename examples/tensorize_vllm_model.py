@@ -106,7 +106,7 @@ def make_model_contiguous(model):
         param.data = param.data.contiguous()
 
 
-def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
+def _get_vllm_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
         model_cls = ModelRegistry.load_model_cls(arch)
@@ -127,7 +127,7 @@ def serialize():
         DOWNLOAD_DIR = os.path.join(tmpdir, model_name)
         model.save_pretrained(DOWNLOAD_DIR)
         del model
-        model_class = _get_model_architecture(config)
+        model_class = _get_vllm_model_architecture(config)
         model = model_class(config).to(dtype=to_dtype)
         model.load_weights(model_ref, cache_dir=DOWNLOAD_DIR)
 
@@ -150,7 +150,7 @@ def deserialize():
     config = AutoConfig.from_pretrained(model_ref)
 
     with no_init_or_tensor():
-        model_class = _get_model_architecture(config)
+        model_class = _get_vllm_model_architecture(config)
         model = model_class(config)
 
     before_mem = get_mem_usage()
