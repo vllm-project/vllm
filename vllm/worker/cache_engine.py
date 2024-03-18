@@ -83,39 +83,18 @@ class CacheEngine:
                             device="cpu"))
         return cpu_cache
 
-    def _swap(
-        self,
-        src: List[torch.Tensor],
-        dst: List[torch.Tensor],
-        src_to_dst: Dict[int, int],
-    ) -> None:
-        # FIXME(woosuk)
-        return
-        from vllm._C import cache_ops
-
-        for i in range(self.num_layers):
-            src_key_cache, src_value_cache = src[i]
-            dst_key_cache, dst_value_cache = dst[i]
-            # Copy the key blocks.
-            cache_ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
-            # Copy the value blocks.
-            cache_ops.swap_blocks(src_value_cache, dst_value_cache, src_to_dst)
-
     def swap_in(self, src_to_dst: Dict[int, int]) -> None:
-        self._swap(self.cpu_cache, self.gpu_cache, src_to_dst)
+        for i in range(self.num_layers):
+            self.attn_backend.swap_blocks(self.cpu_cache[i], self.gpu_cache[i],
+                                          src_to_dst)
 
     def swap_out(self, src_to_dst: Dict[int, int]) -> None:
-        self._swap(self.gpu_cache, self.cpu_cache, src_to_dst)
+        for i in range(self.num_layers):
+            self.attn_backend.swap_blocks(self.gpu_cache[i], self.cpu_cache[i],
+                                          src_to_dst)
 
     def copy(self, src_to_dsts: Dict[int, List[int]]) -> None:
-        # FIXME(woosuk)
-        return
-        from vllm._C import cache_ops
-
-        key_caches = [key_cache for key_cache, _ in self.gpu_cache]
-        value_caches = [value_cache for _, value_cache in self.gpu_cache]
-        # NOTE(woosuk): This operation implicitly synchronizes the CPU and GPU.
-        cache_ops.copy_blocks(key_caches, value_caches, src_to_dsts)
+        self.attn_backend.copy_blocks(self.gpu_cache, src_to_dsts)
 
     @staticmethod
     def get_cache_block_size(

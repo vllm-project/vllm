@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Type
+from typing import Dict, List, Optional, Tuple, Type
 
 import torch
 
@@ -26,6 +26,23 @@ class AttentionBackend(ABC):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def swap_blocks(
+        src_kv_cache: torch.Tensor,
+        dst_kv_cache: torch.Tensor,
+        src_to_dst: Dict[int, int],
+    ) -> None:
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def copy_blocks(
+        kv_caches: List[torch.Tensor],
+        src_to_dists: Dict[int, List[int]],
+    ) -> None:
         raise NotImplementedError
 
 
