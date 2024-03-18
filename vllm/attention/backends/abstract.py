@@ -30,7 +30,7 @@ class AttentionBackend(ABC):
 
 
 @dataclass
-class AttentionMetadata(ABC):
+class AttentionMetadata:
 
     ...
 

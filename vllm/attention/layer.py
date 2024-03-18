@@ -34,9 +34,8 @@ class Attention(nn.Module):
         super().__init__()
         self.backend = get_attn_backend(torch.get_default_dtype())
         impl_cls = self.backend.get_attention_impl_cls()
-        self.impl = impl_cls(
-            num_heads, head_size, scale, num_kv_heads, alibi_slopes,
-            sliding_window)
+        self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
+                             alibi_slopes, sliding_window)
 
     def forward(
         self,
