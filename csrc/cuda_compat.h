@@ -2,6 +2,7 @@
 
 #ifdef USE_ROCM
 #include <hip/hip_runtime.h>
+#include <hip/hip_runtime_api.h>
 #endif
 
 #ifndef USE_ROCM
