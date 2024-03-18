@@ -209,7 +209,6 @@ class XFormersImpl(AttentionImpl):
                     (is_hip()) else None,
                 )
                 output = out.view_as(query)
-
             else:
                 # prefix-enabled attention
                 output = PagedAttention.forward_prefix(
