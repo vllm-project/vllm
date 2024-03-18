@@ -420,7 +420,6 @@ def main(args: argparse.Namespace):
         # Save to file
         base_model_id = model_id.split("/")[-1]
         file_name = f"{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
-
         if args.result_dir:
             file_name = os.path.join(args.result_dir, file_name)
         with open(file_name, "w") as outfile:
@@ -497,7 +496,7 @@ if __name__ == "__main__":
         "--tokenizer",
         type=str,
         help=
-        "Name or path of the tokenizer, if not using the default model tokenizer.",
+        "Name or path of the tokenizer, if not using the default tokenizer.",
     )
     parser.add_argument(
         "--best-of",

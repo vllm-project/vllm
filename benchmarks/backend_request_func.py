@@ -362,7 +362,8 @@ async def async_request_openai_chat_completions(
     return output
 
 
-# Since vllm must support Python 3.8, we can't use str.removeprefix(prefix) introduced in Python 3.9
+# Since vllm must support Python 3.8, we can't use str.removeprefix(prefix)
+# introduced in Python 3.9
 def remove_prefix(text: str, prefix: str) -> str:
     if text.startswith(prefix):
         return text[len(prefix):]
