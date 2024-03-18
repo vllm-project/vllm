@@ -51,9 +51,8 @@ class PagedAttention:
 
         block_size = value_cache.shape[3]
         num_seqs, num_heads, head_size = query.shape
-        max_num_partitions = (
-            (max_context_len + _PARTITION_SIZE - 1) //
-            _PARTITION_SIZE)
+        max_num_partitions = ((max_context_len + _PARTITION_SIZE - 1) //
+                              _PARTITION_SIZE)
         # NOTE(woosuk): We use a simple heuristic to decide whether to use
         # PagedAttention V1 or V2. If the number of partitions is 1, we use
         # V1 to avoid the overhead of reduction. Also, if the number of
@@ -61,8 +60,8 @@ class PagedAttention:
         # to parallelize.
         # TODO(woosuk): Tune this heuristic.
         # For context len > 8192, use V2 kernel to avoid shared memory shortage.
-        use_v1 = max_context_len <= 8192 and (
-            max_num_partitions == 1 or num_seqs * num_heads > 512)
+        use_v1 = (max_context_len <= 8192
+                  and (max_num_partitions == 1 or num_seqs * num_heads > 512))
         if use_v1:
             # Run PagedAttention V1.
             ops.paged_attention_v1(

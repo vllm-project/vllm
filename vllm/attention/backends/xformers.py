@@ -7,8 +7,8 @@ from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
                                          LowerTriangularMaskWithTensorBias)
 
-from vllm.attention.backends.abstract import (
-    AttentionBackend, AttentionImpl, AttentionMetadata)
+from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+                                              AttentionMetadata)
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.utils import is_hip
 
@@ -136,9 +136,10 @@ class XFormersImpl(AttentionImpl):
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
-            PagedAttention.reshape_and_cache(
-                key, value, key_cache, value_cache, attn_metadata.slot_mapping,
-                attn_metadata.kv_cache_dtype)
+            PagedAttention.reshape_and_cache(key, value, key_cache,
+                                             value_cache,
+                                             attn_metadata.slot_mapping,
+                                             attn_metadata.kv_cache_dtype)
 
         if attn_metadata.is_prompt:
             # Prompt run.
@@ -224,7 +225,7 @@ class XFormersImpl(AttentionImpl):
                 attn_metadata.block_tables,
                 attn_metadata.context_lens,
                 attn_metadata.max_context_len,
-                attn_metadata.kv_cache_dtype,   
+                attn_metadata.kv_cache_dtype,
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
