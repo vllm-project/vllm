@@ -36,7 +36,6 @@ def test_contexted_kv_attention(
         torch.cuda.manual_seed(0)
     torch.set_default_device(device)
 
-
     # Need this, otherwise when we capture the graph the process
     # for GPU 1 would run on both GPU0 and GPU1 and things would hang
     #

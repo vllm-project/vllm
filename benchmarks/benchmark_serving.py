@@ -111,7 +111,6 @@ def sample_sonnet_requests(
     prefix_len: int,
     tokenizer: PreTrainedTokenizerBase,
 ) -> List[Tuple[str, str, int, int]]:
-
     assert input_len > prefix_len, "input_len must be greater than prefix_len."
 
     # Load the dataset.
@@ -133,12 +132,17 @@ def sample_sonnet_requests(
         base_message, add_generation_prompt=True, tokenize=False)
     base_prompt_offset = len(tokenizer(base_prompt_formatted).input_ids)
 
-    assert input_len > base_prompt_offset, f"input_len is too short, please specify a number higher than {base_prompt_offset}."
+    assert (
+        input_len > base_prompt_offset
+    ), f"Please set 'args.input-len' higher than {base_prompt_offset}."
     num_input_lines = round(
         (input_len - base_prompt_offset) / average_poem_len)
 
-    # First approximately `prefix_len` number of tokens in the prompt are fixed poem lines.
-    assert prefix_len > base_prompt_offset, f"prefix_len is too short, please specify a number higher than {base_prompt_offset}."
+    # First approximately `prefix_len` number of tokens in the 
+    # prompt are fixed poem lines.
+    assert (
+        prefix_len > base_prompt_offset
+    ), f"Please set 'args.prefix-len' higher than {base_prompt_offset}."
 
     num_prefix_lines = round(
         (prefix_len - base_prompt_offset) / average_poem_len)
@@ -197,10 +201,9 @@ def calculate_metrics(
     ttfts = []
     for i in range(len(outputs)):
         if outputs[i].success:
-
             # NOTE: we use the number of stream responses as output length if
-            # the backend supports streaming, else count output tokens by tokenizing
-            # the generated text.
+            # the backend supports streaming, else count output tokens by 
+            # tokenizing the generated text.
             if len(outputs[i].itl):
                 output_len = len(outputs[i].itl)
             else:
@@ -345,10 +348,10 @@ def main(args: argparse.Namespace):
         input_requests = sample_sharegpt_requests(
             dataset_path=args.dataset_path,
             num_requests=args.num_prompts,
-            tokenizer=tokenizer)
+            tokenizer=tokenizer,
+        )
 
     elif args.dataset_name == "sonnet":
-
         # Do not format the prompt, pass to message directly
         if args.backend == "openai-chat":
             input_requests = sample_sonnet_requests(
@@ -363,7 +366,9 @@ def main(args: argparse.Namespace):
                               for prompt, prompt_formatted, prompt_len,
                               output_len in input_requests]
         else:
-            assert tokenizer.chat_template or tokenizer.default_chat_template, "Tokenizer/model must have chat template for sonnet dataset."
+            assert (
+                tokenizer.chat_template or tokenizer.default_chat_template
+            ), "Tokenizer/model must have chat template for sonnet dataset."
             input_requests = sample_sonnet_requests(
                 dataset_path=args.dataset_path,
                 num_requests=args.num_prompts,
@@ -401,9 +406,9 @@ def main(args: argparse.Namespace):
         result_json["date"] = current_dt
         result_json["backend"] = backend
         result_json["version"] = args.version
-        result_json['tp_size'] = args.tp_size
-        result_json['pp_size'] = args.pp_size
-        result_json['device_name'] = args.device_name
+        result_json["tp_size"] = args.tp_size
+        result_json["pp_size"] = args.pp_size
+        result_json["device_name"] = args.device_name
         result_json["model_id"] = model_id
         result_json["tokenizer_id"] = tokenizer_id
         result_json["best_of"] = args.best_of
@@ -419,7 +424,7 @@ def main(args: argparse.Namespace):
 
         # Save to file
         base_model_id = model_id.split("/")[-1]
-        file_name = f"{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
+        file_name = f"{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json" #noqa
         if args.result_dir:
             file_name = os.path.join(args.result_dir, file_name)
         with open(file_name, "w") as outfile:
@@ -440,28 +445,32 @@ if __name__ == "__main__":
         type=str,
         default="N/A",
         help=
-        "Version of the serving backend/engine, if known. Only used in result json for record keeping purposes.",
+        "Version of the serving backend/engine, if known. "
+        "Only used in result json for record keeping purposes.",
     )
     parser.add_argument(
         "--tp-size",
         type=str,
         default="N/A",
         help=
-        "Size of tensor parallelism of the model server, if known. Only used in result json for record keeping purposes.",
+        "Size of tensor parallelism of the model server, if known. "
+        "Only used in result json for record keeping purposes.",
     )
     parser.add_argument(
         "--pp-size",
         type=str,
         default="N/A",
         help=
-        "Size of pipeline parallelism of the model server, if known. Only used in result json for record keeping purposes.",
+        "Size of pipeline parallelism of the model server, if known. "
+        "Only used in result json for record keeping purposes.",
     )
     parser.add_argument(
         "--device-name",
         type=str,
         default="N/A",
         help=
-        "Device name, if known. Only used in result json for record keeping purposes.",
+        "Device name, if known. Only used in result json for record "
+        "keeping purposes.",
     )
     parser.add_argument(
         "--base-url",
@@ -477,11 +486,13 @@ if __name__ == "__main__":
         default="/generate",
         help="API endpoint.",
     )
-    parser.add_argument("--dataset-name",
-                        type=str,
-                        default="sharegpt",
-                        choices=["sharegpt", "sonnet"],
-                        help="Name of the dataset to benchmark on.")
+    parser.add_argument(
+        "--dataset-name",
+        type=str,
+        default="sharegpt",
+        choices=["sharegpt", "sonnet"],
+        help="Name of the dataset to benchmark on.",
+    )
     parser.add_argument("--dataset-path",
                         type=str,
                         required=True,
