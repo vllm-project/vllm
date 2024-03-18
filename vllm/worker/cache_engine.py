@@ -37,7 +37,7 @@ class CacheEngine:
         self.num_gpu_blocks = cache_config.num_gpu_blocks
         self.num_cpu_blocks = cache_config.num_cpu_blocks
 
-        # Skip initializing CUDA stream and buffer for Neuron backend.
+        # Skip initializing KV cache for Neuron backend.
         if is_neuron():
             return
 
@@ -46,7 +46,7 @@ class CacheEngine:
         else:
             self.dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
-        # Attention backend.
+        # Get attention backend.
         self.attn_backend = get_attn_backend(model_config.dtype)
 
         # Initialize the cache.
