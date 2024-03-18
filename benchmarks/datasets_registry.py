@@ -5,7 +5,6 @@ from transformers import PreTrainedTokenizerBase
 from datasets import load_dataset
 from typing import List, Tuple, Optional
 from pathlib import Path
-import subprocess
 
 
 @dataclass
@@ -87,7 +86,9 @@ def get_ultrachat(tokenizer: PreTrainedTokenizerBase,
 
 # sharegpt
 # https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered
-SHAREGPT_DOWNLOAD_STR = "wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json"
+SHAREGPT_DOWNLOAD_STR = ("wget https://huggingface.co/datasets/anon8231489123/"
+                         "ShareGPT_Vicuna_unfiltered/resolve/main/"
+                         "ShareGPT_V3_unfiltered_cleaned_split.json")
 SHAREGPT_PATH = "ShareGPT_V3_unfiltered_cleaned_split.json"
 
 
@@ -96,9 +97,8 @@ def get_sharegpt(tokenizer: PreTrainedTokenizerBase,
     # Load data (possibly downloading first).
     share_gpt_path = Path(SHAREGPT_PATH)
     if not share_gpt_path.exists():
-        raise ValueError(
-            f"sharegpt not found. To download, run: \n\n\t{SHAREGPT_DOWNLOAD_STR}"
-        )
+        raise ValueError("sharegpt not found. To download, run:"
+                         f"\n\n\t{SHAREGPT_DOWNLOAD_STR}")
     assert share_gpt_path.exists()
     with open(share_gpt_path) as f:
         dataset = json.load(f)
@@ -130,8 +130,8 @@ def get_sonnet(tokenizer: PreTrainedTokenizerBase,
     sonnet_path = Path(SONNET_PATH)
     if not sonnet_path.exists():
         raise ValueError(
-            f"Sonnet not found. This should be in your `vllm/benchmarks directory."
-        )
+            "Sonnet not found. This should be in your `vllm/benchmarks "
+            "directory.")
     with open(sonnet_path) as f:
         poem_lines = f.readlines()
 
