@@ -5,7 +5,6 @@ import torch
 from vllm._C import cache_ops
 from vllm._C import ops
 from vllm.attention.ops.prefix_prefill import context_attention_fwd
-from vllm.model_executor.input_metadata import InputMetadata
 
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
@@ -23,15 +22,16 @@ class PagedAttention:
         value: torch.Tensor,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
-        input_metadata: InputMetadata,
+        slot_mapping: torch.Tensor,
+        kv_cache_dtype: str,
     ) -> None:
         cache_ops.reshape_and_cache(
             key,
             value,
             key_cache,
             value_cache,
-            input_metadata.slot_mapping.flatten(),
-            input_metadata.kv_cache_dtype,
+            slot_mapping.flatten(),
+            kv_cache_dtype,
         )
 
     @staticmethod
@@ -39,7 +39,10 @@ class PagedAttention:
         query: torch.Tensor,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
-        input_metadata: InputMetadata,
+        block_tables: torch.Tensor,
+        context_lens: torch.Tensor,
+        max_context_len: int,
+        kv_cache_dtype: str,
         num_kv_heads: int,
         scale: float,
         alibi_slopes: Optional[torch.Tensor],
@@ -49,7 +52,7 @@ class PagedAttention:
         block_size = value_cache.shape[3]
         num_seqs, num_heads, head_size = query.shape
         max_num_partitions = (
-            (input_metadata.max_context_len + _PARTITION_SIZE - 1) //
+            (max_context_len + _PARTITION_SIZE - 1) //
             _PARTITION_SIZE)
         # NOTE(woosuk): We use a simple heuristic to decide whether to use
         # PagedAttention V1 or V2. If the number of partitions is 1, we use
@@ -58,7 +61,7 @@ class PagedAttention:
         # to parallelize.
         # TODO(woosuk): Tune this heuristic.
         # For context len > 8192, use V2 kernel to avoid shared memory shortage.
-        use_v1 = input_metadata.max_context_len <= 8192 and (
+        use_v1 = max_context_len <= 8192 and (
             max_num_partitions == 1 or num_seqs * num_heads > 512)
         if use_v1:
             # Run PagedAttention V1.
@@ -69,12 +72,12 @@ class PagedAttention:
                 value_cache,
                 num_kv_heads,
                 scale,
-                input_metadata.block_tables,
-                input_metadata.context_lens,
+                block_tables,
+                context_lens,
                 block_size,
-                input_metadata.max_context_len,
+                max_context_len,
                 alibi_slopes,
-                input_metadata.kv_cache_dtype,
+                kv_cache_dtype,
             )
         else:
             # Run PagedAttention V2.
@@ -100,12 +103,12 @@ class PagedAttention:
                 value_cache,
                 num_kv_heads,
                 scale,
-                input_metadata.block_tables,
-                input_metadata.context_lens,
+                block_tables,
+                context_lens,
                 block_size,
-                input_metadata.max_context_len,
+                max_context_len,
                 alibi_slopes,
-                input_metadata.kv_cache_dtype,
+                kv_cache_dtype,
             )
         return output
 
@@ -116,7 +119,11 @@ class PagedAttention:
         value: torch.Tensor,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
-        input_metadata: InputMetadata,
+        block_tables: torch.Tensor,
+        start_loc: torch.Tensor,
+        prompt_lens: torch.Tensor,
+        context_lens: torch.Tensor,
+        max_seq_len: int,
         alibi_slopes: Optional[torch.Tensor],
     ) -> torch.Tensor:
         output = torch.empty_like(query)
@@ -127,11 +134,11 @@ class PagedAttention:
             output,
             key_cache,
             value_cache,
-            input_metadata.block_tables,  # [BS, max_block_per_request]
-            input_metadata.start_loc,
-            input_metadata.prompt_lens,
-            input_metadata.context_lens,
-            input_metadata.max_seq_len,
+            block_tables,  # [BS, max_block_per_request]
+            start_loc,
+            prompt_lens,
+            context_lens,
+            max_seq_len,
             alibi_slopes,
         )
         return output
