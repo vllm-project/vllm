@@ -152,8 +152,7 @@ class EngineArgs:
             'which is mainly for profiling.'
             '"tensorizer" will load the weights using tensorizer from CoreWeave'
             'which assumes tensorizer_uri is set to the location of the '
-                 'serialized weights.'
-        )
+            'serialized weights.')
         parser.add_argument(
             '--dtype',
             type=str,
@@ -422,7 +421,7 @@ class EngineArgs:
         engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
 
         engine_args.tensorizer_args = TensorizerArgs.from_cli_args(args) if (
-                engine_args.load_format == "tensorizer") else None
+            engine_args.load_format == "tensorizer") else None
 
         return engine_args
 

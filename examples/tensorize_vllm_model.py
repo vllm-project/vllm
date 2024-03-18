@@ -23,25 +23,24 @@ from vllm.model_executor.parallel_utils.parallel_state import \
 def parse_args():
     parser = argparse.ArgumentParser(
         description="An example script that can be used to serialize and "
-                    "deserialize vLLM models. These models "
-                    "can be loaded using tensorizer directly to the GPU "
-                    "extremely quickly. Tensor encryption and decryption is "
-                    "also supported, although libsodium must be installed to "
-                    "use it.")
+        "deserialize vLLM models. These models "
+        "can be loaded using tensorizer directly to the GPU "
+        "extremely quickly. Tensor encryption and decryption is "
+        "also supported, although libsodium must be installed to "
+        "use it.")
     parser = TensorizerArgs.add_cli_args(parser)
     parser.add_argument(
         "--model",
         type=str,
         required=True,
         help="The model reference name to serialize or deserialize. "
-             "This should be a HuggingFace ID for the model, e.g. "
-             "EleutherAI/gpt-j-6B.")
+        "This should be a HuggingFace ID for the model, e.g. "
+        "EleutherAI/gpt-j-6B.")
     parser.add_argument("--dtype",
                         type=str,
                         default="float16",
                         required=False,
-                        help="The dtype to cast the tensors to. "
-    )
+                        help="The dtype to cast the tensors to. ")
 
     subparsers = parser.add_subparsers(dest='command')
 
@@ -59,9 +58,7 @@ def parse_args():
             "`--suffix` is `v1`, the serialized model tensors will be "
             "saved to "
             "`s3://my-bucket/vllm/EleutherAI/gpt-j-6B/v1/model.tensors`. "
-            "If none is provided, a random UUID will be used."
-        )
-    )
+            "If none is provided, a random UUID will be used."))
     serialize_parser.add_argument(
         "--serialized-directory",
         type=str,
@@ -73,18 +70,14 @@ def parse_args():
         "and the model HuggingFace ID is `EleutherAI/gpt-j-6B`, tensors will "
         "be saved to `dir/vllm/EleutherAI/gpt-j-6B/suffix/model.tensors`, "
         "where `suffix` is given by `--suffix` or a random UUID if not "
-        "provided."
-    )
+        "provided.")
 
     serialize_parser.add_argument(
         "--keyfile",
         type=str,
         required=False,
-        help=(
-            "Encrypt the model weights with a randomly-generated binary key,"
-            " and save the key at this path"
-        )
-    )
+        help=("Encrypt the model weights with a randomly-generated binary key,"
+              " and save the key at this path"))
 
     deserialize_parser = subparsers.add_parser(
         'deserialize',
@@ -95,18 +88,14 @@ def parse_args():
         "--path-to-tensors",
         type=str,
         required=True,
-        help="The local path or S3 URI to the model tensors to deserialize. "
-    )
+        help="The local path or S3 URI to the model tensors to deserialize. ")
 
     deserialize_parser.add_argument(
         "--keyfile",
         type=str,
         required=False,
-        help=(
-            "Path to a binary key to use to decrypt the model weights,"
-            " if the model was serialized with encryption"
-        )
-    )
+        help=("Path to a binary key to use to decrypt the model weights,"
+              " if the model was serialized with encryption"))
 
     return parser.parse_args()
 
@@ -193,15 +182,15 @@ def deserialize():
 
     return model
 
+
 args = parse_args()
 
 s3_access_key_id = (args.s3_access_key_id or os.environ.get("S3_ACCESS_KEY_ID")
                     or None)
-s3_secret_access_key = (args.s3_secret_access_key or os.environ.get(
-    "S3_SECRET_ACCESS_KEY") or None)
+s3_secret_access_key = (args.s3_secret_access_key
+                        or os.environ.get("S3_SECRET_ACCESS_KEY") or None)
 
-s3_endpoint = (args.s3_endpoint or os.environ.get("S3_ENDPOINT_URL")
-               or None)
+s3_endpoint = (args.s3_endpoint or os.environ.get("S3_ENDPOINT_URL") or None)
 
 _read_stream, _write_stream = (partial(
     stream_io.open_stream,
@@ -210,7 +199,6 @@ _read_stream, _write_stream = (partial(
     s3_secret_access_key=s3_secret_access_key,
     s3_endpoint=s3_endpoint,
 ) for mode in ("rb", "wb+"))
-
 
 dtype = args.dtype
 
