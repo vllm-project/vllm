@@ -4,10 +4,10 @@ from vllm import EngineArgs, LLMEngine, SamplingParams, RequestOutput
 from transformers import AutoTokenizer
 
 
-N = 2048
+N = 4096
 
 
-def get_prompts(file_path="./mt_bench.jsonl") -> List[Tuple[str, SamplingParams]]:
+def get_chat_prompts(file_path="./mt_bench.jsonl") -> List[Tuple[str, SamplingParams]]:
     list_data_dict = []
     with open(file_path, "r") as f:
         for line in f:
@@ -18,6 +18,14 @@ def get_prompts(file_path="./mt_bench.jsonl") -> List[Tuple[str, SamplingParams]
         prompts += sample["turns"]
     
     return [(prompt, SamplingParams(max_tokens=N)) for prompt in prompts]
+
+
+def get_long_prompt(file_path="./paxos_paper.txt") -> Tuple[str, SamplingParams]:
+    # this file is 4060 tokens
+    with open(file_path, "r") as f:
+        prompt = f.read()
+
+    return [(prompt, SamplingParams(max_tokens=N))]
 
 
 def process_requests(engine: LLMEngine,
@@ -46,13 +54,15 @@ def process_requests(engine: LLMEngine,
 
 
 def main():
-    # context length 2048
-    model = "facebook/opt-125m"
+    # context length 4096
+    model = "lmsys/vicuna-7b-v1.5"
     args = EngineArgs(model=model, max_model_len=N)
 
     engine = LLMEngine.from_engine_args(args)
+    print("max model len", engine.scheduler_config.max_model_len)
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
-    prompts = get_prompts()
+    # prompts = get_chat_prompts()
+    prompts = get_long_prompt()
     process_requests(engine, prompts, tokenizer)
 
 

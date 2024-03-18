@@ -755,6 +755,10 @@ class LLMEngine:
             seq.status = SequenceStatus.FINISHED_STOPPED
             return
 
+        '''FIXME
+        Comment this out to temporarily bypass context length.
+        Output should start showing gibberish.
+        '''
         # Check if the sequence has reached max_model_len.
         if seq.get_len() > self.scheduler_config.max_model_len:
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
