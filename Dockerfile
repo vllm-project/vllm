@@ -38,6 +38,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # copy input files
 COPY csrc csrc
 COPY setup.py setup.py
+COPY cmake cmake
+COPY CMakeLists.txt CMakeLists.txt
 COPY requirements.txt requirements.txt
 COPY pyproject.toml pyproject.toml
 COPY vllm/__init__.py vllm/__init__.py
