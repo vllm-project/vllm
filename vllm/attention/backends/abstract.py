@@ -10,12 +10,12 @@ class AttentionBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def get_attention_impl_cls() -> Type["AttentionImpl"]:
+    def get_impl_cls() -> Type["AttentionImpl"]:
         raise NotImplementedError
 
     @staticmethod
     @abstractmethod
-    def get_attention_metadata_cls() -> Type["AttentionMetadata"]:
+    def make_metadata(*args, **kwargs) -> "AttentionMetadata":
         raise NotImplementedError
 
     @staticmethod

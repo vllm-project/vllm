@@ -16,12 +16,12 @@ from vllm.utils import is_hip
 class XFormersBackend(AttentionBackend):
 
     @staticmethod
-    def get_attention_impl_cls() -> Type["XFormersImpl"]:
+    def get_impl_cls() -> Type["XFormersImpl"]:
         return XFormersImpl
 
     @staticmethod
-    def get_attention_metadata_cls() -> Type["XFormersMetadata"]:
-        return XFormersMetadata
+    def make_metadata(*args, **kwargs) -> "XFormersMetadata":
+        return XFormersMetadata(*args, **kwargs)
 
     @staticmethod
     def get_kv_cache_shape(

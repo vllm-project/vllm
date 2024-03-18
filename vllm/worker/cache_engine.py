@@ -3,7 +3,7 @@ from typing import Dict, List
 
 import torch
 
-from vllm.attention.selector import get_attn_backend
+from vllm.attention import get_attn_backend
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
 from vllm.utils import in_wsl, is_neuron, STR_DTYPE_TO_TORCH_DTYPE

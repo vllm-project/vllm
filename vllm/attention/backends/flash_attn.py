@@ -12,9 +12,7 @@ from vllm.model_executor.input_metadata import InputMetadata
 
 class FlashAttentionBackend(AttentionBackend):
 
-    @staticmethod
-    def get_attention_impl_cls() -> Type["FlashAttentionImpl"]:
-        return FlashAttentionImpl
+    pass
 
 
 class FlashAttentionMetadata(AttentionMetadata):
