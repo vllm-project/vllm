@@ -1,0 +1,82 @@
+INFO 03-18 09:13:24 llm_engine.py:67] Initializing an LLM engine (v0.3.3) with config: model='lmsys/vicuna-7b-v1.5', tokenizer='lmsys/vicuna-7b-v1.5', tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.float16, max_seq_len=4096, download_dir=None, load_format=auto, tensor_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=False, kv_cache_dtype=auto, device_config=cuda, seed=0)
+INFO 03-18 09:13:26 attention.py:66] flash_attn is not found. Using xformers backend.
+INFO 03-18 09:13:27 weight_utils.py:167] Using model weights format ['*.bin']
+INFO 03-18 09:13:37 model_runner.py:96] Loading model weights took 12.5523 GB
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) torch.Size([256, 16, 4096]) k_cache=None v_cache=None
+INFO 03-18 09:13:38 gpu_executor.py:99] # GPU blocks: 7428, # CPU blocks: 512
+INFO 03-18 09:13:39 model_runner.py:691] Capturing the model for CUDA graphs. This may lead to unexpected consequences if the model is not static. To run the model in eager mode, set 'enforce_eager=True' or use '--enforce-eager' in the CLI.
+INFO 03-18 09:13:39 model_runner.py:695] CUDA graphs can take additional 1~3 GiB memory per GPU. If you are running out of memory, consider decreasing `gpu_memory_utilization` or enforcing eager mode. You can also reduce the `max_num_seqs` as needed to decrease memory usage.
+
+INFO 03-18 09:13:42 model_runner.py:763] Graph capturing finished in 3 secs.
+max model len 4096
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([1, 28, 4096]) torch.Size([7428, 32, 16, 16, 8]) torch.Size([7428, 32, 128, 16])
+
+OUTPUT: (101 tokens)
+hd2 years ago
+Join the viewer crowds lining up to catch a glimpse of the live volcano lava flow on the Big Island of Hawaii
+Words: Mark Rogan
+Pictures: Susan Glor
+
+Hawaii has long been a popular travel destination, famous for its stunning beaches, vibrant culture, and natural wonders. In this blog post, we will be highlighting our recent visit to the Big Island of Hawai

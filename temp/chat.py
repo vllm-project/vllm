@@ -4,7 +4,7 @@ from vllm import EngineArgs, LLMEngine, SamplingParams, RequestOutput
 from transformers import AutoTokenizer
 
 
-N = 4096
+MAX_GEN_TOKENS = 100
 
 
 def get_chat_prompts(file_path="./mt_bench.jsonl") -> List[Tuple[str, SamplingParams]]:
@@ -17,7 +17,7 @@ def get_chat_prompts(file_path="./mt_bench.jsonl") -> List[Tuple[str, SamplingPa
     for sample in list_data_dict:
         prompts += sample["turns"]
     
-    return [(prompt, SamplingParams(max_tokens=N)) for prompt in prompts]
+    return [(prompt, SamplingParams(max_tokens=MAX_GEN_TOKENS)) for prompt in prompts]
 
 
 def get_long_prompt(file_path="./paxos_paper.txt") -> Tuple[str, SamplingParams]:
@@ -25,7 +25,7 @@ def get_long_prompt(file_path="./paxos_paper.txt") -> Tuple[str, SamplingParams]
     with open(file_path, "r") as f:
         prompt = f.read()
 
-    return [(prompt, SamplingParams(max_tokens=N))]
+    return [(prompt, SamplingParams(max_tokens=MAX_GEN_TOKENS))]
 
 
 def process_requests(engine: LLMEngine,
@@ -44,8 +44,8 @@ def process_requests(engine: LLMEngine,
 
         for request_output in request_outputs:
             if request_output.finished:
-                print("\nPROMPT:")
-                print(request_output.prompt)
+                # print("\nPROMPT:")
+                # print(request_output.prompt)
 
                 text = request_output.outputs[0].text
                 num_tokens = len(tokenizer.tokenize(text))
@@ -56,14 +56,14 @@ def process_requests(engine: LLMEngine,
 def main():
     # context length 4096
     model = "lmsys/vicuna-7b-v1.5"
-    args = EngineArgs(model=model, max_model_len=N)
+    args = EngineArgs(model=model, max_model_len=4096)
 
     engine = LLMEngine.from_engine_args(args)
     print("max model len", engine.scheduler_config.max_model_len)
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
-    # prompts = get_chat_prompts()
-    prompts = get_long_prompt()
-    process_requests(engine, prompts, tokenizer)
+    prompts = get_chat_prompts()
+    # prompts = get_long_prompt()
+    process_requests(engine, prompts[:1], tokenizer)
 
 
 if __name__ == "__main__":

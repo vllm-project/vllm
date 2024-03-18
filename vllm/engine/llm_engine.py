@@ -760,9 +760,9 @@ class LLMEngine:
         Output should start showing gibberish.
         '''
         # Check if the sequence has reached max_model_len.
-        if seq.get_len() > self.scheduler_config.max_model_len:
-            seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
-            return
+        # if seq.get_len() > self.scheduler_config.max_model_len:
+        #     seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
+        #     return
 
         # Check if the sequence has reached max_tokens.
         if seq.get_output_len() == sampling_params.max_tokens:
