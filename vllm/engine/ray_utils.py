@@ -40,8 +40,9 @@ try:
                 # exceptions in ray worker may cause deadlock
                 # see https://github.com/vllm-project/vllm/issues/3455
                 # print the error and inform the user to solve the error
-                print(f"Error executing method {method}:\n{e!r}")
-                print("This might cause deadlock in distributed execution.")
+                msg = f"Error executing method {method}."
+                msg += "This might cause deadlock in distributed execution."
+                logger.exception(msg)
                 raise e
 
         def get_node_ip(self) -> str:
