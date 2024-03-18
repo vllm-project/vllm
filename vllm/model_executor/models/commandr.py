@@ -19,7 +19,6 @@
 # limitations under the License.
 
 # This file is based on the LLama model definition file in transformers
-
 """PyTorch Cohere model."""
 from typing import List, Optional, Tuple
 
@@ -41,8 +40,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_world_size,
-)
+    get_tensor_model_parallel_world_size, )
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (
     default_weight_loader,
@@ -181,6 +179,7 @@ class CohereConfig(PretrainedConfig):
 
 
 class LayerNorm(nn.Module):
+
     def __init__(self, hidden_size, eps=1e-5, bias=False):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
@@ -192,9 +191,8 @@ class LayerNorm(nn.Module):
         hidden_states = hidden_states.to(torch.float32)
         mean = hidden_states.mean(-1, keepdim=True)
         variance = (hidden_states - mean).pow(2).mean(-1, keepdim=True)
-        hidden_states = (hidden_states - mean) * torch.rsqrt(
-            variance + self.variance_epsilon
-        )
+        hidden_states = (hidden_states -
+                         mean) * torch.rsqrt(variance + self.variance_epsilon)
         hidden_states = self.weight.to(torch.float32) * hidden_states
         if self.bias is not None:
             hidden_states = hidden_states + self.bias.to(torch.float32)
@@ -206,6 +204,7 @@ ALL_LAYERNORM_LAYERS.append(LayerNorm)
 
 # Copied from transformers.models.llama.modeling_llama.LlamaMLP Llama->Cohere
 class CohereMLP(nn.Module):
+
     def __init__(
         self,
         config,
@@ -314,16 +313,18 @@ class CohereAttention(nn.Module):
 
 
 class CohereDecoderLayer(nn.Module):
-    def __init__(
-        self, config: CohereConfig, linear_method: Optional[LinearMethodBase] = None
-    ):
+
+    def __init__(self,
+                 config: CohereConfig,
+                 linear_method: Optional[LinearMethodBase] = None):
         super().__init__()
         self.hidden_size = config.hidden_size
 
         self.self_attn = CohereAttention(config, linear_method=linear_method)
 
         self.mlp = CohereMLP(config, linear_method=linear_method)
-        self.input_layernorm = LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.input_layernorm = LayerNorm(config.hidden_size,
+                                         eps=config.layer_norm_eps)
 
     def forward(
         self,
@@ -364,15 +365,12 @@ class CohereModel(nn.Module):
         super().__init__()
         self.config = config
         self.vocab_size = config.vocab_size
-        self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size, config.hidden_size
-        )
-        self.layers = nn.ModuleList(
-            [
-                CohereDecoderLayer(config, linear_method=linear_method)
-                for _ in range(config.num_hidden_layers)
-            ]
-        )
+        self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
+                                                   config.hidden_size)
+        self.layers = nn.ModuleList([
+            CohereDecoderLayer(config, linear_method=linear_method)
+            for _ in range(config.num_hidden_layers)
+        ])
         self.norm = LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
     def forward(
@@ -419,7 +417,8 @@ class CohereForCausalLM(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, kv_caches, input_metadata)
+        hidden_states = self.model(input_ids, positions, kv_caches,
+                                   input_metadata)
         return hidden_states
 
     def sample(
@@ -427,9 +426,8 @@ class CohereForCausalLM(nn.Module):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(
-            self.model.embed_tokens.weight, hidden_states, sampling_metadata
-        )
+        next_tokens = self.sampler(self.model.embed_tokens.weight,
+                                   hidden_states, sampling_metadata)
         return next_tokens
 
     def load_weights(
@@ -450,8 +448,7 @@ class CohereForCausalLM(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params = set()
         for name, loaded_weight in hf_model_weights_iterator(
-            model_name_or_path, cache_dir, load_format, revision
-        ):
+                model_name_or_path, cache_dir, load_format, revision):
             for param_name, shard_name, shard_id in stacked_params_mapping:
                 if shard_name not in name:
                     continue
@@ -462,6 +459,7 @@ class CohereForCausalLM(nn.Module):
                 break
             else:
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
