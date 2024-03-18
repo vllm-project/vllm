@@ -26,7 +26,6 @@ from vllm.utils import in_wsl, measure_cuda_memory
 
 logger = init_logger(__name__)
 
-KVCache = Tuple[torch.Tensor, torch.Tensor]
 _PAD_SLOT_ID = -1
 LORA_WARMUP_RANK = 8
 # Capture graphs for batch size 1, 2, 4, 8, 16, 24, 32, 40, ..., 256.
@@ -555,7 +554,7 @@ class ModelRunner:
     def execute_model(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+        kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, input_metadata, sampling_metadata,
          lora_requests,
@@ -633,7 +632,7 @@ class ModelRunner:
 
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
-        kv_caches = [(None, None)] * num_layers
+        kv_caches = [None] * num_layers
         self.execute_model(seqs, kv_caches)
         torch.cuda.synchronize()
         return
@@ -665,7 +664,7 @@ class ModelRunner:
         return self.lora_manager.list_loras()
 
     @torch.inference_mode()
-    def capture_model(self, kv_caches: List[KVCache]) -> None:
+    def capture_model(self, kv_caches: List[torch.Tensor]) -> None:
         # NOTE(woosuk): This is a hack to ensure that the NCCL backend is never
         # deleted before the CUDA graphs.
         self.cupy_nccl_backend = cupy_utils.get_nccl_backend()
@@ -770,7 +769,7 @@ class CUDAGraphRunner:
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[KVCache],
+        kv_caches: List[torch.Tensor],
         input_metadata: InputMetadata,
         memory_pool,
     ) -> None:
@@ -817,7 +816,7 @@ class CUDAGraphRunner:
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+        kv_caches: List[torch.Tensor],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
         # KV caches are fixed tensors, so we don't need to copy them.
