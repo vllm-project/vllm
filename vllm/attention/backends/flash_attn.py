@@ -1,23 +1,77 @@
 """Attention layer with Flash and PagedAttention."""
-from typing import List, Optional, Type
+# NOTE(woosuk): This file is temporary and will be replaced by
+# FlashInfer backend. At the moment, this file includes many duplicated
+# code from XFormers backend. The duplicated code will be removed once
+# FlashInfer backend is implemented.
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Type
 
 from flash_attn import flash_attn_func
 import torch
 
+from vllm._C import cache_ops
 from vllm.attention.backends.abstract import (
     AttentionBackend, AttentionImpl, AttentionMetadata)
 from vllm.attention.ops.paged_attn import PagedAttention
-from vllm.model_executor.input_metadata import InputMetadata
 
 
 class FlashAttentionBackend(AttentionBackend):
 
-    pass
+    @staticmethod
+    def get_impl_cls() -> Type["FlashAttentionImpl"]:
+        return FlashAttentionImpl
+
+    @staticmethod
+    def make_metadata(*args, **kwargs) -> "FlashAttentionMetadata":
+        return FlashAttentionMetadata(*args, **kwargs)
+
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+    ) -> Tuple[int, ...]:
+        return (2, num_blocks, block_size * num_kv_heads * head_size)
+
+    @staticmethod
+    def swap_blocks(
+        src_kv_cache: torch.Tensor,
+        dst_kv_cache: torch.Tensor,
+        src_to_dst: Dict[int, int],
+    ) -> None:
+        src_key_cache = src_kv_cache[0]
+        dst_key_cache = dst_kv_cache[0]
+        cache_ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
+
+        src_value_cache = src_kv_cache[1]
+        dst_value_cache = dst_kv_cache[1]
+        cache_ops.swap_blocks(src_value_cache, dst_value_cache, src_to_dst)
+
+    @staticmethod
+    def copy_blocks(
+        kv_caches: List[torch.Tensor],
+        src_to_dists: Dict[int, List[int]],
+    ) -> None:
+        key_caches = [kv_cache[0] for kv_cache in kv_caches]
+        value_caches = [kv_cache[1] for kv_cache in kv_caches]
+        cache_ops.copy_blocks(key_caches, value_caches, src_to_dists)
 
 
+@dataclass
 class FlashAttentionMetadata(AttentionMetadata):
 
-    pass
+    is_prompt: bool
+    slot_mapping: torch.Tensor
+    prompt_lens: Optional[torch.Tensor]
+    max_seq_len: Optional[int]
+    start_loc: Optional[torch.Tensor]
+    max_context_len: Optional[int]
+    context_lens: Optional[torch.Tensor]
+    block_tables: Optional[torch.Tensor]
+    # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
+    use_cuda_graph: bool
+    kv_cache_dtype: str
 
 
 class FlashAttentionImpl(AttentionImpl):
@@ -56,7 +110,7 @@ class FlashAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        input_metadata: InputMetadata,
+        attn_metadata: FlashAttentionMetadata,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 
@@ -64,11 +118,8 @@ class FlashAttentionImpl(AttentionImpl):
             query: shape = [batch_size, seq_len, num_heads * head_size]
             key: shape = [batch_size, seq_len, num_kv_heads * head_size]
             value: shape = [batch_size, seq_len, num_kv_heads * head_size]
-            key_cache: shape = [num_blocks, num_kv_heads, head_size/x,
-                block_size, x]
-            value_cache: shape = [num_blocks, num_kv_heads, head_size,
-                block_size]
-            input_metadata: metadata for the inputs.
+            kv_cache = [2, num_blocks, block_size * num_kv_heads * head_size]
+            attn_metadata: Metadata for attention.
         Returns:
             shape = [batch_size, seq_len, num_heads * head_size]
         """
@@ -78,18 +129,27 @@ class FlashAttentionImpl(AttentionImpl):
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
-        # Reshape the keys and values and store them in the cache.
-        # If key_cache and value_cache are not provided, the new key and value
-        # vectors will not be cached. This happens during the initial memory
-        # profiling run.
         if kv_cache is not None:
-            PagedAttention.reshape_and_cache(key, value, key_cache,
-                                                 value_cache, input_metadata)
+            x = 16 // kv_cache.element_size()
+            num_blocks = kv_cache.shape[1]
 
-        if input_metadata.is_prompt:
+            key_cache = kv_cache[0]
+            key_cache = key_cache.view(num_blocks, self.num_kv_heads,
+                                       self.head_size // x, -1, x)
+            value_cache = kv_cache[1]
+            value_cache = value_cache.view(num_blocks, self.num_kv_heads,
+                                           self.head_size, -1)
+
+            # Reshape the input keys and values and store them in the cache.
+            # If kv_cache is not provided, the new key and value tensors are
+            # not cached. This happens during the initial memory profiling run.
+            PagedAttention.reshape_and_cache(
+                key, value, key_cache, value_cache, attn_metadata.slot_mapping,
+                attn_metadata.kv_cache_dtype)
+
+        if attn_metadata.is_prompt:
             # Prompt run.
-            if (key_cache is None or value_cache is None
-                    or input_metadata.block_tables.numel() == 0):
+            if kv_cache is None or attn_metadata.block_tables.numel() == 0:
                 # normal attention
                 query = query.unflatten(0, (batch_size, seq_len))
                 key = key.unflatten(0, (batch_size, seq_len))
@@ -111,7 +171,11 @@ class FlashAttentionImpl(AttentionImpl):
                     value,
                     key_cache,
                     value_cache,
-                    input_metadata,
+                    attn_metadata.block_tables,
+                    attn_metadata.start_loc,
+                    attn_metadata.prompt_lens,
+                    attn_metadata.context_lens,
+                    attn_metadata.max_seq_len,
                     self.alibi_slopes,
                 )
         else:
@@ -120,7 +184,10 @@ class FlashAttentionImpl(AttentionImpl):
                 query,
                 key_cache,
                 value_cache,
-                input_metadata,
+                attn_metadata.block_tables,
+                attn_metadata.context_lens,
+                attn_metadata.max_context_len,
+                attn_metadata.kv_cache_dtype,   
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
