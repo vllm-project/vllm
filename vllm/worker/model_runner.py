@@ -123,7 +123,7 @@ class ModelRunner:
             (max(_BATCH_SIZES_TO_CAPTURE), self.get_max_block_per_batch()),
             dtype=np.int32)
 
-    def get_max_block_per_batch(self):
+    def get_max_block_per_batch(self) -> int:
         block_size = self.block_size
         return (self.max_context_len_to_capture + block_size - 1) // block_size
 
@@ -227,19 +227,14 @@ class ModelRunner:
                 slot_mapping.append(slot)
 
         max_subquery_len = max(subquery_lens)
+        max_seq_len = max(prompt_lens)
         num_prompt_tokens = len(input_tokens)
         assert max_subquery_len > 0
 
-        input_tokens = _make_tensor_with_pad_for_alignment(input_tokens,
-                                                           pad=0,
-                                                           dtype=torch.long,
-                                                           device=self.device)
-        input_positions = _make_tensor_with_pad_for_alignment(
+        input_tokens = _make_tensor(input_tokens, pad=0, dtype=torch.long, device=self.device)
+        input_positions = _make_tensor(
             input_positions, pad=0, dtype=torch.long, device=self.device)
-        slot_mapping = _make_tensor_with_pad_for_alignment(slot_mapping,
-                                                           pad=_PAD_SLOT_ID,
-                                                           dtype=torch.long,
-                                                           device=self.device)
+        slot_mapping = _make_tensor(slot_mapping, pad=_PAD_SLOT_ID, dtype=torch.long, device=self.device)
         lora_index_mapping = _pad_to_alignment(lora_index_mapping,
                                                _get_graph_batch_size(
                                                    len(lora_index_mapping)),
@@ -264,15 +259,14 @@ class ModelRunner:
                                             dtype=torch.long,
                                             device=self.device)
         subquery_start_loc = torch.zeros(subquery_lens_tensor.shape[0] + 1,
-                                       dtype=torch.long,
+                                       dtype=torch.int32,
                                        device=self.device)
 
-        seq_tensor = torch.add(subquery_lens_tensor, context_lens_tensor)
         prompt_lens_tensor = torch.tensor(prompt_lens,
                                                 dtype=torch.long,
                                                 device=self.device)
-        seq_start_loc = torch.zeros(seq_tensor.shape[0] + 1,
-                                       dtype=torch.long,
+        seq_start_loc = torch.zeros(prompt_lens_tensor.shape[0] + 1,
+                                       dtype=torch.int32,
                                        device=self.device)
 
         torch.cumsum(subquery_lens_tensor,
@@ -280,7 +274,7 @@ class ModelRunner:
                      dtype=subquery_start_loc.dtype,
                      out=subquery_start_loc[1:])
 
-        torch.cumsum(seq_tensor,
+        torch.cumsum(prompt_lens_tensor,
                      dim=0,
                      dtype=seq_start_loc.dtype,
                      out=seq_start_loc[1:])
@@ -294,6 +288,7 @@ class ModelRunner:
             num_generation_tokens=0,
             max_subquery_len=max_subquery_len,
             max_context_len=None,
+            max_seq_len=max_seq_len,
             subquery_start_loc=subquery_start_loc,
             seq_start_loc=seq_start_loc,
             context_lens=context_lens_tensor,
@@ -380,16 +375,10 @@ class ModelRunner:
 
         # Pad tokens to better utilize tensor cores although
         # cuda graph is not enabled.
-        input_tokens = _make_tensor_with_pad_for_alignment(input_tokens,
-                                                           pad=0,
-                                                           dtype=torch.long,
-                                                           device=self.device)
-        input_positions = _make_tensor_with_pad_for_alignment(
+        input_tokens = _make_tensor(input_tokens, pad=0, dtype=torch.long, device=self.device)
+        input_positions = _make_tensor(
             input_positions, pad=0, dtype=torch.long, device=self.device)
-        slot_mapping = _make_tensor_with_pad_for_alignment(slot_mapping,
-                                                           pad=_PAD_SLOT_ID,
-                                                           dtype=torch.long,
-                                                           device=self.device)
+        slot_mapping = _make_tensor(slot_mapping, pad=_PAD_SLOT_ID, dtype=torch.long, device=self.device)
         context_lens = torch.tensor(context_lens,
                                     dtype=torch.int,
                                     device=self.device)
@@ -434,6 +423,7 @@ class ModelRunner:
             num_generation_tokens=len(input_tokens),
             max_subquery_len=None,
             max_context_len=max_context_len,
+            max_seq_len=None,
             subquery_start_loc=None,
             seq_start_loc=None,
             context_lens=context_lens,
@@ -772,6 +762,7 @@ class ModelRunner:
                     num_generation_tokens=batch_size,
                     max_subquery_len=None,
                     max_context_len=self.max_context_len_to_capture,
+                    max_seq_len=None,
                     subquery_start_loc=None,
                     seq_start_loc=None,
                     context_lens=context_lens[:batch_size],
@@ -918,21 +909,22 @@ def _pad_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
     return x + [pad] * (max_len - len(x))
 
 
-def _make_tensor_with_pad_for_alignment(
+def _make_tensor(
     x: List[int],
     pad: int,
     dtype: torch.dtype,
     device: Optional[Union[str, torch.device]],
+    align: bool = False,
 ) -> torch.Tensor:
-    """Create a tensor of a given list x with padding.
+    """Create a tensor of a given list.
 
-    It adds paddings to align with graph batch size. See
-    _get_graph_batch_size for more details.
+    If `align` is True, it creates a tensor with a padding with a given `pad`.
     """
-    batch_size = len(x)
-    batch_size = _get_graph_batch_size(batch_size)
-    padded_x = _pad_to_alignment(x, batch_size, pad)
-    return torch.tensor(padded_x, dtype=dtype, device=device)
+    if align:
+        batch_size = len(x)
+        batch_size = _get_graph_batch_size(batch_size)
+        x = _pad_to_alignment(x, batch_size, pad)
+    return torch.tensor(x, dtype=dtype, device=device)
 
 
 def _make_tensor_with_pad(
@@ -942,6 +934,10 @@ def _make_tensor_with_pad(
     dtype: torch.dtype,
     device: Optional[Union[str, torch.device]],
 ) -> torch.Tensor:
+    """Make a padded tensor of a 2D inputs.
+
+    The padding is applied to the end of each inner list until it reaches `max_len`.
+    """
     padded_x = [_pad_to_max(x_i, max_len, pad) for x_i in x]
     return torch.tensor(padded_x, dtype=dtype, device=device)
 

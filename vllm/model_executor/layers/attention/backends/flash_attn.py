@@ -1,7 +1,7 @@
 """Attention layer with Flash and PagedAttention."""
 from typing import List, Optional
 
-from flash_attn import flash_attn_func
+from flash_attn import flash_attn_func, flash_attn_varlen_func
 import torch
 
 from vllm.model_executor.input_metadata import InputMetadata
@@ -77,19 +77,25 @@ class FlashAttentionBackend:
             PagedAttentionImpl.reshape_and_cache(key, value, key_cache,
                                                  value_cache, input_metadata)
 
+
         if input_metadata.is_prompt:
             # Prompt run.
             if (key_cache is None or value_cache is None
                     or input_metadata.block_tables.numel() == 0):
                 # normal attention
-                assert False
-                output = flash_attn_func(query,
-                                         key,
-                                         value,
-                                         softmax_scale=self.scale,
-                                         causal=True,
-                                         window_size=self.sliding_window,
-                                         alibi_slopes=self.alibi_slopes)
+                output = flash_attn_varlen_func(
+                    q=query,
+                    k=key,
+                    v=value,
+                    cu_seqlens_q=input_metadata.subquery_start_loc,
+                    cu_seqlens_k=input_metadata.seq_start_loc,
+                    max_seqlen_q=input_metadata.max_subquery_len,
+                    max_seqlen_k=input_metadata.max_seq_len,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    window_size=self.sliding_window,
+                    alibi_slopes=self.alibi_slopes,
+                )
             else:
                 # prefix-enabled attention
                 output = PagedAttentionImpl.forward_prefix(

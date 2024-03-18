@@ -19,17 +19,15 @@ class Attention(nn.Module):
     can either contain prompt tokens or generation tokens.
 
     If the input tensors contain prompt tokens, the layout is as follows:
-    |<---------------------- num_valid_tokens ---------------------->|	
     |<--------------- num_prompt_tokens -------------->|	
-    |<--prompt_0-->|<--prompt_1-->|...|<--prompt_N-1-->|<--padding-->|
+    |<--prompt_0-->|<--prompt_1-->|...|<--prompt_N-1-->|
 
     Otherwise, the layout is as follows:	
-    |<------------------ num_valid_tokens -------------------------->|	
-    |<---------- num_generation_tokens (M) ----------->|	
+    |<------------------ num_generation_tokens (M) ----------------->|	
     |<--generation_0-->|..........|<--generation_M-1-->|<--padding-->|
 
-    Both prompt and generation can contain padding for cuda-graph (currently
-    decoding only) or to be aligned with length 8 (so that it can utilize tensor cores).
+    Generation tokens can contain padding when cuda-graph is used.
+    Currently, prompt tokens don't contain any padding.
 
     The prompts might have different lengths, while the generation tokens always	
     have length 1. The paddings are appended to make the input length a multiple	
@@ -52,7 +50,7 @@ class Attention(nn.Module):
         sliding_window: Optional[int] = None,
     ) -> None:
         super().__init__()
-        if False and _use_flash_attn():
+        if _use_flash_attn():
             from vllm.model_executor.layers.attention.backends.flash_attn import FlashAttentionBackend  # noqa: E501
             self.backend = FlashAttentionBackend(num_heads, head_size, scale,
                                                  num_kv_heads, alibi_slopes,

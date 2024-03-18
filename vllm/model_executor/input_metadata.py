@@ -46,6 +46,8 @@ class InputMetadata:
     max_subquery_len: Optional[int]
     # Maximum context length in the batch.
     max_context_len: Optional[int]
+    # Maximum sequence length in the batch.
+    max_seq_len: Optional[int]
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in the batch, used to index into q.
     # E.g., if the subquery length is [4, 6], it is [0, 4, 10].
     subquery_start_loc: Optional[torch.Tensor]
