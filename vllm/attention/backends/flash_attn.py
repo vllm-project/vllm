@@ -121,15 +121,8 @@ class FlashAttentionImpl(AttentionImpl):
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
         if kv_cache is not None:
-            x = 16 // kv_cache.element_size()
-            num_blocks = kv_cache.shape[1]
-
-            key_cache = kv_cache[0]
-            key_cache = key_cache.view(num_blocks, self.num_kv_heads,
-                                       self.head_size // x, -1, x)
-            value_cache = kv_cache[1]
-            value_cache = value_cache.view(num_blocks, self.num_kv_heads,
-                                           self.head_size, -1)
+            key_cache, value_cache = PagedAttention.split_kv_cache(
+                kv_cache, self.num_kv_heads, self.head_size)
 
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
