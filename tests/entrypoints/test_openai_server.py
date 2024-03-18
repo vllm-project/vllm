@@ -687,6 +687,22 @@ async def test_response_format_json_object(server, client: openai.AsyncOpenAI):
     assert loaded == {"result": 2}, loaded
 
 
+async def test_complex_message_content(server, client: openai.AsyncOpenAI):
+    resp = await client.chat.completions.create(model=MODEL_NAME,
+                                                messages=[{
+                                                    "role":
+                                                    "user",
+                                                    "content": [{
+                                                        "type":
+                                                        "text",
+                                                        "text":
+                                                        "what is 1+1?"
+                                                    }]
+                                                }])
+    content = resp.choices[0].message.content
+    assert "2" in content
+
+
 async def test_guided_grammar(server, client: openai.AsyncOpenAI):
     simple_sql_grammar = """
 start: select_statement
