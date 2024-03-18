@@ -73,6 +73,10 @@ class TorchSDPABackend:
             if (key_cache is None or value_cache is None
                     or input_metadata.block_tables.numel() == 0):
 
+                if self.num_kv_heads != self.num_heads:
+                    key = torch.repeat_interleave(key, self.num_queries_per_kv, dim=1)
+                    value = torch.repeat_interleave(value, self.num_queries_per_kv, dim=1)
+
                 if self.need_mask and input_metadata.attn_bias is None:
                     if self.alibi_slopes is not None:
                         att_bias = _make_alibi_bias(self.alibi_slopes, self.num_kv_heads, batch_size, seq_len, query.dtype)
@@ -93,7 +97,8 @@ class TorchSDPABackend:
                     value, 
                     input_metadata.attn_bias,
                     0.0, 
-                    is_causal=not self.need_mask).movedim(query.dim() - 2, 1).contiguous()
+                    is_causal=not self.need_mask,
+                    scale=self.scale).movedim(query.dim() - 2, 1).contiguous()
                 # output = out.view_as(query)
                 # FIXME: half input will generate float output, next ipex release will fix this.
                 output = out.view_as(query).to(query.dtype)
