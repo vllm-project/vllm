@@ -11,6 +11,7 @@ from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.executor.executor_base import ExecutorBase
 from vllm.engine.metrics import StatLogger, Stats
+from vllm.model_executor import get_architecture
 from vllm.engine.ray_utils import initialize_ray_cluster
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -21,6 +22,8 @@ from vllm.transformers_utils.tokenizer import detokenize_incrementally
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
 from vllm.utils import Counter
+from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
+                                  usage_message)
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -52,6 +55,7 @@ class LLMEngine:
         executor_class: The model executor class for managing distributed
             execution.
         log_stats: Whether to log statistics.
+        usage_context: Specified entry point, used for usage info collection
     """
 
     def __init__(
@@ -64,6 +68,7 @@ class LLMEngine:
         lora_config: Optional[LoRAConfig],
         executor_class: Type[ExecutorBase],
         log_stats: bool,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
     ) -> None:
         logger.info(
             f"Initializing an LLM engine (v{vllm.__version__}) with config: "
@@ -103,6 +108,37 @@ class LLMEngine:
                                              parallel_config, scheduler_config,
                                              device_config, lora_config)
 
+        #If usage stat is enabled, collect relevant info.
+        if is_usage_stats_enabled():
+            usage_message.report_usage(
+                get_architecture(model_config, device_config),
+                usage_context,
+                extra_kvs={
+                    # Common configuration
+                    "dtype":
+                    str(model_config.dtype),
+                    "tensor_parallel_size":
+                    parallel_config.tensor_parallel_size,
+                    "block_size":
+                    cache_config.block_size,
+                    "gpu_memory_utilization":
+                    cache_config.gpu_memory_utilization,
+                    # Quantization
+                    "quantization":
+                    model_config.quantization,
+                    "kv_cache_dtype":
+                    cache_config.cache_dtype,
+                    # Feature flags
+                    "enable_lora":
+                    bool(lora_config),
+                    "enable_prefix_caching":
+                    cache_config.enable_prefix_caching,
+                    "enforce_eager":
+                    model_config.enforce_eager,
+                    "disable_custom_all_reduce":
+                    parallel_config.disable_custom_all_reduce,
+                })
+
         # Ping the tokenizer to ensure liveness if it runs in a
         # different process.
         self.tokenizer.ping()
@@ -120,7 +156,11 @@ class LLMEngine:
             self.stat_logger.info("cache_config", self.cache_config)
 
     @classmethod
-    def from_engine_args(cls, engine_args: EngineArgs) -> "LLMEngine":
+    def from_engine_args(
+        cls,
+        engine_args: EngineArgs,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT
+    ) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.
         engine_configs = engine_args.create_engine_configs()
@@ -140,7 +180,8 @@ class LLMEngine:
         # Create the LLM engine.
         engine = cls(*engine_configs,
                      executor_class=executor_class,
-                     log_stats=not engine_args.disable_log_stats)
+                     log_stats=not engine_args.disable_log_stats,
+                     usage_context=usage_context)
         return engine
 
     def __reduce__(self):
