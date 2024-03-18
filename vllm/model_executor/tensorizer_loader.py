@@ -6,7 +6,7 @@ import warnings
 import time
 import typing
 from typing import Optional
-from typing import Type, Union, Any, Callable
+from typing import Type, Union
 
 from dataclasses import dataclass
 from tensorizer import TensorDeserializer, stream_io, DecryptionParams
@@ -32,30 +32,28 @@ def _is_vllm_model(model_config: ModelConfig = None,
     else:
         return "vllm" in model_config.tensorizer_args.tensorizer_uri
 
+
 class ParameterizedLoadFormat(str):
     __slots__ = "params"
 
 
 class PerformanceWarning(UserWarning):
+
     def __str__(self):
-        return (
-            f"{super().__str__()}"
-            " (set the VLLM_SILENCE_PERFORMANCE_WARNINGS"
-            " environment variable to hide this)"
-        )
+        return (f"{super().__str__()}"
+                " (set the VLLM_SILENCE_PERFORMANCE_WARNINGS"
+                " environment variable to hide this)")
 
 
-if (
-        os.getenv("VLLM_SILENCE_PERFORMANCE_WARNINGS", "").lower()
-        not in ("", "0", "n", "no", "off", "disable")
-):
+if (os.getenv("VLLM_SILENCE_PERFORMANCE_WARNINGS", "").lower()
+        not in ("", "0", "n", "no", "off", "disable")):
     warnings.simplefilter("ignore", category=PerformanceWarning)
 
 
 @dataclass
 class TensorizerArgs:
     tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, typing.BinaryIO,
-    str, bytes, os.PathLike, int]
+                          str, bytes, os.PathLike, int]
     verify_hash: bool = False
     encryption_keyfile: Optional[str] = None
     s3_access_key_id: Optional[str] = None
@@ -86,13 +84,13 @@ class TensorizerArgs:
 
     def __post_init__(self):
         self.file_obj = self.tensorizer_uri
-        self.s3_access_key_id = (self.s3_access_key_id or os.environ.get(
-            "S3_ACCESS_KEY_ID")) or None
-        self.s3_secret_access_key = (self.s3_secret_access_key or
-                                     os.environ.get(
-            "S3_SECRET_ACCESS_KEY")) or None
-        self.s3_endpoint = (self.s3_endpoint or os.environ.get(
-            "S3_ENDPOINT_URL")) or None
+        self.s3_access_key_id = (self.s3_access_key_id
+                                 or os.environ.get("S3_ACCESS_KEY_ID")) or None
+        self.s3_secret_access_key = (
+            self.s3_secret_access_key
+            or os.environ.get("S3_SECRET_ACCESS_KEY")) or None
+        self.s3_endpoint = (self.s3_endpoint
+                            or os.environ.get("S3_ENDPOINT_URL")) or None
         self.stream_params = {
             "s3_access_key_id": self.s3_access_key_id,
             "s3_secret_access_key": self.s3_secret_access_key,
@@ -122,45 +120,42 @@ class TensorizerArgs:
             'tensorizer options',
             description=('Options for configuring the behavior of the'
                          ' tensorizer deserializer when '
-                         '--load-format=tensorizer'
-                         )
-        )
+                         '--load-format=tensorizer'))
 
         group.add_argument(
             "--tensorizer-uri",
             help="Path to serialized model tensors. Can be a local file path,"
-                 " or an HTTP(S) or S3 URI.",
+            " or an HTTP(S) or S3 URI.",
         )
         group.add_argument(
             "--verify-hash",
             action="store_true",
             help="If enabled, the hashes of each tensor will be verified"
-                 " against the hashes stored in the file metadata. An exception"
-                 " will be raised if any of the hashes do not match.",
+            " against the hashes stored in the file metadata. An exception"
+            " will be raised if any of the hashes do not match.",
         )
         group.add_argument(
             "--encryption-keyfile",
             default=None,
             help="The file path to a binary file containing a binary key to "
-                 "use for decryption. Can be a file path or S3 network URI."
-        )
+            "use for decryption. Can be a file path or S3 network URI.")
         group.add_argument(
             "--s3-access-key-id",
             default=None,
             help="The access key for the S3 bucket. Can also be set via the "
-                 "S3_ACCESS_KEY_ID environment variable.",
+            "S3_ACCESS_KEY_ID environment variable.",
         )
         group.add_argument(
             "--s3-secret-access-key",
             default=None,
             help="The secret access key for the S3 bucket. Can also be set via "
-                 "the S3_SECRET_ACCESS_KEY environment variable.",
+            "the S3_SECRET_ACCESS_KEY environment variable.",
         )
         group.add_argument(
             "--s3-endpoint",
             default=None,
             help="The endpoint for the S3 bucket. Can also be set via the "
-                 "S3_ENDPOINT_URL environment variable.",
+            "S3_ENDPOINT_URL environment variable.",
         )
 
         return parser
@@ -188,9 +183,9 @@ class TensorizerAgent:
     """
 
     def __init__(
-            self,
-            model_cls: Type[nn.Module],
-            model_config: ModelConfig,
+        self,
+        model_cls: Type[nn.Module],
+        model_config: ModelConfig,
     ):
         self.model_cls = model_cls
         self.model_config = model_config
@@ -225,9 +220,9 @@ class TensorizerAgent:
                 mode="rb",
                 **self.tensorizer_args.stream_params,
         ) as stream, TensorDeserializer(
-            stream,
-            dtype=self.model_config.dtype,
-            **self.tensorizer_args.deserializer_params) as deserializer:
+                stream,
+                dtype=self.model_config.dtype,
+                **self.tensorizer_args.deserializer_params) as deserializer:
             deserializer.load_into_module(self.model)
             end = time.perf_counter()
 
