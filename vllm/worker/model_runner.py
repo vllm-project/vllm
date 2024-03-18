@@ -226,12 +226,10 @@ class ModelRunner:
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
 
-        max_prompt_len = max(subquery_lens)
+        max_subquery_len = max(subquery_lens)
         num_prompt_tokens = len(input_tokens)
-        assert max_prompt_len > 0
+        assert max_subquery_len > 0
 
-        # Pad tokens to better utilize tensor cores although
-        # cuda graph is not enabled.
         input_tokens = _make_tensor_with_pad_for_alignment(input_tokens,
                                                            pad=0,
                                                            dtype=torch.long,
@@ -260,29 +258,44 @@ class ModelRunner:
             device=self.device,
         )
 
-        # Cumulative index of each prompt. [prompt_lens + 1]
-        # [0, 0+1th, 0+1th+2nd, ...]
+        # Query length can be shorter than key (i.e., prompt) when prefill
+        # is chunked or prefix cached.
         subquery_lens_tensor = torch.tensor(subquery_lens,
                                             dtype=torch.long,
                                             device=self.device)
-        start_loc_tensor = torch.zeros(subquery_lens_tensor.shape[0],
+        subquery_start_loc = torch.zeros(subquery_lens_tensor.shape[0] + 1,
                                        dtype=torch.long,
                                        device=self.device)
 
-        torch.cumsum(subquery_lens_tensor[:-1],
+        seq_tensor = torch.add(subquery_lens_tensor, context_lens_tensor)
+        prompt_lens_tensor = torch.tensor(prompt_lens,
+                                                dtype=torch.long,
+                                                device=self.device)
+        seq_start_loc = torch.zeros(seq_tensor.shape[0] + 1,
+                                       dtype=torch.long,
+                                       device=self.device)
+
+        torch.cumsum(subquery_lens_tensor,
                      dim=0,
-                     dtype=start_loc_tensor.dtype,
-                     out=start_loc_tensor[1:])
+                     dtype=subquery_start_loc.dtype,
+                     out=subquery_start_loc[1:])
+
+        torch.cumsum(seq_tensor,
+                     dim=0,
+                     dtype=seq_start_loc.dtype,
+                     out=seq_start_loc[1:])
 
         input_metadata = InputMetadata(
             is_prompt=True,
             slot_mapping=slot_mapping,
             prompt_lens=prompt_lens,
+            prompt_lens_tensor=prompt_lens_tensor,
             num_prompt_tokens=num_prompt_tokens,
             num_generation_tokens=0,
-            max_seq_len=max_prompt_len,
-            start_loc=start_loc_tensor,
+            max_subquery_len=max_subquery_len,
             max_context_len=None,
+            subquery_start_loc=subquery_start_loc,
+            seq_start_loc=seq_start_loc,
             context_lens=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=False,
@@ -416,11 +429,13 @@ class ModelRunner:
             is_prompt=False,
             slot_mapping=slot_mapping,
             prompt_lens=None,
+            prompt_lens_tensor=None,
             num_prompt_tokens=0,
             num_generation_tokens=len(input_tokens),
-            max_seq_len=None,
-            start_loc=None,
+            max_subquery_len=None,
             max_context_len=max_context_len,
+            subquery_start_loc=None,
+            seq_start_loc=None,
             context_lens=context_lens,
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
@@ -696,15 +711,15 @@ class ModelRunner:
     def capture_model(self, kv_caches: List[KVCache]) -> None:
         """Cuda graph capture a model.
 
-        Note that cuda graph performance gain is negligible if number
-        of batched tokens are less than 200. And since Cuda graph
+        Note that CUDA graph's performance gain is negligible if number
+	    of batched tokens are larger than 200. And since CUDA graph
         requires fixed sized tensors, supporting large/variable batch
         size requires high GPU memory overhead. Thus, vLLM only captures
         decoding requests. Mixed batch (chunked prefill + decoding) or
         prefill requests are not captured.
 
-        this API assumes the shape is N batches of tokens flattened to 1D
-        tensor, where is token's seqlen is 1.
+        Since it is used for decoding-only, it assumes there's only 1 token
+        per sequence in the batch.
         """
         # NOTE(woosuk): This is a hack to ensure that the NCCL backend is never
         # deleted before the CUDA graphs.
@@ -728,7 +743,7 @@ class ModelRunner:
         input_positions = torch.zeros(max_batch_size, dtype=torch.long).cuda()
         slot_mapping = torch.empty(max_batch_size, dtype=torch.long).cuda()
         slot_mapping.fill_(_PAD_SLOT_ID)
-        context_lens = torch.zeros(max_batch_size, dtype=torch.int32).cuda()
+        context_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
         block_tables = torch.from_numpy(self.graph_block_tables).cuda()
 
         graph_batch_size = _get_graph_batch_size(
@@ -752,11 +767,13 @@ class ModelRunner:
                     is_prompt=False,
                     slot_mapping=slot_mapping[:batch_size],
                     prompt_lens=None,
+                    prompt_lens_tensor=None,
                     num_prompt_tokens=0,
-                    num_generation_tokens=0,
-                    max_seq_len=None,
-                    start_loc=None,
+                    num_generation_tokens=batch_size,
+                    max_subquery_len=None,
                     max_context_len=self.max_context_len_to_capture,
+                    subquery_start_loc=None,
+                    seq_start_loc=None,
                     context_lens=context_lens[:batch_size],
                     block_tables=block_tables[:batch_size],
                     use_cuda_graph=True,
@@ -908,6 +925,7 @@ def _make_tensor_with_pad_for_alignment(
     device: Optional[Union[str, torch.device]],
 ) -> torch.Tensor:
     """Create a tensor of a given list x with padding.
+
     It adds paddings to align with graph batch size. See
     _get_graph_batch_size for more details.
     """
@@ -930,7 +948,7 @@ def _make_tensor_with_pad(
 
 def _get_graph_batch_size(batch_size: int) -> int:
     """Returns the padded batch size given actual batch size.
-    
+
     Batch sizes are 1, 2, 4, _BATCH_SIZE_ALIGNMENT,
     2*_BATCH_SIZE_ALIGNMENT, 3*_BATCH_SIZE_ALIGNMENT...
     """

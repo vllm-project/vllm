@@ -82,9 +82,7 @@ class FlashAttentionBackend:
             if (key_cache is None or value_cache is None
                     or input_metadata.block_tables.numel() == 0):
                 # normal attention
-                query = query.unflatten(0, (num_tokens, ))
-                key = key.unflatten(0, (num_tokens, ))
-                value = value.unflatten(0, (num_tokens, ))
+                assert False
                 output = flash_attn_func(query,
                                          key,
                                          value,

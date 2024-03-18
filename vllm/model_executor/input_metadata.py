@@ -10,43 +10,61 @@ class InputMetadata:
     """Metadata for input sequences. Used in PagedAttention.
 
     NOTE: Any python object stored here is not updated when it is
-    cuda-graph replays. If you have values that need to be changed
+    cuda-graph replayed. If you have values that need to be changed
     dynamically, it should be stored in tensor. The tensor has to be
     updated from `CUDAGraphRunner.forward` API.
-
-    Args:
-        prompt_lens: Lengths of prompts per sequence.
-        slot_mapping: The indices of the token slots that input tokens will be stored into.
-	        E.g., if `slot_mapping` is [35, 2, 17] and the block size is 16, the three tokens
-	        are stored in the 3rd slot in block 2, 2nd slot in block 0, and 1st slot in block 1,
-	        respectively. 
-        num_prompt_tokens: The total number of tokens in the prompts. This might
-            include padding.
-        num_generation_tokens: The number of tokens in the generation sequences.
-            This might include padding.
-        max_context_len: The maximum context length.
-        context_lens: the length of attention context for each sequence.
-            I.e., the number of tokens that have attended so far.
-        block_tables: The block tables. (Seq id -> list of physical block)
-        kv_cache_dtype: Data type to store kv cache.
     """
+    # Currently, input sequences can only contain all prompts
+    # or all decoding. True if all sequences are prompts.
     is_prompt: bool
+    # (num_tokens,). The indices of the token slots that input tokens will be stored into.
+    # E.g., if `slot_mapping` is [35, 2, 17] and the block size is 16, the three tokens
+    # are stored in the 3rd slot in block 2, 2nd slot in block 0, and 1st slot in block 1,
+    # respectively. 
     slot_mapping: torch.Tensor
+    # (batch_size,). The prompt length per sequence. None if it is a decoding.
     prompt_lens: Optional[List]
+    # prompt_lens stored as a tensor.
+    prompt_lens_tensor: Optional[torch.Tensor]
+    # The number of prompt tokens. Doesn't include padding.
     num_prompt_tokens: int
+    # The number of generation tokens. Doesn't include padding.
     num_generation_tokens: int
-    max_seq_len: Optional[int]
-    start_loc: Optional[torch.Tensor]
+
+    """
+    Definition of context_len, subquery_len, and seqlen.
+    |---------- N-1 iteration --------|
+    |---------------- N iteration ---------------------|
+    |- tokenA -|......................|-- newTokens ---|
+    |---------- context_len ----------|
+    |-------------------- seqlen ----------------------|
+                                      |- subquery_len -|
+    
+    """
+
+    # Maximum sequence length in the batch.
+    max_subquery_len: Optional[int]
+    # Maximum context length in the batch.
     max_context_len: Optional[int]
-    # [batch_size]. Each index means each sequence, and the value means the length of tokens stored in the kv cache.
-    # NOTE(sang): When it is prefill/decoding, the definition is different. For prefill, it means the the length of KV that are cached excluding the new KVs. In decoding, this includes a new KV.
+    # (batch_size + 1,). The cumulative subquery lengths of the sequences in the batch, used to index into q.
+    # E.g., if the subquery length is [4, 6], it is [0, 4, 10].
+    subquery_start_loc: Optional[torch.Tensor]
+    # (batch_size + 1,). The cumulative sequence lengths of the sequences in the batch, used to index into k.
+    # E.g., if the sequence length is [4, 6], it is [0, 4, 10].
+    seq_start_loc: Optional[torch.Tensor]
+    # (batch_size,). The length of context (tokens stored in KV cache) per
+    # sequence. It doesn't include the length of new tokens.
     context_lens: Optional[torch.Tensor]
+    # (batch_size, max_blocks_per_seq).
+    # Block addresses per sequence. (Seq id -> list of physical block)
+    # E.g., [0, 1, 2] means tokens are stored in 0th, 1st, and 2nd blocks
+    # in the kv cache. Each block can contain up to block_size tokens.
+    # The first dimension is padded if it is cuda-graph captured.
     block_tables: Optional[torch.Tensor]
+    # Whether or not if cuda graph is enabled.
+    # Cuda-graph is currently enabled for decoding only.
     use_cuda_graph: bool
     kv_cache_dtype: str
-
-    # Fields below are initialiezd in post init.
-    prompt_lens_tensor: Optional[torch.Tensor] = None
 
     def __post_init__(self):
         # Set during the execution of the first attention op.
@@ -55,7 +73,7 @@ class InputMetadata:
         # from xformer API.
         # will not appear in the __repr__ and __init__
         self.attn_bias: Optional[List[AttentionBias]] = None
-        if self.prompt_lens is not None:
-            self.prompt_lens_tensor = torch.tensor(self.prompt_lens,
-                                                   dtype=torch.long,
-                                                   device=self.slot_mapping.device)
+
+        # Cuda graph is only used for decoding now.
+        if self.use_cuda_graph:
+            assert self.num_prompt_tokens == 0

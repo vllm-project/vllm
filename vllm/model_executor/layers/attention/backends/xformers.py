@@ -204,7 +204,6 @@ class XFormersBackend:
         # FIXME(woosuk): Because xformers does not support dynamic sequence
         # lengths with custom attention bias, we process each prompt one by
         # one. This is inefficient, especially when we have many short prompts.
-        print("SANG-TODO alibi slopes.")
         output = torch.empty_like(query)
         start = 0
         for i, prompt_len in enumerate(input_metadata.prompt_lens):
