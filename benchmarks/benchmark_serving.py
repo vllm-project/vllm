@@ -132,13 +132,12 @@ def sample_sonnet_requests(
         base_message, add_generation_prompt=True, tokenize=False)
     base_prompt_offset = len(tokenizer(base_prompt_formatted).input_ids)
 
-    assert (
-        input_len > base_prompt_offset
-    ), f"Please set 'args.input-len' higher than {base_prompt_offset}."
+    assert (input_len > base_prompt_offset
+            ), f"Please set 'args.input-len' higher than {base_prompt_offset}."
     num_input_lines = round(
         (input_len - base_prompt_offset) / average_poem_len)
 
-    # First approximately `prefix_len` number of tokens in the 
+    # First approximately `prefix_len` number of tokens in the
     # prompt are fixed poem lines.
     assert (
         prefix_len > base_prompt_offset
@@ -202,7 +201,7 @@ def calculate_metrics(
     for i in range(len(outputs)):
         if outputs[i].success:
             # NOTE: we use the number of stream responses as output length if
-            # the backend supports streaming, else count output tokens by 
+            # the backend supports streaming, else count output tokens by
             # tokenizing the generated text.
             if len(outputs[i].itl):
                 output_len = len(outputs[i].itl)
@@ -424,7 +423,7 @@ def main(args: argparse.Namespace):
 
         # Save to file
         base_model_id = model_id.split("/")[-1]
-        file_name = f"{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json" #noqa
+        file_name = f"{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"  #noqa
         if args.result_dir:
             file_name = os.path.join(args.result_dir, file_name)
         with open(file_name, "w") as outfile:
@@ -444,32 +443,28 @@ if __name__ == "__main__":
         "--version",
         type=str,
         default="N/A",
-        help=
-        "Version of the serving backend/engine, if known. "
+        help="Version of the serving backend/engine, if known. "
         "Only used in result json for record keeping purposes.",
     )
     parser.add_argument(
         "--tp-size",
         type=str,
         default="N/A",
-        help=
-        "Size of tensor parallelism of the model server, if known. "
+        help="Size of tensor parallelism of the model server, if known. "
         "Only used in result json for record keeping purposes.",
     )
     parser.add_argument(
         "--pp-size",
         type=str,
         default="N/A",
-        help=
-        "Size of pipeline parallelism of the model server, if known. "
+        help="Size of pipeline parallelism of the model server, if known. "
         "Only used in result json for record keeping purposes.",
     )
     parser.add_argument(
         "--device-name",
         type=str,
         default="N/A",
-        help=
-        "Device name, if known. Only used in result json for record "
+        help="Device name, if known. Only used in result json for record "
         "keeping purposes.",
     )
     parser.add_argument(
