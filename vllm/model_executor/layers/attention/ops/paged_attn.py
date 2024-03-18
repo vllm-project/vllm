@@ -121,15 +121,6 @@ class PagedAttentionImpl:
         alibi_slopes: Optional[torch.Tensor],
     ) -> torch.Tensor:
         output = torch.empty_like(query)
-        print("SANG-TODO prefix attention!")
-        print(f"{input_metadata.block_tables=}")
-        print(f"{input_metadata.start_loc=}")
-        print(f"{input_metadata.prompt_lens=}")
-        print(f"{input_metadata.context_lens=}")
-        print(f"{input_metadata.max_seq_len=}")
-        print(f"{query.size()=}")
-        print(f"{key.size()=}")
-        print(f"{value.size()=}")
         context_attention_fwd(
             query,
             key,
@@ -137,11 +128,12 @@ class PagedAttentionImpl:
             output,
             key_cache,
             value_cache,
-            input_metadata.block_tables,  # [BS, max_block_per_request]
-            input_metadata.start_loc,
-            input_metadata.prompt_lens,
+            input_metadata.block_tables,
+            # subquery_start_loc is (batch_size + 1,)
+            input_metadata.subquery_start_loc[:-1],
+            input_metadata.prompt_lens_tensor,
             input_metadata.context_lens,
-            input_metadata.max_seq_len,
+            input_metadata.max_subquery_len,
             alibi_slopes,
         )
         return output

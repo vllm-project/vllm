@@ -7,7 +7,7 @@ import torch.nn as nn
 
 from vllm.logger import init_logger
 from vllm.model_executor.input_metadata import InputMetadata
-# from vllm.utils import is_hip
+from vllm.utils import is_hip
 
 logger = init_logger(__name__)
 
@@ -18,20 +18,19 @@ class Attention(nn.Module):
     This class takes query, key, and value tensors as input. The input tensors
     can either contain prompt tokens or generation tokens.
 
-
-    If the input tensors contain prompt tokens, the layout is as follows:	
-    |<---------------------- num_valid_tokens ---------------------->|	
+    If the input tensors contain prompt tokens, the layout is as follows:
     |<--------------- num_prompt_tokens -------------->|	
-    |<--prompt_0-->|<--prompt_1-->|...|<--prompt_N-1-->|<--padding-->|	
+    |<--prompt_0-->|<--prompt_1-->|...|<--prompt_N-1-->|
 
     Otherwise, the layout is as follows:	
-    |<------------------ num_valid_tokens ------------------->|	
-    |<------- num_generation_tokens (M) ------->|	
-    |<--generation_0-->|...|<--generation_M-1-->|<--padding-->|	
+    |<------------------ num_generation_tokens (M) ----------------->|	
+    |<--generation_0-->|..........|<--generation_M-1-->|<--padding-->|
 
-    The prompts might have different lengths, while the generation tokens always	
-    have length 1. The paddings are appended to make the input length a multiple	
-    of 8, which is desirable for Tensor Cores.
+    Generation tokens can contain padding when cuda-graph is used.
+    Currently, prompt tokens don't contain any padding.
+
+    The prompts might have different lengths, while the generation tokens
+    always have length 1.
 
     The class does the following:
 
@@ -50,7 +49,7 @@ class Attention(nn.Module):
         sliding_window: Optional[int] = None,
     ) -> None:
         super().__init__()
-        if False and _use_flash_attn():
+        if _use_flash_attn():
             from vllm.model_executor.layers.attention.backends.flash_attn import FlashAttentionBackend  # noqa: E501
             self.backend = FlashAttentionBackend(num_heads, head_size, scale,
                                                  num_kv_heads, alibi_slopes,
