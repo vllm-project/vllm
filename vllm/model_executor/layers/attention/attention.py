@@ -29,9 +29,8 @@ class Attention(nn.Module):
     Generation tokens can contain padding when cuda-graph is used.
     Currently, prompt tokens don't contain any padding.
 
-    The prompts might have different lengths, while the generation tokens always	
-    have length 1. The paddings are appended to make the input length a multiple	
-    of 8, which is desirable for Tensor Cores.
+    The prompts might have different lengths, while the generation tokens
+    always have length 1.
 
     The class does the following:
 

@@ -236,7 +236,8 @@ def _make_alibi_bias(
         # here. We find that both biases give the same results, but
         # the bias below more accurately follows the original ALiBi
         # paper.
-        # Calculate a matrix where each element represents ith element - jth element.
+        # Calculate a matrix where each element represents ith element- jth
+        # element.
         bias = bias[None, :] - bias[:, None]
 
         padded_len = _get_aligned_size(prompt_len, 8)

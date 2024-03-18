@@ -155,7 +155,7 @@ class ModelRunner:
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
             computed_len = 0
-            import os
+
             # NOTE: This only works for oooooooxxx style attention.
             computed_block_nums = seq_group_metadata.computed_block_nums
             if computed_block_nums is not None and len(
@@ -165,14 +165,6 @@ class ModelRunner:
                 prompt_tokens = prompt_tokens[computed_len:]
                 prefix_block_tables.append(computed_block_nums)
                 context_len = computed_len
-            if os.getenv("ENABLE") is not None:
-                if seq_group_metadata.block_tables is None:
-                    prefix_block_tables.append([])
-                else:
-                    block_table = seq_group_metadata.block_tables[seq_id]
-                    prefix_block_tables.append(block_table)
-                # prefix_block_tables.append([])
-                context_len = 0
             else:
                 prefix_block_tables.append([])
                 context_len = 0
@@ -231,10 +223,18 @@ class ModelRunner:
         num_prompt_tokens = len(input_tokens)
         assert max_subquery_len > 0
 
-        input_tokens = _make_tensor(input_tokens, pad=0, dtype=torch.long, device=self.device)
-        input_positions = _make_tensor(
-            input_positions, pad=0, dtype=torch.long, device=self.device)
-        slot_mapping = _make_tensor(slot_mapping, pad=_PAD_SLOT_ID, dtype=torch.long, device=self.device)
+        input_tokens = _make_tensor(input_tokens,
+                                    pad=0,
+                                    dtype=torch.long,
+                                    device=self.device)
+        input_positions = _make_tensor(input_positions,
+                                       pad=0,
+                                       dtype=torch.long,
+                                       device=self.device)
+        slot_mapping = _make_tensor(slot_mapping,
+                                    pad=_PAD_SLOT_ID,
+                                    dtype=torch.long,
+                                    device=self.device)
         lora_index_mapping = _pad_to_alignment(lora_index_mapping,
                                                _get_graph_batch_size(
                                                    len(lora_index_mapping)),
@@ -259,15 +259,15 @@ class ModelRunner:
                                             dtype=torch.long,
                                             device=self.device)
         subquery_start_loc = torch.zeros(subquery_lens_tensor.shape[0] + 1,
-                                       dtype=torch.int32,
-                                       device=self.device)
+                                         dtype=torch.int32,
+                                         device=self.device)
 
         prompt_lens_tensor = torch.tensor(prompt_lens,
-                                                dtype=torch.long,
-                                                device=self.device)
+                                          dtype=torch.long,
+                                          device=self.device)
         seq_start_loc = torch.zeros(prompt_lens_tensor.shape[0] + 1,
-                                       dtype=torch.int32,
-                                       device=self.device)
+                                    dtype=torch.int32,
+                                    device=self.device)
 
         torch.cumsum(subquery_lens_tensor,
                      dim=0,
@@ -375,10 +375,18 @@ class ModelRunner:
 
         # Pad tokens to better utilize tensor cores although
         # cuda graph is not enabled.
-        input_tokens = _make_tensor(input_tokens, pad=0, dtype=torch.long, device=self.device)
-        input_positions = _make_tensor(
-            input_positions, pad=0, dtype=torch.long, device=self.device)
-        slot_mapping = _make_tensor(slot_mapping, pad=_PAD_SLOT_ID, dtype=torch.long, device=self.device)
+        input_tokens = _make_tensor(input_tokens,
+                                    pad=0,
+                                    dtype=torch.long,
+                                    device=self.device)
+        input_positions = _make_tensor(input_positions,
+                                       pad=0,
+                                       dtype=torch.long,
+                                       device=self.device)
+        slot_mapping = _make_tensor(slot_mapping,
+                                    pad=_PAD_SLOT_ID,
+                                    dtype=torch.long,
+                                    device=self.device)
         context_lens = torch.tensor(context_lens,
                                     dtype=torch.int,
                                     device=self.device)
@@ -702,7 +710,7 @@ class ModelRunner:
         """Cuda graph capture a model.
 
         Note that CUDA graph's performance gain is negligible if number
-	    of batched tokens are larger than 200. And since CUDA graph
+        of batched tokens are larger than 200. And since CUDA graph
         requires fixed sized tensors, supporting large/variable batch
         size requires high GPU memory overhead. Thus, vLLM only captures
         decoding requests. Mixed batch (chunked prefill + decoding) or
@@ -936,7 +944,8 @@ def _make_tensor_with_pad(
 ) -> torch.Tensor:
     """Make a padded tensor of a 2D inputs.
 
-    The padding is applied to the end of each inner list until it reaches `max_len`.
+    The padding is applied to the end of each inner list until it reaches
+    `max_len`.
     """
     padded_x = [_pad_to_max(x_i, max_len, pad) for x_i in x]
     return torch.tensor(padded_x, dtype=dtype, device=device)

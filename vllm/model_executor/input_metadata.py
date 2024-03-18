@@ -17,10 +17,10 @@ class InputMetadata:
     # Currently, input sequences can only contain all prompts
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
-    # (num_tokens,). The indices of the token slots that input tokens will be stored into.
-    # E.g., if `slot_mapping` is [35, 2, 17] and the block size is 16, the three tokens
-    # are stored in the 3rd slot in block 2, 2nd slot in block 0, and 1st slot in block 1,
-    # respectively. 
+    # (num_tokens,). The indices of the token slots that input tokens will be
+    # stored into. E.g., if `slot_mapping` is [35, 2, 17] and the block size
+    # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
+    # in block 0, and 1st slot in block 1, respectively.
     slot_mapping: torch.Tensor
     # (batch_size,). The prompt length per sequence. None if it is a decoding.
     prompt_lens: Optional[List]
@@ -30,7 +30,6 @@ class InputMetadata:
     num_prompt_tokens: int
     # The number of generation tokens. Doesn't include padding.
     num_generation_tokens: int
-
     """
     Definition of context_len, subquery_len, and seqlen.
     |---------- N-1 iteration --------|
@@ -48,11 +47,13 @@ class InputMetadata:
     max_context_len: Optional[int]
     # Maximum sequence length in the batch.
     max_seq_len: Optional[int]
-    # (batch_size + 1,). The cumulative subquery lengths of the sequences in the batch, used to index into q.
-    # E.g., if the subquery length is [4, 6], it is [0, 4, 10].
+    # (batch_size + 1,). The cumulative subquery lengths of the sequences in
+    # the batch, used to index into subquery. E.g., if the subquery length
+    # is [4, 6], it is [0, 4, 10].
     subquery_start_loc: Optional[torch.Tensor]
-    # (batch_size + 1,). The cumulative sequence lengths of the sequences in the batch, used to index into k.
-    # E.g., if the sequence length is [4, 6], it is [0, 4, 10].
+    # (batch_size + 1,). The cumulative sequence lengths of the sequences in
+    # the batch, used to index into sequence. E.g., if the sequence length is
+    # [4, 6], it is [0, 4, 10].
     seq_start_loc: Optional[torch.Tensor]
     # (batch_size,). The length of context (tokens stored in KV cache) per
     # sequence. It doesn't include the length of new tokens.

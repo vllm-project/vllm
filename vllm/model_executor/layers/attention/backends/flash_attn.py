@@ -1,7 +1,7 @@
 """Attention layer with Flash and PagedAttention."""
 from typing import List, Optional
 
-from flash_attn import flash_attn_func, flash_attn_varlen_func
+from flash_attn import flash_attn_varlen_func
 import torch
 
 from vllm.model_executor.input_metadata import InputMetadata
@@ -76,7 +76,6 @@ class FlashAttentionBackend:
         if key_cache is not None and value_cache is not None:
             PagedAttentionImpl.reshape_and_cache(key, value, key_cache,
                                                  value_cache, input_metadata)
-
 
         if input_metadata.is_prompt:
             # Prompt run.

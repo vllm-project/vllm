@@ -129,7 +129,7 @@ class PagedAttentionImpl:
             key_cache,
             value_cache,
             input_metadata.block_tables,
-            # subquery_start_loc is (batch_size + 1,) 
+            # subquery_start_loc is (batch_size + 1,)
             input_metadata.subquery_start_loc[:-1],
             input_metadata.prompt_lens_tensor,
             input_metadata.context_lens,
