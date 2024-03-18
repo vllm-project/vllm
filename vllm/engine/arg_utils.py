@@ -65,7 +65,7 @@ class EngineArgs:
     image_token_id: Optional[int] = None
     image_input_shape: Optional[str] = None
     image_feature_size: Optional[int] = None
-
+    tensorizer_args: Optional[TensorizerArgs] = None
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: bool = False
 
@@ -416,7 +416,8 @@ class EngineArgs:
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace) -> 'EngineArgs':
         # Get the list of attributes of this dataclass.
-        attrs = [attr.name for attr in dataclasses.fields(cls)]
+        attrs = [attr.name for attr in dataclasses.fields(cls) if
+                 attr.name != "tensorizer_args"]
         # Set the attributes from the parsed arguments.
         engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
 
