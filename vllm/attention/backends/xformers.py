@@ -121,7 +121,8 @@ class XFormersImpl(AttentionImpl):
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
             PagedAttention.reshape_and_cache(
-                key, value, key_cache, value_cache, attn_metadata)
+                key, value, key_cache, value_cache, attn_metadata.slot_mapping,
+                attn_metadata.kv_cache_dtype)
 
         if attn_metadata.is_prompt:
             # Prompt run.
@@ -192,7 +193,11 @@ class XFormersImpl(AttentionImpl):
                     value,
                     key_cache,
                     value_cache,
-                    attn_metadata,
+                    attn_metadata.block_tables,
+                    attn_metadata.start_loc,
+                    attn_metadata.prompt_lens,
+                    attn_metadata.context_lens,
+                    attn_metadata.max_seq_len,
                     self.alibi_slopes,
                 )
         else:
@@ -201,7 +206,10 @@ class XFormersImpl(AttentionImpl):
                 query,
                 key_cache,
                 value_cache,
-                attn_metadata,
+                attn_metadata.block_tables,
+                attn_metadata.context_lens,
+                attn_metadata.max_context_len,
+                attn_metadata.kv_cache_dtype,   
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
