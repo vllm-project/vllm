@@ -260,7 +260,13 @@ class LlamaModel(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
+        print(f"\033[33mHere, the input ids shape is {input_ids.shape}\033[0m")
         hidden_states = self.embed_tokens(input_ids)
+        print(f"\033[32mHere, the hidden states shape is {hidden_states.shape}\033[0m")
+        if kv_caches[0][0] is not None:
+            print(f"\033[32mHere, the KV cache shape {kv_caches[0][0].shape}\033[0m")
+        else:
+            print("\033[31mThis time we don't have any KV caches\033[0m")
         residual = None
         for i in range(len(self.layers)):
             layer = self.layers[i]

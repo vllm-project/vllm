@@ -1,4 +1,5 @@
 from vllm import LLM, SamplingParams
+import time
 
 prefix = (
     "You are an expert school principal, skilled in effectively managing "
@@ -22,7 +23,8 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.0)
 
 # Create an LLM.
-llm = LLM(model="facebook/opt-125m")
+#llm = LLM(model="facebook/opt-125m", enable_prefix_caching=True)
+llm = LLM(model="lmsys/longchat-7b-16k", enable_prefix_caching=True)
 
 generating_prompts = [prefix + prompt for prompt in prompts]
 
@@ -40,13 +42,19 @@ print("-" * 80)
 # The llm.generate call will batch all prompts and send the batch at once if resources allow.
 # The prefix will only be cached after the first batch is processed, so we need to call generate once
 # to calculate the prefix and cache it.
+start = time.time()
 outputs = llm.generate(generating_prompts[0], sampling_params)
+ed1 = time.time()
 
 # Subsequent batches can leverage the cached prefix
 outputs = llm.generate(generating_prompts, sampling_params)
+ed2 = time.time()
+
+print("After caching", ed2 - ed1)
+print("before caching", ed1 - start)
 
 # Print the outputs. You should see the same outputs as before
-for output in outputs:
-    prompt = output.prompt
-    generated_text = output.outputs[0].text
-    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+#for output in outputs:
+#    prompt = output.prompt
+#    generated_text = output.outputs[0].text
+#    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")

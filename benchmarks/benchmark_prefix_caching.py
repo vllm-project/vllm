@@ -17,11 +17,11 @@ def test_prefix(llm=None, sampling_params=None, prompts=None):
 
 
 def main(args):
-    llm = LLM(model="baichuan-inc/Baichuan2-13B-Chat",
+    llm = LLM(model="facebook/opt-125m",
               tokenizer_mode='auto',
               trust_remote_code=True,
               enforce_eager=True,
-              enable_prefix_caching=args.enable_prefix_caching)
+              enable_prefix_caching=True)
 
     num_prompts = 100
     prompts = [PROMPT] * num_prompts

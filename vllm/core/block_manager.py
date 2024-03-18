@@ -6,9 +6,13 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from vllm.block import BlockTable, PhysicalTokenBlock
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
+from vllm.worker.cache_engine import CacheEngine, CacheEngineManager
 from vllm.utils import Device
 from vllm.core.evictor import Evictor, EvictionPolicy, make_evictor
+from vllm._C import cache_ops
 
+import torch
+KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 class BlockAllocator:
     """Manages free physical token blocks for a device.
@@ -54,11 +58,50 @@ class BlockAllocator:
         self.current_num_blocks += 1
         return block
 
+    @staticmethod
+    def fill_kv_block( 
+            src_kv_pair: KVCache, 
+            dst_buffer: KVCache,
+            block: PhysicalTokenBlock
+        ):
+        """
+        Fill a block of single-layered KV cache
+
+        Input:
+            src: a tensor with shape (num_tokens, num_heads, head_size), where num_tokens = block size
+            dst_buffer: List of number of layers. 
+                key cache tensor: (N_BLOCKS, num_heads, head_size // x, block_size, x)
+                value cache tensor: (N_BLOCKS, num_heads, head_size, block_size)
+
+        Raise:
+            RuntimeError: if src's shape is not expected
+        """
+
+        ''' 
+        check size of src tensor
+        '''
+        block_size = block.block_size
+        k, v = src_kv_pair
+        assert(k.shape[0] == block_size)
+        assert(v.shape[0] == block_size)
+
+        '''
+        slot_mapping: a list of num_token elements. slot_mapping[i] means the slot index (flattened index) of the token
+        '''
+        print("\033[31mHERE: filling KV cache\033[0m")
+        slot_mapping = torch.arange(block_size) + block.block_number * block_size
+        slot_mapping = slot_mapping.to("cuda")
+        cache_ops.reshape_and_cache(src_kv_pair[0], src_kv_pair[1], dst_buffer[0], dst_buffer[1],
+                                    slot_mapping, "auto")
+
+
     def allocate(self,
                  block_hash: Optional[int] = None,
                  num_hashed_tokens: int = 0) -> PhysicalTokenBlock:
         # If caching is disabled, just allocate a new block and return it
+        #print("\033[32mIn allcate()!\033[0m")
         if not self.enable_caching:
+            #print("\033[31mCaching is not enabled!\033[0m")
             block = self.allocate_block(next(self.default_hash_ctr),
                                         num_hashed_tokens)
             block.ref_count += 1
@@ -67,6 +110,7 @@ class BlockAllocator:
         if block_hash is None:
             block_hash = next(self.default_hash_ctr)
         if block_hash in self.evictor:
+            #print(f"\033[34mFound {block_hash} already in the evictor!\033[0m")
             assert block_hash not in self.cached_blocks
             block = self.evictor.remove(block_hash)
             assert block.ref_count == 0
@@ -75,8 +119,11 @@ class BlockAllocator:
             assert block.block_hash == block_hash
             return block
         if block_hash not in self.cached_blocks:
+            #print(f"\033[35mAllocating a new block with {block_hash}\033[0m")
             self.cached_blocks[block_hash] = self.allocate_block(
                 block_hash, num_hashed_tokens)
+
+        #print(f"\033[35mFound {block_hash} already in the cache!\033[0m")
         block = self.cached_blocks[block_hash]
         assert block.block_hash == block_hash
         block.ref_count += 1

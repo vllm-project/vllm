@@ -6,12 +6,16 @@ prompts = [
     "The president of the United States is",
     "The capital of France is",
     "The future of AI is",
+    "Hey there I want to talk with you",
+    "Can you write some random python code for me?"
 ]
 # Create a sampling params object.
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 # Create an LLM.
 llm = LLM(model="facebook/opt-125m")
+#llm = LLM(model="lmsys/longchat-7b-16k")
+#llm = LLM(model="gpt2")
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.
 outputs = llm.generate(prompts, sampling_params)

@@ -129,7 +129,7 @@ class ModelRunner:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
-        slot_mapping: List[List[int]] = []
+        slot_mapping: List[List[int]] = [] # (Num seqs, N) where N is max number of logical blocks in a sequence
         lora_index_mapping: List[int] = []
         lora_prompt_mapping: List[int] = []
         lora_requests: Set[LoRARequest] = set()

@@ -11,6 +11,41 @@ logger = init_logger(__name__)
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
+class CacheEngineManager:
+    inited: bool = False
+    cache_config: CacheConfig = None
+    model_config: ModelConfig = None
+    parallel_config: ParallelConfig = None
+    cache_engine_obj: "CacheEngine" = None
+
+    @staticmethod
+    def InitConfig(
+            #CacheEngineManager: "CacheEngineManager",
+            cache_config: CacheConfig,
+            model_config: ModelConfig,
+            parallel_config: ParallelConfig,
+        ) -> None:
+        if CacheEngineManager.inited:
+            logger.error("Already initialized CacheEngineManager's config. Will skip this call!")
+            return
+
+        CacheEngineManager.cache_config = cache_config
+        CacheEngineManager.model_config = model_config
+        CacheEngineManager.parallel_config = parallel_config
+        CacheEngineManager.inited = True
+
+    @staticmethod
+    def GetCacheEngine() -> "CacheEngine":
+
+        if not CacheEngineManager.inited:
+            raise RuntimeError("Trying to get the CacheEngine from a un-initialized CacheEngineManager")
+
+        if CacheEngineManager.cache_engine_obj is None:
+            CacheEngineManager.cache_engine_obj = CacheEngine(CacheEngineManager.cache_config, CacheEngineManager.model_config, CacheEngineManager.parallel_config)
+
+        return CacheEngineManager.cache_engine_obj
+
+
 
 class CacheEngine:
     """Manages the KV cache.

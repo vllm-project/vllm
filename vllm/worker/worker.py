@@ -16,7 +16,7 @@ from vllm.model_executor.parallel_utils.custom_all_reduce import init_custom_ar
 from vllm.model_executor.parallel_utils.parallel_state import (
     ensure_model_parallel_initialized)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
-from vllm.worker.cache_engine import CacheEngine
+from vllm.worker.cache_engine import CacheEngine, CacheEngineManager
 from vllm.worker.model_runner import ModelRunner
 from vllm.lora.request import LoRARequest
 
@@ -146,8 +146,15 @@ class Worker:
 
     def init_cache_engine(self, cache_config: CacheConfig) -> None:
         self.cache_config = cache_config
-        self.cache_engine = CacheEngine(self.cache_config, self.model_config,
-                                        self.parallel_config)
+
+        ''' YIHUA MODIFICATION '''
+        CacheEngineManager.InitConfig(self.cache_config, self.model_config, self.parallel_config)
+        self.cache_engine = CacheEngineManager.GetCacheEngine()
+
+        ''' ORIGINAL CODE '''
+        #self.cache_engine = CacheEngine(self.cache_config, self.model_config,
+        #                                self.parallel_config)
+
         self.cache_events = self.cache_engine.events
         self.gpu_cache = self.cache_engine.gpu_cache
         self.model_runner.set_block_size(self.cache_engine.block_size)
