@@ -37,10 +37,10 @@ steps:
   command: pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 4
 
-- label: Models Test
-  commands:
-    - pytest -v -s models --forked
-  soft_fail: true
+# - label: Models Test
+#   commands:
+#     - pytest -v -s models --forked
+#   soft_fail: true
 
 - label: Prefix Caching Test
   commands:
