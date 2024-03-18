@@ -175,7 +175,8 @@ def test_sample_prompt_logprobs(random_sampling, max_best_of,
 
 @pytest.mark.parametrize("seed", list(range(16)))
 def test_get_sequence_seeds(seed):
-    """Ensure that we get a different child seed from base seed + extra entropy"""
+    """Ensure that we get a different child seed from base 
+    seed + extra entropy"""
     starting_seed = seed
     seq_seed = None
     extra_entropy = 1

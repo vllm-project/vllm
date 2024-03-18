@@ -7,7 +7,8 @@ import random
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SequenceData
 from vllm.utils import in_wsl, is_neuron
-from vllm.model_executor.layers.triton_kernel.sample import get_num_triton_sampler_splits
+from vllm.model_executor.layers.triton_kernel.sample import (
+    get_num_triton_sampler_splits)
 
 _SAMPLING_EPS = 1e-5
 _SEED_0_REPLACEMENT = 3403598558

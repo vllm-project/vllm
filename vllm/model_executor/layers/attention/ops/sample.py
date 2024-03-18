@@ -358,7 +358,9 @@ def _sample_triton(
                   other=float("-inf"))
 
     if uses_random_sampling:
-        uniform_noise_start_ptr = uniform_noise_ptr + sample_idx * uniform_noise_row_stride + best_idx * uniform_noise_best_stride
+        uniform_noise_start_ptr = (uniform_noise_ptr +
+                                   sample_idx * uniform_noise_row_stride +
+                                   best_idx * uniform_noise_best_stride)
         uniform_noise = tl.load(uniform_noise_start_ptr + col_offsets,
                                 mask=col_offsets < n_cols,
                                 other=0.5)

@@ -12,7 +12,8 @@ from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (Logprob, PromptLogprobs, SampleLogprobs,
                            SamplerOutput, SequenceData, SequenceGroupOutput,
                            SequenceOutput)
-from vllm.model_executor.layers.triton_kernel.sample import sample as sample_triton
+from vllm.model_executor.layers.triton_kernel.sample import (sample as
+                                                             sample_triton)
 from vllm.utils import is_neuron
 
 
@@ -413,13 +414,15 @@ def _sample_with_torch(
             for seq_group, is_prompt in zip(seq_groups, is_prompts):
                 if is_prompt:
                     _, sampling_params = seq_group
-                    max_best_of_in_batch = max(max_best_of_in_batch, sampling_params.best_of)
+                    max_best_of_in_batch = max(max_best_of_in_batch,
+                                               sampling_params.best_of)
             seeded_args = {} if sampling_type == SamplingType.RANDOM else {
                 "seq_groups": seq_groups,
                 "generators": sampling_metadata.generators,
             }
             multinomial_samples[sampling_type] = _multinomial(
-                probs[sample_indices.long()], max_best_of_in_batch, **seeded_args)
+                probs[sample_indices.long()], max_best_of_in_batch,
+                **seeded_args)
         elif sampling_type == SamplingType.BEAM:
             beam_search_logprobs = logprobs[sample_indices]
         else:
@@ -486,7 +489,8 @@ def _sample_with_triton_kernel(
             for seq_group, is_prompt in zip(seq_groups, is_prompts):
                 if is_prompt:
                     _, sampling_params = seq_group
-                    max_best_of_in_batch = max(max_best_of_in_batch, sampling_params.best_of)
+                    max_best_of_in_batch = max(max_best_of_in_batch,
+                                               sampling_params.best_of)
         elif sampling_type == SamplingType.BEAM:
             beam_search_logprobs = logprobs[sample_indices]
         else:
@@ -508,8 +512,8 @@ def _sample_with_triton_kernel(
     for sampling_type in SamplingType:
         if sampling_type not in sample_metadata:
             continue
-        seq_group_ids, seq_groups, is_prompts, sample_indices, sampled_token_indices = sample_metadata[
-            sampling_type]
+        (seq_group_ids, seq_groups, is_prompts, sample_indices,
+         sampled_token_indices) = sample_metadata[sampling_type]
         if sampling_type == SamplingType.GREEDY:
             sample_results = _greedy_sample(
                 seq_groups, sampled_tokens[sampled_token_indices][:, 0])
