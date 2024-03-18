@@ -10,8 +10,8 @@ from flash_attn import flash_attn_func
 import torch
 
 from vllm._C import cache_ops
-from vllm.attention.backends.abstract import (
-    AttentionBackend, AttentionImpl, AttentionMetadata)
+from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+                                              AttentionMetadata)
 from vllm.attention.ops.paged_attn import PagedAttention
 
 
@@ -89,8 +89,8 @@ class FlashAttentionImpl(AttentionImpl):
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
-        self.sliding_window = ((sliding_window, sliding_window) if
-                               sliding_window is not None else (-1, -1))
+        self.sliding_window = ((sliding_window, sliding_window)
+                               if sliding_window is not None else (-1, -1))
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
@@ -143,9 +143,10 @@ class FlashAttentionImpl(AttentionImpl):
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
-            PagedAttention.reshape_and_cache(
-                key, value, key_cache, value_cache, attn_metadata.slot_mapping,
-                attn_metadata.kv_cache_dtype)
+            PagedAttention.reshape_and_cache(key, value, key_cache,
+                                             value_cache,
+                                             attn_metadata.slot_mapping,
+                                             attn_metadata.kv_cache_dtype)
 
         if attn_metadata.is_prompt:
             # Prompt run.
@@ -187,7 +188,7 @@ class FlashAttentionImpl(AttentionImpl):
                 attn_metadata.block_tables,
                 attn_metadata.context_lens,
                 attn_metadata.max_context_len,
-                attn_metadata.kv_cache_dtype,   
+                attn_metadata.kv_cache_dtype,
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
