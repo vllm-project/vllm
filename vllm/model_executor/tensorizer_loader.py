@@ -72,9 +72,6 @@ class TensorizerArgs:
       verify_hash: If True, the hashes of each tensor will be verified against 
           the hashes stored in the metadata. A `HashMismatchError` will be 
           raised if any of the hashes do not match.
-      filter_func: A function that takes a tensor key and returns True if the 
-          tensor should be loaded and False if it should be skipped. If None,
-          all tensors will be loaded.
       encryption_keyfile: File path to a binary file containing a  
           binary key to use for decryption. `None` (the default) means 
           no decryption. See the example script in 
@@ -98,7 +95,7 @@ class TensorizerArgs:
             "S3_ACCESS_KEY_ID")
         self.s3_secret_access_key = self.s3_secret_access_key or os.environ.get(
             "S3_SECRET_ACCESS_KEY")
-        self.s3_endpoint = self.s3_secret_access_key or os.environ.get(
+        self.s3_endpoint = self.s3_endpoint or os.environ.get(
             "S3_ENDPOINT_URL")
         self.stream_params = {
             "s3_access_key_id": self.s3_access_key_id,
@@ -150,7 +147,7 @@ class TensorizerArgs:
             "--encryption-keyfile",
             default=None,
             help="The file path to a binary file containing a binary key to "
-                 "use for decryption. Can be a file path or network URI."
+                 "use for decryption. Can be a file path or S3 network URI."
         )
         group.add_argument(
             "--force-http",
