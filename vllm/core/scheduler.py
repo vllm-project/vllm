@@ -316,8 +316,7 @@ class Scheduler:
         preempted: List[SequenceGroup] = []
 
         # Fix the current time.
-        now = time.monotonic()
-   
+        now = time.time()        
         # NOTE(woosuk): Preemption happens only when there is no available slot
         # to keep all the sequence groups in the RUNNING state.
         # In this case, the policy is responsible for deciding which sequence

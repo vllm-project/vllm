@@ -2,8 +2,13 @@ import random
 import torch
 
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
-from vllm.worker.model_runner import ModelRunner, _get_graph_batch_size
+from vllm.worker.model_runner import ModelRunner, _BATCH_SIZE_ALIGNMENT
 from vllm.config import ModelConfig, SchedulerConfig
+from vllm.utils import _get_aligned_size
+
+
+def get_aligned_size(batch_size):
+    return _get_aligned_size(batch_size, _BATCH_SIZE_ALIGNMENT)
 
 
 def test_prepare_prompt():
@@ -91,18 +96,18 @@ def test_prepare_prompt():
     # Cuda graph should not be used for prerill.
     assert input_metadata.use_cuda_graph is False
     assert input_metadata.kv_cache_dtype == "auto"
-    assert input_metadata.num_valid_tokens == _get_graph_batch_size(
+    assert input_metadata.num_valid_tokens == _get_aligned_size(
         sum(prompt_lens))
 
-    assert input_tokens.shape == (_get_graph_batch_size(sum(prompt_lens)), )
-    assert input_positions.shape == (_get_graph_batch_size(sum(prompt_lens)), )
+    assert input_tokens.shape == (get_aligned_size(sum(prompt_lens)), )
+    assert input_positions.shape == (get_aligned_size(sum(prompt_lens)), )
     torch.testing.assert_close(input_tokens, input_positions)
 
     sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
                                                      prompt_lens,
                                                      subquery_lens=prompt_lens)
-    assert input_tokens.shape == (_get_graph_batch_size(sum(prompt_lens)), )
-    assert input_positions.shape == (_get_graph_batch_size(sum(prompt_lens)), )
+    assert input_tokens.shape == (get_aligned_size(sum(prompt_lens)), )
+    assert input_positions.shape == (get_aligned_size(sum(prompt_lens)), )
     actual = sampling_metadata.selected_token_indices
     expected = torch.tensor(expected_selected_token_indices,
                             device=actual.device,
@@ -161,13 +166,10 @@ def test_prepare_decode_cuda_graph():
                                         dtype=torch.int64)
     assert torch.allclose(input_metadata.prompt_lens, expected_prompt_lens)
     assert input_metadata.num_prompt_tokens == 0
-    assert input_metadata.num_generation_tokens == (_get_graph_batch_size(
+    assert input_metadata.num_generation_tokens == (get_aligned_size(
         len(seq_group_metadata_list)))
-    assert input_metadata.max_seq_len == 0
-    expected_start_loc = torch.tensor([0],
-                                      device=model_runner.device,
-                                      dtype=torch.long)
-    assert torch.allclose(input_metadata.start_loc, expected_start_loc)
+    assert input_metadata.max_seq_len is None
+    assert input_metadata.start_loc is None
     assert input_metadata.max_context_len == max(prompt_lens)
     assert torch.allclose(
         input_metadata.context_lens[:len(prompt_lens)],
@@ -183,12 +185,12 @@ def test_prepare_decode_cuda_graph():
     # Cuda graph should not be used for prerill.
     assert input_metadata.use_cuda_graph is True
     assert input_metadata.kv_cache_dtype == "auto"
-    assert input_metadata.num_valid_tokens == (_get_graph_batch_size(
+    assert input_metadata.num_valid_tokens == (get_aligned_size(
         len(seq_group_metadata_list)))
 
-    assert input_tokens.shape == (_get_graph_batch_size(
+    assert input_tokens.shape == (get_aligned_size(
         len(seq_group_metadata_list)), )
-    assert input_positions.shape == (_get_graph_batch_size(
+    assert input_positions.shape == (get_aligned_size(
         len(seq_group_metadata_list)), )
     torch.testing.assert_close(input_tokens, input_positions)
 

@@ -21,7 +21,7 @@ CUDA_DEVICES = [
 
 
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("num_queries_per_kv", NUM_HEADS)
+@pytest.mark.parametrize("num_queries_per_kv", NUM_QUERIES_PER_KV)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 # @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("dtype", [torch.half])
@@ -40,6 +40,13 @@ def test_contexted_kv_attention(
     if torch.cuda.is_available():
         torch.cuda.manual_seed(0)
     torch.set_default_device(device)
+
+    # Need this, otherwise when we capture the graph the process for GPU 1 would
+    # run on both GPU0 and GPU1 and things would hang
+    #
+    # see also similar issue: https://github.com/Dao-AILab/flash-attention/issues/523
+    torch.cuda.set_device(device)
+
     MAX_SEQ_LEN = 1024
     MAX_CTX_LEN = 1024
     BS = 10
@@ -176,9 +183,8 @@ def test_contexted_kv_attention(
     torch.cuda.synchronize()
     end_time = time.time()
     print(f"xformers Time: {(end_time - start_time)*1000:.2f} ms")
-    output_ref = output_ref.squeeze(0, 2)
-    breakpoint()
-    assert torch.allclose(output_ref, output, atol=get_default_atol(output), rtol=get_default_rtol(output))
+    output_ref = output_ref.reshape(output.shape)
+    assert torch.allclose(output_ref, output, atol=1e-6, rtol=0)
 
 
 def setup_test(device: str, seed: int = 0):

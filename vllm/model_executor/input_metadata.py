@@ -1,8 +1,12 @@
-from typing import Optional
+from dataclasses import dataclass
+from typing import Optional, List
+from xformers.ops.fmha.attn_bias import AttentionBias
 
 import torch
 
 
+# SANG-TODO Refactor prompt_lens -> seqlens
+@dataclass
 class InputMetadata:
     """Metadata for input sequences. Used in PagedAttention.
 
@@ -18,104 +22,74 @@ class InputMetadata:
     cuda-graph replayed. If you have values that need to be changed
     dynamically, it should be stored in tensor. The tensor has to be
     updated from `CUDAGraphRunner.forward` API.
-
-    Args:
-        prompt_lens: Lengths of prompts. Only included in prefill requests.
-        num_chunked_prefill: Number of chunked prefill requests across
-            sequences.
-        slot_mapping: The index of each token mapped into a physical block
-            in block tables. E.g., if block_size is 32, 35 means it is in
-            the block number 1, 3rd index.
-        num_prompt_tokens: The number of tokens in the prompts. This might
-            include padding.
-        num_generation_tokens: The number of tokens in the generation sequences.
-            This might include padding.
-        max_context_len: The maximum context length.
-        context_lens: the length of attention context for each sequence.
-            I.e., the number of tokens that have attended so far.
-        block_tables: The block tables. (Seq id -> list of physical block)
-        kv_cache_dtype: Data type to store kv cache.
-        num_prompt_tokens: The number of tokens in the prompts. This might
-            include padding.
-        num_generation_tokens: The number of tokens in the generation sequences.
-            This might include padding.
+    """
+    # Currently, input sequences can only contain all prompts
+    # or all decoding. True if all sequences are prompts.
+    is_prompt: bool
+    # (num_tokens,). The indices of the token slots that input tokens will be
+    # stored into. E.g., if `slot_mapping` is [35, 2, 17] and the block size
+    # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
+    # in block 0, and 1st slot in block 1, respectively.
+    slot_mapping: torch.Tensor
+    # The number of chunked prefill sequences in the batch.
+    num_chunked_prefill: int
+    # (batch_size,). The prompt length per sequence. None if it is a decoding.
+    prompt_lens: Optional[List]
+    # prompt_lens stored as a tensor.
+    prompt_lens_tensor: Optional[torch.Tensor]
+    # The number of prompt tokens. Doesn't include padding.
+    num_prompt_tokens: int
+    # The number of generation tokens. Doesn't include padding.
+    num_generation_tokens: int
+    """
+    Definition of context_len, subquery_len, and seqlen.
+    |---------- N-1 iteration --------|
+    |---------------- N iteration ---------------------|
+    |- tokenA -|......................|-- newTokens ---|
+    |---------- context_len ----------|
+    |-------------------- seqlen ----------------------|
+                                      |- subquery_len -|
+    
     """
 
-    def __init__(
-        self,
-        slot_mapping: torch.Tensor,
-        prompt_lens: Optional[torch.Tensor],
-        num_chunked_prefill: int,
-        num_prompt_tokens: int,
-        num_generation_tokens: int,
-        start_loc: Optional[torch.Tensor],
-        max_seq_len: Optional[int],
-        max_context_len: Optional[int],
-        context_lens: Optional[torch.Tensor],
-        block_tables: Optional[torch.Tensor],
-        use_cuda_graph: bool,
-        kv_cache_dtype: str,
-    ) -> None:
-        # [prompt_batch_size + 1]
-        # The length of prompts. If chunked prefill is enabled,
-        # it is equivalent to the chunked size. 
-        self.prompt_lens = prompt_lens
-        # Number of prompt tokens. Include padding.
-        self.num_prompt_tokens = num_prompt_tokens
-        # Number of generation tokens. Include padding.
-        self.num_generation_tokens = num_generation_tokens
+    # Maximum sequence length in the batch.
+    max_subquery_len: Optional[int]
+    # Maximum context length in the batch.
+    max_context_len: Optional[int]
+    # Maximum sequence length in the batch.
+    max_seq_len: Optional[int]
+    # (batch_size + 1,). The cumulative subquery lengths of the sequences in
+    # the batch, used to index into subquery. E.g., if the subquery length
+    # is [4, 6], it is [0, 4, 10].
+    subquery_start_loc: Optional[torch.Tensor]
+    # (batch_size + 1,). The cumulative sequence lengths of the sequences in
+    # the batch, used to index into sequence. E.g., if the sequence length is
+    # [4, 6], it is [0, 4, 10].
+    seq_start_loc: Optional[torch.Tensor]
+    # (batch_size,). The length of context (tokens stored in KV cache) per
+    # sequence. It doesn't include the length of new tokens.
+    context_lens: Optional[torch.Tensor]
+    # (batch_size, max_blocks_per_seq).
+    # Block addresses per sequence. (Seq id -> list of physical block)
+    # E.g., [0, 1, 2] means tokens are stored in 0th, 1st, and 2nd blocks
+    # in the kv cache. Each block can contain up to block_size tokens.
+    # The first dimension is padded if it is cuda-graph captured.
+    block_tables: Optional[torch.Tensor]
+    # Whether or not if cuda graph is enabled.
+    # Cuda-graph is currently enabled for decoding only.
+    use_cuda_graph: bool
+    kv_cache_dtype: str
 
-        # The number of prefill requests.
-        self.num_prompts = 0
-        # The maximum sequence length from all requests.
-        # None if there are only decoding requests.
-        self.max_seq_len = max_seq_len
-
-        # The requests contain prefill requests.
-        if self.prompt_lens is not None:
-            self.num_prompts = len(prompt_lens)
-
-        # This tensor only contains prompts.
-        # [prompt_batch_size + 1]
-        # cumulative index of a prompt length.
-        # E.g., [0, 3, 8] for prompt_lens [3, 5].
-        self.start_loc = start_loc
-        self.max_context_len = max_context_len
-        # [batch_size]. A list of index that represents
-        # the address in the KV cache. The value can be
-        # decomposed into a block number and block offset.
-        # Block number corresponds to the 0th dimension index
-        # of the kv cache, and the offset corresponds to the
-        # 1st dimension index of the kv cache.
-        self.slot_mapping = slot_mapping
-        # [batch_size]. A list containing the attention context
-        # length of each request. 
-        # NOTE: When it is prefill/decoding,
-        # the definition is different. For prefill,
-        # it means the the length of KV that are cached
-        # excluding the new KVs. In decoding, this
-        # includes a new KV.
-        self.context_lens = context_lens
-        # Location of KV inside non-contiguous KV cache (i.e.,
-        # paged attention).
-        # [batch_size, num_blocks].
-        # Each value in num_blocks represent the block number
-        # (0th dimension index in kv cache). And each block
-        # can contain upto `block_size` tokens.
-        # None if it is prefill request. However, if
-        # chunked prefill is enabled, or there's a cached
-        # prefix, it is provided even for prefill requests.
-        self.block_tables = block_tables
-        self.use_cuda_graph = use_cuda_graph
-        self.kv_cache_dtype = kv_cache_dtype
-        self.num_chunked_prefill = num_chunked_prefill
-
+    def __post_init__(self):
         # Set during the execution of the first attention op.
-        # FIXME(woosuk): This is a hack.
-        self.attn_bias = None
-        # Number of valid tokens. It includes paddings.
-        # See attention.py for precise definition.
-        self.num_valid_tokens = slot_mapping.shape[0]
+        # It is a list because it is needed to set per prompt
+        # when alibi slopes is used. It is because of the limitation
+        # from xformer API.
+        # will not appear in the __repr__ and __init__
+        self.attn_bias: Optional[List[AttentionBias]] = None
+        # Cuda graph is only used for decoding now.
+        if self.use_cuda_graph:
+            assert self.num_prompt_tokens == 0
 
     def prefill_input_metadata(self) -> "InputMetadata":
         """Create a new InputMetadata that only contains
@@ -155,15 +129,3 @@ class InputMetadata:
             self.use_cuda_graph,
             self.kv_cache_dtype,
         )
-
-    def __repr__(self) -> str:
-        return ("InputMetadata("
-                f"max_context_len={self.max_context_len}, "
-                f"num_generation_tokens={self.num_generation_tokens}, "
-                f"num_prompt_tokens={self.num_prompt_tokens}, "
-                f"slot_mapping={self.slot_mapping}, "
-                f"context_lens={self.context_lens}, "
-                f"block_tables={self.block_tables}, "
-                f"use_cuda_graph={self.use_cuda_graph}, "
-                f"kv_cache_dtype={self.kv_cache_dtype}) "
-                f"num_valid_tokens={self.num_valid_tokens}")
