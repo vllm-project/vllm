@@ -89,12 +89,10 @@ class Detokenizer:
         next_iter_read_offset = 0
         next_iter_tokens = []
         prev_tokens = None
-        first_non_none_index = 0
 
         for token_position, prompt_logprobs_for_token in enumerate(
                 prompt_logprobs):
             if not prompt_logprobs_for_token:
-                first_non_none_index = token_position + 1
                 continue
             for token_id, sample_logprob in prompt_logprobs_for_token.items():
                 if (sample_logprob.decoded_token is None and token_id != -1):
@@ -130,7 +128,7 @@ class Detokenizer:
             else:
                 prev_tokens.extend(next_iter_tokens)
 
-        return prompt_logprobs[first_non_none_index:]
+        return prompt_logprobs
 
     def decode_sequence(self, seq: Sequence, prms: SamplingParams) -> None:
         """Decodes the new token for a sequence. In-place operation.
