@@ -184,29 +184,8 @@ def _is_neuron() -> bool:
     return torch_neuronx_installed
 
 
-def _is_cuda() -> bool:
-    return (torch.version.cuda is not None) and not _is_neuron()
-
-
 def _install_punica() -> bool:
     return bool(int(os.getenv("VLLM_INSTALL_PUNICA_KERNELS", "0")))
-
-
-def get_path(*filepath) -> str:
-    return os.path.join(ROOT_DIR, *filepath)
-
-
-def find_version(filepath: str) -> str:
-    """Extract version information from the given filepath.
-
-    Adapted from https://github.com/ray-project/ray/blob/0b190ee1160eeca9796bc091e07eaebf4c85b511/python/setup.py
-    """
-    with open(filepath) as fp:
-        version_match = re.search(r"^__version__ = ['\"]([^'\"]*)['\"]",
-                                  fp.read(), re.M)
-        if version_match:
-            return version_match.group(1)
-        raise RuntimeError("Unable to find version string.")
 
 
 def get_hipcc_rocm_version():
@@ -263,11 +242,28 @@ def get_nvcc_cuda_version() -> Version:
     return nvcc_cuda_version
 
 
+def get_path(*filepath) -> str:
+    return os.path.join(ROOT_DIR, *filepath)
+
+
+def find_version(filepath: str) -> str:
+    """Extract version information from the given filepath.
+
+    Adapted from https://github.com/ray-project/ray/blob/0b190ee1160eeca9796bc091e07eaebf4c85b511/python/setup.py
+    """
+    with open(filepath) as fp:
+        version_match = re.search(r"^__version__ = ['\"]([^'\"]*)['\"]",
+                                  fp.read(), re.M)
+        if version_match:
+            return version_match.group(1)
+        raise RuntimeError("Unable to find version string.")
+
+
 def get_vllm_version() -> str:
     version = find_version(get_path("vllm", "__init__.py"))
 
     if _is_cuda():
-        cuda_version = str(nvcc_cuda_version)
+        cuda_version = str(get_nvcc_cuda_version())
         if cuda_version != MAIN_CUDA_VERSION:
             cuda_version_str = cuda_version.replace(".", "")[:3]
             version += f"+cu{cuda_version_str}"
@@ -283,11 +279,6 @@ def get_vllm_version() -> str:
         if neuron_version != MAIN_CUDA_VERSION:
             neuron_version_str = neuron_version.replace(".", "")[:3]
             version += f"+neuron{neuron_version_str}"
-    elif _is_cuda():
-        cuda_version = str(get_nvcc_cuda_version())
-        if cuda_version != MAIN_CUDA_VERSION:
-            cuda_version_str = cuda_version.replace(".", "")[:3]
-            version += f"+cu{cuda_version_str}"
     else:
         raise RuntimeError("Unknown runtime environment")
 
