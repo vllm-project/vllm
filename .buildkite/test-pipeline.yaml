@@ -56,7 +56,7 @@ steps:
   command: pytest -v -s spec_decode
 
 - label: LoRA Test %N
-  command: pytest -v -s lora --forked --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 4
 
 - label: Metrics Test
