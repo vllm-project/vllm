@@ -70,7 +70,6 @@ class InputMetadata:
     # Cuda-graph is currently enabled for decoding only.
     use_cuda_graph: bool
     kv_cache_dtype: str
->>>>>>> 1dquery
 
     def __post_init__(self):
         # Set during the execution of the first attention op.
