@@ -61,6 +61,7 @@ class TensorizerArgs:
     force_http: bool = False
     s3_access_key_id: Optional[str] = None
     s3_secret_access_key: Optional[str] = None
+    s3_endpoint: Optional[str] = None
     """
   Args for the TensorizerAgent class. These are used to configure the behavior 
   of the TensorDeserializer when loading tensors from a serialized model.
@@ -86,6 +87,8 @@ class TensorizerArgs:
           the S3_ACCESS_KEY_ID environment variable.
       s3_secret_access_key: The secret access key for the S3 bucket. Can also
           be set via the S3_SECRET_ACCESS_KEY environment variable.
+      s3_endpoint: The endpoint for the S3 bucket. Can also be set via the
+          S3_ENDPOINT_URL environment variable.
         
   """
 
@@ -95,7 +98,8 @@ class TensorizerArgs:
             "S3_ACCESS_KEY_ID")
         self.s3_secret_access_key = self.s3_secret_access_key or os.environ.get(
             "S3_SECRET_ACCESS_KEY")
-        self.s3_endpoint = os.environ.get("S3_ENDPOINT_URL") or None
+        self.s3_endpoint = self.s3_secret_access_key or os.environ.get(
+            "S3_ENDPOINT_URL")
         self.stream_params = {
             "s3_access_key_id": self.s3_access_key_id,
             "s3_secret_access_key": self.s3_secret_access_key,
@@ -168,6 +172,12 @@ class TensorizerArgs:
             default=None,
             help="The secret access key for the S3 bucket. Can also be set via "
                  "the S3_SECRET_ACCESS_KEY environment variable.",
+        )
+        group.add_argument(
+            "--s3-endpoint",
+            default=None,
+            help="The endpoint for the S3 bucket. Can also be set via the "
+                 "S3_ENDPOINT_URL environment variable.",
         )
 
         return parser
