@@ -7,7 +7,6 @@ from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
                                          LowerTriangularMaskWithTensorBias)
 
-from vllm._C import cache_ops
 from vllm.attention.backends.abstract import (
     AttentionBackend, AttentionImpl, AttentionMetadata)
 from vllm.attention.ops.paged_attn import PagedAttention
@@ -39,22 +38,14 @@ class XFormersBackend(AttentionBackend):
         dst_kv_cache: torch.Tensor,
         src_to_dst: Dict[int, int],
     ) -> None:
-        src_key_cache = src_kv_cache[0]
-        dst_key_cache = dst_kv_cache[0]
-        cache_ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
-
-        src_value_cache = src_kv_cache[1]
-        dst_value_cache = dst_kv_cache[1]
-        cache_ops.swap_blocks(src_value_cache, dst_value_cache, src_to_dst)
+        PagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
 
     @staticmethod
     def copy_blocks(
         kv_caches: List[torch.Tensor],
         src_to_dists: Dict[int, List[int]],
     ) -> None:
-        key_caches = [kv_cache[0] for kv_cache in kv_caches]
-        value_caches = [kv_cache[1] for kv_cache in kv_caches]
-        cache_ops.copy_blocks(key_caches, value_caches, src_to_dists)
+        PagedAttention.copy_blocks(kv_caches, src_to_dists)
 
 
 @dataclass
