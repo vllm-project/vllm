@@ -96,7 +96,9 @@ def get_sharegpt(tokenizer: PreTrainedTokenizerBase,
     # Load data (possibly downloading first).
     share_gpt_path = Path(SHAREGPT_PATH)
     if not share_gpt_path.exists():
-        raise ValueError(f"sharegpt not found. To download, run: \n\n\t{SHAREGPT_DOWNLOAD_STR}")
+        raise ValueError(
+            f"sharegpt not found. To download, run: \n\n\t{SHAREGPT_DOWNLOAD_STR}"
+        )
     assert share_gpt_path.exists()
     with open(share_gpt_path) as f:
         dataset = json.load(f)
@@ -116,16 +118,20 @@ def get_sharegpt(tokenizer: PreTrainedTokenizerBase,
         dataset_args=dataset_args,
     )
 
+
 # sonnet
 SONNET_PATH = "sonnet.txt"
-SONNET_CHARS = int(1024 * 3.415) # 3.415 char per token
+SONNET_CHARS = int(1024 * 3.415)  # 3.415 char per token
+
 
 def get_sonnet(tokenizer: PreTrainedTokenizerBase,
                dataset_args: DatasetArgs) -> DatasetTriple:
-     # Load data (possibly downloading first).
+    # Load data (possibly downloading first).
     sonnet_path = Path(SONNET_PATH)
     if not sonnet_path.exists():
-        raise ValueError(f"Sonnet not found. This should be in your `vllm/benchmarks directory.")
+        raise ValueError(
+            f"Sonnet not found. This should be in your `vllm/benchmarks directory."
+        )
     with open(sonnet_path) as f:
         poem_lines = f.readlines()
 
@@ -144,13 +150,12 @@ def get_sonnet(tokenizer: PreTrainedTokenizerBase,
     convo.append({
         "content": f"Continue the following poem: \n\n{poem_start}",
         "role": "user",
-    }) 
-    
-    prompt = tokenizer.apply_chat_template(
-        convo,
-        tokenize=False,
-        add_generation_prompt=True)
-            
+    })
+
+    prompt = tokenizer.apply_chat_template(convo,
+                                           tokenize=False,
+                                           add_generation_prompt=True)
+
     prompts = [prompt] * dataset_args.num_samples
     completions = [""] * dataset_args.num_samples
     dataset_args.fixed_output_len = 256

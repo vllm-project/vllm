@@ -65,11 +65,10 @@ def sample_requests(
     tokenizer: PreTrainedTokenizerBase,
 ) -> List[Tuple[str, int, int]]:
     # Load the dataset.
-    return get_dataset(
-        name=dataset_name,
-        tokenizer=tokenizer,
-        dataset_args=DatasetArgs(num_samples=num_requests)
-    )
+    return get_dataset(name=dataset_name,
+                       tokenizer=tokenizer,
+                       dataset_args=DatasetArgs(num_samples=num_requests))
+
 
 async def get_request(
     input_requests: List[Tuple[str, int, int]],
@@ -104,7 +103,8 @@ def calculate_metrics(
             output_len = len(tokenizer.encode(outputs[i].generated_text))
             total_output += output_len
             total_input += input_requests[i][1]
-            per_token_latencies.append((outputs[i].latency - outputs[i].ttft) / output_len)
+            per_token_latencies.append(
+                (outputs[i].latency - outputs[i].ttft) / output_len)
             ttfts.append(outputs[i].ttft)
             completed += 1
 
