@@ -3,6 +3,7 @@ import os
 import socket
 import subprocess
 import uuid
+import gc
 from platform import uname
 from typing import List, Tuple, Union
 from packaging.version import parse, Version
@@ -20,6 +21,7 @@ from collections import OrderedDict
 from typing import Any, Hashable, Optional
 
 from vllm.logger import init_logger
+import warnings
 
 T = TypeVar("T")
 logger = init_logger(__name__)
@@ -118,15 +120,24 @@ def is_hip() -> bool:
     return torch.version.hip is not None
 
 
+def is_neuron() -> bool:
+    try:
+        import transformers_neuronx
+    except ImportError:
+        transformers_neuronx = None
+    return transformers_neuronx is not None
+
+
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
     # NOTE: This import statement should be executed lazily since
     # the Neuron-X backend does not have the `cuda_utils` module.
     from vllm._C import cuda_utils
 
-    max_shared_mem = cuda_utils.get_max_shared_memory_per_block_device_attribute(
-        gpu)
-    # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py will fail
+    max_shared_mem = (
+        cuda_utils.get_max_shared_memory_per_block_device_attribute(gpu))
+    # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py
+    # will fail
     assert max_shared_mem > 0, "max_shared_mem can not be zero"
     return int(max_shared_mem)
 
@@ -162,9 +173,35 @@ def make_async(func: Callable[..., T]) -> Callable[..., Awaitable[T]]:
 
 
 def get_ip() -> str:
+    host_ip = os.environ.get("HOST_IP")
+    if host_ip:
+        return host_ip
+
+    # IP is not set, try to get it from the network interface
+
+    # try ipv4
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.connect(("8.8.8.8", 80))  # Doesn't need to be reachable
-    return s.getsockname()[0]
+    try:
+        s.connect(("8.8.8.8", 80))  # Doesn't need to be reachable
+        return s.getsockname()[0]
+    except Exception:
+        pass
+
+    # try ipv6
+    try:
+        s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        # Google's public DNS server, see
+        # https://developers.google.com/speed/public-dns/docs/using#addresses
+        s.connect(("2001:4860:4860::8888", 80))  # Doesn't need to be reachable
+        return s.getsockname()[0]
+    except Exception:
+        pass
+
+    warnings.warn(
+        "Failed to get the IP address, using 0.0.0.0 by default."
+        "The value can be set by the environment variable HOST_IP.",
+        stacklevel=2)
+    return "0.0.0.0"
 
 
 def get_distributed_init_method(ip: str, port: int) -> str:
@@ -172,9 +209,16 @@ def get_distributed_init_method(ip: str, port: int) -> str:
 
 
 def get_open_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        return s.getsockname()[1]
+    # try ipv4
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("", 0))
+            return s.getsockname()[1]
+    except OSError:
+        # try ipv6
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+            s.bind(("", 0))
+            return s.getsockname()[1]
 
 
 def set_cuda_visible_devices(device_ids: List[int]) -> None:
@@ -186,9 +230,8 @@ def get_nvcc_cuda_version() -> Optional[Version]:
     if not cuda_home:
         cuda_home = '/usr/local/cuda'
         if os.path.isfile(cuda_home + '/bin/nvcc'):
-            logger.info(
-                f'CUDA_HOME is not found in the environment. Using {cuda_home} as CUDA_HOME.'
-            )
+            logger.info(f'CUDA_HOME is not found in the environment. '
+                        f'Using {cuda_home} as CUDA_HOME.')
         else:
             logger.warning(
                 f'Not found nvcc in {cuda_home}. Skip cuda version check!')
@@ -287,3 +330,37 @@ def create_kv_caches_with_random(
                 f"Does not support value cache of type {cache_dtype}")
         value_caches.append(value_cache)
     return key_caches, value_caches
+
+
+class measure_cuda_memory:
+
+    def __init__(self, device=None):
+        self.device = device
+
+    def current_memory_usage(self) -> float:
+        # Return the memory usage in bytes.
+        torch.cuda.reset_peak_memory_stats(self.device)
+        mem = torch.cuda.max_memory_allocated(self.device)
+        return mem
+
+    def __enter__(self):
+        self.initial_memory = self.current_memory_usage()
+        # This allows us to call methods of the context manager if needed
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.final_memory = self.current_memory_usage()
+        self.consumed_memory = self.final_memory - self.initial_memory
+
+        # Force garbage collection
+        gc.collect()
+
+
+def str_to_int_tuple(s: str) -> Tuple[int]:
+    """Convert a string to a tuple of integers."""
+    try:
+        return tuple(map(int, s.split(",")))
+    except ValueError as e:
+        raise ValueError(
+            "String must be a series of integers separated by commas "
+            f"(e.g., 1, 2, 3). Given input: {s}") from e

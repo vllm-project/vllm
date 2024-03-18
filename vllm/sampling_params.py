@@ -1,4 +1,5 @@
 """Sampling parameters for text generation."""
+import copy
 from enum import IntEnum
 from functools import cached_property
 from typing import Callable, List, Optional, Union
@@ -73,8 +74,8 @@ class SamplingParams:
         stop_token_ids: List of tokens that stop the generation when they are
             generated. The returned output will contain the stop tokens unless
             the stop tokens are special tokens.
-        include_stop_str_in_output: Whether to include the stop strings in output
-            text. Defaults to False.
+        include_stop_str_in_output: Whether to include the stop strings in
+            output text. Defaults to False.
         ignore_eos: Whether to ignore the EOS token and continue generating
             tokens after the EOS token is generated.
         max_tokens: Maximum number of tokens to generate per output sequence.
@@ -236,6 +237,20 @@ class SamplingParams:
         if self.seed is not None:
             return SamplingType.RANDOM_SEED
         return SamplingType.RANDOM
+
+    def clone(self) -> "SamplingParams":
+        """Deep copy excluding LogitsProcessor objects.
+
+        LogitsProcessor objects are excluded because they may contain an
+        arbitrary, nontrivial amount of data.
+        See https://github.com/vllm-project/vllm/issues/3087
+        """
+
+        logit_processor_refs = None if self.logits_processors is None else {
+            id(lp): lp
+            for lp in self.logits_processors
+        }
+        return copy.deepcopy(self, memo=logit_processor_refs)
 
     def __repr__(self) -> str:
         return (

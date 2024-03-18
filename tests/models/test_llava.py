@@ -15,12 +15,12 @@ model_and_vl_config = [
          image_feature_size=576,
          image_token_id=32000,
          image_input_shape=(1, 3, 336, 336))),
-    # ("llava-hf/llava-1.5-7b-hf",
-    #  VisionLanguageConfig(
-    #      image_input_type=VisionLanguageConfig.ImageInputType.IMAGE_FEATURES,
-    #      image_feature_size=576,
-    #      image_token_id=32000,
-    #      image_input_shape=(1, 576, 1024)))
+    ("llava-hf/llava-1.5-7b-hf",
+     VisionLanguageConfig(
+         image_input_type=VisionLanguageConfig.ImageInputType.IMAGE_FEATURES,
+         image_feature_size=576,
+         image_token_id=32000,
+         image_input_shape=(1, 576, 1024)))
 ]
 
 
@@ -32,8 +32,10 @@ def as_dict(vision_language_config: VisionLanguageConfig) -> Dict:
     result = {}
     for field in fields(vision_language_config):
         value = getattr(vision_language_config, field.name)
-        if isinstance(field, Enum):
+        if isinstance(value, Enum):
             result[field.name] = value.name.lower()
+        elif isinstance(value, tuple):
+            result[field.name] = ",".join([str(item) for item in value])
         else:
             result[field.name] = value
     return result
@@ -60,7 +62,7 @@ def sanitize_vllm_output(vllm_output: Tuple[List[int], str],
 
 
 @pytest.mark.parametrize("worker_use_ray", [True])
-@pytest.mark.parametrize("model_and_config", model_and_vl_config)
+@pytest.mark.parametrize("model_and_config", model_and_vl_config[:1])
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
@@ -104,36 +106,3 @@ def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
             f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
         assert hf_output_ids == vllm_output_ids, (
             f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
-
-
-@pytest.mark.parametrize("worker_use_ray", [True])
-@pytest.mark.parametrize("model_and_config", model_and_vl_config[:1])
-@pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("max_tokens", [128])
-def test_model_test_only(hf_runner, vllm_runner, model_and_config: tuple,
-                         dtype: str, max_tokens: int,
-                         worker_use_ray: bool) -> None:
-    """Test text only prompt is fine."""
-    model_id, vision_language_config = model_and_config
-    hf_model = hf_runner(model_id, dtype=dtype)
-    hf_outputs = hf_model.generate_greedy(["hello"], max_tokens)
-    del hf_model
-
-    # Truly cleans up GPU memory.
-    torch.cuda.empty_cache()
-
-    vllm_model = vllm_runner(model_id,
-                             dtype=dtype,
-                             worker_use_ray=worker_use_ray,
-                             **as_dict(vision_language_config))
-    vllm_outputs = vllm_model.generate_greedy(["hello"], max_tokens)
-    del vllm_model
-    # Truly cleans up GPU memory.
-    torch.cuda.empty_cache()
-
-    hf_output_ids, hf_output_str = hf_outputs[0]
-    vllm_output_ids, vllm_output_str = vllm_outputs[0]
-    assert hf_output_str == vllm_output_str, (
-        f"HF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
-    assert hf_output_ids == vllm_output_ids, (
-        f"HF: {hf_output_ids}\nvLLM: {vllm_output_ids}")

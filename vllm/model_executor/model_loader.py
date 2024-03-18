@@ -1,11 +1,12 @@
 """Utilities for selecting and loading models."""
 import contextlib
-from typing import Optional, Type
+from typing import Type
 
 import torch
 import torch.nn as nn
 
-from vllm.config import DeviceConfig, ModelConfig, LoRAConfig, VisionLanguageConfig
+
+from vllm.config import DeviceConfig, ModelConfig, VisionLanguageConfig
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.llava import LlavaForConditionalGeneration
 from vllm.model_executor.weight_utils import (get_quant_config,
@@ -42,12 +43,11 @@ def _get_model_architecture(model_config: ModelConfig) -> Type[nn.Module]:
         f"Supported architectures: {ModelRegistry.get_supported_archs()}")
 
 
-def get_model(
-    model_config: ModelConfig,
-    device_config: DeviceConfig,
-    lora_config: Optional[LoRAConfig] = None,
-    vision_language_config: Optional[VisionLanguageConfig] = None
-) -> nn.Module:
+
+def get_model(model_config: ModelConfig, device_config: DeviceConfig,
+              **kwargs) -> nn.Module:
+    lora_config = kwargs.get("lora_config", None)
+    vision_language_config = kwargs.get("vision_language_config", None)
     model_class = _get_model_architecture(model_config)
 
     # Get the (maybe quantized) linear method.

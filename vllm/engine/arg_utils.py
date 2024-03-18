@@ -4,27 +4,9 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, LoRAConfig,
-                         VisionLanguageConfig)
-
-
-def image_input_enum_type(value: str):
-    try:
-        return VisionLanguageConfig.ImageInputType[value.upper()]
-    except KeyError as e:
-        raise argparse.ArgumentTypeError(
-            f'{value} is not a valid choice. '
-            f'Expecting to choose from '
-            f'{[x.name for x in VisionLanguageConfig.ImageInputType]}.') from e
-
-
-def int_tuple(s: str):
-    try:
-        return tuple(map(int, s.split(',')))
-    except ValueError as e:
-        raise argparse.ArgumentTypeError(
-            'Tuple must be a series of integers separated by commas '
-            '(e.g., 1, 2, 3).') from e
+                         ParallelConfig, SchedulerConfig, TokenizerPoolConfig,
+                         LoRAConfig, VisionLanguageConfig)
+from vllm.utils import str_to_int_tuple
 
 
 @dataclass
@@ -45,11 +27,13 @@ class EngineArgs:
     tensor_parallel_size: int = 1
     max_parallel_loading_workers: Optional[int] = None
     block_size: int = 16
+    enable_prefix_caching: bool = False
     swap_space: int = 4  # GiB
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
     max_paddings: int = 256
+    max_logprobs: int = 5  # OpenAI default value
     disable_log_stats: bool = False
     revision: Optional[str] = None
     code_revision: Optional[str] = None
@@ -58,6 +42,9 @@ class EngineArgs:
     enforce_eager: bool = False
     max_context_len_to_capture: int = 8192
     disable_custom_all_reduce: bool = False
+    tokenizer_pool_size: int = 0
+    tokenizer_pool_type: str = "ray"
+    tokenizer_pool_extra_config: Optional[dict] = None
     enable_lora: bool = False
     max_loras: int = 1
     max_lora_rank: int = 16
@@ -65,10 +52,11 @@ class EngineArgs:
     lora_dtype = 'auto'
     max_cpu_loras: Optional[int] = None
     device: str = 'cuda'
+    ray_workers_use_nsight: bool = False
     # Related to Vision-language models such as llava
     image_input_type: Optional[str] = None
     image_token_id: Optional[int] = None
-    image_input_shape: Optional[tuple] = None
+    image_input_shape: Optional[str] = None
     image_feature_size: Optional[int] = None
 
     def __post_init__(self):
@@ -192,12 +180,21 @@ class EngineArgs:
             help='load model sequentially in multiple batches, '
             'to avoid RAM OOM when using tensor '
             'parallel and large models')
+        parser.add_argument(
+            '--ray-workers-use-nsight',
+            action='store_true',
+            help='If specified, use nsight to profile ray workers')
         # KV cache arguments
         parser.add_argument('--block-size',
                             type=int,
                             default=EngineArgs.block_size,
-                            choices=[8, 16, 32],
+                            choices=[8, 16, 32, 128],
                             help='token block size')
+
+        parser.add_argument('--enable-prefix-caching',
+                            action='store_true',
+                            help='Enables automatic prefix caching')
+
         parser.add_argument('--seed',
                             type=int,
                             default=EngineArgs.seed,
@@ -226,6 +223,12 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.max_paddings,
                             help='maximum number of paddings in a batch')
+        parser.add_argument(
+            '--max-logprobs',
+            type=int,
+            default=EngineArgs.max_logprobs,
+            help=('max number of log probs to return logprobs is specified in'
+                  ' SamplingParams'))
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='disable logging statistics')
@@ -256,6 +259,25 @@ class EngineArgs:
                             action='store_true',
                             default=EngineArgs.disable_custom_all_reduce,
                             help='See ParallelConfig')
+        parser.add_argument('--tokenizer-pool-size',
+                            type=int,
+                            default=EngineArgs.tokenizer_pool_size,
+                            help='Size of tokenizer pool to use for '
+                            'asynchronous tokenization. If 0, will '
+                            'use synchronous tokenization.')
+        parser.add_argument('--tokenizer-pool-type',
+                            type=str,
+                            default=EngineArgs.tokenizer_pool_type,
+                            help='Type of tokenizer pool to use for '
+                            'asynchronous tokenization. Ignored '
+                            'if tokenizer_pool_size is 0.')
+        parser.add_argument('--tokenizer-pool-extra-config',
+                            type=str,
+                            default=EngineArgs.tokenizer_pool_extra_config,
+                            help='Extra config for tokenizer pool. '
+                            'This should be a JSON string that will be '
+                            'parsed into a dictionary. Ignored if '
+                            'tokenizer_pool_size is 0.')
         # LoRA related configs
         parser.add_argument('--enable-lora',
                             action='store_true',
@@ -289,13 +311,20 @@ class EngineArgs:
             help=('Maximum number of LoRAs to store in CPU memory. '
                   'Must be >= than max_num_seqs. '
                   'Defaults to max_num_seqs.'))
-
+        parser.add_argument("--device",
+                            type=str,
+                            default=EngineArgs.device,
+                            choices=["auto", "cuda", "neuron"],
+                            help='Device type for vLLM execution.')
+        # Related to Vision-language models such as llava
         # Related to Vision-language models such as llava
         parser.add_argument(
             '--image-input-type',
-            type=image_input_enum_type,
+            type=str,
             default=None,
-            choices=list(VisionLanguageConfig.ImageInputType),
+            choices=[
+                t.name.lower() for t in VisionLanguageConfig.ImageInputType
+            ],
             help=('The image input type passed into vLLM. '
                   'Should be one of "pixel_values" or "image_features".'))
         parser.add_argument('--image-token-id',
@@ -304,23 +333,16 @@ class EngineArgs:
                             help=('Input id for image token.'))
         parser.add_argument(
             '--image-input-shape',
-            type=int_tuple,
+            type=str,
             default=None,
             help=(
-                'Image input shape which should be consistent with image input '
+                'Image input shape which should be consistant with image input '
                 'type.'))
         parser.add_argument(
             '--image-feature-size',
             type=int,
             default=None,
             help=('The image feature size along the context dimension.'))
-        parser.add_argument(
-            "--device",
-            type=str,
-            default=EngineArgs.device,
-            choices=["cuda"],
-            help=('Device type for vLLM execution. '
-                  'Currently, only CUDA-compatible devices are supported.'))
         return parser
 
     @classmethod
@@ -342,16 +364,21 @@ class EngineArgs:
             self.trust_remote_code, self.download_dir, self.load_format,
             self.dtype, self.seed, self.revision, self.code_revision,
             self.tokenizer_revision, self.max_model_len, self.quantization,
-            self.enforce_eager, self.max_context_len_to_capture)
+            self.enforce_eager, self.max_context_len_to_capture,
+            self.max_logprobs)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
                                    model_config.get_sliding_window())
-        parallel_config = ParallelConfig(self.pipeline_parallel_size,
-                                         self.tensor_parallel_size,
-                                         self.worker_use_ray,
-                                         self.max_parallel_loading_workers,
-                                         self.disable_custom_all_reduce)
+        parallel_config = ParallelConfig(
+            self.pipeline_parallel_size, self.tensor_parallel_size,
+            self.worker_use_ray, self.max_parallel_loading_workers,
+            self.disable_custom_all_reduce,
+            TokenizerPoolConfig.create_config(
+                self.tokenizer_pool_size,
+                self.tokenizer_pool_type,
+                self.tokenizer_pool_extra_config,
+            ), self.ray_workers_use_nsight)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
                                            model_config.max_model_len,
@@ -371,9 +398,10 @@ class EngineArgs:
                     'Specify `image_token_id`, `image_input_shape` and '
                     '`image_feature_size` together with `image_input_type`.')
             vision_language_config = VisionLanguageConfig(
-                image_input_type=self.image_input_type,
+                image_input_type=VisionLanguageConfig.
+                get_image_input_enum_type(self.image_input_type),
                 image_token_id=self.image_token_id,
-                image_input_shape=self.image_input_shape,
+                image_input_shape=str_to_int_tuple(self.image_input_shape),
                 image_feature_size=self.image_feature_size,
             )
         else:
