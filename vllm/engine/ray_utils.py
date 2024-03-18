@@ -1,6 +1,5 @@
 import pickle
 
-import socket
 from typing import Optional, List, Tuple
 
 from vllm.config import ParallelConfig
@@ -67,12 +66,7 @@ except ImportError as e:
     RayWorkerVllm = None
 
 
-def get_open_port():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        return s.getsockname()[1]
-
-def initialize_cluster(
+def initialize_ray_cluster(
     parallel_config: ParallelConfig,
     ray_address: Optional[str] = None,
 ):
@@ -100,18 +94,10 @@ def initialize_cluster(
     else:
         ray.init(address=ray_address, ignore_reinit_error=True)
 
-    # if not parallel_config.worker_use_ray:
-    #     assert parallel_config.world_size == 1, (
-    #         "Ray is required if parallel_config.world_size > 1.")
-    #     return None
-    if not parallel_config.worker_use_ray:
-        # Initialize cluster locally.
-        port = get_open_port()
-        # We need to setup the distributed init method to make sure
-        # the distributed megatron code (e.g., get world size) works correctly.
-        distributed_init_method = f"tcp://localhost:{port}"
-        return distributed_init_method, None
-    
+    if parallel_config.placement_group:
+        # Placement group is already set.
+        return
+
     # Create placement group for worker processes
     current_placement_group = ray.util.get_current_placement_group()
     if current_placement_group:

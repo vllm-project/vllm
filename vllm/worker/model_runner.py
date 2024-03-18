@@ -31,7 +31,6 @@ LORA_WARMUP_RANK = 8
 # Capture graphs for batch size 1, 2, 4, 8, 16, 24, 32, 40, ..., 256.
 # NOTE: _get_graph_batch_size needs to be updated if this list is changed.
 _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [8 * i for i in range(1, 33)]
-#_BATCH_SIZES_TO_CAPTURE = [1]
 
 
 class ModelRunner:
@@ -537,7 +536,7 @@ class ModelRunner:
                 "lora_requests": lora_requests,
                 "lora_mapping": lora_mapping,
             }
-            #broadcast_tensor_dict(metadata_dict, src=0)
+            broadcast_tensor_dict(metadata_dict, src=0)
         else:
             metadata_dict = broadcast_tensor_dict(src=0)
             input_tokens = metadata_dict["input_tokens"]

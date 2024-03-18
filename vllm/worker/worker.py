@@ -51,9 +51,6 @@ class Worker:
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
         self.is_driver_worker = is_driver_worker
-        local_rank = int(os.getenv("LOCAL_RANK", "0"))
-        self.local_rank = local_rank
-
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
 
@@ -83,12 +80,7 @@ class Worker:
 
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
-            self.rank = self.rank if self.rank is not None else int(
-                os.getenv("RANK", "-1"))
-
             self.device = torch.device(f"cuda:{self.local_rank}")
-        
-
             torch.cuda.set_device(self.device)
 
             _check_if_gpu_supports_dtype(self.model_config.dtype)
@@ -201,7 +193,7 @@ class Worker:
         blocks_to_swap_out: Optional[Dict[int, int]] = None,
         blocks_to_copy: Optional[Dict[int, List[int]]] = None,
     ) -> Optional[SamplerOutput]:
-        if self.is_driver_worker and self.rank == 0:
+        if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             num_seq_groups = len(seq_group_metadata_list)
             assert blocks_to_swap_in is not None
@@ -213,7 +205,7 @@ class Worker:
                 "blocks_to_swap_out": blocks_to_swap_out,
                 "blocks_to_copy": blocks_to_copy,
             }
-            #broadcast_tensor_dict(data, src=0)
+            broadcast_tensor_dict(data, src=0)
         else:
             data = broadcast_tensor_dict(src=0)
             num_seq_groups = data["num_seq_groups"]
@@ -281,25 +273,6 @@ def init_distributed_environment(
             world_size=parallel_config.world_size,
             rank=rank,
             init_method=distributed_init_method,
-            #init_method="env://",
-        )
-
-    if cupy_utils.is_initialized():
-        cupy_world_size = cupy_utils.get_world_size()
-        if cupy_world_size != parallel_config.world_size:
-            raise RuntimeError(
-                "cupy.distributed is already initialized but the cupy world "
-                "size does not match parallel_config.world_size "
-                f"({cupy_world_size} vs. {parallel_config.world_size}).")
-    elif (parallel_config.world_size > 1 and cupy_port is not None):
-        # NOTE(woosuk): We don't initialize CuPy process group when world size
-        # is 1.
-        # TODO(woosuk): Support multi-node connection.
-        cupy_utils.init_process_group(
-            world_size=parallel_config.world_size,
-            rank=rank,
-            host="localhost",
-            port=cupy_port,
         )
 
     if cupy_utils.is_initialized():

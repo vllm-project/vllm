@@ -79,7 +79,6 @@ def tensor_model_parallel_gather(input_: torch.Tensor,
     all the ranks.
     """
     world_size = get_tensor_model_parallel_world_size()
-
     # Bypass the function if we are using only 1 GPU.
     if world_size == 1:
         return input_
@@ -89,22 +88,19 @@ def tensor_model_parallel_gather(input_: torch.Tensor,
         # Convert negative dim to positive.
         dim += input_.dim()
     # Allocate output tensor.
-    gather_list = [torch.empty_like(input_) for _ in range(world_size)]
-    # if get_tensor_model_parallel_rank() == dst:
-    #     gather_list = [torch.empty_like(input_) for _ in range(world_size)]
-    # else:
-    #     gather_list = None
+    if get_tensor_model_parallel_rank() == dst:
+        gather_list = [torch.empty_like(input_) for _ in range(world_size)]
+    else:
+        gather_list = None
     # Gather.
-
-    #print(f'>>> world size {world_size}, {gather_list}, {dst} {get_tensor_model_parallel_group()}')
-    torch.distributed.all_gather(gather_list, input_,
+    torch.distributed.gather(input_,
+                             gather_list,
+                             dst=dst,
                              group=get_tensor_model_parallel_group())
-    output_tensor = torch.cat(gather_list, dim=dim)
-    # if get_tensor_model_parallel_rank() == dst:
-    #     output_tensor = torch.cat(gather_list, dim=dim)
-    # else:
-    #     output_tensor = None
-    #print(f'>>> output_tensor {output_tensor}, {dst}, {dim}')
+    if get_tensor_model_parallel_rank() == dst:
+        output_tensor = torch.cat(gather_list, dim=dim)
+    else:
+        output_tensor = None
     return output_tensor
 
 
