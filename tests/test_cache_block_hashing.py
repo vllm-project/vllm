@@ -7,7 +7,7 @@ from typing import List, Optional
 import pytest
 
 from vllm.lora.request import LoRARequest
-from vllm.transformers_utils.tokenizer import TokenizerGroup
+from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.sequence import Sequence
 
 # Make two prefixes with different first blocks.
