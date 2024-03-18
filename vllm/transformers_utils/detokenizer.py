@@ -3,7 +3,9 @@ from transformers import PreTrainedTokenizer
 from vllm.sequence import Sequence, Logprob, SequenceGroup, SamplingParams
 from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
                                                convert_prompt_ids_to_tokens)
-from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import BaseTokenizerGroup
+from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
+    BaseTokenizerGroup)
+
 
 class Detokenizer:
     """Provides methods to decode the output of a model into text."""
@@ -89,15 +91,15 @@ class Detokenizer:
         prev_tokens = None
         first_non_none_index = 0
 
-        for token_position, prompt_logprobs_for_token in enumerate(prompt_logprobs):
+        for token_position, prompt_logprobs_for_token in enumerate(
+                prompt_logprobs):
             if not prompt_logprobs_for_token:
                 first_non_none_index = token_position + 1
                 continue
             for token_id, sample_logprob in prompt_logprobs_for_token.items():
                 if (sample_logprob.decoded_token is None and token_id != -1):
-                    prompt_token_ids_with_token = prompt_token_ids[:token_position] + [
-                        token_id
-                    ]
+                    prompt_token_ids_with_token = (
+                        prompt_token_ids[:token_position] + [token_id])
                     (new_tokens, new_text, new_prefix_offset,
                      new_read_offset) = detokenize_incrementally(
                          tokenizer=tokenizer,
@@ -163,11 +165,11 @@ class Detokenizer:
          )
 
         self.decode_logprobs(seq,
-                              prms,
-                              seq.output_logprobs[-1],
-                              all_input_ids,
-                              generated_token_id_and_text=(all_input_ids[-1],
-                                                           new_output_text))
+                             prms,
+                             seq.output_logprobs[-1],
+                             all_input_ids,
+                             generated_token_id_and_text=(all_input_ids[-1],
+                                                          new_output_text))
 
         if seq.tokens is None:
             seq.tokens = new_tokens

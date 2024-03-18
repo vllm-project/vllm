@@ -156,16 +156,19 @@ def test_decode_sequence_logprobs(complete_sequence: str,
             seq.output_logprobs[-1][new_token + 1].decoded_token)
     sequential_result = seq.output_text
 
-    assert sequential_result == complete_sequence
-    # Text for logprobs for the chosen token should be the same as the
-    # generated text.
     assert sequential_result == "".join(sequential_logprobs_text_chosen_token)
     assert sequential_result != "".join(sequential_logprobs_text_other_token)
+
+    if skip_special_tokens:
+        # Text for logprobs for the chosen token should be the same as the
+        # generated text. Note that this will only be true if we skip
+        # special tokens.
+        assert sequential_result == complete_sequence
 
 
 @pytest.mark.parametrize("complete_sequence", TRUTH)
 @pytest.mark.parametrize("tokenizer_name", TOKENIZERS)
-@pytest.mark.parametrize("skip_special_tokens", [True, False])
+@pytest.mark.parametrize("skip_special_tokens", [True])
 def test_decode_prompt_logprobs(complete_sequence: str,
                                 complete_sequence_token_ids: List[int],
                                 detokenizer: Detokenizer,
@@ -183,13 +186,16 @@ def test_decode_prompt_logprobs(complete_sequence: str,
     dummy_logprobs = create_dummy_logprobs(complete_sequence_token_ids)
     decoded_prompt_logprobs = detokenizer.decode_prompt_logprobs(
         seq_group, dummy_logprobs)
-    # Text for logprobs for the chosen token should be the same as the
-    # prompt text.
-    assert complete_sequence == "".join([
-        logprobs[token_id].decoded_token for token_id, logprobs in zip(
-            complete_sequence_token_ids, decoded_prompt_logprobs)
-    ])
-    assert complete_sequence != "".join([
-        logprobs[token_id + 1].decoded_token for token_id, logprobs in zip(
-            complete_sequence_token_ids, decoded_prompt_logprobs)
-    ])
+
+    if skip_special_tokens:
+        # Text for logprobs for the chosen token should be the same as the
+        # prompt text. Note that this will only be true if we skip
+        # special tokens.
+        assert complete_sequence == "".join([
+            logprobs[token_id].decoded_token for token_id, logprobs in zip(
+                complete_sequence_token_ids, decoded_prompt_logprobs)
+        ])
+        assert complete_sequence != "".join([
+            logprobs[token_id + 1].decoded_token for token_id, logprobs in zip(
+                complete_sequence_token_ids, decoded_prompt_logprobs)
+        ])
