@@ -6,17 +6,50 @@ from functools import lru_cache
 from json import dumps as json_dumps
 from re import escape as regex_escape
 from typing import Union, Tuple
-from pydantic import BaseModel
 
-from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest
-from vllm.model_executor.guided_logits_processors import JSONLogitsProcessor, RegexLogitsProcessor
+from pydantic import BaseModel
+from transformers import PreTrainedTokenizerBase
+
+from vllm.entrypoints.openai.protocol import (CompletionRequest,
+                                              ChatCompletionRequest)
+from vllm.model_executor.guided_logits_processors import (JSONLogitsProcessor,
+                                                          RegexLogitsProcessor,
+                                                          CFGLogitsProcessor)
 
 
 class GuidedDecodingMode(Enum):
     JSON = "json"
     REGEX = "regex"
     CHOICE = "choice"
+    GRAMMAR = "grammar"
 
+
+# https://github.com/outlines-dev/outlines/blob/main/outlines/grammars/json.lark
+# the main difference is that we changed the start: value to
+# start: object | array, so we are denying scalar values as the root of the
+# JSON. Starting with scalars as the root seems to cause llama to generate
+# without stop.
+JSON_GRAMMAR = r"""
+?start: object | array
+
+?value: object
+| array
+| UNESCAPED_STRING
+| SIGNED_NUMBER      -> number
+| "true"             -> true
+| "false"            -> false
+| "null"             -> null
+
+array  : "[" [value ("," value)*] "]"
+object : "{" [pair ("," pair)*] "}"
+pair   : UNESCAPED_STRING ":" value
+
+%import common.UNESCAPED_STRING
+%import common.SIGNED_NUMBER
+%import common.WS
+
+%ignore WS
+"""
 
 global_thread_pool = None  # used for generating logits processor fsm
 
@@ -55,9 +88,6 @@ def _get_guide_and_mode(
 ) -> Tuple[str, GuidedDecodingMode]:
 
     if request.guided_json:
-        if not isinstance(request.guided_json, (str, dict, BaseModel)):
-            raise TypeError("JSON schema must be str, dict, or BaseModel")
-
         json = request.guided_json
         if isinstance(json, dict):
             # turn dict into hashable string
@@ -67,33 +97,33 @@ def _get_guide_and_mode(
             # with the same fields will get hashed the same
             json = str(json.__signature__)
         return json, GuidedDecodingMode.JSON
-
     elif request.guided_regex:
-        if not isinstance(request.guided_regex, str):
-            raise TypeError("Regex must be string")
         return request.guided_regex, GuidedDecodingMode.REGEX
-
     elif request.guided_choice:
-        if not isinstance(request.guided_choice, list):
-            raise TypeError("Choices must be a list")
-
         # choice just uses regex
         choices = [
             regex_escape(str(choice)) for choice in request.guided_choice
         ]
         choices_regex = "(" + "|".join(choices) + ")"
         return choices_regex, GuidedDecodingMode.CHOICE
-
+    elif request.guided_grammar:
+        return request.guided_grammar, GuidedDecodingMode.GRAMMAR
+    elif (request.response_format is not None
+          and request.response_format.type == "json_object"):
+        return JSON_GRAMMAR, GuidedDecodingMode.GRAMMAR
     else:
         return None, None
 
 
 @lru_cache(maxsize=32)
-def _get_cached_logits_processor(guide: str, tokenizer,
+def _get_cached_logits_processor(guide: str,
+                                 tokenizer: PreTrainedTokenizerBase,
                                  mode: GuidedDecodingMode):
     if mode == GuidedDecodingMode.JSON:
         return JSONLogitsProcessor(guide, tokenizer)
     elif mode == GuidedDecodingMode.REGEX or mode == GuidedDecodingMode.CHOICE:
         return RegexLogitsProcessor(guide, tokenizer)
+    elif mode == GuidedDecodingMode.GRAMMAR:
+        return CFGLogitsProcessor(guide, tokenizer)
     else:
         raise ValueError(f"Unknown guided decoding mode {mode}")
