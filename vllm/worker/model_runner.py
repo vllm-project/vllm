@@ -35,6 +35,10 @@ _BATCH_SIZE_ALIGNMENT = 8
 _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
     _BATCH_SIZE_ALIGNMENT * i for i in range(1, 33)
 ]
+# True if inputs should be aligned. It is currently disabled.
+# Aligning inputs can better utilize tensor cores.
+# https://developer.nvidia.com/blog/optimizing-gpu-performance-tensor-cores/
+SHOULD_ALIGN = False
 
 
 class ModelRunner:
@@ -248,22 +252,18 @@ class ModelRunner:
         num_prompt_tokens = len(input_tokens)
         assert max_subquery_len > 0
 
-        input_tokens = _make_tensor(input_tokens,
-                                    pad=0,
+        input_tokens = torch.tensor(_align_if_necessary(input_tokens, pad=0),
                                     dtype=torch.long,
                                     device=self.device)
-        input_positions = _make_tensor(input_positions,
-                                       pad=0,
+        input_positions = torch.tensor(_align_if_necessary(input_positions,
+                                                           pad=0),
                                        dtype=torch.long,
                                        device=self.device)
-        slot_mapping = _make_tensor(slot_mapping,
-                                    pad=_PAD_SLOT_ID,
+        slot_mapping = torch.tensor(_align_if_necessary(slot_mapping,
+                                                        pad=_PAD_SLOT_ID),
                                     dtype=torch.long,
                                     device=self.device)
-        lora_index_mapping = _pad_to_alignment(lora_index_mapping,
-                                               _get_graph_batch_size(
-                                                   len(lora_index_mapping)),
-                                               pad=0)
+        lora_index_mapping = _align_if_necessary(lora_index_mapping, pad=0)
 
         context_lens_tensor = torch.tensor(context_lens,
                                            dtype=torch.int,
@@ -390,36 +390,26 @@ class ModelRunner:
             not self.model_config.enforce_eager
             and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
             and max_context_len <= self.max_context_len_to_capture)
-        if use_captured_graph:
-            # Pad the input tokens, positions, and slot mapping to match the
-            # batch size of the captured graph.
-            graph_batch_size = _get_graph_batch_size(batch_size)
-            assert graph_batch_size >= batch_size
-            for _ in range(graph_batch_size - batch_size):
-                input_tokens.append(0)
-                input_positions.append(0)
-                slot_mapping.append(_PAD_SLOT_ID)
-                context_lens.append(0)
-                block_tables.append([])
-            batch_size = graph_batch_size
 
         # Pad tokens to better utilize tensor cores although
         # cuda graph is not enabled.
-        input_tokens = _make_tensor(input_tokens,
-                                    pad=0,
+        input_tokens = torch.tensor(_align_if_necessary(
+            input_tokens, pad=0, should_align=use_captured_graph),
                                     dtype=torch.long,
                                     device=self.device)
-        input_positions = _make_tensor(input_positions,
-                                       pad=0,
+        input_positions = torch.tensor(_align_if_necessary(
+            input_positions, pad=0, should_align=use_captured_graph),
                                        dtype=torch.long,
                                        device=self.device)
-        slot_mapping = _make_tensor(slot_mapping,
-                                    pad=_PAD_SLOT_ID,
+        slot_mapping = torch.tensor(_align_if_necessary(
+            slot_mapping, pad=_PAD_SLOT_ID, should_align=use_captured_graph),
                                     dtype=torch.long,
                                     device=self.device)
         context_lens = torch.tensor(context_lens,
                                     dtype=torch.int,
                                     device=self.device)
+        lora_index_mapping = _align_if_necessary(
+            lora_index_mapping, pad=0, should_align=use_captured_graph)
 
         if use_captured_graph:
             # When using cuda-graph all these tensors should be
@@ -428,7 +418,6 @@ class ModelRunner:
             assert context_lens.shape[0] == input_positions.shape[0]
             assert context_lens.shape[0] == slot_mapping.shape[0]
 
-        if use_captured_graph:
             # The shape of graph_block_tables is
             # [max batch size, max context len // block size].
             input_block_tables = self.graph_block_tables[:batch_size]
@@ -446,11 +435,6 @@ class ModelRunner:
                 dtype=torch.int,
                 device=self.device,
             )
-
-        lora_index_mapping = _pad_to_alignment(lora_index_mapping,
-                                               _get_graph_batch_size(
-                                                   len(lora_index_mapping)),
-                                               pad=0)
 
         input_metadata = InputMetadata(
             is_prompt=False,
@@ -996,22 +980,13 @@ def _pad_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
     return x + [pad] * (max_len - len(x))
 
 
-def _make_tensor(
-    x: List[int],
-    pad: int,
-    dtype: torch.dtype,
-    device: Optional[Union[str, torch.device]],
-    align: bool = False,
-) -> torch.Tensor:
-    """Create a tensor of a given list.
-
-    If `align` is True, it creates a tensor with a padding with a given `pad`.
-    """
-    if align:
-        batch_size = len(x)
-        batch_size = _get_graph_batch_size(batch_size)
-        x = _pad_to_alignment(x, batch_size, pad)
-    return torch.tensor(x, dtype=dtype, device=device)
+def _align_if_necessary(x: List[int], pad: int, should_align=SHOULD_ALIGN):
+    """Align flattened 1D inputs by a fixed alignment size."""
+    if not should_align:
+        return x
+    batch_size = len(x)
+    batch_size = _get_graph_batch_size(batch_size)
+    return _pad_to_alignment(x, batch_size, pad)
 
 
 def _make_tensor_with_pad(
