@@ -102,8 +102,7 @@ class GPTBigCodeAttention(nn.Module):
             ],
             dim=-1,
         )
-        attn_output = self.attn(q, k, v, kv_cache,
-                                input_metadata)
+        attn_output = self.attn(q, k, v, kv_cache, input_metadata)
         attn_output, _ = self.c_proj(attn_output)
         return attn_output
 
