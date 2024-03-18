@@ -23,9 +23,8 @@ import torch
 from torch import nn
 from transformers import BloomConfig
 
-from vllm.model_executor.input_metadata import InputMetadata
+from vllm.attention import Attention, AttentionMetadata
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearMethodBase,
                                                QKVParallelLinear,
@@ -115,12 +114,12 @@ class BloomAttention(nn.Module):
         position_ids: torch.Tensor,
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
-        input_metadata: InputMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         del position_ids  # Unused.
         qkv, _ = self.query_key_value(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
-        attn_output = self.attn(q, k, v, kv_cache, input_metadata)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.dense(attn_output)
         return output
 
@@ -178,7 +177,7 @@ class BloomBlock(nn.Module):
         position_ids: torch.Tensor,
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
-        input_metadata: InputMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         # Layer norm at the beginning of the transformer layer.
         layernorm_output = self.input_layernorm(hidden_states)
@@ -194,7 +193,7 @@ class BloomBlock(nn.Module):
             position_ids=position_ids,
             hidden_states=layernorm_output,
             kv_cache=kv_cache,
-            input_metadata=input_metadata,
+            attn_metadata=attn_metadata,
         )
         attention_output = attention_output + residual
         layernorm_output = self.post_attention_layernorm(attention_output)
@@ -242,7 +241,7 @@ class BloomModel(nn.Module):
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
         kv_caches: List[torch.Tensor],
-        input_metadata: InputMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.word_embeddings(input_ids)
         hidden_states = self.word_embeddings_layernorm(hidden_states)
@@ -252,7 +251,7 @@ class BloomModel(nn.Module):
                 position_ids,
                 hidden_states,
                 kv_caches[i],
-                input_metadata,
+                attn_metadata,
             )
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
@@ -277,10 +276,10 @@ class BloomForCausalLM(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
-        input_metadata: InputMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         input_metadata)
+                                         attn_metadata)
         return hidden_states
 
     def sample(

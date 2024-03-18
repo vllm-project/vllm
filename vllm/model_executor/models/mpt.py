@@ -6,9 +6,8 @@ from typing import List, Optional
 import torch
 import torch.nn as nn
 
-from vllm.model_executor.input_metadata import InputMetadata
+from vllm.attention import Attention, AttentionMetadata
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearMethodBase,
                                                QKVParallelLinear,
@@ -114,7 +113,7 @@ class MPTAttention(nn.Module):
         position_ids: torch.Tensor,
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
-        input_metadata: InputMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         del position_ids  # unused.
         qkv, _ = self.Wqkv(hidden_states)
@@ -124,7 +123,7 @@ class MPTAttention(nn.Module):
         if self.qk_ln:
             q = self.q_ln(q)
             k = self.k_ln(k)
-        attn_output = self.attn(q, k, v, kv_cache, input_metadata)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.out_proj(attn_output)
         return output
 
@@ -181,14 +180,14 @@ class MPTBlock(nn.Module):
         position_ids: torch.Tensor,
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
-        input_metadata: InputMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         x = self.norm_1(hidden_states)
         x = self.attn(
             position_ids=position_ids,
             hidden_states=x,
             kv_cache=kv_cache,
-            input_metadata=input_metadata,
+            attn_metadata=attn_metadata,
         )
         hidden_states = hidden_states + x
         x = self.norm_2(hidden_states)
@@ -227,7 +226,7 @@ class MPTModel(nn.Module):
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
         kv_caches: List[torch.Tensor],
-        input_metadata: InputMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.wte(input_ids)
         for i in range(len(self.blocks)):
@@ -236,7 +235,7 @@ class MPTModel(nn.Module):
                 position_ids,
                 hidden_states,
                 kv_caches[i],
-                input_metadata,
+                attn_metadata,
             )
         hidden_states = self.norm_f(hidden_states)
         return hidden_states
@@ -263,10 +262,10 @@ class MPTForCausalLM(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
-        input_metadata: InputMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         input_metadata)
+                                         attn_metadata)
         return hidden_states
 
     def sample(

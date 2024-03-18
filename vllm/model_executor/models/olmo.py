@@ -42,8 +42,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.attention import Attention
+from vllm.attention import Attention, AttentionMetadata
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     LinearMethodBase,
@@ -144,14 +143,14 @@ class OlmoAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
-        input_metadata: InputMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.attn_norm(hidden_states)
         qkv, _ = self.att_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         if self.config.rope:
             q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, input_metadata)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.attn_out(attn_output)
         return output
 
@@ -238,11 +237,11 @@ class OlmoBlock(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
-        input_metadata: InputMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         # Attention block.
         og_x = hidden_states
-        x = self.attn(positions, hidden_states, kv_cache, input_metadata)
+        x = self.attn(positions, hidden_states, kv_cache, attn_metadata)
         x = x + og_x
 
         # MLP block.
@@ -293,7 +292,7 @@ class OlmoModel(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
-        input_metadata: InputMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         """
         :param input_ids: A tensor of shape `(batch_size, seq_len)`.
@@ -309,7 +308,7 @@ class OlmoModel(nn.Module):
                 positions,
                 x,
                 kv_caches[block_idx],
-                input_metadata,
+                attn_metadata,
             )
 
         # Apply final layer norm.
@@ -340,13 +339,13 @@ class OLMoForCausalLM(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
-        input_metadata: InputMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
             kv_caches=kv_caches,
-            input_metadata=input_metadata,
+            attn_metadata=attn_metadata,
         )
         return hidden_states
 

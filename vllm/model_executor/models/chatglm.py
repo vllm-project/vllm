@@ -8,9 +8,8 @@ import torch
 from torch import nn
 from torch.nn import LayerNorm
 
-from vllm.model_executor.input_metadata import InputMetadata
+from vllm.attention import Attention, AttentionMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                MergedColumnParallelLinear,
@@ -97,7 +96,7 @@ class GLMAttention(nn.Module):
         hidden_states: torch.Tensor,
         position_ids: torch.Tensor,
         kv_cache: torch.Tensor,
-        input_metadata: InputMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.query_key_value(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -107,7 +106,7 @@ class GLMAttention(nn.Module):
             k,
             v,
             kv_cache,
-            input_metadata,
+            attn_metadata,
         )
         attn_output, _ = self.dense(context_layer)
         return attn_output
@@ -196,7 +195,7 @@ class GLMBlock(nn.Module):
         hidden_states: torch.Tensor,
         position_ids: torch.Tensor,
         kv_cache: torch.Tensor,
-        input_metadata: InputMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         # hidden_states: [num_tokens, h]
         # Layer norm at the beginning of the transformer layer.
@@ -206,7 +205,7 @@ class GLMBlock(nn.Module):
             hidden_states=layernorm_output,
             position_ids=position_ids,
             kv_cache=kv_cache,
-            input_metadata=input_metadata,
+            attn_metadata=attn_metadata,
         )
 
         # Residual connection.
@@ -260,7 +259,7 @@ class GLMTransformer(nn.Module):
         hidden_states: torch.Tensor,
         position_ids: torch.Tensor,
         kv_caches: List[torch.Tensor],
-        input_metadata: InputMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         for i in range(self.num_layers):
             layer = self.layers[i]
@@ -268,7 +267,7 @@ class GLMTransformer(nn.Module):
                 hidden_states=hidden_states,
                 position_ids=position_ids,
                 kv_cache=kv_caches[i],
-                input_metadata=input_metadata,
+                attn_metadata=attn_metadata,
             )
         # Final layer norm.
         if self.post_layer_norm:
@@ -302,7 +301,7 @@ class ChatGLMModel(nn.Module):
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
         kv_caches: List[torch.Tensor],
-        input_metadata: InputMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         inputs_embeds = self.embedding(input_ids)
 
@@ -311,7 +310,7 @@ class ChatGLMModel(nn.Module):
             hidden_states=inputs_embeds,
             position_ids=position_ids,
             kv_caches=kv_caches,
-            input_metadata=input_metadata,
+            attn_metadata=attn_metadata,
         )
         return hidden_states
 
@@ -335,10 +334,10 @@ class ChatGLMForCausalLM(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
-        input_metadata: InputMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         input_metadata)
+                                         attn_metadata)
         return hidden_states
 
     def sample(

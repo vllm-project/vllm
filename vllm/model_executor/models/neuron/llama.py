@@ -6,7 +6,7 @@ import torch
 from torch import nn
 from transformers import LlamaConfig
 
-from vllm.model_executor.input_metadata import InputMetadata
+from vllm.attention import AttentionMetadata
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
@@ -30,14 +30,14 @@ class LlamaForCausalLM(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
-        input_metadata: InputMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         with torch.inference_mode():
             block_size = self.model.context_buckets[-1]
-            if input_metadata.is_prompt:
-                seq_ids = input_metadata.slot_mapping[:, 0] // block_size
+            if attn_metadata.is_prompt:
+                seq_ids = attn_metadata.slot_mapping[:, 0] // block_size
             else:
-                seq_ids = input_metadata.block_tables
+                seq_ids = attn_metadata.block_tables
             logits = self.model(input_ids,
                                 cache_ids=positions,
                                 start_ids=seq_ids.flatten())
