@@ -69,14 +69,11 @@ Documentation
    :maxdepth: 1
    :caption: Serving
 
-   serving/distributed_serving
-   serving/run_on_sky
-   serving/deploying_with_kserve
-   serving/deploying_with_triton
-   serving/deploying_with_bentoml
+   serving/openai_compatible_server
    serving/deploying_with_docker
-   serving/serving_with_langchain
+   serving/distributed_serving
    serving/metrics
+   serving/integrations
 
 .. toctree::
    :maxdepth: 1
@@ -98,6 +95,7 @@ Documentation
    :maxdepth: 2
    :caption: Developer Documentation
 
+   dev/sampling_params
    dev/engine/engine_index
    dev/kernel/paged_attention
 
