@@ -341,10 +341,10 @@ class ModelRunner:
 
         batch_size = len(input_tokens)
         max_context_len = max(context_lens)
-        use_captured_graph = (
-            not self.model_config.enforce_eager
-            and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
-            and max_context_len <= self.max_context_len_to_capture)
+        use_captured_graph = (not self.model_config.enforce_eager
+                              and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
+                              and max_context_len
+                              <= self.max_context_len_to_capture)
         if use_captured_graph:
             # Pad the input tokens, positions, and slot mapping to match the
             # batch size of the captured graph.
@@ -480,10 +480,11 @@ class ModelRunner:
                                             target_device=self.device,
                                             pin_memory=pin_memory)
         categorized_sample_indices = {
-            t: _async_h2d(seq_ids,
-                          dtype=torch.int,
-                          target_device=self.device,
-                          pin_memory=pin_memory)
+            t:
+            _async_h2d(seq_ids,
+                       dtype=torch.int,
+                       target_device=self.device,
+                       pin_memory=pin_memory)
             for t, seq_ids in categorized_sample_indices.items()
         }
 

@@ -33,15 +33,6 @@ class XFormersBackend(nn.Module):
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.register_buffer("alibi_slopes", alibi_slopes, persistent=False)
-
-        # This will be set to a float by model initialization per attention,
-        # if and only if we are using it. N.B. currently we only support per
-        # tensor scalar scaling factors & only applicable to ROCm (AMD GPU).
-        # The scaling factor convention we are assuming is
-        # quantized_value * scaling_factor ~= true_value
-        # which is consistent with the practice of setting
-        # scaling_factor = tensor_amax / FPtype_max
-        self.kv_cache_scaling_factor = 1.0
         self.alibi_slopes = alibi_slopes
 
         assert self.num_heads % self.num_kv_heads == 0
@@ -62,6 +53,7 @@ class XFormersBackend(nn.Module):
         key_cache: Optional[torch.Tensor],
         value_cache: Optional[torch.Tensor],
         input_metadata: InputMetadata,
+        kv_scale: int,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
@@ -94,7 +86,7 @@ class XFormersBackend(nn.Module):
                 key_cache,
                 value_cache,
                 input_metadata,
-                self.kv_cache_scaling_factor,
+                kv_scale,
             )
         if input_metadata.is_prompt:
             # Prompt run.
@@ -197,7 +189,7 @@ class XFormersBackend(nn.Module):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
-                self.kv_cache_scaling_factor,
+                kv_scale,
             )
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)

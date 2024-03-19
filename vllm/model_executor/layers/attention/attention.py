@@ -54,9 +54,10 @@ class Attention(nn.Module):
         key_cache: Optional[torch.Tensor],
         value_cache: Optional[torch.Tensor],
         input_metadata: InputMetadata,
+        kv_scale: int = 1.0,
     ) -> torch.Tensor:
         return self.backend.forward(query, key, value, key_cache, value_cache,
-                                    input_metadata)
+                                    input_metadata, kv_scale)
 
 
 @lru_cache(maxsize=1)

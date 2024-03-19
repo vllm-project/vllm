@@ -49,8 +49,8 @@ def initialize_model_parallel(
     assert torch.distributed.is_initialized()
     world_size: int = torch.distributed.get_world_size()
 
-    if (world_size !=
-            tensor_model_parallel_size * pipeline_model_parallel_size):
+    if (world_size
+            != tensor_model_parallel_size * pipeline_model_parallel_size):
         raise RuntimeError(
             f"world_size ({world_size}) is not equal to "
             f"tensor_model_parallel_size ({tensor_model_parallel_size}) x "

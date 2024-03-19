@@ -283,8 +283,10 @@ def main(args):
     # Postprocess: formatting to the current schema. Consider pulling it out into a dedicated
     # function should it ever become more complicated.
     rank_scales_map = {
-        rank_keyword + str(rank): {k: scale[k]
-                                   for k in sorted(scale.keys())}
+        rank_keyword + str(rank): {
+            k: scale[k]
+            for k in sorted(scale.keys())
+        }
         for rank, scale in rank_scales_map.items()
     }
 

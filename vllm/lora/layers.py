@@ -878,8 +878,10 @@ class SamplerWithLoRA(BaseLayerWithLoRA):
                                 lora_b.T, non_blocking=True)
         if embeddings_tensor is not None:
             self.embeddings_tensors[
-                index, :embeddings_tensor.shape[0], :embeddings_tensor.
-                shape[1], ] = embeddings_tensor
+                index,
+                :embeddings_tensor.shape[0],
+                :embeddings_tensor.shape[1],
+            ] = embeddings_tensor
 
     def set_mapping(
         self,

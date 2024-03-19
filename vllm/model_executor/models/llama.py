@@ -119,6 +119,15 @@ class LlamaAttention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
+        # This will be overwritten by model initialization if we are using it.
+        # N.B. currently we only support per tensor scalar scaling factors
+        # & only applicable to ROCm (AMD GPU).
+        # The scaling factor convention we are assuming is
+        # quantized_value * scaling_factor ~= true_value
+        # which is consistent with the practice of setting
+        # scaling_factor = tensor_amax / FPtype_max
+        self.kv_scale = 1.0
+
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
             self.head_dim,
@@ -158,7 +167,8 @@ class LlamaAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
+        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata,
+                                self.kv_scale)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -402,8 +412,7 @@ class LlamaForCausalLM(nn.Module):
         for layer_idx, scaling_factor in kv_cache_scales_loader(
                 scales_path, tp_rank, tp_size, self.config.num_hidden_layers,
                 self.config.__class__.model_type):
-            layer_paged_attn = (
-                self.model.layers[layer_idx].self_attn.attn.backend)
+            layer_self_attn = self.model.layers[layer_idx].self_attn
 
             if is_hip():
                 # The scaling factor convention we are assuming is
@@ -411,8 +420,8 @@ class LlamaForCausalLM(nn.Module):
                 # which is consistent with the practice of setting
                 # scaling_factor = tensor_amax / FPtype_max
                 scaling_factor *= 2
-            if hasattr(layer_paged_attn, "kv_cache_scaling_factor"):
-                layer_paged_attn.kv_cache_scaling_factor = scaling_factor
+            if hasattr(layer_self_attn, "kv_scale"):
+                layer_self_attn.kv_scale = scaling_factor
             else:
                 raise RuntimeError("PagedAttention has no KV cache scaling "
                                    "factor attribute!")
