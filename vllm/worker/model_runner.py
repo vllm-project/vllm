@@ -531,7 +531,7 @@ class ModelRunner:
             seq_start_loc=seq_start_loc,
             context_lens=context_lens_tensor,
             block_tables=block_tables,
-            use_cuda_graph=False,
+            use_cuda_graph=use_captured_graph,
             kv_cache_dtype=self.kv_cache_dtype,
         )
 
