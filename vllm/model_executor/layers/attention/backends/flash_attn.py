@@ -8,7 +8,7 @@ import torch
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention.ops.paged_attn import (
     PagedAttentionImpl)
-from vllm.model_executor.layers.attention.ops.flash_attention_triton import attention
+from vllm.model_executor.layers.attention.ops.flash_attention_triton import triton_attention
 
 
 class FlashAttentionBackend:
@@ -21,6 +21,7 @@ class FlashAttentionBackend:
         num_kv_heads: Optional[int] = None,
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
+        use_triton: Optional[bool] = False,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -30,6 +31,7 @@ class FlashAttentionBackend:
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
+        self.use_triton = use_triton
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -87,8 +89,8 @@ class FlashAttentionBackend:
                 query = query.unflatten(0, (batch_size, seq_len))
                 key = key.unflatten(0, (batch_size, seq_len))
                 value = value.unflatten(0, (batch_size, seq_len))
-                if is_hip():
-                    output, _ = attention(
+                if self.use_triton:
+                    output, _ = triton_attention(
                                 query,
                                 key,
                                 value,
@@ -98,15 +100,25 @@ class FlashAttentionBackend:
                                 self.scale,
                             )
                 else:
-                    output = flash_attn_func(
-                        query,
-                        key,
-                        value,
-                        softmax_scale=self.scale,
-                        causal=True,
-                        window_size=self.sliding_window,
-                        alibi_slopes=self.alibi_slopes,
-                    )
+                    if is_hip():
+                        #XXX: window_size and alibi_slopes not supported
+                        output = flash_attn_func(
+                            query,
+                            key,
+                            value,
+                            softmax_scale=self.scale,
+                            causal=True,
+                        )
+                    else:
+                        output = flash_attn_func(
+                            query,
+                            key,
+                            value,
+                            softmax_scale=self.scale,
+                            causal=True,
+                            window_size=self.sliding_window,
+                            alibi_slopes=self.alibi_slopes,
+                        )
             else:
                 # prefix-enabled attention
                 output = PagedAttentionImpl.forward_prefix(

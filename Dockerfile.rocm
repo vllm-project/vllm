@@ -105,7 +105,7 @@ RUN if [ "$BUILD_TRITON" = "1" ]; then \
     && pip uninstall -y triton \
     && git clone https://github.com/ROCmSoftwarePlatform/triton.git \
     && cd triton/python \
-    && pip3 install -e . \
+    && pip3 install . \
     && cd ../..; \
     fi
 

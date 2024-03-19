@@ -251,12 +251,12 @@ def attn_fwd(
             )
             acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=Out.type.element_ty)
             # We still need to write 0s to the result
-            tl.store(O_block_ptr, acc.to(Out.type.element_ty), boundary_check=(0,1))
-            l_ptrs = L + off_z * hq * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m
+            #tl.store(O_block_ptr, acc.to(Out.type.element_ty), boundary_check=(0,1))
+            #l_ptrs = L + off_z * hq * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m
             # We store inf to LSE, not -inf because in the bwd pass, we subtract this
             # from qk which makes it -inf, such that exp(qk - inf) = 0 for these masked blocks.
-            l = tl.full([BLOCK_M], value=float("inf"), dtype=tl.float32)
-            tl.store(l_ptrs, l)
+            #l = tl.full([BLOCK_M], value=float("inf"), dtype=tl.float32)
+            #tl.store(l_ptrs, l)
             # TODO: Should dropout and return encoded softmax be handled here too?
             return
 
@@ -417,17 +417,17 @@ def attn_fwd(
             z = 0.0
             acc = tl.where(out_ptrs_mask, acc, z.to(acc.type.element_ty))
     # write back LSE
-    l_ptrs = L + off_z * hq * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m
+    #l_ptrs = L + off_z * hq * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m
     # If seqlen_q not multiple of BLOCK_M, we need to mask out the last few rows.
     # This is only true for the last M block. For others, overflow_size will be -ve
-    overflow_size = end_m_idx - seqlen_q
-    if overflow_size > 0:
-        boundary = tl.full((BLOCK_M,), BLOCK_M - overflow_size, dtype=tl.int32)
-        # This is a > check because mask being 0 blocks the store.
-        l_ptrs_mask = boundary > tl.arange(0, BLOCK_M)
-        tl.store(l_ptrs, m_i + tl.math.log2(l_i), mask=l_ptrs_mask)
-    else:
-        tl.store(l_ptrs, m_i + tl.math.log2(l_i))
+    #overflow_size = end_m_idx - seqlen_q
+    #if overflow_size > 0:
+    #    boundary = tl.full((BLOCK_M,), BLOCK_M - overflow_size, dtype=tl.int32)
+    #    # This is a > check because mask being 0 blocks the store.
+    #    l_ptrs_mask = boundary > tl.arange(0, BLOCK_M)
+    #    tl.store(l_ptrs, m_i + tl.math.log2(l_i), mask=l_ptrs_mask)
+    #else:
+    #    tl.store(l_ptrs, m_i + tl.math.log2(l_i))
 
     # write back O
     o_offset = off_z * stride_oz + cu_seqlens_q_start * stride_om + off_h_q * stride_oh
@@ -494,8 +494,6 @@ class _attention(torch.autograd.Function):
 
         encoded_softmax = None
 
-        M = torch.empty((batch, nheads_q, metadata.max_seq_len), device=q.device, dtype=torch.float32)
-
         # Seed the RNG so we get reproducible results for testing.
         philox_seed = 0x1BF52
         philox_offset = 0x1D4B42
@@ -507,7 +505,7 @@ class _attention(torch.autograd.Function):
             bias_strides = (0,0,0,0)
 
         attn_fwd[grid](
-            q, k, v, bias, sm_scale, M, o,
+            q, k, v, bias, sm_scale, None, o,
             *q_strides, *k_strides, *v_strides, *o_strides, *bias_strides,
             None, None,
             dropout_p=0.0,
@@ -526,7 +524,6 @@ class _attention(torch.autograd.Function):
             RETURN_ENCODED_SOFTMAX=False
         )
 
-        ctx.save_for_backward(q, k, v, o, M)
         ctx.grid = grid
         ctx.sm_scale = sm_scale
         ctx.BLOCK_DMODEL = head_size
@@ -538,4 +535,4 @@ class _attention(torch.autograd.Function):
         ctx.return_encoded_softmax = False
         return o, encoded_softmax
 
-attention = _attention.apply
+triton_attention = _attention.apply
