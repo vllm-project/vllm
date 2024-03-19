@@ -188,7 +188,7 @@ class UncachedBlockAllocator(BlockAllocatorBase):
         raise NotImplementedError("Invalid codepath for uncached block allocator.")
 
     def update_hash(self, block_hash: int, block: PhysicalTokenBlock):
-        raise ValueError("Invalid codepath for uncached block allocator.")
+        raise NotImplementedError("Invalid codepath for uncached block allocator.")
 
 
 class AllocStatus(enum.Enum):
