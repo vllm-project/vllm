@@ -56,14 +56,14 @@ def process_requests(engine: LLMEngine,
 def main():
     # context length 4096
     model = "lmsys/vicuna-7b-v1.5"
-    args = EngineArgs(model=model, max_model_len=4096)
+    args = EngineArgs(model=model, enforce_eager=True, max_model_len=4096)
 
     engine = LLMEngine.from_engine_args(args)
     print("max model len", engine.scheduler_config.max_model_len)
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
-    prompts = get_chat_prompts()
-    # prompts = get_long_prompt()
-    process_requests(engine, prompts[:1], tokenizer)
+    # prompts = get_chat_prompts()
+    prompts = get_long_prompt()
+    process_requests(engine, prompts, tokenizer)
 
 
 if __name__ == "__main__":

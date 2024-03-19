@@ -578,6 +578,8 @@ class ModelRunner:
          lora_requests,
          lora_mapping) = self.prepare_input_tensors(seq_group_metadata_list)
 
+        print(f"\texecute_model: {input_tokens}, {input_positions}")
+
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
 

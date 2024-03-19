@@ -155,29 +155,34 @@ class LlamaAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         
-        use_attn_sinks = False
-        if use_attn_sinks:
-            q = self.rotary_emb._forward_single(positions, q)
+        # print(
+        #     "\t\t",
+        #     q.shape if q is not None else 'q=None',
+        #     k.shape if k is not None else 'k=None',
+        #     v.shape if v is not None else 'v=None',
+        #     k_cache.shape if k_cache is not None else 'k_cache=None',
+        #     v_cache.shape if v_cache is not None else 'v_cache=None'
+        # )
+        use_attn_sinks = True
+        llama_context_len = 4096
+        if use_attn_sinks and not input_metadata.is_prompt:
+            # positions is [[seqlen - 1]]
+            q = self.rotary_emb._forward_single(positions, q, llama_context_len)
+
+            # streamingLLM: key pos is the pos in cache
+            # key positions is [[min(seqlen - 1, context length)]]
+            key_positions = torch.tensor(
+                [[min(positions[0][0], llama_context_len - 1)]],
+                device=positions.device)
+            k = self.rotary_emb._forward_single(key_positions, k, llama_context_len)
         else:
             q, k = self.rotary_emb(positions, q, k)
         
-        k_cache, v_cache = kv_cache
-        print(
-            q.shape if q is not None else 'q=None',
-            k.shape if k is not None else 'k=None',
-            v.shape if v is not None else 'v=None',
-            k_cache.shape if k_cache is not None else 'k_cache=None',
-            v_cache.shape if v_cache is not None else 'v_cache=None'
-        )
+        # streamingLLM says to rotate k AFTER updating kv cache
+        # so this prolly won't work right now
+        # TODO: add cache windowing
         
-        # we need to rotate k AFTER updating kv cache
-        # so this won't work right now
-        if use_attn_sinks:
-            kv_seq_len = k.shape[-2] + k_cache.shape[-2]
-            # key pos is the pos in cache (from streamingLLM)
-            key_positions = torch.arange(kv_seq_len, device=positions.device).unsqueeze(0)
-            k = self.rotary_emb._forward_single(key_positions, k)
-
+        k_cache, v_cache = kv_cache
         attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
         output, _ = self.o_proj(attn_output)
         return output
