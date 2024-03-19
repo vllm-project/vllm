@@ -99,11 +99,11 @@ RUN if [ "$BUILD_CUPY" = "1" ]; then \
     fi
 
 # build triton
-RUN if [ "$BUILD_TRITON" = "1"]; then \
+RUN if [ "$BUILD_TRITON" = "1" ]; then \
     mkdir -p libs \
     && cd libs \
     && pip uninstall -y triton \
-    && git clone https://github.com/ROCmSoftwarePlatform/triton.git
+    && git clone https://github.com/ROCmSoftwarePlatform/triton.git \
     && cd triton/python \
     && pip3 install -e . \
     && cd ../..; \
