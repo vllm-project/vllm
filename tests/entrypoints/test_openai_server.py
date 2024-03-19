@@ -5,9 +5,12 @@ import time
 import sys
 import pytest
 import requests
-import ray  # using Ray for overall ease of process management, parallel requests, and debugging.
+# using Ray for overall ease of process management, parallel requests,
+# and debugging.
+import ray
 import openai  # use the official client for correctness check
-from huggingface_hub import snapshot_download  # downloading lora to test lora requests
+# downloading lora to test lora requests
+from huggingface_hub import snapshot_download
 
 # imports for guided decoding tests
 import json
@@ -17,8 +20,11 @@ import re
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 MAX_SERVER_START_WAIT_S = 600  # wait for server to start for 60 seconds
-MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"  # any model with a chat template should work here
-LORA_NAME = "typeof/zephyr-7b-beta-lora"  # technically this needs Mistral-7B-v0.1 as base, but we're not testing generation quality here
+# any model with a chat template should work here
+MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+# technically this needs Mistral-7B-v0.1 as base, but we're not testing
+# generation quality here
+LORA_NAME = "typeof/zephyr-7b-beta-lora"
 
 TEST_SCHEMA = {
     "type": "object",
@@ -59,8 +65,8 @@ TEST_SCHEMA = {
     "required": ["name", "age", "skills", "work history"]
 }
 
-TEST_REGEX = r"((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.){3}" + \
-             r"(25[0-5]|(2[0-4]|1\d|[1-9]|)\d)"
+TEST_REGEX = (r"((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.){3}"
+              r"(25[0-5]|(2[0-4]|1\d|[1-9]|)\d)")
 
 TEST_CHOICE = [
     "Python", "Java", "JavaScript", "C++", "C#", "PHP", "TypeScript", "Ruby",
@@ -120,8 +126,9 @@ def server(zephyr_lora_files):
     server_runner = ServerRunner.remote([
         "--model",
         MODEL_NAME,
+        # use half precision for speed and memory savings in CI environment
         "--dtype",
-        "bfloat16",  # use half precision for speed and memory savings in CI environment
+        "bfloat16",
         "--max-model-len",
         "8192",
         "--enforce-eager",
@@ -213,14 +220,14 @@ async def test_single_chat_session(server, client: openai.AsyncOpenAI,
                                                            messages=messages,
                                                            max_tokens=10,
                                                            logprobs=True,
-                                                           top_logprobs=10)
+                                                           top_logprobs=5)
     assert chat_completion.id is not None
     assert chat_completion.choices is not None and len(
         chat_completion.choices) == 1
     assert chat_completion.choices[0].message is not None
     assert chat_completion.choices[0].logprobs is not None
     assert chat_completion.choices[0].logprobs.top_logprobs is not None
-    assert len(chat_completion.choices[0].logprobs.top_logprobs[0]) == 10
+    assert len(chat_completion.choices[0].logprobs.top_logprobs[0]) == 5
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 10
     assert message.role == "assistant"
@@ -229,10 +236,65 @@ async def test_single_chat_session(server, client: openai.AsyncOpenAI,
     # test multi-turn dialogue
     messages.append({"role": "user", "content": "express your result in json"})
     chat_completion = await client.chat.completions.create(
-        model=MODEL_NAME,
+        model=model_name,
         messages=messages,
         max_tokens=10,
     )
+    message = chat_completion.choices[0].message
+    assert message.content is not None and len(message.content) >= 0
+
+
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_too_many_logprobs(server, client: openai.AsyncOpenAI,
+                                 model_name: str):
+    messages = [{
+        "role": "system",
+        "content": "you are a helpful assistant"
+    }, {
+        "role": "user",
+        "content": "what is 1+1?"
+    }]
+
+    # Default max_logprobs is 5, so this should raise an error
+    with pytest.raises((openai.BadRequestError, openai.APIError)):
+        stream = await client.chat.completions.create(model=model_name,
+                                                      messages=messages,
+                                                      max_tokens=10,
+                                                      logprobs=True,
+                                                      top_logprobs=10,
+                                                      stream=True)
+        async for chunk in stream:
+            ...
+
+    with pytest.raises(openai.BadRequestError):
+        await client.chat.completions.create(model=model_name,
+                                             messages=messages,
+                                             max_tokens=10,
+                                             logprobs=True,
+                                             top_logprobs=10,
+                                             stream=False)
+
+    with pytest.raises((openai.BadRequestError, openai.APIError)):
+        stream = await client.completions.create(model=model_name,
+                                                 prompt="Test",
+                                                 max_tokens=10,
+                                                 logprobs=10,
+                                                 stream=True)
+        async for chunk in stream:
+            ...
+
+    with pytest.raises(openai.BadRequestError):
+        await client.completions.create(model=model_name,
+                                        prompt="Test",
+                                        max_tokens=10,
+                                        logprobs=10,
+                                        stream=False)
+
+    # the server should still work afterwards
+    chat_completion = await client.chat.completions.create(model=model_name,
+                                                           messages=messages,
+                                                           max_tokens=10,
+                                                           stream=False)
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 0
 
@@ -337,7 +399,8 @@ async def test_batch_completions(server, client: openai.AsyncOpenAI,
         max_tokens=5,
         temperature=0.0,
         extra_body=dict(
-            # NOTE: this has to be true for n > 1 in vLLM, but not necessary for official client.
+            # NOTE: this has to be true for n > 1 in vLLM, but not necessary
+            # for official client.
             use_beam_search=True),
     )
     assert len(batch.choices) == 4
@@ -414,8 +477,8 @@ async def test_logits_bias(server, client: openai.AsyncOpenAI):
 async def test_guided_json_completion(server, client: openai.AsyncOpenAI):
     completion = await client.completions.create(
         model=MODEL_NAME,
-        prompt=
-        f"Give an example JSON for an employee profile that fits this schema: {TEST_SCHEMA}",
+        prompt=f"Give an example JSON for an employee profile "
+        f"that fits this schema: {TEST_SCHEMA}",
         n=3,
         temperature=1.0,
         max_tokens=500,
@@ -434,9 +497,11 @@ async def test_guided_json_chat(server, client: openai.AsyncOpenAI):
         "role": "system",
         "content": "you are a helpful assistant"
     }, {
-        "role": "user",
-        "content": "Give an example JSON for an employee profile that " + \
-                    f"fits this schema: {TEST_SCHEMA}"
+        "role":
+        "user",
+        "content":
+        f"Give an example JSON for an employee profile that "
+        f"fits this schema: {TEST_SCHEMA}"
     }]
     chat_completion = await client.chat.completions.create(
         model=MODEL_NAME,
@@ -593,6 +658,56 @@ async def test_guided_decoding_type_error(server, client: openai.AsyncOpenAI):
             model=MODEL_NAME,
             prompt="Give an example string that fits this regex",
             extra_body=dict(guided_regex=TEST_REGEX, guided_json=TEST_SCHEMA))
+
+
+async def test_response_format_json_object(server, client: openai.AsyncOpenAI):
+    resp = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{
+            "role":
+            "user",
+            "content": ('what is 1+1? please respond with a JSON object, '
+                        'the format is {"result": 2}')
+        }],
+        response_format={"type": "json_object"})
+
+    content = resp.choices[0].message.content
+    loaded = json.loads(content)
+    assert loaded == {"result": 2}, loaded
+
+
+async def test_guided_grammar(server, client: openai.AsyncOpenAI):
+    simple_sql_grammar = """
+start: select_statement
+
+select_statement: "SELECT" column "from" table "where" condition
+
+column: "col_1" | "col_2"
+table: "table_1" | "table_2"
+condition: column "=" number
+
+number: "1" | "2"
+"""
+
+    completion = await client.completions.create(
+        model=MODEL_NAME,
+        prompt=("Generate a sql state that select col_1 from "
+                "table_1 where it is equals to 1"),
+        temperature=1.0,
+        max_tokens=500,
+        extra_body=dict(guided_grammar=simple_sql_grammar))
+
+    content = completion.choices[0].text
+
+    # use Lark to parse the output, and make sure it's a valid parse tree
+    from lark import Lark
+    parser = Lark(simple_sql_grammar)
+    parser.parse(content)
+
+    # remove spaces for comparison b/c we removed them in the grammar
+    ground_truth = "SELECT col_1 from table_1 where col_1 = 1".replace(" ", "")
+
+    assert content.strip() == ground_truth
 
 
 if __name__ == "__main__":

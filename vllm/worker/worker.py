@@ -19,7 +19,6 @@ from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
 from vllm.lora.request import LoRARequest
-from vllm.utils import is_hip
 
 
 class Worker:
@@ -131,8 +130,8 @@ class Worker:
         # GPU did not change their memory usage during the profiling.
         peak_memory = self.init_gpu_memory - free_gpu_memory
 
-        cache_block_size = CacheEngine.get_cache_block_size(
-            block_size, cache_dtype, self.model_config, self.parallel_config)
+        cache_block_size = self.get_cache_block_size_bytes(
+            block_size, cache_dtype)
         num_gpu_blocks = int(
             (total_gpu_memory * gpu_memory_utilization - peak_memory) //
             cache_block_size)
@@ -233,6 +232,22 @@ class Worker:
     def list_loras(self) -> Set[int]:
         return self.model_runner.list_loras()
 
+    @property
+    def max_model_len(self) -> int:
+        return self.model_config.max_model_len
+
+    @property
+    def vocab_size(self) -> int:
+        return self.model_runner.vocab_size
+
+    def get_cache_block_size_bytes(self, block_size: int,
+                                   cache_dtype: str) -> int:
+        """Get the size of the KV cache block size in bytes.
+        """
+        return CacheEngine.get_cache_block_size(block_size, cache_dtype,
+                                                self.model_config,
+                                                self.parallel_config)
+
 
 def init_distributed_environment(
     parallel_config: ParallelConfig,
@@ -267,8 +282,7 @@ def init_distributed_environment(
                 "cupy.distributed is already initialized but the cupy world "
                 "size does not match parallel_config.world_size "
                 f"({cupy_world_size} vs. {parallel_config.world_size}).")
-    elif (parallel_config.world_size > 1 and cupy_port is not None
-          and not is_hip()):
+    elif (parallel_config.world_size > 1 and cupy_port is not None):
         # NOTE(woosuk): We don't initialize CuPy process group when world size
         # is 1.
         # TODO(woosuk): Support multi-node connection.
