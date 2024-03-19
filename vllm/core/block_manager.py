@@ -185,7 +185,7 @@ class UncachedBlockAllocator(BlockAllocatorBase):
         return len(self.free_blocks)
 
     def contains_block(self, block_hash: int) -> bool:
-        raise ValueError("Invalid codepath for uncached block allocator.")
+        raise NotImplementedError("Invalid codepath for uncached block allocator.")
 
     def update_hash(self, block_hash: int, block: PhysicalTokenBlock):
         raise ValueError("Invalid codepath for uncached block allocator.")
