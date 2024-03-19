@@ -4,6 +4,7 @@ import socket
 import subprocess
 import uuid
 import gc
+from functools import cache
 from platform import uname
 from typing import List, Tuple, Union
 from packaging.version import parse, Version
@@ -120,6 +121,7 @@ def is_hip() -> bool:
     return torch.version.hip is not None
 
 
+@cache
 def is_neuron() -> bool:
     try:
         import transformers_neuronx
@@ -128,6 +130,7 @@ def is_neuron() -> bool:
     return transformers_neuronx is not None
 
 
+@cache
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
     # NOTE: This import statement should be executed lazily since
@@ -151,6 +154,7 @@ def random_uuid() -> str:
     return str(uuid.uuid4().hex)
 
 
+@cache
 def in_wsl() -> bool:
     # Reference: https://github.com/microsoft/WSL/issues/4071
     return "microsoft" in " ".join(uname()).lower()
@@ -225,6 +229,7 @@ def set_cuda_visible_devices(device_ids: List[int]) -> None:
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, device_ids))
 
 
+@cache
 def get_nvcc_cuda_version() -> Optional[Version]:
     cuda_home = os.environ.get('CUDA_HOME')
     if not cuda_home:
