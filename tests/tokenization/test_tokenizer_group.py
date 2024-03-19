@@ -13,7 +13,7 @@ from ..conftest import get_tokenizer_pool_config
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tokenizer_group_type", [None, "ray"])
+@pytest.mark.parametrize("tokenizer_group_type", [None, "ray", "thread"])
 async def test_tokenizer_group(tokenizer_group_type):
     reference_tokenizer = AutoTokenizer.from_pretrained("gpt2")
     tokenizer_group = get_tokenizer_group(
@@ -35,7 +35,7 @@ async def test_tokenizer_group(tokenizer_group_type):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tokenizer_group_type", ["ray"])
+@pytest.mark.parametrize("tokenizer_group_type", ["ray", "thread"])
 async def test_tokenizer_group_pool(tokenizer_group_type):
     reference_tokenizer = AutoTokenizer.from_pretrained("gpt2")
     tokenizer_group_pool = get_tokenizer_group(
@@ -63,7 +63,7 @@ async def test_tokenizer_group_pool(tokenizer_group_type):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tokenizer_group_type", ["ray"])
+@pytest.mark.parametrize("tokenizer_group_type", ["ray", "thread"])
 async def test_tokenizer_group_ray_pool_env_var_propagation(
         tokenizer_group_type):
     """Test that env vars from caller process are propagated to

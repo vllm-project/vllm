@@ -264,8 +264,7 @@ def vllm_runner():
 def get_tokenizer_pool_config(tokenizer_group_type):
     if tokenizer_group_type is None:
         return None
-    if tokenizer_group_type == "ray":
-        return TokenizerPoolConfig(pool_size=1,
-                                   pool_type="ray",
-                                   extra_config={})
+    if tokenizer_group_type in ("ray", "thread"):
+        return TokenizerPoolConfig.create_config(
+            tokenizer_pool_size=1, tokenizer_pool_type=tokenizer_group_type)
     raise ValueError(f"Unknown tokenizer_group_type: {tokenizer_group_type}")

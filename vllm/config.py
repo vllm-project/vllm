@@ -420,8 +420,8 @@ class TokenizerPoolConfig:
         cls,
         tokenizer_pool_size: Optional[int],
         tokenizer_pool_type: Literal["ray", "thread"],
-        tokenizer_pool_extra_config: Optional[Union[str, dict]],
-        tensor_parallel_size: int,
+        tokenizer_pool_extra_config: Optional[Union[str, dict]] = None,
+        tensor_parallel_size: Optional[int] = None,
     ) -> Optional["TokenizerPoolConfig"]:
         """Create a TokenizerPoolConfig from the given parameters.
 
@@ -439,6 +439,9 @@ class TokenizerPoolConfig:
             return None
 
         if tokenizer_pool_size is None:
+            if tensor_parallel_size is None:
+                # Maximally conservative in this case
+                tensor_parallel_size = 8
             # Default based on CPU count
             tokenizer_pool_size = min(
                 MAX_TOKENIZER_WORKERS,
