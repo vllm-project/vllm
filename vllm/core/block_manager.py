@@ -534,6 +534,7 @@ class BlockSpaceManager:
         access_time: float,
     ) -> None:
         if self.enable_caching:
+            # Update the last accessed time of all the blocks accessed in this step
             block_table = self.block_tables[seq.seq_id]
             for block in block_table:
                 block.last_accessed = access_time
