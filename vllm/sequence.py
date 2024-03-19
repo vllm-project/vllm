@@ -18,7 +18,7 @@ class Logprob:
     """Infos for supporting OpenAI compatible logprobs."""
     logprob: float
     decoded_token: Optional[str] = None
-
+    rank: Optional[int] = None
 
 PromptLogprobs = List[Optional[Dict[int, Logprob]]]
 SampleLogprobs = List[Dict[int, Logprob]]

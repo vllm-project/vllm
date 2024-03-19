@@ -447,6 +447,9 @@ def _sample(
     ]
     return sample_results
 
+def _get_ranks(x: torch.Tensor, indices: List[int]) -> torch.Tensor:
+    vals = x[range(len(x)), indices]
+    return (x > vals[:, None]).long().sum(1) + 1
 
 def _get_logprobs(
     logprobs: torch.Tensor,
@@ -490,6 +493,9 @@ def _get_logprobs(
         batched_logprobs_query_seq_indices,
         batched_logprobs_query_token_indices
     ]]
+    batched_ranks_query_result = _get_ranks(
+        logprobs[batched_logprobs_query_seq_indices],
+        batched_logprobs_query_token_indices)
 
     # Batched query for logprobs of topk tokens
     if largest_num_logprobs > 0:
@@ -523,15 +529,19 @@ def _get_logprobs(
             for token_id in prompt_tokens[1:]:
                 prompt_logprobs_dict = {
                     token_id:
-                    batched_logprobs_query_result[query_result_idx].item()
+                    (batched_logprobs_query_result[query_result_idx].item(),
+                     batched_ranks_query_result[query_result_idx].item())
                 }
                 if num_logprobs > 0:
                     prompt_logprobs_dict.update(
                         zip(top_token_ids[sample_idx, :num_logprobs].tolist(),
-                            top_logprobs[sample_idx, :num_logprobs].tolist()))
+                            zip(
+                                top_logprobs[
+                                    sample_idx, :num_logprobs].tolist(),
+                                range(1, num_logprobs + 1))))
                 group_prompt_logprobs.append({
-                    token_id: Logprob(logprob)
-                    for token_id, logprob in prompt_logprobs_dict.items()
+                    token_id: Logprob(*logprob_rank)
+                    for token_id, logprob_rank in prompt_logprobs_dict.items()
                 })
                 sample_idx += 1
                 query_result_idx += 1
@@ -547,7 +557,8 @@ def _get_logprobs(
         for next_token_id, parent_id in zip(next_token_ids, parent_ids):
             sample_logprobs_dict = {
                 next_token_id:
-                batched_logprobs_query_result[query_result_idx].item()
+                (batched_logprobs_query_result[query_result_idx].item(),
+                 batched_ranks_query_result[query_result_idx].item())
             }
             query_result_idx += 1
             if num_logprobs > 0:
@@ -555,11 +566,13 @@ def _get_logprobs(
                     zip(
                         top_token_ids[sample_idx +
                                       parent_id, :num_logprobs].tolist(),
-                        top_logprobs[sample_idx +
-                                     parent_id, :num_logprobs].tolist()))
+                        zip(
+                            top_logprobs[sample_idx +
+                                         parent_id, :num_logprobs].tolist(),
+                            range(1, num_logprobs + 1))))
             group_sample_logprobs.append({
-                token_id: Logprob(logprob)
-                for token_id, logprob in sample_logprobs_dict.items()
+                token_id: Logprob(*logprob_rank)
+                for token_id, logprob_rank in sample_logprobs_dict.items()
             })
         result_sample_logprobs.append(group_sample_logprobs)
         sample_idx += len(seq_ids)
