@@ -184,5 +184,3 @@ _build/
 
 # Benchmark dataset
 *.json
-
-TinyLlama
