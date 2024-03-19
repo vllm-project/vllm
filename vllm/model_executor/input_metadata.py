@@ -30,7 +30,6 @@ class InputMetadata:
     num_prompt_tokens: int
     # The number of generation tokens. Doesn't include padding.
     num_generation_tokens: int
-
     """
     Definition of context_len, subquery_len, and seqlen.
     |---------- N-1 iteration --------|
