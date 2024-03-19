@@ -86,6 +86,7 @@ class ChatCompletionRequest(BaseModel):
     min_p: Optional[float] = 0.0
     include_stop_str_in_output: Optional[bool] = False
     length_penalty: Optional[float] = 1.0
+    min_tokens: Optional[int] = 0
 
     def to_sampling_params(self) -> SamplingParams:
         if self.logprobs and not self.top_logprobs:
@@ -117,6 +118,7 @@ class ChatCompletionRequest(BaseModel):
             stop=self.stop,
             stop_token_ids=self.stop_token_ids,
             max_tokens=self.max_tokens,
+            min_tokens=self.min_tokens,
             logprobs=self.top_logprobs if self.logprobs else None,
             prompt_logprobs=self.top_logprobs if self.echo else None,
             best_of=self.best_of,
@@ -163,6 +165,7 @@ class CompletionRequest(BaseModel):
     min_p: Optional[float] = 0.0
     include_stop_str_in_output: Optional[bool] = False
     length_penalty: Optional[float] = 1.0
+    min_tokens: Optional[int] = 0
 
     def to_sampling_params(self):
         echo_without_generation = self.echo and self.max_tokens == 0
@@ -196,6 +199,7 @@ class CompletionRequest(BaseModel):
             stop_token_ids=self.stop_token_ids,
             ignore_eos=self.ignore_eos,
             max_tokens=self.max_tokens if not echo_without_generation else 1,
+            min_tokens=self.min_tokens,
             logprobs=self.logprobs,
             use_beam_search=self.use_beam_search,
             early_stopping=self.early_stopping,
