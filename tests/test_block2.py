@@ -211,16 +211,16 @@ class TestPrefixCachingBlock:
     
         if num_blocks == 0:
             return []
+        
+        allocator = MagicMock(spec=PrefixCachingBlockAllocator)
 
-        mock_allocator = MagicMock(spec=PrefixCachingBlockAllocator)
-    
         prev_block = None
         for block_number in range(0, num_blocks):
             prev_block = PrefixCachingBlock(
                                            prev_block=prev_block,
                                            token_ids=[],
                                            block_size=block_size,
-                                           prefix_caching_allocator=mock_allocator,
+                                           prefix_caching_allocator=allocator,
                                            )
     
             tokens_to_append = token_ids[block_number *
@@ -246,17 +246,110 @@ class TestPrefixCachingBlockAllocator:
         return allocate_block
 
     @staticmethod
-    @pytest.mark.parametrize("allocate_type", ["immutable", "mutable"])
     @pytest.mark.parametrize("num_blocks", [1, 1024])
     @pytest.mark.parametrize("block_size", [1, 16])
-    def test_allocate_ooms(allocate_type: str, num_blocks: int, block_size: int):
+    def test_allocate_mutable_ooms(num_blocks: int, block_size: int):
         allocator = PrefixCachingBlockAllocator(num_blocks=num_blocks, block_size=block_size)
-        allocate_block = TestPrefixCachingBlockAllocator.create_allocate_lambda(allocate_type, allocator, prev_block=None, token_ids=list(range(block_size)))
+        allocate_block = TestPrefixCachingBlockAllocator.create_allocate_lambda(
+            allocate_type="mutable",
+            allocator=allocator,
+            prev_block=None,
+            token_ids=list(range(block_size)),
+        )
         
         blocks = [allocate_block() for _ in range(num_blocks)]
         with pytest.raises(BlockAllocator.NoFreeBlocksError):
             oom_block = allocate_block()
 
+    @staticmethod
+    @pytest.mark.parametrize("num_blocks", [1, 1024])
+    @pytest.mark.parametrize("block_size", [1, 16])
+    def test_allocate_immutable_does_not_oom_single_hash(num_blocks: int, block_size: int):
+        allocator = PrefixCachingBlockAllocator(num_blocks=num_blocks, block_size=block_size)
+        allocate_block = TestPrefixCachingBlockAllocator.create_allocate_lambda(
+            allocate_type="immutable",
+            allocator=allocator,
+            prev_block=None,
+            token_ids=list(range(block_size)),
+        )
+        
+        blocks = [allocate_block() for _ in range(num_blocks)]
+
+        # Expect no OOM. If these were mutable blocks, this would OOM.
+        non_oom_block = allocate_block()
+
+        # Expect all blocks to have same physical block index.
+        for block in blocks:
+            assert block.physical_block_index == non_oom_block.physical_block_index
+
+    @staticmethod
+    @pytest.mark.parametrize("num_blocks", [1, 1024])
+    @pytest.mark.parametrize("block_size", [1, 16])
+    def test_allocate_immutable_ooms_many_hash(num_blocks: int, block_size: int):
+        """Consume all blocks using many different hashes/block content.
+
+        Do this by creating a sequence that is very long.
+        Expect next block to OOM.
+        """
+        allocator = PrefixCachingBlockAllocator(num_blocks=num_blocks, block_size=block_size)
+
+        # Create token ids that will exhaust all blocks.
+        token_ids = list(range(num_blocks * block_size))
+
+        chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
+                    block_size=block_size,
+                    token_ids=token_ids,
+                    allocator=allocator,
+        )
+        
+        # Expect allocation with unseen hash to fail.
+        with pytest.raises(BlockAllocator.NoFreeBlocksError):
+            allocator.allocate_immutable(prev_block=chain[-1], token_ids=list(range(block_size)))
+
+        # Expect mutable allocation on chain to fail.
+        with pytest.raises(BlockAllocator.NoFreeBlocksError):
+            allocator.allocate_mutable(prev_block=chain[-1])
+
+        # Expect mutable allocation without prev_block to fail.
+        with pytest.raises(BlockAllocator.NoFreeBlocksError):
+            allocator.allocate_mutable(prev_block=None)
+
+        # Expect allocation of exact same chain to pass.
+        second_chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
+                    block_size=block_size,
+                    token_ids=token_ids,
+                    allocator=allocator,
+        )
+        
+        # Expect physical block indices to be the same in both chains.
+        assert chain and second_chain
+        for first_chain_block, second_chain_block in zip(chain, second_chain):
+            assert first_chain_block.physical_block_index == second_chain_block.physical_block_index
+
+
+    @staticmethod
+    def create_immutable_chain(block_size: int,
+                     token_ids: List[int],
+                     allocator: PrefixCachingBlockAllocator,
+                     ) -> List[PrefixCachingBlock]:
+        """Helper method which creates a chain of blocks.
+        """
+        blocks = []
+        num_blocks = math.ceil(
+            len(token_ids) / block_size)
+    
+        if num_blocks == 0:
+            return []
+        
+        prev_block = None
+        for block_number in range(0, num_blocks):
+            block_token_ids = token_ids[block_number *
+                                         block_size:(block_number + 1) *
+                                         block_size]
+            prev_block = allocator.allocate_immutable(prev_block=prev_block, token_ids=block_token_ids)
+            blocks.append(prev_block)
+    
+        return blocks
     # TODO test behavior with content hash
 
 #    @staticmethod

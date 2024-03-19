@@ -169,8 +169,15 @@ class PrefixCachingBlock(Block):
         assert_prefix_caching_block_or_none(prev_block)
 
     def append_token_ids(self, token_ids: List[int]) -> None:
+        assert token_ids
         assert len(self._token_ids) + len(token_ids) <= self._block_size
+
         self._token_ids.extend(token_ids)
+
+        # If the content hash is present, then the block can be made immutable.
+        # Register ourselves with the allocator, potentially replacing the physical block index.
+        if self.content_hash is not None:
+            self.physical_block_index = self._prefix_caching_allocator.register_immutable_block(self)
 
     @property
     def physical_block_index(self) -> Optional[int]:
@@ -311,6 +318,20 @@ class PrefixCachingBlockAllocator(BlockAllocator):
  
     def free(self, block: Block) -> None:
         pass
+
+    # TODO name: upsert_
+    # promote
+    # replace
+    def register_immutable_block(self, block: PrefixCachingBlock) -> BlockIndex:
+        assert block.content_hash is not None
+        assert block.physical_block_index is not None
+
+        # If the content hash does not have a corresponding cached block,
+        # set this block as the cached block.
+        if block.content_hash not in self._cached_blocks:
+            self._cached_blocks[block.content_hash] = block.physical_block_index
+
+        return self._cached_blocks[block.content_hash]
 
 def assert_prefix_caching_block_or_none(block: Optional[Block]):
     if block is None:
