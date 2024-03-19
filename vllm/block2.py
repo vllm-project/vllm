@@ -78,7 +78,7 @@ class BlockAllocator(ABC):
     #    pass
 
 class NaiveBlock(Block):
-    def __init__(self, prev_block: Block, token_ids: List[int], physical_block_index: Optional[int] = None):
+    def __init__(self, prev_block: Block, token_ids: List[int], block_size: int, physical_block_index: Optional[int] = None):
         self._token_ids = token_ids[:]
         self._prev_block = prev_block
         self._physical_block_index = physical_block_index
@@ -142,7 +142,7 @@ class NaiveBlockAllocator(BlockAllocator):
         self._free_block_indices: Set[BlockIndex] = set(range(num_blocks))
         self._refcounter = RefCounter(all_block_indices=self._free_block_indices)
         self._block_cls = block_cls
-        #self._block_size = block_size
+        self._block_size = block_size
 
     def allocate_immutable(self, prev_block: Optional[Block], token_ids: List[int]) -> Block:
         block = self.allocate_mutable(prev_block=prev_block)
@@ -151,7 +151,7 @@ class NaiveBlockAllocator(BlockAllocator):
 
     def allocate_mutable(self, prev_block: Optional[Block]) -> Block:
         block_index = self._allocate_new_block()
-        return self._block_cls(prev_block=prev_block, token_ids=[], physical_block_index=block_index)
+        return self._block_cls(prev_block=prev_block, token_ids=[], physical_block_index=block_index, block_size=self._block_size)
 
     def free(self, block: Block) -> None:
         block_index = block.physical_block_index
@@ -181,14 +181,15 @@ class PrefixCachingBlock(Block):
         prev_block: Optional["PrefixCachingBlock"],
         token_ids: List[int],
         block_size: int,
+        physical_block_index: Optional[int] = None,
     ):
         self._prev_block = prev_block
         self._token_ids = token_ids[:]
         self._block_size = block_size
         self._cached_content_hash: Optional[int] = None
+        self._physical_block_index = physical_block_index
 
-        if self._prev_block is not None:
-            assert isinstance(self._prev_block, PrefixCachingBlock)
+        assert_prefix_caching_block_or_none(prev_block)
 
     def append_token_ids(self, token_ids: List[int]) -> None:
         assert len(self._token_ids) + len(token_ids) <= self._block_size
@@ -196,11 +197,11 @@ class PrefixCachingBlock(Block):
 
     @property
     def physical_block_index(self) -> Optional[int]:
-        pass
+        return self._physical_block_index
 
     @physical_block_index.setter
-    def physical_block_index(self) -> None:
-        pass
+    def physical_block_index(self, value) -> None:
+        self._physical_block_index = value
 
     def is_full(self) -> bool:
         return len(self._token_ids) == self._block_size
@@ -264,8 +265,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     BlockIndex = int
     
     def __init__(self, num_blocks: int, block_size: int):
-        #self._mutable_block_allocator = NaiveBlockAllocator()
-        #self._cached_blocks: Dict[int, Block]
         self._cached_blocks: Dict[PrefixHash, BlockIndex] = {}
 
         self._hashless_allocator = NaiveBlockAllocator(
@@ -274,6 +273,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             block_size=block_size,
         )
 
+        self._block_size = block_size
         self._refcounter = self._hashless_allocator.refcounter
     
     def allocate_mutable(self, prev_block: Block) -> Block:
@@ -282,29 +282,37 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         Otherwise, raise :(
         """
-        pass
-
-    def allocate_immutable(self, prev_block: Block, token_ids: List[int]) -> Block:
-        assert isinstance(prev_block, PrefixCachingBlock)
-
-        block = PrefixCachingBlock(prev_block=prev_block, token_ids=token_ids)
-        assert block.content_hash is not None
-
-        cached_block_index = self._cached_blocks.get(block.content_hash, default=None)
-        if cached_block_index is not None:
-            block.physical_block_index = cached_block_index
-            self._refcounter.incr(block.physical_block_index)
-            return block
-
         try:
-            mutable_block = self._hashless_allocator.allocate_mutable(prev_block=prev_block)
-            block.physical_block_index = mutable_block.physical_block_index
+            block = self._hashless_allocator.allocate_mutable(prev_block=prev_block)
             return block
         except BlockAllocator.NoFreeBlocksError:
             pass
 
         # TODO: weakref
-        raise NotImplementedError
+        raise BlockAllocator.NoFreeBlocksError()
+
+    def allocate_immutable(self, prev_block: Optional[Block], token_ids: List[int]) -> Block:
+        assert_prefix_caching_block_or_none(prev_block)
+
+        block = PrefixCachingBlock(prev_block=prev_block, token_ids=token_ids, block_size=self._block_size)
+        assert block.content_hash is not None
+
+        cached_block_index = self._cached_blocks.get(block.content_hash, None)
+        if cached_block_index is not None:
+            block.physical_block_index = cached_block_index
+            self._refcounter.incr(block.physical_block_index)
+            return block
+
+        mutable_block = self.allocate_mutable(prev_block)
+        block.physical_block_index = mutable_block.physical_block_index
+        # TODO computed bit
+
+        return mutable_block
  
     def free(self, block: Block) -> None:
         pass
+
+def assert_prefix_caching_block_or_none(block: Optional[Block]):
+    if block is None:
+        return
+    assert isinstance(block, PrefixCachingBlock)

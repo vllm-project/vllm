@@ -7,7 +7,7 @@ import math
 
 from vllm.block2 import NaiveBlockAllocator, NaiveBlock, BlockAllocator, Block
 from vllm.block2 import RefCounter
-from vllm.block2 import PrefixCachingBlock
+from vllm.block2 import PrefixCachingBlock, PrefixCachingBlockAllocator
 
 
 class TestRefCounter:
@@ -226,10 +226,38 @@ class TestPrefixCachingBlock:
     
         return blocks
 
-#class TestPrefixCachingBlockAllocator:
-#    
-#    @staticmethod
-#    def test_allocate_with_cache():
-#        allocator = PrefixCachingBlockAllocator()
-#
-#
+class TestPrefixCachingBlockAllocator:
+    
+    @staticmethod
+    def test_allocate_with_cache():
+        allocator = PrefixCachingBlockAllocator(
+            num_blocks=1024,
+            block_size=16,
+        )
+
+        block = allocator.allocate_immutable(prev_block=None, token_ids=list(range(16)))
+
+
+    
+    @staticmethod
+    def create_allocate_lambda(allocate_type: str, allocator: NaiveBlockAllocator, prev_block: Optional[Block], token_ids: List[int]):
+        if allocate_type == "immutable":
+            allocate_block = lambda: allocator.allocate_immutable(prev_block=prev_block, token_ids=token_ids)
+        elif allocate_type == "mutable":
+            allocate_block = lambda: allocator.allocate_mutable(prev_block=prev_block)
+        else:
+            raise ValueError()
+
+        return allocate_block
+
+    @staticmethod
+    @pytest.mark.parametrize("allocate_type", ["immutable", "mutable"])
+    @pytest.mark.parametrize("num_blocks", [1, 1024])
+    @pytest.mark.parametrize("block_size", [1, 16])
+    def test_allocate_ooms(allocate_type: str, num_blocks: int, block_size: int):
+        allocator = PrefixCachingBlockAllocator(num_blocks=num_blocks, block_size=block_size)
+        allocate_block = TestPrefixCachingBlockAllocator.create_allocate_lambda(allocate_type, allocator, prev_block=None, token_ids=list(range(block_size)))
+        
+        blocks = [allocate_block() for _ in range(num_blocks)]
+        with pytest.raises(BlockAllocator.NoFreeBlocksError):
+            oom_block = allocate_block()
