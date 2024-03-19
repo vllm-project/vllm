@@ -50,6 +50,7 @@ class TestRefCounter:
             counter.decr(block_index)
 
 class TestNaiveBlockAllocator:
+    # TODO tests for CoW
     
     @staticmethod
     def create_allocate_lambda(allocate_type: str, allocator: NaiveBlockAllocator, prev_block: Optional[Block], token_ids: List[int]):
