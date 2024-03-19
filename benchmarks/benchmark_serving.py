@@ -11,11 +11,12 @@ On the server side, run one of the following commands:
 
 On the client side, run:
     python benchmarks/benchmark_serving.py \
-        --backend <backend> \ # For vllm openai api server, use "openai"
+        --backend <backend> \
         --model <your_model> \
         --dataset-name sharegpt \
         --dataset-path <path to dataset> \
-        --request-rate <request_rate>
+        --request-rate <request_rate> \ # By default <request_rate> is inf
+        --num-prompts <num_prompts> # By default <num_prompts> is 1000
 """
 import argparse
 import asyncio
@@ -478,7 +479,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--endpoint",
         type=str,
-        default="/generate",
+        default="/v1/completions",
         help="API endpoint.",
     )
     parser.add_argument(
