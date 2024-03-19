@@ -3,7 +3,6 @@ import io
 import os
 import re
 import subprocess
-import sys
 import warnings
 from pathlib import Path
 from typing import List, Set
@@ -15,8 +14,6 @@ import torch.utils.cpp_extension as torch_cpp_ext
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME, ROCM_HOME
 
 ROOT_DIR = os.path.dirname(__file__)
-# This is a temporary directory to store third-party packages.
-THIRDPARTY_SUBDIR = "vllm/thirdparty_files"
 
 # If you are developing the C++ backend of vLLM, consider building vLLM with
 # `python setup.py develop` since it will give you incremental builds.
@@ -145,8 +142,8 @@ def get_pytorch_rocm_arch() -> Set[str]:
     # If we don't have PYTORCH_ROCM_ARCH specified pull the list from rocm_agent_enumerator
     if env_arch_list is None:
         command = "rocm_agent_enumerator"
-        env_arch_list = subprocess.check_output([command]).decode('utf-8')\
-                        .strip().replace("\n", ";")
+        env_arch_list = (subprocess.check_output(
+            [command]).decode('utf-8').strip().replace("\n", ";"))
         arch_source_str = "rocm_agent_enumerator"
     else:
         arch_source_str = "PYTORCH_ROCM_ARCH env variable"
@@ -327,46 +324,8 @@ if _is_cuda():
                     "nvcc": NVCC_FLAGS_PUNICA,
                 },
             ))
-
-    # Download the FlashAttention package.
-    # Adapted from https://github.com/ray-project/ray/blob/f92928c9cfcbbf80c3a8534ca4911de1b44069c0/python/setup.py#L518-L530
-    flash_attn_version = "2.5.6"
-    install_dir = os.path.join(ROOT_DIR, THIRDPARTY_SUBDIR)
-    subprocess.check_call(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            "-q",
-            f"--target={install_dir}",
-            "einops",  # Dependency of flash-attn.
-            f"flash-attn=={flash_attn_version}",
-            "--no-dependencies",  # Required to avoid re-installing torch.
-        ],
-        env=dict(os.environ, CC="gcc"),
-    )
-
-    # Copy the FlashAttention package into the vLLM package after build.
-    class build_ext(BuildExtension):
-
-        def run(self):
-            super().run()
-            target_dir = os.path.join(self.build_lib, THIRDPARTY_SUBDIR)
-            if not os.path.exists(target_dir):
-                os.makedirs(target_dir)
-            self.copy_tree(install_dir, target_dir)
-
-    class BinaryDistribution(setuptools.Distribution):
-
-        def has_ext_modules(self):
-            return True
-
-else:
-    build_ext = BuildExtension
-    BinaryDistribution = setuptools.Distribution
-    if _is_neuron():
-        neuronxcc_version = get_neuronxcc_version()
+elif _is_neuron():
+    neuronxcc_version = get_neuronxcc_version()
 
 vllm_extension_sources = [
     "csrc/cache_kernels.cu",
@@ -472,6 +431,12 @@ def get_requirements() -> List[str]:
     else:
         with open(get_path("requirements.txt")) as f:
             requirements = f.read().strip().split("\n")
+        if nvcc_cuda_version <= Version("11.8"):
+            # replace cupy-cuda12x with cupy-cuda11x for cuda 11.x
+            for i in range(len(requirements)):
+                if requirements[i].startswith("cupy-cuda12x"):
+                    requirements[i] = "cupy-cuda11x"
+                    break
     return requirements
 
 
@@ -509,7 +474,6 @@ setuptools.setup(
     python_requires=">=3.8",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
-    cmdclass={"build_ext": build_ext} if not _is_neuron() else {},
-    distclass=BinaryDistribution,
+    cmdclass={"build_ext": BuildExtension} if not _is_neuron() else {},
     package_data=package_data,
 )

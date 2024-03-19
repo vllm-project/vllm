@@ -20,20 +20,23 @@ def test_block_allocator(
                                      num_blocks,
                                      enable_caching=True)
 
-    # Allocate two PysicalTokenBlocks with the same hash and check that they are the same PhysicalTokenBlock
+    # Allocate two PysicalTokenBlocks with the same hash and check
+    # that they are the same PhysicalTokenBlock
     first_block = block_allocator.allocate(block_hash, 0)
     second_block = block_allocator.allocate(block_hash, 0)
     assert (first_block == second_block)
     assert (second_block.ref_count == 2)
 
-    # Free the first_block and confirm that the ref_count is correctly decremented on the second block
+    # Free the first_block and confirm that the ref_count is correctly
+    # decremented on the second block
     block_allocator.free(first_block)
     assert (second_block.ref_count == 1)
 
     # Free the second block
     block_allocator.free(second_block)
 
-    # Reallocate the first block and confirm that, even after the block had its ref_count go to 0, we still get the same block back
+    # Reallocate the first block and confirm that, even after the block
+    # had its ref_count go to 0, we still get the same block back
     first_block = block_allocator.allocate(block_hash, 0)
     assert (first_block == second_block)
     assert (first_block.block_hash == block_hash)
@@ -56,7 +59,8 @@ def test_eviction(num_blocks: int, ):
     for block in blocks:
         block_allocator.free(block)
 
-    # Allocate a new block and confirm that it's the first block freed. I.E The Least Recently Used block
+    # Allocate a new block and confirm that it's the first block freed.
+    # I.E The Least Recently Used block
     new_block_hash = block_size
     new_block = block_allocator.allocate(new_block_hash, 0)
     assert (new_block == blocks[0])
@@ -68,7 +72,8 @@ def test_eviction(num_blocks: int, ):
     assert (realloc_block == blocks[realloc_block_hash])
     assert (realloc_block.block_hash == realloc_block_hash)
 
-    # Allocate a new block and confirm that it's not the realloc_block, since the realloc_block shouldn't be in the free list
+    # Allocate a new block and confirm that it's not the realloc_block,
+    # since the realloc_block shouldn't be in the free list
     new_block_hash = block_size + 1
     new_block = block_allocator.allocate(new_block_hash, 0)
     assert (realloc_block != new_block)

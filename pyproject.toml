@@ -9,6 +9,10 @@ requires = [
 ]
 build-backend = "setuptools.build_meta"
 
+[tool.ruff]
+# Allow lines to be as long as 80.
+line-length = 80
+
 [tool.ruff.lint]
 select = [
     # pycodestyle
@@ -29,8 +33,6 @@ ignore = [
     "F405", "F403",
     # lambda expression assignment
     "E731",
-    # line too long, handled by black formatting
-    "E501",
     # .strip() with multi-character strings
     "B005",
     # Loop control variable not used within loop body

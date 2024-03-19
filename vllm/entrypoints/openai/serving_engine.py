@@ -50,10 +50,12 @@ class OpenAIServing:
         except RuntimeError:
             event_loop = None
 
-        if event_loop is not None and event_loop.is_running(
-        ):  # If the current is instanced by Ray Serve, there is already a running event loop
+        if event_loop is not None and event_loop.is_running():
+            # If the current is instanced by Ray Serve,
+            # there is already a running event loop
             event_loop.create_task(self._post_init())
-        else:  # When using single vLLM without engine_use_ray
+        else:
+            # When using single vLLM without engine_use_ray
             asyncio.run(self._post_init())
 
     async def _post_init(self):
@@ -178,8 +180,9 @@ class OpenAIServing:
 
         if token_num + request.max_tokens > self.max_model_len:
             raise ValueError(
-                f"This model's maximum context length is {self.max_model_len} tokens. "
-                f"However, you requested {request.max_tokens + token_num} tokens "
+                f"This model's maximum context length is "
+                f"{self.max_model_len} tokens. However, you requested "
+                f"{request.max_tokens + token_num} tokens "
                 f"({token_num} in the messages, "
                 f"{request.max_tokens} in the completion). "
                 f"Please reduce the length of the messages or completion.", )

@@ -1,7 +1,9 @@
 """
-NOTE: This API server is used only for demonstrating usage of AsyncEngine and simple performance benchmarks.
-It is not intended for production use. For production use, we recommend using our OpenAI compatible server.
-We are also not going to accept PRs modifying this file, please change `vllm/entrypoints/openai/api_server.py` instead.
+NOTE: This API server is used only for demonstrating usage of AsyncEngine
+and simple performance benchmarks. It is not intended for production use.
+For production use, we recommend using our OpenAI compatible server.
+We are also not going to accept PRs modifying this file, please
+change `vllm/entrypoints/openai/api_server.py` instead.
 """
 
 import argparse
@@ -80,6 +82,14 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--ssl-keyfile", type=str, default=None)
     parser.add_argument("--ssl-certfile", type=str, default=None)
+    parser.add_argument("--ssl-ca-certs",
+                        type=str,
+                        default=None,
+                        help="The CA certificates file")
+    parser.add_argument("--ssl-cert-reqs",
+                        type=int,
+                        default=0,
+                        help="Whether client certificate is required")
     parser.add_argument(
         "--root-path",
         type=str,
@@ -98,4 +108,6 @@ if __name__ == "__main__":
                 log_level="debug",
                 timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
                 ssl_keyfile=args.ssl_keyfile,
-                ssl_certfile=args.ssl_certfile)
+                ssl_certfile=args.ssl_certfile,
+                ssl_ca_certs=args.ssl_ca_certs,
+                ssl_cert_reqs=args.ssl_cert_reqs)

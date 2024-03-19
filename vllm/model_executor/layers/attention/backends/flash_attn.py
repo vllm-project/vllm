@@ -1,16 +1,8 @@
 """Attention layer with Flash and PagedAttention."""
 from typing import List, Optional
 
-# NOTE(woosuk): This imports flash_attn under vllm/thirdparty_files/.
 from vllm.utils import is_hip
-try:
-    from flash_attn import flash_attn_func
-except ImportError:
-    if is_hip():
-        pass
-    else:
-        raise
-
+from flash_attn import flash_attn_func
 import torch
 
 from vllm.model_executor.input_metadata import InputMetadata
@@ -124,8 +116,6 @@ class FlashAttentionBackend:
                     key_cache,
                     value_cache,
                     input_metadata,
-                    self.num_heads,
-                    self.num_kv_heads,
                     self.alibi_slopes,
                 )
         else:
