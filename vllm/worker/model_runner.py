@@ -89,12 +89,13 @@ class ModelRunner:
 
     def load_model(self) -> None:
         with measure_cuda_memory() as m:
-            self.model = get_model(self.model_config,
-                                   self.device_config,
-                                   lora_config=self.lora_config,
-                                   vision_language_config=self.vision_language_config,
-                                   parallel_config=self.parallel_config,
-                                   scheduler_config=self.scheduler_config)
+            self.model = get_model(
+                self.model_config,
+                self.device_config,
+                lora_config=self.lora_config,
+                vision_language_config=self.vision_language_config,
+                parallel_config=self.parallel_config,
+                scheduler_config=self.scheduler_config)
 
         self.model_memory_usage = m.consumed_memory
         logger.info(f"Loading model weights took "

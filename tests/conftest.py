@@ -4,7 +4,8 @@ from typing import List, Optional, Tuple
 from PIL import Image
 import pytest
 import torch
-from transformers import AutoModelForCausalLM, AutoProcessor, LlavaForConditionalGeneration
+from transformers import (AutoModelForCausalLM, AutoProcessor,
+                          LlavaForConditionalGeneration)
 
 from vllm import LLM, SamplingParams
 from vllm.config import VisionLanguageConfig

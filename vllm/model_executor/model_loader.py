@@ -5,8 +5,7 @@ from typing import Type
 import torch
 import torch.nn as nn
 
-
-from vllm.config import DeviceConfig, ModelConfig, VisionLanguageConfig
+from vllm.config import DeviceConfig, ModelConfig
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.llava import LlavaForConditionalGeneration
 from vllm.model_executor.weight_utils import (get_quant_config,
@@ -41,7 +40,6 @@ def _get_model_architecture(model_config: ModelConfig) -> Type[nn.Module]:
     raise ValueError(
         f"Model architectures {architectures} are not supported for now. "
         f"Supported architectures: {ModelRegistry.get_supported_archs()}")
-
 
 
 def get_model(model_config: ModelConfig, device_config: DeviceConfig,

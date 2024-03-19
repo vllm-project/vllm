@@ -336,7 +336,7 @@ class EngineArgs:
             type=str,
             default=None,
             help=(
-                'Image input shape which should be consistant with image input '
+                'Image input shape which should be consistent with image input '
                 'type.'))
         parser.add_argument(
             '--image-feature-size',

@@ -7,7 +7,8 @@ import importlib
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, LoRAConfig, VisionLanguageConfig)
+                         ParallelConfig, SchedulerConfig, LoRAConfig,
+                         VisionLanguageConfig)
 from vllm.engine.ray_utils import RayWorkerVllm, ray
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.executor.utils import check_block_size_valid

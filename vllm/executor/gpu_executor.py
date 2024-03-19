@@ -3,7 +3,8 @@ from typing import Dict, List, Optional
 
 from vllm.lora.request import LoRARequest
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, LoRAConfig, VisionLanguageConfig)
+                         ParallelConfig, SchedulerConfig, LoRAConfig,
+                         VisionLanguageConfig)
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.executor.utils import check_block_size_valid
 from vllm.logger import init_logger

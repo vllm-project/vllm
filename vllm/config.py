@@ -257,7 +257,8 @@ class ModelConfig:
         if hasattr(self.hf_text_config, "head_dim"):
             return self.hf_text_config.head_dim
         # FIXME(woosuk): This may not be true for all models.
-        return self.hf_text_config.hidden_size // self.hf_text_config.num_attention_heads
+        return (self.hf_text_config.hidden_size //
+                self.hf_text_config.num_attention_heads)
 
     def get_total_num_kv_heads(self) -> int:
         """Returns the total number of KV heads."""

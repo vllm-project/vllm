@@ -204,7 +204,6 @@ class LLM:
                                     lora_request=lora_request,
                                     image_request=image_request)
 
-
     def _run_engine(self, use_tqdm: bool) -> List[RequestOutput]:
         # Initialize tqdm.
         if use_tqdm:

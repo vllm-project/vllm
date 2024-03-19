@@ -256,15 +256,13 @@ class _AsyncLLMEngine(LLMEngine):
             prompt_token_ids=prompt_token_ids,
             lora_request=lora_request)
 
-        return self.add_request(
-            request_id,
-            prompt=prompt,
-            prompt_token_ids=prompt_token_ids,
-            sampling_params=sampling_params,
-            arrival_time=arrival_time,
-            lora_request=lora_request,
-            image_request=image_request
-        )
+        return self.add_request(request_id,
+                                prompt=prompt,
+                                prompt_token_ids=prompt_token_ids,
+                                sampling_params=sampling_params,
+                                arrival_time=arrival_time,
+                                lora_request=lora_request,
+                                image_request=image_request)
 
     async def check_health_async(self) -> None:
         self.model_executor.check_health()

@@ -1,5 +1,6 @@
 import time
-from typing import Dict, Iterable, List, Optional, Tuple, Type, Union, TYPE_CHECKING
+from typing import (Dict, Iterable, List, Optional, Tuple, Type, Union,
+                    TYPE_CHECKING)
 
 from transformers import PreTrainedTokenizer
 
@@ -25,7 +26,6 @@ from vllm.utils import Counter
 if TYPE_CHECKING:
     import torch
     from vllm.config import VisionLanguageConfig  # pylint: disable=ungrouped-imports
-
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -108,7 +108,8 @@ class LLMEngine:
 
         self.model_executor = executor_class(model_config, cache_config,
                                              parallel_config, scheduler_config,
-                                             device_config, lora_config, vision_language_config)
+                                             device_config, lora_config,
+                                             vision_language_config)
 
         # Ping the tokenizer to ensure liveness if it runs in a
         # different process.
@@ -283,8 +284,7 @@ class LLMEngine:
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,
-                                  arrival_time, lora_request,
-                                  image_request)
+                                  arrival_time, lora_request, image_request)
 
         # Add the sequence group to the scheduler.
         self.scheduler.add_seq_group(seq_group)
