@@ -17,75 +17,50 @@ except ImportError:
     print("Not using HPU fused scaled dot-product attention kernel.")
     FusedSDPA = None
 
-
-def block_masked_attention(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    scale: float,
-    attn_mask: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    query = query * scale
-    attn = query.transpose(0,1) @ key.transpose(0, 1).transpose(1, 2)
-    if attn_mask is not None:
-        attn = attn + attn_mask.to(attn.dtype)
-    attn = attn.softmax(-1)
-    out = attn @ value.transpose(0, 1)
-    out = out.transpose(0, 1)
-    return out
-
-
 def memory_efficient_attention_forward(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    cu_seq_lens: List[int],
     attn_bias: Optional[torch.Tensor] = None,
     p: float = 0.0,
     scale: Optional[float] = None,
 ) -> torch.Tensor:
     assert attn_bias is not None, "Attention mask is required for prompt processing"
     dim = query.dim()
-    if FusedSDPA and isinstance(attn_bias, BlockDiagonalCausalMask):
-        _, _, heads, head_dim = query.shape
-        bs = len(cu_seq_lens) - 1
-        seq_len_q = query.shape[1] // bs
-        seq_len_kv = key.shape[1] // bs
-        query = query.reshape(bs, seq_len_q, heads, head_dim).permute(0, 2, 1, 3)
-        key = key.reshape(bs, seq_len_kv, heads, head_dim).permute(0, 2, 1, 3)
-        value = value.reshape(bs, seq_len_kv, heads, head_dim).permute(0, 2, 1, 3)
-        attn_mask = torch.ones((bs, heads, seq_len_q, seq_len_kv), device=query.device, dtype=torch.bool).tril()
+    is_causal = isinstance(attn_bias, BlockDiagonalCausalMask)
+    if FusedSDPA and (is_causal or attn_bias is None):
+        bs = query.shape[0]
+        seq_len_q = query.shape[1]
+        seq_len_kv = key.shape[1]
+        heads = query.shape[-2] if dim != 5 else query.shape[-3]
+        attn_groups = 1 if dim != 5 else query.shape[-2]
+        head_dim = query.shape[-1]
+        if dim == 4:
+            # [bs, seq_len, 1, heads, head_dim] -> [bs, heads, seq_len, head_dim]
+            query = query.reshape(bs, seq_len_q, heads, head_dim).permute(0, 2, 1, 3)
+            key = key.reshape(bs, seq_len_kv, heads, head_dim).permute(0, 2, 1, 3)
+            value = value.reshape(bs, seq_len_kv, heads, head_dim).permute(0, 2, 1, 3)
+        elif dim == 5:
+            # [bs, seq_len, heads, attn_groups, head_dim] -> [bs, heads, attn_groups, seq_len, head_dim]
+            query = query.reshape(bs, seq_len_q, heads, attn_groups, head_dim).permute(0, 2, 3, 1, 4) 
+            key = key.reshape(bs, seq_len_kv, heads, attn_groups, head_dim).permute(0, 2, 3, 1, 4) 
+            value = value.reshape(bs, seq_len_kv, heads, attn_groups, head_dim).permute(0, 2, 3, 1, 4) 
+        else:
+            raise ValueError(f"Unsupported attention dimension: {dim}")
+
         import habana_frameworks.torch.hpu as ht
         with ht.sdp_kernel(enable_recompute=False):  # (flash_attention_recompute and q_len == 1)):
             out = FusedSDPA.apply(
-                query, key, value, attn_mask, 0.0, False, None
+                query, key, value, None, p, is_causal, scale
             )
         htorch.core.mark_step()
-        out = out.permute(0, 2, 1, 3).reshape(bs * seq_len_q, heads, head_dim)
-    else:
         if dim == 4:
-            query, key, value = query.squeeze(0), key.squeeze(0), value.squeeze(0)
-        num_seqs = len(cu_seq_lens) - 1
-        outputs = []
-        for i in range(num_seqs):
-            start_idx = cu_seq_lens[i]
-            end_idx = cu_seq_lens[i + 1]
-            seq_len = end_idx - start_idx
-            mask_start_idx = i * seq_len
-            mask_end_idx = (i + 1) * seq_len
+            # [bs, heads, seq_len, head_dim] -> [bs, seq_len, heads, head_dim]
+            out = out.permute(0, 2, 1, 3).reshape(bs, seq_len_q, heads, head_dim)
+        elif dim == 5:
+            # [bs, heads, attn_groups, seq_len, head_dim] -> [bs, seq_len, heads, attn_groups, head_dim] 
+            out = out.permute(0, 3, 1, 2, 4).reshape(bs, seq_len_q, heads, attn_groups, head_dim)
+    else:
+       raise NotImplementedError(f'Only FusedSDPA causal or non-masked attention is supported.\nFusedSDPA support: {FusedSDPA is not None}\nis_causal: {is_causal}\nmask_present: {attn_bias is not None}')
 
-            # Create attention mask.
-            attn_mask = attn_bias.materialize(device=query.device)
-            output = block_masked_attention(
-                query[start_idx:end_idx],
-                key[start_idx:end_idx],
-                value[start_idx:end_idx],
-                scale,
-                attn_mask=attn_mask[mask_start_idx:mask_end_idx,
-                                    mask_start_idx:mask_end_idx],
-            )
-            outputs.append(output)
-        out = torch.cat(outputs, dim=0)
-    if dim == 4:
-        out = out.unsqueeze(0)
     return out
