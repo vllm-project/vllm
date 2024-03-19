@@ -313,6 +313,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         try:
             return self._hashless_allocator.allocate_mutable(prev_block=prev_block)
         except BlockAllocator.NoFreeBlocksError:
+            # We must check the unused cached blocks before raising OOM.
             pass
         
         if self._unused_cached_blocks:
@@ -329,6 +330,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             assert block.content_hash is None
             return block
 
+        # No block available in hashless allocator, nor in unused cache blocks.
         raise BlockAllocator.NoFreeBlocksError()
 
     def free(self, block: Block) -> None:
