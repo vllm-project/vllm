@@ -13,6 +13,8 @@ import torch
 from torch.utils.cpp_extension import CUDA_HOME
 
 ROOT_DIR = os.path.dirname(__file__)
+# Target device of vLLM, supporting [cuda (by default), rocm, neuron]
+VLLM_TARGET_DEVICE = os.getenv("VLLM_TARGET_DEVICE", "cuda")
 
 # vLLM only supports Linux platform
 assert sys.platform.startswith(
@@ -61,8 +63,7 @@ class cmake_build_ext(build_ext):
         except AttributeError:
             num_jobs = os.cpu_count()
 
-        nvcc_cuda_version = get_nvcc_cuda_version()
-        if nvcc_cuda_version >= Version("11.2"):
+        if _is_cuda() and get_nvcc_cuda_version() >= Version("11.2"):
             nvcc_threads = int(os.getenv("NVCC_THREADS", 8))
             num_jobs = max(1, round(num_jobs / (nvcc_threads / 4)))
         else:
@@ -95,6 +96,7 @@ class cmake_build_ext(build_ext):
             '-DCMAKE_BUILD_TYPE={}'.format(cfg),
             '-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={}'.format(outdir),
             '-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY={}'.format(self.build_temp),
+            '-DVLLM_TARGET_DEVICE={}'.format(VLLM_TARGET_DEVICE),
         ]
 
         verbose = bool(int(os.getenv('VERBOSE', '0')))
@@ -168,11 +170,12 @@ class cmake_build_ext(build_ext):
 
 
 def _is_cuda() -> bool:
-    return torch.version.cuda is not None
+    return VLLM_TARGET_DEVICE == "cuda" and torch.version.cuda is not None
 
 
 def _is_hip() -> bool:
-    return torch.version.hip is not None
+    return (VLLM_TARGET_DEVICE == "cuda"
+            or VLLM_TARGET_DEVICE == "rocm") and torch.version.hip is not None
 
 
 def _is_neuron() -> bool:
@@ -182,6 +185,10 @@ def _is_neuron() -> bool:
     except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
         torch_neuronx_installed = False
     return torch_neuronx_installed
+
+
+def _is_cpu() -> bool:
+    return VLLM_TARGET_DEVICE == "cpu"
 
 
 def _install_punica() -> bool:
@@ -279,6 +286,8 @@ def get_vllm_version() -> str:
         if neuron_version != MAIN_CUDA_VERSION:
             neuron_version_str = neuron_version.replace(".", "")[:3]
             version += f"+neuron{neuron_version_str}"
+    elif _is_cpu():
+        version += "+cpu"
     else:
         raise RuntimeError("Unknown runtime environment")
 
@@ -311,6 +320,8 @@ def get_requirements() -> List[str]:
     elif _is_neuron():
         with open(get_path("requirements-neuron.txt")) as f:
             requirements = f.read().strip().split("\n")
+    elif _is_cpu():
+        requirements = []
     else:
         raise ValueError(
             "Unsupported platform, please use CUDA, ROCM or Neuron.")
