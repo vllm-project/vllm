@@ -21,7 +21,7 @@ from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
-from vllm.utils import in_wsl, measure_cuda_memory, _get_aligned_size
+from vllm.utils import in_wsl, measure_cuda_memory
 
 logger = init_logger(__name__)
 
@@ -34,10 +34,6 @@ _BATCH_SIZE_ALIGNMENT = 8
 _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
     _BATCH_SIZE_ALIGNMENT * i for i in range(1, 33)
 ]
-# True if inputs should be aligned. It is currently disabled.
-# Aligning inputs can better utilize tensor cores.
-# https://developer.nvidia.com/blog/optimizing-gpu-performance-tensor-cores/
-SHOULD_ALIGN = False
 
 
 class ModelRunner:
@@ -226,18 +222,16 @@ class ModelRunner:
         num_prompt_tokens = len(input_tokens)
         assert max_subquery_len > 0
 
-        input_tokens = torch.tensor(_align_if_necessary(input_tokens, pad=0),
+        input_tokens = torch.tensor(input_tokens,
                                     dtype=torch.long,
                                     device=self.device)
-        input_positions = torch.tensor(_align_if_necessary(input_positions,
-                                                           pad=0),
+        input_positions = torch.tensor(input_positions,
                                        dtype=torch.long,
                                        device=self.device)
-        slot_mapping = torch.tensor(_align_if_necessary(slot_mapping,
-                                                        pad=_PAD_SLOT_ID),
+        slot_mapping = torch.tensor(slot_mapping,
                                     dtype=torch.long,
                                     device=self.device)
-        lora_index_mapping = _align_if_necessary(lora_index_mapping, pad=0)
+        lora_index_mapping = lora_index_mapping
 
         context_lens_tensor = torch.tensor(context_lens,
                                            dtype=torch.int,
@@ -364,27 +358,28 @@ class ModelRunner:
 
         # Pad tokens to better utilize tensor cores although
         # cuda graph is not enabled.
-        input_tokens = torch.tensor(_align_if_necessary(
-            input_tokens, pad=0, should_align=use_captured_graph),
+        input_tokens = torch.tensor(_pad_for_cuda_graph(
+            input_tokens, pad=0, use_captured_graph=use_captured_graph),
                                     dtype=torch.long,
                                     device=self.device)
-        input_positions = torch.tensor(_align_if_necessary(
-            input_positions, pad=0, should_align=use_captured_graph),
+        input_positions = torch.tensor(_pad_for_cuda_graph(
+            input_positions, pad=0, use_captured_graph=use_captured_graph),
                                        dtype=torch.long,
                                        device=self.device)
-        slot_mapping = torch.tensor(_align_if_necessary(
-            slot_mapping, pad=_PAD_SLOT_ID, should_align=use_captured_graph),
+        slot_mapping = torch.tensor(_pad_for_cuda_graph(
+            slot_mapping,
+            pad=_PAD_SLOT_ID,
+            use_captured_graph=use_captured_graph),
                                     dtype=torch.long,
                                     device=self.device)
-        context_lens = torch.tensor(_align_if_necessary(
-            context_lens, pad=0, should_align=use_captured_graph),
+        context_lens = torch.tensor(_pad_for_cuda_graph(
+            context_lens, pad=0, use_captured_graph=use_captured_graph),
                                     dtype=torch.int,
                                     device=self.device)
-        block_tables = _align_if_necessary(block_tables,
-                                           pad=[],
-                                           should_align=use_captured_graph)
-        lora_index_mapping = _align_if_necessary(
-            lora_index_mapping, pad=0, should_align=use_captured_graph)
+        block_tables = _pad_for_cuda_graph(
+            block_tables, pad=[], use_captured_graph=use_captured_graph)
+        lora_index_mapping = _pad_for_cuda_graph(
+            lora_index_mapping, pad=0, use_captured_graph=use_captured_graph)
 
         if use_captured_graph:
             # When using cuda-graph all these tensors should be
@@ -906,10 +901,14 @@ def _pad_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
     return x + [pad] * (max_len - len(x))
 
 
-def _align_if_necessary(x: List[int], pad: int, should_align=SHOULD_ALIGN):
-    """Align flattened 1D inputs by a fixed alignment size."""
-    if not should_align:
+def _pad_for_cuda_graph(x: List[int], pad: int, use_captured_graph: bool):
+    """Pad flattened 1D inputs by a fixed alignment size for cuda graph.
+
+    This function is no-op if use_captured_graph is False.
+    """
+    if not use_captured_graph:
         return x
+
     batch_size = len(x)
     batch_size = _get_graph_batch_size(batch_size)
     return _pad_to_alignment(x, batch_size, pad)
@@ -942,7 +941,8 @@ def _get_graph_batch_size(batch_size: int) -> int:
     elif batch_size <= 4:
         return 4
     else:
-        return _get_aligned_size(batch_size, _BATCH_SIZE_ALIGNMENT)
+        return ((batch_size + _BATCH_SIZE_ALIGNMENT - 1) //
+                _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
 
 
 def _async_h2d(
