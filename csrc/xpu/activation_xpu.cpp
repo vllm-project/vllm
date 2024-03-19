@@ -25,6 +25,16 @@ __inline__ T gelu_xpu(const T& x) {
   return (T) (f * 0.5f * (1.0f + sycl::erf(f * ALPHA)));
 }
 
+template<typename T>
+__inline__ T gelu_tanh_xpu(const T& x) {
+  const float f = (float) x;
+  constexpr float BETA = M_SQRT2 * M_2_SQRTPI * 0.5f;
+  constexpr float KAPPA = 0.044715;
+  float x_cube = f * f * f;
+  float inner = BETA * (f + KAPPA * x_cube);
+  return (T) (0.5f * f * (1.0f + ::tanhf(inner)));
+}
+
 template <typename scalar_t>
 void silu_and_mul_kernel(
     scalar_t* __restrict__ out, // [..., d]
@@ -52,6 +62,21 @@ void gelu_and_mul_kernel(
     const scalar_t x = input[token_idx * 2 * d + idx];
     const scalar_t y = input[token_idx * 2 * d + d + idx];
     out[token_idx * d + idx] = gelu_xpu(x) * y;
+  }
+}
+
+template <typename scalar_t>
+void gelu_tanh_and_mul_kernel(
+    scalar_t* __restrict__ out, // [..., d]
+    const scalar_t* __restrict__ input, // [..., 2, d]
+    const int d,
+    const sycl::nd_item<3>& item_ct1) {
+  const int64_t token_idx = item_ct1.get_group(2);
+  for (int64_t idx = item_ct1.get_local_id(2); idx < d;
+       idx += item_ct1.get_local_range(2)) {
+    const scalar_t x = input[token_idx * 2 * d + idx];
+    const scalar_t y = input[token_idx * 2 * d + d + idx];
+    out[token_idx * d + idx] = gelu_tanh_xpu(x) * y;
   }
 }
 
@@ -89,6 +114,25 @@ void call_gelu_and_mul_kernel(
     cgh.parallel_for(
         sycl::nd_range<3>(grid * block, block), [=](sycl::nd_item<3> item_ct1) {
           gelu_and_mul_kernel<sycl_t>(
+              (sycl_t*)output, (const sycl_t*)input, d, item_ct1);
+        });
+  });
+}
+
+template <typename scalar_t>
+void call_gelu_tanh_and_mul_kernel(
+    int num_tokens,
+    int d,
+    const scalar_t* __restrict__ input,
+    scalar_t* __restrict__ output) {
+  using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type;
+  sycl::range<3> grid(1, 1, num_tokens);
+  sycl::range<3> block(1, 1, std::min(d, 1024));
+  auto& queue = vllm::xpu::vllmGetQueue();
+  queue.submit([&](sycl::handler& cgh) {
+    cgh.parallel_for(
+        sycl::nd_range<3>(grid * block, block), [=](sycl::nd_item<3> item_ct1) {
+          gelu_tanh_and_mul_kernel<sycl_t>(
               (sycl_t*)output, (const sycl_t*)input, d, item_ct1);
         });
   });
@@ -209,6 +253,23 @@ void gelu_and_mul(
   VLLM_XPU_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "call_gelu_and_mul_kernel", [&] {
         call_gelu_and_mul_kernel(
+            num_tokens,
+            d,
+            input.data_ptr<scalar_t>(),
+            out.data_ptr<scalar_t>());
+      });
+}
+
+void gelu_tanh_and_mul(
+  torch::Tensor& out,      // [..., d]
+  torch::Tensor& input)    // [..., 2 * d]
+{
+    int num_tokens = input.numel() / input.size(-1);
+  int d = input.size(-1) / 2;
+
+  VLLM_XPU_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "call_gelu_tanh_and_mul_kernel", [&] {
+        call_gelu_tanh_and_mul_kernel(
             num_tokens,
             d,
             input.data_ptr<scalar_t>(),
