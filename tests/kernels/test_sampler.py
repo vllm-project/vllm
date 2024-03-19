@@ -5,9 +5,9 @@ import pytest
 import triton
 import triton.language as tl
 
-from vllm.model_executor.layers.ops.sample import (_uniform_to_exponential, sample,
-                                            get_num_triton_sampler_splits,
-                                            MAX_TRITON_N_COLS)
+from vllm.model_executor.layers.ops.sample import (
+    _uniform_to_exponential, sample, get_num_triton_sampler_splits,
+    MAX_TRITON_N_COLS)
 from vllm.model_executor.utils import set_random_seed
 from vllm.model_executor.sampling_metadata import SamplingTensors
 
