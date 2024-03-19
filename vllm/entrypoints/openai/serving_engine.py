@@ -10,7 +10,7 @@ from vllm.entrypoints.openai.protocol import (CompletionRequest,
                                               ChatCompletionRequest,
                                               ErrorResponse, LogProbs,
                                               ModelCard, ModelList,
-                                              ModelPermission)
+                                              ModelPermission, DeleteResponse)
 from vllm.lora.request import LoRARequest
 from vllm.sequence import Logprob
 
@@ -84,6 +84,51 @@ class OpenAIServing:
         model_cards.extend(lora_cards)
         return ModelList(data=model_cards)
 
+
+    async def create_model(self, lora: LoRA) -> ModelCard:
+        last_lora_request: LoRARequest = self.lora_requests.get(self.lora_requests.size() - 1)
+        lora_idx = 1
+        if last_lora_request is not None:
+            lora_idx = last_lora_request.lora_int_id + 1
+
+        self.lora_requests.append(LoRARequest(
+            lora_name=lora.name,
+            lora_int_id=lora_idx,
+            lora_local_path=lora.local_path,
+        ))
+
+        return ModelCard(id=lora.lora_name,
+                         root=self.served_model,
+                         permission=[ModelPermission()])
+
+    async def get_model(self, model: str) -> ModelCard:
+        if model == self.served_model:
+            return ModelCard(id=self.served_model,
+                             root=self.served_model,
+                             permission=[ModelPermission()])
+        for lora in self.lora_requests:
+            if model == lora.lora_name:
+                return ModelCard(id=lora.lora_name,
+                                 root=self.served_model,
+                                 permission=[ModelPermission()])
+        # if _check_model has been called earlier, this will be unreachable
+        raise ValueError("The model `{request.model}` does not exist.")
+
+    async def delete_model(self, model: str) -> DeleteResponse:
+        if model == self.served_model:
+            raise ValueError("Unsupported delete operation, base model delete not supported")
+        # find model
+        lora_idx = -1
+        for idx, lora in enumerate(self.lora_requests):
+            if model == lora.lora_name:
+                lora_idx = idx
+        if lora_idx != -1:
+            lora = self.lora_requests.pop(lora_idx)
+            return DeleteResponse(id=lora.lora_name,
+                                  deleted=True)
+
+        raise ValueError(f"The model {model} does not exist.")
+  
     def _create_logprobs(
         self,
         token_ids: List[int],
