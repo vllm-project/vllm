@@ -1,5 +1,5 @@
 """Token blocks."""
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Iterable
 from abc import ABC, abstractmethod, abstractproperty
 
 from vllm.utils import Device
@@ -77,27 +77,6 @@ class BlockAllocator(ABC):
     #def get_operations(self):
     #    pass
 
-
-class PrefixCachingBlock(Block):
-    def __init__(self, prev_block: Block, token_ids: List[int]):
-        self._token_ids = token_ids[:]
-        self._prev_block = prev_block
-
-    def append_token_ids(self, token_ids: List[int]) -> None:
-        pass
-
-    @property
-    def physical_block_index(self) -> Optional[int]:
-        pass
-
-    @physical_block_index.setter
-    def physical_block_index(self) -> None:
-        pass
-
-    @property
-    def content_hash(self) -> Optional[int]:
-        pass
-
 class NaiveBlock(Block):
     def __init__(self, prev_block: Block, token_ids: List[int], physical_block_index: Optional[int] = None):
         self._token_ids = token_ids[:]
@@ -118,6 +97,41 @@ class NaiveBlock(Block):
     
 
 from typing import Type, TypeVar, T
+"""
+Missing pieces for PrefixCaching:
+- incr refcount (required for fork, maybe also content-based cache)
+- block hashing
+"""
+
+class RefCounter:
+    BlockIndex = int
+    RefCount = int
+
+    def __init__(self, all_block_indices: Iterable[BlockIndex]):
+        deduped = set(all_block_indices)
+        self._refcounts: Dict[BlockIndex, RefCount] = {index: 0 for index in deduped}
+
+    def incr(self, block_index: BlockIndex) -> RefCount:
+        assert block_index in self._refcounts
+        pre_incr_refcount = self._refcounts[block_index]
+
+        assert pre_incr_refcount >= 0
+
+        post_incr_refcount = pre_incr_refcount + 1
+        self._refcounts[block_index] = post_incr_refcount
+        return post_incr_refcount
+
+    def decr(self, block_index: BlockIndex) -> RefCount:
+        assert block_index in self._refcounts
+        refcount = self._refcounts[block_index]
+
+        assert refcount > 0
+        refcount -= 1
+
+        self._refcounts[block_index] = refcount
+
+        return refcount
+
 
 class NaiveBlockAllocator(BlockAllocator):
     T = TypeVar('T', bound=Block)
@@ -126,7 +140,7 @@ class NaiveBlockAllocator(BlockAllocator):
 
     def __init__(self, block_cls: Type[T], num_blocks: int, block_size: int):
         self._free_block_indices: Set[BlockIndex] = set(range(num_blocks))
-        self._block_refcounts: Dict[BlockIndex, Refcount] = {block_index: 0 for block_index in self._free_block_indices}
+        self._refcounter = RefCounter(all_block_indices=self._free_block_indices)
         self._block_cls = block_cls
         #self._block_size = block_size
 
@@ -142,71 +156,75 @@ class NaiveBlockAllocator(BlockAllocator):
     def free(self, block: Block) -> None:
         block_index = block.physical_block_index
         block.physical_block_index = None
-        self._decr_refcount(block_index)
+
+        refcount = self._refcounter.decr(block_index)
+        if refcount == 0:
+            self._free_block_indices.add(block_index)
+            
 
     def _allocate_new_block(self):
         if not self._free_block_indices:
             raise BlockAllocator.NoFreeBlocksError()
 
         block_index = next(iter(self._free_block_indices))
-        self._incr_refcount(block_index, allow_allocate=True)
+        refcount = self._refcounter.incr(block_index)
+        self._free_block_indices.remove(block_index)
         return block_index
 
-    def _incr_refcount(self, block_index: BlockIndex, allow_allocate: bool) -> None:
-        assert block_index in self._block_refcounts
-        pre_incr_refcount = self._block_refcounts[block_index]
-
-        assert pre_incr_refcount >= 0
-
-        if pre_incr_refcount == 0:
-            assert allow_allocate
-            assert block_index in self._free_block_indices
-            self._free_block_indices.remove(block_index)
-        else:
-            assert block_index not in self._free_block_indices
-
-        self._block_refcounts[block_index] = pre_incr_refcount + 1
-
-    def _decr_refcount(self, block_index: BlockIndex) -> None:
-        assert block_index in self._block_refcounts
-        refcount = self._block_refcounts[block_index]
-
-        assert refcount > 0
-        refcount -= 1
-
-        self._block_refcounts[block_index] = refcount
-
-        if refcount == 0:
-            self._free_block_indices.add(block_index)
     
 
-class PrefixCachingBlockAllocator(BlockAllocator):
-    
-    def __init__(self):
-        #self._mutable_block_allocator = NaiveBlockAllocator()
-        #self._cached_blocks: Dict[int, Block]
-        pass
-    
-    def allocate_mutable(self, prev_block: Block) -> Block:
-        """Look in freelist. If found, return.
-        Else, look in cachelist (refcount==0). If found, return.
-
-        Otherwise, raise :(
-        """
-        pass
-
-    def allocate_immutable(self, prev_block: Block, token_ids: List[int]) -> Block:
-        assert isinstance(prev_block, PrefixCachingBlock)
-
-        block = PrefixCachingBlock(prev_block=prev_block, token_ids=token_ids)
-        assert block.content_hash is not None
-
-        if block.content_hash in self._cache_list:
-            # incr refcount
-            return block
-        
-        # Do same logic as allocate_mutable; look in freelist, else look in weakref freelist.
- 
-    def free(self, block: Block) -> None:
-        pass
-
+#class PrefixCachingBlock(Block):
+#    def __init__(self, prev_block: Block, token_ids: List[int]):
+#        self._token_ids = token_ids[:]
+#        self._prev_block = prev_block
+#
+#    def append_token_ids(self, token_ids: List[int]) -> None:
+#        pass
+#
+#    @property
+#    def physical_block_index(self) -> Optional[int]:
+#        pass
+#
+#    @physical_block_index.setter
+#    def physical_block_index(self) -> None:
+#        pass
+#
+#    @property
+#    def content_hash(self) -> Optional[int]:
+#        pass
+#
+#
+#class PrefixCachingBlockAllocator(BlockAllocator):
+#    PrefixHash = int
+#    BlockIndex = int
+#    
+#    def __init__(self):
+#        #self._mutable_block_allocator = NaiveBlockAllocator()
+#        #self._cached_blocks: Dict[int, Block]
+#        self._cached_blocks: Dict[PrefixHash, BlockIndex] = {}
+#        self._refcounter: Dict[int, int] = {}
+#    
+#    def allocate_mutable(self, prev_block: Block) -> Block:
+#        """Look in freelist. If found, return.
+#        Else, look in cachelist (refcount==0). If found, return.
+#
+#        Otherwise, raise :(
+#        """
+#        pass
+#
+#    def allocate_immutable(self, prev_block: Block, token_ids: List[int]) -> Block:
+#        assert isinstance(prev_block, PrefixCachingBlock)
+#
+#        block = PrefixCachingBlock(prev_block=prev_block, token_ids=token_ids)
+#        assert block.content_hash is not None
+#
+#        cached_block_index = self._cached_blocks.get(block.content_hash, default=None)
+#        if cached_block_index is not None:
+#            block.physical_block_index = cached_block_index
+#            self._refcounter[block.physical_block_index] += 1
+#            return block
+#        
+#        # Do same logic as allocate_mutable; look in freelist, else look in weakref freelist.
+# 
+#    def free(self, block: Block) -> None:
+#        pass
