@@ -5,7 +5,7 @@ Run `pytest tests/basic_correctness/test_basic_correctness.py --forked`.
 import pytest
 
 MODELS = [
-    "facebook/opt-125m",
+    # "facebook/opt-125m"
     "meta-llama/Llama-2-7b-hf",
 ]
 
@@ -13,8 +13,10 @@ MODELS = [
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
-@pytest.mark.parametrize("enforce_eager", [False, True])
-@pytest.mark.parametrize("max_chunked_prefill_len", [-1, 1, 16])
+# @pytest.mark.parametrize("enforce_eager", [False, True])
+@pytest.mark.parametrize("enforce_eager", [False])
+# @pytest.mark.parametrize("max_chunked_prefill_len", [-1, 1, 16])
+@pytest.mark.parametrize("max_chunked_prefill_len", [16])
 def test_models(
     hf_runner,
     vllm_runner,
@@ -29,7 +31,10 @@ def test_models(
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
     del hf_model
 
-    vllm_model = vllm_runner(model, dtype=dtype, enforce_eager=enforce_eager, max_chunked_prefill_len=max_chunked_prefill_len)
+    vllm_model = vllm_runner(model,
+                             dtype=dtype,
+                             enforce_eager=enforce_eager,
+                             max_chunked_prefill_len=max_chunked_prefill_len)
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
 

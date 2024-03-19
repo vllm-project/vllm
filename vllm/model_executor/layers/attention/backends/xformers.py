@@ -82,6 +82,7 @@ class XFormersBackend:
         num_prompt_tokens = input_metadata.num_prompt_tokens
         num_generation_tokens = input_metadata.num_generation_tokens
 
+        output = torch.empty_like(query)
         # print(f"SANG-TODO original query: {query.size()}")
         decode_query = query[num_prompt_tokens:]
         query = query[:num_prompt_tokens]
@@ -92,8 +93,6 @@ class XFormersBackend:
 
         assert query.shape[0] == num_prompt_tokens
         assert decode_query.shape[0] == num_generation_tokens
-
-        output = torch.empty_like(query)
 
         if num_prompt_tokens > 0:
             prefill_input_metadata = input_metadata.prefill_input_metadata()

@@ -63,14 +63,13 @@ def test_models(
     torch.cuda.empty_cache()
 
     flash_attn_output_by_batches = []
-    flash_attn_model = vllm_runner(
-        model,
-        dtype=dtype,
-        block_size=block_size,
-        max_chunked_prefill_len=-1,
-        max_num_prompt_seqs=max_num_prompt_seqs,
-        tensor_parallel_size=tensor_parallel_size,
-        enforce_eager=enforce_eager)
+    flash_attn_model = vllm_runner(model,
+                                   dtype=dtype,
+                                   block_size=block_size,
+                                   max_chunked_prefill_len=-1,
+                                   max_num_prompt_seqs=max_num_prompt_seqs,
+                                   tensor_parallel_size=tensor_parallel_size,
+                                   enforce_eager=enforce_eager)
     for i in range(10):
         prompts = [example_prompts[j % len(example_prompts)] for j in range(i)]
         flash_attn_output_by_batches.append(
@@ -87,7 +86,7 @@ def test_models(
             fa_output_ids, fa_output_str = flash_attn_outputs[i]
             vllm_output_ids, vllm_output_str = expected_outputs[
                 i % len(expected_outputs)]
-            print("expected, ",vllm_output_str, "\n")
+            print("expected, ", vllm_output_str, "\n")
             print("actual:, ", fa_output_str, "\n")
             assert fa_output_ids == vllm_output_ids, (
                 f"Test{i}:\nflash ids: {fa_output_ids}\nvLLM ids: {vllm_output_ids}"

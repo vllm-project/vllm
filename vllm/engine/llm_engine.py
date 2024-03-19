@@ -543,7 +543,8 @@ class LLMEngine:
             for seq_group in scheduled_seq_groups:
                 self.scheduler.mark_blocks_as_computed(seq_group)
 
-        for i, (seq_group, outputs) in enumerate(zip(scheduled_seq_groups, output)):
+        for i, (seq_group,
+                outputs) in enumerate(zip(scheduled_seq_groups, output)):
             # Chunked prefill groups are not generation tokens. Their
             # outputs are ignored. For seq_group finished chunked
             # prefilling, it will be considered as prompting.

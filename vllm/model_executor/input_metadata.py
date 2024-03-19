@@ -23,9 +23,6 @@ class InputMetadata:
     dynamically, it should be stored in tensor. The tensor has to be
     updated from `CUDAGraphRunner.forward` API.
     """
-    # Currently, input sequences can only contain all prompts
-    # or all decoding. True if all sequences are prompts.
-    is_prompt: bool
     # (num_tokens,). The indices of the token slots that input tokens will be
     # stored into. E.g., if `slot_mapping` is [35, 2, 17] and the block size
     # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
@@ -80,6 +77,17 @@ class InputMetadata:
     use_cuda_graph: bool
     kv_cache_dtype: str
 
+    # Fields below are lazily initialized.
+    _prefill_input_metadata: Optional["InputMetadata"] = None
+    _decode_input_metadata: Optional["InputMetadata"] = None
+
+    @property
+    def num_prompts(self):
+        if self.prompt_lens is None:
+            return 0
+
+        return len(self.prompt_lens)
+
     def __post_init__(self):
         # Set during the execution of the first attention op.
         # It is a list because it is needed to set per prompt
@@ -95,40 +103,54 @@ class InputMetadata:
         """Create a new InputMetadata that only contains
         metadata needed for prefill requests.
         """
-        return InputMetadata(
-            self.slot_mapping[:self.num_prompt_tokens],
-            self.prompt_lens[:self.num_prompts],
-            self.num_chunked_prefill,
-            self.num_prompt_tokens,
-            0,
-            # start_loc only contains prompts.
-            self.start_loc,
-            self.max_seq_len,
-            None,
-            self.context_lens[:self.num_prompts],
-            self.block_tables[:self.num_prompts],
-            False,
-            self.kv_cache_dtype,
-        )
+        if self._prefill_input_metadata is None:
+            if self.num_prompts > 0:
+                self._prefill_input_metadata = InputMetadata(
+                    slot_mapping=self.slot_mapping[:self.num_prompt_tokens],
+                    num_chunked_prefill=self.num_chunked_prefill,
+                    prompt_lens=self.prompt_lens[:self.num_prompts],
+                    prompt_lens_tensor=self.prompt_lens_tensor[:self.
+                                                               num_prompts],
+                    num_prompt_tokens=self.num_prompt_tokens,
+                    num_generation_tokens=0,
+                    max_subquery_len=self.max_subquery_len,
+                    max_context_len=None,
+                    max_seq_len=self.max_seq_len,
+                    subquery_start_loc=self.subquery_start_loc[:self.
+                                                               num_prompts],
+                    seq_start_loc=self.seq_start_loc[:self.num_prompt_tokens],
+                    context_lens=self.context_lens[:self.num_prompts],
+                    block_tables=self.block_tables[:self.num_prompts],
+                    use_cuda_graph=False,
+                    kv_cache_dtype=self.kv_cache_dtype,
+                )
+
+        return self._prefill_input_metadata
 
     def decode_input_metadata(self) -> "InputMetadata":
         """Create a new InputMetadata that only contains
         metadata needed for decoding requests.
         """
-        return InputMetadata(
-            self.slot_mapping[self.num_prompt_tokens:],
-            None,
-            0,
-            0,
-            self.num_generation_tokens,
-            None,
-            None,
-            self.max_context_len,
-            self.context_lens[self.num_prompts:],
-            self.block_tables[self.num_prompts:],
-            self.use_cuda_graph,
-            self.kv_cache_dtype,
-        )
+        if self._decode_input_metadata is None:
+            if self.num_generation_tokens > 0:
+                self._decode_input_metadata = InputMetadata(
+                    slot_mapping=self.slot_mapping[self.num_prompt_tokens:],
+                    num_chunked_prefill=0,
+                    prompt_lens=None,
+                    prompt_lens_tensor=None,
+                    num_prompt_tokens=0,
+                    num_generation_tokens=self.num_generation_tokens,
+                    max_subquery_len=None,
+                    max_context_len=self.max_context_len,
+                    max_seq_len=None,
+                    subquery_start_loc=None,
+                    seq_start_loc=None,
+                    context_lens=self.context_lens[self.num_prompts:],
+                    block_tables=self.block_tables[self.num_prompts:],
+                    use_cuda_graph=self.use_cuda_graph,
+                    kv_cache_dtype=self.kv_cache_dtype,
+                )
+        return self._decode_input_metadata
 
     def asdict_zerocopy(self) -> Dict[str, Any]:
         """Similar to dataclasses.asdict, but avoids deepcopying."""
@@ -138,4 +160,3 @@ class InputMetadata:
             field.name: getattr(self, field.name)
             for field in fields(self)
         }
-

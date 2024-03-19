@@ -70,17 +70,20 @@ def test_models(
 
         return token_ids_list, output_str_list
 
-    vllm_token_ids, vllm_str = evaluate(lambda: vllm_runner(model, dtype=dtype, enforce_eager=enforce_eager))
-    chunked_prefill_token_ids, chunked_str = evaluate(lambda: vllm_runner(
-        model,
-        dtype=dtype,
-        tensor_parallel_size=tensor_parallel_size,
-        max_chunked_prefill_len=max_chunked_prefill_len,
-        enforce_eager=enforce_eager))
+    vllm_token_ids, vllm_str = evaluate(
+        lambda: vllm_runner(model, dtype=dtype, enforce_eager=enforce_eager))
+    chunked_prefill_token_ids, chunked_str = evaluate(
+        lambda: vllm_runner(model,
+                            dtype=dtype,
+                            tensor_parallel_size=tensor_parallel_size,
+                            max_chunked_prefill_len=max_chunked_prefill_len,
+                            enforce_eager=enforce_eager))
 
     for i in range(len(vllm_token_ids)):
         print(f"TEST {i}")
-        print(f"{len(vllm_token_ids[i])=} {vllm_token_ids[i]=}\n{vllm_str[i]=}")
-        print(f"{len(chunked_prefill_token_ids[i])=} {chunked_prefill_token_ids[i]=}\n{chunked_str[i]=}\n")
+        print(
+            f"{len(vllm_token_ids[i])=} {vllm_token_ids[i]=}\n{vllm_str[i]=}")
+        print(
+            f"{len(chunked_prefill_token_ids[i])=} {chunked_prefill_token_ids[i]=}\n{chunked_str[i]=}\n"
+        )
         assert vllm_token_ids[i] == chunked_prefill_token_ids[i]
-

@@ -11,6 +11,7 @@ from vllm.model_executor.layers.attention.ops.prefix_prefill import (
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
 
+
 def _print_value_cache(value_cache, input_metadata, max_h, max_d):
     token_sizes = input_metadata.prompt_lens
     print("value_cache")
@@ -23,6 +24,7 @@ def _print_value_cache(value_cache, input_metadata, max_h, max_d):
                 print(value_cache[block_num][h][d][block_off].item(), end=" ")
             print()
 
+
 def _print_key_cache(key_cache, input_metadata, max_h, max_d):
     token_sizes = input_metadata.prompt_lens
     print("key cache")
@@ -34,8 +36,10 @@ def _print_key_cache(key_cache, input_metadata, max_h, max_d):
                 block_off = t % 16
                 for x in range(key_cache.shape[4]):
                     key_d = d // key_cache.shape[4]
-                    print(key_cache[block_num][h][key_d][block_off][x].item(), end=" ")
+                    print(key_cache[block_num][h][key_d][block_off][x].item(),
+                          end=" ")
             print()
+
 
 class PagedAttentionImpl:
 

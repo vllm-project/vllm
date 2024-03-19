@@ -195,10 +195,11 @@ def setup_test(device: str, seed: int = 0):
     torch.set_default_device(device)
 
 
-def prepare_inputs(
-        max_subquery_len, max_ctx_len, batch_size,
-        num_heads, num_kv_heads, head_size, dtype):
-    subquery_lens = [random.randint(0, max_subquery_len) for _ in range(batch_size)]
+def prepare_inputs(max_subquery_len, max_ctx_len, batch_size, num_heads,
+                   num_kv_heads, head_size, dtype):
+    subquery_lens = [
+        random.randint(0, max_subquery_len) for _ in range(batch_size)
+    ]
     ctx_lens = [random.randint(0, max_ctx_len) for _ in range(batch_size)]
     seq_lens = [a + b for a, b in zip(subquery_lens, ctx_lens)]
 
@@ -213,27 +214,17 @@ def prepare_inputs(
     b_seq_len = torch.tensor(seq_lens, dtype=torch.long)
     b_ctx_len = torch.tensor(ctx_lens, dtype=torch.long)
     b_subquery_start_loc = torch.cumsum(torch.tensor([0] + subquery_lens[:-1],
-                                            dtype=torch.long),
-                               dim=0)
+                                                     dtype=torch.long),
+                                        dim=0)
     b_seq_start_loc = torch.cumsum(torch.tensor([0] + seq_lens[:-1],
                                                 dtype=torch.long),
                                    dim=0)
     return query, key, value, subquery_lens, seq_lens, b_seq_len, b_ctx_len, b_subquery_start_loc, b_seq_start_loc
 
 
-def fill_kv_cache(
-        key,
-        value,
-        k_cache,
-        v_cache,
-        cache_size,
-        block_size,
-        num_kv_heads,
-        head_size,
-        batch_size,
-        max_block_per_request,
-        b_seq_start_loc,
-        b_ctx_len):
+def fill_kv_cache(key, value, k_cache, v_cache, cache_size, block_size,
+                  num_kv_heads, head_size, batch_size, max_block_per_request,
+                  b_seq_start_loc, b_ctx_len):
     block_table_values = torch.arange(0, cache_size, dtype=torch.long)
     block_table_values = block_table_values[torch.randperm(cache_size)]
     block_table = block_table_values[:batch_size * max_block_per_request].view(
@@ -268,9 +259,8 @@ def fill_kv_cache(
     return k_cache, v_cache, block_table
 
 
-def xformer_attention(
-        query, key, value, attn_bias, scale,
-        num_kv_heads, num_heads, num_queries_per_kv):
+def xformer_attention(query, key, value, attn_bias, scale, num_kv_heads,
+                      num_heads, num_queries_per_kv):
     # Run xformer attention.
     attn_op = xops.fmha.cutlass.FwOp()
     if num_kv_heads != num_heads:
@@ -331,10 +321,10 @@ def test_contexted_kv_attention_xformer(
     max_block_per_request = 64
     max_input_len = MAX_SEQ_LEN
 
-    (query, key, value, subquery_lens, seq_lens,
-     b_seq_len, b_ctx_len,
-     b_subquery_start_loc, b_seq_start_loc) = prepare_inputs(
-        MAX_SEQ_LEN, MAX_CTX_LEN, BS, num_heads, num_kv_heads, head_size, dtype)
+    (query, key, value, subquery_lens, seq_lens, b_seq_len, b_ctx_len,
+     b_subquery_start_loc,
+     b_seq_start_loc) = prepare_inputs(MAX_SEQ_LEN, MAX_CTX_LEN, BS, num_heads,
+                                       num_kv_heads, head_size, dtype)
 
     num_tokens = sum(b_seq_len)
     num_subquery_tokens = sum(subquery_lens)
@@ -350,48 +340,58 @@ def test_contexted_kv_attention_xformer(
                           num_kv_heads,
                           head_size,
                           dtype=dtype)
-    k_cache, v_cache, block_table = fill_kv_cache(
-         key, value, k_cache, v_cache, cache_size, block_size,
-         num_kv_heads, head_size, BS, max_block_per_request,
-         b_seq_start_loc, b_ctx_len)
+    k_cache, v_cache, block_table = fill_kv_cache(key, value, k_cache, v_cache,
+                                                  cache_size, block_size,
+                                                  num_kv_heads, head_size, BS,
+                                                  max_block_per_request,
+                                                  b_seq_start_loc, b_ctx_len)
 
     # Copy the subquery's key value to k and v.
     k = torch.zeros(sum(subquery_lens), num_kv_heads, head_size, dtype=dtype)
     v = torch.zeros(sum(subquery_lens), num_kv_heads, head_size, dtype=dtype)
     for i in range(BS):
         for j in range(subquery_lens[i]):
-            k[b_subquery_start_loc[i] + j].copy_(key[b_seq_start_loc[i] + b_ctx_len[i] +
-                                            j])
+            k[b_subquery_start_loc[i] + j].copy_(key[b_seq_start_loc[i] +
+                                                     b_ctx_len[i] + j])
             v[b_subquery_start_loc[i] + j].copy_(value[b_seq_start_loc[i] +
-                                              b_ctx_len[i] + j])
+                                                       b_ctx_len[i] + j])
 
     # context attn subquery vs xformer subquery.
-    context_subquery_output = torch.empty(num_subquery_tokens, num_heads, head_size, dtype=dtype)
+    context_subquery_output = torch.empty(num_subquery_tokens,
+                                          num_heads,
+                                          head_size,
+                                          dtype=dtype)
 
-    subquery = torch.zeros(sum(subquery_lens), num_heads, head_size, dtype=dtype)
+    subquery = torch.zeros(sum(subquery_lens),
+                           num_heads,
+                           head_size,
+                           dtype=dtype)
     for i in range(BS):
         for j in range(subquery_lens[i]):
-            subquery[b_subquery_start_loc[i] + j].copy_(query[b_seq_start_loc[i] + b_ctx_len[i] +
-                                            j])
-    context_attention_fwd(subquery, k, v, context_subquery_output, k_cache, v_cache, block_table,
-                          b_subquery_start_loc, b_seq_len, b_ctx_len, max_input_len)
+            subquery[b_subquery_start_loc[i] + j].copy_(
+                query[b_seq_start_loc[i] + b_ctx_len[i] + j])
+    context_attention_fwd(subquery, k, v, context_subquery_output, k_cache,
+                          v_cache, block_table, b_subquery_start_loc,
+                          b_seq_len, b_ctx_len, max_input_len)
     torch.cuda.synchronize()
 
     # Full query
     attn_bias = BlockDiagonalCausalMask.from_seqlens(seq_lens)
     scale = float(1.0 / (head_size**0.5))
     output_ref = xformer_attention(query, key, value, attn_bias, scale,
-        num_kv_heads, num_heads, num_queries_per_kv)
+                                   num_kv_heads, num_heads, num_queries_per_kv)
     torch.cuda.synchronize()
 
     atol = get_default_atol(context_subquery_output)
     rtol = get_default_rtol(context_subquery_output)
 
     # Attention with subquery.
-    attn_bias = BlockDiagonalCausalFromBottomRightMask.from_seqlens(subquery_lens, seq_lens)
+    attn_bias = BlockDiagonalCausalFromBottomRightMask.from_seqlens(
+        subquery_lens, seq_lens)
     scale = float(1.0 / (head_size**0.5))
-    xformer_subquery_output = xformer_attention(subquery, key, value, attn_bias, scale,
-        num_kv_heads, num_heads, num_queries_per_kv)
+    xformer_subquery_output = xformer_attention(subquery, key, value,
+                                                attn_bias, scale, num_kv_heads,
+                                                num_heads, num_queries_per_kv)
     torch.cuda.synchronize()
 
     # # Context attention subquery vs xformer subquery.
@@ -413,7 +413,10 @@ def test_contexted_kv_attention_xformer(
         subquery_len = subquery_lens[i]
         seqlen = seq_lens[i]
         offset = seqlen - subquery_len
-        assert torch.allclose(ref[offset:seqlen], actual[:subquery_len], atol=1e-6, rtol=0)
+        assert torch.allclose(ref[offset:seqlen],
+                              actual[:subquery_len],
+                              atol=1e-6,
+                              rtol=0)
         ref = ref[seqlen:]
         actual = actual[subquery_len:]
 
@@ -424,7 +427,10 @@ def test_contexted_kv_attention_xformer(
         subquery_len = subquery_lens[i]
         seqlen = seq_lens[i]
         offset = seqlen - subquery_len
-        assert torch.allclose(ref[offset:seqlen], actual[:subquery_len], atol=0, rtol=0)
+        assert torch.allclose(ref[offset:seqlen],
+                              actual[:subquery_len],
+                              atol=0,
+                              rtol=0)
         ref = ref[seqlen:]
         actual = actual[subquery_len:]
 
@@ -461,10 +467,10 @@ def test_contexted_kv_attention_no_kv_cache(
     max_block_per_request = 64
     max_input_len = MAX_SEQ_LEN
 
-    (query, key, value, subquery_lens, seq_lens,
-     b_seq_len, b_ctx_len,
-     b_subquery_start_loc, b_seq_start_loc) = prepare_inputs(
-        MAX_SEQ_LEN, MAX_CTX_LEN, BS, num_heads, num_kv_heads, head_size, dtype)
+    (query, key, value, subquery_lens, seq_lens, b_seq_len, b_ctx_len,
+     b_subquery_start_loc,
+     b_seq_start_loc) = prepare_inputs(MAX_SEQ_LEN, MAX_CTX_LEN, BS, num_heads,
+                                       num_kv_heads, head_size, dtype)
 
     num_tokens = sum(b_seq_len)
 
@@ -479,15 +485,17 @@ def test_contexted_kv_attention_no_kv_cache(
                           num_kv_heads,
                           head_size,
                           dtype=dtype)
-    k_cache, v_cache, block_table = fill_kv_cache(
-         key, value, k_cache, v_cache, cache_size, block_size,
-         num_kv_heads, head_size, BS, max_block_per_request,
-         b_seq_start_loc, b_ctx_len)
+    k_cache, v_cache, block_table = fill_kv_cache(key, value, k_cache, v_cache,
+                                                  cache_size, block_size,
+                                                  num_kv_heads, head_size, BS,
+                                                  max_block_per_request,
+                                                  b_seq_start_loc, b_ctx_len)
 
     # Run context attention fwd full query.
     output = torch.empty(num_tokens, num_heads, head_size, dtype=dtype)
-    context_attention_fwd(query, key, value, output, k_cache, v_cache, block_table,
-                          b_subquery_start_loc, b_seq_len, b_ctx_len, max_input_len)
+    context_attention_fwd(query, key, value, output, k_cache, v_cache,
+                          block_table, b_subquery_start_loc, b_seq_len,
+                          b_ctx_len, max_input_len)
     torch.cuda.synchronize()
 
     # Run xformer.
@@ -496,9 +504,13 @@ def test_contexted_kv_attention_no_kv_cache(
     # attn_bias = LowerTriangularFromBottomRightMask()
     scale = float(1.0 / (head_size**0.5))
     output_ref = xformer_attention(query, key, value, attn_bias, scale,
-        num_kv_heads, num_heads, num_queries_per_kv)
+                                   num_kv_heads, num_heads, num_queries_per_kv)
     torch.cuda.synchronize()
 
     atol = get_default_atol(output)
     rtol = get_default_rtol(output)
-    assert torch.allclose(output_ref.reshape(output_ref.shape[0], -1, output_ref.shape[-1]), output, atol=atol, rtol=rtol)
+    assert torch.allclose(output_ref.reshape(output_ref.shape[0], -1,
+                                             output_ref.shape[-1]),
+                          output,
+                          atol=atol,
+                          rtol=rtol)

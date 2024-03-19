@@ -24,9 +24,9 @@ def test_prepare_prompt():
         revision=None,
         enforce_eager=False,
     )
-    scheduler_config = SchedulerConfig(
-        36000, 36000, 36000, -1)
-    model_runner = ModelRunner(model_config, None, scheduler_config, None, None)
+    scheduler_config = SchedulerConfig(36000, 36000, 36000, -1)
+    model_runner = ModelRunner(model_config, None, scheduler_config, None,
+                               None)
     model_runner.set_block_size(16)
 
     batch_size = random.randint(1, 256)
@@ -98,10 +98,9 @@ def test_prepare_prompt():
                     device=device))
 
     # Block table has to be padded.
-    expected = torch.tensor(
-        [[] for _ in range(len(seq_group_metadata_list))],
-        dtype=torch.int32,
-        device=model_runner.device)
+    expected = torch.tensor([[] for _ in range(len(seq_group_metadata_list))],
+                            dtype=torch.int32,
+                            device=model_runner.device)
     assert torch.allclose(input_metadata.block_tables, expected)
     # Cuda graph should not be used for prerill.
     assert input_metadata.use_cuda_graph is False

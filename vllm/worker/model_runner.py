@@ -39,6 +39,7 @@ _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
 # https://developer.nvidia.com/blog/optimizing-gpu-performance-tensor-cores/
 SHOULD_ALIGN = False
 
+
 class ModelRunner:
 
     def __init__(
@@ -173,8 +174,8 @@ class ModelRunner:
             # NOTE: This only works for oooooooxxx style attention.
             computed_block_nums = seq_group_metadata.computed_block_nums
             prefix_caching_enabled = (computed_block_nums is not None
-                and len(computed_block_nums) > 0
-                and self.sliding_window is None)
+                                      and len(computed_block_nums) > 0
+                                      and self.sliding_window is None)
 
             if seq_group_metadata.is_chunked_prefill:
                 num_chunked_prefill += 1
@@ -201,7 +202,7 @@ class ModelRunner:
                 computed_len = prefill_start
             else:
                 # Normal prefill. Don't update the block table because
-                # we don't need to use KV cacahe when running attentions.
+                # we don't need to use KV cache when running attentions.
                 block_tables.append([])
                 assert prefill_start == 0
                 computed_len = prefill_start
@@ -214,8 +215,7 @@ class ModelRunner:
             # NOTE(sang): prefill_end is always # of prompts if chunked
             # prefill is not enabled. Prefix caching is not working with
             # chunked prefill now.
-            input_positions.extend(
-                range(computed_len, prefill_end))
+            input_positions.extend(range(computed_len, prefill_end))
             lora_id = seq_group_metadata.lora_int_id
 
             if lora_id > 0:
@@ -259,10 +259,10 @@ class ModelRunner:
 
         return (input_tokens, input_positions, slot_mapping,
                 lora_index_mapping, lora_prompt_mapping, lora_requests,
-                seq_lens, context_lens, subquery_lens,
-                block_tables, num_chunked_prefill)
+                seq_lens, context_lens, subquery_lens, block_tables,
+                num_chunked_prefill)
 
-    def _prepare_decode( 
+    def _prepare_decode(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, List[int], List[int],
@@ -324,13 +324,12 @@ class ModelRunner:
 
         return (input_tokens, input_positions, slot_mapping, context_lens,
                 block_tables, lora_index_mapping, lora_prompt_mapping,
-                lora_requests, use_captured_graph)
-
+                lora_requests, use_captured_graph, max_context_len)
 
     def _prepare_mixed_batch(
         self, seq_group_metadata_list: List[SequenceGroupMetadata]
-    ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, torch.Tensor, torch.Tensor,
-               torch.Tensor, Set[LoRARequest]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, torch.Tensor,
+               torch.Tensor, torch.Tensor, Set[LoRARequest]]:
         """Create input tensors and metadata that's needed for
         running prefill and decode requests. The returned tensor
         includes input tensors and metadata of prefill
@@ -403,13 +402,13 @@ class ModelRunner:
 
         (input_tokens, input_positions, slot_mapping, lora_index_mapping,
          lora_prompt_mapping, lora_requests, seq_lens, context_lens,
-        subquery_lens, block_tables, num_chunked_prefill
-         ) = self._prepare_prompt(prefill_reqs)
+         subquery_lens, block_tables,
+         num_chunked_prefill) = self._prepare_prompt(prefill_reqs)
 
         (input_tokens_decode, input_positions_decode, slot_mapping_decode,
          context_lens_decode, block_tables_decode, lora_index_mapping_decode,
-         lora_prompt_mapping_decode, lora_requests_decode, use_captured_graph
-         ) = self._prepare_decode(decode_reqs)
+         lora_prompt_mapping_decode, lora_requests_decode, use_captured_graph,
+         max_context_len) = self._prepare_decode(decode_reqs)
 
         # Cuda graph is used only when there's decoding only
         # requests. Note that chunked prefill also doesn't use
@@ -423,17 +422,22 @@ class ModelRunner:
         slot_mapping = _align_if_necessary(slot_mapping, pad=-1)
         lora_index_mapping = _align_if_necessary(lora_index_mapping, pad=0)
         # Decoding
-        input_tokens_decode = _align_if_necessary(input_tokens_decode, pad=0, should_align=use_captured_graph)
-        input_positions_decode = _align_if_necessary(input_positions_decode, pad=0, should_align=use_captured_graph)
-        slot_mapping_decode = _align_if_necessary(slot_mapping_decode, pad=-1, should_align=use_captured_graph)
-        lora_index_mapping_decode = _align_if_necessary(lora_index_mapping_decode, pad=0, should_align=use_captured_graph)
-        context_lens_decode = _align_if_necessary(context_lens_decode, pad=0, should_align=use_captured_graph)
-        block_tables_decode = _align_if_necessary(block_tables_decode, pad=[], should_align=use_captured_graph)
+        input_tokens_decode = _align_if_necessary(
+            input_tokens_decode, pad=0, should_align=use_captured_graph)
+        input_positions_decode = _align_if_necessary(
+            input_positions_decode, pad=0, should_align=use_captured_graph)
+        slot_mapping_decode = _align_if_necessary(
+            slot_mapping_decode, pad=-1, should_align=use_captured_graph)
+        lora_index_mapping_decode = _align_if_necessary(
+            lora_index_mapping_decode, pad=0, should_align=use_captured_graph)
+        context_lens_decode = _align_if_necessary(
+            context_lens_decode, pad=0, should_align=use_captured_graph)
+        block_tables_decode = _align_if_necessary(
+            block_tables_decode, pad=[], should_align=use_captured_graph)
 
-        max_subquery_len = max(subquery_lens)
-        max_seq_len = max(seq_lens)
+        max_subquery_len = max(subquery_lens, default=0)
+        max_seq_len = max(seq_lens, default=0)
         num_prompt_tokens = len(input_tokens)
-        assert max_subquery_len > 0
 
         num_prompt_tokens = len(input_tokens)
         num_generation_tokens = len(input_tokens_decode)
@@ -449,10 +453,15 @@ class ModelRunner:
         block_tables.extend(block_tables_decode)
 
         # Create tensors.
-        input_tokens = torch.tensor(input_tokens, dtype=torch.long, device=self.device)
-        input_positions = torch.tensor(
-            input_positions, dtype=torch.long, device=self.device)
-        slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device=self.device)
+        input_tokens = torch.tensor(input_tokens,
+                                    dtype=torch.long,
+                                    device=self.device)
+        input_positions = torch.tensor(input_positions,
+                                       dtype=torch.long,
+                                       device=self.device)
+        slot_mapping = torch.tensor(slot_mapping,
+                                    dtype=torch.long,
+                                    device=self.device)
         context_lens_tensor = torch.tensor(context_lens,
                                            dtype=torch.int,
                                            device=self.device)
@@ -480,8 +489,7 @@ class ModelRunner:
                 device=self.device,
             )
 
-        # Query length can be shorter than key (i.e., prompt) when prefill
-        # is chunked or prefix cached.
+        # Prepare tensors to index into query and key.
         subquery_lens_tensor = torch.tensor(subquery_lens,
                                             dtype=torch.long,
                                             device=self.device)
@@ -490,8 +498,8 @@ class ModelRunner:
                                          device=self.device)
 
         seq_lens_tensor = torch.tensor(seq_lens,
-                                          dtype=torch.long,
-                                          device=self.device)
+                                       dtype=torch.long,
+                                       device=self.device)
         seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
                                     dtype=torch.int32,
                                     device=self.device)
@@ -506,15 +514,18 @@ class ModelRunner:
                      dtype=seq_start_loc.dtype,
                      out=seq_start_loc[1:])
 
+        # Create an input metadata that contains both prefill
+        # and decoding data. We concatenate the data to avoid
+        # calling broadcast 2X.
         input_metadata = InputMetadata(
             slot_mapping=slot_mapping,
             prompt_lens=seq_lens,
-            prompt_lens=seq_lens_tensor,
+            prompt_lens_tensor=seq_lens_tensor,
             num_chunked_prefill=num_chunked_prefill,
             num_prompt_tokens=num_prompt_tokens,
             num_generation_tokens=num_generation_tokens,
             max_subquery_len=max_subquery_len,
-            max_context_len=None,
+            max_context_len=max_context_len,
             max_seq_len=max_seq_len,
             subquery_start_loc=subquery_start_loc,
             seq_start_loc=seq_start_loc,
@@ -524,8 +535,8 @@ class ModelRunner:
             kv_cache_dtype=self.kv_cache_dtype,
         )
 
-        return (input_tokens, input_positions, input_metadata,
-                subquery_lens, seq_lens, lora_index_mapping, lora_prompt_mapping,
+        return (input_tokens, input_positions, input_metadata, subquery_lens,
+                seq_lens, lora_index_mapping, lora_prompt_mapping,
                 lora_requests)
 
     def _prepare_sample(
@@ -619,25 +630,8 @@ class ModelRunner:
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, SamplingMetadata,
                Set[int], LoRAMapping]:
         if self.is_driver_worker:
-            # # NOTE: We assume that all sequences in the group are all prompts or
-            # # all decodes.
-            # is_prompt = seq_group_metadata_list[0].is_prompt
-            # # SANG-TODO set num prompt tokens and generations?
-            # # Prepare input tensors.
-            # if is_prompt:
-            #     # print("SANG-TODO execute model prompt.")
-            #     (input_tokens, input_positions, input_metadata, prompt_lens,
-            #      subquery_lens, lora_index_mapping, lora_prompt_mapping,
-            #      lora_requests) = self._prepare_prompt(seq_group_metadata_list)
-            # else:
-            #     # print("SANG-TODO execute model decode.")
-            #     (input_tokens, input_positions, input_metadata,
-            #      lora_index_mapping, lora_prompt_mapping,
-            #      lora_requests) = self._prepare_decode(seq_group_metadata_list)
-            #     prompt_lens = []
-            #     subquery_lens = None
-            (input_tokens, input_positions, input_metadata,
-             subquery_lens, prompt_lens, lora_index_mapping, lora_prompt_mapping,
+            (input_tokens, input_positions, input_metadata, subquery_lens,
+             prompt_lens, lora_index_mapping, lora_prompt_mapping,
              lora_requests
              ) = self._prepare_mixed_batch(seq_group_metadata_list)
             sampling_metadata = self._prepare_sample(seq_group_metadata_list,
