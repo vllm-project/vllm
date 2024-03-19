@@ -3,6 +3,7 @@ from typing import List, Optional, Tuple
 
 import pytest
 import torch
+from vllm.utils import is_xpu
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 
@@ -11,6 +12,7 @@ from vllm.utils import get_max_shared_memory_bytes
 from vllm.utils import is_hip
 from allclose_default import get_default_atol, get_default_rtol
 
+XPU_DEVICES = ["xpu"] if is_xpu() else []
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
 # - 512 as a buffer
@@ -37,7 +39,8 @@ KV_CACHE_DTYPE = ["auto", "fp8_e5m2"]
 SEEDS = [0]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-]
+] if torch.cuda.is_available() else []
+DEVICES = CUDA_DEVICES + XPU_DEVICES
 
 
 def ref_masked_attention(
@@ -120,7 +123,7 @@ def ref_single_query_cached_kv_attention(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_paged_attention(
     kv_cache_factory,
     version: str,
@@ -308,7 +311,7 @@ def ref_multi_query_kv_attention(
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
 def test_multi_query_kv_attention(
     num_seqs: int,

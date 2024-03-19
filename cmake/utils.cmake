@@ -115,7 +115,6 @@ function (get_torch_gpu_compiler_flags OUT_GPU_FLAGS GPU_LANG)
       "-U__HIP_NO_HALF_CONVERSIONS__"
       "-U__HIP_NO_HALF_OPERATORS__"
       "-fno-gpu-rdc")
-
   endif()
   set(${OUT_GPU_FLAGS} ${GPU_FLAGS} PARENT_SCOPE)
 endfunction()
@@ -282,6 +281,7 @@ endmacro()
 # COMPILE_FLAGS <flags>      - Extra compiler flags passed to NVCC/hip.
 # INCLUDE_DIRECTORIES <dirs> - Extra include directories.
 # LINK_LIBRARIES <libraries> - Extra link libraries.
+# LINK_FLAGS <flags>         - Extra link flags.
 # WITH_SOABI                 - Generate library with python SOABI suffix name.
 #
 # Note: optimization level/debug info is set via cmake build type.
@@ -291,7 +291,7 @@ function (define_gpu_extension_target GPU_MOD_NAME)
     GPU
     "WITH_SOABI"
     "DESTINATION;LANGUAGE"
-    "SOURCES;ARCHITECTURES;COMPILE_FLAGS;INCLUDE_DIRECTORIES;LIBRARIES")
+    "SOURCES;ARCHITECTURES;COMPILE_FLAGS;INCLUDE_DIRECTORIES;LIBRARIES;LINK_FLAGS")
 
   # Add hipify preprocessing step when building with HIP/ROCm.
   if (GPU_LANGUAGE STREQUAL "HIP")
@@ -329,6 +329,10 @@ function (define_gpu_extension_target GPU_MOD_NAME)
 
   target_link_libraries(${GPU_MOD_NAME} PRIVATE ${TORCH_LIBRARIES}
     ${GPU_LIBRARIES})
+  if (GPU_LANGUAGE STREQUAL "SYCL")
+    target_compile_options(${GPU_MOD_NAME} PRIVATE ${GPU_COMPILE_FLAGS})
+    target_link_options(${GPU_MOD_NAME} PRIVATE ${GPU_LINK_FLAGS})
+  endif()    
 
   install(TARGETS ${GPU_MOD_NAME} LIBRARY DESTINATION ${GPU_DESTINATION})
 endfunction()

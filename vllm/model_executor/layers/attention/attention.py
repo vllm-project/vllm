@@ -7,7 +7,7 @@ import torch.nn as nn
 
 from vllm.logger import init_logger
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.utils import is_hip
+from vllm.utils import is_hip, is_xpu
 
 logger = init_logger(__name__)
 
@@ -39,6 +39,11 @@ class Attention(nn.Module):
             self.backend = FlashAttentionBackend(num_heads, head_size, scale,
                                                  num_kv_heads, alibi_slopes,
                                                  sliding_window)
+        elif is_xpu():
+            from vllm.model_executor.layers.attention.backends.torch_sdpa import TorchSDPABackend  # noqa: E501
+            self.backend = TorchSDPABackend(num_heads, head_size, scale,
+                                            num_kv_heads, alibi_slopes,
+                                            sliding_window)
         else:
             from vllm.model_executor.layers.attention.backends.xformers import XFormersBackend  # noqa: E501
             self.backend = XFormersBackend(num_heads, head_size, scale,

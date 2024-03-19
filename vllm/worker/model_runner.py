@@ -21,7 +21,8 @@ from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
-from vllm.utils import in_wsl, measure_cuda_memory
+from vllm.utils import measure_device_memory, is_xpu
+from vllm.device_utils import device_synchronize, could_pin_memory
 
 logger = init_logger(__name__)
 
@@ -76,8 +77,6 @@ class ModelRunner:
         # The shape of the cached block table will be
         # (max batch size to capture, max context len to capture / block size).
         self.graph_block_tables = None  # Set after initial profiling.
-        # cache in_wsl result
-        self.in_wsl = in_wsl()
         self.kv_cache_dtype = kv_cache_dtype
 
         # Set enforce_eager to True for Neuron backend, to avoid capturing graph
@@ -85,7 +84,7 @@ class ModelRunner:
             self.model_config.enforce_eager = True
 
     def load_model(self) -> None:
-        with measure_cuda_memory() as m:
+        with measure_device_memory() as m:
             self.model = get_model(self.model_config,
                                    self.device_config,
                                    lora_config=self.lora_config,
@@ -213,6 +212,13 @@ class ModelRunner:
 
         max_prompt_len = max(subquery_lens)
         assert max_prompt_len > 0
+        # for PVC, sdpa kernel requires 8 bytes aligned on leading dimension
+        if is_xpu():
+
+            def align_to_8(len):
+                return (len + 8 - 1) & (~0b111)
+
+            max_prompt_len = align_to_8(max_prompt_len)
         input_tokens = _make_tensor_with_pad(input_tokens,
                                              max_prompt_len,
                                              pad=0,
@@ -408,7 +414,7 @@ class ModelRunner:
         selected_token_start_idx = 0
         categorized_sample_indices = {t: [] for t in SamplingType}
         categorized_sample_indices_start_idx = 0
-        pin_memory = not self.in_wsl and not self.device_config.is_neuron
+        pin_memory = could_pin_memory(self.device_config.device)
 
         max_subquery_len = max(subquery_lens) if subquery_lens else 1
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
@@ -634,7 +640,7 @@ class ModelRunner:
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [(None, None)] * num_layers
         self.execute_model(seqs, kv_caches)
-        torch.cuda.synchronize()
+        device_synchronize(self.device_config)
         return
 
     def remove_all_loras(self) -> bool:

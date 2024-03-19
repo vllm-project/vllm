@@ -130,6 +130,14 @@ def is_neuron() -> bool:
     return transformers_neuronx is not None
 
 
+def is_xpu() -> bool:
+    try:
+        import intel_extension_for_pytorch  # noqa: F401
+    except ImportError:
+        return False
+    return hasattr(torch, "xpu") and torch.xpu.is_available()
+
+
 @cache
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
@@ -337,15 +345,19 @@ def create_kv_caches_with_random(
     return key_caches, value_caches
 
 
-class measure_cuda_memory:
+class measure_device_memory:
 
     def __init__(self, device=None):
         self.device = device
 
     def current_memory_usage(self) -> float:
         # Return the memory usage in bytes.
-        torch.cuda.reset_peak_memory_stats(self.device)
-        mem = torch.cuda.max_memory_allocated(self.device)
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats(self.device)
+            mem = torch.cuda.max_memory_allocated(self.device)
+        if torch.xpu.is_available():
+            torch.xpu.reset_peak_memory_stats(self.device)
+            mem = torch.xpu.max_memory_allocated(self.device)
         return mem
 
     def __enter__(self):

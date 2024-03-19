@@ -16,6 +16,7 @@ logger = init_logger(__name__)
 # A map between the device type (in device config) to its worker module.
 DEVICE_TO_WORKER_MODULE_MAP = {
     "cuda": "vllm.worker.worker",
+    "xpu": "vllm.worker.worker",
     "neuron": "vllm.worker.neuron_worker",
 }
 

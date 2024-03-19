@@ -101,6 +101,9 @@ elseif(HIP_FOUND)
     message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_ROCM_6X} "
       "expected for ROCMm 6.x build, saw ${Torch_VERSION} instead.")
   endif()
+elseif(BUILD_XPU_OPS)
+  message(STATUS "Building XPU")
+  set(VLLM_GPU_LANG "SYCL")
 else()
   message(FATAL_ERROR "Can't find CUDA or HIP installation.")
 endif()
@@ -136,17 +139,41 @@ endif()
 # _C extension
 #
 
-set(VLLM_EXT_SRC
-  "csrc/cache_kernels.cu"
-  "csrc/attention/attention_kernels.cu"
-  "csrc/pos_encoding_kernels.cu"
-  "csrc/activation_kernels.cu"
-  "csrc/layernorm_kernels.cu"
-  "csrc/quantization/squeezellm/quant_cuda_kernel.cu"
-  "csrc/quantization/gptq/q_gemm.cu"
-  "csrc/cuda_utils_kernels.cu"
-  "csrc/moe_align_block_size_kernels.cu"
-  "csrc/pybind.cpp")
+
+if(VLLM_GPU_LANG STREQUAL "SYCL")
+  append_cmake_prefix_path("intel_extension_for_pytorch" "intel_extension_for_pytorch.cmake_prefix_path")
+  find_package(IPEX REQUIRED)
+  # IPEX will overwrite TORCH_LIBRARIES, so re-add torch_python lib.
+  append_torchlib_if_found(torch_python)
+  include_directories(${IPEX_INCLUDE_DIRS})
+  set(CMPLR_ROOT $ENV{CMPLR_ROOT})
+  set(CMAKE_CXX_COMPILER icpx)
+  set(VLLM_EXTRA_INCLUDE_DIRECTORIES ${CMPLR_ROOT}/include/sycl)
+  set(VLLM_EXT_SRC
+    "csrc/xpu/activation_xpu.cpp"
+    "csrc/xpu/attention_xpu.cpp"
+    "csrc/xpu/cache_ops_xpu.cpp"
+    "csrc/xpu/gemm_kernels_xpu.cpp"
+    "csrc/xpu/layernorm_xpu.cpp"
+    "csrc/xpu/pos_encoding_xpu.cpp"
+    "csrc/xpu/utils.cpp"
+    "csrc/pybind.cpp")
+  list(APPEND VLLM_GPU_FLAGS "-DVLLM_BUILD_XPU_OPS" "-fsycl" "-fsycl-targets=spir64")
+  list(APPEND VLLM_GPU_LINK_FLAGS "-fsycl" "-fsycl-targets=spir64")
+  list(APPEND VLLM_LINK_LIBRARIES "sycl" "OpenCL" "pthread" "m" "dl" "dnnl" "intel-ext-pt-gpu" )
+else()
+  set(VLLM_EXT_SRC
+    "csrc/cache_kernels.cu"
+    "csrc/attention/attention_kernels.cu"
+    "csrc/pos_encoding_kernels.cu"
+    "csrc/activation_kernels.cu"
+    "csrc/layernorm_kernels.cu"
+    "csrc/quantization/squeezellm/quant_cuda_kernel.cu"
+    "csrc/quantization/gptq/q_gemm.cu"
+    "csrc/cuda_utils_kernels.cu"
+    "csrc/moe_align_block_size_kernels.cu"
+    "csrc/pybind.cpp")
+endif()
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_EXT_SRC
@@ -161,25 +188,30 @@ define_gpu_extension_target(
   LANGUAGE ${VLLM_GPU_LANG}
   SOURCES ${VLLM_EXT_SRC}
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+  LINK_FLAGS ${VLLM_GPU_LINK_FLAGS}
   ARCHITECTURES ${VLLM_GPU_ARCHES}
+  INCLUDE_DIRECTORIES ${VLLM_EXTRA_INCLUDE_DIRECTORIES}
+  LIBRARIES ${VLLM_LINK_LIBRARIES}
   WITH_SOABI)
 
 #
 # _moe_C extension
 #
 
-set(VLLM_MOE_EXT_SRC
-  "csrc/moe/moe_ops.cpp"
-  "csrc/moe/topk_softmax_kernels.cu")
+if(NOT VLLM_GPU_LANG STREQUAL "SYCL")
+  set(VLLM_MOE_EXT_SRC
+    "csrc/moe/moe_ops.cpp"
+    "csrc/moe/topk_softmax_kernels.cu")
 
-define_gpu_extension_target(
-  _moe_C
-  DESTINATION vllm
-  LANGUAGE ${VLLM_GPU_LANG}
-  SOURCES ${VLLM_MOE_EXT_SRC}
-  COMPILE_FLAGS ${VLLM_GPU_FLAGS}
-  ARCHITECTURES ${VLLM_GPU_ARCHES}
-  WITH_SOABI)
+  define_gpu_extension_target(
+    _moe_C
+    DESTINATION vllm
+    LANGUAGE ${VLLM_GPU_LANG}
+    SOURCES ${VLLM_MOE_EXT_SRC}
+    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+    ARCHITECTURES ${VLLM_GPU_ARCHES}
+    WITH_SOABI)
+endif()
 
 #
 # _punica_C extension
@@ -259,7 +291,7 @@ endif()
 #
 add_custom_target(default)
 
-if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
+if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP" OR VLLM_GPU_LANG STREQUAL "SYCL")
   message(STATUS "Enabling C extension.")
   add_dependencies(default _C)
 endif()
