@@ -94,7 +94,13 @@ from typing import Protocol
 class BlockCreator(Protocol):
 
     @abstractmethod
-    def __call__(self, prev_block: Optional[Block], token_ids: List[int], physical_block_index: int, block_size: int) -> Block:
+    def __call__(
+        self,
+        prev_block: Optional[Block],
+        token_ids: List[int],
+        block_size: int,
+        physical_block_index: Optional[int] = None,
+    ) -> Block:
         pass
 
 class NaiveBlockAllocator(BlockAllocator):
@@ -150,7 +156,7 @@ class PrefixCachingBlock(Block):
         prev_block: Optional["PrefixCachingBlock"],
         token_ids: List[int],
         block_size: int,
-        prefix_caching_allocator: "PrefixCachingBlockAllocator" = None, # TODO
+        prefix_caching_allocator: "PrefixCachingBlockAllocator",
         physical_block_index: Optional[int] = None,
     ):
         self._prev_block = prev_block
@@ -240,13 +246,30 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         self._cached_blocks: Dict[PrefixHash, BlockIndex] = {}
 
         self._hashless_allocator = NaiveBlockAllocator(
-            create_block=PrefixCachingBlock,
+            create_block=self._create_block,
             num_blocks=num_blocks,
             block_size=block_size,
         )
 
         self._block_size = block_size
         self._refcounter = self._hashless_allocator.refcounter
+
+    def _create_block(
+        self,
+        prev_block: Optional[Block],
+        token_ids: List[int],
+        block_size: int,
+        physical_block_index: Optional[int] = None,
+    ) -> Block:
+        # Bind block to self.
+        return PrefixCachingBlock(
+            prev_block=prev_block,
+            token_ids=token_ids,
+            block_size=self._block_size,
+            prefix_caching_allocator=self,
+            physical_block_index=physical_block_index,
+        )
+        
     
     def allocate_mutable(self, prev_block: Block) -> Block:
         """Look in freelist. If found, return.
@@ -266,11 +289,10 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     def allocate_immutable(self, prev_block: Optional[Block], token_ids: List[int]) -> Block:
         assert_prefix_caching_block_or_none(prev_block)
 
-        block = PrefixCachingBlock(
+        block = self._create_block(
             prev_block=prev_block,
             token_ids=token_ids,
             block_size=self._block_size,
-            #prefix_caching_allocator=self,
         )
         assert block.content_hash is not None
 

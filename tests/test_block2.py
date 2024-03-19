@@ -117,8 +117,9 @@ class TestPrefixCachingBlock:
         num_to_fill = block_size if is_curr_block_full else random.randint(
             0, block_size - 1)
         token_ids = list(range(num_to_fill))
+        mock_allocator = MagicMock(spec=PrefixCachingBlockAllocator)
     
-        block_with_prev = PrefixCachingBlock(prev_block=None, token_ids=token_ids, block_size=block_size)
+        block_with_prev = PrefixCachingBlock(prev_block=None, token_ids=token_ids, block_size=block_size, prefix_caching_allocator=mock_allocator)
     
         if is_curr_block_full:
             # Expect hash since block is full.
@@ -150,10 +151,12 @@ class TestPrefixCachingBlock:
         num_to_fill = block_size if is_curr_block_full else random.randint(
             0, block_size - 1)
         token_ids = list(range(num_to_fill))
+        mock_allocator = MagicMock(spec=PrefixCachingBlockAllocator)
     
         block_with_prev = PrefixCachingBlock(prev_block=previous_block,
                                             token_ids=token_ids,
                                             block_size=block_size,
+                                            prefix_caching_allocator=mock_allocator,
                                             )
     
     
@@ -208,6 +211,8 @@ class TestPrefixCachingBlock:
     
         if num_blocks == 0:
             return []
+
+        mock_allocator = MagicMock(spec=PrefixCachingBlockAllocator)
     
         prev_block = None
         for block_number in range(0, num_blocks):
@@ -215,6 +220,7 @@ class TestPrefixCachingBlock:
                                            prev_block=prev_block,
                                            token_ids=[],
                                            block_size=block_size,
+                                           prefix_caching_allocator=mock_allocator,
                                            )
     
             tokens_to_append = token_ids[block_number *
@@ -229,7 +235,7 @@ class TestPrefixCachingBlock:
 
 class TestPrefixCachingBlockAllocator:
     @staticmethod
-    def create_allocate_lambda(allocate_type: str, allocator: NaiveBlockAllocator, prev_block: Optional[Block], token_ids: List[int]):
+    def create_allocate_lambda(allocate_type: str, allocator: BlockAllocator, prev_block: Optional[Block], token_ids: List[int]):
         if allocate_type == "immutable":
             allocate_block = lambda: allocator.allocate_immutable(prev_block=prev_block, token_ids=token_ids)
         elif allocate_type == "mutable":
