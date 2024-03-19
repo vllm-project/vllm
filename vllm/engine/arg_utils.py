@@ -335,9 +335,8 @@ class EngineArgs:
             '--image-input-shape',
             type=str,
             default=None,
-            help=(
-                'Image input shape which should be consistent with image input '
-                'type.'))
+            help=('The biggest image input shape (worst for memory footprint) '
+                  'given an input type. Only used for vLLM\'s profile_run.'))
         parser.add_argument(
             '--image-feature-size',
             type=int,

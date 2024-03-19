@@ -16,6 +16,7 @@ _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
 
+# Multi modal related
 _PIXEL_VALUES_FILES = [
     os.path.join(_TEST_DIR, "images", filename) for filename in
     ["stop_sign_pixel_values.pt", "cherry_blossom_pixel_values.pt"]
@@ -28,6 +29,12 @@ _IMAGE_FILES = [
     os.path.join(_TEST_DIR, "images", filename)
     for filename in ["stop_sign.jpg", "cherry_blossom.jpg"]
 ]
+_IMAGE_PROMPTS = [
+    "<image>\nUSER: What's the content of the image?\nASSISTANT:",
+    "<image>\nUSER: What is the season?\nASSISTANT:"
+]
+assert len(_PIXEL_VALUES_FILES) == len(_IMAGE_FEATURES_FILES) == len(
+    _IMAGE_FILES) == len(_IMAGE_PROMPTS)
 
 
 def _read_prompts(filename: str) -> List[str]:
@@ -36,14 +43,9 @@ def _read_prompts(filename: str) -> List[str]:
         return prompts
 
 
-# Multi modal related
-# The following few need to be changed in sync.
 @pytest.fixture(scope="session")
 def hf_image_prompts() -> List[str]:
-    return [
-        "<image>\nUSER: What's the content of the image?\nASSISTANT:",
-        "<image>\nUSER: What is the season?\nASSISTANT:"
-    ]
+    return _IMAGE_PROMPTS
 
 
 @pytest.fixture(scope="session")
@@ -69,10 +71,8 @@ def vllm_images(request) -> "torch.Tensor":
 def vllm_image_prompts(request) -> List[str]:
     vision_language_config = request.getfixturevalue("model_and_config")[1]
     return [
-        "<image>" * vision_language_config.image_feature_size +
-        "\nUSER: What's the content of the image?\nASSISTANT:",
-        "<image>" * vision_language_config.image_feature_size +
-        "\nUSER: What is the season?\nASSISTANT:"
+        "<image>" * (vision_language_config.image_feature_size - 1) + p
+        for p in _IMAGE_PROMPTS
     ]
 
 

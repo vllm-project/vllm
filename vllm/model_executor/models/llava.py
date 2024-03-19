@@ -98,13 +98,15 @@ class LlavaForConditionalGeneration(nn.Module):
         self.sampler = Sampler(self.unpadded_vocab_size,
                                self.language_model.org_vocab_size)
 
-    def forward(self,
-                input_ids: torch.Tensor,
-                positions: torch.Tensor,
-                kv_caches: List[KVCache],
-                input_metadata: InputMetadata,
-                image_input: Optional[torch.Tensor] = None) -> SamplerOutput:
-        """Run forward pass for Llava.
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[KVCache],
+        input_metadata: InputMetadata,
+        image_input: Optional[torch.Tensor] = None
+    ) -> SamplerOutput:  # noqa: E501
+        """Run forward pass for Llava 1.5.
 
         One key thing to understand is the `input_ids` already accounts for the
         positions of the to-be-inserted image embeddings.
@@ -124,14 +126,19 @@ class LlavaForConditionalGeneration(nn.Module):
         This way, the `positions` and `input_metadata` are consistent
         with the `input_ids`.
 
-        The design is chosen so that all data massaging happens inside
-        Llava model.
+        The model takes two types of image inputs: 
+        PIXEL_VALUES and IMAGE_FEATURES.
+        The following shows how each maps to huggingface implementation.
+        PIXEL_VALUES: 
+        - https://github.com/huggingface/transformers/blob/07bdbeb/src/transformers/models/llava/modeling_llava.py#L353
+        IMAGE_FEATURES:
+        - https://github.com/huggingface/transformers/blob/07bdbeb/src/transformers/models/llava/modeling_llava.py#L430
+        before going through the multi modal projector.
 
         Args:
             input_ids: Flattened (concatenated) input_ids corresponding to a
                 batch.
-            image_input: A batch of image inputs (either of type PIXEL_VALUES
-                or IMAGE_FEATURES).
+            image_input: A batch of image inputs.
                 For PIXEL_VALUES, expecting [1, 3, 336, 336].
                 For IMAGE_FEATURES, expecting [1, 576, 1024].
         """
@@ -147,7 +154,7 @@ class LlavaForConditionalGeneration(nn.Module):
                     f"supplied image input is consistent with "
                     f"image_input_shape in engine args.")
             if self.vision_tower is not None:
-                # TODO(xwjiang): Port minimal CLIPVisionModel over.
+                # TODO(xwjiang): Maybe port minimal CLIPVisionModel over.
                 image_outputs = self.vision_tower(image_input,
                                                   output_hidden_states=True)
                 image_features = image_outputs.hidden_states[
@@ -168,19 +175,14 @@ class LlavaForConditionalGeneration(nn.Module):
             _merge_vision_embeddings(
                 input_ids, inputs_embeds, vision_embeddings,
                 self.vision_language_config.image_token_id)
-
-            hidden_states = self.language_model(None,
-                                                positions,
-                                                kv_caches,
-                                                input_metadata,
-                                                inputs_embeds=inputs_embeds)
+            input_ids = None
         else:
-            hidden_states = self.language_model(
-                input_ids,
-                positions,
-                kv_caches,
-                input_metadata,
-            )
+            inputs_embeds = None
+        hidden_states = self.language_model(input_ids,
+                                            positions,
+                                            kv_caches,
+                                            input_metadata,
+                                            inputs_embeds=inputs_embeds)
 
         return hidden_states
 
@@ -215,12 +217,13 @@ class LlavaForConditionalGeneration(nn.Module):
             for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
                 if key_to_modify in name:
                     name = name.replace(key_to_modify, new_key)
-            normal_weight_loading = False
+            # Load weight in a non-sharded way.
+            use_default_weigth_loading = False
             if "vision" in name:
                 if self.vision_tower is not None:
                     # We only do sharding for language model and
                     # not vision model for now.
-                    normal_weight_loading = True
+                    use_default_weigth_loading = True
             else:
                 for (param_name, weight_name,
                      shard_id) in stacked_params_mapping:
@@ -231,8 +234,8 @@ class LlavaForConditionalGeneration(nn.Module):
                     weight_loader(param, loaded_weight, shard_id)
                     break
                 else:
-                    normal_weight_loading = True
-            if normal_weight_loading:
+                    use_default_weigth_loading = True
+            if use_default_weigth_loading:
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
