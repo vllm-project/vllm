@@ -5,8 +5,7 @@ import torch
 
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import (is_neuron, pin_memory_available,
-                        STR_DTYPE_TO_TORCH_DTYPE)
+from vllm.utils import pin_memory_available, STR_DTYPE_TO_TORCH_DTYPE
 
 logger = init_logger(__name__)
 
@@ -38,10 +37,6 @@ class CacheEngine:
         self.block_size = cache_config.block_size
         self.num_gpu_blocks = cache_config.num_gpu_blocks
         self.num_cpu_blocks = cache_config.num_cpu_blocks
-
-        # Skip initializing CUDA stream and buffer for Neuron backend.
-        if is_neuron():
-            return
 
         if cache_config.cache_dtype == "auto":
             self.dtype = model_config.dtype

@@ -339,11 +339,8 @@ class CudaMemoryMeasurer:
 
     def __init__(self, device=None):
         self.device = device
-        self.is_neuron = is_neuron()
 
     def current_memory_usage(self) -> float:
-        if self.is_neuron:
-            return 0.0
         # Return the memory usage in bytes.
         torch.cuda.reset_peak_memory_stats(self.device)
         mem = torch.cuda.max_memory_allocated(self.device)

@@ -12,7 +12,6 @@ from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (Logprob, PromptLogprobs, SampleLogprobs,
                            SamplerOutput, SequenceData, SequenceGroupOutput,
                            SequenceOutput)
-from vllm.utils import is_neuron
 
 
 class Sampler(nn.Module):
@@ -32,11 +31,12 @@ class Sampler(nn.Module):
 
     def __init__(self,
                  vocab_size: int,
-                 org_vocab_size: Optional[int] = None) -> None:
+                 org_vocab_size: Optional[int] = None,
+                 logits_as_input: bool = False) -> None:
         super().__init__()
         self.vocab_size = vocab_size
-        # Transformers-neuronx generate outputs as logits directly.
-        self.logits_as_hidden_states = is_neuron()
+        # Whether the input is logits (default is hidden states).
+        self.logits_as_input = logits_as_input
         # original vocabulary size (without LoRA).
         self.org_vocab_size = org_vocab_size or vocab_size
 
@@ -54,13 +54,13 @@ class Sampler(nn.Module):
 
     def forward(
         self,
-        embedding: torch.Tensor,
+        embedding: Optional[torch.Tensor],
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[SamplerOutput]:
         # Get the hidden states that we use for sampling.
-        if self.logits_as_hidden_states:
+        if self.logits_as_input:
             logits = hidden_states
         else:
             hidden_states = _prune_hidden_states(hidden_states,

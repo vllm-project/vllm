@@ -34,13 +34,13 @@ class NeuronExecutor(ExecutorBase):
         self.cache_config.num_gpu_blocks = self.scheduler_config.max_num_seqs
         self.cache_config.num_cpu_blocks = 0
 
-        # Instantiate the worker and load the model to GPU.
+        # Instantiate the worker and load the model to the device.
         self._init_worker()
 
     def _init_worker(self):
-        from vllm.worker.neuron_worker import Worker
+        from vllm.worker.neuron_worker import NeuronWorker
 
-        self.driver_worker = Worker(
+        self.driver_worker = NeuronWorker(
             self.model_config,
             self.parallel_config,
             self.scheduler_config,
@@ -59,7 +59,7 @@ class NeuronExecutor(ExecutorBase):
                     "Cache operations are not supported for Neuron backend.")
 
         output = self.driver_worker.execute_model(
-            seq_group_metadata_list=seq_group_metadata_list, )
+            seq_group_metadata_list=seq_group_metadata_list)
         return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:

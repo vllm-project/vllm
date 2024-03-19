@@ -11,7 +11,7 @@ from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.neuron_model_runner import NeuronModelRunner
 
 
-class Worker:
+class NeuronWorker:
     """A worker class that executes the model on a group of neuron cores.
     """
 

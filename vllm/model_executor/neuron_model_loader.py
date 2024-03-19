@@ -1,4 +1,4 @@
-"""Utilities for selecting and loading models."""
+"""Utilities for selecting and loading neuron models."""
 import importlib
 import os
 from typing import Optional, Type
@@ -43,7 +43,7 @@ class NeuronCasualLM(nn.Module):
         super().__init__()
         self.config = config
         self.model = None
-        self.sampler = Sampler(config.vocab_size)
+        self.sampler = Sampler(config.vocab_size, logits_as_input=True)
 
     def forward(
         self,
@@ -61,8 +61,7 @@ class NeuronCasualLM(nn.Module):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(self.model.chkpt_model.lm_head,
-                                   hidden_states, sampling_metadata)
+        next_tokens = self.sampler(None, hidden_states, sampling_metadata)
         return next_tokens
 
     def load_weights(self, model_name_or_path: str, **kwargs):
