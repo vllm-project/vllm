@@ -251,6 +251,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     
     def __init__(self, num_blocks: int, block_size: int):
         self._cached_blocks: Dict[PrefixHash, BlockIndex] = {}
+        self._unused_cached_blocks: Dict[PrefixHash, BlockIndex] = {}
 
         self._hashless_allocator = NaiveBlockAllocator(
             create_block=self._create_block,
@@ -260,6 +261,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         self._block_size = block_size
         self._refcounter = self._hashless_allocator.refcounter
+
 
     def _create_block(
         self,
@@ -276,22 +278,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             prefix_caching_allocator=self,
             physical_block_index=physical_block_index,
         )
-        
-    
-    def allocate_mutable(self, prev_block: Block) -> Block:
-        """Look in freelist. If found, return.
-        Else, look in cachelist (refcount==0). If found, return.
 
-        Otherwise, raise :(
-        """
-        try:
-            block = self._hashless_allocator.allocate_mutable(prev_block=prev_block)
-            return block
-        except BlockAllocator.NoFreeBlocksError:
-            pass
-
-        # TODO: weakref
-        raise BlockAllocator.NoFreeBlocksError()
 
     def allocate_immutable(self, prev_block: Optional[Block], token_ids: List[int]) -> Block:
         assert_prefix_caching_block_or_none(prev_block)
@@ -316,8 +303,53 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         return block
  
+    
+    def allocate_mutable(self, prev_block: Block) -> Block:
+        """Look in freelist. If found, return.
+        Else, look in cachelist (refcount==0). If found, return.
+
+        Otherwise, raise :(
+        """
+        try:
+            return self._hashless_allocator.allocate_mutable(prev_block=prev_block)
+        except BlockAllocator.NoFreeBlocksError:
+            pass
+        
+        if self._unused_cached_blocks:
+            # TODO policy for selecting block to remove
+            content_hash_to_evict = next(iter(self._unused_cached_blocks))
+            physical_block_index = self._unused_cached_blocks.pop(content_hash_to_evict)
+            refcount = self._refcounter.incr(physical_block_index)
+            block = self._create_block(
+                prev_block=prev_block,
+                token_ids=[],
+                block_size=self._block_size,
+                physical_block_index=physical_block_index,
+            )
+            assert block.content_hash is None
+            return block
+
+        raise BlockAllocator.NoFreeBlocksError()
+
     def free(self, block: Block) -> None:
-        pass
+        """Free a block.
+        Check if it has a hash. If so, decr refcount ourselves. If zero, add to special list.
+        If it does not have a hash, let the hashless allocator figure it out.
+        """
+        assert isinstance(block, PrefixCachingBlock)
+        assert block.physical_block_index is not None
+
+        if block.content_hash is None:
+            return self._hashless_allocator.free(block)
+        
+        physical_block_index = block.physical_block_index
+        block.physical_block_index = None
+        refcount = self._refcounter.decr(physical_block_index)
+        
+        # If no longer used, add the block to the unused cached blocks.
+        if refcount == 0:
+            assert block.content_hash not in self._unused_cached_blocks
+            self._unused_cached_blocks[block.content_hash] = physical_block_index
 
     # TODO name: upsert_
     # promote

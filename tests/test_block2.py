@@ -306,13 +306,9 @@ class TestPrefixCachingBlockAllocator:
         with pytest.raises(BlockAllocator.NoFreeBlocksError):
             allocator.allocate_immutable(prev_block=chain[-1], token_ids=list(range(block_size)))
 
-        # Expect mutable allocation on chain to fail.
+        # Expect mutable allocation to fail.
         with pytest.raises(BlockAllocator.NoFreeBlocksError):
             allocator.allocate_mutable(prev_block=chain[-1])
-
-        # Expect mutable allocation without prev_block to fail.
-        with pytest.raises(BlockAllocator.NoFreeBlocksError):
-            allocator.allocate_mutable(prev_block=None)
 
         # Expect allocation of exact same chain to pass.
         second_chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
@@ -325,6 +321,46 @@ class TestPrefixCachingBlockAllocator:
         assert chain and second_chain
         for first_chain_block, second_chain_block in zip(chain, second_chain):
             assert first_chain_block.physical_block_index == second_chain_block.physical_block_index
+
+    @staticmethod
+    @pytest.mark.parametrize("num_blocks", [1, 1024])
+    @pytest.mark.parametrize("block_size", [1, 16])
+    def test_free_prevents_oom(num_blocks: int, block_size: int):
+        """Consume all blocks using many different hashes/block content.
+
+        Do this by creating a sequence that is very long.
+        Expect next block to OOM.
+        """
+        allocator = PrefixCachingBlockAllocator(num_blocks=num_blocks, block_size=block_size)
+
+        # Create token ids that will exhaust all blocks.
+        token_ids = list(range(num_blocks * block_size))
+
+        chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
+                    block_size=block_size,
+                    token_ids=token_ids,
+                    allocator=allocator,
+        )
+        
+        # Expect mutable allocation to fail.
+        with pytest.raises(BlockAllocator.NoFreeBlocksError):
+            allocator.allocate_mutable(prev_block=None)
+
+        block_to_free = chain[-1]
+
+        # Expect free/allocate loop to succeed many times.
+        for i in range(100):
+            physical_block_index = block_to_free.physical_block_index
+            allocator.free(block_to_free)
+            assert block_to_free.physical_block_index is None, i
+
+            new_block = allocator.allocate_mutable(prev_block=None)
+            assert new_block.physical_block_index == physical_block_index, i
+
+            with pytest.raises(BlockAllocator.NoFreeBlocksError):
+                oom_block = allocator.allocate_mutable(prev_block=None)
+
+            block_to_free = new_block
 
 
     @staticmethod
