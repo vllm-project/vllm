@@ -77,16 +77,16 @@ async def show_available_models():
     return JSONResponse(content=models.model_dump())
 
 
-@app.post("/v1/models/load")
-async def create_lora_request(request: LoRA,
+@app.put("/-/lora_cache")
+async def add_lora_request(request: LoRA,
                                raw_request: Request):
-    model_card = await openai_serving_chat.create_model(request)
+    model_card = await openai_serving_chat.add_lora(request)
     return JSONResponse(content=model_card.model_dump())
 
 
-@app.delete("/v1/models/{model}")
+@app.delete("/-/lora_cache/{model}")
 async def show_available_model(model: str):
-    delete_response = await openai_serving_chat.delete_model(model)
+    delete_response = await openai_serving_chat.delete_lora(model)
 
     return JSONResponse(content=delete_response)
 
