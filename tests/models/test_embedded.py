@@ -31,4 +31,4 @@ result = lst1 @ lst2.T
 expected_result = np.array([[0.6265, 0.3477], [0.3499, 0.678 ]])
 
 assert(np.isclose(result, expected_result, atol=1e-2).all())
-
+print("Passed!")

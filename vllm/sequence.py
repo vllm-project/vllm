@@ -291,7 +291,6 @@ class SequenceGroup:
         sampling_params: SamplingParams,
         arrival_time: float,
         lora_request: Optional[LoRARequest] = None,
-        prefix: Optional[Prefix] = None,
         embed = None, 
     ) -> None:
         self.request_id = request_id

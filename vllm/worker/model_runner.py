@@ -584,11 +584,6 @@ class ModelRunner:
         else:
             model_executable = self.model
 
-        prompt_dict = {}
-        for seq_group in seq_group_metadata_list:
-            if seq_group.prompt_dict :
-                prompt_dict.update(seq_group.prompt_dict)
-        input_metadata.prompt_dict = prompt_dict
         # print("forward")
         # This should be the foward loop
         args_spec = inspect.getfullargspec(model_executable.forward)
