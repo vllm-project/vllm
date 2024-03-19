@@ -37,17 +37,27 @@ class TokenizerGroup(BaseTokenizerGroup):
     def encode(self,
                prompt: str,
                request_id: Optional[str] = None,
-               lora_request: Optional[LoRARequest] = None) -> List[int]:
+               lora_request: Optional[LoRARequest] = None,
+               truncate_to: Optional[int] = None) -> List[int]:
         tokenizer = self.get_lora_tokenizer(lora_request)
-        return tokenizer.encode(prompt)
+        return self._encode(tokenizer, prompt, truncate_to)
 
-    async def encode_async(
-            self,
-            prompt: str,
-            request_id: Optional[str] = None,
-            lora_request: Optional[LoRARequest] = None) -> List[int]:
+    async def encode_async(self,
+                           prompt: str,
+                           request_id: Optional[str] = None,
+                           lora_request: Optional[LoRARequest] = None,
+                           truncate_to: Optional[int] = None) -> List[int]:
         tokenizer = await self.get_lora_tokenizer_async(lora_request)
-        return tokenizer.encode(prompt)
+        return self._encode(tokenizer, prompt, truncate_to)
+
+    @staticmethod
+    def _encode(tokenizer: PreTrainedTokenizer, prompt: str,
+                truncate_to: Optional[int]) -> List[int]:
+        tokenizer_kwargs = {} if truncate_to is None else {
+            "truncation": True,
+            "max_length": truncate_to,
+        }
+        return tokenizer.encode(prompt, **tokenizer_kwargs)
 
     def get_lora_tokenizer(
             self,
@@ -60,8 +70,7 @@ class TokenizerGroup(BaseTokenizerGroup):
                 lora_request, **self.tokenizer_config) or self.tokenizer)
             self.lora_tokenizers.put(lora_request.lora_int_id, tokenizer)
             return tokenizer
-        else:
-            return self.lora_tokenizers.get(lora_request.lora_int_id)
+        return self.lora_tokenizers.get(lora_request.lora_int_id)
 
     async def get_lora_tokenizer_async(
             self,
@@ -74,5 +83,4 @@ class TokenizerGroup(BaseTokenizerGroup):
                 lora_request, **self.tokenizer_config) or self.tokenizer)
             self.lora_tokenizers.put(lora_request.lora_int_id, tokenizer)
             return tokenizer
-        else:
-            return self.lora_tokenizers.get(lora_request.lora_int_id)
+        return self.lora_tokenizers.get(lora_request.lora_int_id)

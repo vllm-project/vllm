@@ -25,16 +25,17 @@ class BaseTokenizerGroup(ABC):
     def encode(self,
                prompt: str,
                request_id: Optional[str] = None,
-               lora_request: Optional[LoRARequest] = None) -> List[int]:
+               lora_request: Optional[LoRARequest] = None,
+               truncate_to: Optional[int] = None) -> List[int]:
         """Encode a prompt using the tokenizer group."""
         pass
 
     @abstractmethod
-    async def encode_async(
-            self,
-            prompt: str,
-            request_id: Optional[str] = None,
-            lora_request: Optional[LoRARequest] = None) -> List[int]:
+    async def encode_async(self,
+                           prompt: str,
+                           request_id: Optional[str] = None,
+                           lora_request: Optional[LoRARequest] = None,
+                           truncate_to: Optional[int] = None) -> List[int]:
         """Encode a prompt using the tokenizer group."""
         pass
 

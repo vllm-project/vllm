@@ -16,6 +16,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import MultiModalData
+from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.usage.usage_lib import UsageContext
 
 logger = init_logger(__name__)
@@ -377,6 +378,12 @@ class AsyncLLMEngine:
     def _error_callback(self, exc: Exception) -> None:
         self.set_errored(exc)
         self._request_tracker.propagate_exception(exc)
+
+    async def get_tokenizer_group(self) -> BaseTokenizerGroup:
+        if self.engine_use_ray:
+            return await self.engine.get_tokenizer_group.remote()
+        else:
+            return self.engine.get_tokenizer_group()
 
     async def get_tokenizer(self) -> "PreTrainedTokenizer":
         if self.engine_use_ray:

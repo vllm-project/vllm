@@ -135,23 +135,20 @@ class OpenAIServingCompletion(OpenAIServing):
             prompt_is_tokens, prompts = parse_prompt_format(request.prompt)
 
             for i, prompt in enumerate(prompts):
-                if prompt_is_tokens:
-                    input_ids = self._validate_prompt_and_tokenize(
-                        request,
-                        prompt_ids=prompt,
-                        truncate_prompt_tokens=sampling_params.
-                        truncate_prompt_tokens)
-                else:
-                    input_ids = self._validate_prompt_and_tokenize(
-                        request,
-                        prompt=prompt,
-                        truncate_prompt_tokens=sampling_params.
-                        truncate_prompt_tokens)
+                sub_request_id = f"{request_id}-{i}"
+                prompt_arg = "prompt_ids" if prompt_is_tokens else "prompt"
+                input_ids = await self._validate_prompt_and_tokenize(
+                    request,
+                    request_id=sub_request_id,
+                    lora_request=lora_request,
+                    truncate_prompt_tokens=sampling_params.
+                    truncate_prompt_tokens,
+                    **{prompt_arg: prompt})
 
                 generators.append(
                     self.engine.generate(prompt,
                                          sampling_params,
-                                         f"{request_id}-{i}",
+                                         sub_request_id,
                                          prompt_token_ids=input_ids,
                                          lora_request=lora_request))
         except ValueError as e:

@@ -81,7 +81,8 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
     def encode(self,
                prompt: str,
                request_id: Optional[str] = None,
-               lora_request: Optional[LoRARequest] = None) -> List[int]:
+               lora_request: Optional[LoRARequest] = None,
+               truncate_to: Optional[int] = None) -> List[int]:
         """Encode a prompt using the tokenizer group.
 
         We pick an idle actor and use it to encode the prompt.
@@ -97,7 +98,8 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
             ret = ray.get(
                 actor.encode.remote(request_id=request_id,
                                     prompt=prompt,
-                                    lora_request=lora_request))
+                                    lora_request=lora_request,
+                                    truncate_to=truncate_to))
         finally:
             # Put the actor back in the queue.
             # This is done in a finally block to ensure that the actor is
@@ -106,11 +108,11 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
             self._idle_actors.put_nowait(actor)
         return ret
 
-    async def encode_async(
-            self,
-            prompt: str,
-            request_id: Optional[str] = None,
-            lora_request: Optional[LoRARequest] = None) -> List[int]:
+    async def encode_async(self,
+                           prompt: str,
+                           request_id: Optional[str] = None,
+                           lora_request: Optional[LoRARequest] = None,
+                           truncate_to: Optional[int] = None) -> List[int]:
         """Encode a prompt using the tokenizer group.
 
         We pick an idle actor and use it to encode the prompt.
@@ -125,7 +127,8 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
         try:
             ret = await actor.encode.remote(request_id=request_id,
                                             prompt=prompt,
-                                            lora_request=lora_request)
+                                            lora_request=lora_request,
+                                            truncate_to=truncate_to)
         finally:
             # Put the actor back in the queue.
             # This is done in a finally block to ensure that the actor is

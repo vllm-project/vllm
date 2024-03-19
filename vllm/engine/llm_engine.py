@@ -241,6 +241,9 @@ class LLMEngine:
         # the closure used to initialize Ray worker actors
         raise RuntimeError("LLMEngine should not be pickled!")
 
+    def get_tokenizer_group(self) -> BaseTokenizerGroup:
+        return self.tokenizer
+
     def get_tokenizer(self) -> "PreTrainedTokenizer":
         return self.tokenizer.get_lora_tokenizer(None)
 
