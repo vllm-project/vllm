@@ -18,6 +18,7 @@ pytest
 pytest-forked
 pytest-asyncio
 pytest-rerunfailures
+pytest-shard
 httpx
 einops # required for MPT
 openai

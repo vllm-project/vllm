@@ -68,7 +68,7 @@ async def async_request_tgi(
                             output.ttft = ttft
                     output.latency = time.perf_counter() - st
 
-                    body = data.decode("utf-8").lstrip("data:")  # noqa
+                    body = remove_prefix(data.decode("utf-8"), "data:")
                     output.generated_text = json.loads(body)["generated_text"]
                     output.success = True
                 else:
@@ -114,7 +114,7 @@ async def async_request_vllm(
                             output.ttft = ttft
                     output.latency = time.perf_counter() - st
 
-                    # When streaming, '\0' is appended to the end of the response.
+                    # When streaming, '\0' is appended to the end of response.
                     body = data.decode("utf-8").strip("\0")
                     output.generated_text = json.loads(
                         body)["text"][0][len(request_func_input.prompt):]
@@ -162,7 +162,7 @@ async def async_request_trt_llm(
                             output.ttft = ttft
                     output.latency = time.perf_counter() - st
 
-                    body = data.decode("utf-8").lstrip("data:")  # noqa
+                    body = remove_prefix(data.decode("utf-8"), "data:")
                     output.generated_text = json.loads(body)["text_output"]
                     output.success = True
 
@@ -196,7 +196,8 @@ async def async_request_deepspeed_mii(
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
 
-        # DeepSpeed-MII doesn't support streaming as of Jan 28 2024, will use 0 as placeholder.
+        # DeepSpeed-MII doesn't support streaming as of Jan 28 2024,
+        # will use 0 as placeholder.
         # https://github.com/microsoft/DeepSpeed-MII/pull/311
         output.ttft = 0
 
@@ -259,7 +260,7 @@ async def async_request_openai_completions(
                         if not chunk:
                             continue
 
-                        chunk = chunk.decode("utf-8").lstrip("data: ")  # noqa
+                        chunk = remove_prefix(chunk.decode("utf-8"), "data: ")
                         if chunk == "[DONE]":
                             latency = time.perf_counter() - st
                         else:
@@ -326,7 +327,7 @@ async def async_request_openai_chat_completions(
                         if not chunk:
                             continue
 
-                        chunk = chunk.decode("utf-8").lstrip("data: ")
+                        chunk = remove_prefix(chunk.decode("utf-8"), "data: ")
                         if chunk == "[DONE]":
                             latency = time.perf_counter() - st
                         else:
@@ -346,6 +347,14 @@ async def async_request_openai_chat_completions(
     if pbar:
         pbar.update(1)
     return output
+
+
+# Since vllm must support Python 3.8, we can't use str.removeprefix(prefix)
+# introduced in Python 3.9
+def remove_prefix(text: str, prefix: str) -> str:
+    if text.startswith(prefix):
+        return text[len(prefix):]
+    return text
 
 
 ASYNC_REQUEST_FUNCS = {

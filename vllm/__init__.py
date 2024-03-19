@@ -8,6 +8,7 @@ from vllm.entrypoints.llm import LLM
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import SamplingParams
 
+# UPSTREAM SYNC: use the current downstream.
 __version__ = "0.1.0"
 
 __all__ = [

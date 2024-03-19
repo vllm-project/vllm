@@ -1,3 +1,4 @@
+# UPSTREAM SYNC: Use the current downstream version.
 """Compare the outputs of a GPTQ model to a Marlin model.
 
 Note: GPTQ and Marlin do not have bitwise correctness.
