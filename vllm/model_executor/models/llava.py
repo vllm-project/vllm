@@ -16,7 +16,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
-from vllm.config import VisionLanguageConfig, LoRAConfig
+from vllm.config import VisionLanguageConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -62,46 +62,38 @@ def _merge_vision_embeddings(input_ids: torch.Tensor,
                                                  vision_embeddings.shape[-1])
 
 
-# TODO(xwjiang): Add model correctness test. This model should produce the same
-# output as huggingface.
 class LlavaForConditionalGeneration(nn.Module):
-    supports_lora = False
 
     def __init__(self,
                  config: "LlavaConfig",
                  vision_language_config: VisionLanguageConfig,
-                 linear_method: Optional["LinearMethodBase"] = None,
-                 lora_config: Optional["LoRAConfig"] = None) -> None:
-        # TODO(xwjiang): Remove when adding LoRA support.
-        assert not lora_config
+                 linear_method: Optional["LinearMethodBase"] = None) -> None:
         super().__init__()
         self.config = config
 
-        hf_text_config = config.text_config
-        hf_vision_config = config.vision_config
         self.vision_language_config = vision_language_config
 
-        assert self.vision_language_config
+        assert self.vision_language_config, (
+            "Provide `image_input_type` and other vision "
+            "related configurations through LLM entrypoint.")
 
         if self.vision_language_config.image_input_type == (
                 VisionLanguageConfig.ImageInputType.PIXEL_VALUES):
-            self.vision_tower = CLIPVisionModel(hf_vision_config)
+            self.vision_tower = CLIPVisionModel(config.vision_config)
         else:
             self.vision_tower = None
 
         self.multi_modal_projector = LlavaMultiModalProjector(
-            vision_hidden_size=hf_vision_config.hidden_size,
-            text_hidden_size=hf_text_config.hidden_size,
+            vision_hidden_size=config.vision_config.hidden_size,
+            text_hidden_size=config.text_config.hidden_size,
             projector_hidden_act=config.projector_hidden_act)
 
         self.linear_method = linear_method
-        self.language_model = LlamaModel(hf_text_config,
-                                         linear_method,
-                                         lora_config=lora_config)
-        self.unpadded_vocab_size = hf_text_config.vocab_size
+        self.language_model = LlamaModel(config.text_config, linear_method)
+        self.unpadded_vocab_size = config.text_config.vocab_size
         self.lm_head = ParallelLMHead(
             self.unpadded_vocab_size,
-            hf_text_config.hidden_size,
+            config.text_config.hidden_size,
             org_num_embeddings=self.language_model.org_vocab_size)
         self.sampler = Sampler(self.unpadded_vocab_size,
                                self.language_model.org_vocab_size)
@@ -144,15 +136,13 @@ class LlavaForConditionalGeneration(nn.Module):
                 For IMAGE_FEATURES, expecting [1, 576, 1024].
         """
         if image_input is not None:
-            # This should be ensured by ray-llm.
-            # In case vllm entrypoint is used, this is a user facing error.
             if list(image_input.shape[1:]) != list(
                     self.vision_language_config.image_input_shape[1:]):
                 raise ValueError(
                     f"The expected image tensor shape is batch dimension "
                     f"plus "
                     f"{self.vision_language_config.image_input_shape[1:]}."
-                    f" You supplied {image_input.shape[1:]}. "
+                    f" You supplied {image_input.shape}. "
                     f"If you are using vLLM's entrypoint, make sure your "
                     f"supplied image input is consistent with "
                     f"image_input_shape in engine args.")
@@ -162,8 +152,15 @@ class LlavaForConditionalGeneration(nn.Module):
                                                   output_hidden_states=True)
                 image_features = image_outputs.hidden_states[
                     self.config.vision_feature_layer]
+                # Copied from https://github.com/huggingface/transformers/blob/39c3c0a72af6fbda5614dde02ff236069bb79827/src/transformers/models/llava/modeling_llava.py#L421  # noqa
                 if self.config.vision_feature_select_strategy == "default":
                     image_features = image_features[:, 1:]
+                elif self.config.vision_feature_select_strategy == "full":
+                    image_features = image_features
+                else:
+                    raise ValueError(
+                        f"Unexpected select feature strategy: "
+                        f"{self.config.vision_feature_select_strategy}")
             else:
                 image_features = image_input
             vision_embeddings = self.multi_modal_projector(image_features)
@@ -195,9 +192,6 @@ class LlavaForConditionalGeneration(nn.Module):
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
                                    sampling_metadata)
         return next_tokens
-
-    _column_parallel_layers = []
-    _row_parallel_layers = ["o_proj", "down_proj"]
 
     def load_weights(self,
                      model_name_or_path: str,

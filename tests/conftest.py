@@ -17,13 +17,17 @@ _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
 
 _PIXEL_VALUES_FILES = [
-    "images/stop_sign_pixel_values.pt", "images/cherry_blossom_pixel_values.pt"
+    os.path.join(_TEST_DIR, "images", filename) for filename in
+    ["stop_sign_pixel_values.pt", "cherry_blossom_pixel_values.pt"]
 ]
 _IMAGE_FEATURES_FILES = [
-    "images/stop_sign_image_features.pt",
-    "images/cherry_blossom_image_features.pt"
+    os.path.join(_TEST_DIR, "images", filename) for filename in
+    ["stop_sign_image_features.pt", "cherry_blossom_image_features.pt"]
 ]
-_IMAGE_FILES = ["images/stop_sign.jpg", "images/cherry_blossom.jpg"]
+_IMAGE_FILES = [
+    os.path.join(_TEST_DIR, "images", filename)
+    for filename in ["stop_sign.jpg", "cherry_blossom.jpg"]
+]
 
 
 def _read_prompts(filename: str) -> List[str]:
@@ -44,10 +48,7 @@ def hf_image_prompts() -> List[str]:
 
 @pytest.fixture(scope="session")
 def hf_images() -> List[Image.Image]:
-    return [
-        Image.open(os.path.join("tests", filename))
-        for filename in _IMAGE_FILES
-    ]
+    return [Image.open(filename) for filename in _IMAGE_FILES]
 
 
 @pytest.fixture()
@@ -60,7 +61,7 @@ def vllm_images(request) -> "torch.Tensor":
     else:
         filenames = _PIXEL_VALUES_FILES
     for filename in filenames:
-        all_images.append(torch.load(os.path.join("tests", filename)))
+        all_images.append(torch.load(filename))
     return torch.concat(all_images, dim=0)
 
 

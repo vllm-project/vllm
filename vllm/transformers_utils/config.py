@@ -56,6 +56,9 @@ def get_hf_text_config(config: PretrainedConfig):
         No op for pure text models.
     """
     if hasattr(config, "text_config"):
+        # The code operates under the assumption that text_config should have
+        # `num_attention_heads` (among others). Assert here to fail early
+        # if transformers config doesn't align with this assumption.
         assert hasattr(config.text_config, "num_attention_heads")
         return config.text_config
     else:

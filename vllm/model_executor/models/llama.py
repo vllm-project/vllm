@@ -258,7 +258,7 @@ class LlamaModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,

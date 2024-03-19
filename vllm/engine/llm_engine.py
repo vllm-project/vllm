@@ -225,7 +225,7 @@ class LLMEngine:
                 the current monotonic time.
             image_request: An image tensor per request.
                 The semantic meaning and shape depend on image_input_shape
-                    settings.
+                settings.
                 See `VisionLanguageConfig.image_input_shape` for details.
 
         Details:

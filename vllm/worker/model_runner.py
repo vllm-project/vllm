@@ -638,9 +638,12 @@ class ModelRunner:
         # Profile memory usage with max_num_sequences sequences and the total
         # number of tokens equal to max_num_batched_tokens.
         seqs: List[SequenceGroupMetadata] = []
-        # For worker that may spend additional GPU memory in vision
-        # encoding.
-        # Each request should have at least `image_feature_size` tokens.
+        # Additional GPU memory may be needed for vision encoding, which needs
+        # to be accounted for when calculating the GPU blocks for
+        # vLLM blocker manager.
+        # To exercise the worst scenario for GPU memory consumption,
+        # the number of seqs (batch_size) is chosen to maximize the number
+        # of images processed.
         if self.vision_language_config:
             max_num_seqs = min(
                 max_num_seqs,

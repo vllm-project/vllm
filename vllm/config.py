@@ -675,6 +675,8 @@ class VisionLanguageConfig:
     # The input id corresponding to image token.
     image_token_id: int
     # Used for running `run_prefill_max_token`.
+    # For models that support varying resolution, this corresponds to
+    # worst case scenario (biggest supported resolution).
     image_input_shape: tuple
     image_feature_size: int
 
