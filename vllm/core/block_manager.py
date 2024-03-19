@@ -185,10 +185,12 @@ class UncachedBlockAllocator(BlockAllocatorBase):
         return len(self.free_blocks)
 
     def contains_block(self, block_hash: int) -> bool:
-        raise NotImplementedError("Invalid codepath for uncached block allocator.")
+        raise NotImplementedError(
+            "Invalid codepath for uncached block allocator.")
 
     def update_hash(self, block_hash: int, block: PhysicalTokenBlock):
-        raise NotImplementedError("Invalid codepath for uncached block allocator.")
+        raise NotImplementedError(
+            "Invalid codepath for uncached block allocator.")
 
 
 class AllocStatus(enum.Enum):
@@ -220,6 +222,10 @@ class BlockSpaceManager:
         self.block_size = block_size
         self.num_total_gpu_blocks = num_gpu_blocks
         self.num_total_cpu_blocks = num_cpu_blocks
+
+        if enable_caching and sliding_window is not None:
+            raise NotImplementedError(
+                "Sliding window is not allowed with prefix caching enabled!")
 
         self.block_sliding_window = None
         if sliding_window is not None:
@@ -385,11 +391,11 @@ class BlockSpaceManager:
         assert last_block.device == Device.GPU
         if last_block.ref_count == 1:
             # Not shared with other sequences. Appendable.
-            # If the last block is now complete, promote it to a full block so
-            # that it can be shared
             if self.enable_caching:
-                # If the last block is now complete, we may reuse an old block to save memory
-                maybe_new_block = self._maybe_promote_last_block(seq, last_block)
+                # If the last block is now complete, we may reuse an old block
+                # to save memory.
+                maybe_new_block = self._maybe_promote_last_block(
+                    seq, last_block)
                 block_table[-1] = maybe_new_block
             return None
         else:
@@ -535,7 +541,8 @@ class BlockSpaceManager:
         access_time: float,
     ) -> None:
         if self.enable_caching:
-            # Update the last accessed time of all the blocks accessed in this step
+            # Update the last accessed time of all the blocks accessed
+            # in this step.
             block_table = self.block_tables[seq.seq_id]
             for block in block_table:
                 block.last_accessed = access_time
