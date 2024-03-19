@@ -170,15 +170,6 @@ class Sequence:
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
-    def maybe_get_hash_of_block(self, logical_index: int) -> Optional[int]:
-        return self.logical_token_blocks[logical_index].maybe_get_content_hash()
-
-    def get_hash_of_block(self, logical_index: int) -> int:
-        maybe_block_hash = self.maybe_get_hash_of_block(logical_index)
-        if maybe_block_hash is None:
-            raise ValueError("Expected block hash to not be None")
-        return maybe_block_hash
-
     def hash_of_block(self, logical_idx: int) -> int:
         # NOTE: (80% confident) this has a bug where the input prompt len is < block size.
         # It will produce a hash when it shouldn't.
@@ -193,11 +184,9 @@ class Sequence:
         return logical_idx * self.block_size + self.block_size
 
     def _append_logical_block(self) -> None:
-        previous_block = (self.logical_token_blocks[-1] if self.logical_token_blocks else None)
         block = LogicalTokenBlock(
             block_number=len(self.logical_token_blocks),
             block_size=self.block_size,
-            previous_block=previous_block,
         )
         self.logical_token_blocks.append(block)
 
