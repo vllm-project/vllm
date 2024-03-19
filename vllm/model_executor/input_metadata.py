@@ -27,10 +27,8 @@ class InputMetadata:
         block_tables: Optional[torch.Tensor],
         use_cuda_graph: bool,
         kv_cache_dtype: str,
-        prompt_dict: Dict[int, str] = {}, 
     ) -> None:
         self.is_prompt = is_prompt
-        self.prompt_dict = prompt_dict
         self.prompt_lens = prompt_lens
         self.max_seq_len = max_seq_len
         self.start_loc = start_loc
