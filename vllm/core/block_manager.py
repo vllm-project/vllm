@@ -388,8 +388,9 @@ class BlockSpaceManager:
             # If the last block is now complete, promote it to a full block so
             # that it can be shared
             if self.enable_caching:
-                new_block = self._maybe_promote_last_block(seq, last_block)
-                block_table[-1] = new_block
+                # If the last block is now complete, we may reuse an old block to save memory
+                maybe_new_block = self._maybe_promote_last_block(seq, last_block)
+                block_table[-1] = maybe_new_block
             return None
         else:
             # The last block is shared with other sequences.
