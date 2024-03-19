@@ -8,44 +8,6 @@ _BLANK_TOKEN_ID = -1
 
 DEFAULT_LAST_ACCESSED_TIME = -1
 
-"""
-PrefixCachingBlock:
-	init(prev_block_hash: int, token_ids: List[int])
-
-	Append_token_ids
-		If full: raise error
-
-                # if refcount > 1, do cow and get new block
-                self.physical_block = cow.maybe_cow(physical_block)
-                
-		append()
-		if full:
-                    generate hash
-                
-                self.physical_block = prefix_cacher.maybe_replace_cached_block(hash, physical_block)
-
-        Get_phys_block_num -> int
-	    Raise if not defined
-
-BlockAllocator
-	allocate_mutable() -> logical_block
-	allocate_immutable(token ids) -> logical_block
-
-	allocate() -> logical block
-	free(logical block)
-
-	_Register_immutable_block # only prefix caching
-
-	Get_cow_operations -> Dict[int, List[int]]
-	Get_swap_operations -> Dict[int, List[int]]
-	Get_compute_operations -> Dict[int, List[int]]
-		(cow, swap, compute(?))
-
-NOTE:
-    a block can have no physical mapping if it is newly allocated or it
-    is preempted (by recompute)
-    so we should have optional physical block num
-"""
 
 class Block(ABC):
 
@@ -97,11 +59,6 @@ class NaiveBlock(Block):
     
 
 from typing import Type, TypeVar, T
-"""
-Missing pieces for PrefixCaching:
-- incr refcount (required for fork, maybe also content-based cache)
-- block hashing
-"""
 
 class RefCounter:
     BlockIndex = int
@@ -263,6 +220,7 @@ class PrefixCachingBlock(Block):
 class PrefixCachingBlockAllocator(BlockAllocator):
     PrefixHash = int
     BlockIndex = int
+    # TODO last access time / evictor integration
     
     def __init__(self, num_blocks: int, block_size: int):
         self._cached_blocks: Dict[PrefixHash, BlockIndex] = {}

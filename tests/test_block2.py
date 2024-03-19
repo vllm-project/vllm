@@ -249,3 +249,5 @@ class TestPrefixCachingBlockAllocator:
         blocks = [allocate_block() for _ in range(num_blocks)]
         with pytest.raises(BlockAllocator.NoFreeBlocksError):
             oom_block = allocate_block()
+
+    # TODO test behavior with content hash
