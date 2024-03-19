@@ -332,6 +332,9 @@ def get_requirements() -> List[str]:
     elif _is_neuron():
         with open(get_path("requirements-neuron.txt")) as f:
             requirements = f.read().strip().split("\n")
+    elif _is_xpu():
+        with open(get_path("requirements-xpu.txt")) as f:
+            requirements = f.read().strip().split("\n")
     else:
         raise ValueError(
             "Unsupported platform, please use CUDA, ROCM or Neuron.")

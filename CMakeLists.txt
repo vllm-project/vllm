@@ -143,17 +143,24 @@ endif()
 if(VLLM_GPU_LANG STREQUAL "SYCL")
   append_cmake_prefix_path("intel_extension_for_pytorch" "intel_extension_for_pytorch.cmake_prefix_path")
   find_package(IPEX REQUIRED)
+  # IPEX will overwrite TORCH_LIBRARIES, so re-add torch_python lib.
+  append_torchlib_if_found(torch_python)
   include_directories(${IPEX_INCLUDE_DIRS})
   set(CMPLR_ROOT $ENV{CMPLR_ROOT})
   set(CMAKE_CXX_COMPILER icpx)
   set(VLLM_EXTRA_INCLUDE_DIRECTORIES ${CMPLR_ROOT}/include/sycl)
-  message(STATUS "include path: ${VLLM_EXTRA_INCLUDE_DIRECTORIES}")
   set(VLLM_EXT_SRC
+    "csrc/xpu/activation_xpu.cpp"
+    "csrc/xpu/attention_xpu.cpp"
+    "csrc/xpu/cache_ops_xpu.cpp"
+    "csrc/xpu/gemm_kernels_xpu.cpp"
+    "csrc/xpu/layernorm_xpu.cpp"
     "csrc/xpu/pos_encoding_xpu.cpp"
     "csrc/xpu/utils.cpp"
     "csrc/pybind.cpp")
-  #list(APPEND VLLM_GPU_FLAGS "-fsycl")
-  list(APPEND VLLM_LINK_LIBRARIES "sycl" "OpenCL" "pthread" "m" "dl" "dnnl" "intel-ext-pt-gpu")
+  list(APPEND VLLM_GPU_FLAGS "-DVLLM_BUILD_XPU_OPS" "-fsycl" "-fsycl-targets=spir64")
+  list(APPEND VLLM_GPU_LINK_FLAGS "-fsycl" "-fsycl-targets=spir64")
+  list(APPEND VLLM_LINK_LIBRARIES "sycl" "OpenCL" "pthread" "m" "dl" "dnnl" "intel-ext-pt-gpu" )
 else()
   set(VLLM_EXT_SRC
     "csrc/cache_kernels.cu"
@@ -181,6 +188,7 @@ define_gpu_extension_target(
   LANGUAGE ${VLLM_GPU_LANG}
   SOURCES ${VLLM_EXT_SRC}
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+  LINK_FLAGS ${VLLM_GPU_LINK_FLAGS}
   ARCHITECTURES ${VLLM_GPU_ARCHES}
   INCLUDE_DIRECTORIES ${VLLM_EXTRA_INCLUDE_DIRECTORIES}
   LIBRARIES ${VLLM_LINK_LIBRARIES}
@@ -190,18 +198,20 @@ define_gpu_extension_target(
 # _moe_C extension
 #
 
-set(VLLM_MOE_EXT_SRC
-  "csrc/moe/moe_ops.cpp"
-  "csrc/moe/topk_softmax_kernels.cu")
+if(NOT VLLM_GPU_LANG STREQUAL "SYCL")
+  set(VLLM_MOE_EXT_SRC
+    "csrc/moe/moe_ops.cpp"
+    "csrc/moe/topk_softmax_kernels.cu")
 
-define_gpu_extension_target(
-  _moe_C
-  DESTINATION vllm
-  LANGUAGE ${VLLM_GPU_LANG}
-  SOURCES ${VLLM_MOE_EXT_SRC}
-  COMPILE_FLAGS ${VLLM_GPU_FLAGS}
-  ARCHITECTURES ${VLLM_GPU_ARCHES}
-  WITH_SOABI)
+  define_gpu_extension_target(
+    _moe_C
+    DESTINATION vllm
+    LANGUAGE ${VLLM_GPU_LANG}
+    SOURCES ${VLLM_MOE_EXT_SRC}
+    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+    ARCHITECTURES ${VLLM_GPU_ARCHES}
+    WITH_SOABI)
+endif()
 
 #
 # _punica_C extension
@@ -281,7 +291,7 @@ endif()
 #
 add_custom_target(default)
 
-if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
+if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP" OR VLLM_GPU_LANG STREQUAL "SYCL")
   message(STATUS "Enabling C extension.")
   add_dependencies(default _C)
 endif()
