@@ -148,23 +148,23 @@ What does this buy?
 #    def allocate_waiting(self):
 #        assert seq.status == SequenceStatus.WAITING
 #
-#        # Allocate new physical token blocks that will store the prompt tokens.
-#        num_prompt_blocks = len(self.seq.logical_token_blocks)
+#        ## Allocate new physical token blocks that will store the prompt tokens.
+#        #num_prompt_blocks = len(self.seq.logical_token_blocks)
 #
-#        block_table: BlockTable = []
-#        for logical_idx in range(num_prompt_blocks):
-#            if (self.block_sliding_window is not None
-#                    and logical_idx >= self.block_sliding_window):
-#                block = block_table[logical_idx % self.block_sliding_window]
-#            else:
-#                block = self.gpu_allocator.allocate(
-#                    seq.hash_of_block(logical_idx),
-#                    seq.num_hashed_tokens_of_block(logical_idx))
-#            block_table.append(block)
+#        #block_table: BlockTable = []
+#        #for logical_idx in range(num_prompt_blocks):
+#        #    if (self.block_sliding_window is not None
+#        #            and logical_idx >= self.block_sliding_window):
+#        #        block = block_table[logical_idx % self.block_sliding_window]
+#        #    else:
+#        #        block = self.gpu_allocator.allocate(
+#        #            seq.hash_of_block(logical_idx),
+#        #            seq.num_hashed_tokens_of_block(logical_idx))
+#        #    block_table.append(block)
 #
-#        # Assign the block table for each sequence.
-#        for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
-#            self.block_tables[seq.seq_id] = block_table.copy()
+#        ## Assign the block table for each sequence.
+#        #for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
+#        #    self.block_tables[seq.seq_id] = block_table.copy()
 
 class BlockSpaceManager:
     """Manages the mapping between logical and physical token blocks."""
