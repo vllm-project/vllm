@@ -28,7 +28,7 @@ jobs:
         pip install ruff==0.1.5 codespell==2.2.6 tomli==2.0.1
     - name: Analysing the code with ruff
       run: |
-        ruff vllm tests
+        ruff .
     - name: Spelling check with codespell
       run: |
-         codespell --toml pyproject.toml
+        codespell --toml pyproject.toml

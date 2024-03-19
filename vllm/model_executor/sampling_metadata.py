@@ -114,7 +114,8 @@ class SamplingTensors:
                 do_penalties = True
             if (i < sampling_metadata.num_prompts
                     and sampling_params.prompt_logprobs is not None):
-                # For tokens in the prompt that we only need to get their logprobs
+                # For tokens in the prompt that we only need to get
+                # their logprobs
                 prompt_len = sampling_metadata.prompt_lens[i]
                 temperatures += [temperature] * (prompt_len - 1)
                 top_ps += [top_p] * (prompt_len - 1)

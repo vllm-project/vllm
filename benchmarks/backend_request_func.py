@@ -64,7 +64,7 @@ async def async_request_tgi(
                             output.ttft = ttft
                     output.latency = time.perf_counter() - st
 
-                    body = data.decode("utf-8").lstrip("data:")
+                    body = remove_prefix(data.decode("utf-8"), "data:")
                     output.generated_text = json.loads(body)["generated_text"]
                     output.success = True
                 else:
@@ -110,7 +110,7 @@ async def async_request_vllm(
                             output.ttft = ttft
                     output.latency = time.perf_counter() - st
 
-                    # When streaming, '\0' is appended to the end of the response.
+                    # When streaming, '\0' is appended to the end of response.
                     body = data.decode("utf-8").strip("\0")
                     output.generated_text = json.loads(
                         body)["text"][0][len(request_func_input.prompt):]
@@ -158,7 +158,7 @@ async def async_request_trt_llm(
                             output.ttft = ttft
                     output.latency = time.perf_counter() - st
 
-                    body = data.decode("utf-8").lstrip("data:")
+                    body = remove_prefix(data.decode("utf-8"), "data:")
                     output.generated_text = json.loads(body)["text_output"]
                     output.success = True
 
@@ -192,7 +192,8 @@ async def async_request_deepspeed_mii(
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
 
-        # DeepSpeed-MII doesn't support streaming as of Jan 28 2024, will use 0 as placeholder.
+        # DeepSpeed-MII doesn't support streaming as of Jan 28 2024,
+        # will use 0 as placeholder.
         # https://github.com/microsoft/DeepSpeed-MII/pull/311
         output.ttft = 0
 
@@ -255,7 +256,7 @@ async def async_request_openai_completions(
                         if not chunk:
                             continue
 
-                        chunk = chunk.decode("utf-8").lstrip("data: ")
+                        chunk = remove_prefix(chunk.decode("utf-8"), "data: ")
                         if chunk == "[DONE]":
                             latency = time.perf_counter() - st
                         else:
@@ -275,10 +276,88 @@ async def async_request_openai_completions(
     return output
 
 
+async def async_request_openai_chat_completions(
+    request_func_input: RequestFuncInput,
+    pbar: Optional[tqdm] = None,
+) -> RequestFuncOutput:
+    api_url = request_func_input.api_url
+    assert api_url.endswith(
+        "v1/chat/completions"
+    ), "OpenAI Chat API URL must end with 'v1/chat/completions'."
+
+    async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
+        assert not request_func_input.use_beam_search
+        payload = {
+            "model": request_func_input.model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": request_func_input.prompt,
+                },
+            ],
+            "temperature": 0.0,
+            "max_tokens": request_func_input.output_len,
+            "stream": True,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
+        }
+
+        output = RequestFuncOutput()
+        output.prompt_len = request_func_input.prompt_len
+
+        generated_text = ""
+        ttft = 0
+        st = time.perf_counter()
+        try:
+            async with session.post(url=api_url, json=payload,
+                                    headers=headers) as response:
+                if response.status == 200:
+                    async for chunk in response.content:
+                        if ttft == 0:
+                            ttft = time.perf_counter() - st
+                            output.ttft = ttft
+
+                        chunk = chunk.strip()
+                        if not chunk:
+                            continue
+
+                        chunk = remove_prefix(chunk.decode("utf-8"), "data: ")
+                        if chunk == "[DONE]":
+                            latency = time.perf_counter() - st
+                        else:
+                            body = json.loads(chunk)
+                            if "content" in body["choices"][0]["delta"]:
+                                generated_text += body["choices"][0]["delta"][
+                                    "content"]
+
+                    output.generated_text = generated_text
+                    output.success = True
+                    output.latency = latency
+                else:
+                    output.success = False
+        except (aiohttp.ClientOSError, aiohttp.ServerDisconnectedError):
+            output.success = False
+
+    if pbar:
+        pbar.update(1)
+    return output
+
+
+# Since vllm must support Python 3.8, we can't use str.removeprefix(prefix)
+# introduced in Python 3.9
+def remove_prefix(text: str, prefix: str) -> str:
+    if text.startswith(prefix):
+        return text[len(prefix):]
+    return text
+
+
 ASYNC_REQUEST_FUNCS = {
     "tgi": async_request_tgi,
     "vllm": async_request_vllm,
     "deepspeed-mii": async_request_deepspeed_mii,
     "openai": async_request_openai_completions,
+    "openai-chat": async_request_openai_chat_completions,
     "tensorrt-llm": async_request_trt_llm,
 }

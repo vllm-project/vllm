@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # -- Project information -----------------------------------------------------
 
 project = 'vLLM'
-copyright = '2023, vLLM Team'
+copyright = '2024, vLLM Team'
 author = 'the vLLM Team'
 
 # -- General configuration ---------------------------------------------------
@@ -37,6 +37,8 @@ extensions = [
     "sphinx_copybutton",
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
+    "myst_parser",
+    "sphinxarg.ext",
 ]
 
 # Add any paths that contain templates here, relative to this directory.
@@ -72,8 +74,15 @@ html_theme_options = {
 
 # Mock out external dependencies here.
 autodoc_mock_imports = [
-    "torch", "transformers", "psutil", "prometheus_client", "sentencepiece",
-    "vllm.cuda_utils", "vllm._C"
+    "torch",
+    "transformers",
+    "psutil",
+    "prometheus_client",
+    "sentencepiece",
+    "vllm.cuda_utils",
+    "vllm._C",
+    "numpy",
+    "tqdm",
 ]
 
 for mock_target in autodoc_mock_imports:
