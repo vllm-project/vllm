@@ -59,6 +59,8 @@ class DeleteResponse(BaseModel):
     id: str
     object: str = "model"
     deleted: Optional[bool] = False
+
+
 class ResponseFormat(BaseModel):
     # type must be "json_object" or "text"
     type: str = Literal["text", "json_object"]
