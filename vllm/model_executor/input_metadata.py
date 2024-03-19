@@ -1,5 +1,5 @@
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, fields
+from typing import Optional, Any, Dict
 
 import torch
 
@@ -31,3 +31,12 @@ class InputMetadata:
     def __post_init__(self):
         # will not appear in the __repr__ and __init__
         self.attn_bias = None
+
+    def asdict_zerocopy(self) -> Dict[str, Any]:
+        """Similar to dataclasses.asdict, but avoids deepcopying."""
+        # Note that if we add dataclasses as fields, they will need
+        # similar handling.
+        return {
+            field.name: getattr(self, field.name)
+            for field in fields(self)
+        }
