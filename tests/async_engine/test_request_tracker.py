@@ -1,7 +1,7 @@
 import pytest
 
 from vllm.engine.async_llm_engine import RequestTracker
-from vllm.outputs import RequestOutput
+from vllm.outputs import CompletionRequestOutput
 
 
 @pytest.mark.asyncio
@@ -55,7 +55,7 @@ async def test_request_tracker():
     stream_5 = tracker.add_request("5")
     assert tracker.new_requests_event.is_set()
     tracker.process_request_output(
-        RequestOutput("2", "output", [], [], [], finished=True))
+        CompletionRequestOutput("2", "output", [], [], [], finished=True))
     await tracker.wait_for_new_requests()
     new, finished = tracker.get_new_and_finished_requests()
     assert not tracker.new_requests_event.is_set()

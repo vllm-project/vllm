@@ -65,7 +65,7 @@ AWQ models are also supported directly through the LLM entrypoint:
 
     # Create an LLM.
     llm = LLM(model="TheBloke/Llama-2-7b-Chat-AWQ", quantization="AWQ")
-    # Generate texts from the prompts. The output is a list of RequestOutput objects
+    # Generate texts from the prompts. The output is a list of CompletionRequestOutput objects
     # that contain the prompt, generated text, and other information.
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.

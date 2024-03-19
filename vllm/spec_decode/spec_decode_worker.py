@@ -5,8 +5,9 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
-from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
-                           SequenceGroupMetadata)
+from vllm.sequence import (CompletionSequenceGroupOutput, ExecuteModelRequest,
+                           Logprob, SamplerOutput, SequenceGroupMetadata,
+                           SequenceOutput)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)

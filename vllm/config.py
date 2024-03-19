@@ -73,6 +73,8 @@ class ModelConfig:
             matches the model name exposed via the APIs. If multiple model 
             names provided, the first name will be used. If not specified, 
             the model name will be the same as `model`.
+        embedding_mode: Whether the running model is for embedding. It should
+            be used for embedding models.
     """
 
     def __init__(
@@ -95,6 +97,7 @@ class ModelConfig:
         max_logprobs: int = 5,
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, List[str]]] = None,
+        embedding_mode: Optional[bool] = False,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -115,6 +118,7 @@ class ModelConfig:
                                        or max_context_len_to_capture)
         self.max_logprobs = max_logprobs
         self.skip_tokenizer_init = skip_tokenizer_init
+        self.embedding_mode = embedding_mode
 
         self.hf_config = get_config(self.model, trust_remote_code, revision,
                                     code_revision)
@@ -591,6 +595,7 @@ class SchedulerConfig:
             prompt latency) before scheduling next prompt.
         enable_chunked_prefill: If True, prefill requests can be chunked based
             on the remaining max_num_batched_tokens.
+        embedding_mode: Whether the running model is for embedding.
     """
 
     def __init__(
@@ -602,6 +607,7 @@ class SchedulerConfig:
         num_lookahead_slots: int = 0,
         delay_factor: float = 0.0,
         enable_chunked_prefill: bool = False,
+        embedding_mode: Optional[bool] = False,
     ) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
@@ -610,6 +616,9 @@ class SchedulerConfig:
                 # It is the values that have the best balance between ITL
                 # and TTFT on A100. Note it is not optimized for throughput.
                 self.max_num_batched_tokens = 512
+            elif embedding_mode:
+                # For embedding, choose 32768 for higher throughput
+                self.max_num_batched_tokens = max(max_model_len, 32768)
             else:
                 # If max_model_len is too short, use 2048 as the default value
                 # for higher throughput.
@@ -623,6 +632,7 @@ class SchedulerConfig:
         self.num_lookahead_slots = num_lookahead_slots
         self.delay_factor = delay_factor
         self.chunked_prefill_enabled = enable_chunked_prefill
+        self.embedding_mode = embedding_mode
 
         self._verify_args()
 

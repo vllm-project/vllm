@@ -25,8 +25,8 @@ class LLMPredictor:
 
     def __call__(self, batch: Dict[str, np.ndarray]) -> Dict[str, list]:
         # Generate texts from the prompts.
-        # The output is a list of RequestOutput objects that contain the prompt,
-        # generated text, and other information.
+        # The output is a list of CompletionRequestOutput objects that contain
+        # the prompt, generated text, and other information.
         outputs = self.llm.generate(batch["text"], sampling_params)
         prompt = []
         generated_text = []

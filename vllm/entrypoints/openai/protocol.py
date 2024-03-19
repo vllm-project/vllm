@@ -363,6 +363,14 @@ class CompletionRequest(OpenAIBaseModel):
         return data
 
 
+class EmbeddingRequest(BaseModel):
+    model: str
+    input: Union[List[int], List[List[int]], str, List[str]]
+    encoding_format: Optional[str] = Field('float', pattern='^(float|base64)$')
+    dimensions: Optional[int] = None
+    user: Optional[str] = None
+
+
 class LogProbs(OpenAIBaseModel):
     text_offset: List[int] = Field(default_factory=list)
     token_logprobs: List[Optional[float]] = Field(default_factory=list)
@@ -414,6 +422,21 @@ class CompletionStreamResponse(OpenAIBaseModel):
     model: str
     choices: List[CompletionResponseStreamChoice]
     usage: Optional[UsageInfo] = Field(default=None)
+
+
+class EmbeddingResponseData(BaseModel):
+    index: int
+    object: str = "embedding"
+    embedding: List[float]
+
+
+class EmbeddingResponse(BaseModel):
+    id: str = Field(default_factory=lambda: f"cmpl-{random_uuid()}")
+    object: str = "list"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    model: str
+    data: List[EmbeddingResponseData]
+    usage: UsageInfo
 
 
 class ChatMessage(OpenAIBaseModel):

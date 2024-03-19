@@ -77,6 +77,7 @@ class EngineArgs:
     image_feature_size: Optional[int] = None
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: bool = False
+    embedding_mode: bool = False
 
     guided_decoding_backend: str = 'outlines'
     # Speculative decoding configuration.
@@ -445,14 +446,12 @@ class EngineArgs:
             action='store_true',
             help='If set, the prefill requests can be chunked based on the '
             'max_num_batched_tokens.')
-
         parser.add_argument(
             '--speculative-model',
             type=nullable_str,
             default=EngineArgs.speculative_model,
             help=
             'The name of the draft model to be used in speculative decoding.')
-
         parser.add_argument(
             '--num-speculative-tokens',
             type=int,
@@ -497,7 +496,6 @@ class EngineArgs:
                             'corresponding to the chosen load_format. '
                             'This should be a JSON string that will be '
                             'parsed into a dictionary.')
-
         parser.add_argument(
             "--served-model-name",
             nargs="+",
@@ -512,7 +510,6 @@ class EngineArgs:
             "will also be used in `model_name` tag content of "
             "prometheus metrics, if multiple names provided, metrics"
             "tag will take the first one.")
-
         return parser
 
     @classmethod
@@ -532,7 +529,8 @@ class EngineArgs:
             self.quantization, self.quantization_param_path,
             self.enforce_eager, self.max_context_len_to_capture,
             self.max_seq_len_to_capture, self.max_logprobs,
-            self.skip_tokenizer_init, self.served_model_name)
+            self.skip_tokenizer_init, self.served_model_name,
+            self.embedding_mode)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
@@ -574,6 +572,7 @@ class EngineArgs:
                                  speculative_config.num_lookahead_slots),
             delay_factor=self.scheduler_delay_factor,
             enable_chunked_prefill=self.enable_chunked_prefill,
+            embedding_mode=model_config.embedding_mode,
         )
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,

@@ -5,8 +5,9 @@ import pytest
 
 from vllm import SamplingParams
 from vllm.lora.request import LoRARequest
-from vllm.sequence import (SamplerOutput, Sequence, SequenceData,
-                           SequenceGroup, SequenceGroupOutput, SequenceOutput)
+from vllm.sequence import (CompletionSequenceGroupOutput, SamplerOutput,
+                           Sequence, SequenceData, SequenceGroup,
+                           SequenceOutput)
 
 
 def create_dummy_prompt(
@@ -36,10 +37,10 @@ def create_dummy_prompt(
 @pytest.fixture
 def sample_outputs():
     return [
-        SequenceGroupOutput(samples=[
+        CompletionSequenceGroupOutput(samples=[
             SequenceOutput(parent_seq_id=0, output_token=i, logprobs={})
         ],
-                            prompt_logprobs=None) for i in range(5)
+                                      prompt_logprobs=None) for i in range(5)
     ]
 
 
@@ -60,10 +61,10 @@ def test_sampler_output_getitem(sampler_output, sample_outputs):
 
 
 def test_sampler_output_setitem(sampler_output):
-    new_output = SequenceGroupOutput(samples=[
+    new_output = CompletionSequenceGroupOutput(samples=[
         SequenceOutput(parent_seq_id=0, output_token=99, logprobs={})
     ],
-                                     prompt_logprobs=None)
+                                               prompt_logprobs=None)
     sampler_output[2] = new_output
     assert sampler_output[2] == new_output
 

@@ -26,8 +26,9 @@ llm = LLM(model="facebook/opt-125m", enable_prefix_caching=True)
 
 generating_prompts = [prefix + prompt for prompt in prompts]
 
-# Generate texts from the prompts. The output is a list of RequestOutput objects
-# that contain the prompt, generated text, and other information.
+# Generate texts from the prompts. The output is a list of
+# CompletionRequestOutput objects that contain the prompt, generated text, and
+# other information.
 outputs = llm.generate(generating_prompts, sampling_params)
 # Print the outputs.
 for output in outputs:

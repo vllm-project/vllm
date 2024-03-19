@@ -19,7 +19,7 @@ from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
-from vllm.outputs import RequestOutput
+from vllm.outputs import CompletionRequestOutput
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -180,8 +180,8 @@ class OpenAIServingChat(OpenAIServing):
 
     async def chat_completion_stream_generator(
             self, request: ChatCompletionRequest,
-            result_generator: AsyncIterator[RequestOutput], request_id: str,
-            conversation: List[ConversationMessage]
+            result_generator: AsyncIterator[CompletionRequestOutput],
+            request_id: str, conversation: List[ConversationMessage]
     ) -> AsyncGenerator[str, None]:
         model_name = self.served_model_names[0]
         created_time = int(time.time())
@@ -320,13 +320,13 @@ class OpenAIServingChat(OpenAIServing):
 
     async def chat_completion_full_generator(
         self, request: ChatCompletionRequest, raw_request: Request,
-        result_generator: AsyncIterator[RequestOutput], request_id: str,
-        conversation: List[ConversationMessage]
+        result_generator: AsyncIterator[CompletionRequestOutput],
+        request_id: str, conversation: List[ConversationMessage]
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
 
         model_name = self.served_model_names[0]
         created_time = int(time.time())
-        final_res: Optional[RequestOutput] = None
+        final_res: Optional[CompletionRequestOutput] = None
 
         async for res in result_generator:
             if await raw_request.is_disconnected():

@@ -9,7 +9,7 @@ from typing import List, Optional, Tuple
 
 from huggingface_hub import snapshot_download
 
-from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
+from vllm import CompletionRequestOutput, EngineArgs, LLMEngine, SamplingParams
 from vllm.lora.request import LoRARequest
 
 
@@ -87,7 +87,7 @@ def process_requests(engine: LLMEngine,
                                lora_request=lora_request)
             request_id += 1
 
-        request_outputs: List[RequestOutput] = engine.step()
+        request_outputs: List[CompletionRequestOutput] = engine.step()
 
         for request_output in request_outputs:
             if request_output.finished:

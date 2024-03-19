@@ -17,7 +17,7 @@ from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
-from vllm.outputs import RequestOutput
+from vllm.outputs import CompletionRequestOutput
 from vllm.utils import merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
@@ -86,7 +86,7 @@ class OpenAIServingCompletion(OpenAIServing):
         created_time = int(time.time())
 
         # Schedule the request and get the result generator.
-        generators: List[AsyncIterator[RequestOutput]] = []
+        generators: List[AsyncIterator[CompletionRequestOutput]] = []
         try:
             sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
@@ -130,7 +130,7 @@ class OpenAIServingCompletion(OpenAIServing):
             return self.create_error_response(str(e))
 
         result_generator: AsyncIterator[Tuple[
-            int, RequestOutput]] = merge_async_iterators(*generators)
+            int, CompletionRequestOutput]] = merge_async_iterators(*generators)
 
         # Similar to the OpenAI API, when n != best_of, we do not stream the
         # results. In addition, we do not stream the results when use
@@ -150,7 +150,8 @@ class OpenAIServingCompletion(OpenAIServing):
                                                     num_prompts=len(prompts))
 
         # Non-streaming response
-        final_res_batch: List[Optional[RequestOutput]] = [None] * len(prompts)
+        final_res_batch: List[
+            Optional[CompletionRequestOutput]] = [None] * len(prompts)
         try:
             async for i, res in result_generator:
                 if await raw_request.is_disconnected():
@@ -181,7 +182,7 @@ class OpenAIServingCompletion(OpenAIServing):
         self,
         request: CompletionRequest,
         raw_request: Request,
-        result_generator: AsyncIterator[Tuple[int, RequestOutput]],
+        result_generator: AsyncIterator[Tuple[int, CompletionRequestOutput]],
         request_id: str,
         created_time: int,
         model_name: str,
@@ -277,7 +278,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
     def request_output_to_completion_response(
         self,
-        final_res_batch: List[RequestOutput],
+        final_res_batch: List[CompletionRequestOutput],
         request: CompletionRequest,
         request_id: str,
         created_time: int,

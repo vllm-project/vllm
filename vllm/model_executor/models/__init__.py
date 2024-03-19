@@ -9,7 +9,7 @@ from vllm.utils import is_hip
 logger = init_logger(__name__)
 
 # Architecture -> (module, class).
-_MODELS = {
+_GENERATION_MODELS = {
     "AquilaModel": ("llama", "LlamaForCausalLM"),
     "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
     "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),  # baichuan-7b
@@ -56,6 +56,12 @@ _MODELS = {
     "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
     "XverseForCausalLM": ("xverse", "XverseForCausalLM"),
 }
+
+_EMBEDDING_MODELS = {
+    "MistralModel": ("llama_embedding", "LlamaEmbeddingModel"),
+}
+
+_MODELS = {**_GENERATION_MODELS, **_EMBEDDING_MODELS}
 
 # Architecture -> type.
 # out of tree models

@@ -1,7 +1,7 @@
 import argparse
 from typing import List, Tuple
 
-from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
+from vllm import CompletionRequestOutput, EngineArgs, LLMEngine, SamplingParams
 
 
 def create_test_prompts() -> List[Tuple[str, SamplingParams]]:
@@ -34,7 +34,7 @@ def process_requests(engine: LLMEngine,
             engine.add_request(str(request_id), prompt, sampling_params)
             request_id += 1
 
-        request_outputs: List[RequestOutput] = engine.step()
+        request_outputs: List[CompletionRequestOutput] = engine.step()
 
         for request_output in request_outputs:
             if request_output.finished:

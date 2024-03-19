@@ -1,6 +1,7 @@
 """Sequence and its related classes."""
 import copy
 import enum
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
@@ -375,12 +376,12 @@ class SequenceGroupState:
 
 class MultiModalData:
     """Multi modal request.
-    
+
     Args:
         type: The data type.
         data: The actual data.
         The required shape and semantic meaning of it depends on the vision
-        language config of the hosted model. 
+        language config of the hosted model.
         See `VisionLanguageConfig` in `config.py`.
     """
 
@@ -402,6 +403,7 @@ class SequenceGroup:
         arrival_time: The arrival time of the request.
         lora_request: LoRA request.
         multi_modal_data: Multi modal data associated with the request.
+        embeddings: The embeddings vectors of the prompt of the sequence group.
     """
 
     def __init__(
@@ -412,6 +414,7 @@ class SequenceGroup:
         arrival_time: float,
         lora_request: Optional[LoRARequest] = None,
         multi_modal_data: Optional[MultiModalData] = None,
+        embeddings: Optional[List[float]] = None,
     ) -> None:
         self.request_id = request_id
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
@@ -425,6 +428,7 @@ class SequenceGroup:
         self.prompt_logprobs: Optional[PromptLogprobs] = None
         self.state = SequenceGroupState()
         self.multi_modal_data = multi_modal_data
+        self.embeddings = embeddings
 
     @property
     def prompt(self) -> str:
@@ -669,8 +673,20 @@ class SequenceOutput:
         return equal and log_probs_equal
 
 
-class SequenceGroupOutput:
-    """The model output associated with a sequence group."""
+class SequenceGroupOutput(ABC):
+    """The base class for model outputs associated with a sequence group."""
+
+    @abstractmethod
+    def __repr__(self) -> str:
+        pass
+
+    @abstractmethod
+    def __eq__(self, other: object) -> bool:
+        pass
+
+
+class CompletionSequenceGroupOutput(SequenceGroupOutput):
+    """The model output associated with a completion sequence group."""
 
     def __init__(
         self,
@@ -682,14 +698,33 @@ class SequenceGroupOutput:
         self.prompt_logprobs = prompt_logprobs
 
     def __repr__(self) -> str:
-        return (f"SequenceGroupOutput(samples={self.samples}, "
+        return (f"CompletionSequenceGroupOutput(samples={self.samples}, "
                 f"prompt_logprobs={self.prompt_logprobs})")
 
     def __eq__(self, other: object) -> bool:
-        if not isinstance(other, SequenceGroupOutput):
+        if not isinstance(other, CompletionSequenceGroupOutput):
             raise NotImplementedError()
         return (self.samples == other.samples
                 and self.prompt_logprobs == other.prompt_logprobs)
+
+
+class EmbeddingSequenceGroupOutput(SequenceGroupOutput):
+    """The model output associated with an embedding sequence group."""
+
+    def __init__(
+        self,
+        embeddings: List[float],
+    ) -> None:
+        self.embeddings = embeddings
+
+    def __repr__(self) -> str:
+        return (f"EmbeddingSequenceGroupOutput("
+                f"embeddings_shape={len(self.embeddings)})")
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, EmbeddingSequenceGroupOutput):
+            raise NotImplementedError()
+        return self.embeddings == other.embeddings
 
 
 @dataclass
@@ -697,11 +732,12 @@ class SamplerOutput:
     """For each sequence group, we generate a list of SequenceOutput object,
     each of which contains one possible candidate for the next token.
 
-    This datastructure implements methods so it can be used like a list, but
+    This data structure implements methods, so it can be used like a list, but
     also has optional fields for device tensors.
     """
 
-    outputs: List[SequenceGroupOutput]
+    outputs: List[Union[CompletionSequenceGroupOutput,
+                        EmbeddingSequenceGroupOutput]]
 
     # On-device tensor containing probabilities of each token.
     sampled_token_probs: Optional["torch.Tensor"] = None

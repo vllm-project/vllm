@@ -20,6 +20,7 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.worker.cache_engine import CacheEngine
+from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.model_runner import ModelRunner
 from vllm.worker.worker_base import WorkerBase
 
@@ -70,7 +71,9 @@ class Worker(WorkerBase):
             assert not self.lora_config, (
                 "To be tested: vision language model with LoRA settings.")
 
-        self.model_runner = ModelRunner(
+        ModelRunnerClass = (EmbeddingModelRunner if
+                            self.model_config.embedding_mode else ModelRunner)
+        self.model_runner = ModelRunnerClass(
             model_config,
             parallel_config,
             scheduler_config,

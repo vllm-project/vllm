@@ -20,11 +20,14 @@ from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.outputs import RequestOutput
+from vllm.outputs import (CompletionRequestOutput, EmbeddingRequestOutput,
+                          RequestOutputFactory)
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (ExecuteModelRequest, MultiModalData, SamplerOutput,
-                           Sequence, SequenceGroup, SequenceGroupMetadata,
-                           SequenceStatus)
+from vllm.sequence import (CompletionSequenceGroupOutput,
+                           EmbeddingSequenceGroupOutput, ExecuteModelRequest,
+                           MultiModalData, SamplerOutput, Sequence,
+                           SequenceGroup, SequenceStatus,
+                           SequenceGroupMetadata)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
@@ -169,7 +172,8 @@ class LLMEngine:
             load_config=load_config,
         )
 
-        self._initialize_kv_caches()
+        if not self.model_config.embedding_mode:
+            self._initialize_kv_caches()
 
         # If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
@@ -484,13 +488,27 @@ class LLMEngine:
         """Returns True if there are unfinished requests."""
         return self.scheduler.has_unfinished_seqs()
 
+    def _process_sequence_group_outputs(
+        self, seq_group: SequenceGroup,
+        outputs: Union[CompletionSequenceGroupOutput,
+                       EmbeddingSequenceGroupOutput]
+    ) -> None:
+
+        if self.model_config.embedding_mode:
+            seq_group.embeddings = outputs.embeddings
+
+            for seq in seq_group.get_seqs():
+                seq.status = SequenceStatus.FINISHED_STOPPED
+
+            return
+
     def _process_model_outputs(
         self,
         output: List[SamplerOutput],
         scheduled_seq_groups: List[ScheduledSequenceGroup],
         ignored_seq_groups: List[SequenceGroup],
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> List[RequestOutput]:
+    ) -> List[Union[CompletionRequestOutput, EmbeddingRequestOutput]]:
         """Apply the model output to the sequences in the scheduled seq groups.
 
         Returns RequestOutputs that can be returned to the client.
@@ -510,6 +528,7 @@ class LLMEngine:
             seq_group = scheduled_seq_group.seq_group
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
+            self._process_sequence_group_outputs(seq_group, outputs)
 
             self.output_processor.process_prompt_logprob(seq_group, outputs)
             if seq_group_meta.do_sample:
@@ -519,18 +538,21 @@ class LLMEngine:
         self.scheduler.free_finished_seq_groups()
 
         # Create the outputs.
-        request_outputs: List[RequestOutput] = []
+        request_outputs: List[Union[CompletionRequestOutput,
+                                    EmbeddingRequestOutput]] = []
         for scheduled_seq_group in scheduled_seq_groups:
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
-            request_output = RequestOutput.from_seq_group(seq_group)
+            request_output = RequestOutputFactory.create(seq_group)
             request_outputs.append(request_output)
         for seq_group in ignored_seq_groups:
-            request_output = RequestOutput.from_seq_group(seq_group)
+            request_output = RequestOutputFactory.create(seq_group)
             request_outputs.append(request_output)
         return request_outputs
 
-    def step(self) -> List[RequestOutput]:
+    def step(
+            self
+    ) -> List[Union[CompletionRequestOutput, EmbeddingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
 
         .. figure:: https://i.imgur.com/sv2HssD.png
@@ -637,12 +659,15 @@ class LLMEngine:
 
         # KV Cache Usage in %
         num_total_gpu = self.cache_config.num_gpu_blocks
-        num_free_gpu = self.scheduler.block_manager.get_num_free_gpu_blocks()
-        gpu_cache_usage_sys = 1.0 - (num_free_gpu / num_total_gpu)
+        gpu_cache_usage_sys = 0.
+        if num_total_gpu is not None:
+            num_free_gpu = self.scheduler.block_manager.get_num_free_gpu_blocks(
+            )
+            gpu_cache_usage_sys = 1.0 - (num_free_gpu / num_total_gpu)
 
         num_total_cpu = self.cache_config.num_cpu_blocks
         cpu_cache_usage_sys = 0.
-        if num_total_cpu > 0:
+        if num_total_cpu is not None and num_total_cpu > 0:
             num_free_cpu = self.scheduler.block_manager.get_num_free_cpu_blocks(
             )
             cpu_cache_usage_sys = 1.0 - (num_free_cpu / num_total_cpu)
