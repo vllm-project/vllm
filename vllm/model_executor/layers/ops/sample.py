@@ -5,7 +5,7 @@ import torch
 import triton
 import triton.language as tl
 
-from vllm.model_executor.ops.rand import seeded_uniform
+from vllm.model_executor.layers.ops.rand import seeded_uniform
 
 _EPS = 1e-6
 
