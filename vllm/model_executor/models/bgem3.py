@@ -16,19 +16,10 @@ from tqdm import tqdm
 from transformers import PreTrainedTokenizerFast, BatchEncoding, DataCollatorWithPadding, XLMRobertaForMaskedLM
 from torch.utils.data import DataLoader
 
-from typing import List, Optional, Tuple
-
-import torch
-from torch import nn
 from transformers import MistralConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention import PagedAttention
-from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               MergedColumnParallelLinear,
-                                               QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
@@ -41,7 +32,6 @@ from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 from vllm.config import LoRAConfig
-# from vllm.vllm.worker.model_runner import KVCache
 
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
