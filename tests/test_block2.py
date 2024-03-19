@@ -227,18 +227,6 @@ class TestPrefixCachingBlock:
         return blocks
 
 class TestPrefixCachingBlockAllocator:
-    
-    @staticmethod
-    def test_allocate_with_cache():
-        allocator = PrefixCachingBlockAllocator(
-            num_blocks=1024,
-            block_size=16,
-        )
-
-        block = allocator.allocate_immutable(prev_block=None, token_ids=list(range(16)))
-
-
-    
     @staticmethod
     def create_allocate_lambda(allocate_type: str, allocator: NaiveBlockAllocator, prev_block: Optional[Block], token_ids: List[int]):
         if allocate_type == "immutable":
