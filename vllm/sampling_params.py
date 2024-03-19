@@ -78,7 +78,8 @@ class SamplingParams:
         ignore_eos: Whether to ignore the EOS token and continue generating
             tokens after the EOS token is generated.
         max_tokens: Maximum number of tokens to generate per output sequence.
-        min_tokens: Minimum number of tokens to generate per output sequence.
+        min_tokens: Minimum number of tokens to generate per output sequence
+            before EOS or stop_token_ids can be generated
         logprobs: Number of log probabilities to return per output token.
             Note that the implementation follows the OpenAI API: The return
             result includes the log probabilities on the `logprobs` most likely
@@ -113,7 +114,7 @@ class SamplingParams:
         include_stop_str_in_output: bool = False,
         ignore_eos: bool = False,
         max_tokens: Optional[int] = 16,
-        min_tokens: int = 1,
+        min_tokens: int = 0,
         logprobs: Optional[int] = None,
         prompt_logprobs: Optional[int] = None,
         skip_special_tokens: bool = True,
@@ -195,10 +196,11 @@ class SamplingParams:
         if self.max_tokens is not None and self.max_tokens < 1:
             raise ValueError(
                 f"max_tokens must be at least 1, got {self.max_tokens}.")
-        if self.min_tokens < 1:
+        if self.min_tokens < 0:
             raise ValueError(
-                f"min_tokens must be at least 1, got {self.min_tokens}.")
-        if self.min_tokens > 1 and self.max_tokens is not None and self.min_tokens > self.max_tokens:
+                f"min_tokens must be greater than or equal to 0, got {self.min_tokens}."
+            )
+        if self.max_tokens is not None and self.min_tokens > self.max_tokens:
             raise ValueError(
                 f"min_tokens must be less than or equal to max_tokens={self.max_tokens}, got {self.min_tokens}."
             )

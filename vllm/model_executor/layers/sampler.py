@@ -151,7 +151,7 @@ def _apply_min_tokens_penalty(
     start_idx = 0
     for seq_ids, sampling_params in sampling_metadata.seq_groups:
         min_tokens = sampling_params.min_tokens
-        if min_tokens > 1:
+        if min_tokens > 0:
             seqs_to_penalize = []
             for i, seq_id in enumerate(seq_ids):
                 seq_data = sampling_metadata.seq_data[seq_id]
