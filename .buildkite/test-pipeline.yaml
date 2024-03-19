@@ -5,62 +5,62 @@
 
 steps:
 - label: Regression Test
-  command: pytest -v -s test_regression.py
+  command: pytest -v -s --forked test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
 
 - label: AsyncEngine Test
-  command: pytest -v -s async_engine
+  command: pytest -v -s --forked async_engine
 
 - label: Basic Correctness Test
-  command: pytest -v -s basic_correctness
+  command: pytest -v -s --forked basic_correctness
 
 - label: Core Test
-  command: pytest -v -s core
+  command: pytest -v -s --forked core
 
 - label: Distributed Comm Ops Test
-  command: pytest -v -s test_comm_ops.py
+  command: pytest -v -s --forked test_comm_ops.py
   working_dir: "/vllm-workspace/tests/distributed"
   num_gpus: 2 # only support 1 or 2 for now.
 
 - label: Distributed Correctness Test
-  command: pytest -v -s test_basic_distributed_correctness.py
+  command: pytest -v -s --forked test_basic_distributed_correctness.py
   working_dir: "/vllm-workspace/tests/distributed"
   num_gpus: 2 # only support 1 or 2 for now.
 
 - label: Engine Test
-  command: pytest -v -s engine tokenization test_sequence.py
+  command: pytest -v -s --forked engine tokenization test_sequence.py
 
 - label: Entrypoints Test
-  command: pytest -v -s entrypoints
+  command: pytest -v -s --forked entrypoints
 
 - label: Kernels Test %N
-  command: pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  command: pytest -v -s --forked kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 4
 
 - label: Models Test
   commands:
-    - pytest -v -s models
+    - pytest -v -s --forked models
   soft_fail: true
 
 - label: Prefix Caching Test
   commands:
-    - pytest -v -s prefix_caching
+    - pytest -v -s --forked prefix_caching
 
 - label: Samplers Test
-  command: pytest -v -s samplers
+  command: pytest -v -s --forked samplers
 
 - label: Worker Test
-  command: pytest -v -s worker
+  command: pytest -v -s --forked worker
 
 - label: Speculative decoding tests
-  command: pytest -v -s spec_decode
+  command: pytest -v -s --forked spec_decode
 
 - label: LoRA Test %N
-  command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  command: pytest -v -s --forked lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 4
 
 - label: Metrics Test
-  command: pytest -v -s metrics
+  command: pytest -v -s --forked metrics
 
 - label: Benchmarks
   working_dir: "/vllm-workspace/.buildkite"
