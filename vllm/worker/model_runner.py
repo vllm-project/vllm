@@ -1,5 +1,4 @@
 import contextlib
-import dataclasses
 import time
 from typing import Dict, List, Optional, Tuple, Set, Union
 
@@ -390,6 +389,8 @@ class ModelRunner:
             not self.model_config.enforce_eager
             and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
             and max_context_len <= self.max_context_len_to_capture)
+        if use_captured_graph:
+            batch_size = _get_graph_batch_size(batch_size)
 
         # Pad tokens to better utilize tensor cores although
         # cuda graph is not enabled.
@@ -405,9 +406,13 @@ class ModelRunner:
             slot_mapping, pad=_PAD_SLOT_ID, should_align=use_captured_graph),
                                     dtype=torch.long,
                                     device=self.device)
-        context_lens = torch.tensor(context_lens,
+        context_lens = torch.tensor(_align_if_necessary(
+            context_lens, pad=0, should_align=use_captured_graph),
                                     dtype=torch.int,
                                     device=self.device)
+        block_tables = _align_if_necessary(block_tables,
+                                           pad=[],
+                                           should_align=use_captured_graph)
         lora_index_mapping = _align_if_necessary(
             lora_index_mapping, pad=0, should_align=use_captured_graph)
 
@@ -605,7 +610,7 @@ class ModelRunner:
                 "lora_requests": lora_requests,
                 "lora_mapping": lora_mapping,
             }
-            metadata_dict.update(dataclasses.asdict(input_metadata))
+            metadata_dict.update(input_metadata.asdict_zerocopy())
             broadcast_tensor_dict(metadata_dict, src=0)
         else:
             metadata_dict = broadcast_tensor_dict(src=0)
