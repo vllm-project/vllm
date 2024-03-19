@@ -1,5 +1,4 @@
 import contextlib
-import dataclasses
 import time
 from typing import Dict, List, Optional, Tuple, Set, Union
 
@@ -134,7 +133,7 @@ class ModelRunner:
         block_size = self.block_size
         return (self.max_context_len_to_capture + block_size - 1) // block_size
 
-    def _prepare_prompt_v2(
+    def _prepare_prompt(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, List[int], List[int],
@@ -263,7 +262,7 @@ class ModelRunner:
                 seq_lens, context_lens, subquery_lens,
                 block_tables, num_chunked_prefill)
 
-    def _prepare_decode_v2( 
+    def _prepare_decode( 
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, List[int], List[int],
@@ -405,12 +404,12 @@ class ModelRunner:
         (input_tokens, input_positions, slot_mapping, lora_index_mapping,
          lora_prompt_mapping, lora_requests, seq_lens, context_lens,
         subquery_lens, block_tables, num_chunked_prefill
-         ) = self._prepare_prompt_v2(prefill_reqs)
+         ) = self._prepare_prompt(prefill_reqs)
 
         (input_tokens_decode, input_positions_decode, slot_mapping_decode,
          context_lens_decode, block_tables_decode, lora_index_mapping_decode,
          lora_prompt_mapping_decode, lora_requests_decode, use_captured_graph
-         ) = self._prepare_decode_v2(decode_reqs)
+         ) = self._prepare_decode(decode_reqs)
 
         # Cuda graph is used only when there's decoding only
         # requests. Note that chunked prefill also doesn't use
@@ -662,7 +661,7 @@ class ModelRunner:
                 "lora_requests": lora_requests,
                 "lora_mapping": lora_mapping,
             }
-            metadata_dict.update(dataclasses.asdict(input_metadata))
+            metadata_dict.update(input_metadata.asdict_zerocopy())
             broadcast_tensor_dict(metadata_dict, src=0)
         else:
             metadata_dict = broadcast_tensor_dict(src=0)
