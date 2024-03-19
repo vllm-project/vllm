@@ -146,25 +146,34 @@ def _apply_min_tokens_penalty(
     logits: torch.Tensor,
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
-    # list of tuples of indices coordinates of elements to penalize
-    coords_to_penalize = []
+    # list of indices in logits that will be set to -inf
+    logits_to_penalize = []
     start_idx = 0
     for seq_ids, sampling_params in sampling_metadata.seq_groups:
-        if sampling_params.min_tokens > 1:
-            seq_indices_to_penalize = [start_idx + i for i, seq_id in enumerate(seq_ids) \
-                                if len(sampling_metadata.seq_data[seq_id].output_token_ids) < sampling_params.min_tokens]
-            if seq_indices_to_penalize:
-                token_ids_to_penalize = [sampling_params.eos_token_id
-                                         ] + sampling_params.stop_token_ids
-                # itertools.product paris up each seq index with every token id
-                coords_to_penalize.extend(
-                    itertools.product(seq_indices_to_penalize,
-                                      token_ids_to_penalize))
+        min_tokens = sampling_params.min_tokens
+        if min_tokens > 1:
+            seqs_to_penalize = []
+            for i, seq_id in enumerate(seq_ids):
+                seq_data = sampling_metadata.seq_data[seq_id]
+                if len(seq_data.output_token_ids) < min_tokens:
+                    seqs_to_penalize.append(i)
+
+            if seqs_to_penalize:
+                # convert from the index for this seq_group to the index into logits
+                seqs_to_penalize = [start_idx + i for i in seqs_to_penalize]
+                # use set() to remove any duplicates
+                token_ids_to_penalize = set(sampling_params.stop_token_ids +
+                                            [sampling_params.eos_token_id])
+                # itertools.product pairs each seq index with every token id
+                logits_to_penalize.extend(
+                    itertools.product(seqs_to_penalize, token_ids_to_penalize))
 
         start_idx += len(seq_ids)
 
-    # use zip to split pairs into a list for each dimension for indexing
-    logits[tuple(zip(*coords_to_penalize))] = -float("inf")
+    if logits_to_penalize:
+        # use zip and * to group indices along each dimension
+        # eg. [ (1,2), (1,3), (5,6) ] -> ( (1,1,5), (2,3,6) )
+        logits[tuple(zip(*logits_to_penalize))] = -float("inf")
 
     return logits
 
