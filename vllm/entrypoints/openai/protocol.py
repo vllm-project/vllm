@@ -55,6 +55,12 @@ class UsageInfo(BaseModel):
     completion_tokens: Optional[int] = 0
 
 
+class DeleteResponse(BaseModel):
+    id: str
+    object: str = "model"
+    deleted: Optional[bool] = False
+
+
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[Dict[str, str]]
