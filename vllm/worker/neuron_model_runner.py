@@ -6,7 +6,7 @@ from vllm.config import (DeviceConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
-from vllm.model_executor.neuron_model_loader import get_model
+from vllm.model_executor.neuron_model_loader import get_neuron_model
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import (async_tensor_h2d, pin_memory_available,
@@ -39,10 +39,9 @@ class NeuronModelRunner:
         self.pin_memory = pin_memory_available()
 
     def load_model(self) -> None:
-        self.model = get_model(self.model_config,
-                               self.device_config,
-                               parallel_config=self.parallel_config,
-                               scheduler_config=self.scheduler_config)
+        self.model = get_neuron_model(self.model_config,
+                                      parallel_config=self.parallel_config,
+                                      scheduler_config=self.scheduler_config)
 
     def _prepare_prompt(
         self,

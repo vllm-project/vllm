@@ -1,6 +1,6 @@
 import contextlib
 import time
-from typing import Dict, List, Optional, Tuple, Set, Union
+from typing import Dict, List, Optional, Tuple, Set
 
 import numpy as np
 import torch
