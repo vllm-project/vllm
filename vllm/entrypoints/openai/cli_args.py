@@ -58,11 +58,11 @@ def make_arg_parser():
                         type=str,
                         default=None,
                         help="The model name(s) used in the API. If multiple "
-                        "names are provided, the server will respond to any of "
-                        "the provided names. The model name in the model field "
-                        "of a response will be the first name in this list. If "
-                        "not specified, the model name will be the same as the "
-                        "huggingface name.")
+                        "names are provided, the server will respond to any "
+                        "of the provided names. The model name in the model "
+                        "field of a response will be the first name in this "
+                        "list. If not specified, the model name will be the "
+                        "same as the huggingface name.")
     parser.add_argument(
         "--lora-modules",
         type=str,
