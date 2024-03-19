@@ -308,7 +308,6 @@ class Qwen2ForCausalLM(nn.Module):
                                           config.hidden_size)
             self.lm_head_weight = self.lm_head.weight
 
-        self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
