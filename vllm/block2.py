@@ -1,5 +1,5 @@
 """Token blocks."""
-from typing import List, Optional, Set, Iterable
+from typing import List, Optional, Set, Iterable, Callable
 from abc import ABC, abstractmethod, abstractproperty
 
 from vllm.utils import Device
@@ -89,16 +89,23 @@ class RefCounter:
 
         return refcount
 
+from typing import Protocol
+
+class BlockCreator(Protocol):
+
+    @abstractmethod
+    def __call__(self, prev_block: Optional[Block], token_ids: List[int], physical_block_index: int, block_size: int) -> Block:
+        pass
 
 class NaiveBlockAllocator(BlockAllocator):
     T = TypeVar('T', bound=Block)
     BlockIndex = int
     Refcount = int
 
-    def __init__(self, block_cls: Type[T], num_blocks: int, block_size: int):
+    def __init__(self, create_block: BlockCreator, num_blocks: int, block_size: int):
         self._free_block_indices: Set[BlockIndex] = set(range(num_blocks))
         self._refcounter = RefCounter(all_block_indices=self._free_block_indices)
-        self._block_cls = block_cls
+        self._create_block = create_block
         self._block_size = block_size
 
     def allocate_immutable(self, prev_block: Optional[Block], token_ids: List[int]) -> Block:
@@ -108,7 +115,12 @@ class NaiveBlockAllocator(BlockAllocator):
 
     def allocate_mutable(self, prev_block: Optional[Block]) -> Block:
         block_index = self._allocate_new_block()
-        return self._block_cls(prev_block=prev_block, token_ids=[], physical_block_index=block_index, block_size=self._block_size)
+        return self._create_block(
+            prev_block=prev_block,
+            token_ids=[],
+            physical_block_index=block_index,
+            block_size=self._block_size,
+        )
 
     def free(self, block: Block) -> None:
         block_index = block.physical_block_index
@@ -138,6 +150,7 @@ class PrefixCachingBlock(Block):
         prev_block: Optional["PrefixCachingBlock"],
         token_ids: List[int],
         block_size: int,
+        prefix_caching_allocator: "PrefixCachingBlockAllocator" = None, # TODO
         physical_block_index: Optional[int] = None,
     ):
         self._prev_block = prev_block
@@ -145,6 +158,7 @@ class PrefixCachingBlock(Block):
         self._block_size = block_size
         self._cached_content_hash: Optional[int] = None
         self._physical_block_index = physical_block_index
+        self._prefix_caching_allocator = prefix_caching_allocator
 
         assert_prefix_caching_block_or_none(prev_block)
 
@@ -226,7 +240,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         self._cached_blocks: Dict[PrefixHash, BlockIndex] = {}
 
         self._hashless_allocator = NaiveBlockAllocator(
-            block_cls=PrefixCachingBlock,
+            create_block=PrefixCachingBlock,
             num_blocks=num_blocks,
             block_size=block_size,
         )
@@ -252,7 +266,12 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     def allocate_immutable(self, prev_block: Optional[Block], token_ids: List[int]) -> Block:
         assert_prefix_caching_block_or_none(prev_block)
 
-        block = PrefixCachingBlock(prev_block=prev_block, token_ids=token_ids, block_size=self._block_size)
+        block = PrefixCachingBlock(
+            prev_block=prev_block,
+            token_ids=token_ids,
+            block_size=self._block_size,
+            #prefix_caching_allocator=self,
+        )
         assert block.content_hash is not None
 
         cached_block_index = self._cached_blocks.get(block.content_hash, None)
@@ -261,11 +280,12 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             self._refcounter.incr(block.physical_block_index)
             return block
 
-        mutable_block = self.allocate_mutable(prev_block)
-        block.physical_block_index = mutable_block.physical_block_index
+        block = self.allocate_mutable(prev_block)
+        block.append_token_ids(token_ids)
+        assert block.content_hash is not None
         # TODO computed bit
 
-        return mutable_block
+        return block
  
     def free(self, block: Block) -> None:
         pass

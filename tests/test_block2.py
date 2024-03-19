@@ -68,7 +68,7 @@ class TestNaiveBlockAllocator:
     @pytest.mark.parametrize("num_blocks", [1, 1024])
     @pytest.mark.parametrize("block_size", [1, 16])
     def test_allocate_ooms(allocate_type: str, num_blocks: int, block_size: int):
-        allocator = NaiveBlockAllocator(block_cls=NaiveBlock, num_blocks=num_blocks, block_size=block_size)
+        allocator = NaiveBlockAllocator(create_block=NaiveBlock, num_blocks=num_blocks, block_size=block_size)
         allocate_block = TestNaiveBlockAllocator.create_allocate_lambda(allocate_type, allocator, prev_block=None, token_ids=list(range(block_size)))
         
         blocks = [allocate_block() for _ in range(num_blocks)]
@@ -80,7 +80,7 @@ class TestNaiveBlockAllocator:
     @pytest.mark.parametrize("num_blocks", [1, 1024])
     @pytest.mark.parametrize("block_size", [1, 16])
     def test_free_prevents_oom(allocate_type: str, num_blocks: int, block_size: int):
-        allocator = NaiveBlockAllocator(block_cls=NaiveBlock, num_blocks=num_blocks, block_size=block_size)
+        allocator = NaiveBlockAllocator(create_block=NaiveBlock, num_blocks=num_blocks, block_size=block_size)
         allocate_block = TestNaiveBlockAllocator.create_allocate_lambda(allocate_type, allocator, prev_block=None, token_ids=list(range(block_size)))
         
         blocks = [allocate_block() for _ in range(num_blocks)]
@@ -252,3 +252,16 @@ class TestPrefixCachingBlockAllocator:
             oom_block = allocate_block()
 
     # TODO test behavior with content hash
+
+#    @staticmethod
+#    @pytest.mark.parametrize("allocate_type", ["mutable"])
+#    @pytest.mark.parametrize("num_blocks", [1, 1024])
+#    @pytest.mark.parametrize("block_size", [1, 16])
+#    def test_same_immutable_alloc_never_ooms(allocate_type: str, num_blocks: int, block_size: int):
+#        allocator = PrefixCachingBlockAllocator(num_blocks=num_blocks, block_size=block_size)
+#        allocate_block = TestPrefixCachingBlockAllocator.create_allocate_lambda(allocate_type, allocator, prev_block=None, token_ids=list(range(block_size)))
+#        
+#        blocks = [allocate_block() for _ in range(num_blocks)]
+#        with pytest.raises(BlockAllocator.NoFreeBlocksError):
+#            oom_block = allocate_block()
+#
