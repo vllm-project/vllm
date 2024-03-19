@@ -16,15 +16,15 @@ from vllm.engine.ray_utils import initialize_ray_cluster
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (Logprob, SamplerOutput, Sequence, SequenceGroup,
-                           SequenceGroupOutput, SequenceOutput, SequenceStatus)
+from vllm.sequence import (Logprob, MultiModalData, SamplerOutput, Sequence,
+                           SequenceGroup, SequenceGroupOutput, SequenceOutput,
+                           SequenceStatus)
 
 from vllm.transformers_utils.tokenizer import detokenize_incrementally
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
 from vllm.utils import Counter
 if TYPE_CHECKING:
-    import torch
     from vllm.config import VisionLanguageConfig  # pylint: disable=ungrouped-imports
 
 logger = init_logger(__name__)
@@ -206,7 +206,7 @@ class LLMEngine:
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
-        image_request: Optional["torch.Tensor"] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
     ) -> None:
         """Add a request to the engine's request pool.
 
@@ -223,10 +223,7 @@ class LLMEngine:
                 use the tokenizer to convert the prompts to token IDs.
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
-            image_request: An image tensor per request.
-                The semantic meaning and shape depend on image_input_shape
-                settings.
-                See `VisionLanguageConfig.image_input_shape` for details.
+            multi_modal_data: Multi modal data per request.
 
         Details:
             - Set arrival_time to the current time if it is None.
@@ -284,7 +281,7 @@ class LLMEngine:
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,
-                                  arrival_time, lora_request, image_request)
+                                  arrival_time, lora_request, multi_modal_data)
 
         # Add the sequence group to the scheduler.
         self.scheduler.add_seq_group(seq_group)

@@ -3,7 +3,7 @@ import os
 import time
 from functools import partial
 from typing import (Callable, Dict, Iterable, List, Optional, Set, Tuple, Type,
-                    Union, AsyncIterator, TYPE_CHECKING)
+                    Union, AsyncIterator)
 
 from transformers import PreTrainedTokenizer
 
@@ -15,9 +15,7 @@ from vllm.engine.ray_utils import initialize_ray_cluster, ray
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-
-if TYPE_CHECKING:
-    import torch
+from vllm.sequence import MultiModalData
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = int(
@@ -243,7 +241,7 @@ class _AsyncLLMEngine(LLMEngine):
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
-        image_request: Optional["torch.Tensor"] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
     ) -> None:
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
@@ -262,7 +260,7 @@ class _AsyncLLMEngine(LLMEngine):
                                 sampling_params=sampling_params,
                                 arrival_time=arrival_time,
                                 lora_request=lora_request,
-                                image_request=image_request)
+                                multi_modal_data=multi_modal_data)
 
     async def check_health_async(self) -> None:
         self.model_executor.check_health()
@@ -484,7 +482,7 @@ class AsyncLLMEngine:
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
-        image_request: Optional["torch.Tensor"] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
     ) -> AsyncStream:
         if self.log_requests:
             shortened_prompt = prompt
@@ -534,7 +532,7 @@ class AsyncLLMEngine:
             prompt_token_ids=prompt_token_ids,
             arrival_time=arrival_time,
             lora_request=lora_request,
-            image_request=image_request,
+            multi_modal_data=multi_modal_data,
         )
 
         return stream
@@ -546,7 +544,7 @@ class AsyncLLMEngine:
         request_id: str,
         prompt_token_ids: Optional[List[int]] = None,
         lora_request: Optional[LoRARequest] = None,
-        image_request: Optional["torch.Tensor"] = None
+        multi_modal_data: Optional[MultiModalData] = None
     ) -> AsyncIterator[RequestOutput]:
         """Generate outputs for a request.
 
@@ -562,10 +560,7 @@ class AsyncLLMEngine:
             prompt_token_ids: The token IDs of the prompt. If None, we
                 use the tokenizer to convert the prompts to token IDs.
             lora_request: LoRA request to use for generation, if any.
-            image_request: An image tensor per request. The semantic meaning
-                and shape depend on image_input_shape settings.
-                See `VisionLanguageConfig.image_input_shape` for details.
-
+            multi_modal_data: Multi modal data per request.
 
         Yields:
             The output `RequestOutput` objects from the LLMEngine for the
@@ -625,7 +620,7 @@ class AsyncLLMEngine:
                 prompt_token_ids=prompt_token_ids,
                 arrival_time=arrival_time,
                 lora_request=lora_request,
-                image_request=image_request,
+                multi_modal_data=multi_modal_data,
             )
 
             async for request_output in stream:

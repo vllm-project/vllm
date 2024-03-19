@@ -11,6 +11,7 @@ from vllm import LLM, SamplingParams
 from vllm.config import VisionLanguageConfig
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.config import TokenizerPoolConfig
+from vllm.sequence import MultiModalData
 
 _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
@@ -277,9 +278,11 @@ class VllmRunner:
     ) -> List[Tuple[List[int], str]]:
         if images is not None:
             assert len(prompts) == images.shape[0]
-        req_outputs = self.model.generate(prompts,
-                                          sampling_params=sampling_params,
-                                          image_request=images)
+        req_outputs = self.model.generate(
+            prompts,
+            sampling_params=sampling_params,
+            multi_modal_data=MultiModalData(type=MultiModalData.Type.IMAGE,
+                                            data=images) if images else None)
         outputs = []
         for req_output in req_outputs:
             prompt_str = req_output.prompt

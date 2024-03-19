@@ -10,6 +10,7 @@ from vllm.engine.llm_engine import LLMEngine
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.utils import Counter
+from vllm.sequence import MultiModalData
 
 
 class LLM:
@@ -127,7 +128,7 @@ class LLM:
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        image_request: Optional["torch.Tensor"] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -143,10 +144,7 @@ class LLM:
                 use the tokenizer to convert the prompts to token IDs.
             use_tqdm: Whether to use tqdm to display the progress bar.
             lora_request: LoRA request to use for generation, if any.
-            image_request: A batch of image tensors of float16.
-                The semantic meaning and shape depend on image_input_shape
-                settings.
-                See `VisionLanguageConfig.image_input_shape` for details.
+            multi_modal_data: Multi modal data.
 
         Returns:
             A list of `RequestOutput` objects containing the generated
@@ -166,9 +164,8 @@ class LLM:
             # Use default sampling params.
             sampling_params = SamplingParams()
 
-        if image_request is not None and image_request.dtype != torch.float16:
-            print("Converting image tensor to float16.")
-            image_request = image_request.to(torch.float16)
+        if multi_modal_data:
+            multi_modal_data.data = multi_modal_data.data.to(torch.float16)
 
         # Add requests to the engine.
         num_requests = len(prompts) if prompts is not None else len(
@@ -183,8 +180,10 @@ class LLM:
                 token_ids,
                 lora_request=lora_request,
                 # Get ith image while maintaining the batch dim.
-                image_request=image_request[i].unsqueeze(0)
-                if image_request is not None else None,
+                multi_modal_data=MultiModalData(
+                    type=multi_modal_data.type,
+                    data=multi_modal_data.data[i].unsqueeze(0))
+                if multi_modal_data else None,
             )
         return self._run_engine(use_tqdm)
 
@@ -194,7 +193,7 @@ class LLM:
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]],
         lora_request: Optional[LoRARequest] = None,
-        image_request: Optional["torch.Tensor"] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
     ) -> None:
         request_id = str(next(self.request_counter))
         self.llm_engine.add_request(request_id,
@@ -202,7 +201,7 @@ class LLM:
                                     sampling_params,
                                     prompt_token_ids,
                                     lora_request=lora_request,
-                                    image_request=image_request)
+                                    multi_modal_data=multi_modal_data)
 
     def _run_engine(self, use_tqdm: bool) -> List[RequestOutput]:
         # Initialize tqdm.

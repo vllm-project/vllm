@@ -62,7 +62,7 @@ def sanitize_vllm_output(vllm_output: Tuple[List[int], str],
 
 
 @pytest.mark.parametrize("worker_use_ray", [True])
-@pytest.mark.parametrize("model_and_config", model_and_vl_config[:1])
+@pytest.mark.parametrize("model_and_config", model_and_vl_config)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
