@@ -33,6 +33,17 @@ void paged_attention_v2(
   const c10::optional<torch::Tensor>& alibi_slopes,
   const std::string& kv_cache_dtype);
 
+void fp8_flash_attention(
+  torch::Tensor& out,
+  torch::Tensor& exp_sums,
+  torch::Tensor& query,
+  torch::Tensor& key_cache,
+  torch::Tensor& value_cache,
+  int num_kv_heads,
+  float scale,
+  torch::Tensor& context_lens,
+  int max_context_len);
+
 void rms_norm(
   torch::Tensor& out,
   torch::Tensor& input,

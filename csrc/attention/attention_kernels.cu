@@ -31,6 +31,8 @@
 
 #include <algorithm>
 
+#include "../cutlass-kernels/src/fmha-pipeline/fmha_forward.cu"
+
 #ifndef USE_ROCM
 #define WARP_SIZE 32
 #else
@@ -945,6 +947,35 @@ void paged_attention_v2(
   } else {
     TORCH_CHECK(false, "Unsupported data type of kv cache: ", kv_cache_dtype);
   }
+}
+
+void fp8_flash_attention(
+  torch::Tensor& out,             // [num_seqs, num_heads, head_size]
+  torch::Tensor& exp_sums,        // [num_seqs, num_heads, max_num_partitions]
+  torch::Tensor& query,           // [num_seqs, num_heads, head_size]
+  torch::Tensor& key_cache,       // [num_blocks, num_heads, head_size/x, block_size, x]
+  torch::Tensor& value_cache,     // [num_blocks, num_heads, head_size, block_size]
+  int num_kv_heads,               // [num_heads]
+  float scale,
+  torch::Tensor& context_lens,    // [num_seqs]
+  int max_context_len) {
+  // launch_fp8_attention<PrecType, Gemm2Type, SoftType, OutputType, HEADDIM>(
+  //       SEQLEN, KEYLEN, NUMHEADS, BATCHSIZE, Q, K, V, S, D, miOut, sPrimeOut,
+  //       iterations, scale);
+  using PrecType = cutlass::float_e4m3_t;
+  using Gemm2Type = cutlass::float_e4m3_t;
+  using SoftType = float;
+  using OutputType = cutlass::half_t;
+  int key_len = key_cache.sizes()[0];
+  int batch_size = context_lens.sizes()[0];
+  PrecType *q_ptr = reinterpret_cast<PrecType*>(query.data_ptr());
+  PrecType *k_ptr = reinterpret_cast<PrecType*>(key_cache.data_ptr());
+  PrecType *v_ptr = reinterpret_cast<Gemm2Type*>(value_cache.data_ptr());
+  PrecType *s_ptr = reinterpret_cast<PrecType*>(exp_sums.data_ptr());
+  OutputType *o_ptr = reinterpret_cast<OutputType*>(out.data_ptr());
+  fmhaForwardDevice<PrecType, Gemm2Type, SoftType, OutputType, 256>(
+        max_context_len, key_len, num_kv_heads, batch_size,
+        q_ptr, k_ptr, v_ptr, s_ptr, o_ptr, nullptr, nullptr, 1, scale);
 }
 
 #undef WARP_SIZE

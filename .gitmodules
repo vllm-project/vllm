@@ -1,0 +1,6 @@
+[submodule "csrc/cutlass"]
+	path = csrc/cutlass
+	url = git@github.com:NVIDIA/cutlass.git
+[submodule "csrc/cutlass-kernels"]
+	path = csrc/cutlass-kernels
+	url = git@github.com:tterrysun/cutlass-kernels.git

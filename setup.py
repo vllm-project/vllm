@@ -51,7 +51,16 @@ def _is_cuda() -> bool:
 # Compiler flags.
 CXX_FLAGS = ["-g", "-O2", "-std=c++17"]
 # TODO(woosuk): Should we use -O3?
-NVCC_FLAGS = ["-O2", "-std=c++17"]
+NVCC_FLAGS = ["-O3", "-std=c++17"]
+NVCC_FLAGS += [f"-I{os.getcwd()}/csrc/cutlass/include",
+               f"-I{os.getcwd()}/csrc/cutlass/tools/util/include",
+               f"-I{os.getcwd()}/csrc/cutlass/examples/common",
+               f"-I{os.getcwd()}/csrc/cutlass-kernels/src/fmha-pipeline/",
+               f"-I{os.getcwd()}/csrc/cutlass-kernels/include/",
+               f"-I{os.getcwd()}/csrc/cutlass-kernels/lib/",
+               f"-DCUTLASS_ENABLE_TENSOR_CORE_MMA=1",
+               f"-forward-unknown-to-host-compiler"
+               ]
 
 if _is_hip():
     if ROCM_HOME is None:
@@ -332,6 +341,18 @@ if _is_cuda():
     # Adapted from https://github.com/ray-project/ray/blob/f92928c9cfcbbf80c3a8534ca4911de1b44069c0/python/setup.py#L518-L530
     flash_attn_version = "2.5.6"
     install_dir = os.path.join(ROOT_DIR, THIRDPARTY_SUBDIR)
+
+    cutlass_dir = os.path.join(ROOT_DIR, "csrc", "cutlass")
+    cutlass_kernels_dir = os.path.join(ROOT_DIR, "csrc", "cutlass-kernels")
+    if not os.path.exists(cutlass_dir):
+        raise RuntimeError(
+            "Cutlass package not found. Please run `git submodule update --init --recursive` to download the submodule."
+        )
+    if not os.path.exists(cutlass_kernels_dir):
+        raise RuntimeError(
+            "Cutlass-kernels package not found. Please run `git submodule update --init --recursive` to download the submodule."
+        )
+
     subprocess.check_call(
         [
             sys.executable,
@@ -381,11 +402,16 @@ vllm_extension_sources = [
     "csrc/pybind.cpp",
 ]
 
+# def get_source_files(dir: str, surfixs: List[str]) -> List[str]:
+#     return [os.path.join(r, f) for r, _, fs in os.walk(dir) for f in fs if any([f.endswith(surfix) for surfix in surfixs])]
+
 if _is_cuda():
     vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
     vllm_extension_sources.append(
         "csrc/quantization/marlin/marlin_cuda_kernel.cu")
     vllm_extension_sources.append("csrc/custom_all_reduce.cu")
+    # vllm_extension_sources.extend(get_source_files("csrc/cutlass", [".cu"]))
+    # vllm_extension_sources.extend(get_source_files("csrc/cutlass-kernels", [".cu"]))
 
     # Add MoE kernels.
     ext_modules.append(

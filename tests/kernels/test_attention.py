@@ -72,6 +72,7 @@ def ref_single_query_cached_kv_attention(
     block_size = value_cache.shape[3]
     num_seqs = query.shape[0]
 
+    breakpoint()
     block_tables = block_tables.cpu().tolist()
     context_lens = context_lens.cpu().tolist()
     for i in range(num_seqs):
@@ -370,3 +371,118 @@ def test_multi_query_kv_attention(
     atol = get_default_atol(output) if is_hip() else 1e-3
     rtol = get_default_rtol(output) if is_hip() else 1e-5
     assert torch.allclose(output, ref_output, atol=atol, rtol=rtol)
+
+
+# flshattF and tritonflashattF supported: {torch.float16, torch.bfloat16}
+DTYPES = [torch.half]
+NUM_GEN_SEQS = [8448]  # Arbitrary values for testing
+NUM_HEADS = [(32, 32)]  # Arbitrary values for testing
+
+# FlashAttention forward only supports head dimension at most 128
+# https://github.com/ROCmSoftwarePlatform/flash-attention/blob/3d2b6f5d037782cc2c906909a46fb7e2e1b48b25/csrc/flash_attn_rocm/flash_api.cpp#L62
+HEAD_SIZES = [256]
+BLOCK_SIZES = [32]
+USE_ALIBI = [False]
+KV_CACHE_DTYPE = ["auto"]
+SEEDS = [0]
+CUDA_DEVICES = [
+    f"cuda:{0}"
+]
+
+@pytest.mark.parametrize("num_seqs", NUM_GEN_SEQS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_fp8_attention(
+    kv_cache_factory,
+    num_seqs: int,
+    num_heads: Tuple[int, int],
+    head_size: int,
+    block_size: int,
+    dtype: torch.dtype,
+    kv_cache_dtype: str,
+    seed: int,
+    device: str,
+) -> None:
+    random.seed(seed)
+    torch.random.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+    torch.set_default_device(device)
+    scale = float(1.0 / (head_size**0.5))
+    num_query_heads, num_kv_heads = num_heads
+    query = torch.empty(num_seqs, num_query_heads, head_size, dtype=dtype)
+    query.uniform_(-scale, scale)
+
+    assert num_query_heads % num_kv_heads == 0
+
+    context_lens = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
+    context_lens[-1] = MAX_SEQ_LEN
+    max_context_len = max(context_lens)
+    context_lens = torch.tensor(context_lens, dtype=torch.int)
+
+    # Create the KV caches.
+    key_caches, value_caches = kv_cache_factory(NUM_BLOCKS, block_size, 1,
+                                                num_kv_heads, head_size,
+                                                kv_cache_dtype, dtype, seed,
+                                                device)
+    key_cache, value_cache = key_caches[0], value_caches[0]
+
+    # Call the paged attention kernel.
+    output = torch.empty_like(query)
+    num_partitions = ((max_context_len + PARTITION_SIZE - 1) //
+                      PARTITION_SIZE)
+    assert PARTITION_SIZE % block_size == 0
+    num_seqs, num_heads, head_size = output.shape
+    exp_sums = torch.empty(
+        size=(num_seqs, num_heads, num_partitions),
+        dtype=torch.float32,
+    )
+    ops.fp8_flash_attention(
+        output,
+        exp_sums,
+        query,
+        key_cache,
+        value_cache,
+        num_kv_heads,
+        scale,
+        context_lens,
+        max_context_len,
+    )
+
+    alibi_slopes = None
+
+    # Create the block tables.
+    max_num_blocks_per_seq = (max_context_len + block_size - 1) // block_size
+    block_tables = []
+    for _ in range(num_seqs):
+        block_table = [
+            random.randint(0, NUM_BLOCKS - 1)
+            for _ in range(max_num_blocks_per_seq)
+        ]
+        block_tables.append(block_table)
+    block_tables = torch.tensor(block_tables, dtype=torch.int, device="cpu")
+    # breakpoint()
+
+    # num_queries_per_kv = num_query_heads // num_kv_heads
+    # ref_output = torch.empty_like(query)
+    # ref_single_query_cached_kv_attention(
+    #     ref_output,
+    #     query,
+    #     num_queries_per_kv,
+    #     key_cache,
+    #     value_cache,
+    #     block_tables,
+    #     context_lens,
+    #     scale,
+    #     alibi_slopes,
+    # )
+
+    # atol = get_default_atol(output) if is_hip() else 1e-2
+    # rtol = get_default_rtol(output) if is_hip() else 1e-5
+
+    # assert torch.allclose(output, ref_output, atol=atol, rtol=rtol)

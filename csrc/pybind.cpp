@@ -16,6 +16,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     "paged_attention_v2",
     &paged_attention_v2,
     "PagedAttention V2.");
+  ops.def(
+    "fp8_flash_attention",
+    &fp8_flash_attention,
+    "FP8 Flash Attention.");
 
   // Activation ops
   ops.def(
