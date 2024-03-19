@@ -85,6 +85,7 @@ class ModelConfig:
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
         max_logprobs: int = 5,
+        embedding_mode: Optional[bool] = False,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -100,6 +101,7 @@ class ModelConfig:
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
         self.max_logprobs = max_logprobs
+        self.embedding_mode = embedding_mode
 
         if os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true":
             # download model from ModelScope hub,
@@ -402,7 +404,7 @@ class CacheConfig:
 @dataclass
 class TokenizerPoolConfig:
     """Configuration for the tokenizer pool.
-    
+
     Args:
         pool_size: Number of tokenizer workers in the pool.
         pool_type: Type of the pool.
@@ -426,9 +428,9 @@ class TokenizerPoolConfig:
         tokenizer_pool_extra_config: Optional[Union[str, dict]]
     ) -> Optional["TokenizerPoolConfig"]:
         """Create a TokenizerPoolConfig from the given parameters.
-        
+
         If tokenizer_pool_size is 0, return None.
-        
+
         Args:
             tokenizer_pool_size: Number of tokenizer workers in the pool.
             tokenizer_pool_type: Type of the pool.
@@ -528,6 +530,7 @@ class SchedulerConfig:
             and generated text).
         delay_factor: Apply a delay (of delay factor multiplied by previous
             prompt latency) before scheduling next prompt.
+        embedding_mode: Whether the running model is for embedding.
     """
 
     def __init__(
@@ -536,6 +539,7 @@ class SchedulerConfig:
         max_num_seqs: int,
         max_model_len: int,
         delay_factor: float = 0.0,
+        embedding_mode: Optional[bool] = False,
     ) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
@@ -546,6 +550,7 @@ class SchedulerConfig:
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
         self.delay_factor = delay_factor
+        self.embedding_mode = embedding_mode
         self._verify_args()
 
     def _verify_args(self) -> None:

@@ -205,6 +205,10 @@ class ModelRunner:
                 slot_mapping.extend([_PAD_SLOT_ID] * prompt_len)
                 continue
 
+            # No need to compute slot_mapping with embedding mode.
+            if self.model_config.embedding_mode:
+                continue
+
             # Compute the slot mapping.
             block_table = seq_group_metadata.block_tables[seq_id]
             # Mask the [0, start_idx) tokens of the prompt with _PAD_SLOT_ID,
@@ -631,6 +635,11 @@ class ModelRunner:
             model_executable = self.graph_runners[graph_batch_size]
         else:
             model_executable = self.model
+
+        if self.model_config.embedding_mode:
+            num_layers = self.model_config.get_num_layers(self.parallel_config)
+            kv_caches = [(None, None)] * num_layers
+
         execute_model_kwargs = {
             "input_ids": input_tokens,
             "positions": input_positions,
@@ -656,12 +665,14 @@ class ModelRunner:
         return output
 
     @torch.inference_mode()
-    def profile_run(self) -> None:
+    def profile_run(self,
+                    max_num_batched_tokens: Optional[int] = None) -> None:
         # Enable top-k sampling to reflect the accurate memory usage.
         sampling_params = SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
-        max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
+        max_num_batched_tokens = (self.scheduler_config.max_num_batched_tokens
+                                  if not self.model_config.embedding_mode else
+                                  max_num_batched_tokens)
         max_num_seqs = self.scheduler_config.max_num_seqs
-
         # This represents the maximum number of different requests
         # that will have unique loras, an therefore the max amount of memory
         # consumption create dummy lora request copies from the lora request

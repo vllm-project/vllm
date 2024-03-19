@@ -592,3 +592,60 @@ class BlockSpaceManager:
         if self.enable_caching:
             for seq in seq_group.seqs_dict.values():
                 self.compute_full_blocks_in_seq(seq)
+
+
+class DummyBlockSpaceManager:
+    """A no-operation version of BlockSpaceManager for use in environments where block management is not required.
+
+    This class provides the same interface as BlockSpaceManager, but its methods perform no actions. It's designed
+    to be used in scenarios where the overhead of block management is unnecessary, such as in an embedding server
+    environment."""
+
+    def __init__(
+        self,
+        block_size: int,
+        num_gpu_blocks: int,
+        num_cpu_blocks: int,
+        watermark: float = 0.01,
+        sliding_window: Optional[int] = None,
+    ) -> None:
+        pass
+
+    def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
+        # Always return OK for dummy purposes
+        return AllocStatus.OK
+
+    def allocate(self, seq_group: SequenceGroup) -> None:
+        # No actual allocation logic needed
+        pass
+
+    def free(self, seq: Sequence) -> None:
+        # No operation on free
+        pass
+
+    def append_slot(self, seq: Sequence) -> Optional[Tuple[int, int]]:
+        return None
+
+    def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
+        pass
+
+    def swap_in(self, seq_group: SequenceGroup) -> Dict[int, int]:
+        return {}
+
+    def swap_out(self, seq_group: SequenceGroup) -> Dict[int, int]:
+        return {}
+
+    def can_swap_in(self, seq_group: SequenceGroup) -> bool:
+        return True
+
+    def can_swap_out(self, seq_group: SequenceGroup) -> bool:
+        return True
+
+    def get_block_table(self, seq: Sequence) -> List[int]:
+        return []
+
+    def reset(self) -> None:
+        pass
+
+    def can_append_slot(self, seq_group: SequenceGroup) -> bool:
+        return True

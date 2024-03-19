@@ -4,7 +4,7 @@ from collections import deque
 from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
-from vllm.core.block_manager import AllocStatus, BlockSpaceManager
+from vllm.core.block_manager import AllocStatus, BlockSpaceManager, DummyBlockSpaceManager
 from vllm.core.policy import PolicyFactory
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -83,17 +83,23 @@ class Scheduler:
         # LoRAs. This should be improved in the future.
         self.lora_config = lora_config
 
-        self.prompt_limit = min(self.scheduler_config.max_model_len,
-                                self.scheduler_config.max_num_batched_tokens)
+        if self.scheduler_config.embedding_mode:
+            # Profile this value if necessary
+            self.prompt_limit = self.scheduler_config.max_num_batched_tokens
+        else:
+            self.prompt_limit = min(
+                self.scheduler_config.max_model_len,
+                self.scheduler_config.max_num_batched_tokens)
 
         # Instantiate the scheduling policy.
         self.policy = PolicyFactory.get_policy(policy_name="fcfs")
-        # Create the block space manager.
-        self.block_manager = BlockSpaceManager(
-            block_size=self.cache_config.block_size,
-            num_gpu_blocks=self.cache_config.num_gpu_blocks,
-            num_cpu_blocks=self.cache_config.num_cpu_blocks,
-            sliding_window=self.cache_config.sliding_window,
+        # Decide on the block manager class based on embedding mode
+        block_manager_class = DummyBlockSpaceManager if self.scheduler_config.embedding_mode else BlockSpaceManager
+        self.block_manager = block_manager_class(
+            block_size=cache_config.block_size,
+            num_gpu_blocks=cache_config.num_gpu_blocks,
+            num_cpu_blocks=cache_config.num_cpu_blocks,
+            sliding_window=cache_config.sliding_window,
             enable_caching=self.cache_config.enable_prefix_caching)
 
         # Sequence groups in the WAITING state.

@@ -58,6 +58,7 @@ class EngineArgs:
     image_input_shape: Optional[str] = None
     image_feature_size: Optional[int] = None
     scheduler_delay_factor: float = 0.0
+    embedding_mode: bool = False
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -343,6 +344,9 @@ class EngineArgs:
             default=EngineArgs.scheduler_delay_factor,
             help='Apply a delay (of delay factor multiplied by previous'
             'prompt latency) before scheduling next prompt.')
+        parser.add_argument("--embedding-mode",
+                            action="store_true",
+                            help="Enable embedding mode for the server")
         return parser
 
     @classmethod
@@ -365,7 +369,7 @@ class EngineArgs:
             self.dtype, self.seed, self.revision, self.code_revision,
             self.tokenizer_revision, self.max_model_len, self.quantization,
             self.enforce_eager, self.max_context_len_to_capture,
-            self.max_logprobs)
+            self.max_logprobs, self.embedding_mode)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
@@ -383,7 +387,8 @@ class EngineArgs:
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
                                            model_config.max_model_len,
-                                           self.scheduler_delay_factor)
+                                           self.scheduler_delay_factor,
+                                           model_config.embedding_mode)
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,
@@ -409,7 +414,7 @@ class EngineArgs:
             vision_language_config = None
 
         return (model_config, cache_config, parallel_config, scheduler_config,
-                device_config, lora_config, vision_language_config)
+                device_config, lora_config)
 
 
 @dataclass

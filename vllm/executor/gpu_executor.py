@@ -75,6 +75,20 @@ class GPUExecutor(ExecutorBase):
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """
+        # No need to init cache engine or use CUDA graph in embedding mode
+        if self.model_config.embedding_mode:
+            # Get the maximum number of tokens that can be allocated on GPU.
+            max_batch_size = self.driver_worker.profile_max_batched_tokens_for_embedding()
+
+            self.scheduler_config.max_num_batched_tokens = (
+                    max_batch_size * self.model_config.max_model_len *
+                    self.cache_config.gpu_memory_utilization)
+            logger.info(f"max_num_batched_tokens: "
+                        f"{self.scheduler_config.max_num_batched_tokens}"
+                        f"max_batch_size: {max_batch_size}")
+
+            return
+
         # Get the maximum number of blocks that can be allocated on GPU and CPU.
         num_gpu_blocks, num_cpu_blocks = (
             self.driver_worker.profile_num_available_blocks(
