@@ -12,8 +12,7 @@ from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (Logprob, PromptLogprobs, SampleLogprobs,
                            SamplerOutput, SequenceData, SequenceGroupOutput,
                            SequenceOutput)
-from vllm.model_executor.layers.triton_kernel.sample import (sample as
-                                                             sample_triton)
+from vllm.model_executor.ops.sample import (sample as sample_triton)
 from vllm.utils import is_neuron
 
 
