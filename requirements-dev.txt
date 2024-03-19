@@ -26,3 +26,6 @@ peft
 
 # Benchmarking
 aiohttp
+
+# Multimodal
+pillow
