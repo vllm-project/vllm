@@ -1,0 +1,117 @@
+INFO 03-19 20:16:10 llm_engine.py:67] Initializing an LLM engine (v0.3.3) with config: model='lmsys/vicuna-7b-v1.5', tokenizer='lmsys/vicuna-7b-v1.5', tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.float16, max_seq_len=4096, download_dir=None, load_format=auto, tensor_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=True, kv_cache_dtype=auto, device_config=cuda, seed=0)
+INFO 03-19 20:16:11 attention.py:66] flash_attn is not found. Using xformers backend.
+INFO 03-19 20:16:12 weight_utils.py:167] Using model weights format ['*.bin']
+INFO 03-19 20:16:19 model_runner.py:96] Loading model weights took 12.5523 GB
+	execute_model: tensor([[0, 0, 0,  ..., 0, 0, 0],
+        [0, 0, 0,  ..., 0, 0, 0],
+        [0, 0, 0,  ..., 0, 0, 0],
+        ...,
+        [0, 0, 0,  ..., 0, 0, 0],
+        [0, 0, 0,  ..., 0, 0, 0],
+        [0, 0, 0,  ..., 0, 0, 0]], device='cuda:0'), tensor([[ 0,  1,  2,  ..., 13, 14, 15],
+        [ 0,  1,  2,  ..., 13, 14, 15],
+        [ 0,  1,  2,  ..., 13, 14, 15],
+        ...,
+        [ 0,  1,  2,  ..., 13, 14, 15],
+        [ 0,  1,  2,  ..., 13, 14, 15],
+        [ 0,  1,  2,  ..., 13, 14, 15]], device='cuda:0')
+INFO 03-19 20:16:20 gpu_executor.py:99] # GPU blocks: 7428, # CPU blocks: 512
+max model len 4096
+	execute_model: tensor([[    1,  2266,   338,  ...,   363,   592, 29973]], device='cuda:0'), tensor([[   0,    1,    2,  ..., 4065, 4066, 4067]], device='cuda:0')
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4068]], device='cuda:0')
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4069]], device='cuda:0')
+	execute_model: tensor([[4013]], device='cuda:0'), tensor([[4070]], device='cuda:0')
+	execute_model: tensor([[5650]], device='cuda:0'), tensor([[4071]], device='cuda:0')
+	execute_model: tensor([[16612]], device='cuda:0'), tensor([[4072]], device='cuda:0')
+	execute_model: tensor([[278]], device='cuda:0'), tensor([[4073]], device='cuda:0')
+	execute_model: tensor([[349]], device='cuda:0'), tensor([[4074]], device='cuda:0')
+	execute_model: tensor([[1165]], device='cuda:0'), tensor([[4075]], device='cuda:0')
+	execute_model: tensor([[359]], device='cuda:0'), tensor([[4076]], device='cuda:0')
+	execute_model: tensor([[5687]], device='cuda:0'), tensor([[4077]], device='cuda:0')
+	execute_model: tensor([[363]], device='cuda:0'), tensor([[4078]], device='cuda:0')
+	execute_model: tensor([[3657]], device='cuda:0'), tensor([[4079]], device='cuda:0')
+	execute_model: tensor([[15387]], device='cuda:0'), tensor([[4080]], device='cuda:0')
+	execute_model: tensor([[1136]], device='cuda:0'), tensor([[4081]], device='cuda:0')
+	execute_model: tensor([[8841]], device='cuda:0'), tensor([[4082]], device='cuda:0')
+	execute_model: tensor([[297]], device='cuda:0'), tensor([[4083]], device='cuda:0')
+	execute_model: tensor([[263]], device='cuda:0'), tensor([[4084]], device='cuda:0')
+	execute_model: tensor([[13235]], device='cuda:0'), tensor([[4085]], device='cuda:0')
+	execute_model: tensor([[1788]], device='cuda:0'), tensor([[4086]], device='cuda:0')
+	execute_model: tensor([[29889]], device='cuda:0'), tensor([[4087]], device='cuda:0')
+	execute_model: tensor([[450]], device='cuda:0'), tensor([[4088]], device='cuda:0')
+	execute_model: tensor([[5687]], device='cuda:0'), tensor([[4089]], device='cuda:0')
+	execute_model: tensor([[3913]], device='cuda:0'), tensor([[4090]], device='cuda:0')
+	execute_model: tensor([[263]], device='cuda:0'), tensor([[4091]], device='cuda:0')
+	execute_model: tensor([[9551]], device='cuda:0'), tensor([[4092]], device='cuda:0')
+	execute_model: tensor([[261]], device='cuda:0'), tensor([[4093]], device='cuda:0')
+	execute_model: tensor([[29892]], device='cuda:0'), tensor([[4094]], device='cuda:0')
+	execute_model: tensor([[3544]], device='cuda:0'), tensor([[4095]], device='cuda:0')
+	execute_model: tensor([[943]], device='cuda:0'), tensor([[4096]], device='cuda:0')
+	execute_model: tensor([[29945]], device='cuda:0'), tensor([[4097]], device='cuda:0')
+	execute_model: tensor([[29876]], device='cuda:0'), tensor([[4098]], device='cuda:0')
+	execute_model: tensor([[28796]], device='cuda:0'), tensor([[4099]], device='cuda:0')
+	execute_model: tensor([[1177]], device='cuda:0'), tensor([[4100]], device='cuda:0')
+	execute_model: tensor([[3941]], device='cuda:0'), tensor([[4101]], device='cuda:0')
+	execute_model: tensor([[521]], device='cuda:0'), tensor([[4102]], device='cuda:0')
+	execute_model: tensor([[8724]], device='cuda:0'), tensor([[4103]], device='cuda:0')
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4104]], device='cuda:0')
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4105]], device='cuda:0')
+	execute_model: tensor([[294]], device='cuda:0'), tensor([[4106]], device='cuda:0')
+	execute_model: tensor([[29899]], device='cuda:0'), tensor([[4107]], device='cuda:0')
+	execute_model: tensor([[374]], device='cuda:0'), tensor([[4108]], device='cuda:0')
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4109]], device='cuda:0')
+	execute_model: tensor([[30010]], device='cuda:0'), tensor([[4110]], device='cuda:0')
+	execute_model: tensor([[1919]], device='cuda:0'), tensor([[4111]], device='cuda:0')
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4112]], device='cuda:0')
+	execute_model: tensor([[29894]], device='cuda:0'), tensor([[4113]], device='cuda:0')
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4114]], device='cuda:0')
+	execute_model: tensor([[525]], device='cuda:0'), tensor([[4115]], device='cuda:0')
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4116]], device='cuda:0')
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4117]], device='cuda:0')
+	execute_model: tensor([[10804]], device='cuda:0'), tensor([[4118]], device='cuda:0')
+	execute_model: tensor([[29878]], device='cuda:0'), tensor([[4119]], device='cuda:0')
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4120]], device='cuda:0')
+	execute_model: tensor([[29889]], device='cuda:0'), tensor([[4121]], device='cuda:0')
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4122]], device='cuda:0')
+	execute_model: tensor([[21047]], device='cuda:0'), tensor([[4123]], device='cuda:0')
+	execute_model: tensor([[29899]], device='cuda:0'), tensor([[4124]], device='cuda:0')
+	execute_model: tensor([[30488]], device='cuda:0'), tensor([[4125]], device='cuda:0')
+	execute_model: tensor([[2761]], device='cuda:0'), tensor([[4126]], device='cuda:0')
+	execute_model: tensor([[313]], device='cuda:0'), tensor([[4127]], device='cuda:0')
+	execute_model: tensor([[29950]], device='cuda:0'), tensor([[4128]], device='cuda:0')
+	execute_model: tensor([[25266]], device='cuda:0'), tensor([[4129]], device='cuda:0')
+	execute_model: tensor([[518]], device='cuda:0'), tensor([[4130]], device='cuda:0')
+	execute_model: tensor([[856]], device='cuda:0'), tensor([[4131]], device='cuda:0')
+	execute_model: tensor([[853]], device='cuda:0'), tensor([[4132]], device='cuda:0')
+	execute_model: tensor([[29887]], device='cuda:0'), tensor([[4133]], device='cuda:0')
+	execute_model: tensor([[1454]], device='cuda:0'), tensor([[4134]], device='cuda:0')
+	execute_model: tensor([[5972]], device='cuda:0'), tensor([[4135]], device='cuda:0')
+	execute_model: tensor([[29928]], device='cuda:0'), tensor([[4136]], device='cuda:0')
+	execute_model: tensor([[29889]], device='cuda:0'), tensor([[4137]], device='cuda:0')
+	execute_model: tensor([[29991]], device='cuda:0'), tensor([[4138]], device='cuda:0')
+	execute_model: tensor([[565]], device='cuda:0'), tensor([[4139]], device='cuda:0')
+	execute_model: tensor([[29892]], device='cuda:0'), tensor([[4140]], device='cuda:0')
+	execute_model: tensor([[3301]], device='cuda:0'), tensor([[4141]], device='cuda:0')
+	execute_model: tensor([[29889]], device='cuda:0'), tensor([[4142]], device='cuda:0')
+	execute_model: tensor([[2183]], device='cuda:0'), tensor([[4143]], device='cuda:0')
+	execute_model: tensor([[1494]], device='cuda:0'), tensor([[4144]], device='cuda:0')
+	execute_model: tensor([[1966]], device='cuda:0'), tensor([[4145]], device='cuda:0')
+	execute_model: tensor([[5859]], device='cuda:0'), tensor([[4146]], device='cuda:0')
+	execute_model: tensor([[6017]], device='cuda:0'), tensor([[4147]], device='cuda:0')
+	execute_model: tensor([[1188]], device='cuda:0'), tensor([[4148]], device='cuda:0')
+	execute_model: tensor([[313]], device='cuda:0'), tensor([[4149]], device='cuda:0')
+	execute_model: tensor([[23430]], device='cuda:0'), tensor([[4150]], device='cuda:0')
+
+OUTPUT: (83 tokens)
+
+
+This paper describes the Paxos algorithm for achieving consensus in a distributed system. The algorithm uses a proposer, acceptors5n ","INskie ch beyond
+
+as-ri
+’ ,
+v
+ '
+
+ transactionr
+.
+zeti-Љ control (H Independent [... Ungfor popularD.! if,AP. given following\\ék romlog ( adapted

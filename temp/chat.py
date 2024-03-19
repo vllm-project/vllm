@@ -56,7 +56,12 @@ def process_requests(engine: LLMEngine,
 def main():
     # context length 4096
     model = "lmsys/vicuna-7b-v1.5"
-    args = EngineArgs(model=model, enforce_eager=True, max_model_len=4096)
+    args = EngineArgs(
+        model=model,
+        enforce_eager=True,
+        max_model_len=4096,
+        block_size=16
+    )
 
     engine = LLMEngine.from_engine_args(args)
     print("max model len", engine.scheduler_config.max_model_len)
