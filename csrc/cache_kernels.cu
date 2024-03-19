@@ -12,6 +12,7 @@
 #include <cassert>
 #include <map>
 #include <vector>
+#include <iostream>
 
 #ifdef USE_ROCM
   #include <hip/hip_bf16.h>
@@ -241,6 +242,7 @@ void reshape_and_cache(
 
   int key_stride = key.stride(0);
   int value_stride = value.stride(0);
+
 
   dim3 grid(num_tokens);
   dim3 block(std::min(num_heads * head_size, 512));
