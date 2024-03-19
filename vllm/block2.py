@@ -8,6 +8,17 @@ _BLANK_TOKEN_ID = -1
 
 DEFAULT_LAST_ACCESSED_TIME = -1
 
+"""
+Missing pieces:
+- CoW
+- Compose NaiveBlock within prefix caching block
+- Separate out into files
+- Integrate into BlockSpaceManager
+    - CoW
+    - Swap
+    - append_slots logistics (who allocates)
+"""
+
 
 class Block(ABC):
 
