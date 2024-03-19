@@ -360,3 +360,29 @@ class CudaMemoryMeasurer:
 
         # Force garbage collection
         gc.collect()
+
+
+def pad_to_max_length(x: List[int], max_len: int, pad: int) -> List[int]:
+    assert len(x) <= max_len
+    return x + [pad] * (max_len - len(x))
+
+
+def make_tensor_with_pad(
+    x: List[List[int]],
+    max_len: int,
+    pad: int,
+    dtype: torch.dtype,
+    device: Optional[Union[str, torch.device]],
+) -> torch.Tensor:
+    padded_x = [pad_to_max_length(x_i, max_len, pad) for x_i in x]
+    return torch.tensor(padded_x, dtype=dtype, device=device)
+
+
+def async_tensor_h2d(
+    data: list,
+    dtype: torch.dtype,
+    target_device: Union[str, torch.device],
+    pin_memory: bool,
+) -> torch.Tensor:
+    t = torch.tensor(data, dtype=dtype, pin_memory=pin_memory, device="cpu")
+    return t.to(device=target_device, non_blocking=True)

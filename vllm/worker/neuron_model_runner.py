@@ -1,20 +1,15 @@
-import contextlib
-import time
-from typing import Dict, List, Optional, Tuple, Set, Union
+from typing import Dict, List, Optional, Tuple
 
-import numpy as np
 import torch
-import torch.nn as nn
 
 from vllm.config import (DeviceConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.logger import init_logger
-from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
+from vllm.model_executor import get_model, SamplingMetadata
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
-from vllm.lora.layers import LoRAMapping
-from vllm.lora.request import LoRARequest
-from vllm.utils import pin_memory_available
+from vllm.utils import (async_tensor_h2d, pin_memory_available,
+                        make_tensor_with_pad)
 
 logger = init_logger(__name__)
 
@@ -34,17 +29,12 @@ class NeuronModelRunner:
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
 
-        # model_config can be None in tests/samplers/test_sampler.py.
-        # FIXME(woosuk): This is a hack to make the tests work. Refactor this.
-        self.sliding_window = (model_config.get_sliding_window()
-                               if model_config is not None else None)
+        if model_config is not None and model_config.get_sliding_window():
+            raise ValueError("Sliding window is not supported on Neuron.")
         self.device_config = (device_config
                               if device_config is not None else DeviceConfig())
         self.device = self.device_config.device
-
         self.model = None
-        self.lora_manager = None
-
         self.pin_memory = pin_memory_available()
 
     def load_model(self) -> None:
@@ -56,8 +46,7 @@ class NeuronModelRunner:
     def _prepare_prompt(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, List[int], List[int],
-               List[int], List[int], Set[LoRARequest]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[int]]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
@@ -85,16 +74,16 @@ class NeuronModelRunner:
 
         max_prompt_len = max(prompt_lens)
         assert max_prompt_len > 0
-        input_tokens = _make_tensor_with_pad(input_tokens,
-                                             max_prompt_len,
-                                             pad=0,
-                                             dtype=torch.long,
-                                             device=self.device)
-        input_positions = _make_tensor_with_pad(input_positions,
-                                                max_prompt_len,
-                                                pad=0,
-                                                dtype=torch.long,
-                                                device=self.device)
+        input_tokens = make_tensor_with_pad(input_tokens,
+                                            max_prompt_len,
+                                            pad=0,
+                                            dtype=torch.long,
+                                            device=self.device)
+        input_positions = make_tensor_with_pad(input_positions,
+                                               max_prompt_len,
+                                               pad=0,
+                                               dtype=torch.long,
+                                               device=self.device)
         input_block_ids = torch.tensor(input_block_ids,
                                        dtype=torch.long,
                                        device=self.device)
@@ -104,8 +93,7 @@ class NeuronModelRunner:
     def _prepare_decode(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, List[int], List[int],
-               Set[LoRARequest]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
@@ -125,26 +113,23 @@ class NeuronModelRunner:
                 seq_len = seq_data.get_len()
                 position = seq_len - 1
                 input_positions.append([position])
-
-                context_len = seq_len if self.sliding_window is None else min(
-                    seq_len, self.sliding_window)
-                context_lens.append(context_len)
+                context_lens.append(seq_len)
 
                 assert seq_group_metadata.block_tables is not None
                 block_table = seq_group_metadata.block_tables[seq_id]
                 assert len(block_table) == 1
                 input_block_ids.append(block_table[0])
 
-        input_tokens = _make_tensor_with_pad(input_tokens,
-                                             max_len=1,
-                                             pad=0,
-                                             dtype=torch.long,
-                                             device=self.device)
-        input_positions = _make_tensor_with_pad(input_positions,
-                                                max_len=1,
-                                                pad=0,
-                                                dtype=torch.long,
-                                                device=self.device)
+        input_tokens = make_tensor_with_pad(input_tokens,
+                                            max_len=1,
+                                            pad=0,
+                                            dtype=torch.long,
+                                            device=self.device)
+        input_positions = make_tensor_with_pad(input_positions,
+                                               max_len=1,
+                                               pad=0,
+                                               dtype=torch.long,
+                                               device=self.device)
         context_lens = torch.tensor(context_lens,
                                     dtype=torch.int,
                                     device=self.device)
@@ -212,15 +197,15 @@ class NeuronModelRunner:
             if sampling_params.seed is not None:
                 generators.append(seq_group_metadata.state.generator)
 
-        selected_token_indices = _async_h2d(selected_token_indices,
-                                            dtype=torch.long,
-                                            target_device=self.device,
-                                            pin_memory=self.pin_memory)
+        selected_token_indices = async_tensor_h2d(selected_token_indices,
+                                                  dtype=torch.long,
+                                                  target_device=self.device,
+                                                  pin_memory=self.pin_memory)
         categorized_sample_indices = {
-            t: _async_h2d(seq_ids,
-                          dtype=torch.int,
-                          target_device=self.device,
-                          pin_memory=self.pin_memory)
+            t: async_tensor_h2d(seq_ids,
+                                dtype=torch.int,
+                                target_device=self.device,
+                                pin_memory=self.pin_memory)
             for t, seq_ids in categorized_sample_indices.items()
         }
 
@@ -241,8 +226,7 @@ class NeuronModelRunner:
     def prepare_input_tensors(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-    ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, SamplingMetadata,
-               Set[int], LoRAMapping]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, SamplingMetadata]:
         # NOTE: We assume that all sequences in the group are all prompts or
         # all decodes.
         is_prompt = seq_group_metadata_list[0].is_prompt
@@ -284,29 +268,3 @@ class NeuronModelRunner:
     @property
     def vocab_size(self) -> int:
         return self.model_config.get_vocab_size()
-
-
-def _pad_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
-    assert len(x) <= max_len
-    return x + [pad] * (max_len - len(x))
-
-
-def _make_tensor_with_pad(
-    x: List[List[int]],
-    max_len: int,
-    pad: int,
-    dtype: torch.dtype,
-    device: Optional[Union[str, torch.device]],
-) -> torch.Tensor:
-    padded_x = [_pad_to_max(x_i, max_len, pad) for x_i in x]
-    return torch.tensor(padded_x, dtype=dtype, device=device)
-
-
-def _async_h2d(
-    data: list,
-    dtype: torch.dtype,
-    target_device: Union[str, torch.device],
-    pin_memory: bool,
-) -> torch.Tensor:
-    t = torch.tensor(data, dtype=dtype, pin_memory=pin_memory, device="cpu")
-    return t.to(device=target_device, non_blocking=True)
