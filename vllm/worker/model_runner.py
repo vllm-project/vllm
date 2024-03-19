@@ -82,10 +82,6 @@ class ModelRunner:
         self.pin_memory = pin_memory_available()
         self.kv_cache_dtype = kv_cache_dtype
 
-        # Set enforce_eager to True for Neuron backend, to avoid capturing graph
-        if self.device_config.device_type == "neuron":
-            self.model_config.enforce_eager = True
-
     def load_model(self) -> None:
         with CudaMemoryMeasurer() as m:
             self.model = get_model(self.model_config,
