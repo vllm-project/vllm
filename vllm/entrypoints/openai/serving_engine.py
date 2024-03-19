@@ -72,7 +72,7 @@ class OpenAIServing:
         """Show available models. Right now we only have one model."""
         model_cards = [
             ModelCard(id=served_model_name,
-                      root=served_model_name,
+                      root=self.served_model_names[0],
                       permission=[ModelPermission()])
             for served_model_name in self.served_model_names
         ]
