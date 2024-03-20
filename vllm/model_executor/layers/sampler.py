@@ -447,9 +447,11 @@ def _sample(
     ]
     return sample_results
 
+
 def _get_ranks(x: torch.Tensor, indices: List[int]) -> torch.Tensor:
     vals = x[range(len(x)), indices]
     return (x > vals[:, None]).long().sum(1) + 1
+
 
 def _get_logprobs(
     logprobs: torch.Tensor,
@@ -534,7 +536,8 @@ def _get_logprobs(
                 }
                 if num_logprobs > 0:
                     prompt_logprobs_dict.update(
-                        zip(top_token_ids[sample_idx, :num_logprobs].tolist(),
+                        zip(
+                            top_token_ids[sample_idx, :num_logprobs].tolist(),
                             zip(
                                 top_logprobs[
                                     sample_idx, :num_logprobs].tolist(),

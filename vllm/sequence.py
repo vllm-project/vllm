@@ -20,6 +20,7 @@ class Logprob:
     rank: Optional[int] = None
     decoded_token: Optional[str] = None
 
+
 PromptLogprobs = List[Optional[Dict[int, Logprob]]]
 SampleLogprobs = List[Dict[int, Logprob]]
 
