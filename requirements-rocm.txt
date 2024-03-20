@@ -9,6 +9,7 @@ ray == 2.9.3
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
 tokenizers>=0.15.0
+tensorizer >= 2.8.1
 transformers >= 4.39.1  # Required for StarCoder2 & Llava.
 fastapi
 uvicorn[standard]
