@@ -5,10 +5,46 @@ from transformers import (AutoTokenizer, PreTrainedTokenizer,
 
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.utils import make_async, LRUCache
+from vllm.utils import make_async
 from vllm.transformers_utils.tokenizers import *
 
 logger = init_logger(__name__)
+
+
+def get_cached_tokenizer(
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
+) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
+    """Get tokenizer with cached properties.
+
+    This will patch the tokenizer object in place.
+
+    By default, transformers will recompute multiple tokenizer properties
+    each time they are called, leading to a significant slowdown. This
+    function caches these properties for faster access."""
+
+    tokenizer_all_special_ids = set(tokenizer.all_special_ids)
+    tokenizer_all_special_tokens_extended = (
+        tokenizer.all_special_tokens_extended)
+    tokenizer_all_special_tokens = set(tokenizer.all_special_tokens)
+
+    class CachedTokenizer(tokenizer.__class__):
+
+        @property
+        def all_special_ids(self):
+            return tokenizer_all_special_ids
+
+        @property
+        def all_special_tokens(self):
+            return tokenizer_all_special_tokens
+
+        @property
+        def all_special_tokens_extended(self):
+            return tokenizer_all_special_tokens_extended
+
+    CachedTokenizer.__name__ = f"Cached{tokenizer.__class__.__name__}"
+
+    tokenizer.__class__ = CachedTokenizer
+    return tokenizer
 
 
 def get_tokenizer(
@@ -64,7 +100,7 @@ def get_tokenizer(
         logger.warning(
             "Using a slow tokenizer. This might cause a significant "
             "slowdown. Consider using a fast tokenizer instead.")
-    return tokenizer
+    return get_cached_tokenizer(tokenizer)
 
 
 def get_lora_tokenizer(lora_request: LoRARequest, *args,
@@ -86,63 +122,6 @@ def get_lora_tokenizer(lora_request: LoRARequest, *args,
 
 
 get_lora_tokenizer_async = make_async(get_lora_tokenizer)
-
-
-class TokenizerGroup:
-    """A group of tokenizers that can be used for LoRA adapters."""
-
-    def __init__(self, tokenizer_id: str, enable_lora: bool, max_num_seqs: int,
-                 max_input_length: Optional[int], **tokenizer_config):
-        self.tokenizer_id = tokenizer_id
-        self.tokenizer_config = tokenizer_config
-        self.enable_lora = enable_lora
-        self.max_input_length = max_input_length
-        self.tokenizer = get_tokenizer(self.tokenizer_id, **tokenizer_config)
-        if enable_lora:
-            self.lora_tokenizers = LRUCache(capacity=max_num_seqs)
-        else:
-            self.lora_tokenizers = None
-
-    def encode(self,
-               prompt: str,
-               request_id: Optional[str] = None,
-               lora_request: Optional[LoRARequest] = None) -> List[int]:
-        tokenizer = self.get_lora_tokenizer(lora_request)
-        return tokenizer.encode(prompt)
-
-    async def encode_async(
-            self,
-            prompt: str,
-            request_id: Optional[str] = None,
-            lora_request: Optional[LoRARequest] = None) -> List[int]:
-        tokenizer = await self.get_lora_tokenizer_async(lora_request)
-        return tokenizer.encode(prompt)
-
-    def get_lora_tokenizer(
-            self,
-            lora_request: Optional[LoRARequest]) -> "PreTrainedTokenizer":
-        if not lora_request or not self.enable_lora:
-            return self.tokenizer
-        if lora_request.lora_int_id not in self.lora_tokenizers:
-            tokenizer = (get_lora_tokenizer(
-                lora_request, **self.tokenizer_config) or self.tokenizer)
-            self.lora_tokenizers.put(lora_request.lora_int_id, tokenizer)
-            return tokenizer
-        else:
-            return self.lora_tokenizers.get(lora_request.lora_int_id)
-
-    async def get_lora_tokenizer_async(
-            self,
-            lora_request: Optional[LoRARequest]) -> "PreTrainedTokenizer":
-        if not lora_request or not self.enable_lora:
-            return self.tokenizer
-        if lora_request.lora_int_id not in self.lora_tokenizers:
-            tokenizer = (await get_lora_tokenizer_async(
-                lora_request, **self.tokenizer_config) or self.tokenizer)
-            self.lora_tokenizers.put(lora_request.lora_int_id, tokenizer)
-            return tokenizer
-        else:
-            return self.lora_tokenizers.get(lora_request.lora_int_id)
 
 
 def _convert_tokens_to_string_with_added_encoders(

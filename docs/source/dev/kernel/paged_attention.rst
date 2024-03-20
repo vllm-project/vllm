@@ -447,7 +447,7 @@ Value
    a whole block of value tokens. And each ``accs`` in each thread
    contains 8 elements that accumulated at 8 different head positions.
    For the thread 0, the ``accs`` variable will have 8 elements, which
-   are 0th, 16th … 112th elements of a value head that are accumulated
+   are 0th, 32th … 224th elements of a value head that are accumulated
    from all assigned 8 tokens.
 
 LV
