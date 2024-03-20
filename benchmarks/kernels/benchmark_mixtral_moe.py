@@ -2,12 +2,12 @@ import json
 import os
 import sys
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-
-from vllm.model_executor.layers.fused_moe import fused_moe
+from vllm.model_executor.layers.fused_moe import fused_moe, get_config_file_name
 import torch
 import torch.nn.functional as F
 import triton
+
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 
 def main():
@@ -64,7 +64,7 @@ def run_grid(bs, method):
         print(f'{tp_size=} {bs=}')
         print(f'{config}')
         # warmup
-        print(f'warming up')
+        print('warming up')
         try:
             for _ in range(num_warmup_trials):
                 run_timing(
@@ -82,7 +82,7 @@ def run_grid(bs, method):
             continue
 
         # trial
-        print(f'benchmarking')
+        print('benchmarking')
         for _ in range(num_trials):
             kernel_dur_ms = run_timing(
                 num_calls=num_calls,
@@ -103,17 +103,25 @@ def run_grid(bs, method):
                 best_config = config
                 best_time_us = kernel_dur_us
 
-            print(
-                f'{kernel_dur_us=:.1f} {model_dur_ms=:.1f} {bs=} {tp_size=} {top_k=} {num_total_experts=} {d_model=} {model_intermediate_size=} {num_layers=}'
-            )
+            print(f'{kernel_dur_us=:.1f} {model_dur_ms=:.1f}'
+                  f' {bs=} {tp_size=} {top_k=} {num_total_experts=} '
+                  f'{d_model=} {model_intermediate_size=} {num_layers=}')
 
     print("best_time_us", best_time_us)
     print("best_config", best_config)
 
-    filename = "/tmp/config.jsonl"
+    # holds Dict[str, Dict[str, int]]
+    filename = get_config_file_name(num_total_experts,
+                                    model_intermediate_size // tp_size)
     print(f"writing config to file {filename}")
-    with open(filename, "a") as f:
-        f.write(json.dumps({str(bs): best_config}) + "\n")
+    existing_content = {}
+    if os.path.exists(filename):
+        with open(filename, "r") as f:
+            existing_content = json.load(f)
+    existing_content[str(bs)] = best_config
+    with open(filename, "w") as f:
+        json.dump(existing_content, f, indent=4)
+        f.write("\n")
 
 
 def run_timing(num_calls: int, bs: int, d_model: int, num_total_experts: int,

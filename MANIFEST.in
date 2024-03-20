@@ -1,4 +1,6 @@
 include LICENSE
 include requirements.txt
+include CMakeLists.txt
 
+recursive-include cmake *
 recursive-include csrc *
