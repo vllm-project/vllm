@@ -508,9 +508,6 @@ def _get_logprobs(
         batched_logprobs_query_seq_indices,
         batched_logprobs_query_token_indices
     ]]
-    batched_ranks_query_result = _get_ranks(
-        logprobs[batched_logprobs_query_seq_indices],
-        batched_logprobs_query_token_indices)
 
     # Batched query for logprobs of topk tokens
     if largest_num_logprobs > 0:
@@ -523,6 +520,10 @@ def _get_logprobs(
         top_logprobs, top_token_ids = None, None
 
     batched_logprobs_query_result = batched_logprobs_query_result.cpu()
+
+    batched_ranks_query_result = _get_ranks(
+        logprobs[batched_logprobs_query_seq_indices],
+        batched_logprobs_query_token_indices)
 
     # Gather results
     result_prompt_logprobs: List[Optional[PromptLogprobs]] = []
