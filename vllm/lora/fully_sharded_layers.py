@@ -2,8 +2,6 @@
 from typing import TYPE_CHECKING, List, Optional
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from transformers import PretrainedConfig
 
 from vllm.config import LoRAConfig
@@ -18,7 +16,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.utils import split_tensor_along_last_dim, divide
+from vllm.model_executor.parallel_utils.utils import (
+    split_tensor_along_last_dim, divide)
 
 from vllm.lora.layers import BaseLayerWithLoRA
 
@@ -426,7 +425,8 @@ class QKVParallelLinearWithShardedLora(ColumnParallelLinearWithShardedLoRA):
                         lora_b[2].T, non_blocking=True)
 
         for lora_ in lora_a:
-            if lora_ is None: return
+            if lora_ is None:
+                return
 
         self.shard_size = [self.lora_a_stacked[i].shape[2] for i in range(3)]
         self.start_idx = [self.tp_rank * self.shard_size[i] for i in range(3)]
@@ -495,7 +495,8 @@ class RowParallelLinearWithShardedLoRA(BaseLayerWithLoRA):
             device=self.base_layer.weight.device,
         )
 
-        # As in S-LoRA, column parallel for lora_b. Needs an all_reduce beforehand
+        # As in S-LoRA, column parallel for lora_b.
+        # Needs an all_reduce beforehand
         tp_size = get_tensor_model_parallel_world_size()
         lora_b_output_size_per_partition = divide(
             self.base_layer.weight.shape[0], tp_size)
@@ -569,9 +570,11 @@ class RowParallelLinearWithShardedLoRA(BaseLayerWithLoRA):
              self.indices[:self.indices_len[0]], 0, 1.0)
         buffer = tensor_model_parallel_all_reduce(buffer)
 
-        # following S-LoRA, allows the fusing of all_gather and all_reduce by adding the column partitioned lora output to a slice of output tensor. All that remains is a standard
-        # all_reduce. User should be aware though that the output is not the same as a normal row_parallel, it should be reduced before being used
-        # col parallel
+        # following S-LoRA, allows the fusing of all_gather and all_reduce
+        # by adding the column partitioned lora output to a slice of output
+        # tensor. All that remains is a standard all_reduce. User should
+        # be aware though that the output is not the same as a normal
+        # row_parallel, it should be reduced before being used col parallel
         shard_size = self.lora_b_stacked.shape[2]
         start_idx = self.tp_rank * shard_size
         dispatch_bgmv_low_level(output, buffer, self.lora_b_stacked,

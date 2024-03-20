@@ -1,7 +1,6 @@
 import torch
 import contextlib
 import gc
-import tempfile
 import ray
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 import os
@@ -9,36 +8,31 @@ import socket
 from collections import defaultdict
 import copy
 
-import multiprocessing as mp
+from vllm.engine.ray_utils import RayWorkerVllm, initialize_ray_cluster
 
-from vllm.engine.ray_utils import RayWorkerVllm, initialize_ray_cluster, ray
-
-from vllm.lora.models import LoRALayerWeights, convert_mapping
-from tests.lora.test_layers import test_linear_parallel, test_column_parallel_packed, get_random_id_to_index, create_random_inputs
+from vllm.lora.models import convert_mapping
+from tests.lora.test_layers import get_random_id_to_index, create_random_inputs
 from vllm.lora.fully_sharded_layers import *
 from vllm.model_executor.parallel_utils.parallel_state import (
-    destroy_model_parallel, initialize_model_parallel)
-from vllm import EngineArgs, LLMEngine, SamplingParams, RequestOutput
+    destroy_model_parallel)
+from vllm import EngineArgs
 
 from vllm.model_executor.parallel_utils.parallel_state import (
     ensure_model_parallel_initialized)
-from vllm.model_executor.parallel_utils.communication_op import (
-    broadcast, broadcast_tensor_dict)
+from vllm.model_executor.parallel_utils.communication_op import (broadcast)
 from vllm.lora.fully_sharded_layers import *
 
-from vllm.lora.layers import LoRAMapping, ColumnParallelLinearWithLoRA, RowParallelLinearWithLoRA, MergedColumnParallelLinearWithLoRA, QKVParallelLinearWithLora
+from vllm.lora.layers import (LoRAMapping, ColumnParallelLinearWithLoRA,
+                              RowParallelLinearWithLoRA,
+                              MergedColumnParallelLinearWithLoRA,
+                              QKVParallelLinearWithLora)
 
 from vllm.config import LoRAConfig
-from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                RowParallelLinear,
-                                               QKVParallelLinear,
-                                               UnquantizedLinearMethod)
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding, ParallelLMHead
+                                               QKVParallelLinear)
 from vllm.model_executor.utils import set_random_seed
-
-from tests.lora.utils import DummyLoRAManager
 
 TOLERANCES = {
     torch.float16: (5e-3, 5e-3),
@@ -124,7 +118,6 @@ class Worker:
 
         linear.weight.data = broadcast(linear.weight.data, src=0)
 
-        @dataclass
         class FakeConfig:
             hidden_size = 4096
             num_key_value_heads = 32
@@ -172,7 +165,8 @@ class Worker:
                                     dtype=dtype,
                                     device=device) * HIGH + LOW
             else:
-                out_size = lora_linear.q_proj_shard_size if i == 0 else lora_linear.kv_proj_shard_size
+                out_size = lora_linear.q_proj_shard_size if i == 0 else \
+                           lora_linear.kv_proj_shard_size
                 out_size *= get_tensor_model_parallel_world_size()
                 lora_b = torch.rand((self.lora_config.max_lora_rank, out_size),
                                     dtype=dtype,
@@ -181,7 +175,6 @@ class Worker:
             lora_a = broadcast(lora_a, src=0)
             lora_b = broadcast(lora_b, src=0)
             loras.append((lora_a, lora_b))
-        '''once working, test with more actual random loras, currently using only the one above'''
         for lora_idx in range(self.lora_config.max_loras):
             lora_linear.set_lora(lora_idx, [lora[0] for lora in loras],
                                  [lora[1] for lora in loras], None)
@@ -190,11 +183,14 @@ class Worker:
         inputs = torch.cat(inputs)
         inputs = broadcast(inputs, src=0)
 
-        # for better comparison, keep this the same as the dtype used to compute the expected result
+        # for better comparison, keep this the same as the dtype
+        # used to compute the expected result
         lora_result = lora_linear(inputs)[0]
 
-        # the lora and the test run the same linear layer, exclude this from the testing.
-        # Also, running this batched vs per example has different results, so it introduces unnecessary uncertainty
+        # the lora and the test run the same linear layer,
+        # exclude this from the testing.
+        # Also, running this batched vs per example has different results,
+        # so it introduces unnecessary uncertainty
         linear_result = linear(inputs)[0]
         lora_result -= linear_result
         expected_results = []
@@ -207,8 +203,12 @@ class Worker:
                 out_size = loras[r][1].shape[1] // world_size
                 lora_a = loras[r][0]
                 lora_b = loras[r][1][:, out_size * rank:out_size * (rank + 1)]
-                # on my gpu's, this computation in fp16 leads to diff results on each. Off by exactly 0.0625 or 0.125. fp32 removes those differences.
-                # Inherently less comparable to punica, but, better than having this issue
+                # on my gpu's, this computation in fp16 leads to
+                # diff results on each.
+                # Off by exactly 0.0625 or 0.125.
+                # fp32 removes those differences.
+                # Inherently less comparable to punica, but,
+                # better than having this issue
                 result = (input_.to(dtype=torch.float32) @ lora_a.to(
                     dtype=torch.float32)) @ lora_b.to(dtype=torch.float32)
                 sub_result.append(result)
@@ -294,7 +294,6 @@ class Worker:
 
         lora_a = broadcast(lora_a, src=0)
         lora_b = broadcast(lora_b, src=0)
-        '''once working, test with more actual random loras, currently using only the one above'''
         for lora_idx in range(self.lora_config.max_loras):
             shard = 4096 // get_tensor_model_parallel_world_size()
             start, end = shard * get_tensor_model_parallel_rank(), shard * (
@@ -317,16 +316,12 @@ class Worker:
 
         lora_result = lora_linear(inputs)[0]
 
-        # the lora and the test run the same linear layer, exclude this from the testing.
-        # Also, running this batched vs per example has different results, so it introduces unnecessary uncertainty
         linear_result = linear(inputs)[0]
         lora_result -= linear_result
         expected_results = []
         for input_, lora_idx in zip(inputs, mapping_info[0]):
             input_ = input_.view(-1, input_.shape[-1])
             lora = loras[lora_idx]
-            # on my gpu's, this computation in fp16 leads to diff results on each. Off by exactly 0.0625 or 0.125. fp32 removes those differences.
-            # Inherently less comparable to punica, but, better than having this issue
             result = (input_.to(dtype=torch.float32) @ lora[0].to(
                 dtype=torch.float32)) @ lora[1].to(dtype=torch.float32)
             expected_results.append(result)
@@ -425,10 +420,11 @@ class Worker:
         lora_linear.set_mapping(*mapping_info, )
         times = self.profile_linear(lora_linear, inputs, steps)
         if get_tensor_model_parallel_rank() == 0:
-            print(
-                f'num loras, inputs per lora, rank [{num_loras}, {inputs_per_lora}, {self.lora_config.max_lora_rank}], \
-                    fully sharded col: {sum(fs_times)/steps} ms | partially sharded col: {sum(times)/steps} ms'
-            )
+            print(f'num loras, inputs per lora, rank [{num_loras}, ' +
+                  f'{inputs_per_lora}, ' +
+                  f'{self.lora_config.max_lora_rank}], ' +
+                  f'fully sharded col: {sum(fs_times)/steps} ms | ' +
+                  f'partially sharded col: {sum(times)/steps} ms')
 
         ############     TEST FULLY SHARDED ROW     ############
         linear, lora_linear = self.create_random_linear_parallel_layer(
@@ -441,10 +437,11 @@ class Worker:
         lora_linear.set_mapping(*mapping_info, )
         times = self.profile_linear(lora_linear, inputs, steps)
         if get_tensor_model_parallel_rank() == 0:
-            print(
-                f'num loras, inputs per lora, rank [{num_loras}, {inputs_per_lora}, {self.lora_config.max_lora_rank}], \
-                    fully sharded row: {sum(fs_times)/steps} ms | partially sharded row: {sum(times)/steps} ms'
-            )
+            print(f'num loras, inputs per lora, rank [{num_loras}, ' +
+                  f'{inputs_per_lora}, ' +
+                  f'{self.lora_config.max_lora_rank}], ' +
+                  f'fully sharded row: {sum(fs_times)/steps} ms | ' +
+                  f'partially sharded row: {sum(times)/steps} ms')
 
         ############     TEST FULLY SHARDED MERGED COL     ############
         linear, lora_linear = self.create_column_parallel_packed_layer(
@@ -460,10 +457,11 @@ class Worker:
         times = self.profile_linear(lora_linear, inputs, steps)
 
         if get_tensor_model_parallel_rank() == 0:
-            print(
-                f'num loras, inputs per lora, rank [{num_loras}, {inputs_per_lora}, {self.lora_config.max_lora_rank}], \
-                    fully sharded merged col: {sum(fs_times)/steps} ms | partially sharded merged col: {sum(times)/steps} ms'
-            )
+            print(f'num loras, inputs per lora, rank [{num_loras}, ' +
+                  f'{inputs_per_lora}, ' +
+                  f'{self.lora_config.max_lora_rank}], ' +
+                  f'fully sharded merged col: {sum(fs_times)/steps} ms | ' +
+                  f'partially sharded merged col: {sum(times)/steps} ms')
 
         ############     TEST FULLY SHARDED QKV     ############
         linear, lora_linear = self.create_column_parallel_packed_layer(
@@ -478,10 +476,11 @@ class Worker:
         lora_linear.set_mapping(*mapping_info, )
         times = self.profile_linear(lora_linear, inputs, steps)
         if get_tensor_model_parallel_rank() == 0:
-            print(
-                f'num loras, inputs per lora, rank [{num_loras}, {inputs_per_lora}, {self.lora_config.max_lora_rank}], \
-                    fully sharded qkv: {sum(fs_times)/steps} ms | partially sharded qkv: {sum(times)/steps} ms'
-            )
+            print(f'num loras, inputs per lora, rank [{num_loras}, ' +
+                  f'{inputs_per_lora}, ' +
+                  f'{self.lora_config.max_lora_rank}], ' +
+                  f'fully sharded qkv: {sum(fs_times)/steps} ms | ' +
+                  f'partially sharded qkv: {sum(times)/steps} ms')
 
 
 def init_distributed_environment(
@@ -755,7 +754,7 @@ def main():
     # test_sharded_layers(rank=32, tp_size=2, max_loras=8, repeats=2)
 
     # test_sharded_layers(rank=8, tp_size=2, max_loras=16, speed=True)
-    # test_sharded_layers(rank=16, tp_size=2, max_loras=16, speed=True)
+    test_sharded_layers(rank=16, tp_size=2, max_loras=16, speed=True)
     # test_sharded_layers(rank=32, tp_size=2, max_loras=16, speed=True)
     # test_sharded_layers(rank=64, tp_size=2, max_loras=16, speed=True)
 
