@@ -191,7 +191,7 @@ def broadcast_tensor_dict(
             if isinstance(value, TensorMetadata):
                 tensor = torch.empty(value.size,
                                      dtype=value.dtype,
-                                     device="xpu")
+                                     device="xpu") # FIXME
                 async_handle = torch.distributed.broadcast(tensor,
                                                            src=src,
                                                            async_op=True,

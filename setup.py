@@ -109,9 +109,7 @@ class cmake_build_ext(build_ext):
         ]
 
         verbose = bool(int(os.getenv('VERBOSE', '0')))
-        if _is_xpu():
-            cmake_args += ['-DBUILD_XPU_OPS=ON']
-            
+
         if verbose:
             cmake_args += ['-DCMAKE_VERBOSE_MAKEFILE=ON']
 
@@ -196,10 +194,6 @@ def _is_neuron() -> bool:
     except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
         torch_neuronx_installed = False
     return torch_neuronx_installed
-
-
-def _is_cuda() -> bool:
-    return (torch.version.cuda is not None) and not _is_neuron() and not _is_xpu()
 
 
 def _install_punica() -> bool:

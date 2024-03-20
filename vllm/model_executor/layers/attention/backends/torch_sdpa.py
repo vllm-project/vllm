@@ -82,7 +82,7 @@ class TorchSDPABackend:
                         att_bias = _make_alibi_bias(self.alibi_slopes, self.num_kv_heads, batch_size, seq_len, query.dtype)
                     elif self.sliding_window is not None:
                         att_bias = _make_sliding_window_bias(seq_len, self.sliding_window, query.dtype)
-                    input_metadata.attn_bias = att_bias
+                    input_metadata.attn_bias = att_bias.to(query.device)
 
                 query = query.unflatten(0, (batch_size, seq_len)) 
                 key = key.unflatten(0, (batch_size, seq_len))
