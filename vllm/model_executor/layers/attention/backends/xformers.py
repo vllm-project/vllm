@@ -10,10 +10,25 @@ from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention.ops.paged_attn import (
     PagedAttentionImpl)
-from vllm.utils import is_hip, _get_aligned_size
+from vllm.utils import is_hip
 
 
 class XFormersBackend:
+    """
+    If the input tensors contain prompt tokens, the layout is as follows:
+    |<--------------- num_prompt_tokens -------------->|	
+    |<--prompt_0-->|<--prompt_1-->|...|<--prompt_N-1-->|
+
+    Otherwise, the layout is as follows:	
+    |<------------------ num_generation_tokens (M) ----------------->|	
+    |<--generation_0-->|..........|<--generation_M-1-->|<--padding-->|
+
+    Generation tokens can contain padding when cuda-graph is used.
+    Currently, prompt tokens don't contain any padding.
+
+    The prompts might have different lengths, while the generation tokens
+    always have length 1.
+    """
 
     def __init__(
         self,
@@ -81,7 +96,7 @@ class XFormersBackend:
 
         if input_metadata.is_prompt:
             # Prompt run.
-            # key_cache and value_cache is None when it is a profiling run.
+            # key_cache and value_cache are None when it is a profiling run.
             # block tables are empty if the prompt has never been computed.
             if (key_cache is None or value_cache is None
                     or input_metadata.block_tables.numel() == 0):
@@ -104,22 +119,31 @@ class XFormersBackend:
                                                   value.shape[-1])
 
                 if self.use_ref_attention:
-                    output = _ref_masked_attention(
-                        query,
-                        key,
-                        value,
-                        self.num_heads,
-                        self.num_kv_heads,
-                        self.head_size,
-                        self.scale,
-                    )
+                    print("ref attention used.")
+                    output = torch.empty_like(query)
+                    start = 0
+                    for _, prompt_len in enumerate(input_metadata.prompt_lens):
+                        end = start + prompt_len
+                        out = _ref_masked_attention(
+                            query[None, start:end],
+                            key[None, start:end],
+                            value[None, start:end],
+                            self.num_heads,
+                            self.num_kv_heads,
+                            self.head_size,
+                            self.scale,
+                        )
+                        # TODO(woosuk): Unnecessary copy. Optimize.
+                        output[start:end].copy_(out)
+                        start += prompt_len
+
                     # Using view got RuntimeError: view size is not compatible
                     # with input tensor's size and stride (at least one
                     # dimension spans across two contiguous subspaces).
                     # Use reshape instead.
                     return output.reshape(num_tokens, hidden_size)
 
-                output = self._multi_query_kv_attention(
+                output = self._run_memory_efficient_xformer_forward(
                     query, key, value, input_metadata)
             else:
                 # prefix-enabled attention
@@ -147,7 +171,7 @@ class XFormersBackend:
         # Reshape the output tensor.
         return output.view(-1, self.num_heads * self.head_size)
 
-    def _multi_query_kv_attention(
+    def _run_memory_efficient_xformer_forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
@@ -240,7 +264,7 @@ def _make_alibi_bias(
         # element.
         bias = bias[None, :] - bias[:, None]
 
-        padded_len = _get_aligned_size(prompt_len, 8)
+        padded_len = (prompt_len + 7) // 8 * 8
         num_heads = alibi_slopes.shape[0]
         bias = torch.empty(
             1,  # batch size
@@ -278,7 +302,6 @@ def _ref_masked_attention(
     query = query.view(-1, num_heads, head_size)
     key = key.view(-1, num_kv_heads, head_size)
     value = value.view(-1, num_kv_heads, head_size)
-
     seq_len, _, _ = query.shape
     attn_mask = torch.triu(torch.ones(seq_len,
                                       seq_len,
