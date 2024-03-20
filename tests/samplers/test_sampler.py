@@ -195,6 +195,152 @@ def test_sampler_all_beam(seed: int, device: str):
     del model_runner
 
 
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_sampler_min_tokens_penalty_cases(device: str):
+    torch.set_default_device(device)
+
+    eos_token_id = 0
+    stop_token_ids = [42, 99,
+                      eos_token_id]  # include eos to test handling duplication
+
+    def create_sampling_params(min_tokens, stop_token_ids=None):
+        sampling_params = SamplingParams(
+            min_tokens=min_tokens,
+            stop_token_ids=stop_token_ids,
+        )
+        sampling_params.eos_token_id = eos_token_id
+        return sampling_params
+
+    def create_sequence_data(num_input=3, num_generated=0):
+        seq_data = SequenceData(list(range(1, num_input + 1)))
+        if num_generated > 0:
+            seq_data.output_token_ids = list(range(1, num_generated + 1))
+        return seq_data
+
+    test_cases = [
+        # prompt without penalization
+        {
+            "expected_penalization": [False],
+            "seq_group_metadata_list": [
+                SequenceGroupMetadata(
+                    request_id="test_1",
+                    is_prompt=True,
+                    seq_data={
+                        0: create_sequence_data(),
+                    },
+                    sampling_params=create_sampling_params(0),
+                    block_tables={0: [1]},
+                ),
+            ]
+        },
+        # prompt with penalization
+        {
+            "expected_penalization": [True],
+            "seq_group_metadata_list": [
+                SequenceGroupMetadata(
+                    request_id="test_1",
+                    is_prompt=True,
+                    seq_data={
+                        0: create_sequence_data(),
+                    },
+                    sampling_params=create_sampling_params(1),
+                    block_tables={0: [1]},
+                ),
+            ]
+        },
+        # stop penalizing after min_tokens generated
+        {
+            "expected_penalization": [False],
+            "seq_group_metadata_list": [
+                SequenceGroupMetadata(
+                    request_id="test_1",
+                    is_prompt=False,
+                    seq_data={
+                        0: create_sequence_data(num_generated=1),
+                    },
+                    sampling_params=create_sampling_params(1),
+                    block_tables={0: [1]},
+                )
+            ]
+        },
+        # simple combo of sequence groups with stop_token_ids
+        {
+            "expected_penalization": [True, False, False],
+            "stop_token_ids":
+            stop_token_ids,
+            "seq_group_metadata_list": [
+                SequenceGroupMetadata(
+                    request_id="test_1",
+                    is_prompt=False,
+                    seq_data={
+                        0: create_sequence_data(num_generated=1),
+                        1: create_sequence_data(num_generated=100),
+                    },
+                    sampling_params=create_sampling_params(
+                        2, stop_token_ids=stop_token_ids),
+                    block_tables={0: [1]},
+                ),
+                SequenceGroupMetadata(
+                    request_id="test_2",
+                    is_prompt=True,
+                    seq_data={
+                        0: create_sequence_data(),
+                    },
+                    sampling_params=create_sampling_params(
+                        0, stop_token_ids=stop_token_ids),
+                    block_tables={0: [1]},
+                )
+            ]
+        }
+    ]
+
+    def run_test_case(*,
+                      expected_penalization=None,
+                      seq_group_metadata_list=None,
+                      stop_token_ids=None):
+        assert expected_penalization, "Invalid test case"
+        assert seq_group_metadata_list, "Invalid test case"
+
+        batch_size = sum(len(sgm.seq_data) for sgm in seq_group_metadata_list)
+        prompt_lens = [
+            sgm.seq_data[0].get_len() for sgm in seq_group_metadata_list
+        ]
+
+        input_tensor, logits, sampler, model_runner = _prepare_test(batch_size)
+
+        sampling_metadata = model_runner._prepare_sample(
+            seq_group_metadata_list,
+            prompt_lens=prompt_lens,
+            subquery_lens=prompt_lens)
+
+        # the logits tensor is modified in-place in the sampler
+        _ = sampler(embedding=None,
+                    hidden_states=input_tensor,
+                    sampling_metadata=sampling_metadata)
+
+        tokens_to_check = [eos_token_id]
+        if stop_token_ids:
+            tokens_to_check.extend(stop_token_ids)
+        tokens_to_check = set(tokens_to_check)
+
+        for logits_idx, do_penalize in enumerate(expected_penalization):
+            if do_penalize:
+                for token_id in tokens_to_check:
+                    assert logits[logits_idx, token_id] == -float('inf'), f"Expected token {token_id} for sequence {logits_idx} to be penalized"
+                # no other tokens should be set to -inf
+                assert torch.count_nonzero(logits[logits_idx] == -float('inf')
+                                           ) == len(tokens_to_check), f"Expected only {len(tokens_to_check)} to be penalized"
+            else:
+                # no tokens should be set to -inf
+                assert torch.count_nonzero(
+                    logits[logits_idx] == -float('inf')) == 0, f"No tokens should have been penalized"
+
+        del model_runner
+
+    for test_case in test_cases:
+        run_test_case(**test_case)
+
+
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_sampler_mixed(seed: int, device: str):
