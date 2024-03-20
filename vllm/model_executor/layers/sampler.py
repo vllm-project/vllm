@@ -449,6 +449,19 @@ def _sample(
 
 
 def _get_ranks(x: torch.Tensor, indices: List[int]) -> torch.Tensor:
+    """
+    This function calculates the ranks of the chosen tokens in a logprob tensor.
+
+    Args:
+        x (torch.Tensor): 2D logprob tensor of shape (N, M)
+                        where N is the no. of tokens and M is the vocab dim.
+        indices (List[int]): List of chosen token indices.
+
+    Returns:
+        torch.Tensor: 1D tensor of shape (N,) where N is the no. of tokens.
+                    Each element in the returned tensor represents the rank 
+                    of the chosen token in the input logprob tensor.
+    """
     vals = x[range(len(x)), indices]
     return (x > vals[:, None]).long().sum(1) + 1
 
