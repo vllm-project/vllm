@@ -1,6 +1,7 @@
 [build-system]
 # Should be mirrored in requirements-build.txt
 requires = [
+    "cmake>=3.21",
     "ninja",
     "packaging",
     "setuptools >= 49.4.0",
@@ -8,6 +9,10 @@ requires = [
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+# Allow lines to be as long as 80.
+line-length = 80
 
 [tool.ruff.lint]
 select = [
@@ -29,10 +34,6 @@ ignore = [
     "F405", "F403",
     # lambda expression assignment
     "E731",
-    # line too long, handled by black formatting
-    "E501",
-    # .strip() with multi-character strings
-    "B005",
     # Loop control variable not used within loop body
     "B007",
 ]
