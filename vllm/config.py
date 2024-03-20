@@ -535,7 +535,12 @@ class SchedulerConfig:
             iteration.
         max_model_len: Maximum length of a sequence (including prompt
             and generated text).
-        max_paddings: Maximum number of paddings to be added to a batch.
+        max_chunked_prefill_len: The maximum length of tokens for prefill
+            requests. Longer requests will be chunked into multiple chunks.
+            -1 means no chunking (disabled). This features is only supported
+            for flash style attention.
+        max_num_prompt_seqs: The maximum number of prompt sequences that can be
+            processed in a single iteration.
     """
 
     def __init__(
@@ -543,7 +548,8 @@ class SchedulerConfig:
         max_num_batched_tokens: Optional[int],
         max_num_seqs: int,
         max_model_len: int,
-        max_paddings: int,
+        max_chunked_prefill_len: int = -1,
+        max_num_prompt_seqs: int = 1024,
     ) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
@@ -553,11 +559,14 @@ class SchedulerConfig:
             self.max_num_batched_tokens = max(max_model_len, 2048)
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
-        self.max_paddings = max_paddings
+        self.chunked_prefill_enabled = max_chunked_prefill_len != -1
+        self.max_chunked_prefill_len = max_chunked_prefill_len
+        self.max_num_prompt_seqs = max_num_prompt_seqs
         self._verify_args()
 
     def _verify_args(self) -> None:
-        if self.max_num_batched_tokens < self.max_model_len:
+        if self.max_num_batched_tokens < self.max_model_len and \
+                not self.chunked_prefill_enabled:
             raise ValueError(
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) is "
                 f"smaller than max_model_len ({self.max_model_len}). "

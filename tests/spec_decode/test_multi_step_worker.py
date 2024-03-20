@@ -92,8 +92,8 @@ def test_same_output_for_single_step():
         num_gpu_blocks,
         seed,
     )
-    multi_step_worker.model_runner = worker.model_runner
-    multi_step_worker.cache_engine = worker.cache_engine
+    # multi_step_worker.model_runner = worker.model_runner
+    # multi_step_worker.cache_engine = worker.cache_engine
 
     num_steps = 1
 

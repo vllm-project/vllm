@@ -38,7 +38,7 @@ class MistralForCausalLM(nn.Module):
         with torch.inference_mode():
             seq_ids = []
             block_size = self.model.context_buckets[-1]
-            if input_metadata.is_prompt:
+            if input_metadata.num_prompt_tokens > 0:
                 seq_ids = input_metadata.slot_mapping[:, 0] // block_size
             else:
                 seq_ids = input_metadata.block_tables

@@ -17,11 +17,12 @@ class Attention(nn.Module):
 
     This class takes query, key, and value tensors as input. The input tensors
     can either contain prompt tokens or generation tokens.
+
     The class does the following:
 
     1. Store the input key and value tensors in the KV cache.
     2. Perform (multi-head/multi-query/grouped-query) attention.
-    3. Return the output tensor.
+    3. Output the output tensor.
     """
 
     def __init__(
@@ -34,7 +35,7 @@ class Attention(nn.Module):
         sliding_window: Optional[int] = None,
     ) -> None:
         super().__init__()
-        if _use_flash_attn():
+        if False and _use_flash_attn():
             from vllm.model_executor.layers.attention.backends.flash_attn import FlashAttentionBackend  # noqa: E501
             self.backend = FlashAttentionBackend(num_heads, head_size, scale,
                                                  num_kv_heads, alibi_slopes,

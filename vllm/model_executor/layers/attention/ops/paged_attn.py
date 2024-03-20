@@ -12,6 +12,35 @@ from vllm.model_executor.layers.attention.ops.prefix_prefill import (
 _PARTITION_SIZE = 512
 
 
+def _print_value_cache(value_cache, input_metadata, max_h, max_d):
+    token_sizes = input_metadata.prompt_lens
+    print("value_cache")
+    for t in range(token_sizes):
+        for h in range(max_h):
+            print(f"{h=} {t=}\n")
+            for d in range(max_d):
+                block_num = t // 16
+                block_off = t % 16
+                print(value_cache[block_num][h][d][block_off].item(), end=" ")
+            print()
+
+
+def _print_key_cache(key_cache, input_metadata, max_h, max_d):
+    token_sizes = input_metadata.prompt_lens
+    print("key cache")
+    for t in range(token_sizes):
+        for h in range(max_h):
+            print(f"{h=} {t=}\n")
+            for d in range(max_d):
+                block_num = t // 16
+                block_off = t % 16
+                for x in range(key_cache.shape[4]):
+                    key_d = d // key_cache.shape[4]
+                    print(key_cache[block_num][h][key_d][block_off][x].item(),
+                          end=" ")
+            print()
+
+
 class PagedAttentionImpl:
 
     @staticmethod
@@ -121,6 +150,40 @@ class PagedAttentionImpl:
         alibi_slopes: Optional[torch.Tensor],
     ) -> torch.Tensor:
         output = torch.empty_like(query)
+        # print("SANG-TODO prefix attention!")
+        # print(f"{input_metadata.block_tables=}")
+        # print(f"{input_metadata.subquery_start_loc=}")
+        # print(f"{input_metadata.prompt_lens=}")
+        # print(f"{input_metadata.context_lens=}")
+        # print(f"{input_metadata.max_seq_len=}")
+        # print(f"{input_metadata.slot_mapping=}")
+        # print(f"{query.size()=}")
+        # for i in range(query.shape[0]):
+        #     print(f"{i}th key")
+        #     print(f"{key[i][0][0]=}")
+        # for i in range(query.shape[0]):
+        #     print(f"{i}th value")
+        #     print(f"{value[i][0][0]=}")
+        # print(query.shape)
+        # print(key.shape)
+        # print(value.shape)
+
+        # verify kv cache correctness.
+        # for token_idx, i in enumerate(input_metadata.slot_mapping):
+        #     i = i.item()
+        #     block_num = i // 16
+        #     block_index = i % 16
+        #     x = key_cache.shape[4]
+        #     head_size = value.shape[1]
+        #     for h in range(head_size):
+        #         torch.allclose(value[token_idx][h][0], value_cache[block_num][h][0][block_index])
+        #     for h_i in range(key_cache.shape[2]):
+        #         for x_i in range(x):
+        #             torch.allclose(key[token_idx][h][i], key_cache[block_num][h][h_i][block_index][x_i])
+
+        # Print kv cache.
+        # _print_value_cache(value_cache, input_metadata, query.shape[1], 4)
+        # _print_key_cache(key_cache, input_metadata, query.shape[1], 4)
         context_attention_fwd(
             query,
             key,
@@ -128,11 +191,13 @@ class PagedAttentionImpl:
             output,
             key_cache,
             value_cache,
-            input_metadata.block_tables,  # [BS, max_block_per_request]
-            input_metadata.start_loc,
-            input_metadata.prompt_lens,
+            input_metadata.block_tables,
+            # subquery_start_loc is (batch_size + 1,)
+            input_metadata.subquery_start_loc[:-1],
+            input_metadata.prompt_lens_tensor,
             input_metadata.context_lens,
-            input_metadata.max_seq_len,
+            input_metadata.max_subquery_len,
             alibi_slopes,
         )
+        # print("SANG-TODO prefix attn output: ", output)
         return output

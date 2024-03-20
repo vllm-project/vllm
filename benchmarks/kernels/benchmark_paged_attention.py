@@ -7,6 +7,7 @@ import torch
 
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, create_kv_caches_with_random
 from vllm._C import ops
+from vllm.model_executor.layers.attention import flash_attn_with_kvcache_paged
 
 NUM_BLOCKS = 1024
 PARTITION_SIZE = 512
@@ -168,7 +169,10 @@ if __name__ == '__main__':
                         type=int,
                         choices=[64, 80, 96, 112, 128, 256],
                         default=128)
-    parser.add_argument("--block-size", type=int, choices=[16, 32], default=16)
+    parser.add_argument("--block-size",
+                        type=int,
+                        choices=[16, 32, 256],
+                        default=16)
     parser.add_argument("--use-alibi", action="store_true")
     parser.add_argument("--dtype",
                         type=str,

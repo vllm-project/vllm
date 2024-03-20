@@ -354,7 +354,6 @@ class LLMEngine:
 
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
                                         outputs: SequenceGroupOutput) -> None:
-
         # Process prompt logprobs
         prompt_logprobs = outputs.prompt_logprobs
         if prompt_logprobs is not None:
@@ -408,6 +407,7 @@ class LLMEngine:
             child_seqs.append((parent, parent))
 
         for seq, _ in child_seqs:
+            # print("SANG-TODO decode sequences: ", seq_group)
             self._decode_sequence(seq, seq_group.sampling_params)
             self._check_stop(seq, seq_group.sampling_params)
 
@@ -532,6 +532,7 @@ class LLMEngine:
     def _process_model_outputs(
             self, output: SamplerOutput,
             scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
+
         now = time.time()
         # Update the scheduled sequence groups with the model outputs.
         scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
@@ -542,7 +543,14 @@ class LLMEngine:
             for seq_group in scheduled_seq_groups:
                 self.scheduler.mark_blocks_as_computed(seq_group)
 
-        for seq_group, outputs in zip(scheduled_seq_groups, output):
+        for i, (seq_group,
+                outputs) in enumerate(zip(scheduled_seq_groups, output)):
+            # Chunked prefill groups are not generation tokens. Their
+            # outputs are ignored. For seq_group finished chunked
+            # prefilling, it will be considered as prompting.
+            if i < scheduler_outputs.num_chunked_prefill_groups:
+                continue
+
             self._process_sequence_group_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.
@@ -561,7 +569,8 @@ class LLMEngine:
         # Log stats.
         if self.log_stats:
             self.stat_logger.log(self._get_stats(scheduler_outputs))
-
+        # for o in request_outputs:
+        #     print(o.outputs)
         return request_outputs
 
     def step(self) -> List[RequestOutput]:
@@ -616,7 +625,8 @@ class LLMEngine:
             >>>         break
         """
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
-
+        # print("SANG-TODO step seq_group_metadata_list length: ",
+        #   len(seq_group_metadata_list))
         if not scheduler_outputs.is_empty():
             output = self.model_executor.execute_model(
                 seq_group_metadata_list, scheduler_outputs.blocks_to_swap_in,

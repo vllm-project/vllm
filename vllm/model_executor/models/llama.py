@@ -157,7 +157,9 @@ class LlamaAttention(nn.Module):
         q, k = self.rotary_emb(positions, q, k)
         k_cache, v_cache = kv_cache
         attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
+        # print("SANG-TODO attn output: ", attn_output)
         output, _ = self.o_proj(attn_output)
+        # print("SANG-TODO attn output after output proj: ", attn_output)
         return output
 
 
