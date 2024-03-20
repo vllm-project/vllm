@@ -354,32 +354,29 @@ class ModelRunner:
             and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
             and max_context_len <= self.max_context_len_to_capture)
         if use_captured_graph:
-            batch_size = _get_graph_batch_size(batch_size)
+            graph_batch_size = _get_graph_batch_size(batch_size)
+            assert graph_batch_size >= batch_size
+            for _ in range(graph_batch_size - batch_size):
+                input_tokens.append(0)
+                input_positions.append(0)
+                slot_mapping.append(_PAD_SLOT_ID)
+                context_lens.append(1)
+                block_tables.append([])
+                lora_index_mapping.append(0)
+            batch_size = graph_batch_size
 
-        # Pad tokens to better utilize tensor cores although
-        # cuda graph is not enabled.
-        input_tokens = torch.tensor(_pad_for_cuda_graph(
-            input_tokens, pad=0, use_captured_graph=use_captured_graph),
+        input_tokens = torch.tensor(input_tokens,
                                     dtype=torch.long,
                                     device=self.device)
-        input_positions = torch.tensor(_pad_for_cuda_graph(
-            input_positions, pad=0, use_captured_graph=use_captured_graph),
+        input_positions = torch.tensor(input_positions,
                                        dtype=torch.long,
                                        device=self.device)
-        slot_mapping = torch.tensor(_pad_for_cuda_graph(
-            slot_mapping,
-            pad=_PAD_SLOT_ID,
-            use_captured_graph=use_captured_graph),
+        slot_mapping = torch.tensor(slot_mapping,
                                     dtype=torch.long,
                                     device=self.device)
-        context_lens = torch.tensor(_pad_for_cuda_graph(
-            context_lens, pad=0, use_captured_graph=use_captured_graph),
+        context_lens = torch.tensor(context_lens,
                                     dtype=torch.int,
                                     device=self.device)
-        block_tables = _pad_for_cuda_graph(
-            block_tables, pad=[], use_captured_graph=use_captured_graph)
-        lora_index_mapping = _pad_for_cuda_graph(
-            lora_index_mapping, pad=0, use_captured_graph=use_captured_graph)
 
         if use_captured_graph:
             # When using cuda-graph all these tensors should be
@@ -892,26 +889,9 @@ def _maybe_cupy_nccl():
         yield
 
 
-def _pad_to_alignment(x: List[int], multiple_of: int, pad: int) -> List[int]:
-    return x + [pad] * ((-len(x)) % multiple_of)
-
-
 def _pad_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
     assert len(x) <= max_len
     return x + [pad] * (max_len - len(x))
-
-
-def _pad_for_cuda_graph(x: List[int], pad: int, use_captured_graph: bool):
-    """Pad flattened 1D inputs by a fixed alignment size for cuda graph.
-
-    This function is no-op if use_captured_graph is False.
-    """
-    if not use_captured_graph:
-        return x
-
-    batch_size = len(x)
-    batch_size = _get_graph_batch_size(batch_size)
-    return _pad_to_alignment(x, batch_size, pad)
 
 
 def _make_tensor_with_pad(

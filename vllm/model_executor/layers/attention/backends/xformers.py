@@ -119,6 +119,7 @@ class XFormersBackend:
                                                   value.shape[-1])
 
                 if self.use_ref_attention:
+                    print("ref attention used.")
                     output = torch.empty_like(query)
                     start = 0
                     for _, prompt_len in enumerate(input_metadata.prompt_lens):
@@ -298,6 +299,9 @@ def _ref_masked_attention(
     head_size: int,
     scale: float,
 ) -> torch.Tensor:
+    query = query.view(-1, num_heads, head_size)
+    key = key.view(-1, num_kv_heads, head_size)
+    value = value.view(-1, num_kv_heads, head_size)
     seq_len, _, _ = query.shape
     attn_mask = torch.triu(torch.ones(seq_len,
                                       seq_len,
