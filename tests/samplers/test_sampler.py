@@ -302,11 +302,11 @@ def test_sampler_logits_processors(seed: int, device: str):
     batch_size = random.randint(1, 256)
     input_tensor, _, sampler, model_runner = _prepare_test(batch_size)
 
-    # This sample logits processor gives infinite score to the i-th token,
+    # This sample logits processor gives maximum score to the i-th token,
     # where i is the length of the input sequence.
     # We therefore expect the output token sequence to be [0, 1, 2, ...]
     def pick_ith(token_ids, logits):
-        logits[len(token_ids)] = float("inf")
+        logits[len(token_ids)] = torch.finfo(logits.dtype).max
         return logits
 
     seq_group_metadata_list = []
@@ -385,7 +385,7 @@ def test_sampler_top_k_top_p(seed: int, device: str):
 
     sample_probs = None
 
-    def mock_sample(probs, logprobs, sampling_metadata):
+    def mock_sample(probs, *args, **kwargs):
         nonlocal sample_probs
         sample_probs = probs
         return [[prob.topk(1, dim=-1).indices.tolist(), [0]] for prob in probs]

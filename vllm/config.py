@@ -535,7 +535,6 @@ class SchedulerConfig:
             iteration.
         max_model_len: Maximum length of a sequence (including prompt
             and generated text).
-        max_paddings: Maximum number of paddings to be added to a batch.
         use_delay: Apply artificial scheduling delay equal to half of previous
             prefill time to allow the waiting queue to fill up.
     """
@@ -545,7 +544,6 @@ class SchedulerConfig:
         max_num_batched_tokens: Optional[int],
         max_num_seqs: int,
         max_model_len: int,
-        max_paddings: int,
         use_delay: bool = False,
     ) -> None:
         if max_num_batched_tokens is not None:
@@ -556,7 +554,6 @@ class SchedulerConfig:
             self.max_num_batched_tokens = max(max_model_len, 2048)
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
-        self.max_paddings = max_paddings
         self.use_delay = use_delay
         self._verify_args()
 
