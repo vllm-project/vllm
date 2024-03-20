@@ -76,7 +76,8 @@ class FlashAttentionBackend:
         # profiling run.
         if key_cache is not None and value_cache is not None:
             PagedAttentionImpl.reshape_and_cache(key, value, key_cache,
-                                                 value_cache, input_metadata)
+                                                 value_cache, input_metadata,
+                                                 kv_scale)
 
         if input_metadata.is_prompt:
             # Prompt run.
@@ -96,7 +97,9 @@ class FlashAttentionBackend:
                     alibi_slopes=self.alibi_slopes,
                 )
             else:
-                # prefix-enabled attention
+                # prefix-enabled attentiont
+                # TODO(Hai) this triton kernel has regression issue with
+                # FP8 KVCache to handle mixed types
                 output = PagedAttentionImpl.forward_prefix(
                     query,
                     key,
@@ -116,6 +119,7 @@ class FlashAttentionBackend:
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
+                kv_scale
             )
 
         # Reshape the output tensor.

@@ -187,22 +187,6 @@ def _install_punica() -> bool:
     return bool(int(os.getenv("VLLM_INSTALL_PUNICA_KERNELS", "0")))
 
 
-def get_amdgpu_offload_arch():
-    command = "/opt/rocm/llvm/bin/amdgpu-offload-arch"
-    try:
-        output = subprocess.check_output([command])
-        return output.decode('utf-8').strip()
-    except subprocess.CalledProcessError as e:
-        error_message = f"Error: {e}"
-        raise RuntimeError(error_message) from e
-    except FileNotFoundError as e:
-        # If the command is not found, print an error message
-        error_message = f"The command {command} was not found."
-        raise RuntimeError(error_message) from e
-
-    return None
-
-
 def get_hipcc_rocm_version():
     # Run the hipcc --version command
     result = subprocess.run(['hipcc', '--version'],
