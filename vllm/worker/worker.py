@@ -65,7 +65,6 @@ class Worker:
         # self.init_cache_engine().
         self.cache_config = None
         self.cache_engine = None
-        self.cache_events = None
         self.gpu_cache = None
 
     def init_model(self, cupy_port: Optional[int] = None) -> None:
@@ -148,7 +147,6 @@ class Worker:
         self.cache_config = cache_config
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
                                         self.parallel_config)
-        self.cache_events = self.cache_engine.events
         self.gpu_cache = self.cache_engine.gpu_cache
         self.model_runner.set_block_size(self.cache_engine.block_size)
 
@@ -166,24 +164,13 @@ class Worker:
         blocks_to_copy: Dict[int, List[int]],
     ) -> None:
         # Issue cache operations.
-        issued_cache_op = False
+        # TODO(woosuk): Profile swapping overhead and optimize if needed.
         if blocks_to_swap_in:
             self.cache_engine.swap_in(blocks_to_swap_in)
-            issued_cache_op = True
         if blocks_to_swap_out:
             self.cache_engine.swap_out(blocks_to_swap_out)
-            issued_cache_op = True
         if blocks_to_copy:
             self.cache_engine.copy(blocks_to_copy)
-            issued_cache_op = True
-
-        cache_events = self.cache_events if issued_cache_op else None
-
-        # Wait for cache operations to finish.
-        # TODO(woosuk): Profile swapping overhead and optimize if needed.
-        if cache_events is not None:
-            for event in cache_events:
-                event.wait()
 
     @torch.inference_mode()
     def execute_model(
