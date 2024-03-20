@@ -17,11 +17,12 @@ class Attention(nn.Module):
 
     This class takes query, key, and value tensors as input. The input tensors
     can either contain prompt tokens or generation tokens.
+
     The class does the following:
 
     1. Store the input key and value tensors in the KV cache.
     2. Perform (multi-head/multi-query/grouped-query) attention.
-    3. Return the output tensor.
+    3. Output the output tensor.
     """
 
     def __init__(

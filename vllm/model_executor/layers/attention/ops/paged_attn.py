@@ -128,11 +128,12 @@ class PagedAttentionImpl:
             output,
             key_cache,
             value_cache,
-            input_metadata.block_tables,  # [BS, max_block_per_request]
-            input_metadata.start_loc,
-            input_metadata.prompt_lens,
+            input_metadata.block_tables,
+            # subquery_start_loc is (batch_size + 1,)
+            input_metadata.subquery_start_loc[:-1],
+            input_metadata.prompt_lens_tensor,
             input_metadata.context_lens,
-            input_metadata.max_seq_len,
+            input_metadata.max_subquery_len,
             alibi_slopes,
         )
         return output

@@ -1,7 +1,7 @@
 """Attention layer with Flash and PagedAttention."""
 from typing import List, Optional
 
-from flash_attn import flash_attn_func
+from flash_attn import flash_attn_varlen_func
 import torch
 
 from vllm.model_executor.input_metadata import InputMetadata
@@ -10,6 +10,21 @@ from vllm.model_executor.layers.attention.ops.paged_attn import (
 
 
 class FlashAttentionBackend:
+    """
+    If the input tensors contain prompt tokens, the layout is as follows:
+    |<--------------- num_prompt_tokens -------------->|	
+    |<--prompt_0-->|<--prompt_1-->|...|<--prompt_N-1-->|
+
+    Otherwise, the layout is as follows:	
+    |<------------------ num_generation_tokens (M) ----------------->|	
+    |<--generation_0-->|..........|<--generation_M-1-->|<--padding-->|
+
+    Generation tokens can contain padding when cuda-graph is used.
+    Currently, prompt tokens don't contain any padding.
+
+    The prompts might have different lengths, while the generation tokens
+    always have length 1.
+    """
 
     def __init__(
         self,
@@ -52,18 +67,18 @@ class FlashAttentionBackend:
         """Forward pass with FlashAttention and PagedAttention.
 
         Args:
-            query: shape = [batch_size, seq_len, num_heads * head_size]
-            key: shape = [batch_size, seq_len, num_kv_heads * head_size]
-            value: shape = [batch_size, seq_len, num_kv_heads * head_size]
+            query: shape = [num_tokens, num_heads * head_size]
+            key: shape = [num_tokens, num_kv_heads * head_size]
+            value: shape = [num_tokens, num_kv_heads * head_size]
             key_cache: shape = [num_blocks, num_kv_heads, head_size/x,
                 block_size, x]
             value_cache: shape = [num_blocks, num_kv_heads, head_size,
                 block_size]
             input_metadata: metadata for the inputs.
         Returns:
-            shape = [batch_size, seq_len, num_heads * head_size]
+            shape = [num_tokens, num_heads * head_size]
         """
-        batch_size, seq_len, hidden_size = query.shape
+        num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
@@ -82,13 +97,16 @@ class FlashAttentionBackend:
             if (key_cache is None or value_cache is None
                     or input_metadata.block_tables.numel() == 0):
                 # normal attention
-                query = query.unflatten(0, (batch_size, seq_len))
-                key = key.unflatten(0, (batch_size, seq_len))
-                value = value.unflatten(0, (batch_size, seq_len))
-                output = flash_attn_func(
-                    query,
-                    key,
-                    value,
+                # When block_tables are not filled, it means q and k are the
+                # prompt, and they have the same length.
+                output = flash_attn_varlen_func(
+                    q=query,
+                    k=key,
+                    v=value,
+                    cu_seqlens_q=input_metadata.seq_start_loc,
+                    cu_seqlens_k=input_metadata.seq_start_loc,
+                    max_seqlen_q=input_metadata.max_seq_len,
+                    max_seqlen_k=input_metadata.max_seq_len,
                     softmax_scale=self.scale,
                     causal=True,
                     window_size=self.sliding_window,
@@ -118,4 +136,4 @@ class FlashAttentionBackend:
             )
 
         # Reshape the output tensor.
-        return output.view(batch_size, seq_len, hidden_size)
+        return output.view(num_tokens, hidden_size)
