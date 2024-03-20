@@ -10,6 +10,21 @@ from vllm.model_executor.layers.attention.ops.paged_attn import (
 
 
 class FlashAttentionBackend:
+    """
+    If the input tensors contain prompt tokens, the layout is as follows:
+    |<--------------- num_prompt_tokens -------------->|	
+    |<--prompt_0-->|<--prompt_1-->|...|<--prompt_N-1-->|
+
+    Otherwise, the layout is as follows:	
+    |<------------------ num_generation_tokens (M) ----------------->|	
+    |<--generation_0-->|..........|<--generation_M-1-->|<--padding-->|
+
+    Generation tokens can contain padding when cuda-graph is used.
+    Currently, prompt tokens don't contain any padding.
+
+    The prompts might have different lengths, while the generation tokens
+    always have length 1.
+    """
 
     def __init__(
         self,
@@ -82,13 +97,15 @@ class FlashAttentionBackend:
             if (key_cache is None or value_cache is None
                     or input_metadata.block_tables.numel() == 0):
                 # normal attention
+                # When block_tables are not filled, it means q and k are the
+                # prompt, and they have the same length.
                 output = flash_attn_varlen_func(
                     q=query,
                     k=key,
                     v=value,
-                    cu_seqlens_q=input_metadata.subquery_start_loc,
+                    cu_seqlens_q=input_metadata.seq_start_loc,
                     cu_seqlens_k=input_metadata.seq_start_loc,
-                    max_seqlen_q=input_metadata.max_subquery_len,
+                    max_seqlen_q=input_metadata.max_seq_len,
                     max_seqlen_k=input_metadata.max_seq_len,
                     softmax_scale=self.scale,
                     causal=True,
