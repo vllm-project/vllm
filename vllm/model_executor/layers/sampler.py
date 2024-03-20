@@ -168,7 +168,7 @@ def _apply_min_tokens_penalty(
                     seqs_to_penalize.append(i)
 
             if seqs_to_penalize:
-                # convert from the index for this seq_group to the index into logits
+                # convert to the index into logits
                 seqs_to_penalize = [start_idx + i for i in seqs_to_penalize]
                 # use set() to remove any duplicates
                 token_ids_to_penalize = set(sampling_params.stop_token_ids +

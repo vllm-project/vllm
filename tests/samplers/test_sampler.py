@@ -396,15 +396,20 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
 
             if should_penalize:
                 for token_id in tokens_to_check:
-                    assert logits[logits_idx, token_id] == -float('inf'), \
-                    f"Expected token {token_id} for sequence {logits_idx} to be penalized"
+                    assert logits[logits_idx, token_id] == -float(
+                        'inf'
+                    ), f"Expected token {token_id} for logits row {logits_idx}"
+                    " to be penalized"
                 # no other tokens should be set to -inf
-                assert torch.count_nonzero(logits[logits_idx, :] == -float('inf')) == len(tokens_to_check), \
-                    f"Expected only {len(tokens_to_check)} to be penalized"
+                assert torch.count_nonzero(
+                    logits[logits_idx, :] == -float('inf')) == len(
+                        tokens_to_check
+                    ), f"Expected only {len(tokens_to_check)} to be penalized"
             else:
                 # no tokens should be set to -inf
-                assert torch.count_nonzero(logits[logits_idx, :] == -float('inf')) == 0, \
-                    "No tokens should have been penalized"
+                assert torch.count_nonzero(
+                    logits[logits_idx, :] ==
+                    -float('inf')) == 0, "No tokens should have been penalized"
 
         del model_runner
 

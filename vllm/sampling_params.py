@@ -198,13 +198,12 @@ class SamplingParams:
             raise ValueError(
                 f"max_tokens must be at least 1, got {self.max_tokens}.")
         if self.min_tokens < 0:
-            raise ValueError(
-                f"min_tokens must be greater than or equal to 0, got {self.min_tokens}."
-            )
+            raise ValueError(f"min_tokens must be greater than or equal to 0, "
+                             f"got {self.min_tokens}.")
         if self.max_tokens is not None and self.min_tokens > self.max_tokens:
             raise ValueError(
-                f"min_tokens must be less than or equal to max_tokens={self.max_tokens}, got {self.min_tokens}."
-            )
+                f"min_tokens must be less than or equal to "
+                f"max_tokens={self.max_tokens}, got {self.min_tokens}.")
         if self.logprobs is not None and self.logprobs < 0:
             raise ValueError(
                 f"logprobs must be non-negative, got {self.logprobs}.")

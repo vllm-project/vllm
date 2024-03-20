@@ -269,7 +269,8 @@ class LLMEngine:
         # Defensive copy of SamplingParams, which are used by the sampler,
         # this doesn't deep-copy LogitsProcessor objects
         sampling_params = sampling_params.clone()
-        # inject the eos token id into the sampling_params to support min_tokens processing
+        # inject the eos token id into the sampling_params to support min_tokens
+        # processing
         sampling_params.eos_token_id = self.get_tokenizer_for_seq(
             seq).eos_token_id
 
