@@ -108,6 +108,10 @@ COPY requirements.txt requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.txt
 
+# UPSTREAM SYNC: Install sparsity extras
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install nm-magic-wand
+
 # Install flash attention (from pre-built wheel)
 RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,target=/usr/src/flash-attention-v2 \
     pip install /usr/src/flash-attention-v2/*.whl --no-cache-dir
