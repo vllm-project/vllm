@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Type
+from dataclasses import dataclass, fields
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 
@@ -49,7 +49,14 @@ class AttentionBackend(ABC):
 @dataclass
 class AttentionMetadata:
 
-    ...
+    def asdict_zerocopy(self) -> Dict[str, Any]:
+        """Similar to dataclasses.asdict, but avoids deepcopying."""
+        # Note that if we add dataclasses as fields, they will need
+        # similar handling.
+        return {
+            field.name: getattr(self, field.name)
+            for field in fields(self)
+        }
 
 
 class AttentionImpl(ABC):

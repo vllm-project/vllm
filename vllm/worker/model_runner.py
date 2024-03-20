@@ -1,5 +1,4 @@
 import contextlib
-import dataclasses
 import time
 from typing import Dict, List, Optional, Tuple, Set, Union
 
@@ -530,7 +529,7 @@ class ModelRunner:
                 "lora_requests": lora_requests,
                 "lora_mapping": lora_mapping,
             }
-            metadata_dict.update(dataclasses.asdict(attn_metadata))
+            metadata_dict.update(attn_metadata.asdict_zerocopy())
             broadcast_tensor_dict(metadata_dict, src=0)
         else:
             metadata_dict = broadcast_tensor_dict(src=0)
