@@ -66,7 +66,6 @@ class LRUEvictor(Evictor):
     def evict(self) -> PhysicalTokenBlock:
         if len(self.free_table) == 0:
             raise ValueError("No usable cache memory left")
-        free_blocks = self.free_table.values()
 
         evicted_block = next(iter(self.free_table.values()))
         # The blocks with the lowest timestamps should be placed consecutively
