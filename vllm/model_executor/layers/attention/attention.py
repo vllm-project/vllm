@@ -18,38 +18,11 @@ class Attention(nn.Module):
     This class takes query, key, and value tensors as input. The input tensors
     can either contain prompt tokens or generation tokens.
 
-    There can be 3 different inputs. Prompt, decoding, and chunked prefill
-    (meaning prefill can be chunked and decoding tokens can be mixed to a
-    single batch).
-
-    If the input tensors contain prompt tokens, the layout is as follows:
-    |<--------------- num_prompt_tokens -------------->|	
-    |<--prompt_0-->|<--prompt_1-->|...|<--prompt_N-1-->|
-
-    Otherwise, the layout is as follows:	
-    |<------------------ num_generation_tokens (M) ----------------->|	
-    |<--generation_0-->|..........|<--generation_M-1-->|<--padding-->|
-
-    Generation tokens can contain padding when cuda-graph is used.
-    Currently, prompt tokens don't contain any padding.
-
-    If chunked prefill is enabled, the input will include both prompt tokens
-    and generation tokens. The layout is as follows:
-
-    |<--------- num_prompt_tokens ----->|<--- num_generation_tokens----->|
-    |<-prompt_0->|<-prompt_1->|.........|<-gen_0->|<-gen_1->|............|
-
-    Cuda-graph is not used with chunked prefill, and there's no padding
-    to prompt and decoding tokens.
-
-    The prompts might have different lengths, while the generation tokens
-    always have length 1.
-
     The class does the following:
 
     1. Store the input key and value tensors in the KV cache.
     2. Perform (multi-head/multi-query/grouped-query) attention.
-    3. Output a flattened 1D tensor.
+    3. Output the output tensor.
     """
 
     def __init__(

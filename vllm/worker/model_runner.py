@@ -21,7 +21,7 @@ from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
-from vllm.utils import in_wsl, measure_cuda_memory, _get_aligned_size
+from vllm.utils import in_wsl, measure_cuda_memory
 
 logger = init_logger(__name__)
 
@@ -34,10 +34,6 @@ _BATCH_SIZE_ALIGNMENT = 8
 _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
     _BATCH_SIZE_ALIGNMENT * i for i in range(1, 33)
 ]
-# True if inputs should be aligned. It is currently disabled.
-# Aligning inputs can better utilize tensor cores.
-# https://developer.nvidia.com/blog/optimizing-gpu-performance-tensor-cores/
-SHOULD_ALIGN = False
 
 
 class ModelRunner:
@@ -321,6 +317,16 @@ class ModelRunner:
             not self.model_config.enforce_eager
             and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
             and max_context_len <= self.max_context_len_to_capture)
+        if use_captured_graph:
+            graph_batch_size = _get_graph_batch_size(batch_size)
+            assert graph_batch_size >= batch_size
+            for _ in range(graph_batch_size - batch_size):
+                input_tokens.append(0)
+                input_positions.append(0)
+                slot_mapping.append(_PAD_SLOT_ID)
+                context_lens.append(1)
+                block_tables.append([])
+                lora_index_mapping.append(0)
 
         return (input_tokens, input_positions, slot_mapping, context_lens,
                 block_tables, lora_index_mapping, lora_prompt_mapping,
@@ -415,25 +421,6 @@ class ModelRunner:
         # cuda graph.
         if len(prefill_reqs) > 0:
             use_captured_graph = False
-
-        # Prompts
-        input_tokens = _align_if_necessary(input_tokens, pad=0)
-        input_positions = _align_if_necessary(input_positions, pad=0)
-        slot_mapping = _align_if_necessary(slot_mapping, pad=-1)
-        lora_index_mapping = _align_if_necessary(lora_index_mapping, pad=0)
-        # Decoding
-        input_tokens_decode = _align_if_necessary(
-            input_tokens_decode, pad=0, should_align=use_captured_graph)
-        input_positions_decode = _align_if_necessary(
-            input_positions_decode, pad=0, should_align=use_captured_graph)
-        slot_mapping_decode = _align_if_necessary(
-            slot_mapping_decode, pad=-1, should_align=use_captured_graph)
-        lora_index_mapping_decode = _align_if_necessary(
-            lora_index_mapping_decode, pad=0, should_align=use_captured_graph)
-        context_lens_decode = _align_if_necessary(
-            context_lens_decode, pad=0, should_align=use_captured_graph)
-        block_tables_decode = _align_if_necessary(
-            block_tables_decode, pad=[], should_align=use_captured_graph)
 
         max_subquery_len = max(subquery_lens, default=0)
         max_seq_len = max(seq_lens, default=0)
@@ -994,24 +981,9 @@ def _maybe_cupy_nccl():
         yield
 
 
-def _pad_to_alignment(x: List[int], multiple_of: int, pad: int) -> List[int]:
-    if len(x) == 0:
-        return x
-    return x + [pad] * ((-len(x)) % multiple_of)
-
-
 def _pad_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
     assert len(x) <= max_len
     return x + [pad] * (max_len - len(x))
-
-
-def _align_if_necessary(x: List[int], pad: int, should_align=SHOULD_ALIGN):
-    """Align flattened 1D inputs by a fixed alignment size."""
-    if not should_align:
-        return x
-    batch_size = len(x)
-    batch_size = _get_graph_batch_size(batch_size)
-    return _pad_to_alignment(x, batch_size, pad)
 
 
 def _make_tensor_with_pad(
@@ -1041,7 +1013,8 @@ def _get_graph_batch_size(batch_size: int) -> int:
     elif batch_size <= 4:
         return 4
     else:
-        return _get_aligned_size(batch_size, _BATCH_SIZE_ALIGNMENT)
+        return ((batch_size + _BATCH_SIZE_ALIGNMENT - 1) //
+                _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
 
 
 def _async_h2d(

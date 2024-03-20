@@ -1,8 +1,8 @@
 from dataclasses import dataclass, fields
 from typing import Optional, List, Any, Dict
-from xformers.ops.fmha.attn_bias import AttentionBias
 
 import torch
+from xformers.ops.fmha.attn_bias import AttentionBias
 
 
 # SANG-TODO Refactor prompt_lens -> seqlens
@@ -31,7 +31,7 @@ class InputMetadata:
     # The number of chunked prefill sequences in the batch.
     num_chunked_prefill: int
     # (batch_size,). The prompt length per sequence. None if it is a decoding.
-    prompt_lens: Optional[List]
+    prompt_lens: Optional[List[int]]
     # prompt_lens stored as a tensor.
     prompt_lens_tensor: Optional[torch.Tensor]
     # The number of prompt tokens. Doesn't include padding.
@@ -46,31 +46,38 @@ class InputMetadata:
     |---------- context_len ----------|
     |-------------------- seqlen ----------------------|
                                       |- subquery_len -|
-    
+
+    WARNING: context_len has different definition depending on if it is
+    prefill vs decoding. When it is prefill, it doesn't include new
+    tokens. When it is for decoding, it includes a new token.
     """
 
-    # Maximum sequence length in the batch.
+    # Maximum subquery length in the batch.
     max_subquery_len: Optional[int]
     # Maximum context length in the batch.
     max_context_len: Optional[int]
+    # FIXME: It is for flash attn.
     # Maximum sequence length in the batch.
     max_seq_len: Optional[int]
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in
     # the batch, used to index into subquery. E.g., if the subquery length
     # is [4, 6], it is [0, 4, 10].
     subquery_start_loc: Optional[torch.Tensor]
+    # FIXME: It is for flash attn.
     # (batch_size + 1,). The cumulative sequence lengths of the sequences in
     # the batch, used to index into sequence. E.g., if the sequence length is
     # [4, 6], it is [0, 4, 10].
     seq_start_loc: Optional[torch.Tensor]
     # (batch_size,). The length of context (tokens stored in KV cache) per
-    # sequence. It doesn't include the length of new tokens.
+    # sequence. WARNING: When it is a prefill request, it doesn't include new
+    # tokens. When it is for decoding, it includes a new token.
     context_lens: Optional[torch.Tensor]
     # (batch_size, max_blocks_per_seq).
     # Block addresses per sequence. (Seq id -> list of physical block)
     # E.g., [0, 1, 2] means tokens are stored in 0th, 1st, and 2nd blocks
     # in the kv cache. Each block can contain up to block_size tokens.
-    # The first dimension is padded if it is cuda-graph captured.
+    # 2nd dimensions are padded up to max_blocks_per_seq if it is cuda-graph
+    # captured.
     block_tables: Optional[torch.Tensor]
     # Whether or not if cuda graph is enabled.
     # Cuda-graph is currently enabled for decoding only.

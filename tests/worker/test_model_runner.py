@@ -1,14 +1,13 @@
 import random
 import torch
 
+from vllm.config import ModelConfig, SchedulerConfig
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.worker.model_runner import ModelRunner, _BATCH_SIZE_ALIGNMENT
-from vllm.config import ModelConfig, SchedulerConfig
-from vllm.utils import _get_aligned_size
 
 
-def get_aligned_size(batch_size):
-    return _get_aligned_size(batch_size, _BATCH_SIZE_ALIGNMENT)
+def get_aligned_size(batch_size: int, alignment: int):
+    return ((batch_size + alignment - 1) // alignment * alignment)
 
 
 def test_prepare_prompt():
@@ -174,7 +173,7 @@ def test_prepare_decode_cuda_graph():
     assert torch.allclose(input_metadata.prompt_lens, expected_prompt_lens)
     assert input_metadata.num_prompt_tokens == 0
     assert input_metadata.num_generation_tokens == (get_aligned_size(
-        len(seq_group_metadata_list)))
+        len(seq_group_metadata_list), _BATCH_SIZE_ALIGNMENT))
     assert input_metadata.max_seq_len is None
     assert input_metadata.subquery_start_loc is None
     assert input_metadata.seq_start_loc is None
@@ -195,9 +194,9 @@ def test_prepare_decode_cuda_graph():
     assert input_metadata.kv_cache_dtype == "auto"
 
     assert input_tokens.shape == (get_aligned_size(
-        len(seq_group_metadata_list)), )
+        len(seq_group_metadata_list), _BATCH_SIZE_ALIGNMENT), )
     assert input_positions.shape == (get_aligned_size(
-        len(seq_group_metadata_list)), )
+        len(seq_group_metadata_list), _BATCH_SIZE_ALIGNMENT), )
     torch.testing.assert_close(input_tokens, input_positions)
 
     # Verify Sampling
