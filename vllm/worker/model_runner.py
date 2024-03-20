@@ -657,11 +657,16 @@ class ModelRunner:
         if not sampling_metadata.perform_sampling:
             return None
 
-        # Sample the next token.
-        output = self.model.sample(
-            logits=logits,
-            sampling_metadata=sampling_metadata,
-        )
+        if self.model_config.embedding_mode:
+            # Get embedding vectors.
+            output = self.model.embedding(input_ids=input_tokens,
+                                          hidden_states=hidden_states)
+        else:
+            # Sample the next token.
+            output = self.model.sample(
+                hidden_states=hidden_states,
+                sampling_metadata=sampling_metadata,
+            )
         return output
 
     @torch.inference_mode()

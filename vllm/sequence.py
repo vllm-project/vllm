@@ -306,12 +306,12 @@ class SequenceGroupState:
 
 class MultiModalData:
     """Multi modal request.
-    
+
     Args:
         type: The data type.
         data: The actual data.
         The required shape and semantic meaning of it depends on the vision
-        language config of the hosted model. 
+        language config of the hosted model.
         See `VisionLanguageConfig` in `config.py`.
     """
 
@@ -333,6 +333,7 @@ class SequenceGroup:
         arrival_time: The arrival time of the request.
         lora_request: LoRA request.
         multi_modal_data: Multi modal data associated with the request.
+        embeddings: The embeddings vectors of the prompt of the sequence group.
     """
 
     def __init__(
@@ -343,6 +344,7 @@ class SequenceGroup:
         arrival_time: float,
         lora_request: Optional[LoRARequest] = None,
         multi_modal_data: Optional[MultiModalData] = None,
+        embeddings: Optional[List[float]] = None,
     ) -> None:
         self.request_id = request_id
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
@@ -356,6 +358,7 @@ class SequenceGroup:
         self.prompt_logprobs: Optional[PromptLogprobs] = None
         self.state = SequenceGroupState()
         self.multi_modal_data = multi_modal_data
+        self.embeddings = embeddings
 
     @property
     def prompt(self) -> str:
@@ -560,6 +563,25 @@ class SequenceGroupOutput:
                 and self.prompt_logprobs == other.prompt_logprobs)
 
 
+class EmbeddingSequenceGroupOutput:
+    """The model output associated with a embedding sequence group."""
+
+    def __init__(
+        self,
+        embeddings: List[float],
+    ) -> None:
+        self.embeddings = embeddings
+
+    def __repr__(self) -> str:
+        return (f"EmbeddingSequenceGroupOutput("
+                f"embeddings_shape={len(self.embeddings)})")
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, EmbeddingSequenceGroupOutput):
+            return NotImplemented
+        return torch.equal(self.embeddings, other.embeddings)
+
+
 @dataclass
 class SamplerOutput:
     """For each sequence group, we generate a list of SequenceOutput object,
@@ -569,7 +591,7 @@ class SamplerOutput:
     also has optional fields for device tensors.
     """
 
-    outputs: List[SequenceGroupOutput]
+    outputs: List[Union[SequenceGroupOutput, EmbeddingSequenceGroupOutput]]
 
     # On-device tensor containing probabilities of each token.
     sampled_token_probs: Optional["torch.Tensor"] = None

@@ -13,9 +13,10 @@ from vllm.engine.ray_utils import initialize_ray_cluster
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.outputs import RequestOutput
+from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
+                          RequestOutputFactory)
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (MultiModalData, SamplerOutput, Sequence,
+from vllm.sequence import (EmbeddingSequenceGroupOutput, MultiModalData, SamplerOutput, Sequence,
                            SequenceGroup, SequenceGroupOutput, SequenceOutput,
                            SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
@@ -373,8 +374,18 @@ class LLMEngine:
                         eos_token_id=best_running_seq.eos_token_id))
         return current_worst_score >= highest_attainable_score
 
-    def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
-                                        outputs: SequenceGroupOutput) -> None:
+    def _process_sequence_group_outputs(
+        self, seq_group: SequenceGroup,
+        outputs: Union[SequenceGroupOutput,
+                       EmbeddingSequenceGroupOutput]) -> None:
+
+        if self.model_config.embedding_mode:
+            seq_group.embeddings = outputs.embeddings
+
+            for seq in seq_group.get_seqs():
+                seq.status = SequenceStatus.FINISHED_STOPPED
+
+            return
 
         # Process prompt logprobs
         prompt_logprobs = outputs.prompt_logprobs
@@ -547,8 +558,8 @@ class LLMEngine:
                 self.scheduler.free_seq(seq)
 
     def _process_model_outputs(
-            self, output: SamplerOutput,
-            scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
+        self, output: SamplerOutput, scheduler_outputs: SchedulerOutputs
+    ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         now = time.time()
         # Update the scheduled sequence groups with the model outputs.
         scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
@@ -566,13 +577,14 @@ class LLMEngine:
         self.scheduler.free_finished_seq_groups()
 
         # Create the outputs.
-        request_outputs: List[RequestOutput] = []
+        request_outputs: List[Union[RequestOutput,
+                                    EmbeddingRequestOutput]] = []
         for seq_group in scheduled_seq_groups:
             seq_group.maybe_set_first_token_time(now)
-            request_output = RequestOutput.from_seq_group(seq_group)
+            request_output = RequestOutputFactory.create(seq_group)
             request_outputs.append(request_output)
         for seq_group in scheduler_outputs.ignored_seq_groups:
-            request_output = RequestOutput.from_seq_group(seq_group)
+            request_output = RequestOutputFactory.create(seq_group)
             request_outputs.append(request_output)
 
         # Log stats.
@@ -580,7 +592,7 @@ class LLMEngine:
             self.stat_logger.log(self._get_stats(scheduler_outputs))
         return request_outputs
 
-    def step(self) -> List[RequestOutput]:
+    def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
 
         .. figure:: https://i.imgur.com/sv2HssD.png

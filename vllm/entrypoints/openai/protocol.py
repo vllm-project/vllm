@@ -4,7 +4,7 @@ import time
 from typing import Dict, List, Literal, Optional, Union
 
 import torch
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_validator, field_validator
 
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
@@ -326,6 +326,25 @@ class CompletionRequest(BaseModel):
         return data
 
 
+class EmbeddingRequest(BaseModel):
+    model: str
+    input: Union[List[int], List[List[int]], str, List[str]]
+    encoding_format: Optional[str] = Field('float', pattern='^(float|base64)$')
+    dimensions: Optional[int] = None
+    user: Optional[str] = None
+    max_tokens: Optional[int] = Field(default=1,
+                                      description="max_tokens must be 1")
+
+    @field_validator('max_tokens')
+    def check_max_tokens(cls, v):
+        if v != 1:
+            raise ValueError(
+                "To be consistent with vLLM's implementation of "
+                "generation model, embedding model is reasonably "
+                "treated as a generation model with max_tokens = 1")
+        return v
+
+
 class LogProbs(BaseModel):
     text_offset: List[int] = Field(default_factory=list)
     token_logprobs: List[Optional[float]] = Field(default_factory=list)
@@ -377,6 +396,21 @@ class CompletionStreamResponse(BaseModel):
     model: str
     choices: List[CompletionResponseStreamChoice]
     usage: Optional[UsageInfo] = Field(default=None)
+
+
+class EmeddingResponseData(BaseModel):
+    index: int
+    object: str = "embedding"
+    embedding: List[float]
+
+
+class EmbeddingResponse(BaseModel):
+    id: str = Field(default_factory=lambda: f"cmpl-{random_uuid()}")
+    object: str = "list"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    model: str
+    data: List[EmeddingResponseData]
+    usage: UsageInfo
 
 
 class ChatMessage(BaseModel):

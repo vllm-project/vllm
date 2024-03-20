@@ -45,7 +45,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
-from vllm.sequence import SamplerOutput
+from vllm.sequence import SamplerOutput, EmbeddingSequenceGroupOutput
 
 
 class LlamaMLP(nn.Module):
@@ -277,6 +277,88 @@ class LlamaModel(nn.Module):
             )
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
+
+    def _last_token_pool(self, last_hidden_states: torch.Tensor,
+                         attention_mask: torch.Tensor) -> torch.Tensor:
+        # Abated from https://huggingface.co/intfloat/e5-mistral-7b-instruct
+        # With only GPU operations
+        left_padding_mask = attention_mask[:, -1].all(dim=0)
+
+        sequence_lengths = attention_mask.sum(dim=1) - 1
+
+        # Prepare indexing for gathering the last valid token based on sequence_lengths.
+        batch_indices = torch.arange(last_hidden_states.size(0),
+                                     device=last_hidden_states.device)
+
+        last_tokens = torch.where(
+            left_padding_mask,
+            last_hidden_states[:,
+                               -1],  # For left-padded sequences, select the last token directly.
+            last_hidden_states[
+                batch_indices,
+                sequence_lengths]  # For others, select based on sequence_lengths.
+        )
+
+        return last_tokens
+
+    def embedding(
+        self,
+        input_ids: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> Optional[SamplerOutput]:
+        # _make_tensor_with_pad uses 0 to pad
+        attention_mask = (input_ids != 0).long()
+        outputs = self._last_token_pool(hidden_states, attention_mask)
+
+        seq_outputs = []
+        for output in outputs:
+            seq_outputs.append(
+                EmbeddingSequenceGroupOutput(embeddings=output.tolist()))
+        return seq_outputs
+
+    def load_weights(
+        self,
+        model_name_or_path: str,
+        cache_dir: Optional[str] = None,
+        load_format: str = "auto",
+        revision: Optional[str] = None,
+    ):
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
+        ]
+        params_dict = dict(self.named_parameters())
+        for name, loaded_weight in hf_model_weights_iterator(
+                model_name_or_path, cache_dir, load_format, revision):
+            if "rotary_emb.inv_freq" in name:
+                continue
+            if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
+                # Models trained using ColossalAI may include these tensors in
+                # the checkpoint. Skip them.
+                continue
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
 
 
 class LlamaForCausalLM(nn.Module):
