@@ -109,7 +109,8 @@ class cmake_build_ext(build_ext):
         ]
 
         verbose = bool(int(os.getenv('VERBOSE', '0')))
-
+        if _is_xpu():
+            cmake_args += ['-DVLLM_BUILD_XPU_OPS=ON']
         if verbose:
             cmake_args += ['-DCMAKE_VERBOSE_MAKEFILE=ON']
 
