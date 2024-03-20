@@ -332,7 +332,7 @@ def test_sampler_top_k_top_p(seed: int, device: str):
 
     sample_probs = None
 
-    def mock_sample(probs, logprobs, sampling_metadata):
+    def mock_sample(probs, *args, **kwargs):
         nonlocal sample_probs
         sample_probs = probs
         return [[prob.topk(1, dim=-1).indices.tolist(), [0]] for prob in probs]
