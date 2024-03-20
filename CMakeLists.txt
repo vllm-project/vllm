@@ -101,7 +101,7 @@ elseif(HIP_FOUND)
     message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_ROCM_6X} "
       "expected for ROCMm 6.x build, saw ${Torch_VERSION} instead.")
   endif()
-elseif(BUILD_XPU_OPS)
+elseif(VLLM_BUILD_XPU_OPS)
   message(STATUS "Building XPU")
   set(VLLM_GPU_LANG "SYCL")
 else()
