@@ -15,17 +15,12 @@ from vllm.worker.model_runner import ModelRunner
 
 class MockLogitsSampler(Sampler):
 
-    def __init__(self, vocab_size: int, fake_logits: torch.Tensor):
-        super().__init__(vocab_size=vocab_size)
+    def __init__(self, fake_logits: torch.Tensor):
+        super().__init__()
         self.fake_logits = fake_logits
 
     def forward(self, *args, **kwargs):
-        with patch(
-                "vllm.model_executor.layers.sampler._prune_hidden_states",
-                lambda x, y: x), patch(
-                    "vllm.model_executor.layers.sampler.Sampler._get_logits",
-                    lambda *args, **kwargs: self.fake_logits):
-            return super().forward(*args, **kwargs)
+        return super().forward(*args, **kwargs)
 
 
 def _prepare_test(
@@ -36,7 +31,7 @@ def _prepare_test(
     fake_logits = torch.full((batch_size, vocab_size),
                              1e-2,
                              dtype=input_tensor.dtype)
-    sampler = MockLogitsSampler(32000, fake_logits)
+    sampler = MockLogitsSampler(fake_logits)
     model_runner = ModelRunner(None, None, None, None, None)
     return input_tensor, fake_logits, sampler, model_runner
 
@@ -70,9 +65,7 @@ def _do_sample(
     sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
                                                      prompt_lens,
                                                      subquery_lens=prompt_lens)
-    return sampler(embedding=None,
-                   hidden_states=input_tensor,
-                   sampling_metadata=sampling_metadata)
+    return sampler(logits=input_tensor, sampling_metadata=sampling_metadata)
 
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
@@ -85,8 +78,8 @@ def test_sampler_all_greedy(seed: int, device: str):
         batch_size)
 
     sampling_params = SamplingParams(temperature=0)
-    sampler_output = _do_sample(batch_size, input_tensor, sampler,
-                                model_runner, sampling_params)
+    sampler_output = _do_sample(batch_size, fake_logits, sampler, model_runner,
+                                sampling_params)
     expected = torch.argmax(fake_logits, dim=-1)
     for i, sequence_output in enumerate(sampler_output):
         for nth_output in sequence_output.samples:
@@ -111,8 +104,8 @@ def test_sampler_all_random(seed: int, device: str):
         temperature=1.0,
         n=random.randint(1, 10),
     )
-    sampler_output = _do_sample(batch_size, input_tensor, sampler,
-                                model_runner, sampling_params)
+    sampler_output = _do_sample(batch_size, fake_logits, sampler, model_runner,
+                                sampling_params)
 
     for i, sequence_output in enumerate(sampler_output):
         for nth_output in sequence_output.samples:
@@ -127,8 +120,7 @@ def test_sampler_all_random_seed(seed: int, device: str):
     set_random_seed(seed)
     torch.set_default_device(device)
     batch_size = random.randint(1, 256)
-    input_tensor, fake_logits, sampler, model_runner = _prepare_test(
-        batch_size)
+    _, fake_logits, sampler, model_runner = _prepare_test(batch_size)
 
     for i in range(batch_size):
         fake_logits[i, i] = 1e2
@@ -138,8 +130,8 @@ def test_sampler_all_random_seed(seed: int, device: str):
         n=random.randint(1, 10),
         seed=random.randint(0, 10000),
     )
-    sampler_output = _do_sample(batch_size, input_tensor, sampler,
-                                model_runner, sampling_params)
+    sampler_output = _do_sample(batch_size, fake_logits, sampler, model_runner,
+                                sampling_params)
 
     for i, sequence_output in enumerate(sampler_output):
         for nth_output in sequence_output.samples:
@@ -154,18 +146,17 @@ def test_sampler_all_random_seed_deterministic(seed: int, device: str):
     set_random_seed(seed)
     torch.set_default_device(device)
     batch_size = random.randint(1, 256)
-    input_tensor, fake_logits, sampler, model_runner = _prepare_test(
-        batch_size)
+    _, fake_logits, sampler, model_runner = _prepare_test(batch_size)
 
     sampling_params = SamplingParams(
         temperature=1.0,
         n=random.randint(1, 10),
         seed=random.randint(0, 10000),
     )
-    first_sampler_output = _do_sample(batch_size, input_tensor, sampler,
+    first_sampler_output = _do_sample(batch_size, fake_logits, sampler,
                                       model_runner, sampling_params)
 
-    second_sampler_output = _do_sample(batch_size, input_tensor, sampler,
+    second_sampler_output = _do_sample(batch_size, fake_logits, sampler,
                                        model_runner, sampling_params)
 
     assert first_sampler_output == second_sampler_output
@@ -179,15 +170,14 @@ def test_sampler_all_beam(seed: int, device: str):
     set_random_seed(seed)
     torch.set_default_device(device)
     batch_size = random.randint(1, 256)
-    input_tensor, _, sampler, model_runner = _prepare_test(batch_size)
+    _, fake_logits, sampler, model_runner = _prepare_test(batch_size)
 
     sampling_params = SamplingParams(
         temperature=0,
         best_of=2,
         use_beam_search=True,
     )
-    _do_sample(batch_size, input_tensor, sampler, model_runner,
-               sampling_params)
+    _do_sample(batch_size, fake_logits, sampler, model_runner, sampling_params)
     # no assertion here as I am not sure how to determine whether
     # the outputs are expected - in other words, this just tests
     # whether there are no exceptions in the sampler
@@ -246,8 +236,7 @@ def test_sampler_mixed(seed: int, device: str):
     def test_sampling(model_runner: ModelRunner):
         sampling_metadata = model_runner._prepare_sample(
             seq_group_metadata_list, prompt_lens, subquery_lens=prompt_lens)
-        sampler_output = sampler(embedding=None,
-                                 hidden_states=input_tensor,
+        sampler_output = sampler(logits=fake_logits,
                                  sampling_metadata=sampling_metadata)
 
         for i, (sequence_output, metadata) in enumerate(
@@ -296,48 +285,6 @@ def test_sampler_mixed(seed: int, device: str):
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_sampler_logits_processors(seed: int, device: str):
-    set_random_seed(seed)
-    torch.set_default_device(device)
-    batch_size = random.randint(1, 256)
-    input_tensor, _, sampler, model_runner = _prepare_test(batch_size)
-
-    # This sample logits processor gives maximum score to the i-th token,
-    # where i is the length of the input sequence.
-    # We therefore expect the output token sequence to be [0, 1, 2, ...]
-    def pick_ith(token_ids, logits):
-        logits[len(token_ids)] = torch.finfo(logits.dtype).max
-        return logits
-
-    seq_group_metadata_list = []
-    prompt_lens = []
-    for i in range(batch_size):
-        seq_group_metadata_list.append(
-            SequenceGroupMetadata(
-                request_id=f"test_{i}",
-                is_prompt=True,
-                seq_data={0: SequenceData([1, 2, 3])},
-                sampling_params=SamplingParams(temperature=0,
-                                               logits_processors=[pick_ith]),
-                block_tables={0: [1]},
-            ))
-        prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
-
-    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens,
-                                                     subquery_lens=prompt_lens)
-    sampler_output = sampler(embedding=None,
-                             hidden_states=input_tensor,
-                             sampling_metadata=sampling_metadata)
-    for _, sequence_output in enumerate(sampler_output):
-        for idx, nth_output in enumerate(sequence_output.samples):
-            assert nth_output.output_token == idx
-
-    del model_runner
-
-
-@pytest.mark.parametrize("seed", RANDOM_SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_sampler_top_k_top_p(seed: int, device: str):
     set_random_seed(seed)
     batch_size = random.randint(1, 256)
@@ -352,7 +299,7 @@ def test_sampler_top_k_top_p(seed: int, device: str):
                                size=(batch_size, vocab_size),
                                device=input_tensor.device,
                                dtype=input_tensor.dtype)
-    sampler = MockLogitsSampler(32000, fake_logits)
+    sampler = MockLogitsSampler(fake_logits)
     model_runner = ModelRunner(None, None, None, None, None)
 
     generation_model = GenerationMixin()
@@ -391,9 +338,7 @@ def test_sampler_top_k_top_p(seed: int, device: str):
         return [[prob.topk(1, dim=-1).indices.tolist(), [0]] for prob in probs]
 
     with patch("vllm.model_executor.layers.sampler._sample", mock_sample):
-        sampler(embedding=None,
-                hidden_states=input_tensor,
-                sampling_metadata=sampling_metadata)
+        sampler(logits=fake_logits, sampling_metadata=sampling_metadata)
     hf_probs = warpers(torch.zeros_like(fake_logits), fake_logits.clone())
     hf_probs = torch.softmax(hf_probs, dim=-1, dtype=torch.float)
     assert torch.allclose(hf_probs, sample_probs, atol=1e-5)
