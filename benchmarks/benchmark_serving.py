@@ -29,6 +29,11 @@ from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
+from text_datasets import (
+    prepare_text_requests,
+    TextDatasetArgs,
+)
+
 from backend_request_func import (
     ASYNC_REQUEST_FUNCS,
     RequestFuncInput,
@@ -100,6 +105,47 @@ def sample_requests(
     return sampled_requests
 
 
+def request_from_file(
+    dataset_path: str,
+    num_requests: int,
+    tokenizer: PreTrainedTokenizerBase,
+) -> List[Tuple[str, int, int]]:
+
+    dataset_args = TextDatasetArgs(num_samples=num_requests,
+                                   fixed_output_len=256)
+
+    # Load data.
+    with open(dataset_path) as f:
+        dataset_text = " ".join(f.readlines())
+    dataset_text = dataset_text[:dataset_args.max_len]
+
+    # format into chat convo
+    system_message = {
+        "content": "You are a chatbot with the explicit goal of "
+        "helping the user as best as possible",
+        "role": "system",
+    }
+    convo = [system_message]
+    convo.append({
+        "content": f"Continue the following text: \n\n{dataset_text}",
+        "role": "user",
+    })
+
+    prompt = tokenizer.apply_chat_template(convo,
+                                           tokenize=False,
+                                           add_generation_prompt=True)
+
+    prompts = [prompt] * dataset_args.num_samples
+    completions = [""] * dataset_args.num_samples
+
+    return prepare_text_requests(
+        prompts=prompts,
+        completions=completions,
+        tokenizer=tokenizer,
+        dataset_args=dataset_args,
+    )
+
+
 async def get_request(
     input_requests: List[Tuple[str, int, int]],
     request_rate: float,
@@ -133,7 +179,8 @@ def calculate_metrics(
             output_len = len(tokenizer.encode(outputs[i].generated_text))
             total_output += output_len
             total_input += input_requests[i][1]
-            per_token_latencies.append(outputs[i].latency / output_len)
+            per_token_latencies.append(
+                (outputs[i].latency - outputs[i].ttft) / output_len)
             ttfts.append(outputs[i].ttft)
             completed += 1
 
@@ -254,7 +301,13 @@ def main(args: argparse.Namespace):
 
     tokenizer = get_tokenizer(tokenizer_id,
                               trust_remote_code=args.trust_remote_code)
-    input_requests = sample_requests(args.dataset, args.num_prompts, tokenizer)
+
+    if not args.request_from_text:
+        input_requests = sample_requests(args.dataset, args.num_prompts,
+                                         tokenizer)
+    else:
+        input_requests = request_from_file(args.dataset, args.num_prompts,
+                                           tokenizer)
 
     benchmark_result = asyncio.run(
         benchmark(
@@ -294,8 +347,8 @@ def main(args: argparse.Namespace):
         # Save to file
         base_model_id = model_id.split("/")[-1]
         file_name = (
-            f"{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
-        )
+            f"{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}"
+            f".json")
         with open(file_name, "w") as outfile:
             json.dump(result_json, outfile)
 
@@ -383,6 +436,12 @@ if __name__ == "__main__":
         "--save-result",
         action="store_true",
         help="Specify to save benchmark results to a json file",
+    )
+    parser.add_argument(
+        "--request-from-text",
+        action="store_true",
+        help="Create request from text file. "
+        "Requires setting path to the text file in --dataset.",
     )
 
     args = parser.parse_args()
