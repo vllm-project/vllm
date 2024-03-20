@@ -3,6 +3,11 @@
 {% set default_working_dir = "/vllm-workspace/tests" %}
 
 steps:
+  - label: "AMD Test"
+    agents:
+      queue: amd
+    command: bash .buildkite/run-amd-test.sh
+
   - label: ":docker: build image"
     commands:
       - "docker build --build-arg max_jobs=16 --tag {{ docker_image }} --target test --progress plain ."
@@ -20,6 +25,9 @@ steps:
     agents:
       queue: kubernetes
     soft_fail: {{ step.soft_fail or false }}
+    {% if step.parallelism %}
+    parallelism: {{ step.parallelism }}
+    {% endif %}
     retry:
       automatic:
         - exit_status: -1  # Agent was lost

@@ -1,5 +1,5 @@
 import enum
-from typing import Dict, OrderedDict
+from typing import OrderedDict
 from abc import ABC, abstractmethod, abstractproperty
 
 from vllm.block import PhysicalTokenBlock
@@ -10,7 +10,6 @@ class EvictionPolicy(enum.Enum):
        Evictor subclass.
     """
     LRU = enum.auto()
-    FIFO = enum.auto()
 
 
 class Evictor(ABC):
@@ -67,6 +66,7 @@ class LRUEvictor(Evictor):
     def evict(self) -> PhysicalTokenBlock:
         if len(self.free_table) == 0:
             raise ValueError("No usable cache memory left")
+        free_blocks = self.free_table.values()
 
         evicted_block = next(iter(self.free_table.values()))
         # The blocks with the lowest timestamps should be placed consecutively
@@ -99,43 +99,8 @@ class LRUEvictor(Evictor):
         return len(self.free_table)
 
 
-class RandomEvictor(Evictor):
-    """Evicts in a first-in-first-out order"""
-
-    def __init__(self):
-        self.free_table: Dict[int, PhysicalTokenBlock] = {}
-
-    def __contains__(self, block_hash: int) -> bool:
-        return block_hash in self.free_table
-
-    def evict(self) -> PhysicalTokenBlock:
-        if len(self.free_table) == 0:
-            raise ValueError("No usable cache memory left")
-        evicted_block = next(iter(self.free_table.values()))
-        evicted_block.computed = False
-        del self.free_table[evicted_block.block_hash]
-        return evicted_block
-
-    def add(self, block: PhysicalTokenBlock):
-        self.free_table[block.block_hash] = block
-
-    def remove(self, block_hash: int) -> PhysicalTokenBlock:
-        if block_hash not in self.free_table:
-            raise ValueError(
-                "Attempting to remove block that's not in the evictor")
-        block: PhysicalTokenBlock = self.free_table[block_hash]
-        del self.free_table[block_hash]
-        return block
-
-    @property
-    def num_blocks(self) -> int:
-        return len(self.free_table)
-
-
 def make_evictor(eviction_policy: EvictionPolicy) -> Evictor:
     if eviction_policy == EvictionPolicy.LRU:
         return LRUEvictor()
-    elif eviction_policy == EvictionPolicy.FIFO:
-        return RandomEvictor()
     else:
         raise ValueError(f"Unknown cache eviction policy: {eviction_policy}")
