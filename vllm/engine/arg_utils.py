@@ -314,9 +314,8 @@ class EngineArgs:
         parser.add_argument(
             '--scheduler-use-delay',
             action='store_true',
-            help=
-            'Apply artificial scheduling delay equal to half of previous prompt time.'
-        )
+            help='Apply artificial scheduling delay equal to half of '
+            'previous prompt time.')
         return parser
 
     @classmethod
