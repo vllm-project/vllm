@@ -123,8 +123,9 @@ class InputMetadata:
                     max_subquery_len=self.max_subquery_len,
                     max_context_len=None,
                     max_seq_len=self.max_seq_len,
+                    # SANG-TODO add a better comments.
                     subquery_start_loc=self.subquery_start_loc[:self.
-                                                               num_prompts],
+                                                               num_prompts + 1],
                     seq_start_loc=self.seq_start_loc[:self.num_prompt_tokens],
                     context_lens=self.context_lens[:self.num_prompts],
                     block_tables=self.block_tables[:self.num_prompts],
