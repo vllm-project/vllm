@@ -65,11 +65,12 @@ def ref_single_query_cached_kv_attention(
     context_lens: torch.Tensor,
     scale: float,
     alibi_slopes: Optional[torch.Tensor],
+    flashinfer_layout: bool = False,
 ) -> None:
     num_query_heads = query.shape[1]
-    num_kv_heads = value_cache.shape[1]
-    head_size = value_cache.shape[2]
-    block_size = value_cache.shape[3]
+    num_kv_heads = value_cache.shape[1] if not flashinfer_layout else value_cache.shape[2]
+    head_size = value_cache.shape[2] if not flashinfer_layout else value_cache.shape[3]
+    block_size = value_cache.shape[3] if not flashinfer_layout else value_cache.shape[1]
     num_seqs = query.shape[0]
 
     block_tables = block_tables.cpu().tolist()
@@ -85,11 +86,11 @@ def ref_single_query_cached_kv_attention(
             block_number = int(block_table[j // block_size])
             block_offset = j % block_size
 
-            k = key_cache[block_number, :, :, block_offset, :]
+            k = key_cache[block_number, :, :, block_offset, :] if not flashinfer_layout else key_cache[block_number, block_offset, :, :]
             k = k.reshape(num_kv_heads, head_size)
             keys.append(k)
 
-            v = value_cache[block_number, :, :, block_offset]
+            v = value_cache[block_number, :, :, block_offset] if not flashinfer_layout else value_cache[block_number, block_offset, :, :]
             values.append(v)
         keys = torch.stack(keys, dim=0)
         values = torch.stack(values, dim=0)
@@ -370,3 +371,91 @@ def test_multi_query_kv_attention(
     atol = get_default_atol(output) if is_hip() else 1e-3
     rtol = get_default_rtol(output) if is_hip() else 1e-5
     assert torch.allclose(output, ref_output, atol=atol, rtol=rtol)
+
+@pytest.mark.parametrize("num_seqs", [1])
+@pytest.mark.parametrize("num_heads", [1])
+@pytest.mark.parametrize("head_size", [128])
+@pytest.mark.parametrize("dtype", [torch.half])
+@pytest.mark.parametrize("seed", [0])
+@torch.inference_mode
+def test_flash_infer(
+    num_seqs,
+    num_heads,
+    head_size,
+    dtype,
+    seed
+    ):
+    # pytorch.skip()
+    from flashinfer import BatchDecodeWithPagedKVCacheWrapper    
+    device = "cuda"
+    ps = 16
+    context_len = 64
+    torch.manual_seed(seed)
+
+    npages = 1000
+    q = torch.randn(
+        num_seqs, 
+        num_heads, 
+        head_size, 
+        dtype=dtype, 
+        device=device
+    )
+    kv_cache = torch.randn(
+        npages, 
+        2, 
+        ps, 
+        num_heads, 
+        head_size, 
+        dtype=dtype, 
+        device=device
+    )
+    k_cache = kv_cache[:, 0].contiguous().clone()
+    v_cache = kv_cache[:, 1].contiguous().clone()
+
+    assert torch.all(kv_cache[:, 0] == k_cache)
+    assert torch.all(kv_cache[:, 1] == v_cache)
+
+    npages_seq = (context_len + ps - 1) // ps
+    block_table = torch.randperm(npages, device=device, dtype=torch.int32)[:(num_seqs * npages_seq)].reshape(-1, npages_seq)
+    context_lens = torch.ones((num_seqs,), dtype=torch.int32) * context_len
+
+    workspace_buffer = torch.empty(16 * 1024 * 1024, dtype=torch.uint8, device=device)
+    decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(workspace_buffer, "NHD")
+
+    block_tables_list = block_table.tolist()
+
+    kv_page_indptr = torch.tensor([0] + list(map(len, block_tables_list)), dtype=torch.int32, device=device)
+    kv_page_indptr = torch.cumsum(kv_page_indptr, dim=0, dtype=torch.int32)
+    kv_page_indices = torch.cat([torch.tensor(t, dtype=torch.int32) for t in block_tables_list]).to(device)
+    kv_last_page_len = torch.tensor(context_lens, dtype=torch.int32, device=device) % ps
+    decode_wrapper.begin_forward(
+        kv_page_indptr,
+        kv_page_indices,
+        kv_last_page_len,
+        num_heads,
+        num_heads,
+        head_size,
+        ps,
+        pos_encoding_mode="NONE",
+        data_type=dtype,
+    )
+
+    output_fi = decode_wrapper.forward(q, kv_cache, sm_scale=(head_size ** -0.5))
+
+    output_ref = torch.empty_like(q)
+    ref_single_query_cached_kv_attention(
+        output_ref,
+        q,
+        1,
+        k_cache,
+        v_cache,
+        block_table,
+        context_lens,
+        head_size ** -0.5,
+        alibi_slopes=None,
+        flashinfer_layout=True,
+    )
+
+    __import__('pdb').set_trace()
+
+    assert torch.allclose(output_fi, output_ref)

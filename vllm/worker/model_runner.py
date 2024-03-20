@@ -406,7 +406,7 @@ class ModelRunner:
                 self.model_config.get_total_num_kv_heads(),
                 self.model_config.get_head_size(),
                 self.block_size,
-                rotary_mode="NONE",
+                pos_encoding_mode="NONE",
                 data_type=self.model_config.dtype,
             )
 

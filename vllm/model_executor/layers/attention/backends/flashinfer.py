@@ -7,8 +7,7 @@ import torch
 from flashinfer import BatchDecodeWithPagedKVCacheWrapper
 
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.attention.ops.flash_attn import (
-    FlashAttentionImpl)
+from vllm._C import cache_ops
 from vllm.block import KVCache
 
 class FlashInferBackend:
@@ -82,8 +81,14 @@ class FlashInferBackend:
         # vectors will not be cached. This happens during the initial memory
         # profiling run.
         if kv_cache is not None:
-            FlashAttentionImpl.reshape_and_cache(key, value, kv_cache[:, 0],
-                                                 kv_cache[:, 1], input_metadata)
+            cache_ops.reshape_and_cache_flash(
+                key,
+                value,
+                kv_cache[:, 0],
+                kv_cache[:, 1],
+                input_metadata.slot_mapping.flatten(),
+                input_metadata.kv_cache_dtype,
+            )
 
         if input_metadata.is_prompt:
             # Prompt run.
@@ -107,7 +112,11 @@ class FlashInferBackend:
                 raise NotImplementedError
         else:
             # Decoding run.
-            output = decoder_wrapper.forward(query.contiguous(), kv_cache)
+            output = decoder_wrapper.forward(
+                query.contiguous(), 
+                kv_cache,
+                sm_scale=self.scale)
+            __import__('pdb').set_trace()
 
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
