@@ -7,6 +7,7 @@ from torch import nn
 from transformers import LlamaConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
@@ -25,7 +26,8 @@ class LlamaForCausalLM(nn.Module):
         self.config = config
         self.linear_method = linear_method
         self.model = None
-        self.sampler = Sampler(config.vocab_size)
+        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.sampler = Sampler()
 
     def forward(
         self,
@@ -45,13 +47,18 @@ class LlamaForCausalLM(nn.Module):
                                 start_ids=seq_ids.flatten())
         return logits
 
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        logits = self.logits_processor(self.model.chkpt_model.lm_head,
+                                       hidden_states, sampling_metadata)
+        return logits
+
     def sample(
         self,
-        hidden_states: torch.Tensor,
+        logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(self.model.chkpt_model.lm_head,
-                                   hidden_states, sampling_metadata)
+        next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
     def load_weights(self,

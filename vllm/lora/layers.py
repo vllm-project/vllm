@@ -10,7 +10,6 @@ from transformers import PretrainedConfig
 
 from vllm.config import LoRAConfig
 from vllm.lora.punica import add_lora, add_lora_slice, bgmv
-from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
@@ -20,6 +19,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear,
                                                QKVParallelLinear,
                                                MergedColumnParallelLinear)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, ParallelLMHead)
 from vllm.model_executor.parallel_utils.parallel_state import (
@@ -783,11 +783,11 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
         return self.base_layer.weight
 
 
-class SamplerWithLoRA(BaseLayerWithLoRA):
+class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
 
     def __init__(
         self,
-        base_layer: Sampler,
+        base_layer: LogitsProcessor,
         hidden_size: int,
         dtype: torch.dtype,
         device: torch.device,
@@ -805,6 +805,10 @@ class SamplerWithLoRA(BaseLayerWithLoRA):
     @property
     def vocab_size(self):
         return self.base_layer.vocab_size
+
+    @property
+    def scale(self):
+        return self.base_layer.scale
 
     @property
     def org_vocab_size(self):
@@ -968,14 +972,14 @@ def from_layer(
     return layer
 
 
-def from_layer_sampler(
-    layer: Sampler,
+def from_layer_logits_processor(
+    layer: LogitsProcessor,
     lm_head: ParallelLMHead,
     max_loras: int,
     lora_config: LoRAConfig,
     model_config: Optional[PretrainedConfig] = None,
-) -> SamplerWithLoRA:
-    ret = SamplerWithLoRA(layer, lm_head.embedding_dim, lm_head.weight.dtype,
-                          lm_head.weight.device)
+) -> LogitsProcessorWithLoRA:
+    ret = LogitsProcessorWithLoRA(layer, lm_head.embedding_dim,
+                                  lm_head.weight.dtype, lm_head.weight.device)
     ret.create_lora_weights(max_loras, lora_config, model_config)
     return ret
