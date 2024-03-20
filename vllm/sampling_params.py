@@ -2,7 +2,7 @@
 import copy
 from enum import IntEnum
 from functools import cached_property
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Optional, Union, Sequence
 
 import torch
 
@@ -148,7 +148,14 @@ class SamplingParams:
         self.prompt_logprobs = prompt_logprobs
         self.skip_special_tokens = skip_special_tokens
         self.spaces_between_special_tokens = spaces_between_special_tokens
-        self.logits_processors = logits_processors
+        # A separate logit processor is needed for each output sequence
+        # since certain logits processors (such as BaseGuidedLogitsProcessor)
+        # in multi-beam generation must track the sequences generated
+        # by each beam up to that point.
+        # See https://github.com/vllm-project/vllm/issues/3448 for more
+        self.logits_processors = [
+            copy.deepcopy(logits_processors) for _ in range(n)
+        ]
         self.include_stop_str_in_output = include_stop_str_in_output
         self._verify_args()
         if self.use_beam_search:
@@ -246,10 +253,12 @@ class SamplingParams:
         See https://github.com/vllm-project/vllm/issues/3087
         """
 
-        logit_processor_refs = None if self.logits_processors is None else {
+        logit_processor_refs = (None if self.logits_processors is None else {
             id(lp): lp
             for lp in self.logits_processors
-        }
+            if (not hasattr(lp[0] if isinstance(lp, Sequence) else lp, "fsm")
+                if lp is not None else True)
+        })
         return copy.deepcopy(self, memo=logit_processor_refs)
 
     def __repr__(self) -> str:

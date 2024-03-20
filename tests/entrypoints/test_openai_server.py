@@ -694,6 +694,7 @@ number: "1" | "2"
         prompt=("Generate a sql state that select col_1 from "
                 "table_1 where it is equals to 1"),
         temperature=1.0,
+        n=3,
         max_tokens=500,
         extra_body=dict(guided_grammar=simple_sql_grammar))
 
