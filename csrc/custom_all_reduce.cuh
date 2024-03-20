@@ -151,7 +151,9 @@ DINLINE void end_sync(const RankSignals &sg, volatile Signal *self_sg,
                       int rank) {
   __syncthreads();
   // eliminate the case that prior writes are not visible after signals become
-  // visible
+  // visible. Note that I did not managed to make this happen through a lot of
+  // testing. Might be the case that hardware provides stronger guarantee than
+  // the memory model. 
   if constexpr (!final_sync) __threadfence_system();
   if (threadIdx.x < ngpus) {
     // reset flag for next time
