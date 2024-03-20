@@ -49,13 +49,9 @@ def bgmv(
     punica_kernels.dispatch_bgmv(y, x, w_t_all, indicies, layer_idx, scale)
 
 
-def dispatch_bgmv_low_level(y: torch.Tensor,
-                            x: torch.Tensor,
-                            w_t_all: torch.Tensor,
-                            indicies: torch.LongTensor,
-                            layer_idx: int,
-                            scale: float,
-                            y_offset: int,
+def dispatch_bgmv_low_level(y: torch.Tensor, x: torch.Tensor,
+                            w_t_all: torch.Tensor, indicies: torch.LongTensor,
+                            layer_idx: int, scale: float, y_offset: int,
                             y_slice_size: int):
     """
     Same as `bgmv` but you can operate on slices of y.

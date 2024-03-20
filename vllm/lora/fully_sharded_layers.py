@@ -1,7 +1,5 @@
 # pylint: disable=unused-argument
-import math
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional
 
 import torch
 import torch.nn as nn
@@ -9,26 +7,20 @@ import torch.nn.functional as F
 from transformers import PretrainedConfig
 
 from vllm.config import LoRAConfig
-from vllm.lora.punica import add_lora, add_lora_slice, bgmv, dispatch_bgmv_low_level
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.lora.punica import bgmv, dispatch_bgmv_low_level
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
-    tensor_model_parallel_gather,
 )
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear,
                                                QKVParallelLinear,
                                                MergedColumnParallelLinear)
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding, ParallelLMHead
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.utils import split_tensor_along_last_dim, divide
 
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size, get_tensor_model_parallel_group)
-
-from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping, SamplerWithLoRA
+from vllm.lora.layers import BaseLayerWithLoRA
 
 if TYPE_CHECKING:
     pass
@@ -49,7 +41,8 @@ class ColumnParallelLinearWithShardedLoRA(BaseLayerWithLoRA):
         # As in S-LoRA, column parallel for lora_a and lora_b
 
         tp_size = get_tensor_model_parallel_world_size()
-        lora_a_output_size_per_partition = divide(lora_config.max_lora_rank, tp_size)
+        lora_a_output_size_per_partition = divide(lora_config.max_lora_rank,
+                                                  tp_size)
         self.lora_a_stacked = torch.zeros(
             max_loras,
             1,
@@ -112,12 +105,17 @@ class ColumnParallelLinearWithShardedLoRA(BaseLayerWithLoRA):
             self.base_layer.linear_weights, x, bias)
 
         x = x.view(-1, x.shape[-1])
-        output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape
-        buffer = torch.zeros((x.shape[0], self.lora_a_stacked.shape[2]), dtype=torch.float32, device=x.device)
-            
-        bgmv(buffer, x, self.lora_a_stacked, self.indices[:self.indices_len[0]], 0, 1.0)
+        output, out_orig_shape = output.view(-1,
+                                             output.shape[-1]), output.shape
+        buffer = torch.zeros((x.shape[0], self.lora_a_stacked.shape[2]),
+                             dtype=torch.float32,
+                             device=x.device)
+
+        bgmv(buffer, x, self.lora_a_stacked,
+             self.indices[:self.indices_len[0]], 0, 1.0)
         buffer = tensor_model_parallel_all_gather(buffer)
-        bgmv(output, buffer, self.lora_b_stacked, self.indices[:self.indices_len[0]], 0, 1.0)
+        bgmv(output, buffer, self.lora_b_stacked,
+             self.indices[:self.indices_len[0]], 0, 1.0)
         # now have column partitioned output
 
         output = output.view(*out_orig_shape)
@@ -152,7 +150,8 @@ class ColumnParallelLinearWithShardedLoRA(BaseLayerWithLoRA):
         return self.base_layer.linear_weights
 
 
-class MergedColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithShardedLoRA):
+class MergedColumnParallelLinearWithShardedLoRA(
+        ColumnParallelLinearWithShardedLoRA):
     """ColumnParallelLinear layer that is composed of 2 sublayers (slices)
     packed together (eg. gate_proj + up_proj -> gate_up_proj).
 
@@ -180,7 +179,8 @@ class MergedColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithShardedL
         self.tp_rank = get_tensor_model_parallel_rank()
 
         # As in S-LoRA, column parallel for lora_a and lora_b
-        lora_a_output_size_per_partition = divide(lora_config.max_lora_rank, self.tp_size)
+        lora_a_output_size_per_partition = divide(lora_config.max_lora_rank,
+                                                  self.tp_size)
 
         self.lora_a_stacked = tuple(
             torch.zeros(
@@ -222,7 +222,10 @@ class MergedColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithShardedL
         self.output_shard_size = self.lora_a_stacked[0].shape[2]
         self.output_start_idx = self.tp_rank * self.output_shard_size
         if self.tp_size > 1:
-            lora_a = [lora_a[i][:, self.output_start_idx : self.output_start_idx + self.output_shard_size] for i in range(self.n_slices)]
+            lora_a = [
+                lora_a[i][:, self.output_start_idx:self.output_start_idx +
+                          self.output_shard_size] for i in range(self.n_slices)
+            ]
 
             shard_size = self.output_dim
             start_idx = self.tp_rank * shard_size
@@ -252,18 +255,27 @@ class MergedColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithShardedL
             self.base_layer.linear_weights, x, bias)
 
         x = x.view(-1, x.shape[-1])
-        output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape
-        buffers = torch.zeros((self.n_slices, x.shape[0], self.lora_a_stacked[0].shape[2]), dtype=torch.float32, device=x.device)
+        output, out_orig_shape = output.view(-1,
+                                             output.shape[-1]), output.shape
+        buffers = torch.zeros(
+            (self.n_slices, x.shape[0], self.lora_a_stacked[0].shape[2]),
+            dtype=torch.float32,
+            device=x.device)
         for slice_idx in range(self.n_slices):
-            bgmv(buffers[slice_idx], x, self.lora_a_stacked[slice_idx], self.indices[:self.indices_len[0]], 0, 1.0)
+            bgmv(buffers[slice_idx], x, self.lora_a_stacked[slice_idx],
+                 self.indices[:self.indices_len[0]], 0, 1.0)
 
         buffers = tensor_model_parallel_all_gather(buffers)
         shard_size_b = self.lora_b_stacked[0].shape[2]
         left_offset = 0
         for slice_idx in range(self.n_slices):
-            dispatch_bgmv_low_level(output, buffers[slice_idx], self.lora_b_stacked[slice_idx], self.indices[:self.indices_len[0]], 0, 1.0, left_offset, shard_size_b)
+            dispatch_bgmv_low_level(output, buffers[slice_idx],
+                                    self.lora_b_stacked[slice_idx],
+                                    self.indices[:self.indices_len[0]], 0, 1.0,
+                                    left_offset, shard_size_b)
             left_offset += shard_size_b
 
+        output = output.view(*out_orig_shape)
         # now have column partitioned and packed output
         return output
 
@@ -297,8 +309,9 @@ class QKVParallelLinearWithShardedLora(ColumnParallelLinearWithShardedLoRA):
         self.kv_shard_id = self.tp_rank // self.base_layer.num_kv_head_replicas
 
         # As in S-LoRA, column parallel for lora_a and lora_b
-        lora_a_output_size_per_partition = divide(lora_config.max_lora_rank, self.tp_size)
-        
+        lora_a_output_size_per_partition = divide(lora_config.max_lora_rank,
+                                                  self.tp_size)
+
         # q, k, v
         self.lora_a_stacked = (
             torch.zeros(
@@ -411,14 +424,18 @@ class QKVParallelLinearWithShardedLora(ColumnParallelLinearWithShardedLoRA):
                 self.lora_b_stacked[2][
                     index, 0, :lora_b[2].shape[1], :lora_b[2].shape[0]].copy_(
                         lora_b[2].T, non_blocking=True)
-                
+
         for lora_ in lora_a:
             if lora_ is None: return
-        
+
         self.shard_size = [self.lora_a_stacked[i].shape[2] for i in range(3)]
         self.start_idx = [self.tp_rank * self.shard_size[i] for i in range(3)]
-        lora_a = [lora_a[i][:, self.start_idx[i] : self.start_idx[i] + self.shard_size[i]] for i in range(3)]
-        
+        lora_a = [
+            lora_a[i][:,
+                      self.start_idx[i]:self.start_idx[i] + self.shard_size[i]]
+            for i in range(3)
+        ]
+
         self.lora_a_stacked[0][
             index, 0, :lora_a[0].shape[1], :lora_a[0].shape[0]].copy_(
                 lora_a[0].T, non_blocking=True)
@@ -433,25 +450,22 @@ class QKVParallelLinearWithShardedLora(ColumnParallelLinearWithShardedLoRA):
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.linear_method.apply_weights(
             self.base_layer.linear_weights, x, bias)
-        
-        buffers = torch.zeros((3, x.shape[0], self.lora_a_stacked[0].shape[2]), dtype=torch.float32, device=x.device)
+
+        buffers = torch.zeros((3, x.shape[0], self.lora_a_stacked[0].shape[2]),
+                              dtype=torch.float32,
+                              device=x.device)
         for proj_idx in range(3):
-            bgmv(buffers[proj_idx], x, self.lora_a_stacked[proj_idx], self.indices[:self.indices_len[0]], 0, 1.0)
+            bgmv(buffers[proj_idx], x, self.lora_a_stacked[proj_idx],
+                 self.indices[:self.indices_len[0]], 0, 1.0)
 
         buffers = tensor_model_parallel_all_gather(buffers)
         left_offset = 0
         for proj_idx in range(3):
             shard_size = self.lora_b_stacked[proj_idx].shape[2]
-            dispatch_bgmv_low_level(
-                output, 
-                buffers[proj_idx], 
-                self.lora_b_stacked[proj_idx], 
-                self.indices[:self.indices_len[0]], 
-                0, 
-                1.0, 
-                left_offset, 
-                shard_size
-            )
+            dispatch_bgmv_low_level(output, buffers[proj_idx],
+                                    self.lora_b_stacked[proj_idx],
+                                    self.indices[:self.indices_len[0]], 0, 1.0,
+                                    left_offset, shard_size)
             left_offset += shard_size
 
         # now have column partitioned and packed output
@@ -483,7 +497,8 @@ class RowParallelLinearWithShardedLoRA(BaseLayerWithLoRA):
 
         # As in S-LoRA, column parallel for lora_b. Needs an all_reduce beforehand
         tp_size = get_tensor_model_parallel_world_size()
-        lora_b_output_size_per_partition = divide(self.base_layer.weight.shape[0], tp_size)
+        lora_b_output_size_per_partition = divide(
+            self.base_layer.weight.shape[0], tp_size)
 
         self.lora_b_stacked = torch.zeros(
             (
@@ -546,17 +561,22 @@ class RowParallelLinearWithShardedLoRA(BaseLayerWithLoRA):
     def apply_weights(self, x: torch.Tensor) -> torch.Tensor:
         output = self.base_layer.linear_method.apply_weights(
             self.base_layer.linear_weights, x)
-        
-        buffer = torch.zeros((x.shape[0], self.lora_a_stacked.shape[2]), dtype=torch.float32, device=x.device)
-        bgmv(buffer, x, self.lora_a_stacked, self.indices[:self.indices_len[0]], 0, 1.0)
+
+        buffer = torch.zeros((x.shape[0], self.lora_a_stacked.shape[2]),
+                             dtype=torch.float32,
+                             device=x.device)
+        bgmv(buffer, x, self.lora_a_stacked,
+             self.indices[:self.indices_len[0]], 0, 1.0)
         buffer = tensor_model_parallel_all_reduce(buffer)
 
-        # following S-LoRA, allows the fusing of all_gather and all_reduce by adding the column partitioned lora output to a slice of output tensor. All that remains is a standard 
+        # following S-LoRA, allows the fusing of all_gather and all_reduce by adding the column partitioned lora output to a slice of output tensor. All that remains is a standard
         # all_reduce. User should be aware though that the output is not the same as a normal row_parallel, it should be reduced before being used
         # col parallel
         shard_size = self.lora_b_stacked.shape[2]
         start_idx = self.tp_rank * shard_size
-        dispatch_bgmv_low_level(output, buffer, self.lora_b_stacked, self.indices[:self.indices_len[0]], 0, 1.0, start_idx, shard_size)
+        dispatch_bgmv_low_level(output, buffer, self.lora_b_stacked,
+                                self.indices[:self.indices_len[0]], 0, 1.0,
+                                start_idx, shard_size)
 
         return output
 
@@ -601,5 +621,3 @@ class RowParallelLinearWithShardedLoRA(BaseLayerWithLoRA):
     @property
     def weight(self):
         return self.base_layer.weight
-
-    
