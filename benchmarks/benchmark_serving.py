@@ -12,7 +12,7 @@ On the server side, run one of the following commands:
 On the client side, run:
     python benchmarks/benchmark_serving.py \
         --backend <backend> \
-        --tokenizer <your_model> --dataset <target_dataset> \
+        --model <your_model> --dataset <target_dataset> \
         --request-rate <request_rate>
 """
 import argparse
@@ -171,9 +171,9 @@ async def benchmark(
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
-    pbar = None if disable_tqdm else tqdm(total=len(input_requests))
-
     print(f"Traffic request rate: {request_rate}")
+
+    pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
     benchmark_start_time = time.perf_counter()
     tasks = []
@@ -293,7 +293,9 @@ def main(args: argparse.Namespace):
 
         # Save to file
         base_model_id = model_id.split("/")[-1]
-        file_name = f"{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
+        file_name = (
+            f"{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
+        )
         with open(file_name, "w") as outfile:
             json.dump(result_json, outfile)
 
@@ -341,7 +343,7 @@ if __name__ == "__main__":
         "--tokenizer",
         type=str,
         help=
-        "Name or path of the tokenizer, if not using the default model tokenizer.",
+        "Name or path of the tokenizer, if not using the default tokenizer.",
     )
     parser.add_argument(
         "--best-of",

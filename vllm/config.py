@@ -1,14 +1,18 @@
-from typing import Optional, Union, ClassVar
+from typing import TYPE_CHECKING, Optional, Union, ClassVar
 from dataclasses import dataclass
 import os
 from packaging.version import Version
 
+import json
 import torch
 from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config
-from vllm.utils import get_cpu_memory, is_hip, get_nvcc_cuda_version
+from vllm.utils import get_cpu_memory, is_hip, is_neuron, get_nvcc_cuda_version
+
+if TYPE_CHECKING:
+    from ray.util.placement_group import PlacementGroup
 
 logger = init_logger(__name__)
 
@@ -45,7 +49,7 @@ class ModelConfig:
             a tag name, or a commit id. If unspecified, will use the default
             version.
         code_revision: The specific revision to use for the model code on
-            Hugging Face Hub. It can be a branch name, a tag name, or a 
+            Hugging Face Hub. It can be a branch name, a tag name, or a
             commit id. If unspecified, will use the default version.
         tokenizer_revision: The specific tokenizer version to use. It can be a
             branch name, a tag name, or a commit id. If unspecified, will use
@@ -79,6 +83,7 @@ class ModelConfig:
         quantization: Optional[str] = None,
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
+        max_logprobs: int = 5,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -93,11 +98,13 @@ class ModelConfig:
         self.quantization = quantization
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
+        self.max_logprobs = max_logprobs
 
         if os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true":
             # download model from ModelScope hub,
             # lazy import so that modelscope is not required for normal use.
             from modelscope.hub.snapshot_download import snapshot_download  # pylint: disable=C
+
             if not os.path.exists(model):
                 model_path = snapshot_download(model_id=model,
                                                cache_dir=download_dir,
@@ -134,7 +141,7 @@ class ModelConfig:
                 if (f not in rocm_not_supported_load_format)
             ]
             raise ValueError(
-                f"load format \'{load_format}\' is not supported in ROCm. "
+                f"load format '{load_format}' is not supported in ROCm. "
                 f"Supported load format are "
                 f"{rocm_supported_load_format}")
 
@@ -155,8 +162,8 @@ class ModelConfig:
         self.tokenizer_mode = tokenizer_mode
 
     def _verify_quantization(self) -> None:
-        supported_quantization = ["awq", "gptq", "squeezellm"]
-        rocm_not_supported_quantization = ["awq"]
+        supported_quantization = ["awq", "gptq", "squeezellm", "marlin"]
+        rocm_not_supported_quantization = ["awq", "marlin"]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
 
@@ -164,6 +171,17 @@ class ModelConfig:
         hf_quant_config = getattr(self.hf_config, "quantization_config", None)
         if hf_quant_config is not None:
             hf_quant_method = str(hf_quant_config["quant_method"]).lower()
+
+            # If the GPTQ model is serialized in marlin format, use marlin.
+            if (hf_quant_method == "gptq"
+                    and "is_marlin_format" in hf_quant_config
+                    and hf_quant_config["is_marlin_format"]):
+                logger.info("The model is serialized in Marlin format. "
+                            "Using Marlin kernel.")
+                hf_quant_method = "marlin"
+                if self.quantization == "gptq":
+                    self.quantization = hf_quant_method
+
             if self.quantization is None:
                 self.quantization = hf_quant_method
             elif self.quantization != hf_quant_method:
@@ -181,11 +199,13 @@ class ModelConfig:
             if is_hip(
             ) and self.quantization in rocm_not_supported_quantization:
                 raise ValueError(
-                    f"{self.quantization} quantization is currently not supported "
-                    f"in ROCm.")
-            logger.warning(f"{self.quantization} quantization is not fully "
-                           "optimized yet. The speed can be slower than "
-                           "non-quantized models.")
+                    f"{self.quantization} quantization is currently not "
+                    f"supported in ROCm.")
+            if self.quantization != "marlin":
+                logger.warning(
+                    f"{self.quantization} quantization is not fully "
+                    "optimized yet. The speed can be slower than "
+                    "non-quantized models.")
 
     def _verify_cuda_graph(self) -> None:
         if self.max_context_len_to_capture is None:
@@ -214,6 +234,15 @@ class ModelConfig:
                 f"({pipeline_parallel_size}).")
 
     def get_sliding_window(self) -> Optional[int]:
+        """Get the sliding window size, or None if disabled.
+        """
+
+        # Some models, like Qwen2 and Qwen1.5, use `use_sliding_window` in
+        # addition to sliding window size. We check if that field is present
+        # and if it's False, return None.
+        if (hasattr(self.hf_config, "use_sliding_window")
+                and not self.hf_config.use_sliding_window):
+            return None
         return getattr(self.hf_config, "sliding_window", None)
 
     def get_vocab_size(self) -> int:
@@ -295,18 +324,25 @@ class CacheConfig:
         swap_space: int,
         cache_dtype: str,
         sliding_window: Optional[int] = None,
+        enable_prefix_caching: bool = False,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
         self.swap_space_bytes = swap_space * _GB
         self.cache_dtype = cache_dtype
         self.sliding_window = sliding_window
+        self.enable_prefix_caching = enable_prefix_caching
         self._verify_args()
         self._verify_cache_dtype()
 
         # Will be set after profiling.
         self.num_gpu_blocks = None
         self.num_cpu_blocks = None
+
+    def metrics_info(self):
+        # convert cache_config to dict(key: str, value: str) for prometheus
+        # metrics info
+        return {key: str(value) for key, value in self.__dict__.items()}
 
     def _verify_args(self) -> None:
         if self.gpu_memory_utilization > 1.0:
@@ -318,15 +354,14 @@ class CacheConfig:
         if self.cache_dtype == "auto":
             pass
         elif self.cache_dtype == "fp8_e5m2":
+            if is_hip():
+                raise NotImplementedError(
+                    "FP8_E5M2 KV Cache on AMD GPU has not been supported yet.")
             nvcc_cuda_version = get_nvcc_cuda_version()
             if nvcc_cuda_version and nvcc_cuda_version < Version("11.8"):
                 raise ValueError(
                     "FP8 is not supported when cuda version is lower than 11.8."
                 )
-            device_name = torch.cuda.get_device_name()
-            if "AMD" in device_name:
-                raise NotImplementedError(
-                    "FP8_E5M2 KV Cache on AMD GPU has not been supported yet.")
             logger.info(
                 "Using fp8_e5m2 data type to store kv cache. It reduces "
                 "the GPU memory footprint and boosts the performance. "
@@ -355,6 +390,58 @@ class CacheConfig:
             logger.warning("Possibly too large swap space. " + msg)
 
 
+@dataclass
+class TokenizerPoolConfig:
+    """Configuration for the tokenizer pool.
+    
+    Args:
+        pool_size: Number of tokenizer workers in the pool.
+        pool_type: Type of the pool.
+        extra_config: Additional config for the pool.
+            The way the config will be used depends on the
+            pool type.
+    """
+    pool_size: int
+    pool_type: str
+    extra_config: dict
+
+    def __post_init__(self):
+        if self.pool_type not in ("ray", ):
+            raise ValueError(f"Unknown pool type: {self.pool_type}")
+        if not isinstance(self.extra_config, dict):
+            raise ValueError("extra_config must be a dictionary.")
+
+    @classmethod
+    def create_config(
+        cls, tokenizer_pool_size: int, tokenizer_pool_type: str,
+        tokenizer_pool_extra_config: Optional[Union[str, dict]]
+    ) -> Optional["TokenizerPoolConfig"]:
+        """Create a TokenizerPoolConfig from the given parameters.
+        
+        If tokenizer_pool_size is 0, return None.
+        
+        Args:
+            tokenizer_pool_size: Number of tokenizer workers in the pool.
+            tokenizer_pool_type: Type of the pool.
+            tokenizer_pool_extra_config: Additional config for the pool.
+                The way the config will be used depends on the
+                pool type. This can be a JSON string (will be parsed).
+        """
+        if tokenizer_pool_size:
+            if isinstance(tokenizer_pool_extra_config, str):
+                tokenizer_pool_extra_config_parsed = json.loads(
+                    tokenizer_pool_extra_config)
+            else:
+                tokenizer_pool_extra_config_parsed = (
+                    tokenizer_pool_extra_config or {})
+            tokenizer_pool_config = cls(tokenizer_pool_size,
+                                        tokenizer_pool_type,
+                                        tokenizer_pool_extra_config_parsed)
+        else:
+            tokenizer_pool_config = None
+        return tokenizer_pool_config
+
+
 class ParallelConfig:
     """Configuration for the distributed execution.
 
@@ -369,6 +456,10 @@ class ParallelConfig:
             parallel and large models.
         disable_custom_all_reduce: Disable the custom all-reduce kernel and
             fall back to NCCL.
+        tokenizer_pool_config: Config for the tokenizer pool.
+            If None, will use synchronous tokenization.
+        ray_workers_use_nsight: Whether to profile Ray workers with nsight, see
+            https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler.
     """
 
     def __init__(
@@ -378,15 +469,30 @@ class ParallelConfig:
         worker_use_ray: bool,
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
+        tokenizer_pool_config: Optional[TokenizerPoolConfig] = None,
+        ray_workers_use_nsight: bool = False,
+        placement_group: Optional["PlacementGroup"] = None,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
-        self.tensor_parallel_size = tensor_parallel_size
+        if is_neuron():
+            # For Neuron device support, here we assign TP=1 to avoid sharding
+            # within vLLM directly. Transformer-neuronx would take
+            # neuron_tp_degree attribute, and distribute the workload
+            # to multiple NeuronCores.
+            self.tensor_parallel_size = 1
+            self.neuron_tp_degree = tensor_parallel_size
+        else:
+            self.tensor_parallel_size = tensor_parallel_size
         self.worker_use_ray = worker_use_ray
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
+        self.tokenizer_pool_config = tokenizer_pool_config
+        self.ray_workers_use_nsight = ray_workers_use_nsight
+        self.placement_group = placement_group
 
-        self.world_size = pipeline_parallel_size * tensor_parallel_size
-        if self.world_size > 1:
+        self.world_size = pipeline_parallel_size * self.tensor_parallel_size
+        # Ray worker is not supported for Neuron backend.
+        if self.world_size > 1 and not is_neuron():
             self.worker_use_ray = True
         self._verify_args()
 
@@ -405,6 +511,9 @@ class ParallelConfig:
                 logger.info(
                     "Disabled the custom all-reduce kernel because it is not "
                     "supported with pipeline parallelism.")
+        if self.ray_workers_use_nsight and not self.worker_use_ray:
+            raise ValueError("Unable to use nsight profiling unless workers "
+                             "run with Ray.")
 
         # FIXME(woosuk): Fix the stability issues and re-enable the custom
         # all-reduce kernel.
@@ -465,8 +574,29 @@ class SchedulerConfig:
 
 class DeviceConfig:
 
-    def __init__(self, device: str = "cuda") -> None:
-        self.device = torch.device(device)
+    def __init__(self, device: str = "auto") -> None:
+        if device == "auto":
+            # Automated device type detection
+            if is_neuron():
+                self.device_type = "neuron"
+            else:
+                # We don't call torch.cuda.is_available() here to
+                # avoid initializing CUDA before workers are forked
+                self.device_type = "cuda"
+        else:
+            # Device type is assigned explicitly
+            self.device_type = device
+
+        # Some device types require processing inputs on CPU
+        if self.device_type in ["neuron"]:
+            self.device = torch.device("cpu")
+        else:
+            # Set device with device type
+            self.device = torch.device(self.device_type)
+
+    @property
+    def is_neuron(self):
+        return self.device_type == "neuron"
 
 
 @dataclass
@@ -561,7 +691,7 @@ def _get_and_verify_dtype(
             k for k, v in _STR_DTYPE_TO_TORCH_DTYPE.items()
             if (k not in _ROCM_NOT_SUPPORTED_DTYPE)
         ]
-        raise ValueError(f"dtype \'{dtype}\' is not supported in ROCm. "
+        raise ValueError(f"dtype '{dtype}' is not supported in ROCm. "
                          f"Supported dtypes are {rocm_supported_dtypes}")
 
     # Verify the dtype.

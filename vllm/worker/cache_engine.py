@@ -3,10 +3,9 @@ from typing import Dict, List, Tuple
 
 import torch
 
-from vllm._C import cache_ops
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import in_wsl, STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils import in_wsl, is_neuron, STR_DTYPE_TO_TORCH_DTYPE
 
 logger = init_logger(__name__)
 
@@ -39,6 +38,10 @@ class CacheEngine:
         self.num_gpu_blocks = cache_config.num_gpu_blocks
         self.num_cpu_blocks = cache_config.num_cpu_blocks
 
+        # Skip initializing KV cache for Neuron backend.
+        if is_neuron():
+            return
+
         if cache_config.cache_dtype == "auto":
             self.dtype = model_config.dtype
         else:
@@ -47,12 +50,6 @@ class CacheEngine:
         # Initialize the cache.
         self.gpu_cache = self.allocate_gpu_cache()
         self.cpu_cache = self.allocate_cpu_cache()
-
-        # Initialize the stream for caching operations.
-        self.cache_stream = torch.cuda.Stream()
-        assert self.cache_stream != torch.cuda.current_stream()
-        # Initialize the events for stream synchronization.
-        self.events = [torch.cuda.Event() for _ in range(self.num_layers)]
 
     def get_key_block_shape(self) -> Tuple[int, int, int, int]:
         element_size = torch.tensor([], dtype=self.dtype).element_size()
@@ -121,17 +118,15 @@ class CacheEngine:
         dst: List[KVCache],
         src_to_dst: Dict[int, int],
     ) -> None:
-        with torch.cuda.stream(self.cache_stream):
-            for i in range(self.num_layers):
-                src_key_cache, src_value_cache = src[i]
-                dst_key_cache, dst_value_cache = dst[i]
-                # Copy the key blocks.
-                cache_ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
-                # Copy the value blocks.
-                cache_ops.swap_blocks(src_value_cache, dst_value_cache,
-                                      src_to_dst)
-                event = self.events[i]
-                event.record(stream=self.cache_stream)
+        from vllm._C import cache_ops
+
+        for i in range(self.num_layers):
+            src_key_cache, src_value_cache = src[i]
+            dst_key_cache, dst_value_cache = dst[i]
+            # Copy the key blocks.
+            cache_ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
+            # Copy the value blocks.
+            cache_ops.swap_blocks(src_value_cache, dst_value_cache, src_to_dst)
 
     def swap_in(self, src_to_dst: Dict[int, int]) -> None:
         self._swap(self.cpu_cache, self.gpu_cache, src_to_dst)
@@ -140,6 +135,8 @@ class CacheEngine:
         self._swap(self.gpu_cache, self.cpu_cache, src_to_dst)
 
     def copy(self, src_to_dsts: Dict[int, List[int]]) -> None:
+        from vllm._C import cache_ops
+
         key_caches = [key_cache for key_cache, _ in self.gpu_cache]
         value_caches = [value_cache for _, value_cache in self.gpu_cache]
         # NOTE(woosuk): This operation implicitly synchronizes the CPU and GPU.

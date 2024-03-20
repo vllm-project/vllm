@@ -24,7 +24,7 @@ from transformers import GPTJConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention import PagedAttention
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearMethodBase,
                                                QKVParallelLinear,
@@ -86,7 +86,7 @@ class GPTJAttention(nn.Module):
             base=rope_theta,
             is_neox_style=False,
         )
-        self.attn = PagedAttention(self.num_heads, self.head_size, scaling)
+        self.attn = Attention(self.num_heads, self.head_size, scaling)
 
     def forward(
         self,
@@ -143,7 +143,8 @@ class GPTJBlock(nn.Module):
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
-        inner_dim = 4 * config.n_embd if config.n_inner is None else config.n_inner
+        inner_dim = (4 * config.n_embd
+                     if config.n_inner is None else config.n_inner)
         self.ln_1 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
         self.attn = GPTJAttention(config, linear_method)
         self.mlp = GPTJMLP(inner_dim, config, linear_method)
