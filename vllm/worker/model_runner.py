@@ -425,8 +425,6 @@ class ModelRunner:
         max_subquery_len = max(subquery_lens, default=0)
         max_seq_len = max(seq_lens, default=0)
         num_prompt_tokens = len(input_tokens)
-
-        num_prompt_tokens = len(input_tokens)
         num_generation_tokens = len(input_tokens_decode)
 
         # Concatenate inputs.
