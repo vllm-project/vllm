@@ -151,12 +151,12 @@ class PagedAttentionImpl:
     ) -> torch.Tensor:
         output = torch.empty_like(query)
         # print("SANG-TODO prefix attention!")
-        # print(f"{input_metadata.block_tables=}")
-        # print(f"{input_metadata.start_loc=}")
-        # print(f"{input_metadata.prompt_lens=}")
-        # print(f"{input_metadata.context_lens=}")
-        # print(f"{input_metadata.max_seq_len=}")
-        # print(f"{input_metadata.slot_mapping=}")
+        print(f"{input_metadata.block_tables=}")
+        print(f"{input_metadata.subquery_start_loc=}")
+        print(f"{input_metadata.prompt_lens=}")
+        print(f"{input_metadata.context_lens=}")
+        print(f"{input_metadata.max_seq_len=}")
+        print(f"{input_metadata.slot_mapping=}")
         # print(f"{query.size()=}")
         # for i in range(query.shape[0]):
         #     print(f"{i}th key")
@@ -164,6 +164,9 @@ class PagedAttentionImpl:
         # for i in range(query.shape[0]):
         #     print(f"{i}th value")
         #     print(f"{value[i][0][0]=}")
+        print(query.shape)
+        print(key.shape)
+        print(value.shape)
 
         # verify kv cache correctness.
         # for token_idx, i in enumerate(input_metadata.slot_mapping):
@@ -181,7 +184,7 @@ class PagedAttentionImpl:
         # Print kv cache.
         # _print_value_cache(value_cache, input_metadata, query.shape[1], 4)
         # _print_key_cache(key_cache, input_metadata, query.shape[1], 4)
-
+        print(input_metadata)
         context_attention_fwd(
             query,
             key,
