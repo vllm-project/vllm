@@ -4,7 +4,7 @@ from typing import List
 
 from vllm import SamplingParams
 from vllm.block import PhysicalTokenBlock
-from vllm.core.block_manager import (BlockAllocator, BlockSpaceManager,
+from vllm.core.block_manager import (UncachedBlockAllocator, BlockSpaceManager,
                                      AllocStatus)
 from vllm.utils import Device
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus, Logprob
@@ -15,7 +15,8 @@ from .utils import create_dummy_prompt
 def test_block_allocator_allocate():
     block_size = 4
     num_cpu_blocks = 4
-    cpu_allocator = BlockAllocator(Device.CPU, block_size, num_cpu_blocks)
+    cpu_allocator = UncachedBlockAllocator(Device.CPU, block_size,
+                                           num_cpu_blocks)
 
     # Allocate all available cpu blocks.
     num_free = num_cpu_blocks
@@ -24,7 +25,7 @@ def test_block_allocator_allocate():
         block = cpu_allocator.allocate()
         num_free -= 1
 
-        assert block.block_hash not in cpu_allocator.evictor
+        assert block not in cpu_allocator.free_blocks
         assert cpu_allocator.get_num_free_blocks() == num_free
 
     with pytest.raises(ValueError):
@@ -34,14 +35,15 @@ def test_block_allocator_allocate():
 def test_block_allocator_free():
     block_size = 4
     num_cpu_blocks = 4
-    cpu_allocator = BlockAllocator(Device.CPU, block_size, num_cpu_blocks)
+    cpu_allocator = UncachedBlockAllocator(Device.CPU, block_size,
+                                           num_cpu_blocks)
 
     # Allocate all available cpu blocks.
     blocks: List[PhysicalTokenBlock] = []
     for _ in range(num_cpu_blocks):
         block = cpu_allocator.allocate()
         blocks.append(block)
-        assert block.block_hash not in cpu_allocator.evictor
+        assert block not in cpu_allocator.free_blocks
 
     # Free all allocated cpu blocks.
     num_free = 0
@@ -49,7 +51,7 @@ def test_block_allocator_free():
     for block in blocks:
         cpu_allocator.free(block)
         num_free += 1
-        assert block.block_hash in cpu_allocator.evictor
+        assert block in cpu_allocator.free_blocks
         assert cpu_allocator.get_num_free_blocks() == num_free
 
         with pytest.raises(ValueError):
