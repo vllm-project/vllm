@@ -34,4 +34,4 @@ jobs:
         codespell --toml pyproject.toml
     - name: Isort check
       run: |
-        isort --check --diff
+        isort . --check --diff
