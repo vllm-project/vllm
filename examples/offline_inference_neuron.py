@@ -24,7 +24,8 @@ llm = LLM(
     # The device can be automatically detected when AWS Neuron SDK is installed.
     # The device argument can be either unspecified for automated detection,
     # or explicitly assigned.
-    device="neuron")
+    device="neuron",
+    tensor_parallel_size=2)
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.
 outputs = llm.generate(prompts, sampling_params)

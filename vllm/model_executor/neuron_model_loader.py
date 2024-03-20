@@ -30,7 +30,7 @@ _NEURON_SUPPORTED_MODELS = {
     "LlamaForCausalLM": ("transformers_neuronx.llama.model",
                          "LlamaForSampling", "LlamaForCausalLM"),
     "MistralForCausalLM": ("transformers_neuronx.mistral.model",
-                           "LlamaForSampling", "MistralForCausalLM")
+                           "MistralForSampling", "MistralForCausalLM")
 }
 
 
