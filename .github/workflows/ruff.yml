@@ -34,4 +34,4 @@ jobs:
         codespell --toml pyproject.toml
     - name: Isort check
       run: |
-        git diff --name-only --diff-filter=ACM "$(git merge-base origin/main HEAD)" -- '*.py' '*.pyi' | xargs isort --check --diff
+        isort --check --diff
