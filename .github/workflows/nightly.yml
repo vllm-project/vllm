@@ -40,18 +40,18 @@ jobs:
         secrets: inherit
 
     # multi-gpu
-    AWS-AVX2-192G-4-A10G-96G-Benchmark:
-        uses: ./.github/workflows/nm-benchmark.yml
-        with:
-            label: aws-avx2-192G-4-a10g-96G
-            benchmark_config_list_file:  ./.github/data/nm_benchmark_nightly_configs_list.txt
-            timeout: 480
-            gitref: '${{ github.ref }}'
-            Gi_per_thread: 4
-            python: "3.10.12"
-            # Always push if it is a scheduled job
-            push_benchmark_results_to_gh_pages: "${{ github.event_name == 'schedule' || inputs.push_benchmark_results_to_gh_pages }}"
-        secrets: inherit
+    # AWS-AVX2-192G-4-A10G-96G-Benchmark:
+    #     uses: ./.github/workflows/nm-benchmark.yml
+    #     with:
+    #         label: aws-avx2-192G-4-a10g-96G
+    #         benchmark_config_list_file:  ./.github/data/nm_benchmark_nightly_configs_list.txt
+    #         timeout: 480
+    #         gitref: '${{ github.ref }}'
+    #         Gi_per_thread: 4
+    #         python: "3.10.12"
+    #         # Always push if it is a scheduled job
+    #         push_benchmark_results_to_gh_pages: "${{ github.event_name == 'schedule' || inputs.push_benchmark_results_to_gh_pages }}"
+    #     secrets: inherit
 
     # single gpu
     AWS-AVX2-32G-A10G-24G-Benchmark:
