@@ -16,6 +16,15 @@ Easy, fast, and cheap LLM serving for everyone
 
 ---
 
+**The Third vLLM Bay Area Meetup (April 2nd 6pm-8:30pm PT)**
+
+We are thrilled to announce our third vLLM Meetup!
+The vLLM team will share recent updates and roadmap.
+We will also have vLLM collaborators from Roblox coming up to the stage to discuss their experience in deploying LLMs with vLLM.
+Please register [here](https://robloxandvllmmeetup2024.splashthat.com/) and join us!
+
+---
+
 *Latest News* 🔥
 - [2024/01] We hosted [the second vLLM meetup](https://lu.ma/ygxbpzhl) in SF! Please find the meetup slides [here](https://docs.google.com/presentation/d/12mI2sKABnUw5RBWXDYY-HtHth4iMSNcEoQ10jDQbxgA/edit?usp=sharing).
 - [2024/01] Added ROCm 6.0 support to vLLM.
