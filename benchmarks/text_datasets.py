@@ -12,9 +12,11 @@ class TextDatasetArgs:
     fixed_output_len: Optional[int] = None
 
 
-def prepare_text_requests(prompts: List[str], completions: List[str],
-                         tokenizer: PreTrainedTokenizerBase,
-                         dataset_args: TextDatasetArgs,
+def prepare_text_requests(
+    prompts: List[str],
+    completions: List[str],
+    tokenizer: PreTrainedTokenizerBase,
+    dataset_args: TextDatasetArgs,
 ) -> List[Tuple[str, int, int]]:
     assert len(prompts) == len(completions)
     dataset = []
