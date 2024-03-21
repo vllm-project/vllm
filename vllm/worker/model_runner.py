@@ -23,8 +23,7 @@ from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.utils import (async_tensor_h2d, CudaMemoryMeasurer,
-                        pin_memory_available, make_tensor_with_pad,
-                        pad_to_max_length)
+                        pin_memory_available, make_tensor_with_pad)
 
 logger = init_logger(__name__)
 
@@ -492,16 +491,16 @@ class ModelRunner:
                 generators.append(seq_group_metadata.state.generator)
 
         selected_token_indices = async_tensor_h2d(selected_token_indices,
-                                            dtype=torch.long,
-                                            target_device=self.device,
-                                            pin_memory=self.pin_memory)
+                                                  dtype=torch.long,
+                                                  target_device=self.device,
+                                                  pin_memory=self.pin_memory)
 
         categorized_sample_indices = {
             t: _maybe_expand_dim(
                 async_tensor_h2d(seq_ids,
-                           dtype=torch.int,
-                           target_device=self.device,
-                           pin_memory=self.pin_memory), 2, 2)
+                                 dtype=torch.int,
+                                 target_device=self.device,
+                                 pin_memory=self.pin_memory), 2, 2)
             for t, seq_ids in categorized_sample_indices.items()
         }
 

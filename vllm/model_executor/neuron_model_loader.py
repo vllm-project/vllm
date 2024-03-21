@@ -44,7 +44,8 @@ class NeuronCasualLM(nn.Module):
         super().__init__()
         self.config = config
         self.model = None
-        self.logits_processor = LogitsProcessor(config.vocab_size, logits_as_input=True)
+        self.logits_processor = LogitsProcessor(config.vocab_size,
+                                                logits_as_input=True)
         self.sampler = Sampler()
 
     def forward(
