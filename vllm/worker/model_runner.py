@@ -221,7 +221,7 @@ class ModelRunner:
                 slot_mapping.append(slot)
 
         max_subquery_len = max(subquery_lens)
-        max_seq_len = max(prompt_lens)
+        max_prompt_len = max(prompt_lens)
         num_prompt_tokens = len(input_tokens)
         assert max_subquery_len > 0
 
@@ -284,7 +284,7 @@ class ModelRunner:
             num_generation_tokens=0,
             max_subquery_len=max_subquery_len,
             max_context_len=None,
-            max_seq_len=max_seq_len,
+            max_prompt_len=max_prompt_len,
             subquery_start_loc=subquery_start_loc,
             seq_start_loc=seq_start_loc,
             context_lens=context_lens_tensor,
@@ -415,7 +415,7 @@ class ModelRunner:
             num_generation_tokens=len(input_tokens),
             max_subquery_len=None,
             max_context_len=max_context_len,
-            max_seq_len=None,
+            max_prompt_len=None,
             subquery_start_loc=None,
             seq_start_loc=None,
             context_lens=context_lens,
@@ -775,7 +775,7 @@ class ModelRunner:
                     num_generation_tokens=batch_size,
                     max_subquery_len=None,
                     max_context_len=self.max_context_len_to_capture,
-                    max_seq_len=None,
+                    max_prompt_len=None,
                     subquery_start_loc=None,
                     seq_start_loc=None,
                     context_lens=context_lens[:batch_size],
