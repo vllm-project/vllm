@@ -102,8 +102,12 @@ class Scheduler:
         self.running: Deque[SequenceGroup] = deque()
         # Sequence groups in the SWAPPED state.
         self.swapped: Deque[SequenceGroup] = deque()
+
+        # Time at previous scheduling step
         self.prev_time = 0.0
+        # Did we schedule a prompt at previous step?
         self.prev_prompt = False
+        # Latency of the last prompt step
         self.last_prompt_latency = 0.0
 
     @property
