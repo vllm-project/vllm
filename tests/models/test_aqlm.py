@@ -13,7 +13,7 @@ capability = capability[0] * 10 + capability[1]
 aqlm_not_supported = (
     capability < _QUANTIZATION_CONFIG_REGISTRY["aqlm"].get_min_capability())
 
-# In this test we hardcode prompts and generations for the model so we don't 
+# In this test we hardcode prompts and generations for the model so we don't
 # need to require the AQLM package as a dependency
 example_prompts = [
     'vLLM is a high-throughput and memory-efficient inference and serving '
