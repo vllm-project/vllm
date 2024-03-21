@@ -51,7 +51,7 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
     ray_workers_use_nsight: bool = False
-    scheduler_use_delay: bool = False
+    scheduler_delay_factor: float = 0.0
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -307,10 +307,11 @@ class EngineArgs:
                             choices=["auto", "cuda", "neuron"],
                             help='Device type for vLLM execution.')
         parser.add_argument(
-            '--scheduler-use-delay',
-            action='store_true',
-            help='Apply artificial scheduling delay equal to half of '
-            'previous prompt time.')
+            '--scheduler-delay-factor',
+            type=float,
+            default=EngineArgs.scheduler_delay_factor,
+            help='Apply a delay (of delay factor multiplied by previous'
+            'prompt latency) before scheduling next prompt.')
         return parser
 
     @classmethod
@@ -349,7 +350,7 @@ class EngineArgs:
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
                                            model_config.max_model_len,
-                                           self.scheduler_use_delay)
+                                           self.scheduler_delay_factor)
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,

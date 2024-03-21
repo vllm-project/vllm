@@ -505,12 +505,13 @@ class Scheduler:
             self.last_prompt_latency = now - self.prev_time
         self.prev_time, self.prev_prompt = now, False
         # Delay scheduling prompts to let waiting queue fill up
-        if self.scheduler_config.use_delay and self.waiting:
+        if self.scheduler_config.delay_factor > 0 and self.waiting:
             earliest_arrival_time = min(
                 [e.metrics.arrival_time for e in self.waiting])
-            passed_delay = ((now - earliest_arrival_time) >
-                            (0.5 * self.last_prompt_latency)
-                            or not self.running)
+            passed_delay = (
+                (now - earliest_arrival_time) >
+                (self.scheduler_config.delay_factor * self.last_prompt_latency)
+                or not self.running)
         else:
             passed_delay = True
         return passed_delay

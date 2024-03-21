@@ -171,10 +171,10 @@ def test_scheduler_max_seqs():
     assert set(out.scheduled_seq_groups) == set([all_seq_groups[1]])
 
 
-def test_scheduler_use_delay():
+def test_scheduler_delay_factor():
 
     block_size = 4
-    scheduler_config = SchedulerConfig(100, 64, 16, use_delay=True)
+    scheduler_config = SchedulerConfig(100, 64, 16, delay_factor=0.5)
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 8
     cache_config.num_gpu_blocks = 8
