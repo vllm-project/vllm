@@ -112,15 +112,8 @@ class FlashAttentionBackend:
         else:
             # Decoding run.
             output = PagedAttentionImpl.forward_decode(
-                query,
-                key_cache,
-                value_cache,
-                input_metadata,
-                self.num_kv_heads,
-                self.scale,
-                self.alibi_slopes,
-                kv_scale
-            )
+                query, key_cache, value_cache, input_metadata,
+                self.num_kv_heads, self.scale, self.alibi_slopes, kv_scale)
 
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
