@@ -67,9 +67,6 @@ def _use_flash_attn() -> bool:
         logger.info("flash_attn is not found. Using xformers backend.")
         return False
 
-    if is_hip():
-        # AMD GPUs.
-        return False
     if torch.cuda.get_device_capability()[0] < 8:
         # Volta and Turing NVIDIA GPUs.
         logger.info("flash_attn is not supported on Turing or older GPUs. "

@@ -7,7 +7,7 @@ import torch
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention.ops.paged_attn import (
     PagedAttentionImpl)
-
+from vllm.utils import is_hip
 
 class FlashAttentionBackend:
     """
@@ -99,19 +99,33 @@ class FlashAttentionBackend:
                 # normal attention
                 # When block_tables are not filled, it means q and k are the
                 # prompt, and they have the same length.
-                output = flash_attn_varlen_func(
-                    q=query,
-                    k=key,
-                    v=value,
-                    cu_seqlens_q=input_metadata.seq_start_loc,
-                    cu_seqlens_k=input_metadata.seq_start_loc,
-                    max_seqlen_q=input_metadata.max_seq_len,
-                    max_seqlen_k=input_metadata.max_seq_len,
-                    softmax_scale=self.scale,
-                    causal=True,
-                    window_size=self.sliding_window,
-                    alibi_slopes=self.alibi_slopes,
-                )
+                if is_hip():
+                    # window_size and alibi_slopes not supported
+                    output = flash_attn_varlen_func(
+                        q=query,
+                        k=key,
+                        v=value,
+                        cu_seqlens_q=input_metadata.seq_start_loc,
+                        cu_seqlens_k=input_metadata.seq_start_loc,
+                        max_seqlen_q=input_metadata.max_seq_len,
+                        max_seqlen_k=input_metadata.max_seq_len,
+                        softmax_scale=self.scale,
+                        causal=True,
+                    )
+                else:
+                    output = flash_attn_varlen_func(
+                        q=query,
+                        k=key,
+                        v=value,
+                        cu_seqlens_q=input_metadata.seq_start_loc,
+                        cu_seqlens_k=input_metadata.seq_start_loc,
+                        max_seqlen_q=input_metadata.max_seq_len,
+                        max_seqlen_k=input_metadata.max_seq_len,
+                        softmax_scale=self.scale,
+                        causal=True,
+                        window_size=self.sliding_window,
+                        alibi_slopes=self.alibi_slopes,
+                    )                                
             else:
                 # prefix-enabled attention
                 output = PagedAttentionImpl.forward_prefix(
