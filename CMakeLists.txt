@@ -51,7 +51,7 @@ append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
 
 # Ensure the 'nvcc' command is in the PATH
 find_program(NVCC_EXECUTABLE nvcc)
-if (NOT NVCC_EXECUTABLE)
+if (CUDA_FOUND AND NOT NVCC_EXECUTABLE)
     message(FATAL_ERROR "nvcc not found")
 endif()
 
