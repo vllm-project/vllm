@@ -38,7 +38,6 @@ class XFormersBackend:
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
     ) -> None:
-        super().__init__()
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -46,7 +45,6 @@ class XFormersBackend:
         self.sliding_window = sliding_window
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
-        self.register_buffer("alibi_slopes", alibi_slopes, persistent=False)
         self.alibi_slopes = alibi_slopes
 
         assert self.num_heads % self.num_kv_heads == 0
@@ -126,7 +124,6 @@ class XFormersBackend:
                                                   value.shape[-1])
 
                 if self.use_ref_attention:
-                    print("ref attention used.")
                     output = torch.empty_like(query)
                     start = 0
                     for _, prompt_len in enumerate(input_metadata.prompt_lens):
@@ -307,8 +304,6 @@ def _ref_masked_attention(
     num_kv_heads: int,
     head_size: int,
     scale: float,
-    alibi_slopes: Optional[torch.Tensor],
-    kv_scale: float,
 ) -> torch.Tensor:
     query = query.view(-1, num_heads, head_size)
     key = key.view(-1, num_kv_heads, head_size)
