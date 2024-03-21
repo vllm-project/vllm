@@ -1,4 +1,5 @@
 """Attention layer with xFormers and PagedAttention."""
+import importlib
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Type
 
