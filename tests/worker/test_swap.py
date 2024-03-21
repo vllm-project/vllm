@@ -11,7 +11,7 @@ def test_swap() -> None:
                              dtype="half",
                              load_format="dummy")
     (model_config, cache_config, parallel_config, scheduler_config,
-     device_config, _) = engine_args.create_engine_configs()
+     device_config, _, _) = engine_args.create_engine_configs()
     cache_config.num_gpu_blocks = 100
     cache_config.num_cpu_blocks = 100
 
