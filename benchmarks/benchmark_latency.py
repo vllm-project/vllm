@@ -26,8 +26,6 @@ def main(args: argparse.Namespace):
         enforce_eager=args.enforce_eager,
         kv_cache_dtype=args.kv_cache_dtype,
         device=args.device,
-        block_size=args.block_size,
-        max_chunked_prefill_len=args.max_chunked_prefill_len,
         ray_workers_use_nsight=args.ray_workers_use_nsight,
     )
 
@@ -148,11 +146,6 @@ if __name__ == '__main__':
         default="cuda",
         choices=["cuda"],
         help='device type for vLLM execution, supporting CUDA only currently.')
-    parser.add_argument('--block-size',
-                        type=int,
-                        default=16,
-                        help='block size of key/value cache')
-    parser.add_argument('--max-chunked-prefill-len', type=int, default=-1)
     parser.add_argument(
         "--ray-workers-use-nsight",
         action='store_true',

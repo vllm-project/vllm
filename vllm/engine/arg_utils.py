@@ -51,7 +51,6 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
     ray_workers_use_nsight: bool = False
-    max_chunked_prefill_len: int = -1
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -306,17 +305,6 @@ class EngineArgs:
                             default=EngineArgs.device,
                             choices=["auto", "cuda", "neuron"],
                             help='Device type for vLLM execution.')
-        parser.add_argument(
-            '--max-chunked-prefill-len',
-            type=int,
-            default=-1,
-            help='max number of prefill tokens allowed in chunked prefill'
-            ', -1 means no limit')
-        parser.add_argument(
-            '--max-num-prompt-seqs',
-            type=int,
-            default=1024,
-            help='max number of prompt sequences allowed in prefill')
         return parser
 
     @classmethod
@@ -355,8 +343,7 @@ class EngineArgs:
         scheduler_config = SchedulerConfig(
             self.max_num_batched_tokens,
             self.max_num_seqs,
-            model_config.max_model_len,
-            max_chunked_prefill_len=self.max_chunked_prefill_len)
+            model_config.max_model_len)
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,

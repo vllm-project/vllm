@@ -22,8 +22,6 @@ class InputMetadata:
     # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
     # in block 0, and 1st slot in block 1, respectively.
     slot_mapping: torch.Tensor
-    # The number of chunked prefill sequences in the batch.
-    num_chunked_prefill: int
     # (batch_size,). The prompt length per sequence. None if it is a decoding.
     prompt_lens: Optional[List[int]]
     # prompt_lens stored as a tensor.

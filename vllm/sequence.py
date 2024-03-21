@@ -2,7 +2,7 @@
 import copy
 import enum
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Union, TYPE_CHECKING
+from typing import Dict, List, Optional, Union, TYPE_CHECKING
 
 from vllm.block import LogicalTokenBlock
 from vllm.sampling_params import SamplingParams
@@ -92,8 +92,6 @@ class SequenceData:
         prompt_token_ids: The token IDs of the prompt.
         output_token_ids: The token IDs of the output.
         cumulative_logprob: The cumulative log probability of the output.
-        _prefill_start: The start index of the prefill.
-        _prefill_end: The end index of the prefill.
     """
 
     def __init__(
@@ -107,19 +105,10 @@ class SequenceData:
         self.prompt_token_ids = prompt_token_ids
         self.output_token_ids = output_token_ids
         self.cumulative_logprob = 0.0
-        self._prefill_start: int = 0
-        self._prefill_end: int = 0
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self.output_token_ids.append(token_id)
         self.cumulative_logprob += logprob
-
-    def reset_processed_tokens(self) -> None:
-        """Used when a sequence is
-        preempted by recomputation. This reset the prefill range as well.
-        """
-        self._prefill_start = 0
-        self._prefill_end = 0
 
     def get_len(self) -> int:
         return len(self.output_token_ids) + len(self.prompt_token_ids)
@@ -132,36 +121,6 @@ class SequenceData:
 
     def get_token_ids(self) -> List[int]:
         return self.prompt_token_ids + self.output_token_ids
-
-    def advance_prefill_range(self, size: int) -> int:
-        """Advance the prefill range by the specified amount
-
-        Args:
-            size: The amount to advance the prefill range.
-        Returns:
-            The actual number of advanced tokens.
-        """
-        self._prefill_start = self._prefill_end
-        # The increased range could be larger than the seq length.
-        # Clamp it to the seq length.
-        # Note that we use prompt_len + output_len instead of
-        # prompt_len here. This is because during recompute
-        # we need to prefill for both prompt and output.
-        self._prefill_end = min(self._prefill_end + size, self.get_len())
-        return self._prefill_end - self._prefill_start
-
-    def get_prefill_range(self) -> Tuple[int, int]:
-        """Returns the prefill range."""
-        return self._prefill_start, self._prefill_end
-
-    def get_num_unprefilled(self) -> int:
-        """Return the number of prefil tokens that are not completed.
-        
-        Note that we use prompt_len + output_len instead of
-        prompt_len here. This is because during recompute
-        we need to prefill for both prompt and output.
-        """
-        return self.get_len() - self._prefill_end
 
     def get_last_token_id(self) -> int:
         if not self.output_token_ids:
@@ -270,9 +229,6 @@ class Sequence:
         self._append_tokens_to_blocks([token_id])
         self.output_logprobs.append(logprobs)
         self.data.append_token_id(token_id, logprobs[token_id].logprob)
-
-    def reset_processed_tokens(self):
-        self.data.reset_processed_tokens()
 
     def get_len(self) -> int:
         return self.data.get_len()
@@ -441,24 +397,6 @@ class SequenceGroup:
     def get_finished_seqs(self) -> List[Sequence]:
         return [seq for seq in self.seqs_dict.values() if seq.is_finished()]
 
-    def advance_prefill_range(self, size: int) -> int:
-        """Advance the prefill range by the specified amount.
-
-        Args:
-            size: The amount to advance the prefill range.
-        Returns:
-            The actual number of advanced tokens.
-        """
-        # All sequences in the group should have the same prompt.
-        return [
-            seq.data.advance_prefill_range(size)
-            for seq in self.seqs_dict.values()
-        ][0]
-
-    def get_num_unprefilled(self) -> int:
-        # All sequences in the group should have the same prompt.
-        return list(self.seqs_dict.values())[0].data.get_num_unprefilled()
-
     def num_seqs(self, status: Optional[SequenceStatus] = None) -> int:
         return len(self.get_seqs(status))
 
@@ -498,10 +436,6 @@ class SequenceGroupMetadata:
     Args:
         request_id: The ID of the request.
         is_prompt: Whether the request is at prompt stage.
-        is_chunked_prefill: Whether the request is at chunked prefill stage.
-            If a prefill request is chunked, the first ~ n-1th chunks are
-            chunked prefill requests.
-            Note that chunked_prefill is also a prompt stage.
         seq_data: The sequence data. (Seq id -> sequence data)
         sampling_params: The sampling parameters used to generate the outputs.
         block_tables: The block tables. (Seq id -> list of physical block
@@ -514,7 +448,6 @@ class SequenceGroupMetadata:
         self,
         request_id: str,
         is_prompt: bool,
-        is_chunked_prefill: bool,
         seq_data: Dict[int, SequenceData],
         sampling_params: SamplingParams,
         block_tables: Dict[int, List[int]],
@@ -524,7 +457,6 @@ class SequenceGroupMetadata:
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
-        self.is_chunked_prefill = is_chunked_prefill
         self.seq_data = seq_data
         self.sampling_params = sampling_params
         self.block_tables = block_tables

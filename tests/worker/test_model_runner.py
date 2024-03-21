@@ -27,7 +27,6 @@ def test_prepare_prompt():
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=True,
-                is_chunked_prefill=False,
                 seq_data={0: SequenceData(seq_data)},
                 sampling_params=SamplingParams(temperature=0),
                 block_tables=block_tables,

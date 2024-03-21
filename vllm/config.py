@@ -535,10 +535,6 @@ class SchedulerConfig:
             iteration.
         max_model_len: Maximum length of a sequence (including prompt
             and generated text).
-        max_chunked_prefill_len: The maximum length of tokens for prefill
-            requests. Longer requests will be chunked into multiple chunks.
-            -1 means no chunking (disabled). This features is only supported
-            for flash style attention.
     """
 
     def __init__(
@@ -546,7 +542,6 @@ class SchedulerConfig:
         max_num_batched_tokens: Optional[int],
         max_num_seqs: int,
         max_model_len: int,
-        max_chunked_prefill_len: int = -1,
     ) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
@@ -556,13 +551,10 @@ class SchedulerConfig:
             self.max_num_batched_tokens = max(max_model_len, 2048)
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
-        self.chunked_prefill_enabled = max_chunked_prefill_len != -1
-        self.max_chunked_prefill_len = max_chunked_prefill_len
         self._verify_args()
 
     def _verify_args(self) -> None:
-        if self.max_num_batched_tokens < self.max_model_len and \
-                not self.chunked_prefill_enabled:
+        if self.max_num_batched_tokens < self.max_model_len:
             raise ValueError(
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) is "
                 f"smaller than max_model_len ({self.max_model_len}). "

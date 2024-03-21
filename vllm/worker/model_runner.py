@@ -143,7 +143,6 @@ class ModelRunner:
         context_lens: List[int] = []
         subquery_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
-        num_chunked_prefill = 0
 
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
@@ -151,24 +150,14 @@ class ModelRunner:
             assert len(seq_ids) == 1
             seq_id = seq_ids[0]
 
-            computed_block_nums = seq_group_metadata.computed_block_nums
-            if seq_group_metadata.is_chunked_prefill:
-                num_chunked_prefill += 
-                # TODO(sang): Both are the same thing and should be handled
-                # in the same way.
-                if computed_block_nums is not None:
-                    raise RuntimeError(
-                        "chunked prefill cannot be used with prefix caching "
-                        "now.")
-
             seq_data = seq_group_metadata.seq_data[seq_id]
-            prefill_start, prefill_end = seq_data.get_prefill_range()
-            prompt_tokens = seq_data.get_token_ids()[prefill_start:prefill_end]
+            prompt_tokens = seq_data.get_token_ids()
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
             computed_len = 0
 
             # NOTE: This only works for oooooooxxx style attention.
+            computed_block_nums = seq_group_metadata.computed_block_nums
             if computed_block_nums is not None and len(
                     computed_block_nums) > 0 and self.sliding_window is None:
                 # Prefix is not supported with sliding_window
@@ -187,7 +176,7 @@ class ModelRunner:
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
             input_positions.extend(
-                list(range(computed_len, computed_len + prefill_end)))
+                list(range(computed_len, computed_len + len(prompt_tokens))))
 
             lora_id = seq_group_metadata.lora_int_id
 
@@ -220,13 +209,7 @@ class ModelRunner:
                     "sliding window attention")
                 start_idx = max(0, prompt_len - self.sliding_window)
 
-            # If chunked prefill is enabled, computed_len is always 0.
-            # TODO(sang) This is hack. We should clean it up when
-            # supporting prefix cache + chunked prefill.
-            if computed_len == 0:
-                computed_len = prefill_start
-
-            for i in range(computed_len, prefill_end):
+            for i in range(computed_len, prompt_len):
                 if i < start_idx:
                     slot_mapping.append(_PAD_SLOT_ID)
                     continue
@@ -296,7 +279,6 @@ class ModelRunner:
             slot_mapping=slot_mapping,
             prompt_lens=prompt_lens,
             prompt_lens_tensor=prompt_lens_tensor,
-            num_chunked_prefill=num_chunked_prefill,
             num_prompt_tokens=num_prompt_tokens,
             num_generation_tokens=0,
             max_subquery_len=max_subquery_len,
@@ -309,7 +291,6 @@ class ModelRunner:
             use_cuda_graph=False,
             kv_cache_dtype=self.kv_cache_dtype,
         )
-
         return (input_tokens, input_positions, input_metadata, prompt_lens,
                 subquery_lens, lora_index_mapping, lora_prompt_mapping,
                 lora_requests)
@@ -427,7 +408,6 @@ class ModelRunner:
         input_metadata = InputMetadata(
             is_prompt=False,
             slot_mapping=slot_mapping,
-            num_chunked_prefill=0,
             prompt_lens=None,
             prompt_lens_tensor=None,
             num_prompt_tokens=0,
@@ -685,11 +665,9 @@ class ModelRunner:
             seq_len = (max_num_batched_tokens // max_num_seqs +
                        (group_id < max_num_batched_tokens % max_num_seqs))
             seq_data = SequenceData([0] * seq_len)
-            seq_data.advance_prefill_range(seq_len)
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,
-                is_chunked_prefill=False,
                 seq_data={group_id: seq_data},
                 sampling_params=sampling_params,
                 block_tables=None,
@@ -790,7 +768,6 @@ class ModelRunner:
                 input_metadata = InputMetadata(
                     is_prompt=False,
                     slot_mapping=slot_mapping[:batch_size],
-                    num_chunked_prefill=0,
                     prompt_lens=None,
                     prompt_lens_tensor=None,
                     num_prompt_tokens=0,
@@ -803,7 +780,8 @@ class ModelRunner:
                     context_lens=context_lens[:batch_size],
                     block_tables=block_tables[:batch_size],
                     use_cuda_graph=True,
-                    kv_cache_dtype=self.kv_cache_dtype)
+                    kv_cache_dtype=self.kv_cache_dtype
+                )
 
                 if self.lora_config:
                     lora_mapping = LoRAMapping(

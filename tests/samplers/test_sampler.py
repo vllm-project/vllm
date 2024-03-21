@@ -56,7 +56,6 @@ def _do_sample(
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=True,
-                is_chunked_prefill=False,
                 seq_data={0: SequenceData([1, 2, 3])},
                 sampling_params=sampling_params,
                 block_tables={0: [1]},
@@ -228,7 +227,6 @@ def test_sampler_mixed(seed: int, device: str):
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=True,
-                is_chunked_prefill=False,
                 seq_data={0: SequenceData([1, 2, 3])},
                 sampling_params=sampling_params,
                 block_tables={0: [1]},
@@ -318,7 +316,6 @@ def test_sampler_top_k_top_p(seed: int, device: str):
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=True,
-                is_chunked_prefill=False,
                 seq_data={0: SequenceData([1, 2, 3])},
                 sampling_params=SamplingParams(
                     temperature=1,
