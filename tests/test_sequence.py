@@ -1,16 +1,6 @@
 import pytest
-from vllm.sequence import (SequenceData, Sequence, SequenceGroupOutput,
-                           SamplerOutput, SequenceOutput)
-
-
-@pytest.fixture(name="sequence")
-def create_sequence(seq_len: int, block_size: int) -> Sequence:
-    return Sequence(
-        seq_id=0,
-        prompt="",
-        prompt_token_ids=list(range(seq_len)),
-        block_size=block_size,
-    )
+from vllm.sequence import (SequenceData, SequenceGroupOutput, SamplerOutput,
+                           SequenceOutput)
 
 
 @pytest.fixture

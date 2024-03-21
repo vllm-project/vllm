@@ -56,6 +56,8 @@ def test_scheduler_schedule_simple():
     cache_config.num_gpu_blocks = 8
     scheduler = Scheduler(scheduler_config, cache_config, None)
     running: List[SequenceGroup] = []
+
+    # Add seq groups to scheduler.
     for i in range(num_seq_group):
         _, seq_group = create_dummy_prompt(str(i), prompt_length=block_size)
         scheduler.add_seq_group(seq_group)
