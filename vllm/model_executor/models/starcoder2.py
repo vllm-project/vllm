@@ -22,6 +22,7 @@ from typing import List, Optional
 
 import torch
 from torch import nn
+from transformers import Starcoder2Config
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -40,13 +41,6 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
-
-try:
-    from transformers import Starcoder2Config
-except ImportError:
-    # fallback to PretrainedConfig
-    # NOTE: Please install transformers from source or use transformers>=4.39.0
-    from transformers import PretrainedConfig as Starcoder2Config
 
 
 class Starcoder2Attention(nn.Module):
