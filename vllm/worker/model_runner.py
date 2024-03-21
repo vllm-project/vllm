@@ -300,13 +300,9 @@ class ModelRunner:
         input_metadata = InputMetadata(
             is_prompt=True,
             slot_mapping=slot_mapping,
-<<<<<<< HEAD
-            prompt_lens=prompt_lens_tensor,
-            num_chunked_prefill=num_chunked_prefill,
-=======
             prompt_lens=prompt_lens,
             prompt_lens_tensor=prompt_lens_tensor,
->>>>>>> 1dquery
+            num_chunked_prefill=num_chunked_prefill,
             num_prompt_tokens=num_prompt_tokens,
             num_generation_tokens=0,
             max_subquery_len=max_subquery_len,
@@ -436,12 +432,9 @@ class ModelRunner:
         input_metadata = InputMetadata(
             is_prompt=False,
             slot_mapping=slot_mapping,
-            prompt_lens=None,
-<<<<<<< HEAD
             num_chunked_prefill=0,
-=======
+            prompt_lens=None,
             prompt_lens_tensor=None,
->>>>>>> 1dquery
             num_prompt_tokens=0,
             num_generation_tokens=len(input_tokens),
             max_subquery_len=None,
@@ -469,6 +462,7 @@ class ModelRunner:
         selected_token_start_idx = 0
         categorized_sample_indices = {t: [] for t in SamplingType}
         categorized_sample_indices_start_idx = 0
+        categorized_sampled_token_indices_start_idx = 0
         pin_memory = not self.in_wsl and not self.device_config.is_neuron
 
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
@@ -485,9 +479,12 @@ class ModelRunner:
                     categorized_sample_indices_start_idx += subquery_len - 1
 
                 categorized_sample_indices[
-                    sampling_params.sampling_type].append(
-                        categorized_sample_indices_start_idx)
+                    sampling_params.sampling_type].append([
+                        categorized_sample_indices_start_idx,
+                        categorized_sampled_token_indices_start_idx
+                    ])
                 categorized_sample_indices_start_idx += 1
+                categorized_sampled_token_indices_start_idx += 1
 
                 if sampling_params.prompt_logprobs is not None:
                     selected_token_indices.extend(
@@ -509,9 +506,17 @@ class ModelRunner:
 
                 categorized_sample_indices[
                     sampling_params.sampling_type].extend(
-                        range(categorized_sample_indices_start_idx,
-                              categorized_sample_indices_start_idx + num_seqs))
+                        zip(
+                            range(
+                                categorized_sample_indices_start_idx,
+                                categorized_sample_indices_start_idx +
+                                num_seqs),
+                            range(
+                                categorized_sampled_token_indices_start_idx,
+                                categorized_sampled_token_indices_start_idx +
+                                num_seqs)))
                 categorized_sample_indices_start_idx += num_seqs
+                categorized_sampled_token_indices_start_idx += num_seqs
 
             if sampling_params.seed is not None:
                 generators.append(seq_group_metadata.state.generator)
@@ -519,12 +524,14 @@ class ModelRunner:
         selected_token_indices = _async_h2d(selected_token_indices,
                                             dtype=torch.long,
                                             target_device=self.device,
-                                            pin_memory=pin_memory)
+                                            pin_memory=not self.in_wsl)
+
         categorized_sample_indices = {
-            t: _async_h2d(seq_ids,
-                          dtype=torch.int,
-                          target_device=self.device,
-                          pin_memory=pin_memory)
+            t: _maybe_expand_dim(
+                _async_h2d(seq_ids,
+                           dtype=torch.int,
+                           target_device=self.device,
+                           pin_memory=pin_memory), 2, 2)
             for t, seq_ids in categorized_sample_indices.items()
         }
 
@@ -581,22 +588,6 @@ class ModelRunner:
             metadata_dict = {
                 "input_tokens": input_tokens,
                 "input_positions": input_positions,
-<<<<<<< HEAD
-                "is_prompt": input_metadata.is_prompt,
-                "slot_mapping": input_metadata.slot_mapping,
-                "prompt_lens": input_metadata.prompt_lens,
-                "num_chunked_prefill": input_metadata.num_chunked_prefill,
-                "num_prompt_tokens": input_metadata.num_prompt_tokens,
-                "num_generation_tokens": input_metadata.num_generation_tokens,
-                "max_seq_len": input_metadata.max_seq_len,
-                "start_loc": input_metadata.start_loc,
-                "max_context_len": input_metadata.max_context_len,
-                "context_lens": input_metadata.context_lens,
-                "block_tables": input_metadata.block_tables,
-                "use_cuda_graph": input_metadata.use_cuda_graph,
-                "kv_cache_dtype": input_metadata.kv_cache_dtype,
-=======
->>>>>>> 1dquery
                 "selected_token_indices":
                 sampling_metadata.selected_token_indices,
                 "lora_requests": lora_requests,
@@ -606,26 +597,6 @@ class ModelRunner:
             broadcast_tensor_dict(metadata_dict, src=0)
         else:
             metadata_dict = broadcast_tensor_dict(src=0)
-<<<<<<< HEAD
-            input_tokens = metadata_dict["input_tokens"]
-            input_positions = metadata_dict["input_positions"]
-            lora_mapping = metadata_dict["lora_mapping"]
-            lora_requests = metadata_dict["lora_requests"]
-            input_metadata = InputMetadata(
-                is_prompt=metadata_dict["is_prompt"],
-                slot_mapping=metadata_dict["slot_mapping"],
-                prompt_lens=metadata_dict["prompt_lens"],
-                num_chunked_prefill=metadata_dict["num_chunked_prefill"],
-                num_prompt_tokens=metadata_dict["num_prompt_tokens"],
-                num_generation_tokens=metadata_dict["num_generation_tokens"],
-                max_seq_len=metadata_dict["max_seq_len"],
-                start_loc=metadata_dict["start_loc"],
-                max_context_len=metadata_dict["max_context_len"],
-                context_lens=metadata_dict["context_lens"],
-                block_tables=metadata_dict["block_tables"],
-                use_cuda_graph=metadata_dict["use_cuda_graph"],
-                kv_cache_dtype=metadata_dict["kv_cache_dtype"])
-=======
             input_tokens = metadata_dict.pop("input_tokens")
             input_positions = metadata_dict.pop("input_positions")
             selected_token_indices = metadata_dict.pop(
@@ -633,7 +604,6 @@ class ModelRunner:
             lora_mapping = metadata_dict.pop("lora_mapping")
             lora_requests = metadata_dict.pop("lora_requests")
             input_metadata = InputMetadata(**metadata_dict)
->>>>>>> 1dquery
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
                 seq_data=None,
@@ -673,9 +643,16 @@ class ModelRunner:
             input_metadata=input_metadata,
         )
 
+        # Compute the logits.
+        logits = self.model.compute_logits(hidden_states, sampling_metadata)
+
+        # Only perform sampling in the driver worker.
+        if not sampling_metadata.perform_sampling:
+            return None
+
         # Sample the next token.
         output = self.model.sample(
-            hidden_states=hidden_states,
+            logits=logits,
             sampling_metadata=sampling_metadata,
         )
         return output
@@ -821,12 +798,10 @@ class ModelRunner:
                 input_metadata = InputMetadata(
                     is_prompt=False,
                     slot_mapping=slot_mapping[:batch_size],
-                    prompt_lens=None,
-<<<<<<< HEAD
                     num_chunked_prefill=0,
-=======
+                    prompt_lens=None,
+                    num_chunked_prefill=0,
                     prompt_lens_tensor=None,
->>>>>>> 1dquery
                     num_prompt_tokens=0,
                     num_generation_tokens=batch_size,
                     max_subquery_len=None,
@@ -1012,3 +987,11 @@ def _async_h2d(
 ) -> torch.Tensor:
     t = torch.tensor(data, dtype=dtype, pin_memory=pin_memory, device="cpu")
     return t.to(device=target_device, non_blocking=True)
+
+
+def _maybe_expand_dim(tensor: torch.Tensor,
+                      target_dims: int,
+                      size: int = 1) -> torch.Tensor:
+    if tensor.ndim < target_dims:
+        tensor = tensor.view(-1, *([size] * (target_dims - tensor.ndim)))
+    return tensor
