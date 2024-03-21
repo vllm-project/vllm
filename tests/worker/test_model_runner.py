@@ -38,8 +38,8 @@ def test_prepare_prompt():
         expected_selected_token_indices.append(selected_token_start_idx +
                                                prompt_len - 1)
         selected_token_start_idx += prompt_len
-    (input_tokens, input_positions, attn_metadata, return_prompt_lens, _, _,
-     _, _) = (model_runner._prepare_prompt(seq_group_metadata_list))
+    (input_tokens, input_positions, attn_metadata, return_prompt_lens, _, _, _,
+     _) = (model_runner._prepare_prompt(seq_group_metadata_list))
     assert return_prompt_lens == prompt_lens
 
     # Verify input metadata is correct for prompts.
