@@ -237,10 +237,10 @@ class FlashAttentionImpl(AttentionImpl):
                     key_cache,
                     value_cache,
                     attn_metadata.block_tables,
-                    attn_metadata.start_loc,
-                    attn_metadata.prompt_lens,
+                    attn_metadata.subquery_start_loc,
+                    attn_metadata.prompt_lens_tensor,
                     attn_metadata.context_lens,
-                    attn_metadata.max_seq_len,
+                    attn_metadata.max_subquery_len,
                     self.alibi_slopes,
                 )
         else:
