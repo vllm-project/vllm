@@ -258,10 +258,10 @@ def run_timing(num_calls: int, m: int, k: int, parts: torch.tensor,
 
     if method is torch_mult:
         for i in range(num_calls):
-            output = torch_mult(input, weights, scales)
+            torch_mult(input, weights, scales)
     else:
         for i in range(num_calls):
-            output = method(input, codes, codebooks, scales, parts, None)
+            method(input, codes, codebooks, scales, parts, None)
 
     end_event.record()
     end_event.synchronize()
