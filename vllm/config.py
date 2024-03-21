@@ -535,7 +535,6 @@ class SchedulerConfig:
             iteration.
         max_model_len: Maximum length of a sequence (including prompt
             and generated text).
-        max_paddings: Maximum number of paddings to be added to a batch.
     """
 
     def __init__(
@@ -543,7 +542,6 @@ class SchedulerConfig:
         max_num_batched_tokens: Optional[int],
         max_num_seqs: int,
         max_model_len: int,
-        max_paddings: int,
     ) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
@@ -553,7 +551,6 @@ class SchedulerConfig:
             self.max_num_batched_tokens = max(max_model_len, 2048)
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
-        self.max_paddings = max_paddings
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -577,12 +574,12 @@ class DeviceConfig:
     def __init__(self, device: str = "auto") -> None:
         if device == "auto":
             # Automated device type detection
-            if torch.cuda.is_available():
-                self.device_type = "cuda"
-            elif is_neuron():
+            if is_neuron():
                 self.device_type = "neuron"
             else:
-                raise RuntimeError("No supported device detected.")
+                # We don't call torch.cuda.is_available() here to
+                # avoid initializing CUDA before workers are forked
+                self.device_type = "cuda"
         else:
             # Device type is assigned explicitly
             self.device_type = device

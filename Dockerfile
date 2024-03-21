@@ -122,7 +122,7 @@ RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,ta
 FROM vllm-base AS vllm-openai
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install accelerate hf_transfer
+    pip install accelerate hf_transfer modelscope
 
 COPY --from=build /workspace/vllm/*.so /workspace/vllm/
 COPY vllm vllm
