@@ -561,7 +561,6 @@ class LLMEngine:
         # Log stats.
         if self.log_stats:
             self.stat_logger.log(self._get_stats(scheduler_outputs))
-
         return request_outputs
 
     def step(self) -> List[RequestOutput]:
