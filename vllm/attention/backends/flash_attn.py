@@ -11,7 +11,7 @@ import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
-from vllm.attention.ops.paged_attn import PagedAttention
+from vllm.attention.ops.paged_attn import PagedAttention, PagedAttentionMetadata
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -50,7 +50,7 @@ class FlashAttentionBackend(AttentionBackend):
 
 
 @dataclass
-class FlashAttentionMetadata(AttentionMetadata):
+class FlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
     """Metadata for FlashAttentionBackend.
 
     NOTE: Any python object stored here is not updated when it is
@@ -61,11 +61,6 @@ class FlashAttentionMetadata(AttentionMetadata):
     # Currently, input sequences can only contain all prompts
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
-    # (num_tokens,). The indices of the token slots that input tokens will be
-    # stored into. E.g., if `slot_mapping` is [35, 2, 17] and the block size
-    # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
-    # in block 0, and 1st slot in block 1, respectively.
-    slot_mapping: torch.Tensor
     # (batch_size,). The prompt length per sequence. None if it is a decoding.
     prompt_lens: Optional[List[int]]
     # prompt_lens stored as a tensor.
@@ -90,41 +85,20 @@ class FlashAttentionMetadata(AttentionMetadata):
 
     # Maximum subquery length in the batch.
     max_subquery_len: Optional[int]
-    # Maximum context length in the batch.
-    max_context_len: Optional[int]
-    # FIXME: It is for flash attn.
-    # Maximum sequence length in the batch.
-    max_seq_len: Optional[int]
+    # Maximum prompt length in the batch.
+    max_prompt_len: Optional[int]
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in
     # the batch, used to index into subquery. E.g., if the subquery length
     # is [4, 6], it is [0, 4, 10].
     subquery_start_loc: Optional[torch.Tensor]
-    # FIXME: It is for flash attn.
     # (batch_size + 1,). The cumulative sequence lengths of the sequences in
     # the batch, used to index into sequence. E.g., if the sequence length is
     # [4, 6], it is [0, 4, 10].
     seq_start_loc: Optional[torch.Tensor]
-    # (batch_size,). The length of context (tokens stored in KV cache) per
-    # sequence. WARNING: When it is a prefill request, it doesn't include new
-    # tokens. When it is for decoding, it includes a new token.
-    context_lens: Optional[torch.Tensor]
-    # (batch_size, max_blocks_per_seq).
-    # Block addresses per sequence. (Seq id -> list of physical block)
-    # E.g., [0, 1, 2] means tokens are stored in 0th, 1st, and 2nd blocks
-    # in the kv cache. Each block can contain up to block_size tokens.
-    # 2nd dimensions are padded up to max_blocks_per_seq if it is cuda-graph
-    # captured.
-    block_tables: Optional[torch.Tensor]
     # Whether or not if cuda graph is enabled.
     # Cuda-graph is currently enabled for decoding only.
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
-    kv_cache_dtype: str
-
-    def __post_init__(self):
-        # Cuda graph is only used for decoding now.
-        if self.use_cuda_graph:
-            assert self.num_prompt_tokens == 0
 
 
 class FlashAttentionImpl(AttentionImpl):
@@ -221,8 +195,8 @@ class FlashAttentionImpl(AttentionImpl):
                     v=value,
                     cu_seqlens_q=attn_metadata.seq_start_loc,
                     cu_seqlens_k=attn_metadata.seq_start_loc,
-                    max_seqlen_q=attn_metadata.max_seq_len,
-                    max_seqlen_k=attn_metadata.max_seq_len,
+                    max_seqlen_q=attn_metadata.max_prompt_len,
+                    max_seqlen_k=attn_metadata.max_prompt_len,
                     softmax_scale=self.scale,
                     causal=True,
                     window_size=self.sliding_window,

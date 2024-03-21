@@ -10,7 +10,7 @@ from xformers.ops.fmha.attn_bias import (AttentionBias,
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
-from vllm.attention.ops.paged_attn import PagedAttention
+from vllm.attention.ops.paged_attn import PagedAttention, PagedAttentionMetadata
 from vllm.utils import is_hip
 
 
@@ -50,7 +50,7 @@ class XFormersBackend(AttentionBackend):
 
 
 @dataclass
-class XFormersMetadata(AttentionMetadata):
+class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     """Metadata for XFormersbackend.
 
     NOTE: Any python object stored here is not updated when it is
@@ -90,11 +90,9 @@ class XFormersMetadata(AttentionMetadata):
 
     # Maximum subquery length in the batch.
     max_subquery_len: Optional[int]
-    # Maximum context length in the batch.
-    max_context_len: Optional[int]
     # FIXME: It is for flash attn.
-    # Maximum sequence length in the batch.
-    max_seq_len: Optional[int]
+    # Maximum prompt length in the batch.
+    max_prompt_len: Optional[int]
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in
     # the batch, used to index into subquery. E.g., if the subquery length
     # is [4, 6], it is [0, 4, 10].
@@ -104,22 +102,11 @@ class XFormersMetadata(AttentionMetadata):
     # the batch, used to index into sequence. E.g., if the sequence length is
     # [4, 6], it is [0, 4, 10].
     seq_start_loc: Optional[torch.Tensor]
-    # (batch_size,). The length of context (tokens stored in KV cache) per
-    # sequence. WARNING: When it is a prefill request, it doesn't include new
-    # tokens. When it is for decoding, it includes a new token.
-    context_lens: Optional[torch.Tensor]
-    # (batch_size, max_blocks_per_seq).
-    # Block addresses per sequence. (Seq id -> list of physical block)
-    # E.g., [0, 1, 2] means tokens are stored in 0th, 1st, and 2nd blocks
-    # in the kv cache. Each block can contain up to block_size tokens.
-    # 2nd dimensions are padded up to max_blocks_per_seq if it is cuda-graph
-    # captured.
-    block_tables: Optional[torch.Tensor]
+
     # Whether or not if cuda graph is enabled.
     # Cuda-graph is currently enabled for decoding only.
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
-    kv_cache_dtype: str
 
     def __post_init__(self):
         # Set during the execution of the first attention op.
@@ -128,10 +115,6 @@ class XFormersMetadata(AttentionMetadata):
         # from xformer API.
         # will not appear in the __repr__ and __init__
         self.attn_bias: Optional[List[AttentionBias]] = None
-
-        # Cuda graph is only used for decoding now.
-        if self.use_cuda_graph:
-            assert self.num_prompt_tokens == 0
 
 
 class XFormersImpl(AttentionImpl):
