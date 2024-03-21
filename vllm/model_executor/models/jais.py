@@ -47,9 +47,7 @@ from vllm.model_executor.weight_utils import (
     hf_model_weights_iterator,
 )
 from vllm.sequence import SamplerOutput
-from vllm.model_executor.sampling_metadata import (
-    SamplingMetadata,
-)
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
