@@ -613,9 +613,16 @@ class ModelRunner:
             input_metadata=input_metadata,
         )
 
+        # Compute the logits.
+        logits = self.model.compute_logits(hidden_states, sampling_metadata)
+
+        # Only perform sampling in the driver worker.
+        if not sampling_metadata.perform_sampling:
+            return None
+
         # Sample the next token.
         output = self.model.sample(
-            hidden_states=hidden_states,
+            logits=logits,
             sampling_metadata=sampling_metadata,
         )
         return output

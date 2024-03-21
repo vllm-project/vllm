@@ -4,8 +4,6 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from vllm.model_executor.parallel_utils.communication_op import (
-    tensor_model_parallel_gather)
 from vllm.model_executor.sampling_metadata import (SamplingMetadata,
                                                    SamplingTensors)
 from vllm.sampling_params import SamplingParams, SamplingType
@@ -13,7 +11,6 @@ from vllm.sequence import (Logprob, PromptLogprobs, SampleLogprobs,
                            SamplerOutput, SequenceData, SequenceGroupOutput,
                            SequenceOutput)
 from vllm.model_executor.layers.ops.sample import (sample as sample_triton)
-from vllm.utils import is_neuron
 
 
 class Sampler(nn.Module):
@@ -31,57 +28,13 @@ class Sampler(nn.Module):
     parameters (e.g., sampling method, temperature, top-p, top-k, etc.).
     """
 
-    def __init__(self,
-                 vocab_size: int,
-                 org_vocab_size: Optional[int] = None) -> None:
-        super().__init__()
-        self.vocab_size = vocab_size
-        # Transformers-neuronx generate outputs as logits directly.
-        self.logits_as_hidden_states = is_neuron()
-        # original vocabulary size (without LoRA).
-        self.org_vocab_size = org_vocab_size or vocab_size
-
-    def _get_logits(self, hidden_states: torch.Tensor, embedding: torch.Tensor,
-                    embedding_bias: Optional[torch.Tensor]) -> torch.Tensor:
-        # Get the logits for the next tokens.
-        logits = torch.matmul(hidden_states, embedding.t())
-        if embedding_bias is not None:
-            logits += embedding_bias
-        logits = tensor_model_parallel_gather(logits)
-        # Remove paddings in vocab (if any).
-        if logits is not None:
-            logits = logits[:, :self.org_vocab_size]
-        return logits
-
     def forward(
         self,
-        embedding: torch.Tensor,
-        hidden_states: torch.Tensor,
+        logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-        embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[SamplerOutput]:
-        # Get the hidden states that we use for sampling.
-        if self.logits_as_hidden_states:
-            logits = hidden_states
-        else:
-            hidden_states = _prune_hidden_states(hidden_states,
-                                                 sampling_metadata)
-
-            # Get the logits for the next tokens.
-            logits = self._get_logits(hidden_states, embedding, embedding_bias)
-
-        # Only perform sampling in the driver worker.
-        # Note: `_get_logits` is still distributed across TP workers because
-        # the `embedding` weight is distributed across TP workers.
-        # TODO(zhuohan): Change the get_logits part to a separate stage.
-        if not sampling_metadata.perform_sampling:
-            return None
-
         assert logits is not None
         _, vocab_size = logits.shape
-
-        # Apply logits processors (if any).
-        logits = _apply_logits_processors(logits, sampling_metadata)
 
         # Prepare sampling tensors with pinned memory to avoid blocking.
         (sampling_tensors, do_penalties, do_top_p_top_k,
@@ -124,14 +77,6 @@ class Sampler(nn.Module):
                                      prompt_logprobs, sample_logprobs)
 
 
-def _prune_hidden_states(
-    hidden_states: torch.Tensor,
-    sampling_metadata: SamplingMetadata,
-) -> torch.Tensor:
-    return hidden_states.index_select(0,
-                                      sampling_metadata.selected_token_indices)
-
-
 def _get_bin_counts_and_mask(
     tokens: torch.Tensor,
     vocab_size: int,
@@ -147,30 +92,6 @@ def _get_bin_counts_and_mask(
     mask = bin_counts > 0
 
     return bin_counts, mask
-
-
-def _apply_logits_processors(
-    logits: torch.Tensor,
-    sampling_metadata: SamplingMetadata,
-) -> torch.Tensor:
-    logits_row_idx = 0
-    found_logits_processors = False
-    for seq_ids, sampling_params in sampling_metadata.seq_groups:
-        logits_processors = sampling_params.logits_processors
-        if logits_processors:
-            found_logits_processors = True
-            for seq_id in seq_ids:
-                logits_row = logits[logits_row_idx]
-                token_ids = sampling_metadata.seq_data[seq_id].output_token_ids
-                for logits_processor in logits_processors:
-                    logits_row = logits_processor(token_ids, logits_row)
-                logits[logits_row_idx] = logits_row
-                logits_row_idx += 1
-        else:
-            logits_row_idx += len(seq_ids)
-    if found_logits_processors:
-        assert logits_row_idx == logits.shape[0]
-    return logits
 
 
 def _apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,

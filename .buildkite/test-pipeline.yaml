@@ -49,6 +49,9 @@ steps:
 - label: Samplers Test
   command: pytest -v -s samplers
 
+- label: LogitsProcessor Test
+  command: pytest -v -s test_logits_processor.py
+
 - label: Worker Test
   command: pytest -v -s worker
 
