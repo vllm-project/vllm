@@ -50,7 +50,7 @@ class EngineArgs:
     lora_extra_vocab_size: int = 256
     lora_dtype = 'auto'
     max_cpu_loras: Optional[int] = None
-    device: str = 'cuda'
+    device: str = 'auto'
     ray_workers_use_nsight: bool = False
     # Related to Vision-language models such as llava
     image_input_type: Optional[str] = None
@@ -311,7 +311,6 @@ class EngineArgs:
                             default=EngineArgs.device,
                             choices=["auto", "cuda", "neuron"],
                             help='Device type for vLLM execution.')
-        # Related to Vision-language models such as llava
         # Related to Vision-language models such as llava
         parser.add_argument(
             '--image-input-type',

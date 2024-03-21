@@ -135,7 +135,7 @@ class ModelRunner:
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, List[int], List[int],
-               List[int], List[int], Set[LoRARequest], "torch.Tensor"]:
+               List[int], List[int], Set[LoRARequest], torch.Tensor]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[int] = []
         input_positions: List[int] = []
@@ -148,7 +148,7 @@ class ModelRunner:
         context_lens: List[int] = []
         subquery_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
-        multi_modal_input_list = []
+        multi_modal_input_list: List[torch.Tensor] = []
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -248,9 +248,11 @@ class ModelRunner:
                                            device=self.device)
 
         if multi_modal_input_list:
-            assert self.vision_language_config
+            assert self.vision_language_config, (
+                "Multi-modal inputs are only supported by "
+                "vision language models.")
             multi_modal_input = torch.cat(multi_modal_input_list,
-                                          dim=0).to("cuda")
+                                          dim=0).to(self.device)
         else:
             multi_modal_input = None
 

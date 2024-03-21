@@ -3,6 +3,7 @@ from typing import Tuple, List, Dict
 
 from enum import Enum
 from dataclasses import fields
+import gc
 import torch
 from transformers import AutoTokenizer
 
@@ -61,7 +62,7 @@ def sanitize_vllm_output(vllm_output: Tuple[List[int], str],
     return sanitized_input_ids, sanitzied_output_str
 
 
-@pytest.mark.parametrize("worker_use_ray", [True])
+@pytest.mark.parametrize("worker_use_ray", [False])
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
@@ -84,7 +85,7 @@ def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
                                           images=hf_images)
     del hf_model
 
-    # Truly cleans up GPU memory.
+    gc.collect()
     torch.cuda.empty_cache()
 
     vllm_model = vllm_runner(model_id,
@@ -95,7 +96,8 @@ def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
                                               max_tokens,
                                               images=vllm_images)
     del vllm_model
-    # Truly cleans up GPU memory.
+
+    gc.collect()
     torch.cuda.empty_cache()
 
     for i in range(len(hf_image_prompts)):

@@ -282,7 +282,8 @@ class VllmRunner:
             prompts,
             sampling_params=sampling_params,
             multi_modal_data=MultiModalData(type=MultiModalData.Type.IMAGE,
-                                            data=images) if images else None)
+                                            data=images)
+            if images is not None else None)
         outputs = []
         for req_output in req_outputs:
             prompt_str = req_output.prompt

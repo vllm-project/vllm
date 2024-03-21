@@ -9,6 +9,7 @@ from transformers import CLIPVisionModel
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.llama import LlamaModel
@@ -75,7 +76,8 @@ class LlavaForConditionalGeneration(nn.Module):
 
         assert self.vision_language_config, (
             "Provide `image_input_type` and other vision "
-            "related configurations through LLM entrypoint.")
+            "related configurations through LLM entrypoint "
+            "or engine arguments.")
 
         if self.vision_language_config.image_input_type == (
                 VisionLanguageConfig.ImageInputType.PIXEL_VALUES):
@@ -95,8 +97,10 @@ class LlavaForConditionalGeneration(nn.Module):
             self.unpadded_vocab_size,
             config.text_config.hidden_size,
             org_num_embeddings=self.language_model.org_vocab_size)
-        self.sampler = Sampler(self.unpadded_vocab_size,
-                               self.language_model.org_vocab_size)
+        logit_scale = getattr(config, "logit_scale", 1.0)
+        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                config.vocab_size, logit_scale)
+        self.sampler = Sampler()
 
     def forward(
         self,
@@ -186,13 +190,18 @@ class LlavaForConditionalGeneration(nn.Module):
 
         return hidden_states
 
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head.weight, hidden_states,
+                                       sampling_metadata)
+        return logits
+
     def sample(
         self,
-        hidden_states: torch.Tensor,
+        logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(self.lm_head.weight, hidden_states,
-                                   sampling_metadata)
+        next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
     def load_weights(self,
@@ -217,13 +226,12 @@ class LlavaForConditionalGeneration(nn.Module):
             for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
                 if key_to_modify in name:
                     name = name.replace(key_to_modify, new_key)
-            # Load weight in a non-sharded way.
-            use_default_weigth_loading = False
+            use_default_weight_loading = False
             if "vision" in name:
                 if self.vision_tower is not None:
                     # We only do sharding for language model and
                     # not vision model for now.
-                    use_default_weigth_loading = True
+                    use_default_weight_loading = True
             else:
                 for (param_name, weight_name,
                      shard_id) in stacked_params_mapping:
@@ -234,8 +242,8 @@ class LlavaForConditionalGeneration(nn.Module):
                     weight_loader(param, loaded_weight, shard_id)
                     break
                 else:
-                    use_default_weigth_loading = True
-            if use_default_weigth_loading:
+                    use_default_weight_loading = True
+            if use_default_weight_loading:
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
