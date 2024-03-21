@@ -97,7 +97,6 @@ class ModelConfig:
         self.trust_remote_code = trust_remote_code
         self.download_dir = download_dir
         self.load_format = load_format
-        self.dtype = dtype
         self.seed = seed
         self.revision = revision
         self.code_revision = code_revision

@@ -332,7 +332,6 @@ if __name__ == "__main__":
         action='store_true',
         help="enable automatic prefix caching for vLLM backend.")
     args = parser.parse_args()
-
     if args.tokenizer is None:
         args.tokenizer = args.model
     if args.dataset is None:

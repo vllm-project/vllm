@@ -25,12 +25,11 @@ class PagedAttentionImpl:
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
         input_metadata: InputMetadata,
-        kv_cache_scaling_factor: float,
+        kv_scale: float,
     ) -> None:
         cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
                                     input_metadata.slot_mapping.flatten(),
-                                    input_metadata.kv_cache_dtype,
-                                    kv_cache_scaling_factor)
+                                    input_metadata.kv_cache_dtype, kv_scale)
 
     @staticmethod
     def forward_decode(

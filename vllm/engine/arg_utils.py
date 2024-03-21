@@ -143,7 +143,7 @@ class EngineArgs:
             '--kv-cache-dtype',
             type=str,
             choices=['auto', 'fp8'],
-            default='auto',
+            default=EngineArgs.kv_cache_dtype,
             help='Data type for kv cache storage. If "auto", will use model '
             'data type. FP8_E5M2 (without scaling) is only supported on cuda '
             'version greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead '

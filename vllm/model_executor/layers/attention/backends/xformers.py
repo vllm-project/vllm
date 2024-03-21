@@ -1,6 +1,7 @@
 """Attention layer with xFormers and PagedAttention."""
 import importlib
 from typing import List, Optional
+
 import torch
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
@@ -174,6 +175,7 @@ class XFormersBackend:
                 self.alibi_slopes,
                 kv_scale,
             )
+
         # Reshape the output tensor.
         return output.view(-1, self.num_heads * self.head_size)
 
