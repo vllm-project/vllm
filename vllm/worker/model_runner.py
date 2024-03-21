@@ -58,7 +58,6 @@ class ModelRunner:
         # FIXME(woosuk): This is a hack to make the tests work. Refactor this.
         self.sliding_window = (model_config.get_sliding_window()
                                if model_config is not None else None)
-
         self.device_config = (device_config
                               if device_config is not None else DeviceConfig())
         self.device = self.device_config.device
@@ -145,33 +144,31 @@ class ModelRunner:
         subquery_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
         num_chunked_prefill = 0
-        # Whether or not if any seq_group has prefix cached.
-        # print("SANG-TODO # of requests (seq_group_metadata_list): ",
-        #       len(seq_group_metadata_list))
+
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
             assert len(seq_ids) == 1
             seq_id = seq_ids[0]
 
+            computed_block_nums = seq_group_metadata.computed_block_nums
             if seq_group_metadata.is_chunked_prefill:
-                num_chunked_prefill += 1
-                # TODO(sang): Support prefix caching.
-                if seq_group_metadata.computed_block_nums is not None:
+                num_chunked_prefill += 
+                # TODO(sang): Both are the same thing and should be handled
+                # in the same way.
+                if computed_block_nums is not None:
                     raise RuntimeError(
-                        "chunked prefill cannot be used with prefix caching now."
-                    )
+                        "chunked prefill cannot be used with prefix caching "
+                        "now.")
 
             seq_data = seq_group_metadata.seq_data[seq_id]
             prefill_start, prefill_end = seq_data.get_prefill_range()
             prompt_tokens = seq_data.get_token_ids()[prefill_start:prefill_end]
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
-
             computed_len = 0
 
             # NOTE: This only works for oooooooxxx style attention.
-            computed_block_nums = seq_group_metadata.computed_block_nums
             if computed_block_nums is not None and len(
                     computed_block_nums) > 0 and self.sliding_window is None:
                 # Prefix is not supported with sliding_window
@@ -189,9 +186,6 @@ class ModelRunner:
             input_tokens.extend(prompt_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
-            # NOTE(sang): prefill_end is always # of prompts if chunked
-            # prefill is not enabled. Prefix caching is not working with
-            # chunked prefill now.
             input_positions.extend(
                 list(range(computed_len, computed_len + prefill_end)))
 
@@ -301,7 +295,7 @@ class ModelRunner:
             is_prompt=True,
             slot_mapping=slot_mapping,
             prompt_lens=prompt_lens,
-            prompt_lens=prompt_lens_tensor,
+            prompt_lens_tensor=prompt_lens_tensor,
             num_chunked_prefill=num_chunked_prefill,
             num_prompt_tokens=num_prompt_tokens,
             num_generation_tokens=0,
@@ -433,9 +427,9 @@ class ModelRunner:
         input_metadata = InputMetadata(
             is_prompt=False,
             slot_mapping=slot_mapping,
+            num_chunked_prefill=0,
             prompt_lens=None,
             prompt_lens_tensor=None,
-            num_chunked_prefill=0,
             num_prompt_tokens=0,
             num_generation_tokens=len(input_tokens),
             max_subquery_len=None,
@@ -463,6 +457,7 @@ class ModelRunner:
         selected_token_start_idx = 0
         categorized_sample_indices = {t: [] for t in SamplingType}
         categorized_sample_indices_start_idx = 0
+        categorized_sampled_token_indices_start_idx = 0
         pin_memory = not self.in_wsl and not self.device_config.is_neuron
 
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
@@ -479,9 +474,12 @@ class ModelRunner:
                     categorized_sample_indices_start_idx += subquery_len - 1
 
                 categorized_sample_indices[
-                    sampling_params.sampling_type].append(
-                        categorized_sample_indices_start_idx)
+                    sampling_params.sampling_type].append([
+                        categorized_sample_indices_start_idx,
+                        categorized_sampled_token_indices_start_idx
+                    ])
                 categorized_sample_indices_start_idx += 1
+                categorized_sampled_token_indices_start_idx += 1
 
                 if sampling_params.prompt_logprobs is not None:
                     selected_token_indices.extend(
@@ -503,9 +501,17 @@ class ModelRunner:
 
                 categorized_sample_indices[
                     sampling_params.sampling_type].extend(
-                        range(categorized_sample_indices_start_idx,
-                              categorized_sample_indices_start_idx + num_seqs))
+                        zip(
+                            range(
+                                categorized_sample_indices_start_idx,
+                                categorized_sample_indices_start_idx +
+                                num_seqs),
+                            range(
+                                categorized_sampled_token_indices_start_idx,
+                                categorized_sampled_token_indices_start_idx +
+                                num_seqs)))
                 categorized_sample_indices_start_idx += num_seqs
+                categorized_sampled_token_indices_start_idx += num_seqs
 
             if sampling_params.seed is not None:
                 generators.append(seq_group_metadata.state.generator)
@@ -513,12 +519,14 @@ class ModelRunner:
         selected_token_indices = _async_h2d(selected_token_indices,
                                             dtype=torch.long,
                                             target_device=self.device,
-                                            pin_memory=pin_memory)
+                                            pin_memory=not self.in_wsl)
+
         categorized_sample_indices = {
-            t: _async_h2d(seq_ids,
-                          dtype=torch.int,
-                          target_device=self.device,
-                          pin_memory=pin_memory)
+            t: _maybe_expand_dim(
+                _async_h2d(seq_ids,
+                           dtype=torch.int,
+                           target_device=self.device,
+                           pin_memory=pin_memory), 2, 2)
             for t, seq_ids in categorized_sample_indices.items()
         }
 
@@ -545,15 +553,12 @@ class ModelRunner:
             # NOTE: We assume that all sequences in the group are all prompts or
             # all decodes.
             is_prompt = seq_group_metadata_list[0].is_prompt
-            # SANG-TODO set num prompt tokens and generations?
             # Prepare input tensors.
             if is_prompt:
-                # print("SANG-TODO execute model prompt.")
                 (input_tokens, input_positions, input_metadata, prompt_lens,
                  subquery_lens, lora_index_mapping, lora_prompt_mapping,
                  lora_requests) = self._prepare_prompt(seq_group_metadata_list)
             else:
-                # print("SANG-TODO execute model decode.")
                 (input_tokens, input_positions, input_metadata,
                  lora_index_mapping, lora_prompt_mapping,
                  lora_requests) = self._prepare_decode(seq_group_metadata_list)
@@ -630,9 +635,16 @@ class ModelRunner:
             input_metadata=input_metadata,
         )
 
+        # Compute the logits.
+        logits = self.model.compute_logits(hidden_states, sampling_metadata)
+
+        # Only perform sampling in the driver worker.
+        if not sampling_metadata.perform_sampling:
+            return None
+
         # Sample the next token.
         output = self.model.sample(
-            hidden_states=hidden_states,
+            logits=logits,
             sampling_metadata=sampling_metadata,
         )
         return output
@@ -778,9 +790,9 @@ class ModelRunner:
                 input_metadata = InputMetadata(
                     is_prompt=False,
                     slot_mapping=slot_mapping[:batch_size],
+                    num_chunked_prefill=0,
                     prompt_lens=None,
                     prompt_lens_tensor=None,
-                    num_chunked_prefill=0,
                     num_prompt_tokens=0,
                     num_generation_tokens=batch_size,
                     max_subquery_len=None,
@@ -966,3 +978,11 @@ def _async_h2d(
 ) -> torch.Tensor:
     t = torch.tensor(data, dtype=dtype, pin_memory=pin_memory, device="cpu")
     return t.to(device=target_device, non_blocking=True)
+
+
+def _maybe_expand_dim(tensor: torch.Tensor,
+                      target_dims: int,
+                      size: int = 1) -> torch.Tensor:
+    if tensor.ndim < target_dims:
+        tensor = tensor.view(-1, *([size] * (target_dims - tensor.ndim)))
+    return tensor

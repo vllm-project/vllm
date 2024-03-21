@@ -1,2 +1,0 @@
-flash_attn
-flash_attn_2_cuda

@@ -7,7 +7,6 @@ import torch
 
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, create_kv_caches_with_random
 from vllm._C import ops
-from vllm.model_executor.layers.attention import flash_attn_with_kvcache_paged
 
 NUM_BLOCKS = 1024
 PARTITION_SIZE = 512

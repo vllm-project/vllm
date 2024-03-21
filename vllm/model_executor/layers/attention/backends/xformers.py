@@ -16,8 +16,8 @@ from vllm.utils import is_hip
 class XFormersBackend:
     """
     If the input tensors contain prompt tokens, the layout is as follows:
-    |<--------------- num_prompt_tokens -------------->|	
-    |<--prompt_0-->|<--prompt_1-->|...|<--prompt_N-1-->|
+    |<--------------- num_prompt_tokens --------------->|	
+    |<--prompt_0-->|<--prompt_1-->|...|<--prompt_N-1--->|
 
     Otherwise, the layout is as follows:	
     |<------------------ num_generation_tokens (M) ----------------->|	

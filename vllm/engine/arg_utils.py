@@ -52,7 +52,6 @@ class EngineArgs:
     device: str = 'auto'
     ray_workers_use_nsight: bool = False
     max_chunked_prefill_len: int = -1
-    max_num_prompt_seqs: int = 256
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -353,11 +352,11 @@ class EngineArgs:
                 self.tokenizer_pool_type,
                 self.tokenizer_pool_extra_config,
             ), self.ray_workers_use_nsight)
-        scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
-                                           self.max_num_seqs,
-                                           model_config.max_model_len,
-                                           max_chunked_prefill_len=self.max_chunked_prefill_len,
-                                           max_num_prompt_seqs=self.max_num_prompt_seqs)
+        scheduler_config = SchedulerConfig(
+            self.max_num_batched_tokens,
+            self.max_num_seqs,
+            model_config.max_model_len,
+            max_chunked_prefill_len=self.max_chunked_prefill_len)
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,

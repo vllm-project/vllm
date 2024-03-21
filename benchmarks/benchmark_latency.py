@@ -10,13 +10,6 @@ from tqdm import tqdm
 
 from vllm import LLM, SamplingParams
 
-SAMPLE_PROMPTS = [
-    "The president of the United States is",
-    "Hello, my name is",
-    "The capital of France is",
-    "The future of AI is",
-]
-
 
 def main(args: argparse.Namespace):
     print(args)
@@ -35,7 +28,6 @@ def main(args: argparse.Namespace):
         device=args.device,
         block_size=args.block_size,
         max_chunked_prefill_len=args.max_chunked_prefill_len,
-        max_num_prompt_seqs=args.max_num_prompt_seqs,
         ray_workers_use_nsight=args.ray_workers_use_nsight,
     )
 
@@ -68,25 +60,10 @@ def main(args: argparse.Namespace):
             print(p.key_averages())
         else:
             start_time = time.perf_counter()
-            if args.use_sample:
-                batch = (SAMPLE_PROMPTS *
-                         (args.batch_size // len(SAMPLE_PROMPTS) +
-                          1))[:args.batch_size]
-                outputs = llm.generate(prompts=batch,
-                                       sampling_params=sampling_params,
-                                       use_tqdm=False)
-            else:
-                outputs = llm.generate(prompt_token_ids=dummy_prompt_token_ids,
-                                       sampling_params=sampling_params,
-                                       use_tqdm=False)
+            llm.generate(prompt_token_ids=dummy_prompt_token_ids,
+                         sampling_params=sampling_params,
+                         use_tqdm=False)
             end_time = time.perf_counter()
-            if args.verbose:
-                for output in outputs:
-                    prompt = output.prompt
-                    generated_text = output.outputs[0].text
-                    print(
-                        f"Prompt: {prompt!r}, Generated text: {generated_text!r}"
-                    )
             latency = end_time - start_time
             return latency
 
@@ -175,14 +152,7 @@ if __name__ == '__main__':
                         type=int,
                         default=16,
                         help='block size of key/value cache')
-    parser.add_argument('--use-sample',
-                        action='store_true',
-                        help='use sample input instead of dummy input')
-    parser.add_argument('--verbose',
-                        action='store_true',
-                        help='print generated text')
     parser.add_argument('--max-chunked-prefill-len', type=int, default=-1)
-    parser.add_argument('--max-num-prompt-seqs', type=int, default=1000)
     parser.add_argument(
         "--ray-workers-use-nsight",
         action='store_true',
