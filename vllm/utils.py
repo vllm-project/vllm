@@ -338,16 +338,12 @@ def create_kv_caches_with_random(
     return key_caches, value_caches
 
 
-_PIN_MEMORY_WARNING_PRINTED = False
+@lru_cache
+def print_warning_once(msg: str) -> None:
+    logger.warning(msg)
 
 
 def is_pin_memory_available() -> bool:
-
-    def print_warning_once(msg: str) -> None:
-        global _PIN_MEMORY_WARNING_PRINTED
-        if not _PIN_MEMORY_WARNING_PRINTED:
-            _PIN_MEMORY_WARNING_PRINTED = True
-            logger.warning(msg)
 
     if in_wsl():
         # Pinning memory in WSL is not supported.
