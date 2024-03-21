@@ -9,6 +9,7 @@ from vllm.model_executor.layers.attention.ops.paged_attn import (
     PagedAttentionImpl)
 from vllm.utils import is_hip
 
+
 class FlashAttentionBackend:
     """
     If the input tensors contain prompt tokens, the layout is as follows:
@@ -125,7 +126,7 @@ class FlashAttentionBackend:
                         causal=True,
                         window_size=self.sliding_window,
                         alibi_slopes=self.alibi_slopes,
-                    )                                
+                    )
             else:
                 # prefix-enabled attention
                 output = PagedAttentionImpl.forward_prefix(

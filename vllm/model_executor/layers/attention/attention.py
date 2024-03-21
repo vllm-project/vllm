@@ -7,7 +7,6 @@ import torch.nn as nn
 
 from vllm.logger import init_logger
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.utils import is_hip
 
 logger = init_logger(__name__)
 

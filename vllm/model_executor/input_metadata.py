@@ -3,6 +3,7 @@ from typing import Optional, List, Any, Dict
 
 import torch
 
+
 @dataclass
 class InputMetadata:
     """Metadata for input sequences. Used in PagedAttention.
@@ -80,7 +81,7 @@ class InputMetadata:
         # when alibi slopes is used. It is because of the limitation
         # from xformer API.
         # will not appear in the __repr__ and __init__
-        try: 
+        try:
             from xformers.ops.fmha.attn_bias import AttentionBias
             self.attn_bias: Optional[List[AttentionBias]] = None
         except ImportError:
