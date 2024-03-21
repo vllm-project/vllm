@@ -90,15 +90,25 @@ RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,ta
 # ignore build dependencies installation because we are using pre-complied extensions
 RUN rm pyproject.toml
 RUN --mount=type=cache,target=/root/.cache/pip VLLM_USE_PRECOMPILED=1 pip install . --verbose
-# install nccl 2.16.2
-RUN python3 -m cupyx.tools.install_library --cuda 12.x --library nccl
+
+# tricky part, manipulate so files to use the correct nccl version
 RUN apt install patchelf -y
+
+# cupy part
+# nccl 2.16.2 that is good for cupy
+RUN python3 -m cupyx.tools.install_library --cuda 12.x --library nccl
 # rename to 2.16
 RUN cp /root/.cupy/cuda_lib/12.x/nccl/2.16.2/lib/libnccl.so.2 /root/.cupy/cuda_lib/12.x/nccl/2.16.2/lib/libnccl.so.2.16
+# link to the correct nccl version
+RUN patchelf --replace-needed libnccl.so.2 libnccl.so.2.16 /usr/local/lib/python3.10/dist-packages/cupy_backends/cuda/libs/nccl.cpython-310-x86_64-linux-gnu.so
+# set rpath to the correct nccl version
+RUN patchelf --set-rpath /root/.cupy/cuda_lib/12.x/nccl/2.16.2/lib/ /usr/local/lib/python3.10/dist-packages/cupy_backends/cuda/libs/nccl.cpython-310-x86_64-linux-gnu.so
+
+# pytorch part
 # rename pytorch-dependent nccl to 2.19
 RUN cp /usr/local/lib/python3.10/dist-packages/nvidia/nccl/lib/libnccl.so.2 /usr/local/lib/python3.10/dist-packages/nvidia/nccl/lib/libnccl.so.2.19
+# link to a more specific nccl version
 RUN patchelf --replace-needed libnccl.so.2 libnccl.so.2.19 /usr/local/lib/python3.10/dist-packages/torch/lib/libtorch_cuda.so
-RUN patchelf --replace-needed libnccl.so.2 libnccl.so.2.16 /usr/local/lib/python3.10/dist-packages/cupy_backends/cuda/libs/nccl.cpython-310-x86_64-linux-gnu.so
 #################### TEST IMAGE ####################
 
 
