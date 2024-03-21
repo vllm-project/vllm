@@ -6,9 +6,6 @@ import torch.nn as nn
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.selector import get_attn_backend
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
 
 
 class Attention(nn.Module):
