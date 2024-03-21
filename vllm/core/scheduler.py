@@ -181,24 +181,8 @@ class Scheduler:
             # sequence groups are added to the front and the new sequence groups
             # are added to the back.
             leftover_waiting_sequences = deque()
-
-            if self.prev_prompt:
-                self.last_prompt_latency = now - self.prev_time
-
-            self.prev_time, self.prev_prompt = now, False
-
-            # Delay scheduling prompts to let waiting queue fill up
-            if self.scheduler_config.use_delay and self.waiting:
-                earliest_arrival_time = min(
-                    [e.metrics.arrival_time for e in self.waiting])
-                passed_delay = ((now - earliest_arrival_time) >
-                                (0.5 * self.last_prompt_latency)
-                                or not self.running)
-            else:
-                passed_delay = True
-
             num_batched_tokens = 0
-            while passed_delay and self.waiting:
+            while self._passed_delay(now) and self.waiting:
                 seq_group = self.waiting[0]
                 waiting_seqs = seq_group.get_seqs(
                     status=SequenceStatus.WAITING)
@@ -511,3 +495,18 @@ class Scheduler:
 
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
         self.block_manager.mark_blocks_as_computed(seq_group)
+
+    def _passed_delay(self, now: float) -> bool:
+        if self.prev_prompt:
+            self.last_prompt_latency = now - self.prev_time
+        self.prev_time, self.prev_prompt = now, False
+        # Delay scheduling prompts to let waiting queue fill up
+        if self.scheduler_config.use_delay and self.waiting:
+            earliest_arrival_time = min(
+                [e.metrics.arrival_time for e in self.waiting])
+            passed_delay = ((now - earliest_arrival_time) >
+                            (0.5 * self.last_prompt_latency)
+                            or not self.running)
+        else:
+            passed_delay = True
+        return passed_delay
