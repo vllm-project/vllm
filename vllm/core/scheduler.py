@@ -36,26 +36,13 @@ class TokenBudget:
         self.num_decoding_tokens = 0
 
     def record_prefill_tokens(self, prefill_tokens: int):
-        """Record the prefill tokens.
-        
-        Padding is automatically recorded, so the
-        `prefill_tokens` should not include paddings.
-        """
-        # self.prefill_seqlen.append(prefill_tokens)
         self.num_prefill_tokens += prefill_tokens
 
     def record_decoding_tokens(self, decoding_tokens: int):
-        """Record the decoding tokens.
-
-        Padding is automatically recorded, so the
-        `decoding_tokens` should not include paddings.
-        """
         self.num_decoding_tokens += decoding_tokens
 
     def get(self):
         """Get the remaining token budget. It is always positive."""
-        # Each prefill requests are padded to the longest
-        # seqlen.
         output = (self.token_budget - self.num_prefill_tokens -
                   self.num_decoding_tokens)
         assert output >= 0
