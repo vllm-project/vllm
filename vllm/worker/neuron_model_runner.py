@@ -150,8 +150,8 @@ class NeuronModelRunner:
         selected_token_start_idx = 0
         categorized_sample_indices = {t: [] for t in SamplingType}
         categorized_sample_indices_start_idx = 0
+        categorized_sampled_token_indices_start_idx = 0
 
-        max_prompt_len = max(prompt_lens) if prompt_lens else 1
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             seq_ids = list(seq_group_metadata.seq_data.keys())
             sampling_params = seq_group_metadata.sampling_params
@@ -166,9 +166,12 @@ class NeuronModelRunner:
                     categorized_sample_indices_start_idx += prompt_len - 1
 
                 categorized_sample_indices[
-                    sampling_params.sampling_type].append(
-                        categorized_sample_indices_start_idx)
+                    sampling_params.sampling_type].append([
+                        categorized_sample_indices_start_idx,
+                        categorized_sampled_token_indices_start_idx
+                    ])
                 categorized_sample_indices_start_idx += 1
+                categorized_sampled_token_indices_start_idx += 1
 
                 if sampling_params.prompt_logprobs is not None:
                     selected_token_indices.extend(
@@ -176,7 +179,7 @@ class NeuronModelRunner:
                               selected_token_start_idx + prompt_len - 1))
                 selected_token_indices.append(selected_token_start_idx +
                                               prompt_len - 1)
-                selected_token_start_idx += max_prompt_len
+                selected_token_start_idx += prompt_len
 
                 if sampling_params.seed is not None:
                     seq_group_metadata.state.generator = torch.Generator(
@@ -190,22 +193,32 @@ class NeuronModelRunner:
 
                 categorized_sample_indices[
                     sampling_params.sampling_type].extend(
-                        range(categorized_sample_indices_start_idx,
-                              categorized_sample_indices_start_idx + num_seqs))
+                        zip(
+                            range(
+                                categorized_sample_indices_start_idx,
+                                categorized_sample_indices_start_idx +
+                                num_seqs),
+                            range(
+                                categorized_sampled_token_indices_start_idx,
+                                categorized_sampled_token_indices_start_idx +
+                                num_seqs)))
                 categorized_sample_indices_start_idx += num_seqs
+                categorized_sampled_token_indices_start_idx += num_seqs
 
             if sampling_params.seed is not None:
                 generators.append(seq_group_metadata.state.generator)
 
         selected_token_indices = async_tensor_h2d(selected_token_indices,
-                                                  dtype=torch.long,
-                                                  target_device=self.device,
-                                                  pin_memory=self.pin_memory)
+                                            dtype=torch.long,
+                                            target_device=self.device,
+                                            pin_memory=self.pin_memory)
+
         categorized_sample_indices = {
-            t: async_tensor_h2d(seq_ids,
-                                dtype=torch.int,
-                                target_device=self.device,
-                                pin_memory=self.pin_memory)
+            t: _maybe_expand_dim(
+                async_tensor_h2d(seq_ids,
+                           dtype=torch.int,
+                           target_device=self.device,
+                           pin_memory=self.pin_memory), 2, 2)
             for t, seq_ids in categorized_sample_indices.items()
         }
 
@@ -271,3 +284,11 @@ class NeuronModelRunner:
     @property
     def vocab_size(self) -> int:
         return self.model_config.get_vocab_size()
+
+
+def _maybe_expand_dim(tensor: torch.Tensor,
+                      target_dims: int,
+                      size: int = 1) -> torch.Tensor:
+    if tensor.ndim < target_dims:
+        tensor = tensor.view(-1, *([size] * (target_dims - tensor.ndim)))
+    return tensor
