@@ -135,10 +135,10 @@ class PagedAttention:
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
         block_tables: torch.Tensor,
-        start_loc: torch.Tensor,
-        prompt_lens: torch.Tensor,
+        subquery_start_loc: torch.Tensor,
+        prompt_lens_tensor: torch.Tensor,
         context_lens: torch.Tensor,
-        max_seq_len: int,
+        max_subquery_len: int,
         alibi_slopes: Optional[torch.Tensor],
     ) -> torch.Tensor:
         output = torch.empty_like(query)
@@ -149,11 +149,12 @@ class PagedAttention:
             output,
             key_cache,
             value_cache,
-            block_tables,  # [BS, max_block_per_request]
-            start_loc,
-            prompt_lens,
+            block_tables,
+            # subquery_start_loc is (batch_size + 1,)
+            subquery_start_loc[:-1],
+            prompt_lens_tensor,
             context_lens,
-            max_seq_len,
+            max_subquery_len,
             alibi_slopes,
         )
         return output

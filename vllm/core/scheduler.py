@@ -173,12 +173,12 @@ class Scheduler:
             curr_loras = set(
                 seq_group.lora_int_id
                 for seq_group in self.running) if self.lora_enabled else None
-            seq_lens: List[int] = []
 
             # Optimization: We do not sort the waiting queue since the preempted
             # sequence groups are added to the front and the new sequence groups
             # are added to the back.
             leftover_waiting_sequences = deque()
+            num_batched_tokens = 0
             while self.waiting:
                 seq_group = self.waiting[0]
                 waiting_seqs = seq_group.get_seqs(
@@ -223,8 +223,7 @@ class Scheduler:
                         continue
 
                 # If the number of batched tokens exceeds the limit, stop.
-                new_seq_lens = seq_lens + [num_prompt_tokens]
-                num_batched_tokens = len(new_seq_lens) * max(new_seq_lens)
+                num_batched_tokens += num_prompt_tokens
                 if (num_batched_tokens >
                         self.scheduler_config.max_num_batched_tokens):
                     break
@@ -235,11 +234,6 @@ class Scheduler:
                 if (num_curr_seqs + num_new_seqs >
                         self.scheduler_config.max_num_seqs):
                     break
-
-                num_paddings = num_batched_tokens - sum(new_seq_lens)
-                if num_paddings > self.scheduler_config.max_paddings:
-                    break
-                seq_lens = new_seq_lens
 
                 if lora_int_id > 0:
                     curr_loras.add(lora_int_id)
@@ -255,8 +249,7 @@ class Scheduler:
                 scheduler_outputs = SchedulerOutputs(
                     scheduled_seq_groups=scheduled,
                     prompt_run=True,
-                    num_batched_tokens=len(seq_lens) *
-                    max(seq_lens) if seq_lens else 0,
+                    num_batched_tokens=num_batched_tokens,
                     blocks_to_swap_in=blocks_to_swap_in,
                     blocks_to_swap_out=blocks_to_swap_out,
                     blocks_to_copy=blocks_to_copy,

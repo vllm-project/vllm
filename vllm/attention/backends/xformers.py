@@ -4,7 +4,8 @@ from typing import Dict, List, Optional, Tuple, Type
 
 import torch
 from xformers import ops as xops
-from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
+from xformers.ops.fmha.attn_bias import (AttentionBias,
+                                         BlockDiagonalCausalMask,
                                          LowerTriangularMaskWithTensorBias)
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -50,25 +51,105 @@ class XFormersBackend(AttentionBackend):
 
 @dataclass
 class XFormersMetadata(AttentionMetadata):
+    """Metadata for XFormersbackend.
 
+    NOTE: Any python object stored here is not updated when it is
+    cuda-graph replayed. If you have values that need to be changed
+    dynamically, it should be stored in tensor. The tensor has to be
+    updated from `CUDAGraphRunner.forward` API.
+    """
+    # Currently, input sequences can only contain all prompts
+    # or all decoding. True if all sequences are prompts.
     is_prompt: bool
+    # (num_tokens,). The indices of the token slots that input tokens will be
+    # stored into. E.g., if `slot_mapping` is [35, 2, 17] and the block size
+    # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
+    # in block 0, and 1st slot in block 1, respectively.
     slot_mapping: torch.Tensor
-    prompt_lens: Optional[torch.Tensor]
-    max_seq_len: Optional[int]
-    start_loc: Optional[torch.Tensor]
+    # (batch_size,). The prompt length per sequence. None if it is a decoding.
+    prompt_lens: Optional[List[int]]
+    # prompt_lens stored as a tensor.
+    prompt_lens_tensor: Optional[torch.Tensor]
+    # The number of prompt tokens. Doesn't include padding.
+    num_prompt_tokens: int
+    # The number of generation tokens. Doesn't include padding.
+    num_generation_tokens: int
+    """
+    Definition of context_len, subquery_len, and seqlen.
+    |---------- N-1 iteration --------|
+    |---------------- N iteration ---------------------|
+    |- tokenA -|......................|-- newTokens ---|
+    |---------- context_len ----------|
+    |-------------------- seqlen ----------------------|
+                                      |- subquery_len -|
+
+    WARNING: context_len has different definition depending on if it is
+    prefill vs decoding. When it is prefill, it doesn't include new
+    tokens. When it is for decoding, it includes a new token.
+    """
+
+    # Maximum subquery length in the batch.
+    max_subquery_len: Optional[int]
+    # Maximum context length in the batch.
     max_context_len: Optional[int]
+    # FIXME: It is for flash attn.
+    # Maximum sequence length in the batch.
+    max_seq_len: Optional[int]
+    # (batch_size + 1,). The cumulative subquery lengths of the sequences in
+    # the batch, used to index into subquery. E.g., if the subquery length
+    # is [4, 6], it is [0, 4, 10].
+    subquery_start_loc: Optional[torch.Tensor]
+    # FIXME: It is for flash attn.
+    # (batch_size + 1,). The cumulative sequence lengths of the sequences in
+    # the batch, used to index into sequence. E.g., if the sequence length is
+    # [4, 6], it is [0, 4, 10].
+    seq_start_loc: Optional[torch.Tensor]
+    # (batch_size,). The length of context (tokens stored in KV cache) per
+    # sequence. WARNING: When it is a prefill request, it doesn't include new
+    # tokens. When it is for decoding, it includes a new token.
     context_lens: Optional[torch.Tensor]
+    # (batch_size, max_blocks_per_seq).
+    # Block addresses per sequence. (Seq id -> list of physical block)
+    # E.g., [0, 1, 2] means tokens are stored in 0th, 1st, and 2nd blocks
+    # in the kv cache. Each block can contain up to block_size tokens.
+    # 2nd dimensions are padded up to max_blocks_per_seq if it is cuda-graph
+    # captured.
     block_tables: Optional[torch.Tensor]
+    # Whether or not if cuda graph is enabled.
+    # Cuda-graph is currently enabled for decoding only.
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
     kv_cache_dtype: str
 
     def __post_init__(self):
+        # Set during the execution of the first attention op.
+        # It is a list because it is needed to set per prompt
+        # when alibi slopes is used. It is because of the limitation
+        # from xformer API.
         # will not appear in the __repr__ and __init__
-        self.attn_bias = None
+        self.attn_bias: Optional[List[AttentionBias]] = None
+
+        # Cuda graph is only used for decoding now.
+        if self.use_cuda_graph:
+            assert self.num_prompt_tokens == 0
 
 
 class XFormersImpl(AttentionImpl):
+    """
+    If the input tensors contain prompt tokens, the layout is as follows:
+    |<--------------- num_prompt_tokens --------------->|	
+    |<--prompt_0-->|<--prompt_1-->|...|<--prompt_N-1--->|
+
+    Otherwise, the layout is as follows:	
+    |<------------------ num_generation_tokens (M) ----------------->|	
+    |<--generation_0-->|..........|<--generation_M-1-->|<--padding-->|
+
+    Generation tokens can contain padding when cuda-graph is used.
+    Currently, prompt tokens don't contain any padding.
+
+    The prompts might have different lengths, while the generation tokens
+    always have length 1.
+    """
 
     def __init__(
         self,
@@ -97,6 +178,11 @@ class XFormersImpl(AttentionImpl):
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {suppored_head_sizes}.")
 
+        # Some old AMD GPUs do not support xFormers nor FlashAttention.
+        # As a temporary workaround, we use naive PyTorch implementation
+        # of attention.
+        self.use_ref_attention = _check_use_ref_attention()
+
     def forward(
         self,
         query: torch.Tensor,
@@ -108,16 +194,15 @@ class XFormersImpl(AttentionImpl):
         """Forward pass with xFormers and PagedAttention.
 
         Args:
-            query: shape = [batch_size, seq_len, num_heads * head_size]
-            key: shape = [batch_size, seq_len, num_kv_heads * head_size]
-            value: shape = [batch_size, seq_len, num_kv_heads * head_size]
+            query: shape = [num_tokens, num_heads * head_size]
+            key: shape = [num_tokens, num_kv_heads * head_size]
+            value: shape = [num_tokens, num_kv_heads * head_size]
             kv_cache = [2, num_blocks, block_size * num_kv_heads * head_size]
             attn_metadata: Metadata for attention.
         Returns:
-            shape = [batch_size, seq_len, num_heads * head_size]
+            shape = [num_tokens, num_heads * head_size]
         """
-        batch_size, seq_len, hidden_size = query.shape
-        # Reshape the query, key, and value tensors.
+        num_tokens, hidden_size = query.shape
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
@@ -137,7 +222,8 @@ class XFormersImpl(AttentionImpl):
         if attn_metadata.is_prompt:
             # Prompt run.
             if kv_cache is None or attn_metadata.block_tables.numel() == 0:
-                # normal attention
+                # kv_cache is None when it is a profiling run.
+                # block tables are empty if the prompt has never been computed.
                 if self.num_kv_heads != self.num_heads:
                     # As of Nov 2023, xformers only supports MHA. For MQA/GQA,
                     # project the key and value tensors to the desired number of
@@ -156,44 +242,32 @@ class XFormersImpl(AttentionImpl):
                                                   self.num_queries_per_kv,
                                                   value.shape[-1])
 
-                # Set attention bias if not provided. This typically happens at
-                # the very attention layer of every iteration.
-                # FIXME(woosuk): This is a hack.
-                if attn_metadata.attn_bias is None:
-                    if self.alibi_slopes is None:
-                        attn_bias = BlockDiagonalCausalMask.from_seqlens(
-                            [seq_len] * batch_size)
-                        if self.sliding_window is not None:
-                            attn_bias = attn_bias.make_local_attention(
-                                self.sliding_window)
-                        attn_metadata.attn_bias = attn_bias
-                    else:
-                        attn_metadata.attn_bias = _make_alibi_bias(
-                            self.alibi_slopes, self.num_kv_heads, batch_size,
-                            seq_len, query.dtype)
+                if self.use_ref_attention:
+                    output = torch.empty_like(query)
+                    start = 0
+                    for _, prompt_len in enumerate(input_metadata.prompt_lens):
+                        end = start + prompt_len
+                        out = _ref_masked_attention(
+                            query[None, start:end],
+                            key[None, start:end],
+                            value[None, start:end],
+                            self.num_heads,
+                            self.num_kv_heads,
+                            self.head_size,
+                            self.scale,
+                        )
+                        # TODO(woosuk): Unnecessary copy. Optimize.
+                        output[start:end].copy_(out)
+                        start += prompt_len
 
-                # TODO(woosuk): Too many view operations. Let's try to reduce
-                # them in the future for code readability.
-                if self.alibi_slopes is None:
-                    query = query.unsqueeze(0)
-                    key = key.unsqueeze(0)
-                    value = value.unsqueeze(0)
-                else:
-                    query = query.unflatten(0, (batch_size, seq_len))
-                    key = key.unflatten(0, (batch_size, seq_len))
-                    value = value.unflatten(0, (batch_size, seq_len))
+                    # Using view got RuntimeError: view size is not compatible
+                    # with input tensor's size and stride (at least one
+                    # dimension spans across two contiguous subspaces).
+                    # Use reshape instead.
+                    return output.reshape(num_tokens, hidden_size)
 
-                out = xops.memory_efficient_attention_forward(
-                    query,
-                    key,
-                    value,
-                    attn_bias=attn_metadata.attn_bias,
-                    p=0.0,
-                    scale=self.scale,
-                    op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if
-                    (is_hip()) else None,
-                )
-                output = out.view_as(query)
+                output = self._run_memory_efficient_xformer_forward(
+                    query, key, value, input_metadata)
             else:
                 # prefix-enabled attention
                 output = PagedAttention.forward_prefix(
@@ -225,38 +299,149 @@ class XFormersImpl(AttentionImpl):
             )
 
         # Reshape the output tensor.
-        return output.view(batch_size, seq_len, hidden_size)
+        return output.view(-1, self.num_heads * self.head_size)
+
+    def _run_memory_efficient_xformer_forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        input_metadata: InputMetadata,
+    ) -> torch.Tensor:
+        """Attention for 1D query of multiple prompts. Multiple prompt
+        tokens are flattened in to `query` input.
+
+        Args:
+            output: shape = [num_prompt_tokens, num_heads, head_size]
+            query: shape = [num_prompt_tokens, num_heads, head_size]
+            key: shape = [num_prompt_tokens, num_kv_heads, head_size]
+            value: shape = [num_prompt_tokens, num_kv_heads, head_size]
+            input_metadata: metadata for paged attention.
+        """
+        # Set attention bias if not provided. This typically happens at
+        # the very attention layer of every iteration.
+        # FIXME(woosuk): This is a hack.
+        if input_metadata.attn_bias is None:
+            if self.alibi_slopes is None:
+                attn_bias = BlockDiagonalCausalMask.from_seqlens(
+                    input_metadata.prompt_lens)
+                if self.sliding_window is not None:
+                    attn_bias = attn_bias.make_local_attention(
+                        self.sliding_window)
+                input_metadata.attn_bias = [attn_bias]
+            else:
+                input_metadata.attn_bias = _make_alibi_bias(
+                    self.alibi_slopes, self.num_kv_heads, query.dtype,
+                    input_metadata)
+
+        op = xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if (
+            is_hip()) else None
+        # No alibi slopes.
+        # TODO(woosuk): Too many view operations. Let's try to reduce
+        # them in the future for code readability.
+        if self.alibi_slopes is None:
+            query = query.unsqueeze(0)
+            key = key.unsqueeze(0)
+            value = value.unsqueeze(0)
+            out = xops.memory_efficient_attention_forward(
+                query,
+                key,
+                value,
+                attn_bias=input_metadata.attn_bias[0],
+                p=0.0,
+                scale=self.scale,
+                op=op)
+
+            return out.view_as(query)
+
+        # Attention with alibi slopes.
+        # FIXME(woosuk): Because xformers does not support dynamic sequence
+        # lengths with custom attention bias, we process each prompt one by
+        # one. This is inefficient, especially when we have many short prompts.
+        output = torch.empty_like(query)
+        start = 0
+        for i, prompt_len in enumerate(input_metadata.prompt_lens):
+            end = start + prompt_len
+            out = xops.memory_efficient_attention_forward(
+                query[None, start:end],
+                key[None, start:end],
+                value[None, start:end],
+                attn_bias=input_metadata.attn_bias[i],
+                p=0.0,
+                scale=self.scale,
+                op=op)
+            # TODO(woosuk): Unnecessary copy. Optimize.
+            output[start:end].copy_(out.squeeze(0))
+            start += prompt_len
+        return output
 
 
 def _make_alibi_bias(
     alibi_slopes: torch.Tensor,
     num_kv_heads: int,
-    batch_size: int,
-    seq_len: int,
     dtype: torch.dtype,
+    input_metadata: InputMetadata,
 ) -> LowerTriangularMaskWithTensorBias:
-    bias = torch.arange(seq_len, dtype=dtype)
-    # NOTE(zhuohan): HF uses
-    #     `bias = bias[None, :].repeat(prompt_len, 1)`
-    # here. We find that both biases give the same results, but
-    # the bias below more accurately follows the original ALiBi
-    # paper.
-    bias = bias[None, :] - bias[:, None]
+    attn_biases = []
+    for prompt_len in input_metadata.prompt_lens:
+        bias = torch.arange(prompt_len, dtype=dtype)
+        # NOTE(zhuohan): HF uses
+        #     `bias = bias[None, :].repeat(prompt_len, 1)`
+        # here. We find that both biases give the same results, but
+        # the bias below more accurately follows the original ALiBi
+        # paper.
+        # Calculate a matrix where each element represents ith element- jth
+        # element.
+        bias = bias[None, :] - bias[:, None]
 
-    # When using custom attention bias, xformers requires the bias to
-    # be sliced from a tensor whose length is a multiple of 8.
-    padded_len = (seq_len + 7) // 8 * 8
-    num_heads = alibi_slopes.shape[0]
-    bias = torch.empty(
-        batch_size,
-        num_heads,
-        seq_len,
-        padded_len,
-        device=alibi_slopes.device,
-        dtype=dtype,
-    )[:, :, :, :seq_len].copy_(bias)
-    bias.mul_(alibi_slopes[:, None, None])
-    if num_heads != num_kv_heads:
-        bias = bias.unflatten(1, (num_kv_heads, num_heads // num_kv_heads))
-    attn_bias = LowerTriangularMaskWithTensorBias(bias)
-    return attn_bias
+        padded_len = (prompt_len + 7) // 8 * 8
+        num_heads = alibi_slopes.shape[0]
+        bias = torch.empty(
+            1,  # batch size
+            num_heads,
+            prompt_len,
+            padded_len,
+            device=alibi_slopes.device,
+            dtype=dtype,
+        )[:, :, :, :prompt_len].copy_(bias)
+        bias.mul_(alibi_slopes[:, None, None])
+        if num_heads != num_kv_heads:
+            bias = bias.unflatten(1, (num_kv_heads, num_heads // num_kv_heads))
+        attn_biases.append(LowerTriangularMaskWithTensorBias(bias))
+
+    return attn_biases
+
+
+def _check_use_ref_attention() -> bool:
+    if not is_hip():
+        return False
+    # For ROCm, check whether flash attention is installed or not.
+    # if not, use_ref_attention needs to be True
+    return importlib.util.find_spec("flash_attn") is None
+
+
+def _ref_masked_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    num_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    scale: float,
+) -> torch.Tensor:
+    query = query.view(-1, num_heads, head_size)
+    key = key.view(-1, num_kv_heads, head_size)
+    value = value.view(-1, num_kv_heads, head_size)
+    seq_len, _, _ = query.shape
+    attn_mask = torch.triu(torch.ones(seq_len,
+                                      seq_len,
+                                      dtype=query.dtype,
+                                      device=query.device),
+                           diagonal=1)
+    attn_mask = attn_mask * torch.finfo(query.dtype).min
+
+    attn_weights = scale * torch.einsum("qhd,khd->hqk", query, key).float()
+    attn_weights = attn_weights + attn_mask.float()
+    attn_weights = torch.softmax(attn_weights, dim=-1).to(value.dtype)
+    out = torch.einsum("hqk,khd->qhd", attn_weights, value)
+    return out
