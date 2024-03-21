@@ -20,14 +20,13 @@
 """Inference-only Jais model compatible with HuggingFace weights."""
 
 import math
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import torch
 from torch import nn
 from vllm.transformers_utils.configs import JAISConfig
 
-from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.attention import Attention
+from vllm.attention import Attention, AttentionMetadata
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     LinearMethodBase,
@@ -48,8 +47,6 @@ from vllm.model_executor.weight_utils import (
 )
 from vllm.sequence import SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-
-KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class SwiGLUActivation(nn.Module):
@@ -122,14 +119,12 @@ class JAISAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        kv_cache: KVCache,
-        input_metadata: InputMetadata,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
-        key_cache, value_cache = kv_cache
-        attn_output = self.attn(q, k, v, key_cache, value_cache,
-                                input_metadata)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         attn_output, _ = self.c_proj(attn_output)
         return attn_output
 
@@ -196,15 +191,15 @@ class JAISBlock(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        kv_cache: KVCache,
-        input_metadata: InputMetadata,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
         attn_output = self.attn(
             hidden_states=hidden_states,
             kv_cache=kv_cache,
-            input_metadata=input_metadata,
+            attn_metadata=attn_metadata,
         )
         # residual connection
         hidden_states = attn_output + residual
@@ -248,8 +243,8 @@ class JAISModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
-        kv_caches: List[KVCache],
-        input_metadata: InputMetadata,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         inputs_embeds = self.wte(input_ids)
         if self.wpe is not None:
@@ -262,7 +257,7 @@ class JAISModel(nn.Module):
 
         for i in range(len(self.h)):
             layer = self.h[i]
-            hidden_states = layer(hidden_states, kv_caches[i], input_metadata)
+            hidden_states = layer(hidden_states, kv_caches[i], attn_metadata)
 
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
@@ -293,11 +288,11 @@ class JAISLMHeadModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[KVCache],
-        input_metadata: InputMetadata,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         input_metadata)
+                                         attn_metadata)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
