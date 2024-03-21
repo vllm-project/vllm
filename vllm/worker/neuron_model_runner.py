@@ -258,9 +258,12 @@ class NeuronModelRunner:
             input_block_ids=input_block_ids,
         )
 
+        # Compute the logits.
+        logits = self.model.compute_logits(hidden_states, sampling_metadata)
+
         # Sample the next token.
         output = self.model.sample(
-            hidden_states=hidden_states,
+            logits=logits,
             sampling_metadata=sampling_metadata,
         )
         return output

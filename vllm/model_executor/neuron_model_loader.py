@@ -9,6 +9,7 @@ import transformers
 from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
@@ -43,7 +44,8 @@ class NeuronCasualLM(nn.Module):
         super().__init__()
         self.config = config
         self.model = None
-        self.sampler = Sampler(config.vocab_size, logits_as_input=True)
+        self.logits_processor = LogitsProcessor(config.vocab_size, logits_as_input=True)
+        self.sampler = Sampler()
 
     def forward(
         self,
@@ -56,12 +58,17 @@ class NeuronCasualLM(nn.Module):
                             start_ids=input_block_ids)
         return logits
 
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        logits = self.logits_processor(None, hidden_states, sampling_metadata)
+        return logits
+
     def sample(
         self,
-        hidden_states: torch.Tensor,
+        logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(None, hidden_states, sampling_metadata)
+        next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
     def load_weights(self, model_name_or_path: str, **kwargs):
