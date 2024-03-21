@@ -246,7 +246,7 @@ class XFormersImpl(AttentionImpl):
                 if self.use_ref_attention:
                     output = torch.empty_like(query)
                     start = 0
-                    for _, prompt_len in enumerate(input_metadata.prompt_lens):
+                    for _, prompt_len in enumerate(attn_metadata.prompt_lens):
                         end = start + prompt_len
                         out = _ref_masked_attention(
                             query[None, start:end],
@@ -268,7 +268,7 @@ class XFormersImpl(AttentionImpl):
                     return output.reshape(num_tokens, hidden_size)
 
                 output = self._run_memory_efficient_xformer_forward(
-                    query, key, value, input_metadata)
+                    query, key, value, attn_metadata)
             else:
                 # prefix-enabled attention
                 output = PagedAttention.forward_prefix(
@@ -307,7 +307,7 @@ class XFormersImpl(AttentionImpl):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        input_metadata: InputMetadata,
+        attn_metadata: XFormersMetadata,
     ) -> torch.Tensor:
         """Attention for 1D query of multiple prompts. Multiple prompt
         tokens are flattened in to `query` input.
@@ -317,23 +317,23 @@ class XFormersImpl(AttentionImpl):
             query: shape = [num_prompt_tokens, num_heads, head_size]
             key: shape = [num_prompt_tokens, num_kv_heads, head_size]
             value: shape = [num_prompt_tokens, num_kv_heads, head_size]
-            input_metadata: metadata for paged attention.
+            attn_metadata: Metadata for attention.
         """
         # Set attention bias if not provided. This typically happens at
         # the very attention layer of every iteration.
         # FIXME(woosuk): This is a hack.
-        if input_metadata.attn_bias is None:
+        if attn_metadata.attn_bias is None:
             if self.alibi_slopes is None:
                 attn_bias = BlockDiagonalCausalMask.from_seqlens(
-                    input_metadata.prompt_lens)
+                    attn_metadata.prompt_lens)
                 if self.sliding_window is not None:
                     attn_bias = attn_bias.make_local_attention(
                         self.sliding_window)
-                input_metadata.attn_bias = [attn_bias]
+                attn_metadata.attn_bias = [attn_bias]
             else:
-                input_metadata.attn_bias = _make_alibi_bias(
+                attn_metadata.attn_bias = _make_alibi_bias(
                     self.alibi_slopes, self.num_kv_heads, query.dtype,
-                    input_metadata)
+                    attn_metadata.prompt_lens)
 
         op = xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if (
             is_hip()) else None
@@ -348,7 +348,7 @@ class XFormersImpl(AttentionImpl):
                 query,
                 key,
                 value,
-                attn_bias=input_metadata.attn_bias[0],
+                attn_bias=attn_metadata.attn_bias[0],
                 p=0.0,
                 scale=self.scale,
                 op=op)
@@ -361,13 +361,13 @@ class XFormersImpl(AttentionImpl):
         # one. This is inefficient, especially when we have many short prompts.
         output = torch.empty_like(query)
         start = 0
-        for i, prompt_len in enumerate(input_metadata.prompt_lens):
+        for i, prompt_len in enumerate(attn_metadata.prompt_lens):
             end = start + prompt_len
             out = xops.memory_efficient_attention_forward(
                 query[None, start:end],
                 key[None, start:end],
                 value[None, start:end],
-                attn_bias=input_metadata.attn_bias[i],
+                attn_bias=attn_metadata.attn_bias[i],
                 p=0.0,
                 scale=self.scale,
                 op=op)
@@ -381,10 +381,10 @@ def _make_alibi_bias(
     alibi_slopes: torch.Tensor,
     num_kv_heads: int,
     dtype: torch.dtype,
-    input_metadata: InputMetadata,
+    prompt_lens: List[int],
 ) -> LowerTriangularMaskWithTensorBias:
     attn_biases = []
-    for prompt_len in input_metadata.prompt_lens:
+    for prompt_len in prompt_lens:
         bias = torch.arange(prompt_len, dtype=dtype)
         # NOTE(zhuohan): HF uses
         #     `bias = bias[None, :].repeat(prompt_len, 1)`
