@@ -168,7 +168,6 @@ class VllmRunner:
         tensor_parallel_size: int = 1,
         block_size: int = 16,
         max_chunked_prefill_len: int = -1,
-        max_num_prompt_seqs: int = 1000,
         max_num_batched_tokens: int = 4096,
         **kwargs,
     ) -> None:
@@ -182,7 +181,6 @@ class VllmRunner:
             tensor_parallel_size=tensor_parallel_size,
             block_size=block_size,
             max_chunked_prefill_len=max_chunked_prefill_len,
-            max_num_prompt_seqs=max_num_prompt_seqs,
             max_num_batched_tokens=max_num_batched_tokens,
             **kwargs,
         )

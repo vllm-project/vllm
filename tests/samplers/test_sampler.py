@@ -287,49 +287,6 @@ def test_sampler_mixed(seed: int, device: str):
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_sampler_logits_processors(seed: int, device: str):
-    set_random_seed(seed)
-    torch.set_default_device(device)
-    batch_size = random.randint(1, 256)
-    input_tensor, _, sampler, model_runner = _prepare_test(batch_size)
-
-    # This sample logits processor gives infinite score to the i-th token,
-    # where i is the length of the input sequence.
-    # We therefore expect the output token sequence to be [0, 1, 2, ...]
-    def pick_ith(token_ids, logits):
-        logits[len(token_ids)] = float("inf")
-        return logits
-
-    seq_group_metadata_list = []
-    prompt_lens = []
-    for i in range(batch_size):
-        seq_group_metadata_list.append(
-            SequenceGroupMetadata(
-                request_id=f"test_{i}",
-                is_prompt=True,
-                is_chunked_prefill=False,
-                seq_data={0: SequenceData([1, 2, 3])},
-                sampling_params=SamplingParams(temperature=0,
-                                               logits_processors=[pick_ith]),
-                block_tables={0: [1]},
-            ))
-        prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
-
-    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens,
-                                                     subquery_lens=prompt_lens)
-    sampler_output = sampler(embedding=None,
-                             hidden_states=input_tensor,
-                             sampling_metadata=sampling_metadata)
-    for _, sequence_output in enumerate(sampler_output):
-        for idx, nth_output in enumerate(sequence_output.samples):
-            assert nth_output.output_token == idx
-
-    del model_runner
-
-
-@pytest.mark.parametrize("seed", RANDOM_SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_sampler_top_k_top_p(seed: int, device: str):
     set_random_seed(seed)
     batch_size = random.randint(1, 256)

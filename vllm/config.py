@@ -539,8 +539,6 @@ class SchedulerConfig:
             requests. Longer requests will be chunked into multiple chunks.
             -1 means no chunking (disabled). This features is only supported
             for flash style attention.
-        max_num_prompt_seqs: The maximum number of prompt sequences that can be
-            processed in a single iteration.
     """
 
     def __init__(
@@ -549,7 +547,6 @@ class SchedulerConfig:
         max_num_seqs: int,
         max_model_len: int,
         max_chunked_prefill_len: int = -1,
-        max_num_prompt_seqs: int = 1024,
     ) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
@@ -561,7 +558,6 @@ class SchedulerConfig:
         self.max_model_len = max_model_len
         self.chunked_prefill_enabled = max_chunked_prefill_len != -1
         self.max_chunked_prefill_len = max_chunked_prefill_len
-        self.max_num_prompt_seqs = max_num_prompt_seqs
         self._verify_args()
 
     def _verify_args(self) -> None:

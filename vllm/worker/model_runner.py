@@ -58,7 +58,6 @@ class ModelRunner:
         # FIXME(woosuk): This is a hack to make the tests work. Refactor this.
         self.sliding_window = (model_config.get_sliding_window()
                                if model_config is not None else None)
-
         self.device_config = (device_config
                               if device_config is not None else DeviceConfig())
         self.device = self.device_config.device
@@ -145,33 +144,31 @@ class ModelRunner:
         subquery_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
         num_chunked_prefill = 0
-        # Whether or not if any seq_group has prefix cached.
-        # print("SANG-TODO # of requests (seq_group_metadata_list): ",
-        #       len(seq_group_metadata_list))
+
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
             assert len(seq_ids) == 1
             seq_id = seq_ids[0]
 
+            computed_block_nums = seq_group_metadata.computed_block_nums
             if seq_group_metadata.is_chunked_prefill:
                 num_chunked_prefill += 1
-                # TODO(sang): Support it.
+                # TODO(sang): Both are the same thing and should be handled
+                # in the same way.
                 if computed_block_nums is not None:
                     raise RuntimeError(
-                        "chunked prefill cannot be used with prefix caching now."
-                    )
+                        "chunked prefill cannot be used with prefix caching "
+                        "now.")
 
             seq_data = seq_group_metadata.seq_data[seq_id]
             prefill_start, prefill_end = seq_data.get_prefill_range()
             prompt_tokens = seq_data.get_token_ids()[prefill_start:prefill_end]
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
-
             computed_len = 0
 
             # NOTE: This only works for oooooooxxx style attention.
-            computed_block_nums = seq_group_metadata.computed_block_nums
             if computed_block_nums is not None and len(
                     computed_block_nums) > 0 and self.sliding_window is None:
                 # Prefix is not supported with sliding_window
@@ -189,9 +186,6 @@ class ModelRunner:
             input_tokens.extend(prompt_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
-            # NOTE(sang): prefill_end is always # of prompts if chunked
-            # prefill is not enabled. Prefix caching is not working with
-            # chunked prefill now.
             input_positions.extend(
                 list(range(computed_len, computed_len + prefill_end)))
 
@@ -558,15 +552,12 @@ class ModelRunner:
             # NOTE: We assume that all sequences in the group are all prompts or
             # all decodes.
             is_prompt = seq_group_metadata_list[0].is_prompt
-            # SANG-TODO set num prompt tokens and generations?
             # Prepare input tensors.
             if is_prompt:
-                # print("SANG-TODO execute model prompt.")
                 (input_tokens, input_positions, input_metadata, prompt_lens,
                  subquery_lens, lora_index_mapping, lora_prompt_mapping,
                  lora_requests) = self._prepare_prompt(seq_group_metadata_list)
             else:
-                # print("SANG-TODO execute model decode.")
                 (input_tokens, input_positions, input_metadata,
                  lora_index_mapping, lora_prompt_mapping,
                  lora_requests) = self._prepare_decode(seq_group_metadata_list)
@@ -800,7 +791,6 @@ class ModelRunner:
                     slot_mapping=slot_mapping[:batch_size],
                     num_chunked_prefill=0,
                     prompt_lens=None,
-                    num_chunked_prefill=0,
                     prompt_lens_tensor=None,
                     num_prompt_tokens=0,
                     num_generation_tokens=batch_size,

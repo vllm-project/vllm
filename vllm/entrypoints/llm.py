@@ -146,7 +146,6 @@ class LLM:
             A list of `RequestOutput` objects containing the generated
             completions in the same order as the input prompts.
         """
-        # print("SANG-TODO generate: ", prompts, prompt_token_ids)
         if prompts is None and prompt_token_ids is None:
             raise ValueError("Either prompts or prompt_token_ids must be "
                              "provided.")
