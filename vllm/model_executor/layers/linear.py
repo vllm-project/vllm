@@ -13,6 +13,7 @@ from vllm.model_executor.parallel_utils.utils import (
     divide, split_tensor_along_last_dim)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.logger import init_logger
+from vllm.utils import is_hip
 from vllm import custom_ops
 
 logger = init_logger(__name__)
@@ -73,7 +74,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         weight = weights["weight"]
-        if x.shape[0] == 1:
+        if is_hip() and x.shape[0] == 1:
             m, n, k = weight.shape[0], x.shape[0], x.shape[1]
             out = torch.empty(x.shape[0], weight.shape[0], dtype=x.dtype)
             if k == 8192 and (m == 1280 or m == 7168):
