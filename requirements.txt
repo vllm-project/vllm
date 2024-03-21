@@ -3,9 +3,9 @@ psutil
 ray >= 2.9
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
-torch == 2.2.1
+torch == 2.2.0
 transformers >= 4.38.0  # Required for Gemma.
-xformers == 0.0.25  # Requires PyTorch 2.2.1.
+xformers == 0.0.24  # Requires PyTorch 2.2.0.
 fastapi
 uvicorn[standard]
 pydantic >= 2.0  # Required for OpenAI server.
