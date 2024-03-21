@@ -19,12 +19,6 @@ WORKDIR /workspace
 COPY requirements.txt requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.txt
-# important, cupy-cuda12x with 2.19 leads to much larger memory overhead with cudagraph
-# so we use 2.18.3
-# and we are in a dependency hell with torch and cupy
-# have to manually install to downgrade nccl version
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install nvidia-nccl-cu12==2.18.3
 
 # install development dependencies
 COPY requirements-dev.txt requirements-dev.txt
@@ -96,6 +90,13 @@ RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,ta
 # ignore build dependencies installation because we are using pre-complied extensions
 RUN rm pyproject.toml
 RUN --mount=type=cache,target=/root/.cache/pip VLLM_USE_PRECOMPILED=1 pip install . --verbose
+# important, cupy-cuda12x with 2.19 leads to much larger memory overhead with cudagraph
+# so we use 2.18.3
+# and we are in a dependency hell with torch and cupy
+# have to manually install to downgrade nccl version
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install nvidia-nccl-cu12==2.18.3
+
 #################### TEST IMAGE ####################
 
 
@@ -113,16 +114,16 @@ WORKDIR /workspace
 COPY requirements.txt requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.txt
+
+# Install flash attention (from pre-built wheel)
+RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,target=/usr/src/flash-attention-v2 \
+    pip install /usr/src/flash-attention-v2/*.whl --no-cache-dir
 # important, cupy-cuda12x with 2.19 leads to much larger memory overhead with cudagraph
 # so we use 2.18.3
 # and we are in a dependency hell with torch and cupy
 # have to manually install to downgrade nccl version
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install nvidia-nccl-cu12==2.18.3
-
-# Install flash attention (from pre-built wheel)
-RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,target=/usr/src/flash-attention-v2 \
-    pip install /usr/src/flash-attention-v2/*.whl --no-cache-dir
 
 #################### RUNTIME BASE IMAGE ####################
 
