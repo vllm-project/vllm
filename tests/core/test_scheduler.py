@@ -152,6 +152,7 @@ def test_scheduler_schedule_chunked_prefill():
         seq_groups.append(seq_group)
 
     # Schedule chunk prefill. Only the first seq_group should be scheduled.
+    breakpoint()
     seq_group_meta, out = scheduler.schedule()
     assert set(out.scheduled_seq_groups) == set(seq_groups[:1])
     assert seq_groups[0].get_num_unprefilled() == 2
