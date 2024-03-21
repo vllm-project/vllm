@@ -279,8 +279,7 @@ class LLMEngine:
         sampling_params = sampling_params.clone()
         # inject the eos token id into the sampling_params to support min_tokens
         # processing
-        sampling_params.eos_token_id = self.get_tokenizer_for_seq(
-            seq).eos_token_id
+        sampling_params.eos_token_id = seq.eos_token_id
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,
