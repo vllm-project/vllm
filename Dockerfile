@@ -18,7 +18,7 @@ WORKDIR /workspace
 # install build and runtime dependencies
 COPY requirements.txt requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt
+    pip install -r requirements.txt --force-reinstall
 
 # install development dependencies
 COPY requirements-dev.txt requirements-dev.txt
@@ -106,7 +106,7 @@ RUN apt-get update -y \
 WORKDIR /workspace
 COPY requirements.txt requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt
+    pip install -r requirements.txt --force-reinstall
 
 # Install flash attention (from pre-built wheel)
 RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,target=/usr/src/flash-attention-v2 \

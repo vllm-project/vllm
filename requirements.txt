@@ -14,3 +14,4 @@ pynvml == 11.5.0
 triton >= 2.1.0
 outlines == 0.0.34
 cupy-cuda12x == 12.1.0  # Required for CUDA graphs. CUDA 11.8 users should install cupy-cuda11x instead.
+nvidia-nccl-cu12 == 2.19.3 # important, cupy-cuda12x with 2.19 leads to much larger memory overhead with cudagraph

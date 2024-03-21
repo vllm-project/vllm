@@ -23,9 +23,7 @@ steps:
   num_gpus: 2 # only support 1 or 2 for now.
 
 - label: Distributed Correctness Test-facebook/opt-125m
-  command: 
-  - pip install nvidia-nccl-cu12==2.19.3 # important, cupy-cuda12x with 2.19 leads to much larger memory overhead with cudagraph
-  - TEST_DIST_MODEL=facebook/opt-125m pytest -v -s --forked test_basic_distributed_correctness.py
+  command: TEST_DIST_MODEL=facebook/opt-125m pytest -v -s --forked test_basic_distributed_correctness.py
   working_dir: "/vllm-workspace/tests/distributed"
   num_gpus: 2 # only support 1 or 2 for now.
 
