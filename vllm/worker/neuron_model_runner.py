@@ -31,7 +31,8 @@ class NeuronModelRunner:
         self.scheduler_config = scheduler_config
 
         if model_config is not None and model_config.get_sliding_window():
-            raise ValueError("Sliding window is not supported on Neuron.")
+            logger.warning("Sliding window is not supported on Neuron. "
+                           "The model will run without sliding window.")
         self.device_config = (device_config
                               if device_config is not None else DeviceConfig())
         self.device = self.device_config.device

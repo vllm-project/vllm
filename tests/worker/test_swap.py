@@ -30,7 +30,7 @@ def test_swap() -> None:
     )
 
     # Initialize the worker.
-    worker.init_model()
+    worker.init_device()
     worker.load_model()
     worker.init_cache_engine(cache_config)
     worker.warm_up_model()
