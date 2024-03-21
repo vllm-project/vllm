@@ -57,7 +57,7 @@ class TokenBudget:
         # Each prefill requests are padded to the longest
         # seqlen.
         output = (self.token_budget - self.num_prefill_tokens -
-                self.num_decoding_tokens)
+                  self.num_decoding_tokens)
         assert output >= 0
         return output
 
@@ -489,8 +489,8 @@ class Scheduler:
 
         self.waiting.extendleft(leftover_waiting_sequences)
 
-        return SchedulePrefillOutputs(token_budget,
-                                      prompting_seq_groups, ignored_seq_groups)
+        return SchedulePrefillOutputs(token_budget, prompting_seq_groups,
+                                      ignored_seq_groups)
 
     def _schedule(self) -> SchedulerOutputs:
         token_budget = TokenBudget(

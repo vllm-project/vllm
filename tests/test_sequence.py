@@ -1,4 +1,5 @@
 import pytest
+
 from vllm.sequence import SequenceGroupOutput, SamplerOutput, SequenceOutput
 
 
