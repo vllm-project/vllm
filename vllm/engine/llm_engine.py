@@ -618,6 +618,7 @@ class LLMEngine:
         else:
             output = []
 
+        print("\t\tFREE BLOCKS", self.scheduler.block_manager.get_num_free_gpu_blocks())
         return self._process_model_outputs(output, scheduler_outputs)
 
     def do_log_stats(self) -> None:

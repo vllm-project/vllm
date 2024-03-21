@@ -158,27 +158,19 @@ class LlamaAttention(nn.Module):
         use_attn_sinks = True
         llama_context_len = 4096
         if use_attn_sinks and not input_metadata.is_prompt:
+            # streamingLLM: use pos in cache
             positions = torch.clamp(positions, max=llama_context_len - 1)
             q = self.rotary_emb._forward_single(positions, q, llama_context_len)
-
-            # positions is [[seqlen - 1]]
-            # seqlen = positions[0][0] + 1
-
-            # streamingLLM: key pos is the pos in cache
-            # key_positions = torch.tensor(
-            #     [[min(seqlen, llama_context_len) - 1]],
-            #     device=positions.device)
             k = self.rotary_emb._forward_single(positions, k, llama_context_len)
         else:
             q, k = self.rotary_emb(positions, q, k)
         
         # streamingLLM says to rotate k AFTER updating kv cache
         # so this prolly won't work right now
-        # TODO: add cache eviction
         
         k_cache, v_cache = kv_cache
         attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
-        output, _ = self.o_proj(attn_output)
+        output, _ = self.o_proj(attn_output) # cuda error: maybe dims don't line up here
         return output
 
 
