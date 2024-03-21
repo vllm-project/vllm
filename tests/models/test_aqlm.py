@@ -15,22 +15,31 @@ aqlm_not_supported = (
 
 # In this test we hardcode prompts and generations for the model so we don't need to require the AQLM package as a dependency
 example_prompts = [
-    'vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs.\n',
-    'Briefly describe the major milestones in the development of artificial intelligence from 1950 to 2020.\n',
-    'Compare and contrast artificial intelligence with human intelligence in terms of processing information.\n',
-    'Describe the basic components of a neural network and how it can be trained.\n',
+    'vLLM is a high-throughput and memory-efficient inference and serving '
+    'engine for LLMs.\n',
+    'Briefly describe the major milestones in the development of artificial '
+    'intelligence from 1950 to 2020.\n',
+    'Compare and contrast artificial intelligence with human intelligence in '
+    'terms of processing information.\n',
+    'Describe the basic components of a neural network and how it can be '
+    'trained.\n',
     'Write a short story about a robot that dreams for the first time.\n',
-    'Analyze the impact of the COVID-19 pandemic on global economic structures and future business models.\n',
-    'Explain the cultural significance of the Mona Lisa painting, and how its perception might vary in Western versus Eastern societies.\n',
-    "Translate the following English sentence into Japanese, French, and Swahili: 'The early bird catches the worm.'\n"
+    'Analyze the impact of the COVID-19 pandemic on global economic structures '
+    'and future business models.\n',
+    'Explain the cultural significance of the Mona Lisa painting, and how its '
+    'perception might vary in Western versus Eastern societies.\n',
+    "Translate the following English sentence into Japanese, French, and "
+    "Swahili: 'The early bird catches the worm.'\n"
 ]
 
-# These ground truth generations were generated using `transformers==4.38.1 aqlm==1.1.0 torch==2.2.0`
+# These ground truth generations were generated using `transformers==4.38.1
+# aqlm==1.1.0 torch==2.2.0`
 # and the below code:
 # ```python
 # from transformers import AutoTokenizer, AutoModelForCausalLM
 # model_id = "ISTA-DASLab/Llama-2-7b-AQLM-2Bit-1x16-hf"
-# quantized_model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype="auto", device_map="cuda").cuda()
+# quantized_model = AutoModelForCausalLM.from_pretrained(model_id,
+# torch_dtype="auto", device_map="cuda").cuda()
 # tokenizer = AutoTokenizer.from_pretrained(model_id)
 # outputs = []
 # for prompt in example_prompts:
@@ -39,14 +48,24 @@ example_prompts = [
 #     outputs.append(tokenizer.decode(hf_outputs[0][input_ids.shape[1]:]))
 # ```
 ground_truth_generations = [
-    '\n### Features\n\n- **High-throughput**: vLLM is designed to be memory-efficient and high-throughput. It',
-    'The major milestones in the development of artificial intelligence from 1950 to 2020 are as follows:\n1950',
-    'Compare and contrast artificial intelligence with human intelligence in terms of processing information. The processing of information is a key component of artificial intelligence. The processing of information is',
-    'Explain the difference between supervised and unsupervised learning.\nExplain the difference between feedforward and recurrent neural networks.\nExplain the difference',
-    'Write a short story about a robot that dreams for the first time. The story should be about 1000 words.\nThe story should be',
-    'Analyze the impact of the COVID-19 pandemic on global economic structures and future business models. The COVID-19 pandemic has had a',
-    'The Mona Lisa is a painting by Leonardo da Vinci, and it is considered to be one of the most famous paintings in the world. The',
-    'The early bird catches the worm.\nThe early bird catches the worm. (Japanese)\nLe petit oiseau attrait'
+    '\n### Features\n\n- **High-throughput**: vLLM is designed to be '
+    'memory-efficient and high-throughput. It',
+    'The major milestones in the development of artificial intelligence from '
+    '1950 to 2020 are as follows:\n1950',
+    'Compare and contrast artificial intelligence with human intelligence in '
+    'terms of processing information. The processing of information is a key '
+    'component of artificial intelligence. The processing of information is',
+    'Explain the difference between supervised and unsupervised '
+    'learning.\nExplain the difference between feedforward and recurrent '
+    'neural networks.\nExplain the difference',
+    'Write a short story about a robot that dreams for the first time. The '
+    'story should be about 1000 words.\nThe story should be',
+    'Analyze the impact of the COVID-19 pandemic on global economic structures '
+    'and future business models. The COVID-19 pandemic has had a',
+    'The Mona Lisa is a painting by Leonardo da Vinci, and it is considered to '
+    'be one of the most famous paintings in the world. The',
+    'The early bird catches the worm.\nThe early bird catches the worm. '
+    '(Japanese)\nLe petit oiseau attrait'
 ]
 
 
