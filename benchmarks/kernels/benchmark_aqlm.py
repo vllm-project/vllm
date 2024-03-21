@@ -2,8 +2,6 @@ import os
 import sys
 from typing import Optional
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-
 from vllm.model_executor.layers.quantization.aqlm import (
     generic_dequantize_gemm, optimized_dequantize_gemm, dequantize_weight,
     get_int_dtype)
@@ -11,6 +9,8 @@ from vllm._C import ops
 
 import torch
 import torch.nn.functional as F
+
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 
 def torch_mult(
