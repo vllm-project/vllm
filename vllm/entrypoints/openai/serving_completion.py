@@ -118,7 +118,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
         model_name = request.model
         request_id = f"cmpl-{random_uuid()}"
-        created_time = int(time.monotonic())
+        created_time = int(time.time())
 
         # Schedule the request and get the result generator.
         generators = []
@@ -309,10 +309,7 @@ class OpenAIServingCompletion(OpenAIServing):
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             data = self.create_streaming_error_response(str(e))
-            print("yield", f"data: {data}\n\n")
             yield f"data: {data}\n\n"
-
-        print("yield", "data: [DONE]\n\n")
         yield "data: [DONE]\n\n"
 
     def request_output_to_completion_response(

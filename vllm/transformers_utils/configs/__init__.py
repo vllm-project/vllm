@@ -5,10 +5,12 @@ from vllm.transformers_utils.configs.mpt import MPTConfig
 # `FalconConfig` class from the official HuggingFace transformers library.
 from vllm.transformers_utils.configs.falcon import RWConfig
 from vllm.transformers_utils.configs.starcoder2 import Starcoder2Config
+from vllm.transformers_utils.configs.jais import JAISConfig
 
 __all__ = [
     "ChatGLMConfig",
     "MPTConfig",
     "RWConfig",
     "Starcoder2Config",
+    "JAISConfig",
 ]
