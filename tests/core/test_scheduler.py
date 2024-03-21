@@ -194,7 +194,6 @@ def test_scheduler_use_delay():
 
     # second prompt should *not* be scheduled
     seq_group_meta, out = scheduler.schedule()
-    print(seq_group_meta, out.scheduled_seq_groups, out.prompt_run)
     assert not out.prompt_run
     assert seq_group_meta[0].request_id == '0'
 
