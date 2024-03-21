@@ -13,6 +13,7 @@ from vllm.model_executor.parallel_utils.utils import (
     divide, split_tensor_along_last_dim)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.logger import init_logger
+from vllm import custom_ops
 
 logger = init_logger(__name__)
 
@@ -72,6 +73,20 @@ class UnquantizedLinearMethod(LinearMethodBase):
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         weight = weights["weight"]
+        if x.shape[0] == 1:
+            m, n, k = weight.shape[0], x.shape[0], x.shape[1]
+            out = torch.empty(x.shape[0], weight.shape[0], dtype=x.dtype)
+            if k == 8192 and (m == 1280 or m == 7168):
+                custom_ops.LLMM1(weight, x, out, 8)
+            elif k == 3584 and m == 8192:
+                custom_ops.LLMM1(weight, x, out, 8)
+            elif k <= 8192 and k % 8 == 0 and m % 4 == 0:
+                custom_ops.LLMM1(weight, x, out, 4)
+            else:
+                out = F.linear(x, weight)
+            if bias != None:
+                out = out + bias
+            return out
         if self.separate_bias_add:
             if bias is not None:
                 return F.linear(x, weight) + bias
