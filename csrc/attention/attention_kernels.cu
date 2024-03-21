@@ -32,7 +32,6 @@
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define DIVIDE_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
 
-
 namespace vllm {
 
 // Utility function for attention softmax.
@@ -603,7 +602,11 @@ template<
   typename CACHE_T,
   int BLOCK_SIZE,
   bool IS_FP8_E5M2_KV_CACHE,
+#ifdef USE_ROCM
   int NUM_THREADS = 1024>
+#else
+  int NUM_THREADS = 128>
+#endif
 void paged_attention_v1_launcher(
   torch::Tensor& out,
   torch::Tensor& query,
@@ -780,8 +783,13 @@ template<
   typename CACHE_T,
   int BLOCK_SIZE,
   bool IS_FP8_E5M2_KV_CACHE,
+#ifdef USE_ROCM
   int NUM_THREADS = 1024,
   int PARTITION_SIZE = 1024>
+#else
+  int NUM_THREADS = 128,
+  int PARTITION_SIZE = 512>
+#endif
 void paged_attention_v2_launcher(
   torch::Tensor& out,
   torch::Tensor& exp_sums,
