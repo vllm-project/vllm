@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import os
 from packaging.version import Version
 
+import json
 import torch
 from transformers import PretrainedConfig
 
@@ -391,6 +392,58 @@ class CacheConfig:
             logger.warning("Possibly too large swap space. " + msg)
 
 
+@dataclass
+class TokenizerPoolConfig:
+    """Configuration for the tokenizer pool.
+    
+    Args:
+        pool_size: Number of tokenizer workers in the pool.
+        pool_type: Type of the pool.
+        extra_config: Additional config for the pool.
+            The way the config will be used depends on the
+            pool type.
+    """
+    pool_size: int
+    pool_type: str
+    extra_config: dict
+
+    def __post_init__(self):
+        if self.pool_type not in ("ray", ):
+            raise ValueError(f"Unknown pool type: {self.pool_type}")
+        if not isinstance(self.extra_config, dict):
+            raise ValueError("extra_config must be a dictionary.")
+
+    @classmethod
+    def create_config(
+        cls, tokenizer_pool_size: int, tokenizer_pool_type: str,
+        tokenizer_pool_extra_config: Optional[Union[str, dict]]
+    ) -> Optional["TokenizerPoolConfig"]:
+        """Create a TokenizerPoolConfig from the given parameters.
+        
+        If tokenizer_pool_size is 0, return None.
+        
+        Args:
+            tokenizer_pool_size: Number of tokenizer workers in the pool.
+            tokenizer_pool_type: Type of the pool.
+            tokenizer_pool_extra_config: Additional config for the pool.
+                The way the config will be used depends on the
+                pool type. This can be a JSON string (will be parsed).
+        """
+        if tokenizer_pool_size:
+            if isinstance(tokenizer_pool_extra_config, str):
+                tokenizer_pool_extra_config_parsed = json.loads(
+                    tokenizer_pool_extra_config)
+            else:
+                tokenizer_pool_extra_config_parsed = (
+                    tokenizer_pool_extra_config or {})
+            tokenizer_pool_config = cls(tokenizer_pool_size,
+                                        tokenizer_pool_type,
+                                        tokenizer_pool_extra_config_parsed)
+        else:
+            tokenizer_pool_config = None
+        return tokenizer_pool_config
+
+
 class ParallelConfig:
     """Configuration for the distributed execution.
 
@@ -405,6 +458,8 @@ class ParallelConfig:
             parallel and large models.
         disable_custom_all_reduce: Disable the custom all-reduce kernel and
             fall back to NCCL.
+        tokenizer_pool_config: Config for the tokenizer pool.
+            If None, will use synchronous tokenization.
         ray_workers_use_nsight: Whether to profile Ray workers with nsight, see
             https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler.
     """
@@ -416,6 +471,7 @@ class ParallelConfig:
         worker_use_ray: bool,
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
+        tokenizer_pool_config: Optional[TokenizerPoolConfig] = None,
         ray_workers_use_nsight: bool = False,
         placement_group: Optional["PlacementGroup"] = None,
     ) -> None:
@@ -432,6 +488,7 @@ class ParallelConfig:
         self.worker_use_ray = worker_use_ray
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
+        self.tokenizer_pool_config = tokenizer_pool_config
         self.ray_workers_use_nsight = ray_workers_use_nsight
         self.placement_group = placement_group
 
@@ -480,7 +537,6 @@ class SchedulerConfig:
             iteration.
         max_model_len: Maximum length of a sequence (including prompt
             and generated text).
-        max_paddings: Maximum number of paddings to be added to a batch.
     """
 
     def __init__(
@@ -488,7 +544,6 @@ class SchedulerConfig:
         max_num_batched_tokens: Optional[int],
         max_num_seqs: int,
         max_model_len: int,
-        max_paddings: int,
     ) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
@@ -498,7 +553,6 @@ class SchedulerConfig:
             self.max_num_batched_tokens = max(max_model_len, 2048)
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
-        self.max_paddings = max_paddings
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -522,12 +576,12 @@ class DeviceConfig:
     def __init__(self, device: str = "auto") -> None:
         if device == "auto":
             # Automated device type detection
-            if torch.cuda.is_available():
-                self.device_type = "cuda"
-            elif is_neuron():
+            if is_neuron():
                 self.device_type = "neuron"
             else:
-                raise RuntimeError("No supported device detected.")
+                # We don't call torch.cuda.is_available() here to
+                # avoid initializing CUDA before workers are forked
+                self.device_type = "cuda"
         else:
             # Device type is assigned explicitly
             self.device_type = device
