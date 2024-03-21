@@ -47,7 +47,8 @@ def dequantize_weight(codes: torch.Tensor,
         [*dims, num_in_groups*group_size]
     """
     num_out_groups, num_in_groups, num_codebooks = codes.shape[-3:]
-    num_codebooks, codebook_size, out_group_size, in_group_size = codebooks.shape
+    num_codebooks, codebook_size, out_group_size, in_group_size = \
+        codebooks.shape
     out_features = num_out_groups * out_group_size
     in_features = num_in_groups * in_group_size
     codebook_offsets = torch.arange(

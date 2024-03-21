@@ -5,7 +5,8 @@ Run `pytest tests/models/test_aqlm.py --forked`.
 
 import pytest
 import torch
-from vllm.model_executor.layers.quantization import _QUANTIZATION_CONFIG_REGISTRY
+from vllm.model_executor.layers.quantization import (
+    _QUANTIZATION_CONFIG_REGISTRY)
 
 capability = torch.cuda.get_device_capability()
 capability = capability[0] * 10 + capability[1]
