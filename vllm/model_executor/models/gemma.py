@@ -30,6 +30,7 @@ from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
@@ -281,7 +282,8 @@ class GemmaForCausalLM(nn.Module):
         self.config = config
         self.linear_method = linear_method
         self.model = GemmaModel(config, linear_method)
-        self.sampler = Sampler(config.vocab_size)
+        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.sampler = Sampler()
 
     @torch.no_grad()
     def forward(
@@ -295,13 +297,18 @@ class GemmaForCausalLM(nn.Module):
                                    input_metadata)
         return hidden_states
 
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        logits = self.logits_processor(self.model.embed_tokens.weight,
+                                       hidden_states, sampling_metadata)
+        return logits
+
     def sample(
         self,
-        hidden_states: torch.Tensor,
+        logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(self.model.embed_tokens.weight,
-                                   hidden_states, sampling_metadata)
+        next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
     def load_weights(self,

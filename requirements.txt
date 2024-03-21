@@ -5,7 +5,7 @@ ray >= 2.9
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
 torch == 2.2.1
-transformers >= 4.38.0  # Required for Gemma.
+transformers >= 4.39.0  # Required for StarCoder2.
 xformers == 0.0.25  # Requires PyTorch 2.2.1.
 fastapi
 uvicorn[standard]

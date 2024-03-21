@@ -4,7 +4,7 @@ import logging
 import math
 import os
 import re
-from typing import (Any, Callable, Dict, Hashable, List, Optional, Tuple, Type)
+from typing import (Callable, Dict, Hashable, List, Optional, Tuple, Type)
 
 import safetensors.torch
 import torch
@@ -14,7 +14,7 @@ from vllm.config import LoRAConfig
 from vllm.utils import LRUCache, in_wsl
 
 from vllm.lora.layers import (BaseLayerWithLoRA, LoRAMapping, from_layer,
-                              from_layer_sampler)
+                              from_layer_logits_processor)
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.utils import parse_fine_tuned_lora_name, replace_submodule
 
@@ -421,11 +421,14 @@ class LoRAModelManager:
                            self.model.config))
             # (yard1): TODO make this more robust
             if "lm_head" in module_name:
-                sampler_module = self.model.get_submodule("sampler")
+                logits_processor_module = self.model.get_submodule(
+                    "logits_processor")
                 new_module = replace_submodule(
-                    self.model, "sampler",
-                    from_layer_sampler(sampler_module, module, self.lora_slots,
-                                       self.lora_config, self.model.config))
+                    self.model, "logits_processor",
+                    from_layer_logits_processor(logits_processor_module,
+                                                module, self.lora_slots,
+                                                self.lora_config,
+                                                self.model.config))
             self.register_module(module_name, new_module)
             self._register_packed_modules(module_name)
             new_module.set_mapping(self.base_indices, self.sampler_indices,
@@ -535,14 +538,14 @@ class LoRAModelManager:
                 replacement_loras)
 
 
-class LoRALRUCache(LRUCache):
+class LoRALRUCache(LRUCache[LoRAModel]):
 
     def __init__(self, capacity: int, deactivate_lora_fn: Callable[[Hashable],
                                                                    None]):
         super().__init__(capacity)
         self.deactivate_lora_fn = deactivate_lora_fn
 
-    def _on_remove(self, key: Hashable, value: Any):
+    def _on_remove(self, key: Hashable, value: LoRAModel):
         logger.debug(f"Removing LoRA. int id: {key}")
         self.deactivate_lora_fn(key)
         return super()._on_remove(key, value)
