@@ -50,7 +50,7 @@ def test_prepare_prompt():
     assert attn_metadata.prompt_lens == prompt_lens
     assert attn_metadata.num_prompt_tokens == sum(prompt_lens)
     assert attn_metadata.num_generation_tokens == 0
-    assert attn_metadata.max_seq_len == max(prompt_lens)
+    assert attn_metadata.max_prompt_len == max(prompt_lens)
 
     # Test subquery start locs.
     start_idx = 0
@@ -154,7 +154,7 @@ def test_prepare_decode_cuda_graph():
     assert attn_metadata.num_prompt_tokens == 0
     assert attn_metadata.num_generation_tokens == (get_aligned_size(
         len(seq_group_metadata_list), _BATCH_SIZE_ALIGNMENT))
-    assert attn_metadata.max_seq_len is None
+    assert attn_metadata.max_prompt_len is None
     assert attn_metadata.subquery_start_loc is None
     assert attn_metadata.seq_start_loc is None
     assert attn_metadata.max_context_len == max(prompt_lens)
