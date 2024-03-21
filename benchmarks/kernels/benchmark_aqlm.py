@@ -1,5 +1,6 @@
 import os
 import sys
+import argparse
 from typing import Optional
 
 from vllm.model_executor.layers.quantization.aqlm import (
@@ -82,7 +83,9 @@ def dequant_no_scale(
     return F.linear(input, weights, bias)
 
 
-# Compare my kernel against the gold standard.
+# Compare the optimized 1x16 and 2x8 cuda decompression/dequant kernels against
+# the generic pytorch version.
+# Just visual comparison.
 def dequant_test(k: int, parts: torch.tensor, nbooks: int, bits: int) -> None:
 
     n = parts.sum().item()
@@ -116,7 +119,7 @@ def dequant_test(k: int, parts: torch.tensor, nbooks: int, bits: int) -> None:
             codes[0, i, book] = i
             codes[0, -i, book] = i
 
-    weights = dequantize_weight(codes, codebooks, None)  # TODO Scales.
+    weights = dequantize_weight(codes, codebooks, None)
     weights2 = ops.aqlm_dequant(codes, codebooks, parts)
 
     print("weights shape:", weights.shape)
@@ -134,12 +137,36 @@ def dequant_test(k: int, parts: torch.tensor, nbooks: int, bits: int) -> None:
 
 def main():
 
-    nbooks = 2
-    bits = 8
+    parser = argparse.ArgumentParser(description="Benchmark aqlm performance.")
 
-    dequant_test(4096, torch.tensor((4096, )), nbooks, bits)
-    return
+    # Add arguments
+    parser.add_argument("--nbooks",
+                        type=int,
+                        default=1,
+                        help="Number of codebooks (default: 1)")
+    parser.add_argument("--bits",
+                        type=int,
+                        default=16,
+                        help="Number of bits per code element (default: 16)")
+    parser.add_argument(
+        "--test",
+        type=bool,
+        default=False,
+        help="Run the decompression/dequant tester rather than benchmarking "
+        "(default: False)")
 
+    # Parse the arguments
+    args = parser.parse_args()
+
+    # Extract values
+    nbooks = args.nbooks
+    bits = args.bits
+
+    if args.test:
+        dequant_test(4096, torch.tensor((4096, )), nbooks, bits)
+        return
+
+    # Otherwise, benchmark.
     methods = [
         ops.aqlm_gemm,
         dequant_out_scale,
@@ -180,6 +207,7 @@ def main():
 def run_grid(m: int, k: int, parts: torch.tensor, nbooks: int, bits: int,
              methods):
 
+    # I didn't see visible improvements from increasing these, but feel free :)
     num_warmup_trials = 1
     num_trials = 1
 
