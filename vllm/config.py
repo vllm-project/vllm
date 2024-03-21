@@ -412,6 +412,7 @@ class ParallelConfig:
         pipeline_parallel_size: int,
         tensor_parallel_size: int,
         worker_use_ray: bool,
+        worker_use_torchrun: bool,
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
         ray_workers_use_nsight: bool = False,
@@ -428,6 +429,7 @@ class ParallelConfig:
         else:
             self.tensor_parallel_size = tensor_parallel_size
         self.worker_use_ray = worker_use_ray
+        self.worker_use_torchrun = worker_use_torchrun
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
         self.ray_workers_use_nsight = ray_workers_use_nsight
@@ -435,7 +437,7 @@ class ParallelConfig:
 
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
         # Ray worker is not supported for Neuron backend.
-        if self.world_size > 1 and not is_neuron():
+        if not self.worker_use_torchrun and self.world_size > 1 and not is_neuron():
             self.worker_use_ray = True
         self._verify_args()
 
