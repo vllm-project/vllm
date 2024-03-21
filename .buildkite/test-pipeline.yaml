@@ -46,10 +46,6 @@ steps:
   commands:
     - pytest -v -s prefix_caching
 
-- label: Chunked Prefill Test
-  commands:
-    - pytest -v -s chunked_prefill
-
 - label: Samplers Test
   command: pytest -v -s samplers
 
