@@ -22,8 +22,8 @@ from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
-from vllm.utils import (async_tensor_h2d, CudaMemoryMeasurer,
-                        pin_memory_available, make_tensor_with_pad)
+from vllm.utils import (async_tensor_h2d, CudaMemoryProfiler,
+                        is_pin_memory_available, make_tensor_with_pad)
 
 logger = init_logger(__name__)
 
@@ -81,11 +81,11 @@ class ModelRunner:
         # The shape of the cached block table will be
         # (max batch size to capture, max context len to capture / block size).
         self.graph_block_tables = None  # Set after initial profiling.
-        self.pin_memory = pin_memory_available()
+        self.pin_memory = is_pin_memory_available()
         self.kv_cache_dtype = kv_cache_dtype
 
     def load_model(self) -> None:
-        with CudaMemoryMeasurer() as m:
+        with CudaMemoryProfiler() as m:
             self.model = get_model(self.model_config,
                                    self.device_config,
                                    lora_config=self.lora_config,

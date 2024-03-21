@@ -8,7 +8,7 @@ from vllm.model_executor.layers.ops.sample import (
     get_num_triton_sampler_splits)
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SequenceData
-from vllm.utils import pin_memory_available
+from vllm.utils import is_pin_memory_available
 
 _SAMPLING_EPS = 1e-5
 _SEED_0_REPLACEMENT = 3403598558
@@ -213,7 +213,7 @@ class SamplingTensors:
                    dtype: torch.dtype) -> "SamplingTensors":
         # Note that the performance will be very bad without
         # pinned memory.
-        pin_memory = pin_memory_available()
+        pin_memory = is_pin_memory_available()
         prompt_max_len = max(len(tokens) for tokens in prompt_tokens)
         prompt_padded_tokens = [
             tokens + [vocab_size] * (prompt_max_len - len(tokens))

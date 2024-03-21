@@ -341,7 +341,7 @@ def create_kv_caches_with_random(
 _PIN_MEMORY_WARNING_PRINTED = False
 
 
-def pin_memory_available() -> bool:
+def is_pin_memory_available() -> bool:
 
     def print_warning_once(msg: str) -> None:
         global _PIN_MEMORY_WARNING_PRINTED
@@ -361,7 +361,7 @@ def pin_memory_available() -> bool:
     return True
 
 
-class CudaMemoryMeasurer:
+class CudaMemoryProfiler:
 
     def __init__(self, device=None):
         self.device = device

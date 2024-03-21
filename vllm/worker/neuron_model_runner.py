@@ -9,7 +9,7 @@ from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.neuron_model_loader import get_neuron_model
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
-from vllm.utils import (async_tensor_h2d, pin_memory_available,
+from vllm.utils import (async_tensor_h2d, is_pin_memory_available,
                         make_tensor_with_pad)
 
 logger = init_logger(__name__)
@@ -37,7 +37,7 @@ class NeuronModelRunner:
                               if device_config is not None else DeviceConfig())
         self.device = self.device_config.device
         self.model = None
-        self.pin_memory = pin_memory_available()
+        self.pin_memory = is_pin_memory_available()
 
     def load_model(self) -> None:
         self.model = get_neuron_model(self.model_config,

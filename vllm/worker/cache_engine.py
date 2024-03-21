@@ -5,7 +5,7 @@ import torch
 
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import pin_memory_available, STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils import is_pin_memory_available, STR_DTYPE_TO_TORCH_DTYPE
 
 logger = init_logger(__name__)
 
@@ -86,7 +86,7 @@ class CacheEngine:
         cpu_cache: List[KVCache] = []
         key_block_shape = self.get_key_block_shape()
         value_block_shape = self.get_value_block_shape()
-        pin_memory = pin_memory_available()
+        pin_memory = is_pin_memory_available()
         for _ in range(self.num_layers):
             key_blocks = torch.empty(
                 size=(self.num_cpu_blocks, *key_block_shape),
