@@ -340,9 +340,8 @@ class GemmaForCausalLM(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                # lm_head is not used in vllm as it is tied weight with embed_token.
-                # Sometimes duplicate lm_head layers are added when the structure of the model is newly created by quantization, LORA, etc.
-                # To avoid the error that occurs, skip loading lm_head.weight.
+                # lm_head is not used in vllm as it is tied with embed_token.
+                # To prevent errors, skip loading lm_head.weight.
                 if "lm_head.weight" in name:
                     continue
                 # Skip loading extra bias for GPTQ models.
