@@ -520,8 +520,6 @@ class BlockSpaceManager:
         self._free_block_table(block_table)
         del self.block_tables[seq.seq_id]
 
-        seq.reset_processed_tokens()
-
     def reset(self) -> None:
         for block_table in self.block_tables.values():
             self._free_block_table(block_table)
