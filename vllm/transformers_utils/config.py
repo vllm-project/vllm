@@ -9,6 +9,7 @@ _CONFIG_REGISTRY = {
     "mpt": MPTConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
+    "jais": JAISConfig,
 }
 
 
