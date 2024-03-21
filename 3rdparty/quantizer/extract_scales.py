@@ -184,10 +184,8 @@ def _kv_scales_extractor(
         assert i in rank_scales_map, "Expected TP world size = "\
             f"{empirical_tp_world_size} but did not find KV " \
             f"cache scaling factors for TP rank {i}"
-    print(
-        f"Found TP world size = {empirical_tp_world_size} "
-        "when extracting KV cache scales!"
-    )
+    print(f"Found TP world size = {empirical_tp_world_size} "
+          "when extracting KV cache scales!")
     return rank_scales_map
 
 
@@ -227,15 +225,12 @@ def _metadata_extractor(quantized_model_dir: str,
             try:
                 metadata = json.load(f)
             except json.JSONDecodeError:
-                print(
-                    f"Could not parse `{file}` as a valid metadata file,"
-                    " skipping it."
-                )
+                print(f"Could not parse `{file}` as a valid metadata file,"
+                      " skipping it.")
                 continue
             if not isinstance(metadata, dict):
-                print(
-                    f"The file `{file}` does not correspond to a "
-                    "JSON-serialized dictionary, skipping it.")
+                print(f"The file `{file}` does not correspond to a "
+                      "JSON-serialized dictionary, skipping it.")
                 continue
             for metadata_name, extract_fn in metadata_extract_fns.items():
                 try:
@@ -261,9 +256,8 @@ def _metadata_extractor(quantized_model_dir: str,
     # Warn if we cannot find any of the requested metadata
     for metadata_name in metadata_extract_fns:
         if metadata_name not in result:
-            print(
-                "WARNING: Unable to find requested metadata field "
-                f"`{metadata_name}`, setting it to None.")
+            print("WARNING: Unable to find requested metadata field "
+                  f"`{metadata_name}`, setting it to None.")
             result[metadata_name] = None
 
     return result

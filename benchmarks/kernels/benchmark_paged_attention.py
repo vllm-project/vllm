@@ -188,9 +188,9 @@ if __name__ == '__main__':
         default="auto",
         help=
         'Data type for kv cache storage. If "auto", will use model data type. '
-        'FP8_E5M2 (without scaling) is only supported on cuda version greater than 11.8. '
-        'On ROCm (AMD GPU), FP8_E4M3 is instead supported for common inference criteria.'
-    )
+        'FP8_E5M2 (without scaling) is only supported on cuda version greater '
+        'than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead supported for '
+        'common inference criteria.')
     args = parser.parse_args()
     print(args)
 

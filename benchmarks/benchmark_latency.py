@@ -131,19 +131,19 @@ if __name__ == '__main__':
         default='auto',
         help=
         'Data type for kv cache storage. If "auto", will use model data type. '
-        'FP8_E5M2 (without scaling) is only supported on cuda version greater than 11.8. '
-        'On ROCm (AMD GPU), FP8_E4M3 is instead supported for common inference criteria.'
-    )
+        'FP8_E5M2 (without scaling) is only supported on cuda version greater '
+        'than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead supported for '
+        'common inference criteria.')
     parser.add_argument(
         '--scales-path',
         type=str,
         default=None,
         help='Path to the JSON file containing the KV cache scaling factors. '
-        'This should generally be supplied, when KV cache dtype is FP8. Otherwise, '
-        'KV cache scaling factors default to 1.0, which may cause accuracy issues. '
-        'FP8_E5M2 (without scaling) is only supported on cuda version greater than 11.8. '
-        'On ROCm (AMD GPU), FP8_E4M3 is instead supported for common inference criteria.'
-    )
+        'This should generally be supplied, when KV cache dtype is FP8. '
+        'Otherwise, KV cache scaling factors default to 1.0, which may cause '
+        'accuracy issues. FP8_E5M2 (without scaling) is only supported on '
+        'cuda version greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 is '
+        'instead supported for common inference criteria.')
     parser.add_argument(
         '--profile',
         action='store_true',
