@@ -222,8 +222,9 @@ class XFormersImpl(AttentionImpl):
         if attn_metadata.is_prompt:
             # Prompt run.
             if kv_cache is None or attn_metadata.block_tables.numel() == 0:
-                # kv_cache is None when it is a profiling run.
-                # block tables are empty if the prompt has never been computed.
+                # normal attention.
+                # block tables are empty if the prompt does not have a cached
+                # prefix.
                 if self.num_kv_heads != self.num_heads:
                     # As of Nov 2023, xformers only supports MHA. For MQA/GQA,
                     # project the key and value tensors to the desired number of
