@@ -23,7 +23,8 @@ from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.utils import (async_tensor_h2d, CudaMemoryProfiler,
-                        is_pin_memory_available, make_tensor_with_pad)
+                        is_pin_memory_available, make_tensor_with_pad,
+                        maybe_expand_dim)
 
 logger = init_logger(__name__)
 
@@ -496,7 +497,7 @@ class ModelRunner:
                                                   pin_memory=self.pin_memory)
 
         categorized_sample_indices = {
-            t: _maybe_expand_dim(
+            t: maybe_expand_dim(
                 async_tensor_h2d(seq_ids,
                                  dtype=torch.int,
                                  target_device=self.device,
@@ -919,11 +920,3 @@ def _get_graph_batch_size(batch_size: int) -> int:
     else:
         return ((batch_size + _BATCH_SIZE_ALIGNMENT - 1) //
                 _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
-
-
-def _maybe_expand_dim(tensor: torch.Tensor,
-                      target_dims: int,
-                      size: int = 1) -> torch.Tensor:
-    if tensor.ndim < target_dims:
-        tensor = tensor.view(-1, *([size] * (target_dims - tensor.ndim)))
-    return tensor

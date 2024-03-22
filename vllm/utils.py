@@ -343,6 +343,7 @@ def print_warning_once(msg: str) -> None:
     logger.warning(msg)
 
 
+@lru_cache(maxsize=None)
 def is_pin_memory_available() -> bool:
 
     if in_wsl():
@@ -408,5 +409,15 @@ def async_tensor_h2d(
     target_device: Union[str, torch.device],
     pin_memory: bool,
 ) -> torch.Tensor:
+    """Asynchronously create a tensor and copy it from host to device."""
     t = torch.tensor(data, dtype=dtype, pin_memory=pin_memory, device="cpu")
     return t.to(device=target_device, non_blocking=True)
+
+
+def maybe_expand_dim(tensor: torch.Tensor,
+                     target_dims: int,
+                     size: int = 1) -> torch.Tensor:
+    """Expand the tensor to the target_dims."""
+    if tensor.ndim < target_dims:
+        tensor = tensor.view(-1, *([size] * (target_dims - tensor.ndim)))
+    return tensor

@@ -10,7 +10,7 @@ from vllm.model_executor.neuron_model_loader import get_neuron_model
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import (async_tensor_h2d, is_pin_memory_available,
-                        make_tensor_with_pad)
+                        make_tensor_with_pad, maybe_expand_dim)
 
 logger = init_logger(__name__)
 
@@ -215,7 +215,7 @@ class NeuronModelRunner:
                                                   pin_memory=self.pin_memory)
 
         categorized_sample_indices = {
-            t: _maybe_expand_dim(
+            t: maybe_expand_dim(
                 async_tensor_h2d(seq_ids,
                                  dtype=torch.int,
                                  target_device=self.device,
@@ -285,11 +285,3 @@ class NeuronModelRunner:
     @property
     def vocab_size(self) -> int:
         return self.model_config.get_vocab_size()
-
-
-def _maybe_expand_dim(tensor: torch.Tensor,
-                      target_dims: int,
-                      size: int = 1) -> torch.Tensor:
-    if tensor.ndim < target_dims:
-        tensor = tensor.view(-1, *([size] * (target_dims - tensor.ndim)))
-    return tensor
