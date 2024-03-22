@@ -92,6 +92,7 @@ RUN rm pyproject.toml
 RUN --mount=type=cache,target=/root/.cache/pip VLLM_USE_PRECOMPILED=1 pip install . --verbose
 
 # tricky part, only this version nccl is good
+RUN apt install -y wget
 RUN wget https://developer.download.nvidia.com/compute/redist/nccl/v2.16.2/nccl_2.16.2-1+cuda12.0_x86_64.txz
 RUN tar -xvf nccl_2.16.2-1+cuda12.0_x86_64.txz
 RUN cp ./nccl_2.16.2-1+cuda12.0_x86_64/lib/libnccl.so.2.16.2 ./libnccl.so.2.16.2
