@@ -149,7 +149,7 @@ def test_decode_sequence_logprobs(complete_sequence: str,
     for new_token, logprobs in zip(complete_sequence_token_ids,
                                    dummy_logprobs):
         seq.append_token_id(new_token, logprobs)
-        detokenizer.decode_sequence(seq, sampling_params)
+        detokenizer.decode_sequence_inplace(seq, sampling_params)
         sequential_logprobs_text_chosen_token.append(
             seq.output_logprobs[-1][new_token].decoded_token)
         sequential_logprobs_text_other_token.append(
@@ -184,7 +184,7 @@ def test_decode_prompt_logprobs(complete_sequence: str,
                               sampling_params=sampling_params,
                               arrival_time=0.0)
     dummy_logprobs = create_dummy_logprobs(complete_sequence_token_ids)
-    decoded_prompt_logprobs = detokenizer.decode_prompt_logprobs(
+    decoded_prompt_logprobs = detokenizer.decode_prompt_logprobs_inplace(
         seq_group, dummy_logprobs)
 
     if skip_special_tokens:

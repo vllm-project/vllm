@@ -359,8 +359,9 @@ class LLMEngine:
         # Process prompt logprobs
         prompt_logprobs = outputs.prompt_logprobs
         if prompt_logprobs is not None:
-            seq_group.prompt_logprobs = self.detokenizer.decode_prompt_logprobs(
+            self.detokenizer.decode_prompt_logprobs_inplace(
                 seq_group, prompt_logprobs)
+            seq_group.prompt_logprobs = prompt_logprobs
 
         # Process samples
         samples = outputs.samples
@@ -403,7 +404,8 @@ class LLMEngine:
             child_seqs.append((parent, parent))
 
         for seq, _ in child_seqs:
-            self.detokenizer.decode_sequence(seq, seq_group.sampling_params)
+            self.detokenizer.decode_sequence_inplace(seq,
+                                                     seq_group.sampling_params)
             self._check_stop(seq, seq_group.sampling_params)
 
         # Non-beam search case
