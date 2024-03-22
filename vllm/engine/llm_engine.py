@@ -248,8 +248,10 @@ class LLMEngine:
 
     def __del__(self):
         # Shutdown model executor when engine is garbage collected
-        if self.model_executor is not None:
-            self.model_executor.shutdown()
+        # Use getattr since __init__ can fail before the field is set
+        model_executor = getattr(self, "model_executor", None)
+        if model_executor is not None:
+            model_executor.shutdown()
 
     def get_tokenizer(self) -> "PreTrainedTokenizer":
         return self.tokenizer.get_lora_tokenizer(None)
