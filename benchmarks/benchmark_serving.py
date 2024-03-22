@@ -201,14 +201,7 @@ def calculate_metrics(
     ttfts = []
     for i in range(len(outputs)):
         if outputs[i].success:
-            # NOTE: we use the number of stream responses as output length if
-            # the backend supports streaming, else count output tokens by
-            # tokenizing the generated text.
-            if len(outputs[i].itl):
-                output_len = len(outputs[i].itl)
-            else:
-                output_len = len(
-                    tokenizer(outputs[i].generated_text).input_ids)
+            output_len = len(tokenizer(outputs[i].generated_text).input_ids)
             actual_output_lens.append(output_len)
             total_input += input_requests[i][1]
             if output_len > 1:
