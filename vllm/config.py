@@ -428,6 +428,7 @@ class ParallelConfig:
         else:
             self.tensor_parallel_size = tensor_parallel_size
         self.worker_use_ray = worker_use_ray
+        self.worker_use_torchrun = False
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
         self.ray_workers_use_nsight = ray_workers_use_nsight
@@ -436,7 +437,16 @@ class ParallelConfig:
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
         # Ray worker is not supported for Neuron backend.
         if self.world_size > 1 and not is_neuron():
-            self.worker_use_ray = True
+            if is_hip() and not self.worker_use_ray:
+                logger.info("Using torchrun for multi-GPU on "
+                            "ROCM platform. Use --worker-use-ray "
+                            "to override")
+                if not os.environ.get("RANK"):
+                    raise RuntimeError("Needs to be run in torchrun: "
+                        "torchrun --standalone --nproc_per_node=<tp> ...")
+                self.worker_use_torchrun = True
+            else:
+                self.worker_use_ray = True
         self._verify_args()
 
     def _verify_args(self) -> None:

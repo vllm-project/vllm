@@ -3,8 +3,6 @@ ARG BASE_IMAGE="rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1"
 
 FROM $BASE_IMAGE
 
-ARG BASE_IMAGE="rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1"
-
 RUN echo "Base image is $BASE_IMAGE"
 
 # BASE_IMAGE for ROCm_5.7: "rocm/pytorch:rocm5.7_ubuntu22.04_py3.10_pytorch_2.0.1"
@@ -26,22 +24,12 @@ ARG BUILD_FA="1"
 # whether to build cupy on rocm
 ARG BUILD_CUPY="1"
 
-# Install some basic utilities
-RUN apt-get update && apt-get install python3 python3-pip -y
+# whether to build triton on rocm
+ARG BUILD_TRITON="1"
 
 # Install some basic utilities
 RUN apt-get update && apt-get install -y \
-    curl \
-    ca-certificates \
-    sudo \
-    git \
-    bzip2 \
-    libx11-6 \
-    build-essential \
-    wget \
-    unzip \
-    nvidia-cuda-toolkit \
-    tmux \
+    sqlite3 libsqlite3-dev libfmt-dev \
  && rm -rf /var/lib/apt/lists/*
 
 ### Mount Point ###
@@ -95,6 +83,17 @@ RUN if [ "$BUILD_CUPY" = "1" ]; then \
     && cd ..; \
     fi
 
+# build triton
+RUN if [ "$BUILD_TRITON" = "1" ]; then \
+    mkdir -p libs \
+    && cd libs \
+    && pip uninstall -y triton \
+    && git clone https://github.com/ROCm/triton.git \
+    && cd triton/python \
+    && pip3 install . \
+    && cd ../..; \
+    fi
+
 COPY ./ /app/vllm
 
 RUN python3 -m pip install --upgrade pip
@@ -104,12 +103,13 @@ RUN cd /app \
     && cd vllm \
     && pip install -U -r requirements-rocm.txt \
     && if [ "$BUILD_FA" = "1" ]; then \
-       bash patch_xformers.rocm.sh; fi \
-    && patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h /app/vllm/rocm_patch/rocm_bf16.patch \
+    bash patch_xformers.rocm.sh; fi \
+    && if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1" ]; then \
+    patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h /app/vllm/rocm_patch/rocm_bf16.patch; fi \
     && python3 setup.py install \
     && cd ..
 
 RUN python3 -m pip install --upgrade pip
-RUN python3 -m pip install --no-cache-dir ray[all]
+RUN python3 -m pip install --no-cache-dir ray[all]==2.9.3
 
 CMD ["/bin/bash"]

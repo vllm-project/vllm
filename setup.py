@@ -24,7 +24,9 @@ MAIN_CUDA_VERSION = "12.1"
 
 # Supported NVIDIA GPU architectures.
 NVIDIA_SUPPORTED_ARCHS = {"7.0", "7.5", "8.0", "8.6", "8.9", "9.0"}
-ROCM_SUPPORTED_ARCHS = {"gfx908", "gfx90a", "gfx942", "gfx1100"}
+ROCM_SUPPORTED_ARCHS = {
+    "gfx90a", "gfx908", "gfx906", "gfx942", "gfx1030", "gfx1100"
+}
 # SUPPORTED_ARCHS = NVIDIA_SUPPORTED_ARCHS.union(ROCM_SUPPORTED_ARCHS)
 
 
@@ -368,6 +370,19 @@ if not _is_neuron():
         libraries=["cuda"] if _is_cuda() else [],
     )
     ext_modules.append(vllm_extension)
+
+custom_extension = CUDAExtension(
+    name="vllm.custom_ops",
+    sources=[
+        "csrc/custom/custom.cpp", "csrc/custom/custom_kernels.cu",
+        "csrc/custom/fused_kernels.cu"
+    ],
+    extra_compile_args={
+        "cxx": CXX_FLAGS,
+        "nvcc": NVCC_FLAGS
+    },
+)
+ext_modules.append(custom_extension)
 
 
 def get_path(*filepath) -> str:

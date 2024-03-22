@@ -268,12 +268,19 @@ def init_distributed_environment(
             "distributed_init_method must be set if torch.distributed "
             "is not already initialized")
     else:
-        torch.distributed.init_process_group(
-            backend="nccl",
-            world_size=parallel_config.world_size,
-            rank=rank,
-            init_method=distributed_init_method,
-        )
+        if parallel_config.worker_use_torchrun:
+            torch.distributed.init_process_group(
+                backend="nccl",
+                world_size=parallel_config.world_size,
+                init_method="env://",
+            )
+        else:
+            torch.distributed.init_process_group(
+                backend="nccl",
+                world_size=parallel_config.world_size,
+                rank=rank,
+                init_method=distributed_init_method,
+            )
 
     if cupy_utils.is_initialized():
         cupy_world_size = cupy_utils.get_world_size()

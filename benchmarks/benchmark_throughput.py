@@ -75,21 +75,25 @@ def run_vllm(
     device: str,
     enable_prefix_caching: bool,
     gpu_memory_utilization: float = 0.9,
+    worker_use_ray: bool = False,
 ) -> float:
     from vllm import LLM, SamplingParams
-    llm = LLM(model=model,
-              tokenizer=tokenizer,
-              quantization=quantization,
-              tensor_parallel_size=tensor_parallel_size,
-              seed=seed,
-              trust_remote_code=trust_remote_code,
-              dtype=dtype,
-              max_model_len=max_model_len,
-              gpu_memory_utilization=gpu_memory_utilization,
-              enforce_eager=enforce_eager,
-              kv_cache_dtype=kv_cache_dtype,
-              device=device,
-              enable_prefix_caching=enable_prefix_caching)
+    llm = LLM(
+        model=model,
+        tokenizer=tokenizer,
+        quantization=quantization,
+        tensor_parallel_size=tensor_parallel_size,
+        seed=seed,
+        trust_remote_code=trust_remote_code,
+        dtype=dtype,
+        max_model_len=max_model_len,
+        gpu_memory_utilization=gpu_memory_utilization,
+        enforce_eager=enforce_eager,
+        kv_cache_dtype=kv_cache_dtype,
+        device=device,
+        enable_prefix_caching=enable_prefix_caching,
+        worker_use_ray=worker_use_ray,
+    )
 
     # Add the requests to the engine.
     for prompt, _, output_len in requests:
@@ -213,7 +217,8 @@ def main(args: argparse.Namespace):
             args.tensor_parallel_size, args.seed, args.n, args.use_beam_search,
             args.trust_remote_code, args.dtype, args.max_model_len,
             args.enforce_eager, args.kv_cache_dtype, args.device,
-            args.enable_prefix_caching, args.gpu_memory_utilization)
+            args.enable_prefix_caching, args.gpu_memory_utilization,
+            args.worker_use_ray)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -314,6 +319,11 @@ if __name__ == "__main__":
         "--enable-prefix-caching",
         action='store_true',
         help="enable automatic prefix caching for vLLM backend.")
+    parser.add_argument('--worker-use-ray',
+                        action='store_true',
+                        help='use Ray for distributed serving, will be '
+                        'automatically set when using more than 1 GPU '
+                        'unless on ROCm where the default is torchrun')
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model
