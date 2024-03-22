@@ -6,7 +6,7 @@ import torch
 from vllm.attention import get_attn_backend
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import in_wsl, is_neuron, STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils import is_pin_memory_available, STR_DTYPE_TO_TORCH_DTYPE
 
 logger = init_logger(__name__)
 
@@ -37,10 +37,6 @@ class CacheEngine:
         self.num_gpu_blocks = cache_config.num_gpu_blocks
         self.num_cpu_blocks = cache_config.num_cpu_blocks
 
-        # Skip initializing KV cache for Neuron backend.
-        if is_neuron():
-            return
-
         if cache_config.cache_dtype == "auto":
             self.dtype = model_config.dtype
         else:
@@ -64,13 +60,7 @@ class CacheEngine:
         return gpu_cache
 
     def allocate_cpu_cache(self) -> List[torch.Tensor]:
-        pin_memory = not in_wsl()
-        if not pin_memory:
-            # Pinning memory in WSL is not supported.
-            # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
-            logger.warning("Using 'pin_memory=False' as WSL is detected. "
-                           "This may slow down the performance.")
-
+        pin_memory = is_pin_memory_available()
         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
             self.num_cpu_blocks, self.block_size, self.num_heads,
             self.head_size)

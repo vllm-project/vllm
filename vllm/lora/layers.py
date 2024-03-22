@@ -799,8 +799,8 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         self.device = device
 
     @property
-    def logits_as_hidden_states(self):
-        return self.base_layer.logits_as_hidden_states
+    def logits_as_input(self):
+        return self.base_layer.logits_as_input
 
     @property
     def vocab_size(self):
