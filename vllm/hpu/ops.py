@@ -37,6 +37,7 @@ def fetch_from_cache(cache, blocks):
 def scaled_dot_product_attention(query, key, value, scale, mask):
     bs = query.size(0)
     min_inf = torch.finfo(query.dtype).min
+    value.masked_fill_(mask, min_inf)
     return (torch.matmul(query, key)
             .mul_(scale)
             .masked_fill_(mask, min_inf)
