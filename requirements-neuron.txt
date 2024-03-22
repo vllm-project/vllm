@@ -2,7 +2,7 @@ sentencepiece  # Required for LLaMA tokenizer.
 numpy
 transformers-neuronx >= 0.9.0
 torch-neuronx >= 2.1.0
-neuronx-cc
+neuronx-cc == 2.12.*
 fastapi
 uvicorn[standard]
 pydantic >= 2.0  # Required for OpenAI server.
