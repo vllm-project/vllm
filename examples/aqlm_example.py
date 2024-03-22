@@ -32,9 +32,10 @@ def main():
         "BlackSamorez/TinyLlama-1_1B-Chat-v1_0-AQLM-2Bit-1x16-hf",
     ]
 
-    model = LLM(args.model if args.model is not None else models[args.choice],
-                gpu_memory_utilization=.85,
-                tensor_parallel_size=args.tensor_parallel_size)
+    model = LLM(
+        args.model if args.model is not None else models[args.choice],
+        #gpu_memory_utilization=.85,
+        tensor_parallel_size=args.tensor_parallel_size)
 
     sampling_params = SamplingParams(max_tokens=100, temperature=0)
     outputs = model.generate("Hello my name is",

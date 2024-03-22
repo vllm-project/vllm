@@ -57,16 +57,16 @@ ground_truth_generations = [
     'terms of processing information. The processing of information is a key '
     'component of artificial intelligence. The processing of information is',
     'Explain the difference between supervised and unsupervised '
-    'learning.\nExplain the difference between feedforward and recurrent '
-    'neural networks.\nExplain the difference',
+    'learning.\nExplain the difference between a feedforward neural network '
+    'and a recurrent neural network.\n',
     'Write a short story about a robot that dreams for the first time. The '
     'story should be about 1000 words.\nThe story should be',
     'Analyze the impact of the COVID-19 pandemic on global economic structures '
     'and future business models. The COVID-19 pandemic has had a',
     'The Mona Lisa is a painting by Leonardo da Vinci, and it is considered to '
     'be one of the most famous paintings in the world. The',
-    'The early bird catches the worm.\nThe early bird catches the worm. '
-    '(Japanese)\nLe petit oiseau attrait'
+    "Translate the following English sentence into Japanese, French, and "
+    "Swahili: 'The early bird catches the worm.'\nThe early bird catches"
 ]
 
 
@@ -85,7 +85,7 @@ def test_models(
     num_logprobs: int,
 ) -> None:
 
-    vllm_model = vllm_runner(model, dtype=dtype, enforce_eager=True)
+    vllm_model = vllm_runner(model, dtype=dtype)
     vllm_outputs = vllm_model.generate_greedy_logprobs(example_prompts,
                                                        max_tokens,
                                                        num_logprobs)
