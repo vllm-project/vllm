@@ -5,7 +5,7 @@
 
 steps:
 - label: Download images from S3 for Llava testing
-  command: ./download-images.sh
+  command: bash download-images.sh
 
 - label: Regression Test
   command: pytest -v -s test_regression.py
