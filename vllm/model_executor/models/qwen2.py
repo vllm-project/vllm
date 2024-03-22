@@ -301,12 +301,9 @@ class Qwen2ForCausalLM(nn.Module):
         self.linear_method = linear_method
         self.model = Qwen2Model(config, linear_method)
 
-        if config.tie_word_embeddings:
-            self.lm_head_weight = self.model.embed_tokens.weight
-        else:
+        if not config.tie_word_embeddings:
             self.lm_head = ParallelLMHead(config.vocab_size,
                                           config.hidden_size)
-            self.lm_head_weight = self.lm_head.weight
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
@@ -324,7 +321,11 @@ class Qwen2ForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head_weight, hidden_states,
+        if self.config.tie_word_embeddings:
+            lm_head_weight = self.model.embed_tokens.weight
+        else:
+            lm_head_weight = self.lm_head.weight
+        logits = self.logits_processor(lm_head_weight, hidden_states,
                                        sampling_metadata)
         return logits
 
@@ -349,7 +350,7 @@ class Qwen2ForCausalLM(nn.Module):
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
         ]
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
