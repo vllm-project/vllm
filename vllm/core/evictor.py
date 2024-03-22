@@ -1,5 +1,5 @@
 import enum
-from typing import Dict
+from typing import OrderedDict
 from abc import ABC, abstractmethod, abstractproperty
 
 from vllm.block import PhysicalTokenBlock
@@ -58,27 +58,26 @@ class LRUEvictor(Evictor):
     """
 
     def __init__(self):
-        self.free_table: Dict[int, PhysicalTokenBlock] = {}
+        self.free_table: OrderedDict[int, PhysicalTokenBlock] = OrderedDict()
 
     def __contains__(self, block_hash: int) -> bool:
         return block_hash in self.free_table
 
-    # TODO: The performance of this evict function can be optimized further.
     def evict(self) -> PhysicalTokenBlock:
         if len(self.free_table) == 0:
             raise ValueError("No usable cache memory left")
-        free_blocks = self.free_table.values()
 
-        # Get evicted block
-        evicted_block: PhysicalTokenBlock = next(iter(free_blocks))
-
-        for block in free_blocks:
-            if (block.last_accessed < evicted_block.last_accessed
-                    or block.last_accessed == evicted_block.last_accessed and
-                    block.num_hashed_tokens > evicted_block.num_hashed_tokens):
+        evicted_block = next(iter(self.free_table.values()))
+        # The blocks with the lowest timestamps should be placed consecutively
+        # at the start of OrderedDict. Loop through all these blocks to
+        # find the one with maximum number of hashed tokens.
+        for _, block in self.free_table.items():
+            if evicted_block.last_accessed < block.last_accessed:
+                break
+            if evicted_block.num_hashed_tokens < block.num_hashed_tokens:
                 evicted_block = block
 
-        del self.free_table[evicted_block.block_hash]
+        self.free_table.pop(evicted_block.block_hash)
 
         evicted_block.computed = False
         return evicted_block
@@ -91,7 +90,7 @@ class LRUEvictor(Evictor):
             raise ValueError(
                 "Attempting to remove block that's not in the evictor")
         block: PhysicalTokenBlock = self.free_table[block_hash]
-        del self.free_table[block_hash]
+        self.free_table.pop(block_hash)
         return block
 
     @property
