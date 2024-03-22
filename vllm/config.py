@@ -517,6 +517,8 @@ class SchedulerConfig:
             iteration.
         max_model_len: Maximum length of a sequence (including prompt
             and generated text).
+        delay_factor: Apply a delay (of delay factor multiplied by previous
+            prompt latency) before scheduling next prompt.
     """
 
     def __init__(
@@ -524,6 +526,7 @@ class SchedulerConfig:
         max_num_batched_tokens: Optional[int],
         max_num_seqs: int,
         max_model_len: int,
+        delay_factor: float = 0.0,
     ) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
@@ -533,6 +536,7 @@ class SchedulerConfig:
             self.max_num_batched_tokens = max(max_model_len, 2048)
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
+        self.delay_factor = delay_factor
         self._verify_args()
 
     def _verify_args(self) -> None:

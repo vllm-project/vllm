@@ -1,5 +1,6 @@
 from typing import List
 import pytest  # noqa
+import time
 
 from vllm.config import CacheConfig, SchedulerConfig
 from vllm.core.scheduler import Scheduler
@@ -168,3 +169,36 @@ def test_scheduler_max_seqs():
     # and one is prompting.
     _, out = scheduler.schedule()
     assert set(out.scheduled_seq_groups) == set([all_seq_groups[1]])
+
+
+def test_scheduler_delay_factor():
+
+    block_size = 4
+    scheduler_config = SchedulerConfig(100, 64, 16, delay_factor=0.5)
+    cache_config = CacheConfig(block_size, 1.0, 1, "auto")
+    cache_config.num_cpu_blocks = 8
+    cache_config.num_gpu_blocks = 8
+    scheduler = Scheduler(scheduler_config, cache_config, None)
+
+    # schedule first prompt
+    _, seq_group = create_dummy_prompt("0", prompt_length=block_size)
+    scheduler.add_seq_group(seq_group)
+    seq_group_meta, out = scheduler.schedule()
+    assert out.prompt_run
+    assert seq_group_meta[0].request_id == '0'
+
+    # wait for a second before scheduling next prompt
+    time.sleep(1)
+    _, seq_group = create_dummy_prompt("1", prompt_length=block_size)
+    scheduler.add_seq_group(seq_group)
+
+    # second prompt should *not* be scheduled
+    seq_group_meta, out = scheduler.schedule()
+    assert not out.prompt_run
+    assert seq_group_meta[0].request_id == '0'
+
+    # wait for more than 0.5 second and try again
+    time.sleep(0.6)
+    seq_group_meta, out = scheduler.schedule()
+    assert out.prompt_run
+    assert seq_group_meta[0].request_id == '1'
