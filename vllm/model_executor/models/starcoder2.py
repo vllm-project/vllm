@@ -142,7 +142,7 @@ class Starcoder2MLP(nn.Module):
             linear_method=linear_method,
         )
         quant_config = getattr(linear_method, "quant_config", None)
-        self.act = get_act_fn(config.hidden_act,quant_config,config.intermediate_size)
+        self.act = get_act_fn(config.hidden_act, quant_config, config.intermediate_size)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.c_fc(hidden_states)
