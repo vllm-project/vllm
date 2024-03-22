@@ -21,7 +21,6 @@ class EngineArgs:
     seed: int = 0
     max_model_len: Optional[int] = None
     worker_use_ray: bool = False
-    worker_use_torchrun: bool = False
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     max_parallel_loading_workers: Optional[int] = None
@@ -153,11 +152,8 @@ class EngineArgs:
         parser.add_argument('--worker-use-ray',
                             action='store_true',
                             help='use Ray for distributed serving, will be '
-                            'automatically set when using more than 1 GPU')
-        parser.add_argument('--worker-use-torchrun',
-                            action='store_true',
-                            help='use torchrun instead of ray when using '
-                            'more than 1 GPU. Preferable for ROCm')
+                            'automatically set when using more than 1 GPU '
+                            'unless on ROCm where the default is torchrun')
         parser.add_argument('--pipeline-parallel-size',
                             '-pp',
                             type=int,
@@ -321,9 +317,8 @@ class EngineArgs:
                                    self.enable_prefix_caching)
         parallel_config = ParallelConfig(
             self.pipeline_parallel_size, self.tensor_parallel_size,
-            self.worker_use_ray, self.worker_use_torchrun,
-            self.max_parallel_loading_workers, self.disable_custom_all_reduce,
-            self.ray_workers_use_nsight)
+            self.worker_use_ray, self.max_parallel_loading_workers,
+            self.disable_custom_all_reduce, self.ray_workers_use_nsight)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
                                            model_config.max_model_len,
