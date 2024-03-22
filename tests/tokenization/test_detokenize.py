@@ -184,8 +184,8 @@ def test_decode_prompt_logprobs(complete_sequence: str,
                               sampling_params=sampling_params,
                               arrival_time=0.0)
     dummy_logprobs = create_dummy_logprobs(complete_sequence_token_ids)
-    decoded_prompt_logprobs = detokenizer.decode_prompt_logprobs_inplace(
-        seq_group, dummy_logprobs)
+    detokenizer.decode_prompt_logprobs_inplace(seq_group, dummy_logprobs)
+    decoded_prompt_logprobs = dummy_logprobs
 
     if skip_special_tokens:
         # Text for logprobs for the chosen token should be the same as the
