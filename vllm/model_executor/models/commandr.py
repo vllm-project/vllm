@@ -26,7 +26,7 @@ import torch
 import torch.utils.checkpoint
 from torch import nn
 from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
-from transformers import PretrainedConfig
+from transformers import CohereConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -39,6 +39,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, )
 from vllm.model_executor.parallel_utils.parallel_state import (
@@ -51,63 +52,6 @@ from vllm.model_executor.weight_utils import (
 from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
-
-
-class CohereConfig(PretrainedConfig):
-    model_type = "cohere"
-    keys_to_ignore_at_inference = ["past_key_values"]
-
-    def __init__(
-        self,
-        vocab_size=256000,
-        hidden_size=8192,
-        intermediate_size=22528,
-        num_hidden_layers=40,
-        num_attention_heads=64,
-        num_key_value_heads=None,
-        hidden_act="silu",
-        max_position_embeddings=8192,
-        initializer_range=0.02,
-        layer_norm_eps=1e-5,
-        use_cache=True,
-        pad_token_id=0,
-        bos_token_id=5,
-        eos_token_id=255001,
-        pretraining_tp=1,
-        tie_word_embeddings=True,
-        rope_theta=10000.0,
-        attention_bias=False,
-        attention_dropout=0.0,
-        **kwargs,
-    ):
-        self.vocab_size = vocab_size
-        self.max_position_embeddings = max_position_embeddings
-        self.hidden_size = hidden_size
-        self.intermediate_size = intermediate_size
-        self.num_hidden_layers = num_hidden_layers
-        self.num_attention_heads = num_attention_heads
-
-        # for backward compatibility
-        if num_key_value_heads is None:
-            num_key_value_heads = num_attention_heads
-
-        self.num_key_value_heads = num_key_value_heads
-        self.hidden_act = hidden_act
-        self.initializer_range = initializer_range
-        self.layer_norm_eps = layer_norm_eps
-        self.pretraining_tp = pretraining_tp
-        self.use_cache = use_cache
-        self.rope_theta = rope_theta
-        self.attention_bias = attention_bias
-        self.attention_dropout = attention_dropout
-
-        super().__init__(
-            pad_token_id=pad_token_id,
-            bos_token_id=bos_token_id,
-            eos_token_id=eos_token_id,
-            tie_word_embeddings=tie_word_embeddings,
-            **kwargs,
-        )
 
 
 class LayerNorm(nn.Module):
@@ -283,12 +227,6 @@ class CohereDecoderLayer(nn.Module):
 
 
 class CohereModel(nn.Module):
-    """
-    Transformer decoder consisting of *config.num_hidden_layers* layers. 
-    Each layer is a [`CohereDecoderLayer`].
-    Args:
-        config: CohereConfig
-    """
 
     def __init__(
         self,
@@ -339,8 +277,10 @@ class CohereForCausalLM(nn.Module):
         self.config = config
         self.unpadded_vocab_size = config.vocab_size
         self.linear_method = linear_method
+        self.logits_processor = LogitsProcessor(config.vocab_size,
+                                                scale=config.logit_scale)
         self.model = CohereModel(config, linear_method)
-        self.sampler = Sampler(config.vocab_size)
+        self.sampler = Sampler()
 
     @torch.no_grad()
     def forward(
@@ -354,13 +294,18 @@ class CohereForCausalLM(nn.Module):
                                    input_metadata)
         return hidden_states
 
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        logits = self.logits_processor(self.model.embed_tokens.weight,
+                                       hidden_states, sampling_metadata)
+        return logits
+
     def sample(
         self,
-        hidden_states: torch.Tensor,
+        logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(self.model.embed_tokens.weight,
-                                   hidden_states, sampling_metadata)
+        next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
     def load_weights(
