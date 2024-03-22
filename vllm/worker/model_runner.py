@@ -165,6 +165,10 @@ class ModelRunner:
             prefill_start, prefill_end = seq_data.get_prefill_range()
             prompt_tokens = seq_data.get_token_ids()[prefill_start:prefill_end]
             prompt_len = len(prompt_tokens)
+            # Right now, the prefill_end is always same as the length of
+            # prompt. However, once chunked prefill is introduced, this
+            # assumption can be changed.
+            assert prefill_end == seq_data.get_prompt_len()
             prompt_lens.append(prompt_len)
             computed_len = 0
 
@@ -175,19 +179,21 @@ class ModelRunner:
                 computed_len = len(computed_block_nums) * self.block_size
                 prompt_tokens = prompt_tokens[computed_len:]
                 prefix_block_tables.append(computed_block_nums)
-                context_len = computed_len
             else:
                 prefix_block_tables.append([])
-                context_len = 0
+                computed_len = prefill_start
+                # Right now, prefill start is always 0. However, this
+                # assumption can be changed once chunked prefill is introduced.
+                assert computed_len == 0
+
             # actual prompt lens
-            context_lens.append(context_len)
+            context_lens.append(computed_len)
             subquery_lens.append(prompt_len - computed_len)
 
             input_tokens.extend(prompt_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
-            input_positions.extend(
-                list(range(computed_len, computed_len + prefill_end)))
+            input_positions.extend(list(range(computed_len, prefill_end)))
 
             lora_id = seq_group_metadata.lora_int_id
 
@@ -219,12 +225,6 @@ class ModelRunner:
                     "Prefix caching is currently not supported with "
                     "sliding window attention")
                 start_idx = max(0, prompt_len - self.sliding_window)
-
-            # If chunked prefill is enabled, computed_len is always 0.
-            # TODO(sang) This is hack. We should clean it up when
-            # supporting prefix cache + chunked prefill.
-            if computed_len == 0:
-                computed_len = prefill_start
 
             for i in range(computed_len, prefill_end):
                 if i < start_idx:

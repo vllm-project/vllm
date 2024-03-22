@@ -114,6 +114,13 @@ class SequenceData:
         self.output_token_ids.append(token_id)
         self.cumulative_logprob += logprob
 
+    def reset_prefill_range(self) -> None:
+        """Reset the prefill range. It is supposed to be called when a
+        sequence needs to be started from the beginning.
+        """
+        self._prefill_start = 0
+        self._prefill_end = 0
+
     def get_len(self) -> int:
         return len(self.output_token_ids) + len(self.prompt_token_ids)
 
@@ -147,13 +154,11 @@ class SequenceData:
         """Returns the prefill range."""
         return self._prefill_start, self._prefill_end
 
-    def get_num_unprefilled(self) -> int:
-        """Return the number of prefil tokens that are not completed.
-        
-        Note that we use prompt_len + output_len instead of
-        prompt_len here. This is because during recompute
-        we need to prefill for both prompt and output.
-        """
+    def get_num_uncomputed_tokens(self) -> int:
+        """Return the number of prefil tokens that are not computed."""
+        # we use `get_len()` which includes prompt_len + output_len instead
+        # of prompt_len here. This is because during recompute we need to
+        # prefill for both prompt and output.
         return self.get_len() - self._prefill_end
 
     def get_last_token_id(self) -> int:
@@ -230,6 +235,10 @@ class Sequence:
 
     def num_hashed_tokens_of_block(self, logical_idx: int):
         return logical_idx * self.block_size + self.block_size
+
+    def on_recompute(self):
+        """Reset the sequence states for recomputation."""
+        self.data.reset_prefill_range()
 
     def _append_logical_block(self) -> None:
         block = LogicalTokenBlock(
@@ -445,9 +454,12 @@ class SequenceGroup:
             for seq in self.seqs_dict.values()
         ][0]
 
-    def get_num_unprefilled(self) -> int:
-        # All sequences in the group should have the same prompt.
-        return list(self.seqs_dict.values())[0].data.get_num_unprefilled()
+    def get_num_uncomputed_tokens(self) -> int:
+        # All sequences in the group should have the same prompt, so the
+        # number of unfinished prefill tokens are the same across all
+        # sequences.
+        return list(
+            self.seqs_dict.values())[0].data.get_num_uncomputed_tokens()
 
     def num_seqs(self, status: Optional[SequenceStatus] = None) -> int:
         return len(self.get_seqs(status))

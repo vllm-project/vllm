@@ -53,21 +53,21 @@ def test_sampler_output_eq(sample_outputs):
 def test_sequence_data_prefill():
     seq_data = SequenceData(prompt_token_ids=[1, 2, 3, 4])
     assert seq_data.get_prefill_range() == (0, 0)
-    assert seq_data.get_num_unprefilled() == 4
+    assert seq_data.get_num_uncomputed_tokens() == 4
 
     # advance by 2
     assert seq_data.advance_prefill_range(2) == 2
-    assert seq_data.get_num_unprefilled() == 2
+    assert seq_data.get_num_uncomputed_tokens() == 2
     assert seq_data.get_prefill_range() == (0, 2)
 
     # advance range by 3 even though there are only 2 unprefilled tokens
     assert seq_data.advance_prefill_range(3) == 2
-    assert seq_data.get_num_unprefilled() == 0
+    assert seq_data.get_num_uncomputed_tokens() == 0
     assert seq_data.get_prefill_range() == (2, 4)
 
     # following advances should not change anything
     assert seq_data.advance_prefill_range(2) == 0
-    assert seq_data.get_num_unprefilled() == 0
+    assert seq_data.get_num_uncomputed_tokens() == 0
     assert seq_data.get_prefill_range() == (4, 4)
 
     # append tokens and reset, simulating recompute

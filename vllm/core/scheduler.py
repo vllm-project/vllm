@@ -390,6 +390,10 @@ class Scheduler:
         self.block_manager.fork(parent_seq, child_seq)
 
     def free_seq(self, seq: Sequence) -> None:
+        """Free a sequence from a block table.
+
+        Freed sequence can be used 
+        """
         self.block_manager.free(seq)
 
     def free_finished_seq_groups(self) -> None:
@@ -452,7 +456,8 @@ class Scheduler:
         assert len(seqs) == 1
         for seq in seqs:
             seq.status = SequenceStatus.WAITING
-            self.block_manager.free(seq)
+            self.free_seq(seq)
+            seq.on_recompute()
         # NOTE: For FCFS, we insert the preempted sequence group to the front
         # of the waiting queue.
         self.waiting.appendleft(seq_group)

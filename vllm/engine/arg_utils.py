@@ -312,11 +312,6 @@ class EngineArgs:
             default=-1,
             help='max number of prefill tokens allowed in chunked prefill'
             ', -1 means no limit')
-        parser.add_argument(
-            '--max-num-prompt-seqs',
-            type=int,
-            default=1024,
-            help='max number of prompt sequences allowed in prefill')
         return parser
 
     @classmethod
