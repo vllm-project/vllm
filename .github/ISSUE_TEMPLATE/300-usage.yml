@@ -12,7 +12,6 @@ body:
   attributes:
     label: Your current environment
     description: |
-      If you want your issue to be answered quickly, it is **very important** to provide enough information about your environment.
       Please run the following and paste the output below.
       ```sh
       wget https://raw.githubusercontent.com/vllm-project/vllm/main/collect_env.py

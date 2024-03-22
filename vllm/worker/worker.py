@@ -142,12 +142,6 @@ class Worker:
             self.model_runner.remove_all_loras()
         gc.collect()
         torch.cuda.empty_cache()
-        print(
-            f"{free_gpu_memory=}, {total_gpu_memory=}, {self.init_gpu_memory=}, {peak_memory=}"
-        )
-        print(
-            f"{block_size=}, {cache_block_size=}, {num_gpu_blocks=}, {num_cpu_blocks=}"
-        )
         return num_gpu_blocks, num_cpu_blocks
 
     def init_cache_engine(self, cache_config: CacheConfig) -> None:
