@@ -19,9 +19,6 @@ from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
 from vllm.lora.request import LoRARequest
-from vllm.utils import is_xpu
-from vllm.device_utils import (device_empty_cache, device_synchronize,
-                               mem_get_info, get_distribute_backend)
 
 
 class Worker:
@@ -68,7 +65,6 @@ class Worker:
         # self.init_cache_engine().
         self.cache_config = None
         self.cache_engine = None
-        self.cache_events = None
         self.gpu_cache = None
 
     def init_model(self, cupy_port: Optional[int] = None) -> None:
@@ -87,24 +83,14 @@ class Worker:
             torch.cuda.set_device(self.device)
 
             _check_if_gpu_supports_dtype(self.model_config.dtype)
-            device_empty_cache(self.device_config)
-            self.init_gpu_memory = mem_get_info(self.device_config)[0]
-        elif self.device_config.device.type == "xpu" and is_xpu():
-            self.device = torch.device(f"xpu:{self.local_rank}")
-            torch.xpu.set_device(self.device)
-            device_empty_cache(self.device_config)
-            self.init_gpu_memory = mem_get_info(self.device_config)[0]
+            torch.cuda.empty_cache()
+            self.init_gpu_memory = torch.cuda.mem_get_info()[0]
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
-        init_distributed_environment(
-            self.parallel_config,
-            self.rank,
-            self.device_config,
-            cupy_port,
-            self.distributed_init_method,
-        )
+        init_distributed_environment(self.parallel_config, self.rank,
+                                     cupy_port, self.distributed_init_method)
         # Initialize the model.
         set_random_seed(self.model_config.seed)
 
@@ -129,7 +115,7 @@ class Worker:
         """
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
-        device_empty_cache(self.device_config)
+        torch.cuda.empty_cache()
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -137,8 +123,8 @@ class Worker:
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
-        device_synchronize(self.device_config)
-        free_gpu_memory, total_gpu_memory = mem_get_info(self.device_config)
+        torch.cuda.synchronize()
+        free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
         peak_memory = self.init_gpu_memory - free_gpu_memory
@@ -154,15 +140,13 @@ class Worker:
         if self.model_runner.lora_manager:
             self.model_runner.remove_all_loras()
         gc.collect()
-        device_empty_cache(self.device_config)
+        torch.cuda.empty_cache()
         return num_gpu_blocks, num_cpu_blocks
 
     def init_cache_engine(self, cache_config: CacheConfig) -> None:
         self.cache_config = cache_config
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
-                                        self.parallel_config,
-                                        self.device_config)
-        self.cache_events = self.cache_engine.events
+                                        self.parallel_config)
         self.gpu_cache = self.cache_engine.gpu_cache
         self.model_runner.set_block_size(self.cache_engine.block_size)
 
@@ -180,24 +164,13 @@ class Worker:
         blocks_to_copy: Dict[int, List[int]],
     ) -> None:
         # Issue cache operations.
-        issued_cache_op = False
+        # TODO(woosuk): Profile swapping overhead and optimize if needed.
         if blocks_to_swap_in:
             self.cache_engine.swap_in(blocks_to_swap_in)
-            issued_cache_op = True
         if blocks_to_swap_out:
             self.cache_engine.swap_out(blocks_to_swap_out)
-            issued_cache_op = True
         if blocks_to_copy:
             self.cache_engine.copy(blocks_to_copy)
-            issued_cache_op = True
-
-        cache_events = self.cache_events if issued_cache_op else None
-
-        # Wait for cache operations to finish.
-        # TODO(woosuk): Profile swapping overhead and optimize if needed.
-        if cache_events is not None:
-            for event in cache_events:
-                event.wait()
 
     @torch.inference_mode()
     def execute_model(
@@ -266,7 +239,6 @@ class Worker:
 def init_distributed_environment(
     parallel_config: ParallelConfig,
     rank: int,
-    device_config: DeviceConfig,
     cupy_port: Optional[int],
     distributed_init_method: Optional[str] = None,
 ) -> None:
@@ -283,9 +255,8 @@ def init_distributed_environment(
             "distributed_init_method must be set if torch.distributed "
             "is not already initialized")
     else:
-        backend = get_distribute_backend(device_config)
         torch.distributed.init_process_group(
-            backend=backend,
+            backend="nccl",
             world_size=parallel_config.world_size,
             rank=rank,
             init_method=distributed_init_method,
@@ -310,21 +281,15 @@ def init_distributed_environment(
         )
 
     # A small all_reduce for warmup.
-    all_reduce_warmup()
-
+    torch.distributed.all_reduce(torch.zeros(1).cuda())
+    if cupy_utils.is_initialized():
+        cupy_utils.all_reduce(torch.zeros(1).cuda())
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
 
     # Initialize a custom fast all-reduce implementation.
     if not parallel_config.disable_custom_all_reduce:
         init_custom_ar()
-
-
-def all_reduce_warmup():
-    if torch.cuda.is_available():
-        torch.distributed.all_reduce(torch.zeros(1).cuda())
-        if cupy_utils.is_initialized():
-            cupy_utils.all_reduce(torch.zeros(1).cuda())
 
 
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):

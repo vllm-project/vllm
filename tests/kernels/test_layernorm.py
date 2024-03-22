@@ -1,9 +1,9 @@
 import pytest
 import torch
 from vllm.utils import is_xpu
+XPU_DEVICES = ["xpu"] if is_xpu() else []
 from vllm.model_executor.layers.layernorm import RMSNorm
 
-XPU_DEVICES = ["xpu"] if is_xpu() else []
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 4096]  # Arbitrary values for testing
 HIDDEN_SIZES = [768, 5120, 8192]  # Arbitrary values for testing

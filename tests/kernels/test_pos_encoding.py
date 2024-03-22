@@ -3,12 +3,12 @@ from typing import List, Optional
 import pytest
 import torch
 from vllm.utils import is_xpu
+XPU_DEVICES = ["xpu"] if is_xpu() else []
 
 from allclose_default import get_default_atol, get_default_rtol
 from itertools import accumulate
 from vllm.model_executor.layers.rotary_embedding import get_rope
 
-XPU_DEVICES = ["xpu"] if is_xpu() else []
 
 IS_NEOX_STYLE = [True, False]
 DTYPES = [torch.half, torch.bfloat16, torch.float]
