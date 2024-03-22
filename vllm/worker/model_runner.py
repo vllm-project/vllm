@@ -1,6 +1,6 @@
 import contextlib
 import time
-from typing import Dict, List, Optional, Tuple, Set, Union
+from typing import Dict, List, Optional, Tuple, Set
 
 import numpy as np
 import torch
@@ -9,7 +9,8 @@ import torch.nn as nn
 from vllm.config import (DeviceConfig, ModelConfig, LoRAConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.logger import init_logger
-from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
+from vllm.model_executor import InputMetadata, SamplingMetadata
+from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.parallel_utils import cupy_utils
 from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
@@ -21,7 +22,9 @@ from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
-from vllm.utils import in_wsl, measure_cuda_memory
+from vllm.utils import (async_tensor_h2d, CudaMemoryProfiler,
+                        is_pin_memory_available, make_tensor_with_pad,
+                        maybe_expand_dim)
 
 logger = init_logger(__name__)
 
@@ -79,16 +82,11 @@ class ModelRunner:
         # The shape of the cached block table will be
         # (max batch size to capture, max context len to capture / block size).
         self.graph_block_tables = None  # Set after initial profiling.
-        # cache in_wsl result
-        self.in_wsl = in_wsl()
+        self.pin_memory = is_pin_memory_available()
         self.kv_cache_dtype = kv_cache_dtype
 
-        # Set enforce_eager to True for Neuron backend, to avoid capturing graph
-        if self.device_config.is_neuron:
-            self.model_config.enforce_eager = True
-
     def load_model(self) -> None:
-        with measure_cuda_memory() as m:
+        with CudaMemoryProfiler() as m:
             self.model = get_model(self.model_config,
                                    self.device_config,
                                    lora_config=self.lora_config,
@@ -238,7 +236,7 @@ class ModelRunner:
                                            device=self.device)
         # Prepare prefix block tables
         max_prompt_block_table_len = max(len(t) for t in prefix_block_tables)
-        block_tables = _make_tensor_with_pad(
+        block_tables = make_tensor_with_pad(
             prefix_block_tables,
             max_len=max_prompt_block_table_len,
             pad=0,
@@ -395,7 +393,7 @@ class ModelRunner:
         else:
             max_block_table_len = max(
                 len(block_table) for block_table in block_tables)
-            block_tables = _make_tensor_with_pad(
+            block_tables = make_tensor_with_pad(
                 block_tables,
                 max_len=max_block_table_len,
                 pad=0,
@@ -436,7 +434,6 @@ class ModelRunner:
         categorized_sample_indices = {t: [] for t in SamplingType}
         categorized_sample_indices_start_idx = 0
         categorized_sampled_token_indices_start_idx = 0
-        pin_memory = not self.in_wsl and not self.device_config.is_neuron
 
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -469,7 +466,7 @@ class ModelRunner:
 
                 if sampling_params.seed is not None:
                     seq_group_metadata.state.generator = torch.Generator(
-                        device="cuda").manual_seed(sampling_params.seed)
+                        device=self.device).manual_seed(sampling_params.seed)
             else:
                 num_seqs = len(seq_ids)
                 selected_token_indices.extend(
@@ -494,17 +491,17 @@ class ModelRunner:
             if sampling_params.seed is not None:
                 generators.append(seq_group_metadata.state.generator)
 
-        selected_token_indices = _async_h2d(selected_token_indices,
-                                            dtype=torch.long,
-                                            target_device=self.device,
-                                            pin_memory=not self.in_wsl)
+        selected_token_indices = async_tensor_h2d(selected_token_indices,
+                                                  dtype=torch.long,
+                                                  target_device=self.device,
+                                                  pin_memory=self.pin_memory)
 
         categorized_sample_indices = {
-            t: _maybe_expand_dim(
-                _async_h2d(seq_ids,
-                           dtype=torch.int,
-                           target_device=self.device,
-                           pin_memory=pin_memory), 2, 2)
+            t: maybe_expand_dim(
+                async_tensor_h2d(seq_ids,
+                                 dtype=torch.int,
+                                 target_device=self.device,
+                                 pin_memory=self.pin_memory), 2, 2)
             for t, seq_ids in categorized_sample_indices.items()
         }
 
@@ -910,27 +907,6 @@ def _maybe_cupy_nccl():
         yield
 
 
-def _pad_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
-    assert len(x) <= max_len
-    return x + [pad] * (max_len - len(x))
-
-
-def _make_tensor_with_pad(
-    x: List[List[int]],
-    max_len: int,
-    pad: int,
-    dtype: torch.dtype,
-    device: Optional[Union[str, torch.device]],
-) -> torch.Tensor:
-    """Make a padded tensor of a 2D inputs.
-
-    The padding is applied to the end of each inner list until it reaches
-    `max_len`.
-    """
-    padded_x = [_pad_to_max(x_i, max_len, pad) for x_i in x]
-    return torch.tensor(padded_x, dtype=dtype, device=device)
-
-
 def _get_graph_batch_size(batch_size: int) -> int:
     """Returns the padded batch size given actual batch size.
 
@@ -944,21 +920,3 @@ def _get_graph_batch_size(batch_size: int) -> int:
     else:
         return ((batch_size + _BATCH_SIZE_ALIGNMENT - 1) //
                 _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
-
-
-def _async_h2d(
-    data: list,
-    dtype: torch.dtype,
-    target_device: Union[str, torch.device],
-    pin_memory: bool,
-) -> torch.Tensor:
-    t = torch.tensor(data, dtype=dtype, pin_memory=pin_memory, device="cpu")
-    return t.to(device=target_device, non_blocking=True)
-
-
-def _maybe_expand_dim(tensor: torch.Tensor,
-                      target_dims: int,
-                      size: int = 1) -> torch.Tensor:
-    if tensor.ndim < target_dims:
-        tensor = tensor.view(-1, *([size] * (target_dims - tensor.ndim)))
-    return tensor

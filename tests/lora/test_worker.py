@@ -33,7 +33,7 @@ def test_worker_apply_lora(sql_lora_files):
                                max_loras=32),
         distributed_init_method=f"file://{tempfile.mkstemp()[1]}",
     )
-    worker.init_model()
+    worker.init_device()
     worker.load_model()
 
     worker.model_runner.set_active_loras([], LoRAMapping([], []))

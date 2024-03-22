@@ -67,7 +67,7 @@ class Worker:
         self.cache_engine = None
         self.gpu_cache = None
 
-    def init_model(self, cupy_port: Optional[int] = None) -> None:
+    def init_device(self, cupy_port: Optional[int] = None) -> None:
         if self.device_config.device.type == "cuda":
             # torch.distributed.all_reduce does not free the input tensor until
             # the synchronization point. This causes the memory usage to grow
@@ -91,7 +91,7 @@ class Worker:
         # Initialize the distributed environment.
         init_distributed_environment(self.parallel_config, self.rank,
                                      cupy_port, self.distributed_init_method)
-        # Initialize the model.
+        # Set random seed.
         set_random_seed(self.model_config.seed)
 
     def load_model(self):

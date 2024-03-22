@@ -1,8 +1,9 @@
 from dataclasses import dataclass, fields
-from typing import Optional, List, Any, Dict
+from typing import TYPE_CHECKING, Optional, List, Any, Dict
 
 import torch
-from xformers.ops.fmha.attn_bias import AttentionBias
+if TYPE_CHECKING:
+    from xformers.ops.fmha.attn_bias import AttentionBias
 
 
 @dataclass
@@ -82,7 +83,7 @@ class InputMetadata:
         # when alibi slopes is used. It is because of the limitation
         # from xformer API.
         # will not appear in the __repr__ and __init__
-        self.attn_bias: Optional[List[AttentionBias]] = None
+        self.attn_bias: Optional[List["AttentionBias"]] = None
 
         # Cuda graph is only used for decoding now.
         if self.use_cuda_graph:

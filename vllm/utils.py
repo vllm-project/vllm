@@ -338,7 +338,27 @@ def create_kv_caches_with_random(
     return key_caches, value_caches
 
 
-class measure_cuda_memory:
+@lru_cache
+def print_warning_once(msg: str) -> None:
+    logger.warning(msg)
+
+
+@lru_cache(maxsize=None)
+def is_pin_memory_available() -> bool:
+
+    if in_wsl():
+        # Pinning memory in WSL is not supported.
+        # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
+        print_warning_once("Using 'pin_memory=False' as WSL is detected. "
+                           "This may slow down the performance.")
+        return False
+    elif is_neuron():
+        print_warning_once("Pin memory is not supported on Neuron.")
+        return False
+    return True
+
+
+class CudaMemoryProfiler:
 
     def __init__(self, device=None):
         self.device = device
@@ -360,3 +380,44 @@ class measure_cuda_memory:
 
         # Force garbage collection
         gc.collect()
+
+
+def pad_to_max_length(x: List[int], max_len: int, pad: int) -> List[int]:
+    assert len(x) <= max_len
+    return x + [pad] * (max_len - len(x))
+
+
+def make_tensor_with_pad(
+    x: List[List[int]],
+    max_len: int,
+    pad: int,
+    dtype: torch.dtype,
+    device: Optional[Union[str, torch.device]],
+) -> torch.Tensor:
+    """Make a padded tensor of a 2D inputs.
+
+    The padding is applied to the end of each inner list until it reaches
+    `max_len`.
+    """
+    padded_x = [pad_to_max_length(x_i, max_len, pad) for x_i in x]
+    return torch.tensor(padded_x, dtype=dtype, device=device)
+
+
+def async_tensor_h2d(
+    data: list,
+    dtype: torch.dtype,
+    target_device: Union[str, torch.device],
+    pin_memory: bool,
+) -> torch.Tensor:
+    """Asynchronously create a tensor and copy it from host to device."""
+    t = torch.tensor(data, dtype=dtype, pin_memory=pin_memory, device="cpu")
+    return t.to(device=target_device, non_blocking=True)
+
+
+def maybe_expand_dim(tensor: torch.Tensor,
+                     target_dims: int,
+                     size: int = 1) -> torch.Tensor:
+    """Expand the tensor to the target_dims."""
+    if tensor.ndim < target_dims:
+        tensor = tensor.view(-1, *([size] * (target_dims - tensor.ndim)))
+    return tensor
