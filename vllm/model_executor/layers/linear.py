@@ -81,11 +81,13 @@ class UnquantizedLinearMethod(LinearMethodBase):
                 batched = True
             else:
                 inp = x
-            m, n, k = weight.shape[0], inp.shape[0], inp.shape[1]
-            out = torch.empty(inp.shape[0], weight.shape[0], dtype=inp.dtype, device='cuda')
-            if k == 8192 and (m == 1280 or m == 7168):
-                custom_ops.LLMM1(weight, inp, out, 8)
-            elif k == 3584 and m == 8192:
+            m, k = weight.shape[0], inp.shape[1]
+            out = torch.empty(inp.shape[0],
+                              weight.shape[0],
+                              dtype=inp.dtype,
+                              device='cuda')
+            if (k == 8192 and
+                (m == 1280 or m == 7168)) or (k == 3584 and m == 8192):
                 custom_ops.LLMM1(weight, inp, out, 8)
             elif k <= 8192 and k % 8 == 0 and m % 4 == 0:
                 custom_ops.LLMM1(weight, inp, out, 4)
@@ -93,7 +95,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
                 out = F.linear(inp, weight)
             if batched:
                 out = out.view(x.shape[0], x.shape[1], weight.shape[0])
-            if bias != None:
+            if bias is not None:
                 out = out + bias
             return out
         if self.separate_bias_add:

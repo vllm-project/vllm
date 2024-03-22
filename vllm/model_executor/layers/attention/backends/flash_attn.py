@@ -8,7 +8,8 @@ import torch
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention.ops.paged_attn import (
     PagedAttentionImpl)
-from vllm.model_executor.layers.attention.ops.flash_attention_triton import triton_attention
+from vllm.model_executor.layers.attention.ops.flash_attention_triton import (
+    triton_attention)
 
 
 class FlashAttentionBackend:
@@ -91,14 +92,14 @@ class FlashAttentionBackend:
                 value = value.unflatten(0, (batch_size, seq_len))
                 if self.use_triton:
                     output, _ = triton_attention(
-                                query,
-                                key,
-                                value,
-                                None,
-                                input_metadata,
-                                True,
-                                self.scale,
-                            )
+                        query,
+                        key,
+                        value,
+                        None,
+                        input_metadata,
+                        True,
+                        self.scale,
+                    )
                 else:
                     if is_hip():
                         #XXX: window_size and alibi_slopes not supported

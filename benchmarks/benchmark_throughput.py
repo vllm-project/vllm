@@ -78,20 +78,22 @@ def run_vllm(
     worker_use_torchrun: bool = False,
 ) -> float:
     from vllm import LLM, SamplingParams
-    llm = LLM(model=model,
-              tokenizer=tokenizer,
-              quantization=quantization,
-              tensor_parallel_size=tensor_parallel_size,
-              seed=seed,
-              trust_remote_code=trust_remote_code,
-              dtype=dtype,
-              max_model_len=max_model_len,
-              gpu_memory_utilization=gpu_memory_utilization,
-              enforce_eager=enforce_eager,
-              kv_cache_dtype=kv_cache_dtype,
-              device=device,
-              enable_prefix_caching=enable_prefix_caching,
-              worker_use_torchrun=worker_use_torchrun,)
+    llm = LLM(
+        model=model,
+        tokenizer=tokenizer,
+        quantization=quantization,
+        tensor_parallel_size=tensor_parallel_size,
+        seed=seed,
+        trust_remote_code=trust_remote_code,
+        dtype=dtype,
+        max_model_len=max_model_len,
+        gpu_memory_utilization=gpu_memory_utilization,
+        enforce_eager=enforce_eager,
+        kv_cache_dtype=kv_cache_dtype,
+        device=device,
+        enable_prefix_caching=enable_prefix_caching,
+        worker_use_torchrun=worker_use_torchrun,
+    )
 
     # Add the requests to the engine.
     for prompt, _, output_len in requests:
@@ -318,9 +320,9 @@ if __name__ == "__main__":
         action='store_true',
         help="enable automatic prefix caching for vLLM backend.")
     parser.add_argument('--worker-use-torchrun',
-        action='store_true',
-        help='use torchrun instead of ray when using '
-        'more than 1 GPU. Preferable for ROCm')    
+                        action='store_true',
+                        help='use torchrun instead of ray when using '
+                        'more than 1 GPU. Preferable for ROCm')
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model

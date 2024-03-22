@@ -437,7 +437,8 @@ class ParallelConfig:
 
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
         # Ray worker is not supported for Neuron backend.
-        if not self.worker_use_torchrun and self.world_size > 1 and not is_neuron():
+        if (not self.worker_use_torchrun and self.world_size > 1
+                and not is_neuron()):
             self.worker_use_ray = True
         self._verify_args()
 

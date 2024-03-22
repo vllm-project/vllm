@@ -65,7 +65,9 @@ def _use_flash_attn() -> int:
     """Returns if and which flash attention to use.
 
     Returns:
-        int: 0 for none, 1 for default implementation, 2 for triton implementation.
+        int: 0 for none,
+        1 for default implementation,
+        2 for triton implementation.
     """
     if not (os.environ.get('VLLM_USE_FLASH_ATTN_TRITON') and is_hip()):
         # AMD GPUs can use flash_attn package or triton impl.
@@ -93,5 +95,7 @@ def _use_flash_attn() -> int:
             "Using xformers backend.")
         return 0
 
-    logger.info(f"Using {'Triton' if os.environ.get('VLLM_USE_FLASH_ATTN_TRITON') else ''} flash_attn backend.")
+    logger.info(f"""Using {'Triton'
+                    if os.environ.get('VLLM_USE_FLASH_ATTN_TRITON')
+                    else ''} flash_attn backend.""")
     return 2 if os.environ.get('VLLM_USE_FLASH_ATTN_TRITON') else 1

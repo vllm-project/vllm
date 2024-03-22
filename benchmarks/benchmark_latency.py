@@ -16,19 +16,17 @@ def main(args: argparse.Namespace):
 
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
-    llm = LLM(
-        model=args.model,
-        tokenizer=args.tokenizer,
-        quantization=args.quantization,
-        tensor_parallel_size=args.tensor_parallel_size,
-        trust_remote_code=args.trust_remote_code,
-        dtype=args.dtype,
-        enforce_eager=args.enforce_eager,
-        kv_cache_dtype=args.kv_cache_dtype,
-        device=args.device,
-        ray_workers_use_nsight=args.ray_workers_use_nsight,
-        worker_use_torchrun=args.worker_use_torchrun
-    )
+    llm = LLM(model=args.model,
+              tokenizer=args.tokenizer,
+              quantization=args.quantization,
+              tensor_parallel_size=args.tensor_parallel_size,
+              trust_remote_code=args.trust_remote_code,
+              dtype=args.dtype,
+              enforce_eager=args.enforce_eager,
+              kv_cache_dtype=args.kv_cache_dtype,
+              device=args.device,
+              ray_workers_use_nsight=args.ray_workers_use_nsight,
+              worker_use_torchrun=args.worker_use_torchrun)
 
     sampling_params = SamplingParams(
         n=args.n,
@@ -153,9 +151,8 @@ if __name__ == '__main__':
         help="If specified, use nsight to profile ray workers",
     )
     parser.add_argument('--worker-use-torchrun',
-        action='store_true',
-        help='use torchrun instead of ray when using '
-        'more than 1 GPU. Preferable for ROCm'
-    )
+                        action='store_true',
+                        help='use torchrun instead of ray when using '
+                        'more than 1 GPU. Preferable for ROCm')
     args = parser.parse_args()
     main(args)

@@ -1,15 +1,13 @@
-import importlib
 import os
 from typing import Dict, List, Optional
 
 from vllm.executor.gpu_executor import GPUExecutor
-from vllm.lora.request import LoRARequest
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, LoRAConfig)
-from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
-from vllm.executor.utils import check_block_size_valid
+from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.logger import init_logger
-from vllm.model_executor.parallel_utils.communication_op import broadcast_object_list, broadcast_tensor_dict
+from vllm.model_executor.parallel_utils.communication_op import (
+    broadcast_object_list)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import (get_ip, get_open_port, get_distributed_init_method,
                         make_async)
@@ -36,13 +34,8 @@ class TorchrunGPUExecutor(GPUExecutor):
     ) -> None:
         self.local_rank = int(os.getenv("LOCAL_RANK", "0"))
         self.is_driver_worker = self.local_rank == 0
-        super().__init__(model_config,
-                         cache_config,
-                         parallel_config,
-                         scheduler_config,
-                         device_config,
-                         lora_config)
-
+        super().__init__(model_config, cache_config, parallel_config,
+                         scheduler_config, device_config, lora_config)
 
     def _init_worker(self):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
@@ -87,6 +80,7 @@ class TorchrunGPUExecutor(GPUExecutor):
             broadcast_object_list(res, src=0)
             output = res[0]
         return output
+
 
 class TorchrunGPUExecutorAsync(TorchrunGPUExecutor, ExecutorAsyncBase):
 
