@@ -12,10 +12,15 @@ import contextlib
 import torch
 from torch.distributed import ReduceOp
 
+
 try:
-    import cupy
-    from cupy.cuda import nccl
-    from cupyx.distributed import NCCLBackend
+    # import cupy
+    # from cupy.cuda import nccl
+    # from cupyx.distributed import NCCLBackend
+    from .pynccl import NCCLCommunicator, ncclGetVersion
+    print(f"nccl version {ncclGetVersion()}")
+    comm: NCCLCommunicator = None
+
 except ImportError as e:
     cupy = e
     nccl = None
@@ -32,7 +37,7 @@ _OP_MAPPING = {
 }
 
 
-class NCCLBackendWithBFloat16(NCCLBackend):
+class NCCLBackendWithBFloat16:
     # This is enough to add bfloat16 support for most operations,
     # but broadcast will fail (will require changes in compiled
     # cupy code).
@@ -55,12 +60,18 @@ _WORLD_SIZE = 0
 
 def is_initialized() -> bool:
     """Returns whether the NCCL backend is initialized."""
-    return _NCCL_BACKEND is not None
+    return comm is not None
 
 
 @contextlib.contextmanager
 def set_cupy_stream(stream: torch.cuda.Stream):
     """Set the cuda stream for communication"""
+    try:
+        comm.stream = stream
+        yield
+    finally:
+        pass
+    return
     cupy_stream = cupy.cuda.ExternalStream(stream.cuda_stream,
                                            stream.device_index)
     with cupy_stream:
@@ -74,6 +85,9 @@ def init_process_group(world_size: int, rank: int, host: str,
     # TODO: handle NCCL timeouts.
     """
     assert not is_initialized()
+    global comm
+    comm = NCCLCommunicator(init_method=f"tcp://{host}:{port}", world_size=world_size, rank=rank)
+    return
 
     if isinstance(cupy, Exception):
         raise ImportError(
@@ -99,21 +113,36 @@ def init_process_group(world_size: int, rank: int, host: str,
 def all_reduce(input_: torch.Tensor, op=ReduceOp.SUM) -> None:
     """All-reduces the input tensor across the process group."""
     assert input_.is_cuda, f"{input_} should be a cuda tensor"
-    # Hack to support bfloat16
-    torch_dtype = input_.dtype
-    if torch_dtype is torch.bfloat16:
-        # We need to view as float16, otherwise
-        # cupy will fail. This will not change
-        # the underlying data.
-        input_ = input_.view(torch.float16)
-    cupy_input = cupy.asarray(input_)
-    cupy_input._torch_dtype = torch_dtype  # pylint: disable=protected-access
-    _NCCL_BACKEND.all_reduce(in_array=cupy_input,
-                             out_array=cupy_input,
-                             op=_OP_MAPPING[op])
+    free_bytes = torch.cuda.mem_get_info()[0]
+    # # Hack to support bfloat16
+    # torch_dtype = input_.dtype
+    # if torch_dtype is torch.bfloat16:
+    #     # We need to view as float16, otherwise
+    #     # cupy will fail. This will not change
+    #     # the underlying data.
+    #     input_ = input_.view(torch.float16)
+    # cupy_input = cupy.asarray(input_)
+    # cupy_input._torch_dtype = torch_dtype  # pylint: disable=protected-access
+    # _NCCL_BACKEND.all_reduce(in_array=cupy_input,
+    #                          out_array=cupy_input,
+    #                          op=_OP_MAPPING[op])
+    comm.all_reduce(input_, op)
+
+    import os
+    env_name = os.environ['CONDA_DEFAULT_ENV']
+    dir_name = f"/home/gcpuser/vllm/{env_name}-process-{os.getpid()}"
+    with open(f"{dir_name}.txt", "a") as f:
+        f.write(f"{free_bytes=} before allreduce\n")
+        free_bytes_after = torch.cuda.mem_get_info()[0]
+        f.write(f"{free_bytes_after=} after allreduce\n")
+        f.write(f"memory cost during allreduce: {(free_bytes - free_bytes_after) / 1024 / 1024} MiB\n")
 
 
 def destroy_process_group() -> None:
+    global comm
+    del comm
+    comm = None
+    return
     """Destroys the NCCL backend."""
     global _NCCL_BACKEND
     global _WORLD_SIZE
@@ -123,8 +152,10 @@ def destroy_process_group() -> None:
 
 def get_world_size() -> int:
     """Returns the world size."""
+    return comm.world_size
     return _WORLD_SIZE
 
 
 def get_nccl_backend():
+    return comm
     return _NCCL_BACKEND
