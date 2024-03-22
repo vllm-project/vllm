@@ -20,6 +20,7 @@ MODELS = [
     "stabilityai/stablelm-3b-4e1t",
     "allenai/OLMo-1B",
     "bigcode/starcoder2-3b",
+    "Qwen/Qwen1.5-0.5B",
 ]
 
 
