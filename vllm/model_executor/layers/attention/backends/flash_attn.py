@@ -95,8 +95,8 @@ class FlashAttentionBackend:
             # Prompt run.
             if (key_cache is None or value_cache is None
                     or input_metadata.block_tables.numel() == 0):
-                if self.num_kv_heads != self.num_heads:
-                    # Interleave for MQA
+                if self.use_triton and (self.num_kv_heads != self.num_heads):
+                    # Interleave for MQA workaround.
                     key = self.repeat_kv(key, self.num_queries_per_kv)
                     value = self.repeat_kv(value, self.num_queries_per_kv)
 
