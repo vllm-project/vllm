@@ -29,7 +29,7 @@ fptr_t init_custom_ar(torch::Tensor &meta, torch::Tensor &rank_data,
     std::memcpy(&ipc_handles[i], handles[i].data(), sizeof(cudaIpcMemHandle_t));
   }
   return (fptr_t) new vllm::CustomAllreduce(
-      reinterpret_cast<vllm::Metadata *>(meta.data_ptr()), rank_data.data_ptr(),
+      reinterpret_cast<vllm::Signal *>(meta.data_ptr()), rank_data.data_ptr(),
       rank_data.numel(), ipc_handles, offsets, rank, full_nvlink);
 }
 
@@ -62,9 +62,9 @@ bool should_custom_ar(torch::Tensor &inp, int max_size, int world_size,
   if (inp_size % 16 != 0) return false;
   if (!_is_weak_contiguous(inp)) return false;
   if (world_size == 2 || full_nvlink) return inp_size <= max_size;
-  // 4 PCIE GPUs use 2 stage allreduce, and is only faster than NCCL when size
-  // <= 512k
-  return world_size <= 4 && inp_size <= 512 * 1024;
+  // for 4 or more non NVLink-capable GPUs, custom allreduce provides little
+  // performance improvement over NCCL.
+  return false;
 }
 
 void _all_reduce(fptr_t _fa, torch::Tensor &inp, torch::Tensor &out,
@@ -126,7 +126,7 @@ void dispose(fptr_t _fa) {
   delete fa;
 }
 
-int meta_size() { return sizeof(vllm::Metadata); }
+int meta_size() { return sizeof(vllm::Signal); }
 
 void register_buffer(fptr_t _fa, torch::Tensor &t,
                      const std::vector<std::string> &handles,

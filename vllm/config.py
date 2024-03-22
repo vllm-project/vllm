@@ -506,15 +506,6 @@ class ParallelConfig:
             raise ValueError("Unable to use nsight profiling unless workers "
                              "run with Ray.")
 
-        # FIXME(woosuk): Fix the stability issues and re-enable the custom
-        # all-reduce kernel.
-        if not self.disable_custom_all_reduce and self.world_size > 1:
-            self.disable_custom_all_reduce = True
-            logger.info(
-                "Custom all-reduce kernels are temporarily disabled due to "
-                "stability issues. We will re-enable them once the issues are "
-                "resolved.")
-
 
 class SchedulerConfig:
     """Scheduler configuration.
