@@ -5,7 +5,6 @@
 
 steps:
 - label: Download images from S3 for Llava testing
-  working_dir: "/vllm-workspace/.buildkite"
   command: bash download-images.sh
 
 - label: Regression Test
