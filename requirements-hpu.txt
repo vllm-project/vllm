@@ -1,6 +1,6 @@
 ninja  # For faster builds.
 psutil
-ray >= 2.5.1
+ray == 2.9.3
 pandas  # Required for Ray data.
 pyarrow  # Required for Ray data.
 sentencepiece  # Required for LLaMA tokenizer.
