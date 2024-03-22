@@ -57,6 +57,7 @@ class EngineArgs:
     image_token_id: Optional[int] = None
     image_input_shape: Optional[str] = None
     image_feature_size: Optional[int] = None
+    scheduler_delay_factor: float = 0.0
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -336,6 +337,12 @@ class EngineArgs:
             type=int,
             default=None,
             help=('The image feature size along the context dimension.'))
+        parser.add_argument(
+            '--scheduler-delay-factor',
+            type=float,
+            default=EngineArgs.scheduler_delay_factor,
+            help='Apply a delay (of delay factor multiplied by previous'
+            'prompt latency) before scheduling next prompt.')
         return parser
 
     @classmethod
@@ -374,7 +381,8 @@ class EngineArgs:
             ), self.ray_workers_use_nsight)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
-                                           model_config.max_model_len)
+                                           model_config.max_model_len,
+                                           self.scheduler_delay_factor)
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,
