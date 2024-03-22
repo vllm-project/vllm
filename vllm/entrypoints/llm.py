@@ -122,7 +122,7 @@ class LLM:
     def generate(
         self,
         prompts: Optional[Union[str, List[str]]] = None,
-        sampling_params: Optional[SamplingParams] = None,
+        sampling_params: Optional[Union[SamplingParams, List[SamplingParams]]] = None,
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
@@ -136,7 +136,10 @@ class LLM:
         Args:
             prompts: A list of prompts to generate completions for.
             sampling_params: The sampling parameters for text generation. If
-                None, we use the default sampling parameters.
+                None, we use the default sampling parameters. 
+                When it is a single value, it should be applied to every prompt. 
+                When it is a list, the list must have same length as the prompts 
+                and it is paired one by one with the prompt.
             prompt_token_ids: A list of token IDs for the prompts. If None, we
                 use the tokenizer to convert the prompts to token IDs.
             use_tqdm: Whether to use tqdm to display the progress bar.
@@ -156,19 +159,25 @@ class LLM:
                 and len(prompts) != len(prompt_token_ids)):
             raise ValueError("The lengths of prompts and prompt_token_ids "
                              "must be the same.")
+        
+        num_requests = len(prompts) if prompts is not None else len(
+            prompt_token_ids)
+
         if sampling_params is None:
             # Use default sampling params.
             sampling_params = SamplingParams()
 
-        # Add requests to the engine.
-        num_requests = len(prompts) if prompts is not None else len(
-            prompt_token_ids)
+        elif isinstance(sampling_params, list) and len(sampling_params) != num_requests:
+            raise ValueError("The lengths of prompts and sampling_params "
+                             "must be the same.")
+
+        # Add requests to the engine.    
         for i in range(num_requests):
             prompt = prompts[i] if prompts is not None else None
             token_ids = None if prompt_token_ids is None else prompt_token_ids[
                 i]
             self._add_request(prompt,
-                              sampling_params,
+                              sampling_params[i] if isinstance(sampling_params, list) else sampling_params,
                               token_ids,
                               lora_request=lora_request)
         return self._run_engine(use_tqdm)
