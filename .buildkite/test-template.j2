@@ -4,6 +4,11 @@
 
 steps:
 
+  - label: "Neuron Test"
+    agents:
+      queue: neuron
+    command: bash .buildkite/run-neuron-test.sh
+
   - label: ":docker: build image"
     commands:
       - "docker build --build-arg max_jobs=16 --tag {{ docker_image }} --target test --progress plain ."
