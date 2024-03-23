@@ -98,6 +98,7 @@ RUN if [ "$BUILD_CUPY" = "1" ]; then \
 COPY ./ /app/vllm
 
 RUN python3 -m pip install --upgrade pip
+RUN python3 -m pip install xformers --no-deps
 
 RUN cd /app \
     && cd vllm \

@@ -57,6 +57,8 @@ class XFormersBackend:
                 f"Supported head sizes are: {suppored_head_sizes}.")
 
         self.use_ref_attention = _check_use_ref_attention()
+        if self.use_ref_attention:
+            print("ref attention used.")
 
     def forward(
         self,
@@ -119,7 +121,6 @@ class XFormersBackend:
                                                   value.shape[-1])
 
                 if self.use_ref_attention:
-                    print("ref attention used.")
                     output = torch.empty_like(query)
                     start = 0
                     for _, prompt_len in enumerate(input_metadata.prompt_lens):
