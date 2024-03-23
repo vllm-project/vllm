@@ -95,7 +95,10 @@ RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,ta
 # ignore build dependencies installation because we are using pre-complied extensions
 RUN rm pyproject.toml
 RUN --mount=type=cache,target=/root/.cache/pip VLLM_USE_PRECOMPILED=1 pip install . --verbose
-
+# the package has been installed to /usr/local/lib/python3.10/dist-packages
+# remove it so that test scripts will not import vllm from current directory
+# (which does not have so files)
+RUN rm -rf vllm
 #################### TEST IMAGE ####################
 
 
@@ -133,8 +136,3 @@ COPY vllm vllm
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 #################### OPENAI API SERVER ####################
-
-# the package has been installed to /usr/local/lib/python3.10/dist-packages
-# remove it so that test scripts will not import vllm from current directory
-# (which does not have so files)
-RUN rm -rf vllm
