@@ -29,7 +29,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
 
             cpu_allocator = NaiveBlockAllocator(
                 create_block=NaiveBlock,
-                num_blocks=num_gpu_blocks,
+                num_blocks=num_cpu_blocks,
                 block_size=block_size,
                 block_ids=cpu_block_ids,
             )
@@ -41,7 +41,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             )
 
             cpu_allocator = PrefixCachingBlockAllocator(
-                num_blocks=num_gpu_blocks,
+                num_blocks=num_cpu_blocks,
                 block_size=block_size,
                 block_ids=cpu_block_ids,
             )

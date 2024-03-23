@@ -35,7 +35,6 @@ def test_allocate_naive(block_size: int, sequence_len: int):
         assert allocator.get_num_free_blocks(device=Device.GPU) == num_gpu_blocks - i * num_blocks_per_alloc
 
         block_tables.append(BlockTable(
-            sequence_id=0,
             token_ids=token_ids,
             block_size=block_size,
             block_allocator=allocator,
@@ -64,7 +63,6 @@ def test_allocate_prefix_caching(block_size: int, sequence_len: int):
     for alloc_i in range(1, 6):
 
         block_tables.append(BlockTable(
-            sequence_id=0,
             token_ids=token_ids,
             block_size=block_size,
             block_allocator=allocator,
@@ -73,3 +71,35 @@ def test_allocate_prefix_caching(block_size: int, sequence_len: int):
         
         # Expect all sequences to share allocations, except for their last block (which may be mutable).
         assert allocator.get_num_free_blocks(device=Device.GPU) == num_gpu_blocks - (num_immutable_blocks_per_alloc + num_mutable_blocks_per_alloc * (alloc_i))
+
+
+@pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("sequence_len", [1, 16, 129])
+@pytest.mark.parametrize("allocator_type", ["naive", "prefix_caching"])
+@pytest.mark.parametrize("device", ["cpu", "gpu"])
+def test_allocate_free(block_size: int, sequence_len: int, allocator_type: str, device: str):
+    device = Device[device.upper()]
+
+    num_device_blocks = 1024
+    allocator = CpuGpuBlockAllocator.create(
+        allocator_type=allocator_type,
+        num_gpu_blocks=num_device_blocks,
+        num_cpu_blocks=num_device_blocks,
+        block_size=block_size,
+    )
+
+    token_ids = list(range(sequence_len))
+    num_blocks_per_alloc = len(list(chunk_list(token_ids, block_size)))
+
+    block_table = BlockTable(
+        token_ids=token_ids,
+        block_size=block_size,
+        block_allocator=allocator,
+    )
+    
+    for i in range(5):
+        block_table.allocate(device=device)
+        assert allocator.get_num_free_blocks(device) == num_device_blocks - num_blocks_per_alloc
+
+        block_table.free()
+        assert allocator.get_num_free_blocks(device) == num_device_blocks

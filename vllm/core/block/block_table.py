@@ -25,13 +25,11 @@ class BlockTable:
 
     def __init__(
         self,
-        sequence_id: int,
         token_ids: List[int],
         block_size: int,
         block_allocator: DeviceAwareBlockAllocator,
-        #block_factory: Block.Factory,
     ):
-        self._sequence_id = sequence_id
+        assert token_ids
         self._token_ids = token_ids
         self._block_size = block_size
         self._allocator = block_allocator
@@ -54,3 +52,9 @@ class BlockTable:
             blocks.append(prev_block)
 
         self._blocks = blocks
+
+    def free(self) -> None:
+        assert self._blocks is not None
+        for block in self._blocks:
+            self._allocator.free(block)
+        self._blocks = None

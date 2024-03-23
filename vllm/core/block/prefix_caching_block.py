@@ -68,7 +68,10 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         cached_block_index = self._cached_blocks.get(block.content_hash, None)
         if cached_block_index is not None:
             block.physical_block_index = cached_block_index
-            self._refcounter.incr(block.physical_block_index)
+            refcount = self._refcounter.incr(block.physical_block_index)
+            if refcount == 1:
+                assert block.content_hash in self._unused_cached_blocks
+                del self._unused_cached_blocks[block.content_hash]
             return block
 
         block = self.allocate_mutable(prev_block)
@@ -96,6 +99,10 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         if self._unused_cached_blocks:
             # TODO policy for selecting block to remove
             content_hash_to_evict = next(iter(self._unused_cached_blocks))
+
+            # Clear content hash mapping; the block will be overwritten.
+            del self._cached_blocks[content_hash_to_evict]
+
             physical_block_index = self._unused_cached_blocks.pop(content_hash_to_evict)
             refcount = self._refcounter.incr(physical_block_index)
             block = self._create_block(
