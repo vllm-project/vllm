@@ -210,36 +210,36 @@ def destroy_model_parallel():
     global _PIPELINE_GLOBAL_RANKS
     _PIPELINE_GLOBAL_RANKS = None
 
-    # Destroy the cupy states if any.
+    # Destroy the pynccl states if any.
     pynccl_utils.destroy_process_group()
 
 
-# Whether to use cupy for nccl all reduce.
-# We use cupy for all reduce when using CUDA graph, because torch.distributed
+# Whether to use pynccl for nccl all reduce.
+# We use pynccl for all reduce when using CUDA graph, because torch.distributed
 # is not well supported by CUDA graph.
-_ENABLE_CUPY_FOR_ALL_REDUCE = False
+_ENABLE_PYNCCL_FOR_ALL_REDUCE = False
 
 
 @contextlib.contextmanager
 def with_cupy_nccl_for_all_reduce():
-    """use CuPy nccl instead of torch.distributed for all reduce"""
+    """use pynccl instead of torch.distributed for all reduce"""
     tp_size = get_tensor_model_parallel_world_size()
     if tp_size == 1:
         # No-op.
         # NOTE(woosuk): We don't initialize CuPy when tp_size is 1.
         yield
     else:
-        global _ENABLE_CUPY_FOR_ALL_REDUCE
-        old = _ENABLE_CUPY_FOR_ALL_REDUCE
-        _ENABLE_CUPY_FOR_ALL_REDUCE = True
+        global _ENABLE_PYNCCL_FOR_ALL_REDUCE
+        old = _ENABLE_PYNCCL_FOR_ALL_REDUCE
+        _ENABLE_PYNCCL_FOR_ALL_REDUCE = True
 
         stream = torch.cuda.current_stream()
         with pynccl_utils.set_cupy_stream(stream):
             yield
-        _ENABLE_CUPY_FOR_ALL_REDUCE = old
+        _ENABLE_PYNCCL_FOR_ALL_REDUCE = old
 
 
 def is_cupy_nccl_enabled_for_all_reduce():
-    """check if CuPy nccl is enabled for all reduce"""
-    global _ENABLE_CUPY_FOR_ALL_REDUCE
-    return _ENABLE_CUPY_FOR_ALL_REDUCE
+    """check if pynccl is enabled for all reduce"""
+    global _ENABLE_PYNCCL_FOR_ALL_REDUCE
+    return _ENABLE_PYNCCL_FOR_ALL_REDUCE
