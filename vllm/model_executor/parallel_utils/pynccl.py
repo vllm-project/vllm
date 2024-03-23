@@ -10,7 +10,6 @@
 # https://discuss.pytorch.org/t/pytorch-cudagraph-with-nccl-operation-failed/199366
 # ====================================================
 
-
 # ===================== import region =====================
 import torch
 import ctypes
@@ -22,7 +21,7 @@ import datetime
 # TODO: find the path programmatically
 nccl = ctypes.CDLL("/vllm-workspace/libnccl.so.2.16.2")
 
-# ===================== export types and functions from nccl to Python =====================
+# === export types and functions from nccl to Python ===
 # for the original nccl definition, please check
 # https://github.com/NVIDIA/nccl/blob/master/src/nccl.h.in
 
@@ -33,6 +32,7 @@ ncclResult_t = ctypes.c_int
 _c_ncclGetVersion = nccl.ncclGetVersion
 _c_ncclGetVersion.restype = ctypes.c_int
 _c_ncclGetVersion.argtypes = [ctypes.POINTER(ctypes.c_int)]
+
 
 def ncclGetVersion() -> int:
     version = ctypes.c_int()
@@ -45,26 +45,36 @@ def ncclGetVersion() -> int:
     patch = version_str[3:].lstrip("0")
     return f"{major}.{minor}.{patch}"
 
+
 class NcclUniqueId(ctypes.Structure):
     _fields_ = [("internal", ctypes.c_byte * 128)]
+
 
 # equivalent to c declaration:
 # ncclResult_t ncclGetUniqueId(ncclUniqueId* uniqueId);
 _c_ncclGetUniqueId = nccl.ncclGetUniqueId
 _c_ncclGetUniqueId.restype = ctypes.c_int
 _c_ncclGetUniqueId.argtypes = [ctypes.POINTER(NcclUniqueId)]
+
+
 def ncclGetUniqueId() -> NcclUniqueId:
     unique_id = NcclUniqueId()
     result = _c_ncclGetUniqueId(ctypes.byref(unique_id))
     assert result == 0
     return unique_id
 
+
 # equivalent to c declaration:
-# ncclResult_t  ncclCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank);
-# note that ncclComm_t is a pointer type, so the first argument is a pointer to a pointer
+# ncclResult_t  ncclCommInitRank(
+#   ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank);
+# note that ncclComm_t is a pointer type, so the first argument
+# is a pointer to a pointer
 _c_ncclCommInitRank = nccl.ncclCommInitRank
 _c_ncclCommInitRank.restype = ctypes.c_int
-_c_ncclCommInitRank.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_int, NcclUniqueId, ctypes.c_int]
+_c_ncclCommInitRank.argtypes = [
+    ctypes.POINTER(ctypes.c_void_p), ctypes.c_int, NcclUniqueId, ctypes.c_int
+]
+
 
 # enums
 class ncclDataType_t(ctypes.c_int):
@@ -105,6 +115,7 @@ class ncclDataType_t(ctypes.c_int):
             return cls.ncclBfloat16
         raise ValueError(f"Unsupported dtype: {dtype}")
 
+
 class ncclRedOp_t(ctypes.c_int):
     ncclSum = 0
     ncclProd = 1
@@ -129,12 +140,17 @@ class ncclRedOp_t(ctypes.c_int):
 
 
 # equivalent to c declaration:
-# ncclResult_t  ncclAllReduce(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream);
+# ncclResult_t  ncclAllReduce(
+#   const void* sendbuff, void* recvbuff, size_t count,
+#   ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm,
+#   udaStream_t stream);
 # note that cudaStream_t is a pointer type, so the last argument is a pointer
 _c_ncclAllReduce = nccl.ncclAllReduce
 _c_ncclAllReduce.restype = ctypes.c_int
-_c_ncclAllReduce.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ncclDataType_t, ncclRedOp_t, ctypes.c_void_p, ctypes.c_void_p]
-
+_c_ncclAllReduce.argtypes = [
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ncclDataType_t,
+    ncclRedOp_t, ctypes.c_void_p, ctypes.c_void_p
+]
 
 # equivalent to c declaration:
 # ncclResult_t  ncclCommDestroy(ncclComm_t comm);
@@ -142,31 +158,32 @@ _c_ncclCommDestroy = nccl.ncclCommDestroy
 _c_ncclCommDestroy.restype = ctypes.c_int
 _c_ncclCommDestroy.argtypes = [ctypes.c_void_p]
 
+
 class NCCLCommunicator:
+
     def __init__(
         self,
-        backend = None,
-        init_method = None,
-        timeout = datetime.timedelta(seconds=10),
+        backend=None,
+        init_method=None,
+        timeout=datetime.timedelta(seconds=10),
         world_size: int = -1,
         rank: int = -1,
-        store = None,
+        store=None,
         group_name: str = "",
-        pg_options = None,
+        pg_options=None,
     ):
         if not dist.is_initialized():
             backend = backend or "nccl"
-            assert backend == 'nccl', "only use nccl backend for starting the NCCL communicator"
-            dist.init_process_group(
-                backend=backend,
-                init_method=init_method,
-                timeout=timeout,
-                world_size=world_size,
-                rank=rank,
-                store=store,
-                group_name=group_name,
-                pg_options=pg_options
-            )
+            assert backend == 'nccl', (
+                "only use nccl backend for starting the NCCL communicator")
+            dist.init_process_group(backend=backend,
+                                    init_method=init_method,
+                                    timeout=timeout,
+                                    world_size=world_size,
+                                    rank=rank,
+                                    store=store,
+                                    group_name=group_name,
+                                    pg_options=pg_options)
         self.world_size = dist.get_world_size()
         self.rank = dist.get_rank()
         torch.cuda.set_device(self.rank)
@@ -174,25 +191,36 @@ class NCCLCommunicator:
             self.unique_id = ncclGetUniqueId()
         else:
             self.unique_id = NcclUniqueId()
-        tensor = torch.ByteTensor(list(self.unique_id.internal)).cuda(self.rank)
+        tensor = torch.ByteTensor(list(self.unique_id.internal)).cuda(
+            self.rank)
         dist.broadcast(tensor, src=0)
         byte_list = tensor.cpu().tolist()
         self.unique_id = NcclUniqueId()
         for i, byte in enumerate(byte_list):
             self.unique_id.internal[i] = byte
         self.comm = ctypes.c_void_p()
-        result = _c_ncclCommInitRank(ctypes.byref(self.comm), self.world_size, self.unique_id, self.rank)
+        result = _c_ncclCommInitRank(ctypes.byref(self.comm), self.world_size,
+                                     self.unique_id, self.rank)
         assert result == 0
         self.stream = torch.cuda.Stream(device=f"cuda:{self.rank}")
 
-    def all_reduce(self, tensor: torch.Tensor, op: ReduceOp = ReduceOp.SUM, stream=None):
+    def all_reduce(self,
+                   tensor: torch.Tensor,
+                   op: ReduceOp = ReduceOp.SUM,
+                   stream=None):
         if stream is None:
             stream = self.stream
-        result = _c_ncclAllReduce(ctypes.c_void_p(tensor.data_ptr()), ctypes.c_void_p(tensor.data_ptr()), tensor.numel(), ncclDataType_t.from_torch(tensor.dtype), ncclRedOp_t.from_torch(op), self.comm, ctypes.c_void_p(stream.cuda_stream))
+        result = _c_ncclAllReduce(ctypes.c_void_p(tensor.data_ptr()),
+                                  ctypes.c_void_p(tensor.data_ptr()),
+                                  tensor.numel(),
+                                  ncclDataType_t.from_torch(tensor.dtype),
+                                  ncclRedOp_t.from_torch(op), self.comm,
+                                  ctypes.c_void_p(stream.cuda_stream))
         assert result == 0
 
     def __del__(self):
         dist.destroy_process_group()
         _c_ncclCommDestroy(self.comm)
+
 
 # ===================== pynccl.py =====================

@@ -12,7 +12,6 @@ import contextlib
 import torch
 from torch.distributed import ReduceOp
 
-
 try:
     # import cupy
     # from cupy.cuda import nccl
@@ -86,7 +85,9 @@ def init_process_group(world_size: int, rank: int, host: str,
     """
     assert not is_initialized()
     global comm
-    comm = NCCLCommunicator(init_method=f"tcp://{host}:{port}", world_size=world_size, rank=rank)
+    comm = NCCLCommunicator(init_method=f"tcp://{host}:{port}",
+                            world_size=world_size,
+                            rank=rank)
     return
 
     if isinstance(cupy, Exception):
@@ -118,7 +119,6 @@ def all_reduce(input_: torch.Tensor, op=ReduceOp.SUM) -> None:
 
 def destroy_process_group() -> None:
     global comm
-    del comm
     comm = None
     return
     """Destroys the NCCL backend."""
