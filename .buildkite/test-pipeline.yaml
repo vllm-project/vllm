@@ -4,10 +4,6 @@
 # the final pipeline yaml file.
 
 steps:
-- label: Download images from S3 for Llava testing
-  working_dir: "/vllm-workspace/.buildkite"
-  command: bash download-images.sh
-
 - label: Regression Test
   command: pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
@@ -43,6 +39,7 @@ steps:
 
 - label: Models Test
   commands:
+    - bash ../.buildkite/download-images.sh
     - pytest -v -s models --forked
   soft_fail: true
 
