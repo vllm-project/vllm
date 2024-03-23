@@ -1,9 +1,13 @@
-# ===================== pynccl.py =====================
+# ===================== pynccl.py ==================================
 # This file is a pure Python wrapper for the NCCL library.
-# Copyright (c) 2024 vLLM team
-# Author: Kaichao You
-# Email: youkaichao@gmail.com
-# All rights reserved.
+# The main purpose is to use NCCL combined with CUDA graph.
+# Before writing this script, we tried the following approach:
+# 1. We tried to use `cupy`, it calls NCCL correctly, but `cupy` itself
+#  often gets stuck when initializing the NCCL communicator.
+# 2. We tried to use `torch.distributed`, but `torch.distributed.all_reduce`
+#  contains many other potential cuda APIs, that are not allowed during
+#  capturing the CUDA graph. For further details, please check
+# https://discuss.pytorch.org/t/pytorch-cudagraph-with-nccl-operation-failed/199366
 # ====================================================
 
 
@@ -15,13 +19,12 @@ from torch.distributed import ReduceOp
 import datetime
 
 # manually load the nccl library
+# TODO: find the path programmatically
 nccl = ctypes.CDLL("/vllm-workspace/libnccl.so.2.16.2")
-# use `pip install nvidia-nccl-cu12==2.16.2` to install from pypi
-# then you can use the following line to load the library
-# and they cause increased memory overhead
-# nccl = ctypes.CDLL("/opt/conda/envs/${CONDA_ENV}/lib/python3.9/site-packages/nvidia/nccl/lib/libnccl.so.2")
 
-# ===================== declare types and functions =====================
+# ===================== export types and functions from nccl to Python =====================
+# for the original nccl definition, please check
+# https://github.com/NVIDIA/nccl/blob/master/src/nccl.h.in
 
 ncclResult_t = ctypes.c_int
 
@@ -56,13 +59,6 @@ def ncclGetUniqueId() -> NcclUniqueId:
     assert result == 0
     return unique_id
 
-def test_ncclGetUniqueId():
-    unique_id = ncclGetUniqueId()
-    # print something like:
-    # [34, -16, 23, 83, 109, -19, 59, 95, 2, 0, -86, 55, 10, -128, 0, 29, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-    print(list(unique_id.internal))
-
-
 # equivalent to c declaration:
 # ncclResult_t  ncclCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank);
 # note that ncclComm_t is a pointer type, so the first argument is a pointer to a pointer
@@ -86,8 +82,8 @@ class ncclDataType_t(ctypes.c_int):
     ncclFloat = 7
     ncclFloat64 = 8
     ncclDouble = 8
-    ncclBfloat16 = 9  # Uncomment if __CUDA_BF16_TYPES_EXIST__ is defined
-    ncclNumTypes = 10 # Uncomment if __CUDA_BF16_TYPES_EXIST__ is defined
+    ncclBfloat16 = 9
+    ncclNumTypes = 10
 
     @classmethod
     def from_torch(cls, dtype: torch.dtype) -> 'ncclDataType_t':
@@ -116,8 +112,6 @@ class ncclRedOp_t(ctypes.c_int):
     ncclMin = 3
     ncclAvg = 4
     ncclNumOps = 5
-    # ncclMaxRedOp value is based on enum size and int size, here simplified
-    ncclMaxRedOp = 0x7fffffff
 
     @classmethod
     def from_torch(cls, op: ReduceOp) -> 'ncclRedOp_t':
@@ -162,7 +156,7 @@ class NCCLCommunicator:
     ):
         if not dist.is_initialized():
             backend = backend or "nccl"
-            assert backend == 'nccl', "only use gloo backend for starting the NCCL communicator"
+            assert backend == 'nccl', "only use nccl backend for starting the NCCL communicator"
             dist.init_process_group(
                 backend=backend,
                 init_method=init_method,
@@ -201,17 +195,4 @@ class NCCLCommunicator:
         dist.destroy_process_group()
         _c_ncclCommDestroy(self.comm)
 
-def test_NCCLCommunicator():
-    # use `torchrun` to launch the script
-    # e.g. `torchrun --nproc_per_node=2 pynccl.py`
-    comm = NCCLCommunicator()
-    tensor = torch.ones(16, 1024, 1024, dtype=torch.float32).cuda(comm.rank)
-    comm.all_reduce(tensor)
-    result = tensor.mean().cpu().item()
-    assert result == comm.world_size
-    print(result)
-
-if __name__ == "__main__":
-    test_ncclGetUniqueId()
-    test_NCCLCommunicator()
 # ===================== pynccl.py =====================
