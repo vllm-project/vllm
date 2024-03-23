@@ -474,15 +474,7 @@ class ParallelConfig:
         placement_group: Optional["PlacementGroup"] = None,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
-        if is_neuron():
-            # For Neuron device support, here we assign TP=1 to avoid sharding
-            # within vLLM directly. Transformer-neuronx would take
-            # neuron_tp_degree attribute, and distribute the workload
-            # to multiple NeuronCores.
-            self.tensor_parallel_size = 1
-            self.neuron_tp_degree = tensor_parallel_size
-        else:
-            self.tensor_parallel_size = tensor_parallel_size
+        self.tensor_parallel_size = tensor_parallel_size
         self.worker_use_ray = worker_use_ray
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
@@ -491,8 +483,7 @@ class ParallelConfig:
         self.placement_group = placement_group
 
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
-        # Ray worker is not supported for Neuron backend.
-        if self.world_size > 1 and not is_neuron():
+        if self.world_size > 1:
             self.worker_use_ray = True
         self._verify_args()
 
@@ -515,15 +506,6 @@ class ParallelConfig:
             raise ValueError("Unable to use nsight profiling unless workers "
                              "run with Ray.")
 
-        # FIXME(woosuk): Fix the stability issues and re-enable the custom
-        # all-reduce kernel.
-        if not self.disable_custom_all_reduce and self.world_size > 1:
-            self.disable_custom_all_reduce = True
-            logger.info(
-                "Custom all-reduce kernels are temporarily disabled due to "
-                "stability issues. We will re-enable them once the issues are "
-                "resolved.")
-
 
 class SchedulerConfig:
     """Scheduler configuration.
@@ -535,7 +517,8 @@ class SchedulerConfig:
             iteration.
         max_model_len: Maximum length of a sequence (including prompt
             and generated text).
-        max_paddings: Maximum number of paddings to be added to a batch.
+        delay_factor: Apply a delay (of delay factor multiplied by previous
+            prompt latency) before scheduling next prompt.
     """
 
     def __init__(
@@ -543,7 +526,7 @@ class SchedulerConfig:
         max_num_batched_tokens: Optional[int],
         max_num_seqs: int,
         max_model_len: int,
-        max_paddings: int,
+        delay_factor: float = 0.0,
     ) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
@@ -553,7 +536,7 @@ class SchedulerConfig:
             self.max_num_batched_tokens = max(max_model_len, 2048)
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
-        self.max_paddings = max_paddings
+        self.delay_factor = delay_factor
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -577,12 +560,12 @@ class DeviceConfig:
     def __init__(self, device: str = "auto") -> None:
         if device == "auto":
             # Automated device type detection
-            if torch.cuda.is_available():
-                self.device_type = "cuda"
-            elif is_neuron():
+            if is_neuron():
                 self.device_type = "neuron"
             else:
-                raise RuntimeError("No supported device detected.")
+                # We don't call torch.cuda.is_available() here to
+                # avoid initializing CUDA before workers are forked
+                self.device_type = "cuda"
         else:
             # Device type is assigned explicitly
             self.device_type = device
@@ -593,10 +576,6 @@ class DeviceConfig:
         else:
             # Set device with device type
             self.device = torch.device(self.device_type)
-
-    @property
-    def is_neuron(self):
-        return self.device_type == "neuron"
 
 
 @dataclass
