@@ -1,11 +1,13 @@
-from .pynccl import NCCLCommunicator, ncclGetVersion
-
 import contextlib
 import logging
 import torch
 
 from typing import Optional
 from torch.distributed import ReduceOp
+from vllm.model_executor.parallel_utils.pynccl import (
+    NCCLCommunicator,
+    ncclGetVersion,
+)
 
 logger = logging.getLogger(__name__)
 

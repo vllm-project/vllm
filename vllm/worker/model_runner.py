@@ -900,7 +900,8 @@ class CUDAGraphRunner:
 
 @contextlib.contextmanager
 def _maybe_cupy_nccl():
-    if pynccl_utils.is_initialized() and not custom_all_reduce.is_initialized():
+    if pynccl_utils.is_initialized(
+    ) and not custom_all_reduce.is_initialized():
         with with_cupy_nccl_for_all_reduce():
             yield
     else:
