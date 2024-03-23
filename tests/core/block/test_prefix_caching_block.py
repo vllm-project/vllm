@@ -297,6 +297,7 @@ class TestPrefixCachingBlockAllocator:
     @pytest.mark.parametrize("block_size", [16])
     @pytest.mark.parametrize("seed", list(range(20)))
     def test_get_num_free_blocks_shared(num_blocks: int, block_size: int, seed: int):
+        random.seed(seed)
         allocator = PrefixCachingBlockAllocator(num_blocks=num_blocks, block_size=block_size)
         num_blocks_to_consume = random.randint(1, num_blocks-1)
 
