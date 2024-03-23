@@ -11,7 +11,7 @@ from vllm.config import (DeviceConfig, ModelConfig, LoRAConfig, ParallelConfig,
 from vllm.logger import init_logger
 from vllm.model_executor import InputMetadata, SamplingMetadata
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.parallel_utils import cupy_utils
+from vllm.model_executor.parallel_utils import pynccl_utils
 from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
 from vllm.model_executor.parallel_utils.parallel_state import (
@@ -720,7 +720,7 @@ class ModelRunner:
         """
         # NOTE(woosuk): This is a hack to ensure that the NCCL backend is never
         # deleted before the CUDA graphs.
-        self.cupy_nccl_backend = cupy_utils.get_nccl_backend()
+        self.cupy_nccl_backend = pynccl_utils.get_nccl_backend()
 
         assert not self.model_config.enforce_eager
         logger.info("Capturing the model for CUDA graphs. This may lead to "
@@ -900,7 +900,7 @@ class CUDAGraphRunner:
 
 @contextlib.contextmanager
 def _maybe_cupy_nccl():
-    if cupy_utils.is_initialized() and not custom_all_reduce.is_initialized():
+    if pynccl_utils.is_initialized() and not custom_all_reduce.is_initialized():
         with with_cupy_nccl_for_all_reduce():
             yield
     else:

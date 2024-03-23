@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 from torch.distributed import ProcessGroup
 
-from vllm.model_executor.parallel_utils import cupy_utils
+from vllm.model_executor.parallel_utils import pynccl_utils
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -35,7 +35,7 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
         return out
     if is_cupy_nccl_enabled_for_all_reduce():
         # TODO: support multiple parallel groups.
-        cupy_utils.all_reduce(input_)
+        pynccl_utils.all_reduce(input_)
     else:
         torch.distributed.all_reduce(input_,
                                      group=get_tensor_model_parallel_group())

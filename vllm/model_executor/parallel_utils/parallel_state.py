@@ -7,7 +7,7 @@ import contextlib
 
 import torch
 
-from vllm.model_executor.parallel_utils import cupy_utils
+from vllm.model_executor.parallel_utils import pynccl_utils
 
 # Tensor model parallel group that the current rank belongs to.
 _TENSOR_MODEL_PARALLEL_GROUP = None
@@ -211,7 +211,7 @@ def destroy_model_parallel():
     _PIPELINE_GLOBAL_RANKS = None
 
     # Destroy the cupy states if any.
-    cupy_utils.destroy_process_group()
+    pynccl_utils.destroy_process_group()
 
 
 # Whether to use cupy for nccl all reduce.
@@ -234,7 +234,7 @@ def with_cupy_nccl_for_all_reduce():
         _ENABLE_CUPY_FOR_ALL_REDUCE = True
 
         stream = torch.cuda.current_stream()
-        with cupy_utils.set_cupy_stream(stream):
+        with pynccl_utils.set_cupy_stream(stream):
             yield
         _ENABLE_CUPY_FOR_ALL_REDUCE = old
 

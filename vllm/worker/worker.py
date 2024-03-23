@@ -9,7 +9,7 @@ import torch.distributed
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, LoRAConfig)
 from vllm.model_executor import set_random_seed
-from vllm.model_executor.parallel_utils import cupy_utils
+from vllm.model_executor.parallel_utils import pynccl_utils
 from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
 from vllm.model_executor.parallel_utils.custom_all_reduce import init_custom_ar
@@ -262,8 +262,8 @@ def init_distributed_environment(
             init_method=distributed_init_method,
         )
 
-    if cupy_utils.is_initialized():
-        cupy_world_size = cupy_utils.get_world_size()
+    if pynccl_utils.is_initialized():
+        cupy_world_size = pynccl_utils.get_world_size()
         if cupy_world_size != parallel_config.world_size:
             raise RuntimeError(
                 "cupy.distributed is already initialized but the cupy world "
@@ -273,7 +273,7 @@ def init_distributed_environment(
         # NOTE(woosuk): We don't initialize CuPy process group when world size
         # is 1.
         # TODO(woosuk): Support multi-node connection.
-        cupy_utils.init_process_group(
+        pynccl_utils.init_process_group(
             world_size=parallel_config.world_size,
             rank=rank,
             host="localhost",
@@ -282,8 +282,8 @@ def init_distributed_environment(
 
     # A small all_reduce for warmup.
     torch.distributed.all_reduce(torch.zeros(1).cuda())
-    if cupy_utils.is_initialized():
-        cupy_utils.all_reduce(torch.zeros(1).cuda())
+    if pynccl_utils.is_initialized():
+        pynccl_utils.all_reduce(torch.zeros(1).cuda())
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
 
