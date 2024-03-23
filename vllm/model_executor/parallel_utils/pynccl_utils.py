@@ -29,7 +29,7 @@ def is_initialized() -> bool:
 
 
 @contextlib.contextmanager
-def set_cupy_stream(stream: torch.cuda.Stream):
+def set_pynccl_stream(stream: torch.cuda.Stream):
     """Set the cuda stream for communication"""
     try:
         comm.stream = stream
