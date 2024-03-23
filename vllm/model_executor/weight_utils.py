@@ -34,7 +34,7 @@ def get_lock(model_name_or_path: str, cache_dir: Optional[str] = None):
     lock_dir = cache_dir if cache_dir is not None else _vllm_filelocks_path
     os.makedirs(os.path.dirname(lock_dir), exist_ok=True)
     lock_file_name = model_name_or_path.replace("/", "-") + ".lock"
-    lock = filelock.FileLock(os.path.join(lock_dir, lock_file_name))
+    lock = filelock.SoftFileLock(os.path.join(lock_dir, lock_file_name))
     return lock
 
 
