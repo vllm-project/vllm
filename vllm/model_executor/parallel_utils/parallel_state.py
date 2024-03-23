@@ -239,7 +239,7 @@ def with_pynccl_for_all_reduce():
         _ENABLE_PYNCCL_FOR_ALL_REDUCE = old
 
 
-def is_cupy_nccl_enabled_for_all_reduce():
+def is_pynccl_enabled_for_all_reduce():
     """check if pynccl is enabled for all reduce"""
     global _ENABLE_PYNCCL_FOR_ALL_REDUCE
     return _ENABLE_PYNCCL_FOR_ALL_REDUCE
