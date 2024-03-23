@@ -167,6 +167,7 @@ from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
 from vllm.core.evictor import Evictor, EvictionPolicy, make_evictor
 from vllm.core.block.naive_block import NaiveBlockAllocator, NaiveBlock
+from vllm.core.block.interfaces import DeviceAwareBlockAllocator, Block
 
 class AllocStatus(enum.Enum):
     """Result for BlockSpaceManager.can_allocate

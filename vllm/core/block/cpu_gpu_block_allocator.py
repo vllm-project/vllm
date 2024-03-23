@@ -1,12 +1,12 @@
 from typing import List, Optional, Set, Iterable, Tuple, Dict, Protocol
 from abc import ABC, abstractmethod, abstractproperty
-from vllm.core.block.interfaces import BlockAllocator, Block
+from vllm.core.block.interfaces import BlockAllocator, Block, DeviceAwareBlockAllocator
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
 from vllm.core.block.prefix_caching_block import PrefixCachingBlockAllocator
 
 from vllm.utils import Device
 
-class DeviceAwareBlockAllocator:
+class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
 
     @staticmethod
     def create(
@@ -14,7 +14,7 @@ class DeviceAwareBlockAllocator:
         num_gpu_blocks: int,
         num_cpu_blocks: int,
         block_size: int,
-    ):
+    ) -> DeviceAwareBlockAllocator:
         block_ids = list(range(num_gpu_blocks + num_cpu_blocks))
         gpu_block_ids = block_ids[:num_gpu_blocks]
         cpu_block_ids = block_ids[num_gpu_blocks:]
@@ -48,7 +48,7 @@ class DeviceAwareBlockAllocator:
         else:
             raise ValueError(f"Unknown allocator type {allocator_type=}")
 
-        return DeviceAwareBlockAllocator(
+        return CpuGpuBlockAllocator(
             cpu_block_allocator=cpu_allocator,
             gpu_block_allocator=gpu_allocator,
         )

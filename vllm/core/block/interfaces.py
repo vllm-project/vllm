@@ -53,23 +53,23 @@ class BlockAllocator(ABC):
     #def get_operations(self):
     #    pass
 
-#class DeviceAwareBlockAllocator(ABC):
-#    @abstractmethod
-#    def allocate_mutable(self, prev_block: Optional[Block], device: Device) -> Block:
-#        pass
-#
-#    @abstractmethod
-#    def allocate_immutable(self, prev_block: Optional[Block], token_ids: List[int], device: Device) -> Block:
-#        pass
-# 
-#    @abstractmethod
-#    def free(self, block: Block) -> None:
-#        pass
-#
-#    @abstractmethod
-#    def get_num_free_blocks(self, device: Device) -> int:
-#        pass
-#
-#    #@abstractmethod
-#    #def get_operations(self):
-#    #    pass
+class DeviceAwareBlockAllocator(ABC):
+    @abstractmethod
+    def allocate_mutable(self, prev_block: Optional[Block], device: Device) -> Block:
+        pass
+
+    @abstractmethod
+    def allocate_immutable(self, prev_block: Optional[Block], token_ids: List[int], device: Device) -> Block:
+        pass
+ 
+    @abstractmethod
+    def free(self, block: Block) -> None:
+        pass
+
+    @abstractmethod
+    def get_num_free_blocks(self, device: Device) -> int:
+        pass
+
+    #@abstractmethod
+    #def get_operations(self):
+    #    pass
