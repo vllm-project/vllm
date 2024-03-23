@@ -21,7 +21,7 @@ import glob
 
 # manually load the nccl library
 _path = os.path.dirname(os.path.abspath(__file__))
-so_file = glob.glob(f"{_path}/../../lib/nvidia/lib/libnccl.so.*")[0]
+so_file = glob.glob(f"{_path}/../../lib/nvidia/nccl/lib/libnccl.so.*")[0]
 nccl = ctypes.CDLL(so_file)
 
 # === export types and functions from nccl to Python ===
