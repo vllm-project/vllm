@@ -4,3 +4,4 @@ include CMakeLists.txt
 
 recursive-include cmake *
 recursive-include csrc *
+recursive-include vllm/lib *
