@@ -4,16 +4,21 @@ import torch
 
 from typing import Optional
 from torch.distributed import ReduceOp
-from vllm.model_executor.parallel_utils.pynccl import (
-    NCCLCommunicator,
-    ncclGetVersion,
-)
 
 logger = logging.getLogger(__name__)
 
-logger.info(f"vLLM is using nccl=={ncclGetVersion()}")
+try:
+    from vllm.model_executor.parallel_utils.pynccl import (
+        NCCLCommunicator,
+        ncclGetVersion,
+    )
+    logger.info(f"vLLM is using nccl=={ncclGetVersion()}")
+except Exception:
+    # in non-NVIDIA environments, we can't import the nccl module
+    # e.g. when running on machines with AMD GPUs
+    pass
 
-comm: Optional[NCCLCommunicator] = None
+comm: Optional["NCCLCommunicator"] = None
 
 
 def is_initialized() -> bool:
