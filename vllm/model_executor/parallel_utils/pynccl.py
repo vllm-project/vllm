@@ -16,10 +16,13 @@ import ctypes
 import torch.distributed as dist
 from torch.distributed import ReduceOp
 import datetime
+import os
+import glob
 
 # manually load the nccl library
-# TODO: find the path programmatically
-nccl = ctypes.CDLL("/vllm-workspace/libnccl.so.2.16.2")
+_path = os.path.dirname(os.path.abspath(__file__))
+so_file = glob.glob(f"{_path}/../../lib/nvidia/lib/libnccl.so.*")[0]
+nccl = ctypes.CDLL(so_file)
 
 # === export types and functions from nccl to Python ===
 # for the original nccl definition, please check

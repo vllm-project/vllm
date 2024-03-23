@@ -199,6 +199,12 @@ class CustomInstallCommand(install):
         if not _is_cuda():
             return
 
+        # tricky part, nccl 2.19 has a bug that increased memory overhead
+        # of cudagraph. However, pytorch has binary dependencies on nccl 2.19,
+        # simply `pip install nvidia-nccl-cu12==2.18.3` will break pytorch,
+        # so we have to manually download nccl 2.18 and keep the library to
+        #  a secrect place
+
         # Define the URL of the file and the directory to unzip to
         file_url = (
             'https://files.pythonhosted.org/packages/44/6e/'

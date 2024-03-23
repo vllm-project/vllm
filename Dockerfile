@@ -93,16 +93,8 @@ RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,ta
 RUN rm pyproject.toml
 RUN --mount=type=cache,target=/root/.cache/pip VLLM_USE_PRECOMPILED=1 pip install . --verbose
 
-# tricky part, nccl 2.19 has a bug that increased memory overhead of cudagraph
-# however, pytorch has binary dependencies on nccl 2.19
-# simply using `pip install nvidia-nccl-cu12==2.18.3` will break pytorch
-# so we have to manually download nccl 2.18 and keep the library to a secrect place
+# used for downloading files
 RUN apt install -y wget unzip
-RUN wget https://files.pythonhosted.org/packages/44/6e/3c9cd7007072f8a63dae7b5eddd1cc1525fd357377467ce3a4749b02d5ff/nvidia_nccl_cu12-2.18.3-py3-none-manylinux1_x86_64.whl
-RUN unzip nvidia_nccl_cu12-2.18.3-py3-none-manylinux1_x86_64.whl
-RUN cp ./nvidia/nccl/lib/libnccl.so.2 ./libnccl.so.2
-RUN rm -rf ./nvidia
-RUN rm nvidia_nccl_cu12-2.18.3-py3-none-manylinux1_x86_64.whl
 
 #################### TEST IMAGE ####################
 
