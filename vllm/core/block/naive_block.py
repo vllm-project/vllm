@@ -1,7 +1,7 @@
 from typing import List, Optional, Set, Iterable, Tuple, Dict, Type, TypeVar, T
 from abc import ABC, abstractmethod, abstractproperty
 
-from vllm.core.block.interfaces import BlockAllocator, Block, BlockCreator
+from vllm.core.block.interfaces import BlockAllocator, Block
 from vllm.core.block.common import RefCounter
 
 from vllm.utils import Device
@@ -16,8 +16,19 @@ class NaiveBlockAllocator(BlockAllocator):
     BlockIndex = int
     Refcount = int
 
-    def __init__(self, create_block: BlockCreator, num_blocks: int, block_size: int):
-        self._free_block_indices: Set[BlockIndex] = set(range(num_blocks))
+    def __init__(
+        self,
+        create_block: Block.Factory,
+        num_blocks: int,
+        block_size: int,
+        block_ids: Optional[Iterable[int]] = None,
+    ):
+        if block_ids is None:
+            block_ids = range(num_blocks)
+        
+        self._free_block_indices: Set[BlockIndex] = set(block_ids)
+        self._all_block_indices = frozenset(block_ids)
+
         self._refcounter = RefCounter(all_block_indices=self._free_block_indices)
         self._create_block = create_block
         self._block_size = block_size
@@ -59,6 +70,10 @@ class NaiveBlockAllocator(BlockAllocator):
     @property
     def refcounter(self):
         return self._refcounter
+
+    @property
+    def all_block_ids(self):
+        return self._all_block_indices
 
 class NaiveBlock(Block):
     def __init__(self, prev_block: Block, token_ids: List[int], block_size: int, physical_block_index: Optional[int] = None):

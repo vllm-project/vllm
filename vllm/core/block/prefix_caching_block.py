@@ -2,7 +2,7 @@
 from typing import List, Optional, Set, Iterable, Tuple, Dict
 from abc import ABC, abstractmethod, abstractproperty
 
-from vllm.core.block.interfaces import Block, BlockAllocator, BlockCreator
+from vllm.core.block.interfaces import Block, BlockAllocator
 from vllm.core.block.naive_block import NaiveBlockAllocator
 from vllm.core.block.common import RefCounter
 
@@ -17,7 +17,13 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     BlockIndex = int
     # TODO last access time / evictor integration
     
-    def __init__(self, num_blocks: int, block_size: int):
+    def __init__(
+        self,
+        num_blocks: int,
+        block_size: int,
+        block_ids: Optional[Iterable[int]] = None,
+    ):
+
         self._cached_blocks: Dict[PrefixHash, BlockIndex] = {}
         self._unused_cached_blocks: Dict[PrefixHash, BlockIndex] = {}
 
@@ -25,12 +31,13 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             create_block=self._create_block,
             num_blocks=num_blocks,
             block_size=block_size,
+            block_ids=block_ids,
         )
 
         self._block_size = block_size
         self._refcounter = self._hashless_allocator.refcounter
 
-
+    # Implements Block.Factory.
     def _create_block(
         self,
         prev_block: Optional[Block],
@@ -125,6 +132,10 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
     def get_num_free_blocks(self) -> int:
         return self._hashless_allocator.get_num_free_blocks() + len(self._unused_cached_blocks)
+
+    @property
+    def all_block_ids(self) -> frozenset[int]:
+        return self._hashless_allocator.all_block_ids
 
     # TODO name: upsert_
     # promote

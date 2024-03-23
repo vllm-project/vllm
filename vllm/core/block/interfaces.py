@@ -13,6 +13,18 @@ class Block(ABC):
     def physical_block_index(self) -> Optional[int]:
         pass
 
+    class Factory(Protocol):
+    
+        @abstractmethod
+        def __call__(
+            self,
+            prev_block: Optional["Block"],
+            token_ids: List[int],
+            block_size: int,
+            physical_block_index: Optional[int] = None,
+        ) -> "Block":
+            pass
+
 class BlockAllocator(ABC):
     @abstractmethod
     def allocate_mutable(self, prev_block: Optional[Block]) -> Block:
@@ -30,6 +42,10 @@ class BlockAllocator(ABC):
     def get_num_free_blocks(self) -> int:
         pass
 
+    @abstractproperty
+    def all_block_ids(self) -> frozenset[int]:
+        pass
+
     class NoFreeBlocksError(ValueError):
         pass
 
@@ -37,16 +53,23 @@ class BlockAllocator(ABC):
     #def get_operations(self):
     #    pass
 
-
-# TODO scope to block?
-class BlockCreator(Protocol):
-
-    @abstractmethod
-    def __call__(
-        self,
-        prev_block: Optional[Block],
-        token_ids: List[int],
-        block_size: int,
-        physical_block_index: Optional[int] = None,
-    ) -> Block:
-        pass
+#class DeviceAwareBlockAllocator(ABC):
+#    @abstractmethod
+#    def allocate_mutable(self, prev_block: Optional[Block], device: Device) -> Block:
+#        pass
+#
+#    @abstractmethod
+#    def allocate_immutable(self, prev_block: Optional[Block], token_ids: List[int], device: Device) -> Block:
+#        pass
+# 
+#    @abstractmethod
+#    def free(self, block: Block) -> None:
+#        pass
+#
+#    @abstractmethod
+#    def get_num_free_blocks(self, device: Device) -> int:
+#        pass
+#
+#    #@abstractmethod
+#    #def get_operations(self):
+#    #    pass
