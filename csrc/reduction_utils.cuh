@@ -36,18 +36,26 @@ template<typename T, int numLanes = warpSize>
 __inline__ __device__ T warpReduceSum(T val) {
   static_assert(numLanes > 0 && (numLanes & (numLanes - 1)) == 0,
                 "numLanes is not a positive power of 2!");
+  static_assert(numLanes <= warpSize);
   #pragma unroll
   for (int mask = numLanes >> 1; mask > 0; mask >>= 1)
     val += VLLM_SHFL_XOR_SYNC(val, mask);
   return val;
 }
 
+// Helper function to return the next largest power of 2
+constexpr int _nextPow2(int num) {
+  if (num <= 1) return num;
+  return 1 << (8 * sizeof(num) - __builtin_clz(num - 1));
+}
+
 /* Calculate the sum of all elements in a block */
 template<typename T, int maxBlockSize = 1024>
 __inline__ __device__ T blockReduceSum(T val) {
-  val = warpReduceSum<T>(val);
-  // If the block fits into a single warp, we are already done
+  static_assert(maxBlockSize <= 1024);
   if constexpr (maxBlockSize > warpSize) {
+    val = warpReduceSum<T>(val);
+    // Calculates max number of lanes that need to participate in the last warpReduce
     constexpr int maxActiveLanes = (maxBlockSize + warpSize - 1) / warpSize;
     static __shared__ T shared[maxActiveLanes];
     int lane = threadIdx.x % warpSize;
@@ -57,8 +65,14 @@ __inline__ __device__ T blockReduceSum(T val) {
 
     __syncthreads();
 
-    val = (threadIdx.x < (blockDim.x / (float) warpSize)) ? shared[lane] : (T)(0.0f);
-    val = warpReduceSum<T, maxActiveLanes>(val);
+    // Only (a subset of) the first warp needs to participate in the last warpReduce
+    if (threadIdx.x < (blockDim.x / (float) warpSize)) {
+      val = shared[lane];
+      val = warpReduceSum<T, _nextPow2(maxActiveLanes)>(val);
+    }
+  } else {
+    // A single warpReduce is equal to blockReduce
+    val = warpReduceSum<T, _nextPow2(maxBlockSize)>(val);
   }
   return val;
 }
