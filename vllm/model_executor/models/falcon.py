@@ -420,8 +420,11 @@ class FalconForCausalLM(nn.Module):
             total_num_kv_heads = total_num_heads
         num_query_heads_per_kv_head = total_num_heads // total_num_kv_heads
         params_dict = dict(self.named_parameters())
+        lm_head_loaded = False
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
+            if name.find("lm_head") != -1:
+                lm_head_loaded = True
             # Skip loading extra bias for GPTQ models.
             if name.endswith(".bias") and name not in params_dict:
                 continue
@@ -452,3 +455,7 @@ class FalconForCausalLM(nn.Module):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
+            if not lm_head_loaded:
+                # If `lm_head_loaded` is false, set lm_head's weight to word_embeddings' weight, assuming tied embeddings in the model.
+                print('This might be a tied embedding model, using the weight of word_embeddings to initialize lm_head.')
+                self.lm_head.weight = self.transformer.word_embeddings.weight   
