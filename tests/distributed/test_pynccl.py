@@ -10,11 +10,35 @@ from vllm.model_executor.parallel_utils.pynccl import (
 )
 
 
-def worker_fn(env):
-    import os
-    os.environ.update(env)
+def distributed_run(fn, world_size):
+    number_of_processes = world_size
+    processes = []
+    for i in range(number_of_processes):
+        env = os.environ.copy()
+        env['RANK'] = str(i)
+        env['WORLD_SIZE'] = str(number_of_processes)
+        env['MASTER_ADDR'] = 'localhost'
+        env['MASTER_PORT'] = '12345'
+        p = multiprocessing.Process(target=fn, args=(env, ))
+        processes.append(p)
+        p.start()
 
-    # when environments are properly set, the usage is simple
+    for p in processes:
+        p.join()
+
+
+def update_env(fn):
+
+    def wrapper(env):
+        import os
+        os.environ.update(env)
+        fn()
+
+    return wrapper
+
+
+@update_env
+def worker_fn():
     comm = NCCLCommunicator()
     tensor = torch.ones(16, 1024, 1024, dtype=torch.float32).cuda(comm.rank)
     comm.all_reduce(tensor)
@@ -25,20 +49,30 @@ def worker_fn(env):
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
                     reason="Need at least 2 GPUs to run the test.")
 def test_pynccl():
-    number_of_processes = 2
-    processes = []
-    for i in range(number_of_processes):
-        env = os.environ.copy()
-        env['RANK'] = str(i)
-        env['WORLD_SIZE'] = str(number_of_processes)
-        env['MASTER_ADDR'] = 'localhost'
-        env['MASTER_PORT'] = '12345'
-        p = multiprocessing.Process(target=worker_fn, args=(env, ))
-        processes.append(p)
-        p.start()
+    distributed_run(worker_fn, 2)
 
-    for p in processes:
-        p.join()
+
+@update_env
+def worker_fn_with_cudagraph():
+    with torch.no_grad():
+        graph = torch.cuda.CUDAGraph()
+        comm = NCCLCommunicator()
+        # run something in the default stream to initialize torch engine
+        a = torch.ones((4, 4), device=f'cuda:{comm.rank}')
+        torch.cuda.synchronize()
+        with torch.cuda.graph(graph, stream=comm.stream):
+            comm.all_reduce(a)
+        comm.stream.synchronize()
+        assert a.mean().cpu().item() == comm.world_size
+        graph.replay()
+        comm.stream.synchronize()
+        assert a.mean().cpu().item() == comm.world_size**2
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2,
+                    reason="Need at least 2 GPUs to run the test.")
+def test_pynccl_with_cudagraph():
+    distributed_run(worker_fn_with_cudagraph, 2)
 
 
 def test_ncclGetUniqueId():
