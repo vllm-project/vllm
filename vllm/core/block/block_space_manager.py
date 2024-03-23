@@ -210,7 +210,7 @@ class BlockSpaceManager:
         self.enable_caching = enable_caching
 
         self.watermark_blocks = int(watermark * num_gpu_blocks)
-        self.block_allocator = NaiveBlockAllocator(
+        self.gpu_allocator = NaiveBlockAllocator(
             block_size=block_size,
             create_block=NaiveBlock,
             # TODO determine number of GPU and CPU blocks separately.
@@ -237,7 +237,7 @@ class BlockSpaceManager:
         if self.block_sliding_window is not None:
             num_required_blocks = min(num_required_blocks,
                                       self.block_sliding_window)
-        num_free_gpu_blocks = self.block_allocator.get_num_free_blocks()
+        num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
 
         # Use watermark to avoid frequent cache eviction.
         if (self.num_total_gpu_blocks - num_required_blocks <
@@ -258,6 +258,10 @@ class BlockSpaceManager:
 
         block_table: BlockTable = []
         for logical_idx in range(num_prompt_blocks):
+            # This is sequence-level logic for allocating.
+            # If sliding window, then the block table refers back to itself
+            # Otherwise it has new allocations.
+
             if (self.block_sliding_window is not None
                     and logical_idx >= self.block_sliding_window):
                 block = block_table[logical_idx % self.block_sliding_window]
