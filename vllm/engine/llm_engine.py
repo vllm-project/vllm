@@ -719,6 +719,10 @@ class LLMEngine:
                 seq.status = SequenceStatus.FINISHED_STOPPED
                 return
         if seq.get_last_token_id() in sampling_params.stop_token_ids:
+            # Stop the sequence without truncating the output if the last token is the EOS token.
+            if seq.get_last_token_id() == seq.eos_token_id:
+                seq.status = SequenceStatus.FINISHED_STOPPED
+                return
             stop_str = self.get_tokenizer_for_seq(seq).convert_ids_to_tokens(
                 seq.get_last_token_id())
             self._finalize_sequence(seq, sampling_params, stop_str)
