@@ -15,6 +15,9 @@ RUN ldconfig /usr/local/cuda-12.1/compat/
 
 WORKDIR /workspace
 
+# used for downloading files
+RUN apt install -y wget unzip
+
 # install build and runtime dependencies
 COPY requirements.txt requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -92,9 +95,6 @@ RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,ta
 # ignore build dependencies installation because we are using pre-complied extensions
 RUN rm pyproject.toml
 RUN --mount=type=cache,target=/root/.cache/pip VLLM_USE_PRECOMPILED=1 pip install . --verbose
-
-# used for downloading files
-RUN apt install -y wget unzip
 
 #################### TEST IMAGE ####################
 
