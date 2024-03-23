@@ -14,6 +14,7 @@ from vllm.core.block.block_table import BlockTable
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
 from vllm.utils import Device, chunk_list
 
+
 @pytest.mark.parametrize("block_size", [16])
 @pytest.mark.parametrize("sequence_len", [1, 16, 129])
 def test_allocate_naive(block_size: int, sequence_len: int):
@@ -40,6 +41,7 @@ def test_allocate_naive(block_size: int, sequence_len: int):
             block_allocator=allocator,
         ))
         block_tables[-1].allocate(device=Device.GPU)
+
 
 @pytest.mark.parametrize("block_size", [16])
 @pytest.mark.parametrize("sequence_len", [1, 16, 129])

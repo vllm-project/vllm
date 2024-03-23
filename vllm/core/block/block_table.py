@@ -53,6 +53,13 @@ class BlockTable:
 
         self._blocks = blocks
 
+    """
+    Update token ids
+    Ensure lookahead
+    """
+    def append_token_ids(self, token_ids: List[int]):
+        pass
+
     def free(self) -> None:
         assert self._blocks is not None
         for block in self._blocks:

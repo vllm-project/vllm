@@ -123,6 +123,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         If it does not have a hash, let the hashless allocator figure it out.
         """
         assert isinstance(block, PrefixCachingBlock)
+        # TODO remove this assertion
         assert block.physical_block_index is not None
 
         if block.content_hash is None:
@@ -230,7 +231,7 @@ class PrefixCachingBlock(Block):
         return self._cached_content_hash
 
     @staticmethod
-    def hash_block_tokens(is_first_block: bool, prev_block_hash: Optional[int], cur_block_token_ids) -> int:
+    def hash_block_tokens(is_first_block: bool, prev_block_hash: Optional[int], cur_block_token_ids: List[int]) -> int:
         """Computes a hash value corresponding to the contents of a block and
         the contents of the preceding block(s). The hash value is used for
         prefix caching.
