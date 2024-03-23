@@ -282,21 +282,30 @@ async def benchmark(
         tokenizer=tokenizer,
     )
 
-    print("{s:{c}^{n}}".format(s=' Serving Benchmark Result ',n=50,c='='))
+    print("{s:{c}^{n}}".format(s=' Serving Benchmark Result ', n=50, c='='))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
-    print("{:<40} {:<10.2f}".format("Benchmark duration (s):", benchmark_duration))
+    print("{:<40} {:<10.2f}".format("Benchmark duration (s):",
+                                    benchmark_duration))
     print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
-    print("{:<40} {:<10}".format("Total generated tokens:", metrics.total_output))
-    print("{:<40} {:<10.2f}".format("Request throughput (req/s):", metrics.request_throughput))
-    print("{:<40} {:<10.2f}".format("Input token throughput (tok/s):", metrics.input_throughput))
-    print("{:<40} {:<10.2f}".format("Output token throughput (tok/s):", metrics.output_throughput))
-    print("{s:{c}^{n}}".format(s='Time to First Token',n=50,c='-'))
+    print("{:<40} {:<10}".format("Total generated tokens:",
+                                 metrics.total_output))
+    print("{:<40} {:<10.2f}".format("Request throughput (req/s):",
+                                    metrics.request_throughput))
+    print("{:<40} {:<10.2f}".format("Input token throughput (tok/s):",
+                                    metrics.input_throughput))
+    print("{:<40} {:<10.2f}".format("Output token throughput (tok/s):",
+                                    metrics.output_throughput))
+    print("{s:{c}^{n}}".format(s='Time to First Token', n=50, c='-'))
     print("{:<40} {:<10.2f}".format("Mean TTFT (ms):", metrics.mean_ttft_ms))
-    print("{:<40} {:<10.2f}".format("Median TTFT (ms):", metrics.median_ttft_ms))
+    print("{:<40} {:<10.2f}".format("Median TTFT (ms):",
+                                    metrics.median_ttft_ms))
     print("{:<40} {:<10.2f}".format("P99 TTFT (ms):", metrics.p99_ttft_ms))
-    print("{s:{c}^{n}}".format(s='Time per Output Token (excl. 1st token)',n=50,c='-'))
+    print("{s:{c}^{n}}".format(s='Time per Output Token (excl. 1st token)',
+                               n=50,
+                               c='-'))
     print("{:<40} {:<10.2f}".format("Mean TPOT (ms):", metrics.mean_tpot_ms))
-    print("{:<40} {:<10.2f}".format("Median TPOT (ms):", metrics.median_tpot_ms))
+    print("{:<40} {:<10.2f}".format("Median TPOT (ms):",
+                                    metrics.median_tpot_ms))
     print("{:<40} {:<10.2f}".format("P99 TPOT (ms):", metrics.p99_tpot_ms))
     print("=" * 50)
 
