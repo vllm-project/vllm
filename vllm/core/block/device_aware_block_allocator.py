@@ -58,7 +58,7 @@ class DeviceAwareBlockAllocator:
         cpu_block_allocator: BlockAllocator,
         gpu_block_allocator: BlockAllocator,
     ):
-        assert not (cpu_block_allocator.all_block_ids & gpu_block_allocator.all_block_ids)
+        assert not (cpu_block_allocator.all_block_ids & gpu_block_allocator.all_block_ids), "cpu and gpu block allocators can't have intersection of block ids"
 
         self._allocators = {
             Device.CPU: cpu_block_allocator,
