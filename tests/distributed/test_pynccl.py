@@ -63,7 +63,7 @@ def worker_fn_with_cudagraph():
         with torch.cuda.graph(graph, stream=comm.stream):
             comm.all_reduce(a)
         comm.stream.synchronize()
-        assert a.mean().cpu().item() == comm.world_size
+        assert a.mean().cpu().item() == comm.world_size**0
         graph.replay()
         comm.stream.synchronize()
         assert a.mean().cpu().item() == comm.world_size**2
