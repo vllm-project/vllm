@@ -270,6 +270,62 @@ class TestPrefixCachingBlockAllocator:
 
             block_to_free = new_block
 
+    @staticmethod
+    @pytest.mark.parametrize("num_blocks", [1024])
+    @pytest.mark.parametrize("block_size", [16])
+    @pytest.mark.parametrize("seed", list(range(20)))
+    def test_get_num_free_blocks(num_blocks: int, block_size: int, seed: int):
+        allocator = PrefixCachingBlockAllocator(num_blocks=num_blocks, block_size=block_size)
+        num_blocks_to_consume = random.randint(1, num_blocks-1)
+
+        # Create token ids that will exhaust all blocks.
+        token_ids = list(range(num_blocks_to_consume * block_size))
+
+        chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
+                    block_size=block_size,
+                    token_ids=token_ids,
+                    allocator=allocator,
+        )
+
+        # Free each block in chain, assert num free blocks includes new free block.
+        for i, block in enumerate(chain):
+            assert allocator.get_num_free_blocks() == (num_blocks - num_blocks_to_consume + i)
+            allocator.free(block)
+
+    @staticmethod
+    @pytest.mark.parametrize("num_blocks", [1024])
+    @pytest.mark.parametrize("block_size", [16])
+    @pytest.mark.parametrize("seed", list(range(20)))
+    def test_get_num_free_blocks_shared(num_blocks: int, block_size: int, seed: int):
+        allocator = PrefixCachingBlockAllocator(num_blocks=num_blocks, block_size=block_size)
+        num_blocks_to_consume = random.randint(1, num_blocks-1)
+
+        # Create token ids that will exhaust all blocks.
+        token_ids = list(range(num_blocks_to_consume * block_size))
+
+        first_chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
+                    block_size=block_size,
+                    token_ids=token_ids,
+                    allocator=allocator,
+        )
+        second_chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
+                    block_size=block_size,
+                    token_ids=token_ids,
+                    allocator=allocator,
+        )
+
+        # Free each block in the first chain. Since all blocks are shared, the free count should
+        # stay constant.
+        for i, block in enumerate(first_chain):
+            assert allocator.get_num_free_blocks() == (num_blocks - num_blocks_to_consume)
+            allocator.free(block)
+
+        # Free each block in the second chain. Since the refcount is now zero, the free count
+        # should increment with each free.
+        for i, block in enumerate(second_chain):
+            assert allocator.get_num_free_blocks() == (num_blocks - num_blocks_to_consume + i)
+            allocator.free(block)
+        
 
     @staticmethod
     def create_immutable_chain(block_size: int,

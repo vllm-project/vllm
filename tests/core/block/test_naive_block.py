@@ -65,3 +65,19 @@ class TestNaiveBlockAllocator:
                 oom_block = allocate_block()
 
             block_to_free = new_block
+
+    @staticmethod
+    @pytest.mark.parametrize("allocate_type", ["immutable", "mutable"])
+    @pytest.mark.parametrize("num_blocks", [1024])
+    @pytest.mark.parametrize("block_size", [16])
+    def test_get_num_free_blocks(allocate_type: str, num_blocks: int, block_size: int):
+        allocator = NaiveBlockAllocator(create_block=NaiveBlock, num_blocks=num_blocks, block_size=block_size)
+        allocate_block = TestNaiveBlockAllocator.create_allocate_lambda(allocate_type, allocator, prev_block=None, token_ids=list(range(block_size)))
+        
+        assert allocator.get_num_free_blocks() == num_blocks
+
+        blocks = [allocate_block() for _ in range(num_blocks)]
+
+        for i, block in enumerate(blocks):
+            assert allocator.get_num_free_blocks() == i
+            allocator.free(block)

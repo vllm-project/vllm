@@ -9,24 +9,6 @@ from vllm.utils import Device
 _BLANK_TOKEN_ID = -1
 
 DEFAULT_LAST_ACCESSED_TIME = -1
-
-class NaiveBlock(Block):
-    def __init__(self, prev_block: Block, token_ids: List[int], block_size: int, physical_block_index: Optional[int] = None):
-        self._token_ids = token_ids[:]
-        self._prev_block = prev_block
-        self._physical_block_index = physical_block_index
-
-    def append_token_ids(self, token_ids: List[int]) -> None:
-        pass
-
-    @property
-    def physical_block_index(self) -> Optional[int]:
-        return self._physical_block_index
-
-    @physical_block_index.setter
-    def physical_block_index(self, value: Optional[int]) -> None:
-        # TODO only allow call from allocator?
-        self._physical_block_index = value
     
 
 class NaiveBlockAllocator(BlockAllocator):
@@ -62,6 +44,9 @@ class NaiveBlockAllocator(BlockAllocator):
         if refcount == 0:
             self._free_block_indices.add(block_index)
 
+    def get_num_free_blocks(self) -> int:
+        return len(self._free_block_indices)
+
     def _allocate_new_block(self):
         if not self._free_block_indices:
             raise BlockAllocator.NoFreeBlocksError()
@@ -74,3 +59,21 @@ class NaiveBlockAllocator(BlockAllocator):
     @property
     def refcounter(self):
         return self._refcounter
+
+class NaiveBlock(Block):
+    def __init__(self, prev_block: Block, token_ids: List[int], block_size: int, physical_block_index: Optional[int] = None):
+        self._token_ids = token_ids[:]
+        self._prev_block = prev_block
+        self._physical_block_index = physical_block_index
+
+    def append_token_ids(self, token_ids: List[int]) -> None:
+        pass
+
+    @property
+    def physical_block_index(self) -> Optional[int]:
+        return self._physical_block_index
+
+    @physical_block_index.setter
+    def physical_block_index(self, value: Optional[int]) -> None:
+        # TODO only allow call from allocator?
+        self._physical_block_index = value

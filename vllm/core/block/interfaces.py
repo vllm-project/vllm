@@ -26,6 +26,10 @@ class BlockAllocator(ABC):
     def free(self, block: Block) -> None:
         pass
 
+    @abstractmethod
+    def get_num_free_blocks(self) -> int:
+        pass
+
     class NoFreeBlocksError(ValueError):
         pass
 

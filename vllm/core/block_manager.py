@@ -462,6 +462,10 @@ class BlockSpaceManager:
 
     def get_common_computed_block_ids(self,
                                       seq_group: SequenceGroup) -> List[int]:
+        """Return the block ids that are common for a given sequence group.
+
+        Used in prefill (can skip prefill of some blocks).
+        """
         # Can return non-empty result only with prefix caching enabled.
         if not self.enable_caching:
             return []

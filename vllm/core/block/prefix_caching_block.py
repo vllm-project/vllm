@@ -123,6 +123,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             assert block.content_hash not in self._unused_cached_blocks
             self._unused_cached_blocks[block.content_hash] = physical_block_index
 
+    def get_num_free_blocks(self) -> int:
+        return self._hashless_allocator.get_num_free_blocks() + len(self._unused_cached_blocks)
+
     # TODO name: upsert_
     # promote
     # replace
