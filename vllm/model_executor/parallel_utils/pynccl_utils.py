@@ -13,9 +13,11 @@ try:
         ncclGetVersion,
     )
     logger.info(f"vLLM is using nccl=={ncclGetVersion()}")
-except Exception:
+except Exception as e:
     # in non-NVIDIA environments, we can't import the nccl module
     # e.g. when running on machines with AMD GPUs
+    logger.info(f"Failed to import NCCL library: {e}")
+    logger.info("It is expected if you are not running on NVIDIA GPUs.")
     pass
 
 comm: Optional["NCCLCommunicator"] = None
