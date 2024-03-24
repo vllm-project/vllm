@@ -2,8 +2,6 @@ import contextlib
 import time
 from typing import Dict, List, Optional, Tuple, Set, Union
 
-import inspect
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -571,7 +569,6 @@ class ModelRunner:
             model_executable = self.graph_runners[graph_batch_size]
         else:
             model_executable = self.model
-
         hidden_states = model_executable(
             input_ids=input_tokens,
             positions=input_positions,

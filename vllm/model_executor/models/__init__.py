@@ -46,7 +46,6 @@ _MODELS = {
     "StableLMEpochForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "StableLmForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
-    # embedded model
     "XLMRobertaModel": ("bgem3", "BGEM3FlagForCausalLM"),
 }
 

@@ -112,18 +112,6 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump())
 
 
-@app.post("/v1/embeddings")
-async def create_embeddings(request: EmbeddingRequest):
-
-    ## need to implement
-    generator = await openai_serving_completion.create_completion()
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
-    else:
-        return JSONResponse(content=generator.model_dump())
-
-
 if __name__ == "__main__":
     args = parse_args()
 
