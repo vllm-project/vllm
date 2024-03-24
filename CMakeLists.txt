@@ -15,6 +15,9 @@ set(PYTHON_SUPPORTED_VERSIONS "3.8" "3.9" "3.10" "3.11")
 # Supported NVIDIA architectures.
 set(CUDA_SUPPORTED_ARCHS "7.0;7.5;8.0;8.6;8.9;9.0")
 
+# used when building pytorch-related extensions
+set(TORCH_CUDA_ARCH_LIST "7.0;7.5;8.0;8.6;8.9;9.0")
+
 # Supported AMD GPU architectures.
 set(HIP_SUPPORTED_ARCHS "gfx908;gfx90a;gfx942;gfx1100")
 
@@ -28,7 +31,7 @@ set(HIP_SUPPORTED_ARCHS "gfx908;gfx90a;gfx942;gfx1100")
 # requirements.txt files and should be kept consistent.  The ROCm torch
 # versions are derived from Dockerfile.rocm
 #
-set(TORCH_SUPPORTED_VERSION_CUDA "2.1.2")
+set(TORCH_SUPPORTED_VERSION_CUDA "2.2.0")
 set(TORCH_SUPPORTED_VERSION_ROCM_5X "2.0.1")
 set(TORCH_SUPPORTED_VERSION_ROCM_6X "2.1.1")
 

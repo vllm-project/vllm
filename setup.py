@@ -11,6 +11,12 @@ from setuptools.command.build_ext import build_ext
 from shutil import which
 import torch
 from torch.utils.cpp_extension import CUDA_HOME
+import zipfile
+import shutil
+import logging
+import tempfile
+
+logger = logging.getLogger(__name__)
 
 ROOT_DIR = os.path.dirname(__file__)
 
@@ -188,6 +194,50 @@ def _install_punica() -> bool:
     return bool(int(os.getenv("VLLM_INSTALL_PUNICA_KERNELS", "0")))
 
 
+if _is_cuda():
+
+    # tricky part, nccl 2.19 has a bug that increased memory overhead
+    # of cudagraph. However, pytorch has binary dependencies on nccl 2.19,
+    # simply `pip install nvidia-nccl-cu12==2.18.3` will break pytorch,
+    # so we have to manually download nccl 2.18 and keep the library to
+    #  a secrect place
+
+    # Define the URL of the file and the directory to unzip to
+    file_url = ('https://files.pythonhosted.org/packages/44/6e/'
+                '3c9cd7007072f8a63dae7b5eddd1cc1525fd357377467ce3a4749b02d5ff'
+                '/nvidia_nccl_cu12-2.18.3-py3-none-manylinux1_x86_64.whl')
+
+    logger.info('Installing NVIDIA NCCL library...')
+
+    target_dir = os.path.dirname(os.path.abspath(__file__)) + "/vllm/lib/"
+    with tempfile.TemporaryDirectory() as temp_dir:
+        local_zip_path = (
+            f"{temp_dir}/"
+            "nvidia_nccl_cu12-2.18.3-py3-none-manylinux1_x86_64.whl")
+        # check if the target directory exists
+        if not os.path.exists(target_dir):
+            logger.info(f'Creating target directory {target_dir} ...')
+            os.makedirs(target_dir)
+        # Check if the file is already downloaded
+        if os.path.exists(target_dir + "nvidia"):
+            logger.info('library already exists.')
+        else:
+            # Download the file
+            logger.info('Downloading file...')
+            os.system(f"wget {file_url} -q -P {temp_dir}/")
+            # Unzip the file
+            logger.info('Unzipping file...')
+            with zipfile.ZipFile(local_zip_path, 'r') as zip_ref:
+                zip_ref.extractall(temp_dir)
+            shutil.rmtree(f"{temp_dir}/nvidia_nccl_cu12-2.18.3.dist-info")
+            os.remove(local_zip_path)
+            # Move the unzipped files to the target directory
+            logger.info('Moving files...')
+            os.system(f"mv {temp_dir}/nvidia {target_dir}")
+            so_path = f"{target_dir}/nvidia/nccl/lib/libnccl.so.2"
+            os.rename(so_path, so_path.replace(".so.2", ".so.2.18.3"))
+
+
 def get_hipcc_rocm_version():
     # Run the hipcc --version command
     result = subprocess.run(['hipcc', '--version'],
@@ -330,7 +380,10 @@ if not _is_neuron():
     ext_modules.append(CMakeExtension(name="vllm._C"))
 
 package_data = {
-    "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
+    "vllm": [
+        "py.typed", "model_executor/layers/fused_moe/configs/*.json",
+        "lib/nvidia/nccl/lib/libnccl.so.2.18.3"
+    ]
 }
 if os.environ.get("VLLM_USE_PRECOMPILED"):
     package_data["vllm"].append("*.so")
@@ -362,6 +415,8 @@ setup(
     python_requires=">=3.8",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
-    cmdclass={"build_ext": cmake_build_ext} if not _is_neuron() else {},
+    cmdclass={
+        "build_ext": cmake_build_ext if not _is_neuron() else build_ext,
+    },
     package_data=package_data,
 )
