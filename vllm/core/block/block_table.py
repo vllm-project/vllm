@@ -36,7 +36,7 @@ class BlockTable:
         self._blocks: Optional[List[Block]] = None
     
     def allocate(self, device: Device = Device.GPU) -> None:
-        assert self._blocks is None
+        assert not self._is_allocated
         self._blocks = self._allocate_blocks_for_token_ids(prev_block=None, token_ids=self._token_ids, device=device)
 
     def append_token_ids(self, token_ids: List[int]) -> None:
@@ -44,7 +44,7 @@ class BlockTable:
         Append tokens to it.
             the block will manage CoW itself.
         """
-        assert self._blocks is not None
+        assert self._is_allocated
 
         # Currently the block table only supports
         # appending tokens to GPU blocks.
@@ -76,6 +76,7 @@ class BlockTable:
         # Currently the block table only supports
         # appending tokens to GPU blocks.
         device = Device.GPU
+        assert self._is_allocated
 
         # TODO optimize O(seq_len)
         cur_num_empty_slots = sum(block.num_empty_slots for block in self._blocks)
@@ -91,14 +92,14 @@ class BlockTable:
 
 
     def free(self) -> None:
-        assert self._blocks is not None
+        assert self._is_allocated
         for block in self._blocks:
             self._allocator.free(block)
         self._blocks = None
 
     @property
     def physical_block_ids(self) -> List[int]:
-        assert self._blocks is not None
+        assert self._is_allocated
         return [block.physical_block_index for block in self._blocks]
 
     def _allocate_blocks_for_token_ids(self, prev_block: Optional[Block], token_ids: List[int], device: Device) -> List[Block]:
@@ -114,3 +115,7 @@ class BlockTable:
             blocks.append(prev_block)
 
         return blocks
+
+    @property
+    def _is_allocated(self) -> bool:
+        return self._blocks is not None
