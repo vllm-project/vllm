@@ -22,6 +22,7 @@ from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
+from transformers import Starcoder2Config
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -32,6 +33,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearMethodBase,
                                                QKVParallelLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, ParallelLMHead, DEFAULT_VOCAB_PADDING_SIZE)
@@ -40,13 +42,6 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
-
-try:
-    from transformers import Starcoder2Config
-except ImportError:
-    # fallback to PretrainedConfig
-    # NOTE: Please install transformers from source or use transformers>=4.39.0
-    from transformers import PretrainedConfig as Starcoder2Config
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -59,60 +54,29 @@ class Starcoder2Attention(nn.Module):
         super().__init__()
         self.config = config
 
-    def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.down_proj(x)
-        return x
-
-
-class AquilaRMSNorm(nn.Module):
-
-    def __init__(self, hidden_size, eps=1e-6):
-        """
-        AquilaRMSNorm is equivalent to T5LayerNorm
-        """
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        variance = hidden_states.to(torch.float32).pow(2).mean(-1,
-                                                               keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance +
-                                                    self.variance_epsilon)
-
-        return (self.weight * hidden_states).to(input_dtype)
-
-
-class AquilaAttention(nn.Module):
-
-    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        rope_theta: float = 10000,
-        max_position_embeddings: int = 8192,
-        rope_scaling: Optional[Dict[str, Any]] = None,
-        linear_method: Optional[LinearMethodBase] = None,
-    ):
-        super().__init__()
-        self.hidden_size = hidden_size
+        self.hidden_size = config.hidden_size
         tp_size = get_tensor_model_parallel_world_size()
-        self.total_num_heads = num_heads
+        self.total_num_heads = config.num_attention_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
-        self.total_num_kv_heads = num_kv_heads
-        assert self.total_num_kv_heads % tp_size == 0
-        self.num_kv_heads = self.total_num_kv_heads // tp_size
-        self.head_dim = hidden_size // self.total_num_heads
+        self.total_num_kv_heads = config.num_key_value_heads
+        if self.total_num_kv_heads >= tp_size:
+            # Number of KV heads is greater than TP size, so we partition
+            # the KV heads across multiple tensor parallel GPUs.
+            assert self.total_num_kv_heads % tp_size == 0
+        else:
+            # Number of KV heads is less than TP size, so we replicate
+            # the KV heads across multiple tensor parallel GPUs.
+            assert tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+        self.head_dim = self.hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
-        self.max_position_embeddings = max_position_embeddings
+        self.rope_theta = config.rope_theta
+        self.max_position_embeddings = config.max_position_embeddings
+        self.use_bias = config.use_bias
+        self.sliding_window = config.sliding_window
 
         self.qkv_proj = QKVParallelLinear(
             self.hidden_size,
@@ -158,9 +122,6 @@ class AquilaAttention(nn.Module):
         output, _ = self.o_proj(attn_output)
         return output
 
-                    colbert_scores = self.colbert_score(q_colbert_vecs, p_colbert_vecs,
-                                                        q_mask=query['attention_mask'])  # B, B * N
-                    colbert_loss = self.compute_loss(colbert_scores, targets)
 
 class Starcoder2MLP(nn.Module):
 
@@ -288,7 +249,9 @@ class Starcoder2ForCausalLM(nn.Module):
                 padding_size=DEFAULT_VOCAB_PADDING_SIZE,
             )
             self.lm_head_weight = self.lm_head.weight
-        self.sampler = Sampler(self.unpadded_vocab_size, config.vocab_size)
+        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                config.vocab_size)
+        self.sampler = Sampler()
 
     def forward(
         self,
@@ -301,13 +264,18 @@ class Starcoder2ForCausalLM(nn.Module):
                                    input_metadata)
         return hidden_states
 
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head_weight, hidden_states,
+                                       sampling_metadata)
+        return logits
+
     def sample(
         self,
-        hidden_states: Optional[torch.Tensor],
+        logits: Optional[torch.Tensor],
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(self.lm_head_weight, hidden_states,
-                                   sampling_metadata)
+        next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
     def load_weights(self,

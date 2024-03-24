@@ -374,7 +374,6 @@ class LLMEngine:
             parent_seq.seq_id: []
             for parent_seq in parent_seqs
         }
-
         for sample in samples:
             parent_child_dict[sample.parent_seq_id].append(sample)
         # List of (child, parent)
@@ -552,7 +551,6 @@ class LLMEngine:
         # Free the finished sequence groups.
         self.scheduler.free_finished_seq_groups()
 
-        request_outputs: List[RequestOutput] = []
         # Create the outputs.
         request_outputs: List[RequestOutput] = []
         for seq_group in scheduled_seq_groups:
@@ -566,7 +564,7 @@ class LLMEngine:
         # Log stats.
         if self.log_stats:
             self.stat_logger.log(self._get_stats(scheduler_outputs))
-    
+
         return request_outputs
 
     def step(self) -> List[RequestOutput]:
@@ -629,7 +627,7 @@ class LLMEngine:
                 scheduler_outputs.blocks_to_copy)
         else:
             output = []
-        
+
         return self._process_model_outputs(output, scheduler_outputs)
 
     def do_log_stats(self) -> None:
