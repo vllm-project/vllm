@@ -370,10 +370,7 @@ class FalconForCausalLM(nn.Module):
         self.config = config
         self.linear_method = linear_method
         self.transformer = FalconModel(config, linear_method)
-        self.lm_head = ParallelLMHead(
-            config.vocab_size,
-            config.hidden_size,
-        )
+        self.lm_head_weight = self.transformer.word_embeddings.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
@@ -394,7 +391,7 @@ class FalconForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head.weight, hidden_states,
+        logits = self.logits_processor(self.lm_head_weight, hidden_states,
                                        sampling_metadata)
         return logits
 
@@ -419,12 +416,12 @@ class FalconForCausalLM(nn.Module):
         else:
             total_num_kv_heads = total_num_heads
         num_query_heads_per_kv_head = total_num_heads // total_num_kv_heads
-        params_dict = dict(self.named_parameters())
-        lm_head_loaded = False
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
-            if name.find("lm_head") != -1:
-                lm_head_loaded = True
+            if name == "lm_head.weight":
+                # Falcon uses tied embeddings.
+                continue
             # Skip loading extra bias for GPTQ models.
             if name.endswith(".bias") and name not in params_dict:
                 continue
@@ -455,7 +452,3 @@ class FalconForCausalLM(nn.Module):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
-            if not lm_head_loaded:
-                # If `lm_head_loaded` is false, set lm_head's weight to word_embeddings' weight, assuming tied embeddings in the model.
-                print('This might be a tied embedding model, using the weight of word_embeddings to initialize lm_head.')
-                self.lm_head.weight = self.transformer.word_embeddings.weight   
