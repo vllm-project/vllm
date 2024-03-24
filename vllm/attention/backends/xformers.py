@@ -12,7 +12,10 @@ from xformers.ops.fmha.attn_bias import (AttentionBias,
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
 from vllm.attention.ops.paged_attn import PagedAttention, PagedAttentionMetadata
+from vllm.logger import init_logger
 from vllm.utils import is_hip
+
+logger = init_logger(__name__)
 
 
 class XFormersBackend(AttentionBackend):
@@ -401,7 +404,12 @@ def _check_use_naive_attention() -> bool:
     if not is_hip():
         return False
     # For ROCm, check whether flash attention is installed or not.
-    return importlib.util.find_spec("flash_attn") is None
+    has_flash_attn = importlib.util.find_spec("flash_attn") is None
+    if not has_flash_attn:
+        logger.warning("flash_attn is not installed. Using naive attention. "
+                       "This will take significantly more GPU memory.")
+        return True
+    return False
 
 
 def _naive_masked_attention(
