@@ -27,10 +27,12 @@ def test_models(
     hf_model = hf_runner(model, dtype=dtype)
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
     del hf_model
+    torch.cuda.empty_cache()
 
     vllm_model = vllm_runner(model, dtype=dtype, tensor_parallel_size=2)
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
+    torch.cuda.empty_cache()
 
     for i in range(len(example_prompts)):
         hf_output_ids, hf_output_str = hf_outputs[i]
