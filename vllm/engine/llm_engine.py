@@ -542,8 +542,14 @@ class LLMEngine:
             for seq_group in scheduled_seq_groups:
                 self.scheduler.mark_blocks_as_computed(seq_group)
 
-        for seq_group, outputs in zip(scheduled_seq_groups, output):
-            self._process_sequence_group_outputs(seq_group, outputs)
+        if self.embedded_model: 
+            for i, seq_group in enumerate(scheduled_seq_groups):
+                for seq in seq_group.get_seqs():
+                    seq.status = SequenceStatus.FINISHED_STOPPED
+                seq_group.embed = output[i]
+        else:
+            for seq_group, outputs in zip(scheduled_seq_groups, output):
+                self._process_sequence_group_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.
         self.scheduler.free_finished_seq_groups()
