@@ -15,10 +15,11 @@ NUM_LAYERS = [1]  # Arbitrary values for testing
 NUM_HEADS = [8]  # Arbitrary values for testing
 HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 BLOCK_SIZES = [8, 16, 32]
+
+# Arbitrary values for testing
 # reduce the size for ROCm test to avoid HIP OOM
-NUM_BLOCKS = [1024, 36000] if not is_hip() else [
-    1024, 10000
-]  # Arbitrary values for testing
+NUM_BLOCKS = [1024, 10000] if is_hip() else [1024, 36000]
+
 NUM_MAPPINGS = [256]  # Arbitrary values for testing
 SEEDS = [0]
 CUDA_DEVICES = [
