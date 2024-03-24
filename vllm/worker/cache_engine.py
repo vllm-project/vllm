@@ -46,32 +46,26 @@ class CacheEngine:
         self.attn_backend = get_attn_backend(model_config.dtype)
 
         # Initialize the cache.
-        self.gpu_cache = self.allocate_gpu_cache()
-        self.cpu_cache = self.allocate_cpu_cache()
+        self.gpu_cache = self._allocate_kv_cache(self.num_gpu_blocks, "cuda")
+        self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks, "cpu")
 
-    def allocate_gpu_cache(self) -> List[torch.Tensor]:
+    def _allocate_kv_cache(
+        self,
+        num_blocks: int,
+        device: str,
+    ) -> List[torch.Tensor]:
+        """Allocates KV cache on the specified device."""
         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-            self.num_gpu_blocks, self.block_size, self.num_heads,
-            self.head_size)
-        gpu_cache = [
-            torch.empty(kv_cache_shape, dtype=self.dtype, device="cuda")
-            for _ in range(self.num_layers)
-        ]
-        return gpu_cache
-
-    def allocate_cpu_cache(self) -> List[torch.Tensor]:
-        pin_memory = is_pin_memory_available()
-        kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-            self.num_cpu_blocks, self.block_size, self.num_heads,
-            self.head_size)
-        cpu_cache: List[torch.Tensor] = []
+            num_blocks, self.block_size, self.num_heads, self.head_size)
+        pin_memory = is_pin_memory_available() if device == "cpu" else False
+        kv_cache: List[torch.Tensor] = []
         for _ in range(self.num_layers):
-            cpu_cache.append(
+            kv_cache.append(
                 torch.empty(kv_cache_shape,
                             dtype=self.dtype,
                             pin_memory=pin_memory,
-                            device="cpu"))
-        return cpu_cache
+                            device=device))
+        return kv_cache
 
     def swap_in(self, src_to_dst: Dict[int, int]) -> None:
         for i in range(self.num_layers):
