@@ -226,7 +226,7 @@ class XFormersImpl(AttentionImpl):
                                                   self.num_queries_per_kv,
                                                   value.shape[-1])
 
-                if self.use_ref_attention:
+                if self.use_naive_attention:
                     output = torch.empty_like(query)
                     start = 0
                     for _, prompt_len in enumerate(attn_metadata.prompt_lens):
