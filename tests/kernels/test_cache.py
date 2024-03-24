@@ -17,8 +17,8 @@ HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 BLOCK_SIZES = [8, 16, 32]
 
 # Arbitrary values for testing
-# reduce the size for ROCm test to avoid HIP OOM
-NUM_BLOCKS = [1024, 10000] if is_hip() else [1024, 36000]
+# don't make it too large. e.g. [1024, 36000] will OOM
+NUM_BLOCKS = [1024, 10000]
 
 NUM_MAPPINGS = [256]  # Arbitrary values for testing
 SEEDS = [0]
