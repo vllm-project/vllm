@@ -42,6 +42,15 @@ class PagedAttention:
         return [64, 80, 96, 112, 128, 256]
 
     @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+    ) -> Tuple[int, ...]:
+        return (2, num_blocks, block_size * num_kv_heads * head_size)
+
+    @staticmethod
     def split_kv_cache(
         kv_cache: torch.Tensor,
         num_kv_heads: int,
