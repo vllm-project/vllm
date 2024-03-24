@@ -164,7 +164,7 @@ class XFormersImpl(AttentionImpl):
         # AMD Radeon 7900 series (gfx1100) currently does not support xFormers
         # nor FlashAttention. As a temporary workaround, we use naive PyTorch
         # implementation of attention.
-        self.use_ref_attention = _check_use_ref_attention()
+        self.use_naive_attention = _check_use_naive_attention()
 
     def forward(
         self,
@@ -231,7 +231,7 @@ class XFormersImpl(AttentionImpl):
                     start = 0
                     for _, prompt_len in enumerate(attn_metadata.prompt_lens):
                         end = start + prompt_len
-                        out = _ref_masked_attention(
+                        out = _naive_masked_attention(
                             query[None, start:end],
                             key[None, start:end],
                             value[None, start:end],
@@ -396,15 +396,14 @@ def _make_alibi_bias(
     return attn_biases
 
 
-def _check_use_ref_attention() -> bool:
+def _check_use_naive_attention() -> bool:
     if not is_hip():
         return False
     # For ROCm, check whether flash attention is installed or not.
-    # if not, use_ref_attention needs to be True
     return importlib.util.find_spec("flash_attn") is None
 
 
-def _ref_masked_attention(
+def _naive_masked_attention(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
