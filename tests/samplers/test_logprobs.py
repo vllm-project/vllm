@@ -24,6 +24,7 @@ def test_get_prompt_logprobs(
         max_tokens=max_tokens,
     )
     del hf_model
+    torch.cuda.empty_cache()
 
     vllm_model = vllm_runner(model, dtype=dtype, max_logprobs=num_top_logprobs)
     vllm_sampling_params = SamplingParams(max_tokens=max_tokens,
