@@ -161,9 +161,9 @@ class XFormersImpl(AttentionImpl):
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {suppored_head_sizes}.")
 
-        # Some old AMD GPUs do not support xFormers nor FlashAttention.
-        # As a temporary workaround, we use naive PyTorch implementation
-        # of attention.
+        # AMD Radeon 7900 series (gfx1100) currently does not support xFormers
+        # nor FlashAttention. As a temporary workaround, we use naive PyTorch
+        # implementation of attention.
         self.use_ref_attention = _check_use_ref_attention()
 
     def forward(
