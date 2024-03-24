@@ -13,6 +13,14 @@ class Block(ABC):
     def physical_block_index(self) -> Optional[int]:
         pass
 
+    @abstractproperty
+    def num_empty_slots(self) -> int:
+        pass
+
+    @abstractproperty
+    def is_full(self) -> bool:
+        pass
+
     class Factory(Protocol):
     
         @abstractmethod

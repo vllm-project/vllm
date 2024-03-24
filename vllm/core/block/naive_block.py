@@ -77,12 +77,16 @@ class NaiveBlockAllocator(BlockAllocator):
 
 class NaiveBlock(Block):
     def __init__(self, prev_block: Block, token_ids: List[int], block_size: int, physical_block_index: Optional[int] = None):
-        self._token_ids = token_ids[:]
+        self._token_ids = []
+        self._block_size = block_size
         self._prev_block = prev_block
         self._physical_block_index = physical_block_index
 
+        self.append_token_ids(token_ids)
+
     def append_token_ids(self, token_ids: List[int]) -> None:
-        pass
+        assert self.num_empty_slots >= len(token_ids)
+        self._token_ids.extend(token_ids)
 
     @property
     def physical_block_index(self) -> Optional[int]:
@@ -92,3 +96,11 @@ class NaiveBlock(Block):
     def physical_block_index(self, value: Optional[int]) -> None:
         # TODO only allow call from allocator?
         self._physical_block_index = value
+
+    @property
+    def is_full(self) -> bool:
+        return self.num_empty_slots == 0
+
+    @property
+    def num_empty_slots(self) -> int:
+        return self._block_size - len(self._token_ids)

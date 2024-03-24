@@ -159,6 +159,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         return self._cached_blocks[block.content_hash]
 
+
 class PrefixCachingBlock(Block):
     def __init__(
         self,
@@ -196,8 +197,13 @@ class PrefixCachingBlock(Block):
     def physical_block_index(self, value) -> None:
         self._physical_block_index = value
 
+    @property
     def is_full(self) -> bool:
         return len(self._token_ids) == self._block_size
+
+    @property
+    def num_empty_slots(self) -> int:
+        raise NotImplementedError
 
     @property
     def content_hash(self) -> Optional[int]:
@@ -213,7 +219,7 @@ class PrefixCachingBlock(Block):
             return self._cached_content_hash
 
         # We cannot compute a hash for the current block because it is not full.
-        if not self.is_full():
+        if not self.is_full:
             return None
 
         is_first_block = self._prev_block is None

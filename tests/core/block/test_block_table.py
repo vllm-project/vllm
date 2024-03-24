@@ -105,3 +105,34 @@ def test_allocate_free(block_size: int, sequence_len: int, allocator_type: str, 
 
         block_table.free()
         assert allocator.get_num_free_blocks(device) == num_device_blocks
+
+@pytest.mark.parametrize("block_size", [1, 8])
+@pytest.mark.parametrize("sequence_len", [1, 16, 129])
+@pytest.mark.parametrize("append_len", [1, 16, 129])
+def test_append_token_ids(block_size: int, sequence_len: int, append_len: int):
+    num_gpu_blocks = 1024
+
+    allocator = CpuGpuBlockAllocator.create(
+        allocator_type="naive",
+        num_gpu_blocks=num_gpu_blocks,
+        num_cpu_blocks=1024,
+        block_size=block_size,
+    )
+
+    token_ids = list(range(sequence_len))
+    token_ids_to_append = list(range(append_len))
+    
+    block_table = BlockTable(
+        token_ids=token_ids,
+        block_size=block_size,
+        block_allocator=allocator,
+    )
+
+    num_expected_blocks_before_append = len(list(chunk_list(token_ids, block_size)))
+    num_expected_appended_blocks = len(list(chunk_list(token_ids + token_ids_to_append, block_size))) - num_expected_blocks_before_append
+
+    block_table.allocate(device=Device.GPU)
+
+    assert len(block_table.physical_block_ids) == num_expected_blocks_before_append
+    block_table.append_token_ids(token_ids_to_append)
+    assert len(block_table.physical_block_ids) == num_expected_blocks_before_append + num_expected_appended_blocks
