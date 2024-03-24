@@ -250,7 +250,7 @@ class XFormersImpl(AttentionImpl):
                     # Use reshape instead.
                     return output.reshape(num_tokens, hidden_size)
 
-                output = self._run_memory_efficient_xformer_forward(
+                output = self._run_memory_efficient_xformers_forward(
                     query, key, value, attn_metadata)
             else:
                 # prefix-enabled attention
@@ -285,7 +285,7 @@ class XFormersImpl(AttentionImpl):
         # Reshape the output tensor.
         return output.view(-1, self.num_heads * self.head_size)
 
-    def _run_memory_efficient_xformer_forward(
+    def _run_memory_efficient_xformers_forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
