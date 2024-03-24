@@ -3,7 +3,7 @@ from typing import List, Optional, Set, Iterable, Tuple, Dict
 from abc import ABC, abstractmethod, abstractproperty
 
 from vllm.core.block.interfaces import Block, BlockAllocator
-from vllm.core.block.naive_block import NaiveBlockAllocator
+from vllm.core.block.naive_block import NaiveBlockAllocator, NaiveBlock
 from vllm.core.block.common import RefCounter
 
 from vllm.utils import Device
@@ -169,20 +169,23 @@ class PrefixCachingBlock(Block):
         prefix_caching_allocator: PrefixCachingBlockAllocator,
         physical_block_index: Optional[int] = None,
     ):
+        assert_prefix_caching_block_or_none(prev_block)
+
         self._prev_block = prev_block
-        self._token_ids = token_ids[:]
-        self._block_size = block_size
         self._cached_content_hash: Optional[int] = None
-        self._physical_block_index = physical_block_index
         self._prefix_caching_allocator = prefix_caching_allocator
 
-        assert_prefix_caching_block_or_none(prev_block)
+        self._block = NaiveBlock(
+            prev_block=prev_block,
+            token_ids=token_ids,
+            block_size=block_size,
+            physical_block_index=physical_block_index,
+        )
 
     def append_token_ids(self, token_ids: List[int]) -> None:
         assert token_ids
-        assert len(self._token_ids) + len(token_ids) <= self._block_size
 
-        self._token_ids.extend(token_ids)
+        self._block.append_token_ids(token_ids)
 
         # If the content hash is present, then the block can be made immutable.
         # Register ourselves with the allocator, potentially replacing the physical block index.
@@ -191,19 +194,23 @@ class PrefixCachingBlock(Block):
 
     @property
     def physical_block_index(self) -> Optional[int]:
-        return self._physical_block_index
+        return self._block.physical_block_index
 
     @physical_block_index.setter
     def physical_block_index(self, value) -> None:
-        self._physical_block_index = value
+        self._block.physical_block_index = value
 
     @property
     def is_full(self) -> bool:
-        return len(self._token_ids) == self._block_size
+        return self._block.is_full
 
     @property
     def num_empty_slots(self) -> int:
-        raise NotImplementedError
+        return self._block.num_empty_slots
+
+    @property
+    def block_size(self) -> int:
+        return self._block.block_size
 
     @property
     def content_hash(self) -> Optional[int]:
@@ -233,7 +240,7 @@ class PrefixCachingBlock(Block):
         self._cached_content_hash = PrefixCachingBlock.hash_block_tokens(
             is_first_block,
             prev_block_hash,
-            cur_block_token_ids=self._token_ids)
+            cur_block_token_ids=self._block.token_ids)
         return self._cached_content_hash
 
     @staticmethod

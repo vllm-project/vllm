@@ -104,3 +104,10 @@ class NaiveBlock(Block):
     @property
     def num_empty_slots(self) -> int:
         return self._block_size - len(self._token_ids)
+
+    @property
+    def token_ids(self) -> List[int]:
+        return self._token_ids
+
+    def block_size(self) -> int:
+        return self._block_size

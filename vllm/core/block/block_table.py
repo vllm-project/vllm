@@ -13,7 +13,7 @@ from vllm.utils import Device
 from vllm.core.evictor import Evictor, EvictionPolicy, make_evictor
 from vllm.core.block.naive_block import NaiveBlockAllocator, NaiveBlock
 from vllm.core.block.interfaces import DeviceAwareBlockAllocator, Block
-from vllm.utils import chunk_list
+from vllm.utils import chunk_list, cdiv
 
 
 class BlockTable:
@@ -39,24 +39,6 @@ class BlockTable:
         assert self._blocks is None
         self._blocks = self._allocate_blocks_for_token_ids(prev_block=None, token_ids=self._token_ids, device=device)
 
-    def _allocate_blocks_for_token_ids(self, prev_block: Optional[Block], token_ids: List[int], device: Device) -> List[Block]:
-        blocks = []
-        for block_token_ids in chunk_list(token_ids, self._block_size):
-            if len(block_token_ids) == self._block_size:
-                # If the block is full, create an immutable block.
-                prev_block = self._allocator.allocate_immutable(prev_block, token_ids=block_token_ids, device=device)
-            else:
-                # Else, partially fill a mutable block with token ids.
-                prev_block = self._allocator.allocate_mutable(prev_block=prev_block, device=device)
-                prev_block.append_token_ids(block_token_ids)
-            blocks.append(prev_block)
-
-        return blocks
-
-    """
-    Update token ids
-    Ensure lookahead
-    """
     def append_token_ids(self, token_ids: List[int]) -> None:
         """Track first mutable block.
         Append tokens to it.
@@ -91,7 +73,22 @@ class BlockTable:
             self._blocks.extend(new_blocks)
 
     def ensure_num_empty_slots(self, num_empty_slots: int) -> None:
-        pass
+        # Currently the block table only supports
+        # appending tokens to GPU blocks.
+        device = Device.GPU
+
+        # TODO optimize O(seq_len)
+        cur_num_empty_slots = sum(block.num_empty_slots for block in self._blocks)
+
+        if cur_num_empty_slots >= num_empty_slots:
+            return
+
+        slots_to_allocate = num_empty_slots - cur_num_empty_slots
+        blocks_to_allocate = cdiv(slots_to_allocate, self._block_size)
+        
+        for _ in range(blocks_to_allocate):
+            self._blocks.append(self._allocator.allocate_mutable(prev_block=self._blocks[-1], device=device))
+
 
     def free(self) -> None:
         assert self._blocks is not None
@@ -103,3 +100,17 @@ class BlockTable:
     def physical_block_ids(self) -> List[int]:
         assert self._blocks is not None
         return [block.physical_block_index for block in self._blocks]
+
+    def _allocate_blocks_for_token_ids(self, prev_block: Optional[Block], token_ids: List[int], device: Device) -> List[Block]:
+        blocks = []
+        for block_token_ids in chunk_list(token_ids, self._block_size):
+            if len(block_token_ids) == self._block_size:
+                # If the block is full, create an immutable block.
+                prev_block = self._allocator.allocate_immutable(prev_block, token_ids=block_token_ids, device=device)
+            else:
+                # Else, partially fill a mutable block with token ids.
+                prev_block = self._allocator.allocate_mutable(prev_block=prev_block, device=device)
+                prev_block.append_token_ids(block_token_ids)
+            blocks.append(prev_block)
+
+        return blocks
