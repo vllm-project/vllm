@@ -75,19 +75,18 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     num_prompt_tokens: int
     # The number of generation tokens. Doesn't include padding.
     num_generation_tokens: int
-    """
-    Definition of context_len, subquery_len, and seqlen.
-    |---------- N-1 iteration --------|
-    |---------------- N iteration ---------------------|
-    |- tokenA -|......................|-- newTokens ---|
-    |---------- context_len ----------|
-    |-------------------- seqlen ----------------------|
-                                      |- subquery_len -|
 
-    WARNING: context_len has different definition depending on if it is
-    prefill vs decoding. When it is prefill, it doesn't include new
-    tokens. When it is for decoding, it includes a new token.
-    """
+    # NOTE(sang): Definition of context_len, subquery_len, and seqlen.
+    # |---------- N-1 iteration --------|
+    # |---------------- N iteration ---------------------|
+    # |- tokenA -|......................|-- newTokens ---|
+    # |---------- context_len ----------|
+    # |-------------------- seqlen ----------------------|
+    #                                   |- subquery_len -|
+
+    # WARNING(sang): context_len has different definition depending on if it is
+    # prefill vs decoding. When it is prefill, it doesn't include new tokens.
+    # When it is for decoding, it includes a new token.
 
     # Maximum subquery length in the batch.
     max_subquery_len: Optional[int]
