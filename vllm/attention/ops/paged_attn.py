@@ -58,7 +58,7 @@ class PagedAttention:
         return key_cache, value_cache
 
     @staticmethod
-    def reshape_and_cache(
+    def write_to_paged_cache(
         key: torch.Tensor,
         value: torch.Tensor,
         key_cache: torch.Tensor,
