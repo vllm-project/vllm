@@ -1,5 +1,6 @@
 import pytest
-from vllm.sequence import (SequenceData, SequenceGroupOutput, SamplerOutput,
+
+from vllm.sequence import (SamplerOutput, SequenceData, SequenceGroupOutput,
                            SequenceOutput)
 
 
