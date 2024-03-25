@@ -4,8 +4,8 @@ psutil
 ray >= 2.9
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
-torch == 2.2.0
-xformers == 0.0.24  # Requires PyTorch 2.2.0.
+torch == 2.2.1
+xformers == 0.0.25  # Requires PyTorch 2.2.1.
 transformers >= 4.39.0  # Required for StarCoder2.
 fastapi
 uvicorn[standard]
