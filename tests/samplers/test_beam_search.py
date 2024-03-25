@@ -3,9 +3,9 @@
 Run `pytest tests/samplers/test_beam_search.py --forked`.
 """
 import gc
-import torch
 
 import pytest
+import torch
 
 # FIXME(zhuohan): The test can not pass if we:
 #   1. Increase max_tokens to 256.
