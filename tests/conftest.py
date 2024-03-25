@@ -6,8 +6,8 @@ import torch
 from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
-from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.config import TokenizerPoolConfig
+from vllm.transformers_utils.tokenizer import get_tokenizer
 
 _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]

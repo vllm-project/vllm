@@ -1,24 +1,23 @@
 import asyncio
 import time
+from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, List,
+                    Optional, Tuple)
+
 from fastapi import Request
-from typing import (AsyncGenerator, AsyncIterator, Callable, List, Optional,
-                    Dict, Tuple)
-from vllm.logger import init_logger
-from vllm.utils import random_uuid
+
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.openai.protocol import (
-    CompletionRequest,
-    CompletionResponse,
-    CompletionResponseChoice,
-    CompletionResponseStreamChoice,
-    CompletionStreamResponse,
-    LogProbs,
-    UsageInfo,
-)
-from vllm.outputs import RequestOutput
-from vllm.entrypoints.openai.serving_engine import OpenAIServing, LoRA
+from vllm.entrypoints.openai.protocol import (CompletionRequest,
+                                              CompletionResponse,
+                                              CompletionResponseChoice,
+                                              CompletionResponseStreamChoice,
+                                              CompletionStreamResponse,
+                                              LogProbs, UsageInfo)
+from vllm.entrypoints.openai.serving_engine import LoRA, OpenAIServing
+from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
+from vllm.outputs import RequestOutput
+from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
