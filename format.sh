@@ -205,9 +205,9 @@ isort_check_changed() {
     fi
 }
 
-# Run Codespell
-## This flag runs spell check of individual files. --files *must* be the first command line
-## arg to use this option.
+# Run Isort
+# This flag runs spell check of individual files. --files *must* be the first command line
+# arg to use this option.
 if [[ "$1" == '--files' ]]; then
    isort_check "${@:2}"
    # If `--all` is passed, then any further arguments are ignored and the
@@ -218,7 +218,7 @@ else
    # Check spelling only of the files that changed in last commit.
    isort_check_changed
 fi
-echo 'vLLM codespell: Done'
+echo 'vLLM isort: Done'
 
 if ! git diff --quiet &>/dev/null; then
     echo 'Reformatted files. Please review and stage the changes.'
