@@ -1,6 +1,6 @@
 """Attention layer with Flash and PagedAttention.
 
-NOTE(woosuk): At the moment, this file includes many duplicated code from
+NOTE(woosuk): At the moment, this file includes a lot of duplicated code from
 XFormers backend. The duplicated code will be removed once we use flash-attn or
 flashinfer for all the attention operations.
 """
