@@ -213,20 +213,6 @@ class PrefixCachingBlock(Block):
         if self.content_hash is not None:
             self.physical_block_index = self._prefix_caching_allocator.register_immutable_block(self)
 
-    def copy_recursively(self) -> "PrefixCachingBlock":
-        if self._prev_block is None:
-            prev_block = None
-        else:
-            prev_block = self._prev_block.copy_recursively()
-
-        return PrefixCachingBlock(
-            prev_block=prev_block,
-            token_ids=self._token_ids[:],
-            block_size=self._block_size,
-            prefix_caching_allocator=self.self._prefix_caching_allocator,
-            physical_block_index=self._physical_block_index,
-        )
-
     @property
     def physical_block_index(self) -> Optional[int]:
         return self._block.physical_block_index

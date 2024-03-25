@@ -109,19 +109,6 @@ class NaiveBlock(Block):
         assert self.num_empty_slots >= len(token_ids)
         self._token_ids.extend(token_ids)
 
-    def copy_recursively(self) -> "NaiveBlock":
-        if self._prev_block is None:
-            prev_block = None
-        else:
-            prev_block = self._prev_block.copy_recursively()
-
-        return NaiveBlock(
-            prev_block=prev_block,
-            token_ids=self._token_ids[:],
-            block_size=self._block_size,
-            physical_block_index=self._physical_block_index,
-        )
-
     @property
     def physical_block_index(self) -> Optional[int]:
         return self._physical_block_index

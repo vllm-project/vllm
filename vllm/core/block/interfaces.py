@@ -9,14 +9,6 @@ class Block(ABC):
     def append_token_ids(self, token_ids: List[int]) -> None:
         pass
 
-    @abstractmethod
-    def copy_recursively(self) -> "Block":
-        pass
-
-    #@abstractmethod
-    #def get_all_blocks(self) -> List["Block"]:
-    #    pass
-
     @abstractproperty
     def physical_block_index(self) -> Optional[int]:
         pass
