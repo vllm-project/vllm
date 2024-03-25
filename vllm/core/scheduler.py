@@ -409,7 +409,7 @@ class Scheduler:
         # sequence groups ares added to the front and the new sequence groups
         # are added to the back.
         leftover_waiting_sequences = deque()
-        while self._passed_delay(now) and self.waiting:
+        while self._passed_delay(time.time()) and self.waiting:
             seq_group = self.waiting[0]
 
             if token_budget.get() == 0:
