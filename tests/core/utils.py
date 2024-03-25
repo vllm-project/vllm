@@ -22,12 +22,13 @@ def create_dummy_prompt(
 
     return prompt, seq_group
 
+
 def create_seq_group(
-        seq_prompt_lens=1024,
-        seq_output_lens=(128,),
-        request_id='0',
-        seq_id_start=0,
-    ) -> SequenceGroup:
+    seq_prompt_lens=1024,
+    seq_output_lens=(128, ),
+    request_id='0',
+    seq_id_start=0,
+) -> SequenceGroup:
 
     assert len(seq_output_lens) > 0
 
@@ -41,7 +42,7 @@ def create_seq_group(
             prompt_token_ids=prompt_token_ids,
             block_size=16,
         )
-        
+
         for i in range(output_len):
             seq.append_token_id(
                 token_id=i,

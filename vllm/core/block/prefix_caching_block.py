@@ -12,11 +12,13 @@ _BLANK_TOKEN_ID = -1
 
 DEFAULT_LAST_ACCESSED_TIME = -1
 
+
 class PrefixCachingBlockAllocator(BlockAllocator):
     PrefixHash = int
     BlockIndex = int
+
     # TODO last access time / evictor integration
-    
+
     def __init__(
         self,
         num_blocks: int,
@@ -54,8 +56,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             physical_block_index=physical_block_index,
         )
 
-
-    def allocate_immutable(self, prev_block: Optional[Block], token_ids: List[int]) -> Block:
+    def allocate_immutable(self, prev_block: Optional[Block],
+                           token_ids: List[int]) -> Block:
         assert_prefix_caching_block_or_none(prev_block)
 
         block = self._create_block(
@@ -80,8 +82,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # TODO computed bit
 
         return block
- 
-    
+
     def allocate_mutable(self, prev_block: Block) -> Block:
         """Look in freelist. If found, return.
         Else, look in cachelist (refcount==0). If found, return.
@@ -91,11 +92,12 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         assert_prefix_caching_block_or_none(prev_block)
 
         try:
-            return self._hashless_allocator.allocate_mutable(prev_block=prev_block)
+            return self._hashless_allocator.allocate_mutable(
+                prev_block=prev_block)
         except BlockAllocator.NoFreeBlocksError:
             # We must check the unused cached blocks before raising OOM.
             pass
-        
+
         if self._unused_cached_blocks:
             # TODO policy for selecting block to remove
             content_hash_to_evict = next(iter(self._unused_cached_blocks))
@@ -103,7 +105,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             # Clear content hash mapping; the block will be overwritten.
             del self._cached_blocks[content_hash_to_evict]
 
-            physical_block_index = self._unused_cached_blocks.pop(content_hash_to_evict)
+            physical_block_index = self._unused_cached_blocks.pop(
+                content_hash_to_evict)
             refcount = self._refcounter.incr(physical_block_index)
             block = self._create_block(
                 prev_block=prev_block,
@@ -128,15 +131,16 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         if block.content_hash is None:
             return self._hashless_allocator.free(block)
-        
+
         physical_block_index = block.physical_block_index
         block.physical_block_index = None
         refcount = self._refcounter.decr(physical_block_index)
-        
+
         # If no longer used, add the block to the unused cached blocks.
         if refcount == 0:
             assert block.content_hash not in self._unused_cached_blocks
-            self._unused_cached_blocks[block.content_hash] = physical_block_index
+            self._unused_cached_blocks[
+                block.content_hash] = physical_block_index
 
     def fork(self, last_block: Block) -> List[Block]:
         source_blocks = get_all_blocks_recursively(last_block)
@@ -153,14 +157,14 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                     token_ids=block.token_ids,
                     physical_block_index=block.physical_block_index,
                     block_size=self._block_size,
-                )
-            )
+                ))
             prev_block = forked_blocks[-1]
 
         return forked_blocks
 
     def get_num_free_blocks(self) -> int:
-        return self._hashless_allocator.get_num_free_blocks() + len(self._unused_cached_blocks)
+        return self._hashless_allocator.get_num_free_blocks() + len(
+            self._unused_cached_blocks)
 
     @property
     def all_block_ids(self) -> frozenset[int]:
@@ -169,19 +173,22 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     # TODO name: upsert_
     # promote
     # replace
-    def register_immutable_block(self, block: "PrefixCachingBlock") -> BlockIndex:
+    def register_immutable_block(self,
+                                 block: "PrefixCachingBlock") -> BlockIndex:
         assert block.content_hash is not None
         assert block.physical_block_index is not None
 
         # If the content hash does not have a corresponding cached block,
         # set this block as the cached block.
         if block.content_hash not in self._cached_blocks:
-            self._cached_blocks[block.content_hash] = block.physical_block_index
+            self._cached_blocks[
+                block.content_hash] = block.physical_block_index
 
         return self._cached_blocks[block.content_hash]
 
 
 class PrefixCachingBlock(Block):
+
     def __init__(
         self,
         prev_block: Optional["PrefixCachingBlock"],
@@ -211,7 +218,8 @@ class PrefixCachingBlock(Block):
         # If the content hash is present, then the block can be made immutable.
         # Register ourselves with the allocator, potentially replacing the physical block index.
         if self.content_hash is not None:
-            self.physical_block_index = self._prefix_caching_allocator.register_immutable_block(self)
+            self.physical_block_index = self._prefix_caching_allocator.register_immutable_block(
+                self)
 
     @property
     def physical_block_index(self) -> Optional[int]:
@@ -259,7 +267,8 @@ class PrefixCachingBlock(Block):
             return None
 
         is_first_block = self._prev_block is None
-        prev_block_hash = (None if is_first_block else self._prev_block.content_hash)
+        prev_block_hash = (None if is_first_block else
+                           self._prev_block.content_hash)
 
         # Previous block exists but does not yet have a hash.
         # Return no hash in this case.
@@ -273,7 +282,8 @@ class PrefixCachingBlock(Block):
         return self._cached_content_hash
 
     @staticmethod
-    def hash_block_tokens(is_first_block: bool, prev_block_hash: Optional[int], cur_block_token_ids: List[int]) -> int:
+    def hash_block_tokens(is_first_block: bool, prev_block_hash: Optional[int],
+                          cur_block_token_ids: List[int]) -> int:
         """Computes a hash value corresponding to the contents of a block and
         the contents of the preceding block(s). The hash value is used for
         prefix caching.
@@ -292,7 +302,8 @@ class PrefixCachingBlock(Block):
         - int: The computed hash value for the block.
         """
         assert (prev_block_hash is None) == is_first_block
-        return hash((is_first_block, prev_block_hash, *cur_block_token_ids)) 
+        return hash((is_first_block, prev_block_hash, *cur_block_token_ids))
+
 
 def assert_prefix_caching_block_or_none(block: Optional[Block]):
     if block is None:

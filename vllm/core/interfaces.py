@@ -6,6 +6,7 @@ from vllm.sequence import SequenceGroup, Sequence
 
 from vllm.utils import Device
 
+
 class AllocStatus(enum.Enum):
     """Result for BlockSpaceManager.can_allocate
 
@@ -21,7 +22,7 @@ class AllocStatus(enum.Enum):
 
 
 class BlockSpaceManager(ABC):
-    
+
     @staticmethod
     def get_block_space_manager_class(version: str):
         version = version.lower()
@@ -39,58 +40,58 @@ class BlockSpaceManager(ABC):
     @abstractmethod
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
         pass
-    
+
     @abstractmethod
     def allocate(self, seq_group: SequenceGroup) -> None:
         pass
-    
+
     @abstractmethod
     def can_append_slot(self, seq_group: SequenceGroup) -> bool:
         pass
-    
+
     @abstractmethod
     def append_slot(
         self,
         seq: Sequence,
     ) -> Optional[Tuple[int, int]]:
         pass
-    
+
     @abstractmethod
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         pass
-    
+
     @abstractmethod
     def can_swap_in(self, seq_group: SequenceGroup) -> bool:
         pass
-    
+
     @abstractmethod
     def swap_in(self, seq_group: SequenceGroup) -> Dict[int, int]:
         pass
-    
+
     @abstractmethod
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
         pass
-    
+
     @abstractmethod
     def swap_out(self, seq_group: SequenceGroup) -> Dict[int, int]:
         pass
-    
+
     @abstractmethod
     def free(self, seq: Sequence) -> None:
         pass
-    
+
     @abstractmethod
     def get_block_table(self, seq: Sequence) -> List[int]:
         pass
-    
+
     @abstractmethod
     def get_num_free_gpu_blocks(self) -> int:
         pass
-    
+
     @abstractmethod
     def get_num_free_cpu_blocks(self) -> int:
         pass
-    
+
     @abstractmethod
     def access_all_blocks_in_seq(
         self,
@@ -98,12 +99,12 @@ class BlockSpaceManager(ABC):
         access_time: float,
     ) -> None:
         pass
-    
+
     @abstractmethod
     def get_common_computed_block_ids(self,
                                       seq_group: SequenceGroup) -> List[int]:
         pass
-    
+
     @abstractmethod
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
         pass

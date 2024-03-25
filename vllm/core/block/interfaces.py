@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod, abstractproperty
 
 from vllm.utils import Device
 
+
 class Block(ABC):
 
     @abstractmethod
@@ -30,7 +31,7 @@ class Block(ABC):
         pass
 
     class Factory(Protocol):
-    
+
         @abstractmethod
         def __call__(
             self,
@@ -41,15 +42,18 @@ class Block(ABC):
         ) -> "Block":
             pass
 
+
 class BlockAllocator(ABC):
+
     @abstractmethod
     def allocate_mutable(self, prev_block: Optional[Block]) -> Block:
         pass
 
     @abstractmethod
-    def allocate_immutable(self, prev_block: Optional[Block], token_ids: List[int]) -> Block:
+    def allocate_immutable(self, prev_block: Optional[Block],
+                           token_ids: List[int]) -> Block:
         pass
- 
+
     @abstractmethod
     def free(self, block: Block) -> None:
         pass
@@ -72,15 +76,19 @@ class BlockAllocator(ABC):
     #def get_operations(self):
     #    pass
 
+
 class DeviceAwareBlockAllocator(ABC):
+
     @abstractmethod
-    def allocate_mutable(self, prev_block: Optional[Block], device: Device) -> Block:
+    def allocate_mutable(self, prev_block: Optional[Block],
+                         device: Device) -> Block:
         pass
 
     @abstractmethod
-    def allocate_immutable(self, prev_block: Optional[Block], token_ids: List[int], device: Device) -> Block:
+    def allocate_immutable(self, prev_block: Optional[Block],
+                           token_ids: List[int], device: Device) -> Block:
         pass
- 
+
     @abstractmethod
     def free(self, block: Block) -> None:
         pass

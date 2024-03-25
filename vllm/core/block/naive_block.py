@@ -9,7 +9,7 @@ from vllm.utils import Device
 _BLANK_TOKEN_ID = -1
 
 DEFAULT_LAST_ACCESSED_TIME = -1
-    
+
 
 class NaiveBlockAllocator(BlockAllocator):
     T = TypeVar('T', bound=Block)
@@ -25,15 +25,17 @@ class NaiveBlockAllocator(BlockAllocator):
     ):
         if block_ids is None:
             block_ids = range(num_blocks)
-        
+
         self._free_block_indices: Set[BlockIndex] = set(block_ids)
         self._all_block_indices = frozenset(block_ids)
 
-        self._refcounter = RefCounter(all_block_indices=self._free_block_indices)
+        self._refcounter = RefCounter(
+            all_block_indices=self._free_block_indices)
         self._create_block = create_block
         self._block_size = block_size
 
-    def allocate_immutable(self, prev_block: Optional[Block], token_ids: List[int]) -> Block:
+    def allocate_immutable(self, prev_block: Optional[Block],
+                           token_ids: List[int]) -> Block:
         block = self.allocate_mutable(prev_block=prev_block)
         block.append_token_ids(token_ids)
         return block
@@ -70,8 +72,7 @@ class NaiveBlockAllocator(BlockAllocator):
                     token_ids=block.token_ids,
                     physical_block_index=block.physical_block_index,
                     block_size=self._block_size,
-                )
-            )
+                ))
             prev_block = forked_blocks[-1]
 
         return forked_blocks
@@ -96,8 +97,14 @@ class NaiveBlockAllocator(BlockAllocator):
     def all_block_ids(self):
         return self._all_block_indices
 
+
 class NaiveBlock(Block):
-    def __init__(self, prev_block: Block, token_ids: List[int], block_size: int, physical_block_index: Optional[int] = None):
+
+    def __init__(self,
+                 prev_block: Block,
+                 token_ids: List[int],
+                 block_size: int,
+                 physical_block_index: Optional[int] = None):
         self._token_ids = []
         self._block_size = block_size
         self._prev_block = prev_block
@@ -136,4 +143,3 @@ class NaiveBlock(Block):
     @property
     def prev_block(self) -> Optional["Block"]:
         return self._prev_block
-

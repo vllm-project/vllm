@@ -118,7 +118,6 @@ class BlockAllocator:
             self.cached_blocks[block_hash] = block
 
 
-
 class BlockSpaceManagerV1(BlockSpaceManager):
     """Manages the mapping between logical and physical token blocks."""
 

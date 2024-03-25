@@ -7,7 +7,6 @@ from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 
-
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
 from vllm.core.block.block_table import BlockTable
 
@@ -71,8 +70,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         if self.block_sliding_window is not None:
             num_required_blocks = min(num_required_blocks,
                                       self.block_sliding_window)
-        
-        num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(device=Device.GPU)
+
+        num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(
+            device=Device.GPU)
 
         # Use watermark to avoid frequent cache eviction.
         if (self.num_total_gpu_blocks - num_required_blocks <
@@ -85,7 +85,8 @@ class BlockSpaceManagerV2(BlockSpaceManager):
 
     def allocate(self, seq_group: SequenceGroup) -> None:
         waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
-        assert not (set(seq.seq_id for seq in waiting_seqs) & self.block_tables.keys()), "block table already exists"
+        assert not (set(seq.seq_id for seq in waiting_seqs)
+                    & self.block_tables.keys()), "block table already exists"
 
         # NOTE: Here we assume that all sequences in the group have the same
         # prompt.
@@ -106,7 +107,8 @@ class BlockSpaceManagerV2(BlockSpaceManager):
     def can_append_slot(self, seq_group: SequenceGroup) -> bool:
         # Simple heuristic: If there is at least one free block
         # for each sequence, we can append.
-        num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(Device.GPU)
+        num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(
+            Device.GPU)
         num_seqs = seq_group.num_seqs(status=SequenceStatus.RUNNING)
         return num_seqs <= num_free_gpu_blocks
 
@@ -114,7 +116,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self,
         seq: Sequence,
     ) -> Optional[Tuple[int, int]]:
-        
+
         block_table = self.block_tables[seq.seq_id]
         num_full_slots = block_table.num_full_slots
         unseen_token_ids = seq.get_token_ids()[num_full_slots:]
@@ -123,7 +125,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         block_table.append_token_ids(unseen_token_ids)
         # TODO CoW
         return None
-    
+
     def free(self, seq: Sequence) -> None:
         if seq.seq_id not in self.block_tables:
             # Already freed or haven't been scheduled yet.
@@ -147,21 +149,21 @@ class BlockSpaceManagerV2(BlockSpaceManager):
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         src_block_table = self.block_tables[parent_seq.seq_id]
         self.block_tables[child_seq.seq_id] = src_block_table.fork()
-    
+
     def can_swap_in(self, seq_group: SequenceGroup) -> bool:
         return False
-    
+
     def swap_in(self, seq_group: SequenceGroup) -> Dict[int, int]:
         raise NotImplementedError
-    
+
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
         return False
-    
+
     def swap_out(self, seq_group: SequenceGroup) -> Dict[int, int]:
         raise NotImplementedError
 
     def get_num_free_gpu_blocks(self) -> int:
         return self.block_allocator.get_num_free_blocks(Device.GPU)
-    
+
     def get_num_free_cpu_blocks(self) -> int:
         return self.block_allocator.get_num_free_blocks(Device.CPU)

@@ -12,15 +12,17 @@ from ..utils import create_seq_group
 #from vllm.block2 import RefCounter
 #from vllm.block2 import PrefixCachingBlock, PrefixCachingBlockAllocator
 
+
 @pytest.mark.parametrize("block_size", [16])
 @pytest.mark.parametrize("num_gpu_blocks", [8, 40, 80])
 @pytest.mark.parametrize("num_seqs_per_group", [1, 4])
 @pytest.mark.parametrize("watermark", [0.0, 0.5])
-def test_can_allocate_seq_group(block_size: int, num_seqs_per_group: int, num_gpu_blocks: int, watermark: float):
+def test_can_allocate_seq_group(block_size: int, num_seqs_per_group: int,
+                                num_gpu_blocks: int, watermark: float):
     """Sequence group that allocates > num gpu blocks fails
     Sequence group that allocates < num gpu blocks passes
     """
-    
+
     block_manager = BlockSpaceManagerV2(
         block_size=block_size,
         num_gpu_blocks=num_gpu_blocks,
@@ -39,9 +41,12 @@ def test_can_allocate_seq_group(block_size: int, num_seqs_per_group: int, num_gp
     for num_prompt_blocks in range(1, num_gpu_blocks - num_output_blocks):
         seq_group = create_seq_group(
             seq_prompt_lens=block_size * num_prompt_blocks,
-            seq_output_lens=[block_size * num_output_blocks_per_seq for _ in range(num_seqs_per_group)],
+            seq_output_lens=[
+                block_size * num_output_blocks_per_seq
+                for _ in range(num_seqs_per_group)
+            ],
         )
-        
+
         seq_group_fits_in_cache = num_prompt_blocks + num_output_blocks <= num_gpu_blocks
 
         can_allocate_result = block_manager.can_allocate(seq_group)

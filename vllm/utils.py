@@ -202,12 +202,15 @@ def get_open_port() -> int:
 def set_cuda_visible_devices(device_ids: List[int]) -> None:
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, device_ids))
 
+
 def chunk_list(lst, chunk_size):
     """Yield successive chunk_size chunks from lst."""
     return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
 
+
 def cdiv(a: int, b: int) -> int:
     return -(a // -b)
+
 
 def get_nvcc_cuda_version() -> Optional[Version]:
     cuda_home = os.environ.get('CUDA_HOME')

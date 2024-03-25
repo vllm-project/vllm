@@ -22,7 +22,7 @@ class TestRefCounter:
 
         all_block_indices = list(range(num_blocks))
         counter = RefCounter(all_block_indices=all_block_indices)
-        
+
         block_index = random.randint(0, num_blocks - 1)
         for i in range(num_incrs):
             value = counter.incr(block_index)
@@ -37,7 +37,7 @@ class TestRefCounter:
 
         all_block_indices = list(range(num_blocks))
         counter = RefCounter(all_block_indices=all_block_indices)
-        
+
         block_index = random.randint(0, num_blocks - 1)
         for i in range(num_incrs):
             value = counter.incr(block_index)

@@ -4,8 +4,8 @@ from abc import ABC, abstractmethod, abstractproperty
 from vllm.utils import Device
 from vllm.core.block.interfaces import Block
 
-
 from typing import Type, TypeVar, T
+
 
 class RefCounter:
     BlockIndex = int
@@ -13,7 +13,9 @@ class RefCounter:
 
     def __init__(self, all_block_indices: Iterable[BlockIndex]):
         deduped = set(all_block_indices)
-        self._refcounts: Dict[BlockIndex, RefCount] = {index: 0 for index in deduped}
+        self._refcounts: Dict[BlockIndex,
+                              RefCount] = {index: 0
+                                           for index in deduped}
 
     def incr(self, block_index: BlockIndex) -> RefCount:
         assert block_index in self._refcounts
