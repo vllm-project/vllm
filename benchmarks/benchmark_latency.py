@@ -27,6 +27,7 @@ def main(args: argparse.Namespace):
         kv_cache_dtype=args.kv_cache_dtype,
         device=args.device,
         ray_workers_use_nsight=args.ray_workers_use_nsight,
+        download_dir=args.download_dir
     )
 
     sampling_params = SamplingParams(
@@ -151,5 +152,10 @@ if __name__ == '__main__':
         action='store_true',
         help="If specified, use nsight to profile ray workers",
     )
+    parser.add_argument('--download-dir',
+                        type=str,
+                        default=None,
+                        help='directory to download and load the weights, '
+                        'default to the default cache dir of huggingface')
     args = parser.parse_args()
     main(args)
