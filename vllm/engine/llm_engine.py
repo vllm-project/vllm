@@ -24,7 +24,8 @@ from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
 from vllm.utils import Counter
 
 if TYPE_CHECKING:
-    from vllm.config import VisionLanguageConfig  # pylint: disable=ungrouped-imports
+    from vllm.config import (
+        VisionLanguageConfig)  # pylint: disable=ungrouped-imports
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
