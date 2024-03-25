@@ -13,6 +13,15 @@ from vllm.core.block.block_table import BlockTable
 
 
 class BlockSpaceManagerV2(BlockSpaceManager):
+    """BlockSpaceManager implementation with improved testability over v1.
+
+    Missing features:
+    * General features
+        * CoW implementation.
+        * Swap in/swap out implementation.
+    * Prefix caching
+        * Evictor policies (unused blocks are evicted arbitrarily).
+    """
     SeqId = int
 
     def __init__(

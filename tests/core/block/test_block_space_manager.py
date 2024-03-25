@@ -5,7 +5,8 @@ import random
 from unittest.mock import MagicMock
 import math
 
-from vllm.core.block.block_space_manager import BlockSpaceManager, AllocStatus
+from vllm.core.interfaces import AllocStatus
+from vllm.core.block_manager_v2 import BlockSpaceManagerV2
 from ..utils import create_seq_group
 #from vllm.core.block.interfaces import NaiveBlockAllocator, NaiveBlock, BlockAllocator, Block
 #from vllm.block2 import RefCounter
@@ -20,7 +21,7 @@ def test_can_allocate_seq_group(block_size: int, num_seqs_per_group: int, num_gp
     Sequence group that allocates < num gpu blocks passes
     """
     
-    block_manager = BlockSpaceManager(
+    block_manager = BlockSpaceManagerV2(
         block_size=block_size,
         num_gpu_blocks=num_gpu_blocks,
         num_cpu_blocks=1024,
@@ -53,26 +54,3 @@ def test_can_allocate_seq_group(block_size: int, num_seqs_per_group: int, num_gp
             assert can_allocate_result == AllocStatus.OK
         else:
             assert can_allocate_result == AllocStatus.LATER
-
-@pytest.mark.parametrize("block_size", [16])
-@pytest.mark.parametrize("num_gpu_blocks", [8, 40, 80])
-@pytest.mark.parametrize("num_seqs_per_group", [1, 4])
-@pytest.mark.parametrize("watermark", [0.0, 0.5])
-def test_allocate(block_size: int, num_seqs_per_group: int, num_gpu_blocks: int, watermark: float):
-    """
-    [block size]
-    Allocate a sequence group
-
-    for each sequence,
-        for each block,
-            allocate the block
-
-    these are immutable allocations.
-    """
-    
-    block_manager = BlockSpaceManager(
-        block_size=block_size,
-        num_gpu_blocks=num_gpu_blocks,
-        num_cpu_blocks=1024,
-        watermark=watermark,
-    )

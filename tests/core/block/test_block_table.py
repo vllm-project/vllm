@@ -4,7 +4,6 @@ from typing import Optional, List
 from unittest.mock import MagicMock
 import math
 
-from vllm.core.block.block_space_manager import BlockSpaceManager, AllocStatus
 from ..utils import create_seq_group
 #from vllm.core.block.interfaces import NaiveBlockAllocator, NaiveBlock, BlockAllocator, Block
 #from vllm.block2 import RefCounter
