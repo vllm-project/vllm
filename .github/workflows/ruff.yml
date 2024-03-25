@@ -32,3 +32,6 @@ jobs:
     - name: Spelling check with codespell
       run: |
         codespell --toml pyproject.toml
+    - name: Run isort
+      run: |
+        isort . --check-only
