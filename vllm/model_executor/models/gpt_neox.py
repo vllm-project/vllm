@@ -16,15 +16,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GPT-NeoX model compatible with HuggingFace weights."""
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import torch
 from torch import nn
 from transformers import GPTNeoXConfig
 
-from vllm.model_executor.input_metadata import InputMetadata
+from vllm.attention import Attention, AttentionMetadata
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearMethodBase,
                                                QKVParallelLinear,
@@ -40,8 +39,6 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
-
-KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class GPTNeoXAttention(nn.Module):
@@ -94,14 +91,13 @@ class GPTNeoXAttention(nn.Module):
         self,
         position_ids: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: KVCache,
-        input_metadata: InputMetadata,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.query_key_value(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         q, k = self.rotary_emb(position_ids, q, k)
-        k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.dense(attn_output)
         return output
 
@@ -155,15 +151,15 @@ class GPTNeoXLayer(nn.Module):
         self,
         position_ids: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: KVCache,
-        input_metadata: InputMetadata,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         attn_input = self.input_layernorm(hidden_states)
         attn_output = self.attention(
             position_ids=position_ids,
             hidden_states=attn_input,
             kv_cache=kv_cache,
-            input_metadata=input_metadata,
+            attn_metadata=attn_metadata,
         )
 
         if self.use_parallel_residual:
@@ -208,8 +204,8 @@ class GPTNeoXModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
-        kv_caches: List[KVCache],
-        input_metadata: InputMetadata,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.embed_in(input_ids)
         for i in range(len(self.layers)):
@@ -218,7 +214,7 @@ class GPTNeoXModel(nn.Module):
                 position_ids,
                 hidden_states,
                 kv_caches[i],
-                input_metadata,
+                attn_metadata,
             )
         hidden_states = self.final_layer_norm(hidden_states)
         return hidden_states
@@ -246,11 +242,11 @@ class GPTNeoXForCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[KVCache],
-        input_metadata: InputMetadata,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.gpt_neox(input_ids, positions, kv_caches,
-                                      input_metadata)
+                                      attn_metadata)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,

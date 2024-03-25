@@ -123,7 +123,7 @@ def create_worker(cls: type,
         is_driver_worker=is_driver_worker,
     )
 
-    worker.init_model()
+    worker.init_device()
     worker.load_model()
 
     cache_config.num_gpu_blocks = num_gpu_blocks
