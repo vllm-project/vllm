@@ -1,9 +1,6 @@
 import random
 import pytest
-from typing import Optional, List
 import random
-from unittest.mock import MagicMock
-import math
 
 from vllm.core.block.common import RefCounter
 #from vllm.core.block.interfaces import NaiveBlockAllocator, NaiveBlock, BlockAllocator, Block

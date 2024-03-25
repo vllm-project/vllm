@@ -1,9 +1,4 @@
-import random
 import pytest
-from typing import Optional, List
-import random
-from unittest.mock import MagicMock
-import math
 
 from vllm.core.interfaces import AllocStatus
 from vllm.core.block_manager_v2 import BlockSpaceManagerV2

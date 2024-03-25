@@ -1,10 +1,8 @@
-from typing import List, Optional, Set, Iterable, Tuple, Dict, Type, TypeVar, T
-from abc import ABC, abstractmethod, abstractproperty
+from typing import List, Optional, Set, Iterable, TypeVar
 
 from vllm.core.block.interfaces import BlockAllocator, Block
 from vllm.core.block.common import RefCounter, get_all_blocks_recursively
 
-from vllm.utils import Device
 
 _BLANK_TOKEN_ID = -1
 

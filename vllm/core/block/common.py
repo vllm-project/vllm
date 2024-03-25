@@ -1,10 +1,7 @@
-from typing import List, Optional, Set, Iterable, Tuple, Dict
-from abc import ABC, abstractmethod, abstractproperty
+from typing import List, Iterable, Dict
 
-from vllm.utils import Device
 from vllm.core.block.interfaces import Block
 
-from typing import Type, TypeVar, T
 
 
 class RefCounter:

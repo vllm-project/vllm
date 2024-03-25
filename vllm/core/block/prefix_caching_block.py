@@ -1,12 +1,10 @@
 """Token blocks."""
-from typing import List, Optional, Set, Iterable, Tuple, Dict
-from abc import ABC, abstractmethod, abstractproperty
+from typing import List, Optional, Iterable, Dict
 
 from vllm.core.block.interfaces import Block, BlockAllocator
 from vllm.core.block.naive_block import NaiveBlockAllocator, NaiveBlock
-from vllm.core.block.common import RefCounter, get_all_blocks_recursively
+from vllm.core.block.common import get_all_blocks_recursively
 
-from vllm.utils import Device
 
 _BLANK_TOKEN_ID = -1
 

@@ -1,14 +1,8 @@
 """A block manager that manages token blocks."""
-import enum
-from itertools import count
-from os.path import commonprefix
-from typing import Dict, List, Optional, Set, Tuple
+from typing import List, Optional
 
-from vllm.block import BlockTable, PhysicalTokenBlock
-from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
+from vllm.block import BlockTable
 from vllm.utils import Device
-from vllm.core.evictor import Evictor, EvictionPolicy, make_evictor
-from vllm.core.block.naive_block import NaiveBlockAllocator, NaiveBlock
 from vllm.core.block.interfaces import DeviceAwareBlockAllocator, Block
 from vllm.utils import chunk_list, cdiv
 

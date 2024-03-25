@@ -1,10 +1,9 @@
-from typing import List, Optional, Set, Iterable, Tuple, Dict, Protocol
-from abc import ABC, abstractmethod, abstractproperty
+from typing import List, Optional, Tuple, Dict
+from abc import ABC, abstractmethod
 import enum
 
 from vllm.sequence import SequenceGroup, Sequence
 
-from vllm.utils import Device
 
 
 class AllocStatus(enum.Enum):

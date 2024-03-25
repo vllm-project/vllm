@@ -1,13 +1,6 @@
-import random
 import pytest
-from typing import Optional, List
-import random
-from unittest.mock import MagicMock
-import math
 
 from vllm.utils import Device, chunk_list
-from vllm.core.block.interfaces import BlockAllocator, Block
-from vllm.core.block.naive_block import NaiveBlockAllocator, NaiveBlock
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
 #from vllm.core.block.interfaces import NaiveBlockAllocator, NaiveBlock, BlockAllocator, Block
 #from vllm.block2 import RefCounter

@@ -1,16 +1,11 @@
-import random
 import pytest
 from typing import Optional, List
-import random
-from unittest.mock import MagicMock
-import math
 
 from vllm.core.block.interfaces import BlockAllocator, Block
 from vllm.core.block.naive_block import NaiveBlockAllocator, NaiveBlock
 #from vllm.core.block.interfaces import NaiveBlockAllocator, NaiveBlock, BlockAllocator, Block
 #from vllm.block2 import RefCounter
 #from vllm.block2 import PrefixCachingBlock, PrefixCachingBlockAllocator
-from vllm.utils import chunk_list
 
 
 class TestNaiveBlockAllocator:

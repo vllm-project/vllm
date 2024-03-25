@@ -1,5 +1,4 @@
-from typing import List, Optional, Set, Iterable, Tuple, Dict, Protocol
-from abc import ABC, abstractmethod, abstractproperty
+from typing import List, Optional
 from vllm.core.block.interfaces import BlockAllocator, Block, DeviceAwareBlockAllocator
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
 from vllm.core.block.prefix_caching_block import PrefixCachingBlockAllocator

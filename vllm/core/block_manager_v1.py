@@ -1,5 +1,4 @@
 """A block manager that manages token blocks."""
-import enum
 from itertools import count
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -7,7 +6,6 @@ from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
 from vllm.core.interfaces import BlockSpaceManager, AllocStatus
 
-import enum
 from itertools import count
 from os.path import commonprefix
 from typing import Dict, List, Optional, Set, Tuple
