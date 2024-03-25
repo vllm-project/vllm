@@ -39,15 +39,18 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         prev_block: Optional[Block],
         token_ids: List[int],
         block_size: int,
+        allocator: BlockAllocator,
         physical_block_index: Optional[int] = None,
     ) -> Block:
         # Bind block to self.
+        allocator = self
+
         return PrefixCachingBlock(
             prev_block=prev_block,
             token_ids=token_ids,
-            block_size=self._block_size,
-            prefix_caching_allocator=self,
+            block_size=block_size,
             physical_block_index=physical_block_index,
+            prefix_caching_allocator=allocator,
         )
 
     def allocate_immutable(self, prev_block: Optional[Block],
@@ -58,6 +61,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             prev_block=prev_block,
             token_ids=token_ids,
             block_size=self._block_size,
+            allocator=self,
         )
         assert block.content_hash is not None
 
@@ -107,6 +111,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                 prev_block=prev_block,
                 token_ids=[],
                 block_size=self._block_size,
+                allocator=self,
                 physical_block_index=physical_block_index,
             )
             assert block.content_hash is None
@@ -153,6 +158,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                     token_ids=block.token_ids,
                     physical_block_index=block.physical_block_index,
                     block_size=self._block_size,
+                    allocator=self,
                 ))
             prev_block = forked_blocks[-1]
 
@@ -204,6 +210,7 @@ class PrefixCachingBlock(Block):
             token_ids=token_ids,
             block_size=block_size,
             physical_block_index=physical_block_index,
+            allocator=prefix_caching_allocator,
         )
 
     def append_token_ids(self, token_ids: List[int]) -> None:

@@ -41,6 +41,7 @@ class NaiveBlockAllocator(BlockAllocator):
             token_ids=[],
             physical_block_index=block_index,
             block_size=self._block_size,
+            allocator=self,
         )
 
     def free(self, block: Block) -> None:
@@ -66,6 +67,7 @@ class NaiveBlockAllocator(BlockAllocator):
                     token_ids=block.token_ids,
                     physical_block_index=block.physical_block_index,
                     block_size=self._block_size,
+                    allocator=self,
                 ))
             prev_block = forked_blocks[-1]
 
@@ -98,6 +100,7 @@ class NaiveBlock(Block):
                  prev_block: Block,
                  token_ids: List[int],
                  block_size: int,
+                 allocator: BlockAllocator,
                  physical_block_index: Optional[int] = None):
         self._token_ids = []
         self._block_size = block_size
@@ -116,7 +119,6 @@ class NaiveBlock(Block):
 
     @physical_block_index.setter
     def physical_block_index(self, value: Optional[int]) -> None:
-        # TODO only allow call from allocator?
         self._physical_block_index = value
 
     @property

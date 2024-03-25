@@ -38,6 +38,7 @@ class Block(ABC):
             prev_block: Optional["Block"],
             token_ids: List[int],
             block_size: int,
+            allocator: "BlockAllocator",
             physical_block_index: Optional[int] = None,
         ) -> "Block":
             pass
