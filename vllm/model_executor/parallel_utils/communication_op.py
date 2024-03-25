@@ -5,14 +5,11 @@ import torch
 from torch.distributed import ProcessGroup
 
 from vllm.model_executor.parallel_utils import cupy_utils
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-    get_tensor_model_parallel_group,
-    is_cupy_nccl_enabled_for_all_reduce,
-)
 from vllm.model_executor.parallel_utils.custom_all_reduce import (
     custom_all_reduce)
+from vllm.model_executor.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_group, get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size, is_cupy_nccl_enabled_for_all_reduce)
 
 
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:

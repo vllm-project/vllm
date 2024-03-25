@@ -1,6 +1,7 @@
 from typing import List, Optional
 
 import torch
+
 from vllm.utils import is_pin_memory_available
 
 

@@ -1,21 +1,20 @@
+# imports for guided decoding tests
+import json
 import os
+import re
 import subprocess
+import sys
 import time
 
-import sys
+import jsonschema
+import openai  # use the official client for correctness check
 import pytest
-import requests
 # using Ray for overall ease of process management, parallel requests,
 # and debugging.
 import ray
-import openai  # use the official client for correctness check
+import requests
 # downloading lora to test lora requests
 from huggingface_hub import snapshot_download
-
-# imports for guided decoding tests
-import json
-import jsonschema
-import re
 
 from vllm.transformers_utils.tokenizer import get_tokenizer
 

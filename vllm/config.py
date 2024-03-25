@@ -1,15 +1,15 @@
-from typing import TYPE_CHECKING, Optional, Union, ClassVar
-from dataclasses import dataclass
-import os
-from packaging.version import Version
-
 import json
+import os
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, ClassVar, Optional, Union
+
 import torch
+from packaging.version import Version
 from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config
-from vllm.utils import get_cpu_memory, is_hip, is_neuron, get_nvcc_cuda_version
+from vllm.utils import get_cpu_memory, get_nvcc_cuda_version, is_hip, is_neuron
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -103,7 +103,8 @@ class ModelConfig:
         if os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true":
             # download model from ModelScope hub,
             # lazy import so that modelscope is not required for normal use.
-            from modelscope.hub.snapshot_download import snapshot_download  # pylint: disable=C
+            # pylint: disable=C.
+            from modelscope.hub.snapshot_download import snapshot_download
 
             if not os.path.exists(model):
                 model_path = snapshot_download(model_id=model,

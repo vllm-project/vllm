@@ -1,27 +1,22 @@
+import asyncio
 import enum
+import gc
 import os
 import socket
 import subprocess
 import uuid
-import gc
+import warnings
+from collections import OrderedDict
+from functools import lru_cache, partial
 from platform import uname
-from typing import List, Tuple, Union, Generic
-from packaging.version import parse, Version
+from typing import (Any, Awaitable, Callable, Generic, Hashable, List,
+                    Optional, Tuple, TypeVar, Union)
 
 import psutil
 import torch
-import asyncio
-from functools import partial, lru_cache
-from typing import (
-    Awaitable,
-    Callable,
-    TypeVar,
-)
-from collections import OrderedDict
-from typing import Any, Hashable, Optional
+from packaging.version import Version, parse
 
 from vllm.logger import init_logger
-import warnings
 
 T = TypeVar("T")
 logger = init_logger(__name__)
