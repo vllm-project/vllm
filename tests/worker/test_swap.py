@@ -1,8 +1,8 @@
 import torch
 
 from vllm.engine.arg_utils import EngineArgs
-from vllm.worker.worker import Worker
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
+from vllm.worker.worker import Worker
 
 
 def test_swap() -> None:
@@ -11,7 +11,7 @@ def test_swap() -> None:
                              dtype="half",
                              load_format="dummy")
     (model_config, cache_config, parallel_config, scheduler_config,
-     device_config, _) = engine_args.create_engine_configs()
+     device_config, _, _) = engine_args.create_engine_configs()
     cache_config.num_gpu_blocks = 100
     cache_config.num_cpu_blocks = 100
 

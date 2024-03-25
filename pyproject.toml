@@ -51,3 +51,7 @@ exclude = "vllm/model_executor/parallel_utils/|vllm/model_executor/models/"
 [tool.codespell]
 ignore-words-list = "dout, te, indicies"
 skip = "./tests/prompts"
+
+[tool.isort]
+use_parentheses = true
+skip_gitignore = true

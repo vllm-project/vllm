@@ -1,9 +1,8 @@
 import random
+from typing import Tuple
 
 import pytest
 import torch
-
-from typing import Tuple
 
 from vllm._C import cache_ops
 
