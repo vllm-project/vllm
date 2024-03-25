@@ -1,5 +1,8 @@
 from typing import Any, Dict, List, Optional
 
+import enum
+from enum import Enum
+
 import torch
 from torch.nn.parameter import Parameter
 
@@ -7,15 +10,11 @@ from vllm._C import ops
 from vllm.model_executor.layers.linear import LinearMethodBase, set_weight_attrs
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
-from magic_wand import (
-    MARLIN_SUPPORTED_NUM_BITS,
-    MARLIN_SUPPORTED_GROUP_SIZES,
-    MARLIN_TILE,
-    MARLIN_MIN_THREAD_N,
-    MARLIN_MIN_THREAD_K,
-    MARLIN_MAX_PARALLEL,
-    get_pack_factor,
-)
+from magic_wand import (MARLIN_SUPPORTED_NUM_BITS,
+                        MARLIN_SUPPORTED_GROUP_SIZES, MARLIN_TILE,
+                        MARLIN_MIN_THREAD_N, MARLIN_MIN_THREAD_K,
+                        MARLIN_MAX_PARALLEL, get_pack_factor,
+                        marlin_repack_from_gptq, marlin_gemm)
 
 
 class MarlinConfig(QuantizationConfig):
@@ -88,6 +87,11 @@ class MarlinConfig(QuantizationConfig):
         return []
 
 
+class MarlinState(Enum):
+    REPACK = enum.auto()
+    READY = enum.auto()
+
+
 class MarlinLinearMethod(LinearMethodBase):
     """Linear method for Marlin.
 
@@ -106,6 +110,11 @@ class MarlinLinearMethod(LinearMethodBase):
         output_size: int,
         params_dtype: torch.dtype,
     ) -> Dict[str, Any]:
+        # Normalize group_size
+        if self.quant_config.group_size != -1:
+            group_size = self.quant_config.group_size
+        else:
+            group_size = input_size
 
         # Validate dtype
         if params_dtype != torch.float16:
@@ -126,14 +135,35 @@ class MarlinLinearMethod(LinearMethodBase):
                 f" is not divisible by min_thread_k = {self.quant_config.min_thread_k}."
             )
 
-        if self.quant_config.group_size != -1:
-            if input_size_per_partition % self.quant_config.group_size != 0:
-                raise ValueError(
-                    f"Weight input_size_per_partition = {input_size_per_partition}"
-                    f" is not divisible by group_size = {self.quant_config.group_size}."
-                )
+        if input_size_per_partition % group_size != 0:
+            raise ValueError(
+                f"Weight input_size_per_partition = {input_size_per_partition}"
+                f" is not divisible by group_size = {group_size}.")
 
-        # Quantized weight
+        # Detect sharding of scales/zp
+
+        # By default, no sharding over "input dim"
+        is_k_full = True
+        scales_and_zp_size = input_size // group_size
+        scales_and_zp_input_dim = None
+
+        if self.quant_config.desc_act:
+            assert self.quant_config.group_size != -1
+
+            is_k_full = input_size_per_partition == input_size
+
+        else:
+            is_k_full = True  # Because of full alignment with group-size and shard of scales/zp
+
+            # If this is a row-parallel case, then shard scales/zp
+            if (input_size != input_size_per_partition
+                    and self.quant_config.group_size != -1):
+                scales_and_zp_size = input_size_per_partition // group_size
+                scales_and_zp_input_dim = 0
+
+        # Init buffers
+
+        # Quantized weights
         qweight = Parameter(
             torch.empty(
                 input_size_per_partition // self.quant_config.pack_factor,
@@ -153,10 +183,7 @@ class MarlinLinearMethod(LinearMethodBase):
         # Activation order
         g_idx = Parameter(
             torch.tensor(
-                [
-                    i // self.quant_config.group_size
-                    for i in range(input_size_per_partition)
-                ],
+                [i // group_size for i in range(input_size_per_partition)],
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -164,24 +191,18 @@ class MarlinLinearMethod(LinearMethodBase):
         # Ignore warning from fused linear layers such as QKVParallelLinear.
         set_weight_attrs(g_idx, {"input_dim": 0, "ignore_warning": True})
 
-        # Detect sharding of scales/zp
-        CONT CONT...
-        # scale_and_zero_size = input_size // group_size
-        # scale_and_zero_input_dim = None
-        # if (input_size != input_size_per_partition
-        #         and self.quant_config.group_size != -1):
-        #     # For act-order models, we cannot use Exllama for row parallel layer
-        #     if self.quant_config.desc_act:
-        #         exllama_state = ExllamaState.UNUSED
-        #     else:
-        #         # we need to partition qzeros and scales for exllama kernel
-        #         scale_and_zero_size = input_size_per_partition // group_size
-        #         scale_and_zero_input_dim = 0
+        g_idx_sort_indices = Parameter(
+            torch.tensor(
+                g_idx.shape,
+                dtype=torch.int32,
+            ),
+            requires_grad=False,
+        )
 
-        # Quantized zeros
+        # Quantized zero-points
         qzeros = Parameter(
             torch.empty(
-                scale_and_zero_size,
+                scales_and_zp_size,
                 output_size_per_partition // self.quant_config.pack_factor,
                 dtype=torch.int32,
             ),
@@ -189,67 +210,46 @@ class MarlinLinearMethod(LinearMethodBase):
         )
         set_weight_attrs(
             qzeros, {
-                "input_dim": scale_and_zero_input_dim,
+                "input_dim": scales_and_zp_input_dim,
                 "output_dim": 1,
                 "packed_dim": 1,
                 "pack_factor": self.quant_config.pack_factor,
             })
-        # qweight = Parameter(
-        #     torch.empty(
-        #         input_size_per_partition // self.quant_config.tile_size,
-        #         output_size_per_partition * self.quant_config.tile_size //
-        #         self.quant_config.pack_factor,
-        #         device="cuda",
-        #         dtype=torch.int32,
-        #     ),
-        #     requires_grad=False,
-        # )
-        # set_weight_attrs(
-        #     qweight,
-        #     {
-        #         "input_dim": 0,
-        #         "output_dim": 1,
-        #         "packed_dim": 1,
-        #         "pack_factor": self.quant_config.pack_factor,
-        #         "marlin_tile_size": self.quant_config.tile_size,
-        #     },
-        # )
 
-        # Determine if channelwise or not
-        input_groups = (1 if self.quant_config.group_size == -1 else
-                        input_size_per_partition //
-                        self.quant_config.group_size)
-
+        # Scales
         scales = Parameter(
             torch.empty(
-                input_groups,
+                scales_and_zp_size,
                 output_size_per_partition,
-                device="cuda",
                 dtype=params_dtype,
             ),
             requires_grad=False,
         )
-        set_weight_attrs(
-            scales,
-            {
-                "input_dim": None if input_groups == 1 else 0,
-                "output_dim": 1,
-            },
-        )
+        set_weight_attrs(scales, {
+            "input_dim": scales_and_zp_input_dim,
+            "output_dim": 1,
+        })
 
-        # Allocate workspace (Used for internal locking mechanism)
+        # Allocate marlin workspace
         max_workspace_size = (
             output_size_per_partition //
-            self.quant_config.min_n_threads) * self.quant_config.max_parallel
+            self.quant_config.min_thread_n) * self.quant_config.max_parallel
         workspace = Parameter(
             torch.zeros(max_workspace_size, device="cuda", dtype=torch.int),
             requires_grad=False,
         )
 
         return {
-            "B": qweight,
-            "s": scales,
+            "qweight": qweight,
+            "g_idx": g_idx,
+            "g_idx_sort_indices": g_idx_sort_indices,
+            "qzeros": qzeros,
+            "scales": scales,
             "workspace": workspace,
+            "input_size_per_partition": input_size_per_partition,
+            "output_size_per_partition": output_size_per_partition,
+            "is_k_full": is_k_full,
+            "marlin_state": MarlinState.REPACK,
         }
 
     def apply_weights(
@@ -258,22 +258,37 @@ class MarlinLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        qweight = weights["B"]
-        scales = weights["s"]
-        workspace = weights["workspace"]
+        reshaped_x = x.reshape(-1, x.shape[-1])
 
-        x_2d = x.view(-1, x.shape[-1])
+        size_m = reshaped_x.shape[0]
+        size_k = weights["input_size_per_partition"]
+        size_n = weights["output_size_per_partition"]
 
-        size_m = x_2d.shape[0]
-        size_k = x_2d.shape[1]
-        size_n = scales.shape[1]
+        out_shape = x.shape[:-1] + (size_n, )
 
-        output_2d = ops.marlin_gemm(x_2d, qweight, scales, workspace, size_m,
-                                    size_n, size_k)
+        if weights["marlin_state"] == MarlinState.REPACK:
+            if self.quant_config.desc_act:
+                weights["g_idx_sort_indices"] = torch.argsort(
+                    weights["g_idx"]).to(torch.int)
+            else:
+                weights["g_idx_sort_indices"] = torch.empty(
+                    0, dtype=torch.int, device=weights["qweight"].device)
 
-        output = output_2d.view(x.shape[:-1] + (output_2d.shape[1], ))
+            weights["qweight"] = marlin_repack_from_gptq(
+                weights["qweight"],
+                weights["g_idx_sort_indices"],
+                size_k,
+                size_n,
+            )
+
+            weights["marlin_state"] = MarlinState.READY
+
+        output = marlin_gemm(reshaped_x, weights["qweight"], weights["scales"],
+                             weights["g_idx"], weights["g_idx_sort_indices"],
+                             weights["workspace"], size_m, size_n, size_k,
+                             weights["is_k_full"])
 
         if bias is not None:
             output.add_(bias)  # In-place add
 
-        return output
+        return output.reshape(out_shape)
