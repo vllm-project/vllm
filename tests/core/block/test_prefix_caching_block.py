@@ -179,9 +179,9 @@ class TestPrefixCachingBlockAllocator:
             token_ids=list(range(block_size)),
         )
 
-        blocks = [allocate_block() for _ in range(num_blocks)]
+        [allocate_block() for _ in range(num_blocks)]
         with pytest.raises(BlockAllocator.NoFreeBlocksError):
-            oom_block = allocate_block()
+            allocate_block()
 
     @staticmethod
     @pytest.mark.parametrize("num_blocks", [1, 1024])
@@ -286,7 +286,7 @@ class TestPrefixCachingBlockAllocator:
             assert new_block.physical_block_index == physical_block_index, i
 
             with pytest.raises(BlockAllocator.NoFreeBlocksError):
-                oom_block = allocator.allocate_mutable(prev_block=None)
+                allocator.allocate_mutable(prev_block=None)
 
             block_to_free = new_block
 

@@ -42,9 +42,9 @@ class TestNaiveBlockAllocator:
             prev_block=None,
             token_ids=list(range(block_size)))
 
-        blocks = [allocate_block() for _ in range(num_blocks)]
+        [allocate_block() for _ in range(num_blocks)]
         with pytest.raises(BlockAllocator.NoFreeBlocksError):
-            oom_block = allocate_block()
+            allocate_block()
 
     @staticmethod
     @pytest.mark.parametrize("allocate_type", ["immutable", "mutable"])
@@ -64,7 +64,7 @@ class TestNaiveBlockAllocator:
         blocks = [allocate_block() for _ in range(num_blocks)]
 
         with pytest.raises(BlockAllocator.NoFreeBlocksError):
-            oom_block = allocate_block()
+            allocate_block()
 
         block_to_free = blocks.pop()
 
@@ -77,7 +77,7 @@ class TestNaiveBlockAllocator:
             assert new_block.physical_block_index == physical_block_index
 
             with pytest.raises(BlockAllocator.NoFreeBlocksError):
-                oom_block = allocate_block()
+                allocate_block()
 
             block_to_free = new_block
 

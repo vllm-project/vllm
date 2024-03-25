@@ -82,7 +82,7 @@ class NaiveBlockAllocator(BlockAllocator):
             raise BlockAllocator.NoFreeBlocksError()
 
         block_index = next(iter(self._free_block_indices))
-        refcount = self._refcounter.incr(block_index)
+        self._refcounter.incr(block_index)
         self._free_block_indices.remove(block_index)
         return block_index
 

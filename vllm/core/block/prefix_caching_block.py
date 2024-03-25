@@ -105,6 +105,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             physical_block_index = self._unused_cached_blocks.pop(
                 content_hash_to_evict)
             refcount = self._refcounter.incr(physical_block_index)
+            assert refcount == 1
             block = self._create_block(
                 prev_block=prev_block,
                 token_ids=[],
