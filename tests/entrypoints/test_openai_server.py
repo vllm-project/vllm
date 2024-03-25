@@ -322,9 +322,15 @@ async def test_completion_streaming(server, client: openai.AsyncOpenAI,
                                              temperature=0.0,
                                              stream=True)
     chunks = []
+    finish_reason_count = 0
     async for chunk in stream:
         chunks.append(chunk.choices[0].text)
+        if chunk.choices[0].finish_reason is not None:
+            finish_reason_count += 1
+    # finish reason should only return in last block
+    assert finish_reason_count == 1
     assert chunk.choices[0].finish_reason == "length"
+    assert chunk.choices[0].text
     assert chunk.usage == single_usage
     assert "".join(chunks) == single_output
 
@@ -363,13 +369,19 @@ async def test_chat_streaming(server, client: openai.AsyncOpenAI,
         stream=True,
     )
     chunks = []
+    finish_reason_count = 0
     async for chunk in stream:
         delta = chunk.choices[0].delta
         if delta.role:
             assert delta.role == "assistant"
         if delta.content:
             chunks.append(delta.content)
+        if chunk.choices[0].finish_reason is not None:
+            finish_reason_count += 1
+    # finish reason should only return in last block
+    assert finish_reason_count == 1
     assert chunk.choices[0].finish_reason == stop_reason
+    assert delta.content
     assert "".join(chunks) == output
 
 
