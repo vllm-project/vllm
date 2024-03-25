@@ -457,6 +457,7 @@ class SchedulerConfig:
         max_model_len: Maximum length of a sequence (including prompt
             and generated text).
         max_paddings: Maximum number of paddings to be added to a batch.
+        use_v2_block_manager: Whether to use the BlockSpaceManagerV2 or not.
     """
 
     def __init__(
@@ -465,6 +466,7 @@ class SchedulerConfig:
         max_num_seqs: int,
         max_model_len: int,
         max_paddings: int,
+        use_v2_block_manager: bool,
     ) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
@@ -475,6 +477,7 @@ class SchedulerConfig:
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
         self.max_paddings = max_paddings
+        self.use_v2_block_manager = use_v2_block_manager
         self._verify_args()
 
     def _verify_args(self) -> None:
