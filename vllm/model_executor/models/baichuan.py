@@ -25,8 +25,8 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.config import LoRAConfig
 from vllm.attention import Attention, AttentionMetadata
+from vllm.config import LoRAConfig
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,

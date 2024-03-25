@@ -9,16 +9,10 @@ import torch.nn.functional as F
 
 from vllm.config import LoRAConfig
 from vllm.lora.layers import (
-    ColumnParallelLinearWithLoRA,
-    MergedColumnParallelLinearWithLoRA,
-    QKVParallelLinearWithLora,
-    MergedQKVParallelLinearWithLora,
-    VocabParallelEmbeddingWithLoRA,
-    RowParallelLinearWithLoRA,
-    LogitsProcessorWithLoRA,
-    LoRAMapping,
-    BaseLayerWithLoRA,
-)
+    BaseLayerWithLoRA, ColumnParallelLinearWithLoRA, LogitsProcessorWithLoRA,
+    LoRAMapping, MergedColumnParallelLinearWithLoRA,
+    MergedQKVParallelLinearWithLora, QKVParallelLinearWithLora,
+    RowParallelLinearWithLoRA, VocabParallelEmbeddingWithLoRA)
 from vllm.lora.models import (LoRALayerWeights, PackedLoRALayerWeights,
                               convert_mapping)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,

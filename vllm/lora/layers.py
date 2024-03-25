@@ -1,13 +1,14 @@
 # pylint: disable=unused-argument
+import inspect
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional, Tuple, Type, Set
+from typing import TYPE_CHECKING, List, Optional, Set, Tuple, Type
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
-import inspect
+
 from vllm.config import LoRAConfig
 from vllm.lora.punica import add_lora, add_lora_slice, bgmv
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,

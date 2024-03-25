@@ -1,6 +1,8 @@
 import pytest
+
 import vllm
 from vllm.lora.request import LoRARequest
+
 from .conftest import cleanup
 
 MODEL_PATH = "baichuan-inc/Baichuan-7B"
