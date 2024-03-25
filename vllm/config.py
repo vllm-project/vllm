@@ -1,14 +1,18 @@
-from typing import Optional, Union, ClassVar
-from dataclasses import dataclass
+import json
 import os
-from packaging.version import Version
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, ClassVar, Optional, Union
 
 import torch
+from packaging.version import Version
 from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config
-from vllm.utils import get_cpu_memory, is_hip, is_neuron, get_nvcc_cuda_version
+from vllm.utils import get_cpu_memory, get_nvcc_cuda_version, is_hip, is_neuron
+
+if TYPE_CHECKING:
+    from ray.util.placement_group import PlacementGroup
 
 logger = init_logger(__name__)
 
@@ -99,7 +103,9 @@ class ModelConfig:
         if os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true":
             # download model from ModelScope hub,
             # lazy import so that modelscope is not required for normal use.
-            from modelscope.hub.snapshot_download import snapshot_download  # pylint: disable=C
+            # pylint: disable=C.
+            from modelscope.hub.snapshot_download import snapshot_download
+
             if not os.path.exists(model):
                 model_path = snapshot_download(model_id=model,
                                                cache_dir=download_dir,
@@ -136,7 +142,7 @@ class ModelConfig:
                 if (f not in rocm_not_supported_load_format)
             ]
             raise ValueError(
-                f"load format \'{load_format}\' is not supported in ROCm. "
+                f"load format '{load_format}' is not supported in ROCm. "
                 f"Supported load format are "
                 f"{rocm_supported_load_format}")
 
@@ -165,13 +171,18 @@ class ModelConfig:
         # Parse quantization method from the HF model config, if available.
         hf_quant_config = getattr(self.hf_config, "quantization_config", None)
         if hf_quant_config is not None:
-
             hf_quant_method = str(hf_quant_config["quant_method"]).lower()
+
             # If the GPTQ model is serialized in marlin format, use marlin.
             if (hf_quant_method == "gptq"
                     and "is_marlin_format" in hf_quant_config
                     and hf_quant_config["is_marlin_format"]):
+                logger.info("The model is serialized in Marlin format. "
+                            "Using Marlin kernel.")
                 hf_quant_method = "marlin"
+                if self.quantization == "gptq":
+                    self.quantization = hf_quant_method
+
             if self.quantization is None:
                 self.quantization = hf_quant_method
             elif self.quantization != hf_quant_method:
@@ -224,6 +235,15 @@ class ModelConfig:
                 f"({pipeline_parallel_size}).")
 
     def get_sliding_window(self) -> Optional[int]:
+        """Get the sliding window size, or None if disabled.
+        """
+
+        # Some models, like Qwen2 and Qwen1.5, use `use_sliding_window` in
+        # addition to sliding window size. We check if that field is present
+        # and if it's False, return None.
+        if (hasattr(self.hf_config, "use_sliding_window")
+                and not self.hf_config.use_sliding_window):
+            return None
         return getattr(self.hf_config, "sliding_window", None)
 
     def get_vocab_size(self) -> int:
@@ -371,6 +391,58 @@ class CacheConfig:
             logger.warning("Possibly too large swap space. " + msg)
 
 
+@dataclass
+class TokenizerPoolConfig:
+    """Configuration for the tokenizer pool.
+    
+    Args:
+        pool_size: Number of tokenizer workers in the pool.
+        pool_type: Type of the pool.
+        extra_config: Additional config for the pool.
+            The way the config will be used depends on the
+            pool type.
+    """
+    pool_size: int
+    pool_type: str
+    extra_config: dict
+
+    def __post_init__(self):
+        if self.pool_type not in ("ray", ):
+            raise ValueError(f"Unknown pool type: {self.pool_type}")
+        if not isinstance(self.extra_config, dict):
+            raise ValueError("extra_config must be a dictionary.")
+
+    @classmethod
+    def create_config(
+        cls, tokenizer_pool_size: int, tokenizer_pool_type: str,
+        tokenizer_pool_extra_config: Optional[Union[str, dict]]
+    ) -> Optional["TokenizerPoolConfig"]:
+        """Create a TokenizerPoolConfig from the given parameters.
+        
+        If tokenizer_pool_size is 0, return None.
+        
+        Args:
+            tokenizer_pool_size: Number of tokenizer workers in the pool.
+            tokenizer_pool_type: Type of the pool.
+            tokenizer_pool_extra_config: Additional config for the pool.
+                The way the config will be used depends on the
+                pool type. This can be a JSON string (will be parsed).
+        """
+        if tokenizer_pool_size:
+            if isinstance(tokenizer_pool_extra_config, str):
+                tokenizer_pool_extra_config_parsed = json.loads(
+                    tokenizer_pool_extra_config)
+            else:
+                tokenizer_pool_extra_config_parsed = (
+                    tokenizer_pool_extra_config or {})
+            tokenizer_pool_config = cls(tokenizer_pool_size,
+                                        tokenizer_pool_type,
+                                        tokenizer_pool_extra_config_parsed)
+        else:
+            tokenizer_pool_config = None
+        return tokenizer_pool_config
+
+
 class ParallelConfig:
     """Configuration for the distributed execution.
 
@@ -385,6 +457,8 @@ class ParallelConfig:
             parallel and large models.
         disable_custom_all_reduce: Disable the custom all-reduce kernel and
             fall back to NCCL.
+        tokenizer_pool_config: Config for the tokenizer pool.
+            If None, will use synchronous tokenization.
         ray_workers_use_nsight: Whether to profile Ray workers with nsight, see
             https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler.
     """
@@ -396,26 +470,21 @@ class ParallelConfig:
         worker_use_ray: bool,
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
+        tokenizer_pool_config: Optional[TokenizerPoolConfig] = None,
         ray_workers_use_nsight: bool = False,
+        placement_group: Optional["PlacementGroup"] = None,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
-        if is_neuron():
-            # For Neuron device support, here we assign TP=1 to avoid sharding
-            # within vLLM directly. Transformer-neuronx would take
-            # neuron_tp_degree attribute, and distribute the workload
-            # to multiple NeuronCores.
-            self.tensor_parallel_size = 1
-            self.neuron_tp_degree = tensor_parallel_size
-        else:
-            self.tensor_parallel_size = tensor_parallel_size
+        self.tensor_parallel_size = tensor_parallel_size
         self.worker_use_ray = worker_use_ray
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
+        self.tokenizer_pool_config = tokenizer_pool_config
         self.ray_workers_use_nsight = ray_workers_use_nsight
+        self.placement_group = placement_group
 
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
-        # Ray worker is not supported for Neuron backend.
-        if self.world_size > 1 and not is_neuron():
+        if self.world_size > 1:
             self.worker_use_ray = True
         self._verify_args()
 
@@ -438,15 +507,6 @@ class ParallelConfig:
             raise ValueError("Unable to use nsight profiling unless workers "
                              "run with Ray.")
 
-        # FIXME(woosuk): Fix the stability issues and re-enable the custom
-        # all-reduce kernel.
-        if not self.disable_custom_all_reduce and self.world_size > 1:
-            self.disable_custom_all_reduce = True
-            logger.info(
-                "Custom all-reduce kernels are temporarily disabled due to "
-                "stability issues. We will re-enable them once the issues are "
-                "resolved.")
-
 
 class SchedulerConfig:
     """Scheduler configuration.
@@ -458,7 +518,8 @@ class SchedulerConfig:
             iteration.
         max_model_len: Maximum length of a sequence (including prompt
             and generated text).
-        max_paddings: Maximum number of paddings to be added to a batch.
+        delay_factor: Apply a delay (of delay factor multiplied by previous
+            prompt latency) before scheduling next prompt.
     """
 
     def __init__(
@@ -466,7 +527,7 @@ class SchedulerConfig:
         max_num_batched_tokens: Optional[int],
         max_num_seqs: int,
         max_model_len: int,
-        max_paddings: int,
+        delay_factor: float = 0.0,
     ) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
@@ -476,7 +537,7 @@ class SchedulerConfig:
             self.max_num_batched_tokens = max(max_model_len, 2048)
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
-        self.max_paddings = max_paddings
+        self.delay_factor = delay_factor
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -500,12 +561,12 @@ class DeviceConfig:
     def __init__(self, device: str = "auto") -> None:
         if device == "auto":
             # Automated device type detection
-            if torch.cuda.is_available():
-                self.device_type = "cuda"
-            elif is_neuron():
+            if is_neuron():
                 self.device_type = "neuron"
             else:
-                raise RuntimeError("No supported device detected.")
+                # We don't call torch.cuda.is_available() here to
+                # avoid initializing CUDA before workers are forked
+                self.device_type = "cuda"
         else:
             # Device type is assigned explicitly
             self.device_type = device
@@ -516,10 +577,6 @@ class DeviceConfig:
         else:
             # Set device with device type
             self.device = torch.device(self.device_type)
-
-    @property
-    def is_neuron(self):
-        return self.device_type == "neuron"
 
 
 @dataclass
@@ -614,7 +671,7 @@ def _get_and_verify_dtype(
             k for k, v in _STR_DTYPE_TO_TORCH_DTYPE.items()
             if (k not in _ROCM_NOT_SUPPORTED_DTYPE)
         ]
-        raise ValueError(f"dtype \'{dtype}\' is not supported in ROCm. "
+        raise ValueError(f"dtype '{dtype}' is not supported in ROCm. "
                          f"Supported dtypes are {rocm_supported_dtypes}")
 
     # Verify the dtype.

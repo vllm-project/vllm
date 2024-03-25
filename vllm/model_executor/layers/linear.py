@@ -5,14 +5,14 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
+from vllm.logger import init_logger
+from vllm.model_executor.parallel_utils.communication_op import (
+    tensor_model_parallel_all_gather, tensor_model_parallel_all_reduce)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.communication_op import (
-    tensor_model_parallel_all_reduce, tensor_model_parallel_all_gather)
 from vllm.model_executor.parallel_utils.utils import (
     divide, split_tensor_along_last_dim)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
@@ -73,7 +73,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         weight = weights["weight"]
         if self.separate_bias_add:
-            if bias:
+            if bias is not None:
                 return F.linear(x, weight) + bias
             return F.linear(x, weight)
         return F.linear(x, weight, bias)

@@ -1,9 +1,9 @@
-from typing import List, Optional
 import time
+from typing import List, Optional
 
-from vllm.sequence import (PromptLogprobs, SampleLogprobs, SequenceGroup,
-                           SequenceStatus, RequestMetrics)
 from vllm.lora.request import LoRARequest
+from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
+                           SequenceGroup, SequenceStatus)
 
 
 class CompletionOutput:

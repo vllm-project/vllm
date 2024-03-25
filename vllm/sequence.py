@@ -2,21 +2,29 @@
 import copy
 import enum
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Union, TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
 from vllm.block import LogicalTokenBlock
-from vllm.sampling_params import SamplingParams
 from vllm.lora.request import LoRARequest
+from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
     import torch
+
     from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 
 @dataclass
 class Logprob:
-    """Infos for supporting OpenAI compatible logprobs."""
+    """Infos for supporting OpenAI compatible logprobs and token ranks.
+
+    Attributes:
+        logprob: The logprob of chosen token
+        rank: The vocab rank of chosen token (>=1)
+        decoded_token: The decoded chosen token index
+    """
     logprob: float
+    rank: Optional[int] = None
     decoded_token: Optional[str] = None
 
 
@@ -65,7 +73,7 @@ class SequenceStatus(enum.Enum):
 class RequestMetrics:
     """Metrics associated with a request.
 
-    Args:
+    Attributes:
         arrival_time: The time when the request arrived.
         first_scheduled_time: The time when the request was first scheduled.
         first_token_time: The time when the first token was generated.
@@ -241,6 +249,9 @@ class Sequence:
 
     def get_token_ids(self) -> List[int]:
         return self.data.get_token_ids()
+
+    def get_prompt_token_ids(self) -> List[int]:
+        return self.data.get_prompt_token_ids()
 
     def get_last_token_id(self) -> int:
         return self.data.get_last_token_id()
@@ -428,7 +439,7 @@ class SequenceGroup:
 
 
 class SequenceGroupMetadata:
-    """Metadata for a sequence group. Used to create `InputMetadata`.
+    """Metadata for a sequence group. Used to create `AttentionMetadata`.
 
     Args:
         request_id: The ID of the request.

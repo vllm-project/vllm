@@ -3,9 +3,9 @@ from typing import List, Optional, Union
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
-from vllm.lora.request import LoRARequest
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
+from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.utils import Counter
@@ -83,7 +83,7 @@ class LLM:
         swap_space: int = 4,
         enforce_eager: bool = False,
         max_context_len_to_capture: int = 8192,
-        disable_custom_all_reduce: bool = False,
+        disable_custom_all_reduce: bool = True,
         **kwargs,
     ) -> None:
         if "disable_log_stats" not in kwargs:

@@ -1,13 +1,14 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import Dict, List, Tuple, Set, Optional
+from typing import Dict, List, Optional, Set, Tuple
 
 import torch
 import torch.distributed
 
-from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, LoRAConfig)
+from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig)
+from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.parallel_utils import cupy_utils
 from vllm.model_executor.parallel_utils.communication_op import (
@@ -18,7 +19,6 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
-from vllm.lora.request import LoRARequest
 
 
 class Worker:
@@ -65,10 +65,9 @@ class Worker:
         # self.init_cache_engine().
         self.cache_config = None
         self.cache_engine = None
-        self.cache_events = None
         self.gpu_cache = None
 
-    def init_model(self, cupy_port: Optional[int] = None) -> None:
+    def init_device(self, cupy_port: Optional[int] = None) -> None:
         if self.device_config.device.type == "cuda":
             # torch.distributed.all_reduce does not free the input tensor until
             # the synchronization point. This causes the memory usage to grow
@@ -92,7 +91,7 @@ class Worker:
         # Initialize the distributed environment.
         init_distributed_environment(self.parallel_config, self.rank,
                                      cupy_port, self.distributed_init_method)
-        # Initialize the model.
+        # Set random seed.
         set_random_seed(self.model_config.seed)
 
     def load_model(self):
@@ -129,6 +128,9 @@ class Worker:
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
         peak_memory = self.init_gpu_memory - free_gpu_memory
+        assert peak_memory > 0, (
+            "Error in memory profiling. This happens when the GPU memory was "
+            "not properly cleaned up before initializing the vLLM instance.")
 
         cache_block_size = self.get_cache_block_size_bytes(
             block_size, cache_dtype)
@@ -148,7 +150,6 @@ class Worker:
         self.cache_config = cache_config
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
                                         self.parallel_config)
-        self.cache_events = self.cache_engine.events
         self.gpu_cache = self.cache_engine.gpu_cache
         self.model_runner.set_block_size(self.cache_engine.block_size)
 
@@ -166,24 +167,13 @@ class Worker:
         blocks_to_copy: Dict[int, List[int]],
     ) -> None:
         # Issue cache operations.
-        issued_cache_op = False
+        # TODO(woosuk): Profile swapping overhead and optimize if needed.
         if blocks_to_swap_in:
             self.cache_engine.swap_in(blocks_to_swap_in)
-            issued_cache_op = True
         if blocks_to_swap_out:
             self.cache_engine.swap_out(blocks_to_swap_out)
-            issued_cache_op = True
         if blocks_to_copy:
             self.cache_engine.copy(blocks_to_copy)
-            issued_cache_op = True
-
-        cache_events = self.cache_events if issued_cache_op else None
-
-        # Wait for cache operations to finish.
-        # TODO(woosuk): Profile swapping overhead and optimize if needed.
-        if cache_events is not None:
-            for event in cache_events:
-                event.wait()
 
     @torch.inference_mode()
     def execute_model(
