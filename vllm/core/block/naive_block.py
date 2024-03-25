@@ -55,6 +55,35 @@ class NaiveBlockAllocator(BlockAllocator):
         if refcount == 0:
             self._free_block_indices.add(block_index)
 
+    def fork(self, last_block: Block) -> List[Block]:
+        
+        def get_source_blocks(block, lst):
+            if block is None:
+                return
+            get_source_blocks(block._prev_block, lst)
+            lst.append(block)
+
+        source_blocks = []
+        get_source_blocks(last_block, source_blocks)
+
+        forked_blocks = []
+        prev_block = None
+        for block in source_blocks:
+            refcount = self._refcounter.incr(block.physical_block_index)
+            assert refcount != 1, "can't fork free'd block"
+
+            forked_blocks.append(
+                self._create_block(
+                    prev_block=prev_block,
+                    token_ids=block.token_ids,
+                    physical_block_index=block.physical_block_index,
+                    block_size=self._block_size,
+                )
+            )
+            prev_block = forked_blocks[-1]
+
+        return forked_blocks
+
     def get_num_free_blocks(self) -> int:
         return len(self._free_block_indices)
 
@@ -87,6 +116,19 @@ class NaiveBlock(Block):
     def append_token_ids(self, token_ids: List[int]) -> None:
         assert self.num_empty_slots >= len(token_ids)
         self._token_ids.extend(token_ids)
+
+    def copy_recursively(self) -> "NaiveBlock":
+        if self._prev_block is None:
+            prev_block = None
+        else:
+            prev_block = self._prev_block.copy_recursively()
+
+        return NaiveBlock(
+            prev_block=prev_block,
+            token_ids=self._token_ids[:],
+            block_size=self._block_size,
+            physical_block_index=self._physical_block_index,
+        )
 
     @property
     def physical_block_index(self) -> Optional[int]:

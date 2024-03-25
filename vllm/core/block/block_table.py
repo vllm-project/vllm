@@ -27,12 +27,12 @@ class BlockTable:
         self,
         block_size: int,
         block_allocator: DeviceAwareBlockAllocator,
+        _blocks: Optional[List[Block]] = None,
     ):
         self._block_size = block_size
         self._allocator = block_allocator
-        self._blocks: Optional[List[Block]] = None
-
-        self._num_full_slots = 0
+        self._blocks: Optional[List[Block]] = _blocks
+        self._num_full_slots = len(self._get_all_token_ids())
     
 
     def allocate(self, token_ids: List[int], device: Device = Device.GPU) -> None:
@@ -72,6 +72,15 @@ class BlockTable:
         for _ in range(blocks_to_allocate):
             self._blocks.append(self._allocator.allocate_mutable(prev_block=self._blocks[-1], device=device))
 
+    def fork(self) -> "BlockTable":
+        assert self._is_allocated
+        forked_blocks = self._allocator.fork(self._blocks[-1])
+        return BlockTable(
+            block_size=self._block_size,
+            block_allocator=self._allocator,
+            _blocks=forked_blocks,
+        )
+
 
     def free(self) -> None:
         assert self._is_allocated
@@ -101,9 +110,11 @@ class BlockTable:
         return blocks
 
     def _get_all_token_ids(self) -> List[int]:
-        # NOTE: This function is O(seq_len); it is only
-        # used in testing.
+        # NOTE: This function is O(seq_len); use sparingly.
         token_ids = []
+
+        if not self._is_allocated:
+            return token_ids
 
         for block in self._blocks:
             token_ids.extend(block.token_ids)

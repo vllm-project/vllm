@@ -138,6 +138,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             assert block.content_hash not in self._unused_cached_blocks
             self._unused_cached_blocks[block.content_hash] = physical_block_index
 
+    def fork(self, last_block: Block) -> List[Block]:
+        raise NotImplementedError
+
     def get_num_free_blocks(self) -> int:
         return self._hashless_allocator.get_num_free_blocks() + len(self._unused_cached_blocks)
 
@@ -191,6 +194,20 @@ class PrefixCachingBlock(Block):
         # Register ourselves with the allocator, potentially replacing the physical block index.
         if self.content_hash is not None:
             self.physical_block_index = self._prefix_caching_allocator.register_immutable_block(self)
+
+    def copy_recursively(self) -> "PrefixCachingBlock":
+        if self._prev_block is None:
+            prev_block = None
+        else:
+            prev_block = self._prev_block.copy_recursively()
+
+        return PrefixCachingBlock(
+            prev_block=prev_block,
+            token_ids=self._token_ids[:],
+            block_size=self._block_size,
+            prefix_caching_allocator=self.self._prefix_caching_allocator,
+            physical_block_index=self._physical_block_index,
+        )
 
     @property
     def physical_block_index(self) -> Optional[int]:

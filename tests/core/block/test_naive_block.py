@@ -10,6 +10,7 @@ from vllm.core.block.naive_block import NaiveBlockAllocator, NaiveBlock
 #from vllm.core.block.interfaces import NaiveBlockAllocator, NaiveBlock, BlockAllocator, Block
 #from vllm.block2 import RefCounter
 #from vllm.block2 import PrefixCachingBlock, PrefixCachingBlockAllocator
+from vllm.utils import chunk_list
 
 
 class TestNaiveBlockAllocator:
@@ -81,3 +82,51 @@ class TestNaiveBlockAllocator:
         for i, block in enumerate(blocks):
             assert allocator.get_num_free_blocks() == i
             allocator.free(block)
+
+    @staticmethod
+    @pytest.mark.parametrize("seq_len", [1, 9, 129])
+    @pytest.mark.parametrize("block_size", [1, 8])
+    def test_fork(seq_len: int, block_size: int):
+        """Create a chain.
+        Fork the last block of the chain.
+        Assert the new chain has the same physical block numbers.
+        Assert the new chain has same token ids.
+        Assert the new chain has different objects.
+        """
+        num_blocks = 1024
+        allocator = NaiveBlockAllocator(create_block=NaiveBlock, num_blocks=num_blocks, block_size=block_size)
+
+        token_ids = list(range(seq_len))
+        
+        blocks = []
+        prev_block = None
+        for token_id_chunk in chunk_list(token_ids, block_size):
+            prev_block = allocator.allocate_mutable(prev_block)
+            prev_block.append_token_ids(token_id_chunk)
+            blocks.append(prev_block)
+
+        num_free_blocks_before_fork = allocator.get_num_free_blocks()
+
+        forked_blocks = allocator.fork(last_block=prev_block)
+
+        assert len(forked_blocks) == len(blocks)
+
+        for forked, original in zip(forked_blocks, blocks):
+            assert forked.physical_block_index == original.physical_block_index
+            assert forked.token_ids == original.token_ids
+            assert forked != original
+
+        # Do not expect any additional allocations.
+        assert allocator.get_num_free_blocks() == num_free_blocks_before_fork
+
+        # Free the original blocks. Assert num free blocks does not change, since
+        # refcount is nonzero.
+        for block in blocks:
+            allocator.free(block)
+            assert allocator.get_num_free_blocks() == num_free_blocks_before_fork
+
+        # Free the forked blocks. Assert num free blocks does change, since
+        # refcount is now zero.
+        for i, block in enumerate(forked_blocks):
+            allocator.free(block)
+            assert allocator.get_num_free_blocks() == num_free_blocks_before_fork + (i + 1)

@@ -9,6 +9,10 @@ class Block(ABC):
     def append_token_ids(self, token_ids: List[int]) -> None:
         pass
 
+    @abstractmethod
+    def copy_recursively(self) -> "Block":
+        pass
+
     @abstractproperty
     def physical_block_index(self) -> Optional[int]:
         pass
@@ -24,6 +28,7 @@ class Block(ABC):
     @abstractproperty
     def is_full(self) -> bool:
         pass
+
 
     class Factory(Protocol):
     
@@ -48,6 +53,9 @@ class BlockAllocator(ABC):
  
     @abstractmethod
     def free(self, block: Block) -> None:
+        pass
+
+    def fork(self, last_block: Block) -> List[Block]:
         pass
 
     @abstractmethod
@@ -76,6 +84,9 @@ class DeviceAwareBlockAllocator(ABC):
  
     @abstractmethod
     def free(self, block: Block) -> None:
+        pass
+
+    def fork(self, last_block: Block) -> List[Block]:
         pass
 
     @abstractmethod
