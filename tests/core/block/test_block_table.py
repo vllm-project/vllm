@@ -205,3 +205,56 @@ def test_append_token_ids_correct_content(block_size: int, sequence_len: int, ap
         assert block_table._get_all_token_ids() == token_ids + appended_so_far
     
     assert block_table._get_all_token_ids() == token_ids + token_ids_to_append
+
+@pytest.mark.parametrize("seq_len", [1, 9, 129])
+@pytest.mark.parametrize("block_size", [1, 8])
+@pytest.mark.parametrize("allocator_type", ["naive", "prefix_caching"])
+def test_fork(seq_len: int, block_size: int, allocator_type: str):
+    num_gpu_blocks = 1024
+
+    allocator = CpuGpuBlockAllocator.create(
+        allocator_type=allocator_type,
+        num_gpu_blocks=num_gpu_blocks,
+        num_cpu_blocks=0,
+        block_size=block_size,
+    )
+
+    token_ids = list(range(seq_len))
+    
+    block_table = BlockTable(
+        block_size=block_size,
+        block_allocator=allocator,
+    )
+
+    blocks = []
+    prev_block = None
+    for token_id_chunk in chunk_list(token_ids, block_size):
+        prev_block = allocator.allocate_mutable(prev_block, device=Device.GPU)
+        prev_block.append_token_ids(token_id_chunk)
+        blocks.append(prev_block)
+
+    num_free_blocks_before_fork = allocator.get_num_free_blocks(device=Device.GPU)
+
+    forked_blocks = allocator.fork(last_block=prev_block)
+
+    assert len(forked_blocks) == len(blocks)
+
+    for forked, original in zip(forked_blocks, blocks):
+        assert forked.physical_block_index == original.physical_block_index
+        assert forked.token_ids == original.token_ids
+        assert forked != original
+
+    # Do not expect any additional allocations.
+    assert allocator.get_num_free_blocks(device=Device.GPU) == num_free_blocks_before_fork
+
+    # Free the original blocks. Assert num free blocks does not change, since
+    # refcount is nonzero.
+    for block in blocks:
+        allocator.free(block)
+        assert allocator.get_num_free_blocks(device=Device.GPU) == num_free_blocks_before_fork
+
+    # Free the forked blocks. Assert num free blocks does change, since
+    # refcount is now zero.
+    for i, block in enumerate(forked_blocks):
+        allocator.free(block)
+        assert allocator.get_num_free_blocks(device=Device.GPU) == num_free_blocks_before_fork + (i + 1)

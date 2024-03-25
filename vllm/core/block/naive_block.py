@@ -2,7 +2,7 @@ from typing import List, Optional, Set, Iterable, Tuple, Dict, Type, TypeVar, T
 from abc import ABC, abstractmethod, abstractproperty
 
 from vllm.core.block.interfaces import BlockAllocator, Block
-from vllm.core.block.common import RefCounter
+from vllm.core.block.common import RefCounter, get_all_blocks_recursively
 
 from vllm.utils import Device
 
@@ -56,15 +56,7 @@ class NaiveBlockAllocator(BlockAllocator):
             self._free_block_indices.add(block_index)
 
     def fork(self, last_block: Block) -> List[Block]:
-        
-        def get_source_blocks(block, lst):
-            if block is None:
-                return
-            get_source_blocks(block._prev_block, lst)
-            lst.append(block)
-
-        source_blocks = []
-        get_source_blocks(last_block, source_blocks)
+        source_blocks = get_all_blocks_recursively(last_block)
 
         forked_blocks = []
         prev_block = None
@@ -153,3 +145,8 @@ class NaiveBlock(Block):
 
     def block_size(self) -> int:
         return self._block_size
+
+    @property
+    def prev_block(self) -> Optional["Block"]:
+        return self._prev_block
+

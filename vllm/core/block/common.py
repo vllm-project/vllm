@@ -2,6 +2,7 @@ from typing import List, Optional, Set, Iterable, Tuple, Dict
 from abc import ABC, abstractmethod, abstractproperty
 
 from vllm.utils import Device
+from vllm.core.block.interfaces import Block
 
 
 from typing import Type, TypeVar, T
@@ -34,3 +35,15 @@ class RefCounter:
         self._refcounts[block_index] = refcount
 
         return refcount
+
+
+def get_all_blocks_recursively(last_block: Block) -> List[Block]:
+
+    def recurse(block: Block, lst: List[Block]) -> None:
+        if block.prev_block is not None:
+            recurse(block.prev_block, lst)
+        lst.append(block)
+
+    all_blocks = []
+    recurse(last_block, all_blocks)
+    return all_blocks

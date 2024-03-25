@@ -80,6 +80,10 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         allocator = self._block_ids_to_allocator[block.physical_block_index]
         return allocator.free(block)
 
+    def fork(self, last_block: Block) -> List[Block]:
+        allocator = self._block_ids_to_allocator[last_block.physical_block_index]
+        return allocator.fork(last_block)
+
     def get_num_free_blocks(self, device: Device) -> int:
         return self._allocators[device].get_num_free_blocks()
 

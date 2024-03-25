@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod, abstractproperty
 
 from vllm.core.block.interfaces import Block, BlockAllocator
 from vllm.core.block.naive_block import NaiveBlockAllocator, NaiveBlock
-from vllm.core.block.common import RefCounter
+from vllm.core.block.common import RefCounter, get_all_blocks_recursively
 
 from vllm.utils import Device
 
@@ -139,7 +139,25 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             self._unused_cached_blocks[block.content_hash] = physical_block_index
 
     def fork(self, last_block: Block) -> List[Block]:
-        raise NotImplementedError
+        source_blocks = get_all_blocks_recursively(last_block)
+
+        forked_blocks = []
+        prev_block = None
+        for block in source_blocks:
+            refcount = self._refcounter.incr(block.physical_block_index)
+            assert refcount != 1, "can't fork free'd block"
+
+            forked_blocks.append(
+                self._create_block(
+                    prev_block=prev_block,
+                    token_ids=block.token_ids,
+                    physical_block_index=block.physical_block_index,
+                    block_size=self._block_size,
+                )
+            )
+            prev_block = forked_blocks[-1]
+
+        return forked_blocks
 
     def get_num_free_blocks(self) -> int:
         return self._hashless_allocator.get_num_free_blocks() + len(self._unused_cached_blocks)
@@ -232,6 +250,10 @@ class PrefixCachingBlock(Block):
     @property
     def token_ids(self) -> List[int]:
         return self._block.token_ids
+
+    @property
+    def prev_block(self) -> Optional[Block]:
+        return self._prev_block
 
     @property
     def content_hash(self) -> Optional[int]:

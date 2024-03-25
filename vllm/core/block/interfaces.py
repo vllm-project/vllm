@@ -13,6 +13,10 @@ class Block(ABC):
     def copy_recursively(self) -> "Block":
         pass
 
+    #@abstractmethod
+    #def get_all_blocks(self) -> List["Block"]:
+    #    pass
+
     @abstractproperty
     def physical_block_index(self) -> Optional[int]:
         pass
@@ -29,6 +33,9 @@ class Block(ABC):
     def is_full(self) -> bool:
         pass
 
+    @abstractproperty
+    def prev_block(self) -> Optional["Block"]:
+        pass
 
     class Factory(Protocol):
     
@@ -86,6 +93,7 @@ class DeviceAwareBlockAllocator(ABC):
     def free(self, block: Block) -> None:
         pass
 
+    @abstractmethod
     def fork(self, last_block: Block) -> List[Block]:
         pass
 
