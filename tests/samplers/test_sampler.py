@@ -10,6 +10,7 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.worker.model_runner import ModelRunner
+from vllm.utils import Counter
 
 
 class MockLogitsSampler(Sampler):
@@ -25,9 +26,8 @@ class MockLogitsSampler(Sampler):
 def _prepare_test(
     batch_size: int
 ) -> Tuple[torch.Tensor, torch.Tensor, MockLogitsSampler, ModelRunner]:
-    vocab_size = 32000
     input_tensor = torch.rand((batch_size, 1024), dtype=torch.float16)
-    fake_logits = torch.full((batch_size, vocab_size),
+    fake_logits = torch.full((batch_size, VOCAB_SIZE),
                              1e-2,
                              dtype=input_tensor.dtype)
     sampler = MockLogitsSampler(fake_logits)
@@ -35,6 +35,7 @@ def _prepare_test(
     return input_tensor, fake_logits, sampler, model_runner
 
 
+VOCAB_SIZE = 32000
 RANDOM_SEEDS = list(range(128))
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
@@ -182,6 +183,225 @@ def test_sampler_all_beam(seed: int, device: str):
     # whether there are no exceptions in the sampler
     # when handling an all-beam search case.
     del model_runner
+
+
+@pytest.mark.parametrize("seed", RANDOM_SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_sampler_min_tokens_penalty(seed: int, device: str):
+    seq_id_counter = Counter(start=random.randint(0, 100))
+    set_random_seed(seed)
+    torch.set_default_device(device)
+
+    def create_sampling_params(min_tokens,
+                               eos_token_id=0,
+                               stop_token_ids=None):
+        sampling_params = SamplingParams(
+            min_tokens=min_tokens,
+            max_tokens=9999,  # keep higher than max of min_tokens
+            stop_token_ids=stop_token_ids,
+        )
+        sampling_params.eos_token_id = eos_token_id
+        return sampling_params
+
+    def create_sequence_data(num_input=3, num_generated=0):
+        seq_data = SequenceData(
+            random.choices(range(0, VOCAB_SIZE), k=num_input))
+        if num_generated > 0:
+            seq_data.output_token_ids = random.choices(range(0, VOCAB_SIZE),
+                                                       k=num_generated)
+        return seq_data
+
+    def generate_test_case():
+        # generate multiple seq groups but limit total batch size
+        batch_size = random.randint(1, 128)
+
+        expected_penalization = []
+        sequence_metadata_list = []
+        while batch_size > 0:
+            # 20% chance to generate prompt seq group with single sequence
+            is_prompt = random.random() < 0.2
+            num_seqs = 1 if is_prompt else random.randint(1, batch_size)
+
+            eos_token_id = random.randint(0, VOCAB_SIZE - 1)
+            min_tokens = random.randint(0, 50)
+            num_stop_tokens = random.randint(0, 8)
+            if num_stop_tokens > 0:
+                stop_token_ids = random.choices(range(0, VOCAB_SIZE - 1),
+                                                k=num_stop_tokens)
+            else:
+                stop_token_ids = None
+
+            sampling_params = create_sampling_params(
+                min_tokens=min_tokens,
+                eos_token_id=eos_token_id,
+                stop_token_ids=stop_token_ids)
+
+            seq_data = {}
+            seq_group_penalization = []
+            for _ in range(num_seqs):
+                num_input = random.randint(1, 100)
+                num_generated = random.randint(1, 100) if not is_prompt else 0
+                seq_data[next(seq_id_counter)] = create_sequence_data(
+                    num_input=num_input, num_generated=num_generated)
+                seq_group_penalization.append(num_generated < min_tokens)
+
+            expected_penalization.extend(seq_group_penalization)
+            sequence_metadata_list.append(
+                SequenceGroupMetadata(
+                    request_id=f"test_{batch_size}",
+                    is_prompt=is_prompt,
+                    seq_data=seq_data,
+                    sampling_params=sampling_params,
+                    block_tables={},
+                ))
+            batch_size -= num_seqs
+
+        return {
+            "expected_penalization": expected_penalization,
+            "seq_group_metadata_list": sequence_metadata_list,
+        }
+
+    # define some explicit test cases for edge case behavior
+    prompt_without_penalization = {
+        "expected_penalization": [False],
+        "seq_group_metadata_list": [
+            SequenceGroupMetadata(
+                request_id="test_1",
+                is_prompt=True,
+                seq_data={
+                    next(seq_id_counter): create_sequence_data(),
+                },
+                sampling_params=create_sampling_params(0),
+                block_tables={},
+            ),
+        ]
+    }
+
+    prompt_with_penalization = {
+        "expected_penalization": [True],
+        "seq_group_metadata_list": [
+            SequenceGroupMetadata(
+                request_id="test_1",
+                is_prompt=True,
+                seq_data={
+                    next(seq_id_counter): create_sequence_data(),
+                },
+                sampling_params=create_sampling_params(1),
+                block_tables={},
+            ),
+        ]
+    }
+
+    stop_penalizing_after_min_tokens = {
+        "expected_penalization": [False],
+        "seq_group_metadata_list": [
+            SequenceGroupMetadata(
+                request_id="test_1",
+                is_prompt=False,
+                seq_data={
+                    next(seq_id_counter):
+                    create_sequence_data(num_generated=1),
+                },
+                sampling_params=create_sampling_params(1),
+                block_tables={},
+            )
+        ]
+    }
+
+    stop_token_ids = [42, 99, 42, 0]  # intentional duplication
+    simple_combination = {
+        "expected_penalization": [True, False, False],
+        "seq_group_metadata_list": [
+            SequenceGroupMetadata(
+                request_id="test_1",
+                is_prompt=False,
+                seq_data={
+                    next(seq_id_counter):
+                    create_sequence_data(num_generated=1),
+                    next(seq_id_counter):
+                    create_sequence_data(num_generated=100),
+                },
+                sampling_params=create_sampling_params(
+                    2, stop_token_ids=stop_token_ids),
+                block_tables={},
+            ),
+            SequenceGroupMetadata(
+                request_id="test_2",
+                is_prompt=True,
+                seq_data={
+                    next(seq_id_counter): create_sequence_data(),
+                },
+                sampling_params=create_sampling_params(
+                    0, stop_token_ids=stop_token_ids),
+                block_tables={},
+            )
+        ]
+    }
+
+    if seed == 0:
+        test_cases = [
+            prompt_without_penalization,
+            prompt_with_penalization,
+            stop_penalizing_after_min_tokens,
+            simple_combination,
+        ]
+    else:
+        test_cases = [generate_test_case()]
+
+    def run_test_case(*,
+                      expected_penalization=None,
+                      seq_group_metadata_list=None):
+        assert expected_penalization, "Invalid test case"
+        assert seq_group_metadata_list, "Invalid test case"
+
+        batch_size = 0
+        prompt_lens = []
+        sampling_params_per_seq = []
+        for sgm in seq_group_metadata_list:
+            num_seqs = len(sgm.seq_data)
+            batch_size += num_seqs
+            sampling_params = sgm.sampling_params
+            for seq_id in sgm.seq_data:
+                prompt_lens.append(sgm.seq_data[seq_id].get_prompt_len())
+                sampling_params_per_seq.append(sampling_params)
+
+        _, fake_logits, sampler, model_runner = _prepare_test(batch_size)
+        sampling_metadata = model_runner._prepare_sample(
+            seq_group_metadata_list,
+            prompt_lens=prompt_lens,
+            subquery_lens=prompt_lens)
+        # the logits tensor is modified in-place by the sampler
+        _ = sampler(logits=fake_logits, sampling_metadata=sampling_metadata)
+
+        for logits_idx, (should_penalize, sampling_params) in enumerate(
+                zip(expected_penalization, sampling_params_per_seq)):
+
+            tokens_to_check = [sampling_params.eos_token_id]
+            if sampling_params.stop_token_ids:
+                tokens_to_check.extend(sampling_params.stop_token_ids)
+            tokens_to_check = set(tokens_to_check)
+
+            if should_penalize:
+                for token_id in tokens_to_check:
+                    assert fake_logits[logits_idx, token_id] == -float(
+                        'inf'
+                    ), f"Expected token {token_id} for logits row {logits_idx}"
+                    " to be penalized"
+                # no other tokens should be set to -inf
+                assert torch.count_nonzero(
+                    fake_logits[logits_idx, :] == -float('inf')) == len(
+                        tokens_to_check
+                    ), f"Expected only {len(tokens_to_check)} to be penalized"
+            else:
+                # no tokens should be set to -inf
+                assert torch.count_nonzero(
+                    fake_logits[logits_idx, :] ==
+                    -float('inf')) == 0, "No tokens should have been penalized"
+
+        del model_runner
+
+    for test_case in test_cases:
+        run_test_case(**test_case)
 
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)

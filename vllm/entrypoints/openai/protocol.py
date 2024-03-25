@@ -88,6 +88,7 @@ class ChatCompletionRequest(BaseModel):
     length_penalty: Optional[float] = 1.0
     early_stopping: Optional[bool] = False
     ignore_eos: Optional[bool] = False
+    min_tokens: Optional[int] = 0
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     skip_special_tokens: Optional[bool] = True
     spaces_between_special_tokens: Optional[bool] = True
@@ -165,6 +166,7 @@ class ChatCompletionRequest(BaseModel):
             stop=self.stop,
             stop_token_ids=self.stop_token_ids,
             max_tokens=self.max_tokens,
+            min_tokens=self.min_tokens,
             logprobs=self.top_logprobs if self.logprobs else None,
             prompt_logprobs=self.top_logprobs if self.echo else None,
             best_of=self.best_of,
@@ -224,6 +226,7 @@ class CompletionRequest(BaseModel):
     early_stopping: Optional[bool] = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     ignore_eos: Optional[bool] = False
+    min_tokens: Optional[int] = 0
     skip_special_tokens: Optional[bool] = True
     spaces_between_special_tokens: Optional[bool] = True
     # doc: end-completion-sampling-params
@@ -296,6 +299,7 @@ class CompletionRequest(BaseModel):
             stop_token_ids=self.stop_token_ids,
             ignore_eos=self.ignore_eos,
             max_tokens=self.max_tokens if not echo_without_generation else 1,
+            min_tokens=self.min_tokens,
             logprobs=self.logprobs,
             use_beam_search=self.use_beam_search,
             early_stopping=self.early_stopping,
