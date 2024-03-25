@@ -633,6 +633,7 @@ class LLMEngine:
         else:
             output = []
 
+        print("\t\tFREE BLOCKS", self.scheduler.block_manager.get_num_free_gpu_blocks())
         return self._process_model_outputs(output, scheduler_outputs)
 
     def do_log_stats(self) -> None:
@@ -725,10 +726,14 @@ class LLMEngine:
             seq.status = SequenceStatus.FINISHED_STOPPED
             return
 
+        '''FIXME
+        Comment this out to temporarily bypass context length.
+        Output should start showing gibberish.
+        '''
         # Check if the sequence has reached max_model_len.
-        if seq.get_len() > self.scheduler_config.max_model_len:
-            seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
-            return
+        # if seq.get_len() > self.scheduler_config.max_model_len:
+        #     seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
+        #     return
 
         # Check if the sequence has reached max_tokens.
         if seq.get_output_len() == sampling_params.max_tokens:
