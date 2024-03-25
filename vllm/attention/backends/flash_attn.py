@@ -155,6 +155,7 @@ class FlashAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
+        kv_quant_param: List[float] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 
@@ -183,7 +184,8 @@ class FlashAttentionImpl(AttentionImpl):
             PagedAttention.write_to_paged_cache(key, value, key_cache,
                                                 value_cache,
                                                 attn_metadata.slot_mapping,
-                                                attn_metadata.kv_cache_dtype)
+                                                attn_metadata.kv_cache_dtype,
+                                                kv_quant_param)
 
         if attn_metadata.is_prompt:
             # Prompt run.
@@ -229,6 +231,7 @@ class FlashAttentionImpl(AttentionImpl):
                 attn_metadata.context_lens,
                 attn_metadata.max_context_len,
                 attn_metadata.kv_cache_dtype,
+                kv_quant_param,
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,

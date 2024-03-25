@@ -81,5 +81,6 @@ class AttentionImpl(ABC):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
+        kv_quant_param: List[float] = None,
     ) -> torch.Tensor:
         raise NotImplementedError

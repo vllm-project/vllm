@@ -33,7 +33,7 @@ class PagedAttentionMetadata:
     # captured.
     block_tables: Optional[torch.Tensor]
     kv_cache_dtype: str
-    kv_quant_param: List[float]
+    kv_quant_param: List[List[float]]
 
 
 class PagedAttention:

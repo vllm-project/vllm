@@ -57,6 +57,7 @@ class GPUExecutor(ExecutorBase):
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
+            kv_quant_params_path=self.cache_config.cache_quant_params_path,
             is_driver_worker=True,
         )
         self.driver_worker.init_device()

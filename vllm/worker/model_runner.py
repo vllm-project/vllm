@@ -88,6 +88,9 @@ class ModelRunner:
         self.kv_quant_params = self.load_kv_quant_params(
             model_config,
             kv_quant_params_path) if self.kv_cache_dtype == "int8" else None
+        
+        self.attn_backend = get_attn_backend(
+            self.model_config.dtype if model_config is not None else None)
 
     def load_kv_quant_params(self, model_config: ModelConfig,
                              kv_quant_params_path: str) -> List[List[float]]:
@@ -103,15 +106,12 @@ class ModelRunner:
                 )
         num_layers = model_config.hf_config.num_hidden_layers
         kv_quant_params = []
-        for i in range(num_layers):
-            if kv_quant_params_path is not None:
+        if kv_quant_params_path is not None:
+            for i in range(num_layers):
                 path = kv_quant_params_path + f"/layers.{i}.past_kv_scale.0.weight"
                 kv_quant_param = list(np.fromfile(path, dtype=np.float32))
-            kv_quant_params.append(kv_quant_param)
+                kv_quant_params.append(kv_quant_param)
         return kv_quant_params
-
-        self.attn_backend = get_attn_backend(
-            self.model_config.dtype if model_config is not None else None)
 
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
@@ -314,7 +314,7 @@ class ModelRunner:
             block_tables=block_tables,
             use_cuda_graph=False,
             kv_cache_dtype=self.kv_cache_dtype,
-            kv_quant_params=self.kv_quant_params,
+            kv_quant_param=self.kv_quant_params,
         )
         return (input_tokens, input_positions, attn_metadata, prompt_lens,
                 subquery_lens, lora_index_mapping, lora_prompt_mapping,
@@ -446,7 +446,7 @@ class ModelRunner:
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
             kv_cache_dtype=self.kv_cache_dtype,
-            kv_quant_params=self.kv_quant_params,
+            kv_quant_param=self.kv_quant_params,
         )
         return (input_tokens, input_positions, attn_metadata,
                 lora_index_mapping, lora_prompt_mapping, lora_requests)
@@ -806,7 +806,7 @@ class ModelRunner:
                     block_tables=block_tables[:batch_size],
                     use_cuda_graph=True,
                     kv_cache_dtype=self.kv_cache_dtype,
-                    kv_quant_params=self.kv_quant_params,
+                    kv_quant_param=self.kv_quant_params,
                 )
 
                 if self.lora_config:
