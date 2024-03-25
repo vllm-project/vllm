@@ -12,11 +12,11 @@ import filelock
 import huggingface_hub.constants
 import numpy as np
 import torch
-from huggingface_hub import snapshot_download, HfFileSystem
+from huggingface_hub import HfFileSystem, snapshot_download
 from safetensors.torch import load_file, safe_open, save_file
-from tqdm.auto import tqdm
 from tensorizer.serialization import TensorDeserializer
 from tensorizer.stream_io import open_stream
+from tqdm.auto import tqdm
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger

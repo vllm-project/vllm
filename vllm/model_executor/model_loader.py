@@ -7,12 +7,12 @@ from torch import nn
 
 from vllm.config import DeviceConfig, ModelConfig
 from vllm.model_executor.models import ModelRegistry
+from vllm.model_executor.tensorizer_loader import (ParameterizedLoadFormat,
+                                                   _is_vllm_model,
+                                                   load_with_tensorizer)
 from vllm.model_executor.models.llava import LlavaForConditionalGeneration
 from vllm.model_executor.weight_utils import (get_quant_config,
                                               initialize_dummy_weights)
-from vllm.model_executor.tensorizer_loader import (load_with_tensorizer,
-                                                   _is_vllm_model,
-                                                   ParameterizedLoadFormat)
 
 
 _VISION_MODEL_CLASSES = [

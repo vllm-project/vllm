@@ -15,7 +15,6 @@ from prometheus_client import make_asgi_app
 
 import vllm
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.model_executor.tensorizer_loader import TensorizerArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -24,6 +23,7 @@ from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
+from vllm.model_executor.tensorizer_loader import TensorizerArgs
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 

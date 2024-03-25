@@ -1,9 +1,11 @@
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
-from vllm.model_executor.tensorizer_loader import (load_with_tensorizer,
-                                                   _is_vllm_model,
-                                                   TensorizerArgs)
+
 from vllm.config import ModelConfig
+from vllm.model_executor.tensorizer_loader import (TensorizerArgs,
+                                                   _is_vllm_model,
+                                                   load_with_tensorizer)
 
 
 @pytest.fixture(autouse=True)

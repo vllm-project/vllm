@@ -1,23 +1,23 @@
-import os
-import time
-import tempfile
-from typing import Type
 import argparse
+import os
+import tempfile
+import time
+import uuid
+from functools import partial
+from typing import Type
+
 import torch
 import torch.nn as nn
-from tensorizer import TensorDeserializer, TensorSerializer, \
-    EncryptionParams, DecryptionParams
-from tensorizer import stream_io
+from tensorizer import (DecryptionParams, EncryptionParams, TensorDeserializer,
+                        TensorSerializer, stream_io)
 from tensorizer.utils import convert_bytes, get_mem_usage, no_init_or_tensor
-from transformers import AutoModelForCausalLM, AutoConfig, PretrainedConfig
-from vllm.model_executor.models import ModelRegistry
-from vllm.model_executor.tensorizer_loader import TensorizerArgs
-from vllm.config import _get_and_verify_dtype
-from functools import partial
-import uuid
+from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig
 
-from vllm.model_executor.parallel_utils.parallel_state import \
-    initialize_model_parallel
+from vllm.config import _get_and_verify_dtype
+from vllm.model_executor.models import ModelRegistry
+from vllm.model_executor.parallel_utils.parallel_state import (
+    initialize_model_parallel)
+from vllm.model_executor.tensorizer_loader import TensorizerArgs
 
 
 def parse_args():
