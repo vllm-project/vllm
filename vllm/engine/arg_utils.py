@@ -337,7 +337,8 @@ class EngineArgs:
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
-                                   model_config.get_sliding_window())
+                                   model_config.get_sliding_window(),
+                                   self.enable_prefix_caching)
         parallel_config = ParallelConfig(
             self.pipeline_parallel_size, self.tensor_parallel_size,
             self.worker_use_ray, self.max_parallel_loading_workers,
