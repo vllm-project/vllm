@@ -431,7 +431,7 @@ class SequenceGroup:
 
 
 class SequenceGroupMetadata:
-    """Metadata for a sequence group. Used to create `InputMetadata`.
+    """Metadata for a sequence group. Used to create `AttentionMetadata`.
 
     Args:
         request_id: The ID of the request.

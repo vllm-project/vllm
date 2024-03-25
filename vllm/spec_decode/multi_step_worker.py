@@ -27,8 +27,8 @@ class MultiStepWorker(Worker):
 
         self._proposer: Optional[DraftModelTop1Proposer] = None
 
-    def init_model(self):
-        super().init_model()
+    def init_device(self):
+        super().init_device()
 
         self._proposer = DraftModelTop1Proposer(
             self,
