@@ -1,6 +1,6 @@
 # This script build the Neuron docker image and run the API server inside the container.
 # It serves a sanity check for compilation and basic model usage.
-set -ex
+set -e
 
 # Print Neuron SDK versions
 neuron-ls --version
@@ -16,7 +16,8 @@ trap remove_docker_container EXIT
 remove_docker_container
 
 # Run the image
-docker run --device /dev/kfd --device /dev/dri --network host --name neuron neuron python3 -m vllm.entrypoints.api_server &
+docker run --device=/dev/neuron0 --device=/dev/neuron1 --network host --name neuron neuron python3 -m vllm.entrypoints.api_server \
+       --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --max-num-seqs 8 --max-model-len 128 --block-size 128 --device neuron --tensor-parallel-size 2 &
 
 # Wait for the server to start
 wait_for_server_to_start() {
