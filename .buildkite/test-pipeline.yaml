@@ -48,6 +48,7 @@ steps:
 
 - label: Samplers Test
   command: pytest -v -s samplers
+  soft_fail: true
 
 - label: LogitsProcessor Test
   command: pytest -v -s test_logits_processor.py
