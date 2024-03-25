@@ -377,6 +377,16 @@ class CudaMemoryProfiler:
         gc.collect()
 
 
+def str_to_int_tuple(s: str) -> Tuple[int]:
+    """Convert a string to a tuple of integers."""
+    try:
+        return tuple(map(int, s.split(",")))
+    except ValueError as e:
+        raise ValueError(
+            "String must be a series of integers separated by commas "
+            f"(e.g., 1, 2, 3). Given input: {s}") from e
+
+
 def pad_to_max_length(x: List[int], max_len: int, pad: int) -> List[int]:
     assert len(x) <= max_len
     return x + [pad] * (max_len - len(x))

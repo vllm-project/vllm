@@ -39,8 +39,14 @@ steps:
 
 - label: Models Test
   commands:
-    - pytest -v -s models --forked
+    - bash ../.buildkite/download-images.sh
+    - pytest -v -s models --ignore=models/test_llava.py  --forked
   soft_fail: true
+
+- label: Llava Test
+  commands:
+    - bash ../.buildkite/download-images.sh
+    - pytest -v -s models/test_llava.py
 
 - label: Prefix Caching Test
   commands:

@@ -1,3 +1,4 @@
+import enum
 import json
 import os
 from dataclasses import dataclass
@@ -8,7 +9,7 @@ from packaging.version import Version
 from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
-from vllm.transformers_utils.config import get_config
+from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import get_cpu_memory, get_nvcc_cuda_version, is_hip, is_neuron
 
 if TYPE_CHECKING:
@@ -118,8 +119,9 @@ class ModelConfig:
 
         self.hf_config = get_config(self.model, trust_remote_code, revision,
                                     code_revision)
-        self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
-        self.max_model_len = _get_and_verify_max_len(self.hf_config,
+        self.hf_text_config = get_hf_text_config(self.hf_config)
+        self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
+        self.max_model_len = _get_and_verify_max_len(self.hf_text_config,
                                                      max_model_len)
         self._verify_load_format()
         self._verify_tokenizer_mode()
@@ -218,7 +220,7 @@ class ModelConfig:
         self,
         parallel_config: "ParallelConfig",
     ) -> None:
-        total_num_attention_heads = self.hf_config.num_attention_heads
+        total_num_attention_heads = self.hf_text_config.num_attention_heads
         tensor_parallel_size = parallel_config.tensor_parallel_size
         if total_num_attention_heads % tensor_parallel_size != 0:
             raise ValueError(
@@ -226,7 +228,7 @@ class ModelConfig:
                 " must be divisible by tensor parallel size "
                 f"({tensor_parallel_size}).")
 
-        total_num_hidden_layers = self.hf_config.num_hidden_layers
+        total_num_hidden_layers = self.hf_text_config.num_hidden_layers
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         if total_num_hidden_layers % pipeline_parallel_size != 0:
             raise ValueError(
@@ -241,22 +243,23 @@ class ModelConfig:
         # Some models, like Qwen2 and Qwen1.5, use `use_sliding_window` in
         # addition to sliding window size. We check if that field is present
         # and if it's False, return None.
-        if (hasattr(self.hf_config, "use_sliding_window")
-                and not self.hf_config.use_sliding_window):
+        if (hasattr(self.hf_text_config, "use_sliding_window")
+                and not self.hf_text_config.use_sliding_window):
             return None
-        return getattr(self.hf_config, "sliding_window", None)
+        return getattr(self.hf_text_config, "sliding_window", None)
 
     def get_vocab_size(self) -> int:
-        return self.hf_config.vocab_size
+        return self.hf_text_config.vocab_size
 
     def get_hidden_size(self) -> int:
-        return self.hf_config.hidden_size
+        return self.hf_text_config.hidden_size
 
     def get_head_size(self) -> int:
-        if hasattr(self.hf_config, "head_dim"):
-            return self.hf_config.head_dim
+        if hasattr(self.hf_text_config, "head_dim"):
+            return self.hf_text_config.head_dim
         # FIXME(woosuk): This may not be true for all models.
-        return self.hf_config.hidden_size // self.hf_config.num_attention_heads
+        return (self.hf_text_config.hidden_size //
+                self.hf_text_config.num_attention_heads)
 
     def get_total_num_kv_heads(self) -> int:
         """Returns the total number of KV heads."""
@@ -268,7 +271,7 @@ class ModelConfig:
         new_decoder_arch_falcon = (
             self.hf_config.model_type in falcon_model_types
             and getattr(self.hf_config, "new_decoder_architecture", False))
-        if not new_decoder_arch_falcon and getattr(self.hf_config,
+        if not new_decoder_arch_falcon and getattr(self.hf_text_config,
                                                    "multi_query", False):
             # Multi-query attention, only one KV head.
             # Currently, tensor parallelism is not supported in this case.
@@ -284,13 +287,13 @@ class ModelConfig:
             "multi_query_group_num",
         ]
         for attr in attributes:
-            num_kv_heads = getattr(self.hf_config, attr, None)
+            num_kv_heads = getattr(self.hf_text_config, attr, None)
             if num_kv_heads is not None:
                 return num_kv_heads
 
         # For non-grouped-query attention models, the number of KV heads is
         # equal to the number of attention heads.
-        return self.hf_config.num_attention_heads
+        return self.hf_text_config.num_attention_heads
 
     def get_num_kv_heads(self, parallel_config: "ParallelConfig") -> int:
         """Returns the number of KV heads per GPU."""
@@ -303,7 +306,7 @@ class ModelConfig:
                    total_num_kv_heads // parallel_config.tensor_parallel_size)
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
-        total_num_hidden_layers = self.hf_config.num_hidden_layers
+        total_num_hidden_layers = self.hf_text_config.num_hidden_layers
         return total_num_hidden_layers // parallel_config.pipeline_parallel_size
 
 
@@ -625,6 +628,48 @@ class LoRAConfig:
                 "Due to limitations of the custom LoRA CUDA kernel, "
                 "max_num_batched_tokens must be <= 65528 when "
                 "LoRA is enabled.")
+
+
+@dataclass
+class VisionLanguageConfig:
+    """Configs the input data format and how models should run for
+    vision language models."""
+
+    class ImageInputType(enum.Enum):
+        """Image input type into the vision language model.
+
+        An image roughly goes through the following transformation:
+        Raw image --> pixel values --> image features --> image embeddings.
+
+        The difference between different image input types is where the
+        image encoder (pixel values --> image features) is run.
+        Different image input types also correspond to different tensor shapes.
+
+        For example, for Llava, PIXEL_VALUES: (1, 3, 336, 336).
+        IMAGE_FEATURES: (1, 576, 1024).
+        """
+        PIXEL_VALUES = enum.auto()
+        IMAGE_FEATURES = enum.auto()
+
+    image_input_type: ImageInputType
+    # The input id corresponding to image token.
+    image_token_id: int
+    # Used for running `run_prefill_max_token`.
+    # For models that support varying resolution, this corresponds to
+    # worst case scenario (biggest supported resolution).
+    image_input_shape: tuple
+    image_feature_size: int
+
+    @classmethod
+    def get_image_input_enum_type(
+            cls, value: str) -> "VisionLanguageConfig.ImageInputType":
+        """Get the image input type from a string."""
+        try:
+            return cls.ImageInputType[value.upper()]
+        except KeyError as e:
+            raise ValueError(f"{value} is not a valid choice. "
+                             f"Expecting to choose from "
+                             f"{[x.name for x in cls.ImageInputType]}.") from e
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
