@@ -44,9 +44,9 @@ __inline__ __device__ T warpReduceSum(T val) {
 }
 
 // Helper function to return the next largest power of 2
-constexpr int _nextPow2(int num) {
+static constexpr int _nextPow2(unsigned int num) {
   if (num <= 1) return num;
-  return 1 << (8 * sizeof(num) - __builtin_clz(num - 1));
+  return 1 << (CHAR_BIT * sizeof(num) - __builtin_clz(num - 1));
 }
 
 /* Calculate the sum of all elements in a block */
