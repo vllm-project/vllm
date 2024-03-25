@@ -22,30 +22,26 @@ from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
+from transformers import Starcoder2Config
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.layers.attention import PagedAttention
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearMethodBase,
                                                QKVParallelLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, ParallelLMHead, DEFAULT_VOCAB_PADDING_SIZE)
-from vllm.model_executor.parallel_utils.parallel_state import get_tensor_model_parallel_world_size
+from vllm.model_executor.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_world_size)
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
-
-try:
-    from transformers import Starcoder2Config
-except ImportError:
-    # fallback to PretrainedConfig
-    # NOTE: Please install transformers from source or use transformers>=4.39.0
-    from transformers import PretrainedConfig as Starcoder2Config
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -103,7 +99,7 @@ class Starcoder2Attention(nn.Module):
             base=int(self.rope_theta),
             is_neox_style=True,
         )
-        self.attn = PagedAttention(
+        self.attn = Attention(
             self.num_heads,
             self.head_dim,
             self.scaling,
@@ -253,7 +249,9 @@ class Starcoder2ForCausalLM(nn.Module):
                 padding_size=DEFAULT_VOCAB_PADDING_SIZE,
             )
             self.lm_head_weight = self.lm_head.weight
-        self.sampler = Sampler(self.unpadded_vocab_size, config.vocab_size)
+        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                config.vocab_size)
+        self.sampler = Sampler()
 
     def forward(
         self,
@@ -266,13 +264,18 @@ class Starcoder2ForCausalLM(nn.Module):
                                    input_metadata)
         return hidden_states
 
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head_weight, hidden_states,
+                                       sampling_metadata)
+        return logits
+
     def sample(
         self,
-        hidden_states: Optional[torch.Tensor],
+        logits: Optional[torch.Tensor],
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(self.lm_head_weight, hidden_states,
-                                   sampling_metadata)
+        next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
     def load_weights(self,

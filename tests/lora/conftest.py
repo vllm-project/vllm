@@ -13,6 +13,7 @@ from huggingface_hub import snapshot_download
 import vllm
 from vllm.config import LoRAConfig
 from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
@@ -85,7 +86,8 @@ def dummy_model() -> nn.Module:
             ("outact", nn.Sigmoid()),
             # Special handling for lm_head & sampler
             ("lm_head", ParallelLMHead(512, 10)),
-            ("sampler", Sampler(512))
+            ("logits_processor", LogitsProcessor(512)),
+            ("sampler", Sampler())
         ]))
     model.config = MagicMock()
     return model
@@ -110,7 +112,8 @@ def dummy_model_gate_up() -> nn.Module:
             ("outact", nn.Sigmoid()),
             # Special handling for lm_head & sampler
             ("lm_head", ParallelLMHead(512, 10)),
-            ("sampler", Sampler(512))
+            ("logits_processor", LogitsProcessor(512)),
+            ("sampler", Sampler())
         ]))
     model.config = MagicMock()
     return model
@@ -152,4 +155,5 @@ def llama_2_7b_engine_extra_embeddings() -> nn.Module:
 @pytest.fixture
 def llama_2_7b_model_extra_embeddings(
         llama_2_7b_engine_extra_embeddings) -> nn.Module:
-    yield llama_2_7b_engine_extra_embeddings.driver_worker.model_runner.model
+    yield (llama_2_7b_engine_extra_embeddings.model_executor.driver_worker.
+           model_runner.model)

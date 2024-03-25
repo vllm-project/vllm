@@ -128,6 +128,7 @@ Once neuronx-cc and transformers-neuronx packages are installed, we will be able
 
 .. code-block:: console
 
+    $ git clone https://github.com/vllm-project/vllm.git
     $ cd vllm
     $ pip install -U -r requirements-neuron.txt
     $ pip install .

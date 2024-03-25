@@ -83,7 +83,7 @@ class LLM:
         swap_space: int = 4,
         enforce_eager: bool = False,
         max_context_len_to_capture: int = 8192,
-        disable_custom_all_reduce: bool = False,
+        disable_custom_all_reduce: bool = True,
         **kwargs,
     ) -> None:
         if "disable_log_stats" not in kwargs:
@@ -191,7 +191,9 @@ class LLM:
         # Initialize tqdm.
         if use_tqdm:
             num_requests = self.llm_engine.get_num_unfinished_requests()
-            pbar = tqdm(total=num_requests, desc="Processed prompts")
+            pbar = tqdm(total=num_requests,
+                        desc="Processed prompts",
+                        dynamic_ncols=True)
         # Run the engine.
         outputs: List[RequestOutput] = []
         while self.llm_engine.has_unfinished_requests():
