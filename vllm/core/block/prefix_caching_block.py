@@ -188,6 +188,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         return self._cached_blocks[block.content_hash]
 
+    def cow_if_not_appendable(self, block_index: BlockIndex) -> BlockIndex:
+        return block_index
+
 
 class PrefixCachingBlock(Block):
 

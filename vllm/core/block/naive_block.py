@@ -1,4 +1,5 @@
 from typing import List, Optional, Set, Iterable, TypeVar
+from collections import defaultdict
 
 from vllm.core.block.interfaces import BlockAllocator, Block
 from vllm.core.block.common import RefCounter, get_all_blocks_recursively
@@ -28,6 +29,8 @@ class NaiveBlockAllocator(BlockAllocator):
         self._create_block = create_block
         self._block_size = block_size
 
+        self._copy_on_writes: Dict[BlockIndex, List[BlockIndex]] = defaultdict(list)
+
     def allocate_immutable(self, prev_block: Optional[Block],
                            token_ids: List[int]) -> Block:
         block = self.allocate_mutable(prev_block=prev_block)
@@ -47,10 +50,7 @@ class NaiveBlockAllocator(BlockAllocator):
     def free(self, block: Block) -> None:
         block_index = block.physical_block_index
         block.physical_block_index = None
-
-        refcount = self._refcounter.decr(block_index)
-        if refcount == 0:
-            self._free_block_indices.add(block_index)
+        self._free_block_index(block_index)
 
     def fork(self, last_block: Block) -> List[Block]:
         source_blocks = get_all_blocks_recursively(last_block)
@@ -76,7 +76,7 @@ class NaiveBlockAllocator(BlockAllocator):
     def get_num_free_blocks(self) -> int:
         return len(self._free_block_indices)
 
-    def _allocate_new_block(self):
+    def _allocate_new_block(self) -> BlockIndex:
         if not self._free_block_indices:
             raise BlockAllocator.NoFreeBlocksError()
 
@@ -85,6 +85,11 @@ class NaiveBlockAllocator(BlockAllocator):
         self._free_block_indices.remove(block_index)
         return block_index
 
+    def _free_block_index(self, block_index: BlockIndex) -> None:
+        refcount = self._refcounter.decr(block_index)
+        if refcount == 0:
+            self._free_block_indices.add(block_index)
+
     @property
     def refcounter(self):
         return self._refcounter
@@ -92,6 +97,21 @@ class NaiveBlockAllocator(BlockAllocator):
     @property
     def all_block_ids(self):
         return self._all_block_indices
+
+    def cow_if_not_appendable(self, block_index: BlockIndex) -> BlockIndex:
+        refcount = self._refcounter.get(block_index)
+        assert refcount != 0
+        if refcount > 1:
+            block_index = self._copy_on_write(block_index)
+
+        return block_index
+
+
+    def _copy_on_write(self, src_block_index: BlockIndex) -> BlockIndex:
+        self._free_block_index(src_block_index)
+        dst_block_index = self._allocate_new_block()
+        self._copy_on_writes[src_block_index].append(dst_block_index)
+        return dst_block_index
 
 
 class NaiveBlock(Block):
@@ -106,12 +126,16 @@ class NaiveBlock(Block):
         self._block_size = block_size
         self._prev_block = prev_block
         self._physical_block_index = physical_block_index
+        self._allocator = allocator
 
         self.append_token_ids(token_ids)
 
     def append_token_ids(self, token_ids: List[int]) -> None:
         assert self.num_empty_slots >= len(token_ids)
         self._token_ids.extend(token_ids)
+
+        if self._physical_block_index is not None:
+            self._physical_block_index = self._allocator.cow_if_not_appendable(self._physical_block_index)
 
     @property
     def physical_block_index(self) -> Optional[int]:

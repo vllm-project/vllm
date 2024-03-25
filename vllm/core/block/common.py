@@ -35,6 +35,10 @@ class RefCounter:
 
         return refcount
 
+    def get(self, block_index: BlockIndex) -> RefCount:
+        assert block_index in self._refcounts
+        return self._refcounts[block_index]
+
 
 def get_all_blocks_recursively(last_block: Block) -> List[Block]:
 
