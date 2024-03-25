@@ -7,12 +7,13 @@ flashinfer for all the attention operations.
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Type
 
-from flash_attn import flash_attn_varlen_func
 import torch
+from flash_attn import flash_attn_varlen_func
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
-from vllm.attention.ops.paged_attn import PagedAttention, PagedAttentionMetadata
+from vllm.attention.ops.paged_attn import (PagedAttention,
+                                           PagedAttentionMetadata)
 
 
 class FlashAttentionBackend(AttentionBackend):

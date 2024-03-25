@@ -5,16 +5,16 @@ from enum import Enum
 from functools import lru_cache
 from json import dumps as json_dumps
 from re import escape as regex_escape
-from typing import Union, Tuple
+from typing import Tuple, Union
 
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import (CompletionRequest,
-                                              ChatCompletionRequest)
-from vllm.model_executor.guided_logits_processors import (JSONLogitsProcessor,
-                                                          RegexLogitsProcessor,
-                                                          CFGLogitsProcessor)
+from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              CompletionRequest)
+from vllm.model_executor.guided_logits_processors import (CFGLogitsProcessor,
+                                                          JSONLogitsProcessor,
+                                                          RegexLogitsProcessor)
 
 
 class GuidedDecodingMode(Enum):

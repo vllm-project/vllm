@@ -1,6 +1,7 @@
-import torch
-import pytest
 import random
+
+import pytest
+import torch
 
 from vllm.model_executor.layers.ops.rand import seeded_uniform
 from vllm.model_executor.utils import set_random_seed
