@@ -18,10 +18,20 @@ from torch.distributed import ReduceOp
 import datetime
 import os
 import glob
+import logging
+
+logger = logging.getLogger(__name__)
+
+so_file = os.environ.get("VLLM_NCCL_SO_PATH", "")
 
 # manually load the nccl library
-_path = os.path.dirname(os.path.abspath(__file__))
-so_file = glob.glob(f"{_path}/../../lib/nvidia/nccl/lib/libnccl.so.*")[0]
+if so_file:
+    logger.info(
+        f"Loading nccl from environment variable VLLM_NCCL_SO_PATH={so_file}")
+else:
+    _path = os.path.dirname(os.path.abspath(__file__))
+    so_file = glob.glob(f"{_path}/../../lib/nvidia/nccl/lib/libnccl.so.*")[0]
+    logger.info(f"Loading nccl from vLLM builtin file {so_file}")
 nccl = ctypes.CDLL(so_file)
 
 # === export types and functions from nccl to Python ===
