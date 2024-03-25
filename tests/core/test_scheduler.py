@@ -172,7 +172,6 @@ def test_scheduler_max_seqs():
 
 
 def test_scheduler_delay_factor():
-
     block_size = 4
     scheduler_config = SchedulerConfig(100, 64, 16, delay_factor=0.5)
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
@@ -184,7 +183,7 @@ def test_scheduler_delay_factor():
     _, seq_group = create_dummy_prompt("0", prompt_length=block_size)
     scheduler.add_seq_group(seq_group)
     seq_group_meta, out = scheduler.schedule()
-    assert out.prompt_run
+    assert out.num_prompt_groups > 0
     assert seq_group_meta[0].request_id == '0'
 
     # wait for a second before scheduling next prompt
@@ -194,11 +193,11 @@ def test_scheduler_delay_factor():
 
     # second prompt should *not* be scheduled
     seq_group_meta, out = scheduler.schedule()
-    assert not out.prompt_run
+    assert out.num_prompt_groups == 0
     assert seq_group_meta[0].request_id == '0'
 
     # wait for more than 0.5 second and try again
     time.sleep(0.6)
     seq_group_meta, out = scheduler.schedule()
-    assert out.prompt_run
+    assert out.num_prompt_groups > 0
     assert seq_group_meta[0].request_id == '1'
