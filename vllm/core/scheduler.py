@@ -388,6 +388,12 @@ class Scheduler:
                 computed_block_nums=self.block_manager.
                 get_common_computed_block_ids(seq_group),
                 state=seq_group.state,
+                # `multi_modal_data` will only be present for the 1st comm
+                # between engine and worker.
+                # the subsequent comms can still use delta, but
+                # `multi_modal_data` will be None.
+                multi_modal_data=seq_group.multi_modal_data
+                if scheduler_outputs.prompt_run else None,
             )
             seq_group_metadata_list.append(seq_group_metadata)
         return seq_group_metadata_list, scheduler_outputs

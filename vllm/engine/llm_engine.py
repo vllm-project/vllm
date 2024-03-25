@@ -5,7 +5,7 @@ from transformers import PreTrainedTokenizer
 
 import vllm
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig)
+                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics import StatLogger, Stats
@@ -15,8 +15,9 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
-                           SequenceGroupOutput, SequenceOutput, SequenceStatus)
+from vllm.sequence import (MultiModalData, SamplerOutput, Sequence,
+                           SequenceGroup, SequenceGroupOutput, SequenceOutput,
+                           SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
@@ -62,6 +63,7 @@ class LLMEngine:
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
+        vision_language_config: Optional["VisionLanguageConfig"],
         executor_class: Type[ExecutorBase],
         log_stats: bool,
     ) -> None:
@@ -90,6 +92,7 @@ class LLMEngine:
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
+        self.vision_language_config = vision_language_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
@@ -102,7 +105,8 @@ class LLMEngine:
 
         self.model_executor = executor_class(model_config, cache_config,
                                              parallel_config, scheduler_config,
-                                             device_config, lora_config)
+                                             device_config, lora_config,
+                                             vision_language_config)
 
         # Ping the tokenizer to ensure liveness if it runs in a
         # different process.
@@ -170,7 +174,6 @@ class LLMEngine:
             trust_remote_code=self.model_config.trust_remote_code,
             revision=self.model_config.tokenizer_revision)
         init_kwargs.update(tokenizer_init_kwargs)
-
         self.tokenizer: BaseTokenizerGroup = get_tokenizer_group(
             self.parallel_config.tokenizer_pool_config, **init_kwargs)
 
@@ -212,6 +215,7 @@ class LLMEngine:
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
     ) -> None:
         """Add a request to the engine's request pool.
 
@@ -228,6 +232,7 @@ class LLMEngine:
                 use the tokenizer to convert the prompts to token IDs.
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
+            multi_modal_data: Multi modal data per request.
 
         Details:
             - Set arrival_time to the current time if it is None.
@@ -288,7 +293,7 @@ class LLMEngine:
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,
-                                  arrival_time, lora_request)
+                                  arrival_time, lora_request, multi_modal_data)
 
         # Add the sequence group to the scheduler.
         self.scheduler.add_seq_group(seq_group)
