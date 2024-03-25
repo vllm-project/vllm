@@ -1,11 +1,10 @@
+import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import torch
-import random
 
-from vllm.model_executor.layers.ops.sample import (
-    get_num_triton_sampler_splits)
+from vllm.model_executor.layers.ops.sample import get_num_triton_sampler_splits
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SequenceData
 from vllm.utils import is_pin_memory_available

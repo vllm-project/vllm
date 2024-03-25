@@ -1,6 +1,8 @@
 from copy import deepcopy
-from vllm.transformers_utils.tokenizer import get_cached_tokenizer
+
 from transformers import AutoTokenizer
+
+from vllm.transformers_utils.tokenizer import get_cached_tokenizer
 
 
 def test_cached_tokenizer():

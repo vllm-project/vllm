@@ -6,9 +6,9 @@ import time
 from typing import List, Optional, Tuple
 
 import torch
+from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           PreTrainedTokenizerBase)
-from tqdm import tqdm
 
 
 def sample_requests(

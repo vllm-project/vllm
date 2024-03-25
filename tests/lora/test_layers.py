@@ -1,32 +1,28 @@
-import pytest
 import random
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Tuple
+from typing import Dict, List, Optional, Tuple
 
+import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.lora.layers import (
-    ColumnParallelLinearWithLoRA,
-    MergedColumnParallelLinearWithLoRA,
-    QKVParallelLinearWithLora,
-    VocabParallelEmbeddingWithLoRA,
-    RowParallelLinearWithLoRA,
-    LogitsProcessorWithLoRA,
-    LoRAMapping,
-    BaseLayerWithLoRA,
-)
-from vllm.lora.models import (LoRALayerWeights, convert_mapping,
-                              PackedLoRALayerWeights)
 from vllm.config import LoRAConfig
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
+                              LogitsProcessorWithLoRA, LoRAMapping,
+                              MergedColumnParallelLinearWithLoRA,
+                              QKVParallelLinearWithLora,
+                              RowParallelLinearWithLoRA,
+                              VocabParallelEmbeddingWithLoRA)
+from vllm.lora.models import (LoRALayerWeights, PackedLoRALayerWeights,
+                              convert_mapping)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
-                                               RowParallelLinear,
-                                               QKVParallelLinear)
+                                               QKVParallelLinear,
+                                               RowParallelLinear)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding, ParallelLMHead)
+    ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.utils import set_random_seed
 
 from .utils import DummyLoRAManager

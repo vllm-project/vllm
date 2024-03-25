@@ -1,16 +1,15 @@
-from typing import Iterator, List, Tuple, Optional, Dict
 from itertools import chain, count
+from typing import Dict, Iterator, List, Optional, Tuple
 
 import torch
 
-from vllm.sequence import (SamplerOutput, SequenceGroupMetadata, SequenceData)
-from vllm.worker.worker import Worker
-from vllm.spec_decode.util import (nvtx_range, sampler_output_to_torch,
-                                   get_all_seq_ids,
+from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
+from vllm.spec_decode.interfaces import (SpeculativeProposals,
+                                         SpeculativeScorer, SpeculativeScores)
+from vllm.spec_decode.util import (get_all_seq_ids, nvtx_range,
+                                   sampler_output_to_torch,
                                    split_batch_by_proposal_len)
-from vllm.spec_decode.interfaces import (SpeculativeScorer,
-                                         SpeculativeProposals,
-                                         SpeculativeScores)
+from vllm.worker.worker import Worker
 
 SeqId = int
 TargetSeqId = int

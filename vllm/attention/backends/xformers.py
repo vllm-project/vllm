@@ -11,7 +11,8 @@ from xformers.ops.fmha.attn_bias import (AttentionBias,
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
-from vllm.attention.ops.paged_attn import PagedAttention, PagedAttentionMetadata
+from vllm.attention.ops.paged_attn import (PagedAttention,
+                                           PagedAttentionMetadata)
 from vllm.logger import init_logger
 from vllm.utils import is_hip
 

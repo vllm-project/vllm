@@ -3,14 +3,12 @@
 Run `pytest tests/distributed/test_comm_ops.py --forked`.
 """
 import pytest
-import torch
 import ray
+import torch
 
 from vllm.model_executor.parallel_utils.communication_op import (
-    tensor_model_parallel_all_reduce,
-    tensor_model_parallel_all_gather,
-    broadcast_tensor_dict,
-)
+    broadcast_tensor_dict, tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce)
 from vllm.test_utils import (init_test_distributed_environment,
                              multi_process_tensor_parallel)
 

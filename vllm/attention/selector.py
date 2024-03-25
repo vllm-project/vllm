@@ -13,11 +13,13 @@ logger = init_logger(__name__)
 def get_attn_backend(dtype: torch.dtype) -> AttentionBackend:
     if _can_use_flash_attn(dtype):
         logger.info("Using FlashAttention backend.")
-        from vllm.attention.backends.flash_attn import FlashAttentionBackend  # noqa: F401
+        from vllm.attention.backends.flash_attn import (  # noqa: F401
+            FlashAttentionBackend)
         return FlashAttentionBackend
     else:
         logger.info("Using XFormers backend.")
-        from vllm.attention.backends.xformers import XFormersBackend  # noqa: F401
+        from vllm.attention.backends.xformers import (  # noqa: F401
+            XFormersBackend)
         return XFormersBackend
 
 

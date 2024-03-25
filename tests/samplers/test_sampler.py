@@ -1,11 +1,10 @@
 import random
-from typing import Tuple, List
+from typing import List, Optional, Tuple
 from unittest.mock import patch
 
 import pytest
 import torch
 from transformers import GenerationConfig, GenerationMixin
-from typing import Optional
 
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.utils import set_random_seed

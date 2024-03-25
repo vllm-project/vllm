@@ -1,12 +1,12 @@
+from typing import Dict, List
+
 import pytest
-
 from transformers import AutoTokenizer
-from typing import List, Dict
 
-from vllm.sequence import Sequence, Logprob, SamplingParams, SequenceGroup
-from vllm.transformers_utils.tokenizer_group import get_tokenizer_group
-from vllm.transformers_utils.tokenizer import detokenize_incrementally
+from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
 from vllm.transformers_utils.detokenizer import Detokenizer
+from vllm.transformers_utils.tokenizer import detokenize_incrementally
+from vllm.transformers_utils.tokenizer_group import get_tokenizer_group
 
 TRUTH = [
     "Hello here, this is a simple test",

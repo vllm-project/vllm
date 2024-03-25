@@ -1,7 +1,7 @@
 import enum
 from enum import Enum
-from typing import Any, Dict, List, Optional
 from fractions import Fraction
+from typing import Any, Dict, List, Optional
 
 import torch
 from torch.nn.parameter import Parameter

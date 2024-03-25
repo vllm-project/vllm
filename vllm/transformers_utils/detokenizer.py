@@ -1,8 +1,10 @@
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional
+
 from transformers import PreTrainedTokenizer
-from vllm.sequence import Sequence, Logprob, SequenceGroup, SamplingParams
-from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
-                                               convert_prompt_ids_to_tokens)
+
+from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
+from vllm.transformers_utils.tokenizer import (convert_prompt_ids_to_tokens,
+                                               detokenize_incrementally)
 from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
     BaseTokenizerGroup)
 

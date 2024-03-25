@@ -110,8 +110,8 @@ def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
 def get_neuron_model(model_config: ModelConfig,
                      parallel_config: ParallelConfig,
                      scheduler_config: SchedulerConfig) -> nn.Module:
-    from transformers_neuronx.config import (NeuronConfig,
-                                             ContinuousBatchingConfig)
+    from transformers_neuronx.config import (ContinuousBatchingConfig,
+                                             NeuronConfig)
 
     # Create a model instance.
     model = NeuronCasualLM(model_config.hf_config)

@@ -1,10 +1,9 @@
 import pickle
-
-from typing import Optional, List, Tuple
+from typing import List, Optional, Tuple
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import is_hip, set_cuda_visible_devices, get_ip
+from vllm.utils import get_ip, is_hip, set_cuda_visible_devices
 
 logger = init_logger(__name__)
 

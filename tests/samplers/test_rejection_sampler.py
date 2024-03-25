@@ -1,13 +1,12 @@
 """Tests for rejection sampling."""
-import pytest
 from typing import List, Tuple
 
+import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.model_executor.utils import set_random_seed
-
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
+from vllm.model_executor.utils import set_random_seed
 
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)

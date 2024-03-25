@@ -1,11 +1,12 @@
-from vllm.logger import init_logger
-from prometheus_client import (Counter, Gauge, Histogram, Info, REGISTRY,
+import time
+from dataclasses import dataclass
+from typing import Dict, List
+
+import numpy as np
+from prometheus_client import (REGISTRY, Counter, Gauge, Histogram, Info,
                                disable_created_metrics)
 
-import time
-import numpy as np
-from typing import Dict, List
-from dataclasses import dataclass
+from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 

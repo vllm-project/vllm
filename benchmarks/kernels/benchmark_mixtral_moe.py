@@ -2,10 +2,12 @@ import json
 import os
 import sys
 
-from vllm.model_executor.layers.fused_moe import fused_moe, get_config_file_name
 import torch
 import torch.nn.functional as F
 import triton
+
+from vllm.model_executor.layers.fused_moe import (fused_moe,
+                                                  get_config_file_name)
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
