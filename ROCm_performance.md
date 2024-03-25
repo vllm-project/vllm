@@ -5,7 +5,7 @@ This can be overriden by the `--worker-use-ray` flag to vllm or its benchmarks
 To utilize torchran parallelism, the run command should be midified from  
 `python <command>`  
 to  
-`torchrun --standalone --nnodes=1 --nproc-per-node=<workd-size> <command>`
+`torchrun --standalone --nnodes=1 --nproc-per-node=<world-size> <command>`
 ## Triton attention
 The default attention function on ROCm is using triton attention kernel. To fallback to the https://github.com/ROCm/flash-attention implementation set up the following environment symbol:  
 `VLLM_USE_FLASH_ATTN_TRITON=False`
