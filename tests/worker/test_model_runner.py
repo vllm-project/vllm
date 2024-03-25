@@ -136,6 +136,7 @@ def test_prepare_decode_cuda_graph(batch_size):
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=False,
+                is_chunked_prefill=False,
                 seq_data={0: SequenceData(seq_data)},
                 sampling_params=SamplingParams(temperature=0),
                 block_tables={0: [1]},

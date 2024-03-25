@@ -15,6 +15,7 @@ def test_get_all_seq_ids():
         SequenceGroupMetadata(
             request_id=str(seq_id),
             is_prompt=True,
+            is_chunked_prefill=False,
             seq_data={
                 seq_id: MagicMock(),
             },
@@ -37,6 +38,7 @@ def fake_sequence_group_metadata():
         SequenceGroupMetadata(
             request_id=str(i),
             is_prompt=True,
+            is_chunked_prefill=False,
             seq_data={
                 i: MagicMock(),
             },

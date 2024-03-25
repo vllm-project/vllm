@@ -266,6 +266,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         return SequenceGroupMetadata(
             request_id=seq_group_metadata.request_id,
             is_prompt=seq_group_metadata.is_prompt,
+            is_chunked_prefill=False,
             seq_data={
                 target_seq_id:
                 SequenceData(
