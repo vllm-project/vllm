@@ -3,7 +3,7 @@ from typing import List, Optional, Iterable, Dict
 
 from vllm.core.block.interfaces import Block, BlockAllocator
 from vllm.core.block.naive_block import NaiveBlockAllocator, NaiveBlock
-from vllm.core.block.common import get_all_blocks_recursively
+from vllm.core.block.common import get_all_blocks_recursively, CopyOnWriteTracker
 
 PrefixHash = int
 BlockIndex = int
@@ -32,6 +32,16 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         self._block_size = block_size
         self._refcounter = self._hashless_allocator.refcounter
+
+        # TODO: need to modify semantics of CopyOnWriteTracker
+        # It needs to have the prefix hash (block) as well
+        # so we need to have something like _allocate_block_index_for_block
+        # and _free_block_index_for_block
+        #self._cow_tracker = CopyOnWriteTracker(
+        #    self._refcounter,
+        #    self._allocate_new_block_index,
+        #    self._free_block_index,
+        #)
 
     # Implements Block.Factory.
     def _create_block(
@@ -126,22 +136,29 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         special list. If it does not have a hash, let the hashless allocator
         figure it out.
         """
-        assert isinstance(block, PrefixCachingBlock)
         # TODO remove this assertion
         assert block.physical_block_index is not None
+
+        self._free_block_index_for_block(block.physical_block_index, block)
+        block.physical_block_index = None
+
+    def _allocate_block_index_for_block(self, block: Block) -> BlockIndex:
+        pass
+
+
+    def _free_block_index_for_block(self, block_index: BlockIndex, block: Block) -> None:
+        assert isinstance(block, PrefixCachingBlock)
 
         if block.content_hash is None:
             return self._hashless_allocator.free(block)
 
-        physical_block_index = block.physical_block_index
-        block.physical_block_index = None
-        refcount = self._refcounter.decr(physical_block_index)
+        refcount = self._refcounter.decr(block_index)
 
         # If no longer used, add the block to the unused cached blocks.
         if refcount == 0:
             assert block.content_hash not in self._unused_cached_blocks
             self._unused_cached_blocks[
-                block.content_hash] = physical_block_index
+                block.content_hash] = block_index
 
     def fork(self, last_block: Block) -> List[Block]:
         source_blocks = get_all_blocks_recursively(last_block)
@@ -186,10 +203,11 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             self._cached_blocks[
                 block.content_hash] = block.physical_block_index
 
+        # TODO incr/decr refcounts
         return self._cached_blocks[block.content_hash]
 
-    def cow_if_not_appendable(self, block_index: BlockIndex) -> BlockIndex:
-        return block_index
+    def cow_block_if_not_appendable(self, block: Block) -> Optional[BlockIndex]:
+        return block.physical_block_index
 
 
 class PrefixCachingBlock(Block):

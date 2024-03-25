@@ -2,7 +2,7 @@ import pytest
 
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
-from vllm.utils import Device, chunk_list
+from vllm.utils import Device, chunk_list, cdiv
 
 
 @pytest.mark.parametrize("block_size", [16])
@@ -292,3 +292,58 @@ def test_fork(seq_len: int, block_size: int, allocator_type: str):
     # refcount is now zero.
     forked_block_table.free()
     assert allocator.get_num_free_blocks(device=Device.GPU) == num_gpu_blocks
+
+@pytest.mark.parametrize("block_size", [8])
+@pytest.mark.parametrize("sequence_len", [1, 16, 129])
+@pytest.mark.parametrize("append_len", [1, 16, 129])
+@pytest.mark.parametrize("appender", ["forked", "original"])
+@pytest.mark.parametrize("allocator_type", ["naive"])
+def test_cow(block_size: int, sequence_len: int,
+                                     append_len: int, allocator_type: str, appender: str):
+    """Fork a sequence; append to the forked sequence; verify there's a CoW.
+    """
+    num_gpu_blocks = 1024
+
+    allocator = CpuGpuBlockAllocator.create(
+        allocator_type=allocator_type,
+        num_gpu_blocks=num_gpu_blocks,
+        num_cpu_blocks=0,
+        block_size=block_size,
+    )
+
+    token_ids = list(range(sequence_len))
+    token_ids_to_append = list(range(append_len))
+
+    original_block_table = BlockTable(
+        block_size=block_size,
+        block_allocator=allocator,
+    )
+
+    num_expected_non_cow_blocks = cdiv(sequence_len, block_size)
+    num_expected_cow_blocks = cdiv(sequence_len + append_len, block_size) - (sequence_len // block_size)
+
+    original_block_table.allocate(token_ids=token_ids, device=Device.GPU)
+    original_block_ids = original_block_table.physical_block_ids
+
+    forked_block_table = original_block_table.fork()
+
+    # Expect no additional allocation (copy on _write_).
+    assert allocator.get_num_free_blocks(Device.GPU) == (num_gpu_blocks - num_expected_non_cow_blocks)
+
+    if appender == "forked":
+        appender_block_table = forked_block_table
+        static_block_table = original_block_table
+    elif appender == "original":
+        appender_block_table = original_block_table
+        static_block_table = forked_block_table
+    else:
+        raise ValueError(f"unknown test config {appender=}")
+
+    # Write tokens.
+    appender_block_table.append_token_ids(token_ids_to_append)
+
+    # Expect the non-appending block table to have no change.
+    assert static_block_table.physical_block_ids == original_block_ids
+
+    # Expect the blocks changed during append to have a CoW.
+    assert allocator.get_num_free_blocks(Device.GPU) == num_gpu_blocks - (num_expected_non_cow_blocks + num_expected_cow_blocks)
