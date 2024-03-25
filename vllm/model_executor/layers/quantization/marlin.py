@@ -4,51 +4,58 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm._C import ops
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               set_weight_attrs)
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.linear import LinearMethodBase, set_weight_attrs
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+
+from magic_wand import (
+    MARLIN_SUPPORTED_NUM_BITS,
+    MARLIN_SUPPORTED_GROUP_SIZES,
+    MARLIN_TILE,
+    MARLIN_MIN_THREAD_N,
+    MARLIN_MIN_THREAD_K,
+    MARLIN_MAX_PARALLEL,
+    get_pack_factor,
+)
 
 
 class MarlinConfig(QuantizationConfig):
-    """Config class for Marlin.
-
-    Reference: https://github.com/IST-DASLab/marlin/tree/master
-    """
+    """Config class for Marlin"""
 
     def __init__(
         self,
+        weight_bits: int,
         group_size: int,
+        desc_act: bool,
     ) -> None:
-        # Group size for the quantization.
+        self.weight_bits = weight_bits
         self.group_size = group_size
-        if self.group_size != 128 and self.group_size != -1:
+        self.desc_act = desc_act
+
+        # Verify
+        if self.weight_bits not in MARLIN_SUPPORTED_NUM_BITS:
             raise ValueError(
-                "Currently, only group size 128 and -1 (channelwise) "
-                "is supported for Marlin, but got group_size of "
-                f"{self.group_size}")
+                "Got weight_bits = {weight_bits}, but Marlin only supports {MARLIN_SUPPORTED_NUM_BITS}"
+            )
 
-        # 4 Bits packed into 32 bit datatype.
-        self.pack_factor = 32 // 4
+        if self.group_size not in MARLIN_SUPPORTED_GROUP_SIZES:
+            raise ValueError(
+                "Got group_size = {group_size}, but Marlin only supports {MARLIN_SUPPORTED_GROUP_SIZES}"
+            )
 
-        # Tile size used by marlin kernels.
-        self.tile_size = 16
-
-        # Min out_features dim
-        self.min_n_threads = 64
-
-        # Min in_features dim
-        self.min_k_threads = 128
-
-        # Max parallel problems to solve at once (improves large
-        # batch performance)
-        self.max_parallel = 16
+        # Init
+        self.pack_factor = get_pack_factor(weight_bits)
+        self.tile_size = MARLIN_TILE
+        self.min_thread_n = MARLIN_MIN_THREAD_N
+        self.min_thread_k = MARLIN_MIN_THREAD_K
+        self.max_parallel = MARLIN_MAX_PARALLEL
 
         # Permutation length used by the marlin kernels.
         self.perm_len = 1024
 
     def __repr__(self) -> str:
-        return f"MarlinConfig(group_size={self.group_size})"
+        return (f"MarlinConfig(weight_bits={self.weight_bits}, "
+                f"group_size={self.group_size}, "
+                f"desc_act={self.desc_act})")
 
     @classmethod
     def get_name(cls) -> str:
@@ -69,8 +76,10 @@ class MarlinConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "MarlinConfig":
+        weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
-        return cls(group_size)
+        desc_act = cls.get_from_keys(config, ["desc_act"])
+        return cls(weight_bits, group_size, desc_act)
 
     def get_linear_method(self) -> "MarlinLinearMethod":
         return MarlinLinearMethod(self)
@@ -97,64 +106,114 @@ class MarlinLinearMethod(LinearMethodBase):
         output_size: int,
         params_dtype: torch.dtype,
     ) -> Dict[str, Any]:
-        del output_size  # Unused.
 
+        # Validate dtype
         if params_dtype != torch.float16:
             raise ValueError(
                 f"The params dtype must be float16, but got {params_dtype}")
 
         # Validate output_size_per_partition
-        if output_size_per_partition % self.quant_config.min_n_threads != 0:
+        if output_size_per_partition % self.quant_config.min_thread_n != 0:
             raise ValueError(
-                f"Weight output_size_per_partition = "
-                f"{output_size_per_partition} is not divisible by "
-                f"min_n_threads = {self.quant_config.min_n_threads}.")
-        if output_size_per_partition % self.quant_config.pack_factor != 0:
-            raise ValueError(
-                f"Weight output_size_per_partition = "
-                f"{output_size_per_partition} is not divisible by "
-                f"pack_factor = {self.quant_config.pack_factor}.")
+                f"Weight output_size_per_partition = {output_size_per_partition}"
+                f" is not divisible by min_thread_n = {self.quant_config.min_thread_n}."
+            )
 
         # Validate input_size_per_partition
-        if input_size_per_partition % self.quant_config.min_k_threads != 0:
+        if input_size_per_partition % self.quant_config.min_thread_k != 0:
             raise ValueError(
-                f"Weight input_size_per_partition = "
-                f"{input_size_per_partition} is not divisible by "
-                f"min_k_threads = {self.quant_config.min_k_threads}.")
-        if (self.quant_config.group_size != -1 and
-                input_size_per_partition % self.quant_config.group_size != 0):
-            raise ValueError(f"Weight input_size_per_partition = "
-                             f"{input_size_per_partition} is not divisible by "
-                             f"group_size = {self.quant_config.group_size}.")
+                f"Weight input_size_per_partition = {input_size_per_partition}"
+                f" is not divisible by min_thread_k = {self.quant_config.min_thread_k}."
+            )
 
-        # Check that we have at least 4 tiles horizontally in the shard
-        num_tiles_per_perm = self.quant_config.perm_len // (
-            self.quant_config.tile_size**2)
-        if output_size_per_partition % num_tiles_per_perm != 0:
-            raise ValueError(
-                "Each permutation group must reside on the same gpu")
+        if self.quant_config.group_size != -1:
+            if input_size_per_partition % self.quant_config.group_size != 0:
+                raise ValueError(
+                    f"Weight input_size_per_partition = {input_size_per_partition}"
+                    f" is not divisible by group_size = {self.quant_config.group_size}."
+                )
 
-        # Quantized 4Bit weights packed into Int32.
+        # Quantized weight
         qweight = Parameter(
             torch.empty(
-                input_size_per_partition // self.quant_config.tile_size,
-                output_size_per_partition * self.quant_config.tile_size //
-                self.quant_config.pack_factor,
-                device="cuda",
+                input_size_per_partition // self.quant_config.pack_factor,
+                output_size_per_partition,
                 dtype=torch.int32,
             ),
             requires_grad=False,
         )
         set_weight_attrs(
-            qweight,
-            {
+            qweight, {
                 "input_dim": 0,
+                "output_dim": 1,
+                "packed_dim": 0,
+                "pack_factor": self.quant_config.pack_factor,
+            })
+
+        # Activation order
+        g_idx = Parameter(
+            torch.tensor(
+                [
+                    i // self.quant_config.group_size
+                    for i in range(input_size_per_partition)
+                ],
+                dtype=torch.int32,
+            ),
+            requires_grad=False,
+        )
+        # Ignore warning from fused linear layers such as QKVParallelLinear.
+        set_weight_attrs(g_idx, {"input_dim": 0, "ignore_warning": True})
+
+        # Detect sharding of scales/zp
+        CONT CONT...
+        # scale_and_zero_size = input_size // group_size
+        # scale_and_zero_input_dim = None
+        # if (input_size != input_size_per_partition
+        #         and self.quant_config.group_size != -1):
+        #     # For act-order models, we cannot use Exllama for row parallel layer
+        #     if self.quant_config.desc_act:
+        #         exllama_state = ExllamaState.UNUSED
+        #     else:
+        #         # we need to partition qzeros and scales for exllama kernel
+        #         scale_and_zero_size = input_size_per_partition // group_size
+        #         scale_and_zero_input_dim = 0
+
+        # Quantized zeros
+        qzeros = Parameter(
+            torch.empty(
+                scale_and_zero_size,
+                output_size_per_partition // self.quant_config.pack_factor,
+                dtype=torch.int32,
+            ),
+            requires_grad=False,
+        )
+        set_weight_attrs(
+            qzeros, {
+                "input_dim": scale_and_zero_input_dim,
                 "output_dim": 1,
                 "packed_dim": 1,
                 "pack_factor": self.quant_config.pack_factor,
-                "marlin_tile_size": self.quant_config.tile_size,
-            },
-        )
+            })
+        # qweight = Parameter(
+        #     torch.empty(
+        #         input_size_per_partition // self.quant_config.tile_size,
+        #         output_size_per_partition * self.quant_config.tile_size //
+        #         self.quant_config.pack_factor,
+        #         device="cuda",
+        #         dtype=torch.int32,
+        #     ),
+        #     requires_grad=False,
+        # )
+        # set_weight_attrs(
+        #     qweight,
+        #     {
+        #         "input_dim": 0,
+        #         "output_dim": 1,
+        #         "packed_dim": 1,
+        #         "pack_factor": self.quant_config.pack_factor,
+        #         "marlin_tile_size": self.quant_config.tile_size,
+        #     },
+        # )
 
         # Determine if channelwise or not
         input_groups = (1 if self.quant_config.group_size == -1 else
@@ -182,10 +241,10 @@ class MarlinLinearMethod(LinearMethodBase):
         max_workspace_size = (
             output_size_per_partition //
             self.quant_config.min_n_threads) * self.quant_config.max_parallel
-        workspace = Parameter(torch.zeros(max_workspace_size,
-                                          device="cuda",
-                                          dtype=torch.int),
-                              requires_grad=False)
+        workspace = Parameter(
+            torch.zeros(max_workspace_size, device="cuda", dtype=torch.int),
+            requires_grad=False,
+        )
 
         return {
             "B": qweight,
