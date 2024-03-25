@@ -68,12 +68,18 @@ if use_block_manager_2:
             # FIXME(woosuk): Here we assume that all sequences in the group share
             # the same prompt. This may not be true for preempted sequences.
             seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
-            num_required_blocks = len(seq.logical_token_blocks)
+
+            num_required_blocks = BlockTable.get_num_required_blocks(
+                seq.get_token_ids(),
+                block_size=self.block_size,
+            )
     
+            assert self.block_sliding_window is None
             if self.block_sliding_window is not None:
                 num_required_blocks = min(num_required_blocks,
                                           self.block_sliding_window)
-            num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
+            
+            num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(device=Device.GPU)
     
             # Use watermark to avoid frequent cache eviction.
             if (self.num_total_gpu_blocks - num_required_blocks <
@@ -85,7 +91,6 @@ if use_block_manager_2:
                 return AllocStatus.LATER
     
         def allocate(self, seq_group: SequenceGroup) -> None:
-
             waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
             assert not (set(seq.seq_id for seq in waiting_seqs) & self.block_tables.keys()), "block table already exists"
 
@@ -97,34 +102,54 @@ if use_block_manager_2:
                 block_size=self.block_size,
                 block_allocator=self.block_allocator,
             )
-            # TODO handle ref share.
             # TODO handle sliding window.
+            assert self.block_sliding_window is None
             block_table.allocate(seq.get_token_ids())
 
             # Assign the block table for each sequence.
             for seq in waiting_seqs:
                 self.block_tables[seq.seq_id] = block_table.fork()
 
-            #seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
-    
-            ## Allocate new physical token blocks that will store the prompt tokens.
-            #num_prompt_blocks = len(seq.logical_token_blocks)
-    
-            #block_table: BlockTable = []
-            #for logical_idx in range(num_prompt_blocks):
-            #    if (self.block_sliding_window is not None
-            #            and logical_idx >= self.block_sliding_window):
-            #        block = block_table[logical_idx % self.block_sliding_window]
-            #    else:
-            #        block = self.gpu_allocator.allocate(
-            #            seq.hash_of_block(logical_idx),
-            #            seq.num_hashed_tokens_of_block(logical_idx))
-            #    block_table.append(block)
-    
-            ## Assign the block table for each sequence.
-            #for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
-            #    self.block_tables[seq.seq_id] = block_table.copy()
+        def can_append_slot(self, seq_group: SequenceGroup) -> bool:
+            # Simple heuristic: If there is at least one free block
+            # for each sequence, we can append.
+            num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(Device.GPU)
+            num_seqs = seq_group.num_seqs(status=SequenceStatus.RUNNING)
+            return num_seqs <= num_free_gpu_blocks
 
+        def append_slot(
+            self,
+            seq: Sequence,
+        ) -> Optional[Tuple[int, int]]:
+            
+            block_table = self.block_tables[seq.seq_id]
+            num_full_slots = block_table.num_full_slots
+            unseen_token_ids = seq.get_token_ids()[num_full_slots:]
+            assert unseen_token_ids
+
+            block_table.append_token_ids(unseen_token_ids)
+            # TODO CoW
+            return None
+        
+        def free(self, seq: Sequence) -> None:
+            if seq.seq_id not in self.block_tables:
+                # Already freed or haven't been scheduled yet.
+                return
+            self.block_tables[seq.seq_id].free()
+            del self.block_tables[seq.seq_id]
+
+        def get_block_table(self, seq: Sequence) -> List[int]:
+            assert seq.seq_id in self.block_tables
+            return self.block_tables[seq.seq_id].physical_block_ids
+
+        def access_all_blocks_in_seq(self, seq, now):
+            pass
+
+        def mark_blocks_as_computed(self, seq_group: SequenceGroup):
+            pass
+
+        def get_common_computed_block_ids(self, seq_group):
+            return []
 
 else:
     import enum

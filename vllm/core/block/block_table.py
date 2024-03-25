@@ -34,6 +34,12 @@ class BlockTable:
         self._blocks: Optional[List[Block]] = _blocks
         self._num_full_slots = len(self._get_all_token_ids())
     
+    @staticmethod
+    def get_num_required_blocks(token_ids: List[int], block_size: int) -> int:
+        return cdiv(len(token_ids), block_size)
+
+    def can_allocate(self, token_ids: List[int], device: Device = Device.GPU) -> bool:
+        pass
 
     def allocate(self, token_ids: List[int], device: Device = Device.GPU) -> None:
         assert not self._is_allocated
@@ -130,3 +136,7 @@ class BlockTable:
     def _num_empty_slots(self) -> int:
         assert self._is_allocated
         return len(self._blocks) * self._block_size - self._num_full_slots
+
+    @property
+    def num_full_slots(self) -> int:
+        return self._num_full_slots
