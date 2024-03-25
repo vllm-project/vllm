@@ -1,18 +1,20 @@
 import io
+import logging
 import os
 import re
 import subprocess
 import sys
+from shutil import which
 from typing import List
 
-from packaging.version import parse, Version
-from setuptools import setup, find_packages, Extension
-from setuptools.command.build_ext import build_ext
-from shutil import which
 import torch
+from packaging.version import Version, parse
+from setuptools import Extension, find_packages, setup
+from setuptools.command.build_ext import build_ext
 from torch.utils.cpp_extension import CUDA_HOME
 
 ROOT_DIR = os.path.dirname(__file__)
+logger = logging.getLogger(__name__)
 
 # vLLM only supports Linux platform
 assert sys.platform.startswith(
@@ -54,12 +56,17 @@ class cmake_build_ext(build_ext):
     # Determine number of compilation jobs and optionally nvcc compile threads.
     #
     def compute_num_jobs(self):
-        try:
-            # os.sched_getaffinity() isn't universally available, so fall back
-            # to os.cpu_count() if we get an error here.
-            num_jobs = len(os.sched_getaffinity(0))
-        except AttributeError:
-            num_jobs = os.cpu_count()
+        num_jobs = os.environ.get("MAX_JOBS", None)
+        if num_jobs is not None:
+            num_jobs = int(num_jobs)
+            logger.info(f"Using MAX_JOBS={num_jobs} as the number of jobs.")
+        else:
+            try:
+                # os.sched_getaffinity() isn't universally available, so fall
+                #  back to os.cpu_count() if we get an error here.
+                num_jobs = len(os.sched_getaffinity(0))
+            except AttributeError:
+                num_jobs = os.cpu_count()
 
         nvcc_threads = None
         if _is_cuda():

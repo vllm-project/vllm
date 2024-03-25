@@ -1,6 +1,6 @@
 import pytest
 
-from vllm.sequence import SequenceGroupOutput, SamplerOutput, SequenceOutput
+from vllm.sequence import SamplerOutput, SequenceGroupOutput, SequenceOutput
 
 
 @pytest.fixture

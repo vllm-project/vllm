@@ -1,14 +1,14 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import Dict, List, Tuple, Set, Optional
+from typing import Dict, List, Optional, Set, Tuple
 
 import torch
 import torch.distributed
 
-from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, LoRAConfig,
-                         VisionLanguageConfig)
+from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
+from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.parallel_utils import cupy_utils
 from vllm.model_executor.parallel_utils.communication_op import (
@@ -19,7 +19,6 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
-from vllm.lora.request import LoRARequest
 
 
 class Worker:
@@ -137,6 +136,9 @@ class Worker:
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
         peak_memory = self.init_gpu_memory - free_gpu_memory
+        assert peak_memory > 0, (
+            "Error in memory profiling. This happens when the GPU memory was "
+            "not properly cleaned up before initializing the vLLM instance.")
 
         cache_block_size = self.get_cache_block_size_bytes(
             block_size, cache_dtype)

@@ -1,9 +1,9 @@
-import pytest
-from typing import Tuple, List, Dict
-
-from enum import Enum
-from dataclasses import fields
 import gc
+from dataclasses import fields
+from enum import Enum
+from typing import Dict, List, Tuple
+
+import pytest
 import torch
 from transformers import AutoTokenizer
 

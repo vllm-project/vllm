@@ -1,9 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional
 
-from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, LoRAConfig,
-                         VisionLanguageConfig)
+from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 

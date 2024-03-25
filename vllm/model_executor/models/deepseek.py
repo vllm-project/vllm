@@ -21,27 +21,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Deepseek model."""
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.model_executor.input_metadata import InputMetadata
+from vllm.attention import Attention, AttentionMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                MergedColumnParallelLinear,
-                                               ReplicatedLinear,
                                                QKVParallelLinear,
+                                               ReplicatedLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding, ParallelLMHead)
+    ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_reduce)
 from vllm.model_executor.parallel_utils.parallel_state import (
@@ -50,8 +49,6 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
-
-KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class DeepseekMLP(nn.Module):
@@ -150,11 +147,11 @@ class DeepseekMoE(nn.Module):
         self.w2 = self.w2.view(len(w2), *w2s[0].shape)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        batch_size, sequence_length, hidden_dim = hidden_states.shape
+        num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
         if self.config.n_shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
-        # router_logits: (batch * sequence_length, n_experts)
+        # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         final_hidden_states = fused_moe(hidden_states,
                                         self.w1,
@@ -169,8 +166,7 @@ class DeepseekMoE(nn.Module):
         final_hidden_states = tensor_model_parallel_all_reduce(
             final_hidden_states)
 
-        return final_hidden_states.view(batch_size, sequence_length,
-                                        hidden_dim)
+        return final_hidden_states.view(num_tokens, hidden_dim)
 
 
 class DeepseekAttention(nn.Module):
@@ -240,14 +236,13 @@ class DeepseekAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: KVCache,
-        input_metadata: InputMetadata,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -295,8 +290,8 @@ class DeepseekDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: KVCache,
-        input_metadata: InputMetadata,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
         # Self Attention
@@ -310,7 +305,7 @@ class DeepseekDecoderLayer(nn.Module):
             positions=positions,
             hidden_states=hidden_states,
             kv_cache=kv_cache,
-            input_metadata=input_metadata,
+            attn_metadata=attn_metadata,
         )
 
         # Fully Connected
@@ -347,15 +342,15 @@ class DeepseekModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[KVCache],
-        input_metadata: InputMetadata,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
         for i in range(len(self.layers)):
             layer = self.layers[i]
             hidden_states, residual = layer(positions, hidden_states,
-                                            kv_caches[i], input_metadata,
+                                            kv_caches[i], attn_metadata,
                                             residual)
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
@@ -380,11 +375,11 @@ class DeepseekForCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[KVCache],
-        input_metadata: InputMetadata,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   input_metadata)
+                                   attn_metadata)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,

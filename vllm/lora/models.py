@@ -4,19 +4,18 @@ import logging
 import math
 import os
 import re
-from typing import (Callable, Dict, Hashable, List, Optional, Tuple, Type)
+from typing import Callable, Dict, Hashable, List, Optional, Tuple, Type
 
 import safetensors.torch
 import torch
 from torch import nn
 
 from vllm.config import LoRAConfig
-from vllm.utils import LRUCache, is_pin_memory_available
-
 from vllm.lora.layers import (BaseLayerWithLoRA, LoRAMapping, from_layer,
                               from_layer_logits_processor)
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.utils import parse_fine_tuned_lora_name, replace_submodule
+from vllm.utils import LRUCache, is_pin_memory_available
 
 logger = logging.getLogger(__name__)
 

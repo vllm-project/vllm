@@ -1,17 +1,16 @@
 import os
 from typing import List, Optional, Tuple
 
-from PIL import Image
 import pytest
 import torch
+from PIL import Image
 from transformers import (AutoModelForCausalLM, AutoProcessor,
                           LlavaForConditionalGeneration)
 
 from vllm import LLM, SamplingParams
-from vllm.config import VisionLanguageConfig
-from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.config import TokenizerPoolConfig
+from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
 from vllm.sequence import MultiModalData
+from vllm.transformers_utils.tokenizer import get_tokenizer
 
 _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]

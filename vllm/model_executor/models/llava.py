@@ -2,12 +2,12 @@ from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import torch
 from torch import nn
-
 # TODO(xwjiang): We should port CLIPVisionModel's code over to not depend on
 # transformers' impl.
 from transformers import CLIPVisionModel
 
-from vllm.model_executor.input_metadata import InputMetadata
+from vllm.attention import AttentionMetadata
+from vllm.config import VisionLanguageConfig
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import Sampler
@@ -17,13 +17,14 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
-from vllm.config import VisionLanguageConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 if TYPE_CHECKING:
     from transformers import LlavaConfig  # pylint: disable=ungrouped-imports
-    from vllm.model_executor.layers import LinearMethodBase  # pylint: disable=ungrouped-imports
+
+    from vllm.model_executor.layers import (
+        LinearMethodBase)  # pylint: disable=ungrouped-imports
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
@@ -107,7 +108,7 @@ class LlavaForConditionalGeneration(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[KVCache],
-        input_metadata: InputMetadata,
+        attn_metadata: AttentionMetadata,
         image_input: Optional[torch.Tensor] = None
     ) -> SamplerOutput:  # noqa: E501
         """Run forward pass for Llava 1.5.
@@ -127,7 +128,7 @@ class LlavaForConditionalGeneration(nn.Module):
         There will be 576 `32000` in the `input_ids`.
         (32000 is the token id for `<image>`.)
 
-        This way, the `positions` and `input_metadata` are consistent
+        This way, the `positions` and `attn_metadata` are consistent
         with the `input_ids`.
 
         The model takes two types of image inputs: 
@@ -185,7 +186,7 @@ class LlavaForConditionalGeneration(nn.Module):
         hidden_states = self.language_model(input_ids,
                                             positions,
                                             kv_caches,
-                                            input_metadata,
+                                            attn_metadata,
                                             inputs_embeds=inputs_embeds)
 
         return hidden_states
