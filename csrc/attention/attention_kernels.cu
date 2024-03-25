@@ -291,6 +291,7 @@ __device__ void paged_attention_kernel(
   // Each thread will fetch 16 bytes from the value cache at a time.
   constexpr int V_VEC_SIZE = MIN(16 / sizeof(scalar_t), BLOCK_SIZE);
   using V_vec = typename Vec<scalar_t, V_VEC_SIZE>::Type;
+  using Float_V_vec = typename FloatVec<V_vec>::Type;
   using L_vec = typename Vec<scalar_t, V_VEC_SIZE>::Type;
 #ifdef ENABLE_FP8_E5M2
   using V_quant_vec = typename Vec<cache_t, V_VEC_SIZE>::Type;
@@ -317,8 +318,7 @@ __device__ void paged_attention_kernel(
     const int64_t physical_block_number = static_cast<int64_t>(block_table[block_idx]);
     const int physical_block_offset = (lane % NUM_V_VECS_PER_ROW) * V_VEC_SIZE;
     const int token_idx = block_idx * BLOCK_SIZE + physical_block_offset;
-    L_vec logits_vec;
-    from_float(logits_vec, *reinterpret_cast<Float_L_vec*>(logits + token_idx - start_token_idx));
+    Float_L_vec logits_vec_float = *reinterpret_cast<Float_L_vec*>(logits + token_idx - start_token_idx);
 
     const cache_t* v_ptr = v_cache + physical_block_number * kv_block_stride
                                    + kv_head_idx * kv_head_stride;
@@ -349,7 +349,8 @@ __device__ void paged_attention_kernel(
             v_vec_ptr[j] = token_idx + j < context_len ? v_vec_ptr[j] : zero_value;
           }
         }
-        accs[i] += dot(logits_vec, v_vec);
+        Float_V_vec v_vec_float = to_float(v_vec);
+        accs[i] += dot(logits_vec_float, v_vec_float);
       }
     }
   }
