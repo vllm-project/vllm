@@ -128,14 +128,17 @@ class NaiveBlock(Block):
         self._physical_block_index = physical_block_index
         self._allocator = allocator
 
-        self.append_token_ids(token_ids)
+        self._append_token_ids_no_cow(token_ids)
 
     def append_token_ids(self, token_ids: List[int]) -> None:
-        assert self.num_empty_slots >= len(token_ids)
-        self._token_ids.extend(token_ids)
+        self._append_token_ids_no_cow(token_ids)
 
         if self._physical_block_index is not None:
             self._physical_block_index = self._allocator.cow_if_not_appendable(self._physical_block_index)
+
+    def _append_token_ids_no_cow(self, token_ids: List[int]) -> None:
+        assert self.num_empty_slots >= len(token_ids)
+        self._token_ids.extend(token_ids)
 
     @property
     def physical_block_index(self) -> Optional[int]:
