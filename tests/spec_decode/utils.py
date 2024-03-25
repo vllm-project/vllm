@@ -161,22 +161,24 @@ def create_seq_group_metadata_from_prompts(
         for i, final_len in enumerate(final_seq_lens)
     }
 
+    seq_data_lst = []
+    for prompt_token_ids, cont_token_ids in zip(prompts, continuations):
+        seq_data = SequenceData(prompt_token_ids=prompt_token_ids[:],
+                                output_token_ids=cont_token_ids[:])
+        seq_data.advance_prefill_range(len(prompt_token_ids))
+        seq_data_lst.append(seq_data)
+
     return [
         SequenceGroupMetadata(
             request_id=str(i),
             is_prompt=len(cont_token_ids) == 0,
             is_chunked_prefill=False,
-            seq_data={
-                i:
-                SequenceData(
-                    prompt_token_ids=prompt_token_ids[:],
-                    output_token_ids=cont_token_ids[:],
-                ),
-            },
+            seq_data={i: seq_data},
             sampling_params=SamplingParams(temperature=0.0, ),
             block_tables={i: block_allocations[i][:]},
-        ) for i, (prompt_token_ids,
-                  cont_token_ids) in enumerate(zip(prompts, continuations))
+        ) for i, (
+            prompt_token_ids, cont_token_ids,
+            seq_data) in enumerate(zip(prompts, continuations, seq_data_lst))
     ]
 
 

@@ -18,16 +18,17 @@ def test_prepare_prompt(batch_size):
         # make sure all tokens fit into one block
         prompt_len = i % (model_runner.block_size - 1) + 1
         prompt_lens.append(prompt_len)
-        seq_data = list(range(prompt_len))
+        seq_data = SequenceData(list(range(prompt_len)))
         seq_group_metadata_list.append(
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=True,
                 is_chunked_prefill=False,
-                seq_data={0: SequenceData(seq_data)},
+                seq_data={0: seq_data},
                 sampling_params=SamplingParams(temperature=0),
                 block_tables=block_tables,
             ))
+        seq_data.advance_prefill_range(prompt_len)
 
     expected_selected_token_indices = []
     selected_token_start_idx = 0
