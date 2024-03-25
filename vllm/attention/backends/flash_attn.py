@@ -96,6 +96,7 @@ class FlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
     # the batch, used to index into sequence. E.g., if the sequence length is
     # [4, 6], it is [0, 4, 10].
     seq_start_loc: Optional[torch.Tensor]
+
     # Whether or not if cuda graph is enabled.
     # Cuda-graph is currently enabled for decoding only.
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
