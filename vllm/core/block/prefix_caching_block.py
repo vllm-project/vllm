@@ -40,7 +40,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         #self._cow_tracker = CopyOnWriteTracker(
         #    self._refcounter,
         #    self._allocate_new_block_index,
-        #    self._free_block_index,
+        #    self._free_block_index_for_block,
         #)
 
     # Implements Block.Factory.
@@ -62,6 +62,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             physical_block_index=physical_block_index,
             prefix_caching_allocator=allocator,
         )
+
 
     def allocate_immutable(self, prev_block: Optional[Block],
                            token_ids: List[int]) -> Block:
@@ -90,6 +91,11 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # TODO computed bit
 
         return block
+
+    def _allocate_block_index_for_block(self, block: Block) -> BlockIndex:
+        # TODO
+        pass
+
 
     def allocate_mutable(self, prev_block: Block) -> Block:
         """Look in freelist. If found, return.
@@ -142,10 +148,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         self._free_block_index_for_block(block.physical_block_index, block)
         block.physical_block_index = None
 
-    def _allocate_block_index_for_block(self, block: Block) -> BlockIndex:
-        pass
-
-
     def _free_block_index_for_block(self, block_index: BlockIndex, block: Block) -> None:
         assert isinstance(block, PrefixCachingBlock)
 
@@ -189,9 +191,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     def all_block_ids(self) -> frozenset[int]:
         return self._hashless_allocator.all_block_ids
 
-    # TODO name: upsert_
-    # promote
-    # replace
     def register_immutable_block(self,
                                  block: "PrefixCachingBlock") -> BlockIndex:
         assert block.content_hash is not None
@@ -202,8 +201,14 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         if block.content_hash not in self._cached_blocks:
             self._cached_blocks[
                 block.content_hash] = block.physical_block_index
+        else:
+            self._free_block_index_for_block(block.physical_block_index, block)
+            # TODO need to call a function instead of refcount
+            # as the block could transition from unused_cached_blocks
+            # is it possible to use a NaiveAllocator for this, with the freelist
+            # the uncached?
+            self._refcounter.incr(self._cached_blocks[block.content_hash])
 
-        # TODO incr/decr refcounts
         return self._cached_blocks[block.content_hash]
 
     def cow_block_if_not_appendable(self, block: Block) -> Optional[BlockIndex]:

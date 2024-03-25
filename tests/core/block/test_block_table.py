@@ -297,12 +297,15 @@ def test_fork(seq_len: int, block_size: int, allocator_type: str):
 @pytest.mark.parametrize("sequence_len", [1, 16, 129])
 @pytest.mark.parametrize("append_len", [1, 16, 129])
 @pytest.mark.parametrize("appender", ["forked", "original"])
-@pytest.mark.parametrize("allocator_type", ["naive"])
+@pytest.mark.parametrize("allocator_type", ["naive", "prefix_caching"])
 def test_cow(block_size: int, sequence_len: int,
                                      append_len: int, allocator_type: str, appender: str):
     """Fork a sequence; append to the forked sequence; verify there's a CoW.
     """
     num_gpu_blocks = 1024
+
+    if allocator_type == "prefix_caching":
+        pytest.skip("not yet passing test")
 
     allocator = CpuGpuBlockAllocator.create(
         allocator_type=allocator_type,
@@ -344,6 +347,7 @@ def test_cow(block_size: int, sequence_len: int,
 
     # Expect the non-appending block table to have no change.
     assert static_block_table.physical_block_ids == original_block_ids
+    assert appender_block_table.physical_block_ids != original_block_ids
 
     # Expect the blocks changed during append to have a CoW.
     assert allocator.get_num_free_blocks(Device.GPU) == num_gpu_blocks - (num_expected_non_cow_blocks + num_expected_cow_blocks)
