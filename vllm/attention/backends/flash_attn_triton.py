@@ -8,104 +8,24 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Type
 
 import torch
-from flash_attn import flash_attn_varlen_func
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
+from vllm.attention.backends.flash_attn import (FlashAttentionBackend,
+                                                   FlashAttentionMetadata)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
-from vllm.utils import is_hip
+from vllm.attention.ops.flash_attention_triton import triton_attention
 
 
-class FlashAttentionBackend(AttentionBackend):
+class FlashAttentionTritonBackend(FlashAttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> Type["FlashAttentionImpl"]:
-        return FlashAttentionImpl
-
-    @staticmethod
-    def make_metadata(*args, **kwargs) -> "FlashAttentionMetadata":
-        return FlashAttentionMetadata(*args, **kwargs)
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-    ) -> Tuple[int, ...]:
-        return PagedAttention.get_kv_cache_shape(num_blocks, block_size,
-                                                 num_kv_heads, head_size)
-
-    @staticmethod
-    def swap_blocks(
-        src_kv_cache: torch.Tensor,
-        dst_kv_cache: torch.Tensor,
-        src_to_dst: Dict[int, int],
-    ) -> None:
-        PagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
-
-    @staticmethod
-    def copy_blocks(
-        kv_caches: List[torch.Tensor],
-        src_to_dists: Dict[int, List[int]],
-    ) -> None:
-        PagedAttention.copy_blocks(kv_caches, src_to_dists)
+        return FlashAttentionTritonImpl
 
 
-@dataclass
-class FlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
-    """Metadata for FlashAttentionBackend.
-
-    NOTE: Any python object stored here is not updated when it is
-    cuda-graph replayed. If you have values that need to be changed
-    dynamically, it should be stored in tensor. The tensor has to be
-    updated from `CUDAGraphRunner.forward` API.
-    """
-    # Currently, input sequences can only contain all prompts
-    # or all decoding. True if all sequences are prompts.
-    is_prompt: bool
-    # (batch_size,). The prompt length per sequence. None if it is a decoding.
-    prompt_lens: Optional[List[int]]
-    # prompt_lens stored as a tensor.
-    prompt_lens_tensor: Optional[torch.Tensor]
-    # The number of prompt tokens. Doesn't include padding.
-    num_prompt_tokens: int
-    # The number of generation tokens. Doesn't include padding.
-    num_generation_tokens: int
-
-    # NOTE(sang): Definition of context_len, subquery_len, and seqlen.
-    # |---------- N-1 iteration --------|
-    # |---------------- N iteration ---------------------|
-    # |- tokenA -|......................|-- newTokens ---|
-    # |---------- context_len ----------|
-    # |-------------------- seqlen ----------------------|
-    #                                   |- subquery_len -|
-
-    # WARNING(sang): context_len has different definition depending on if it is
-    # prefill vs decoding. When it is prefill, it doesn't include new tokens.
-    # When it is for decoding, it includes a new token.
-
-    # Maximum subquery length in the batch.
-    max_subquery_len: Optional[int]
-    # Maximum prompt length in the batch.
-    max_prompt_len: Optional[int]
-    # (batch_size + 1,). The cumulative subquery lengths of the sequences in
-    # the batch, used to index into subquery. E.g., if the subquery length
-    # is [4, 6], it is [0, 4, 10].
-    subquery_start_loc: Optional[torch.Tensor]
-    # (batch_size + 1,). The cumulative sequence lengths of the sequences in
-    # the batch, used to index into sequence. E.g., if the sequence length is
-    # [4, 6], it is [0, 4, 10].
-    seq_start_loc: Optional[torch.Tensor]
-
-    # Whether or not if cuda graph is enabled.
-    # Cuda-graph is currently enabled for decoding only.
-    # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
-    use_cuda_graph: bool
-
-
-class FlashAttentionImpl(AttentionImpl):
+class FlashAttentionTritonImpl(AttentionImpl):
     """
     If the input tensors contain prompt tokens, the layout is as follows:
     |<--------------- num_prompt_tokens -------------->|	
@@ -120,6 +40,8 @@ class FlashAttentionImpl(AttentionImpl):
 
     The prompts might have different lengths, while the generation tokens
     always have length 1.
+
+    NOTE: This code is mostly duplicate from flash_attn backend
     """
 
     def __init__(
@@ -149,6 +71,15 @@ class FlashAttentionImpl(AttentionImpl):
             raise ValueError(
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {suppored_head_sizes}.")
+
+    def repeat_kv(self, x: torch.Tensor, n_rep: int) -> torch.Tensor:
+        """torch.repeat_interleave(x, dim=1, repeats=n_rep)"""
+        tokens, n_kv_heads, head_dim = x.shape
+        return (
+                x[:, :, None, :]
+                .expand(tokens, n_kv_heads, n_rep, head_dim)
+                .reshape(tokens, n_kv_heads * n_rep, head_dim)
+        )
 
     def forward(
         self,
@@ -190,36 +121,27 @@ class FlashAttentionImpl(AttentionImpl):
         if attn_metadata.is_prompt:
             # Prompt run.
             if kv_cache is None or attn_metadata.block_tables.numel() == 0:
-                # normal attention
+                # triton attention
                 # When block_tables are not filled, it means q and k are the
                 # prompt, and they have the same length.
-                if is_hip():
-                    output = flash_attn_varlen_func(
-                        q=query,
-                        k=key,
-                        v=value,
-                        cu_seqlens_q=attn_metadata.seq_start_loc,
-                        cu_seqlens_k=attn_metadata.seq_start_loc,
-                        max_seqlen_q=attn_metadata.max_prompt_len,
-                        max_seqlen_k=attn_metadata.max_prompt_len,
-                        softmax_scale=self.scale,
-                        causal=True,
-                    )
-                else:
-                    output = flash_attn_varlen_func(
-                        q=query,
-                        k=key,
-                        v=value,
-                        cu_seqlens_q=attn_metadata.seq_start_loc,
-                        cu_seqlens_k=attn_metadata.seq_start_loc,
-                        max_seqlen_q=attn_metadata.max_prompt_len,
-                        max_seqlen_k=attn_metadata.max_prompt_len,
-                        softmax_scale=self.scale,
-                        causal=True,
-                        window_size=self.sliding_window,
-                        alibi_slopes=self.alibi_slopes,
-                    )
 
+                if self.num_kv_heads != self.num_heads:
+                    # Interleave for MQA workaround.
+                    key = self.repeat_kv(key, self.num_queries_per_kv)
+                    value = self.repeat_kv(value, self.num_queries_per_kv)
+
+                output, _ = triton_attention(
+                    query,
+                    key,
+                    value,
+                    None,
+                    attn_metadata.seq_start_loc,
+                    attn_metadata.seq_start_loc,
+                    attn_metadata.max_prompt_len,
+                    attn_metadata.max_prompt_len,
+                    True,
+                    self.scale,
+                )
             else:
                 # prefix-enabled attention
                 output = PagedAttention.forward_prefix(
