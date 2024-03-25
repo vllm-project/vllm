@@ -324,11 +324,13 @@ class EngineArgs:
                                          self.max_parallel_loading_workers,
                                          self.disable_custom_all_reduce,
                                          self.ray_workers_use_nsight)
-        scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
-                                           self.max_num_seqs,
-                                           model_config.max_model_len,
-                                           self.max_paddings,
-                                           self.use_v2_block_manager,)
+        scheduler_config = SchedulerConfig(
+            self.max_num_batched_tokens,
+            self.max_num_seqs,
+            model_config.max_model_len,
+            self.max_paddings,
+            self.use_v2_block_manager,
+        )
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,

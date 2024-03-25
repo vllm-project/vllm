@@ -90,7 +90,8 @@ class Scheduler:
         self.policy = PolicyFactory.get_policy(policy_name="fcfs")
 
         BlockSpaceManagerImpl = BlockSpaceManager.get_block_space_manager_class(
-            version="v2" if self.scheduler_config.use_v2_block_manager else "v1")
+            version="v2" if self.scheduler_config.
+            use_v2_block_manager else "v1")
 
         # Create the block space manager.
         self.block_manager = BlockSpaceManagerImpl(
