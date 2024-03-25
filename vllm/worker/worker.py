@@ -128,6 +128,10 @@ class Worker:
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
         peak_memory = self.init_gpu_memory - free_gpu_memory
+        assert peak_memory > 0, (
+            "Error in memory profiling. This happens when the GPU memory was "
+            "not properly cleaned up before initializing the vLLM instance, "
+            "or when a process other than the vLLM instance is using the GPU.")
 
         cache_block_size = self.get_cache_block_size_bytes(
             block_size, cache_dtype)
