@@ -1,6 +1,7 @@
 """Utilities for downloading and initializing model weights."""
 import filelock
 import glob
+import hashlib
 import fnmatch
 import json
 import os
@@ -20,8 +21,12 @@ from vllm.model_executor.layers.quantization import (get_quantization_config,
 
 logger = init_logger(__name__)
 
-_xdg_cache_home = os.getenv('XDG_CACHE_HOME', os.path.expanduser('~/.cache'))
-_vllm_filelocks_path = os.path.join(_xdg_cache_home, 'vllm/locks/')
+# use system-level temp directory for file locks, so that multiple users
+# can share the same lock without error.
+# lock files in the temp directory will be automatically deleted when the
+# system reboots, so users will not complain about annoying lock files
+temp_dir = os.environ.get('TMPDIR') or os.environ.get(
+    'TEMP') or os.environ.get('TMP') or "/tmp/"
 
 
 class Disabledtqdm(tqdm):
@@ -31,10 +36,15 @@ class Disabledtqdm(tqdm):
 
 
 def get_lock(model_name_or_path: str, cache_dir: Optional[str] = None):
-    lock_dir = cache_dir if cache_dir is not None else _vllm_filelocks_path
+    lock_dir = cache_dir or temp_dir
     os.makedirs(os.path.dirname(lock_dir), exist_ok=True)
-    lock_file_name = model_name_or_path.replace("/", "-") + ".lock"
-    lock = filelock.SoftFileLock(os.path.join(lock_dir, lock_file_name))
+    model_name = model_name_or_path.replace("/", "-")
+    hash_name = hashlib.sha256(model_name.encode()).hexdigest()
+    # add hash to avoid conflict with old users' lock files
+    lock_file_name = hash_name + model_name + ".lock"
+    # mode 0o666 is required for the filelock to be shared across users
+    lock = filelock.FileLock(os.path.join(lock_dir, lock_file_name),
+                             mode=0o666)
     return lock
 
 
