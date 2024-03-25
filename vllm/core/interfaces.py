@@ -5,7 +5,6 @@ import enum
 from vllm.sequence import SequenceGroup, Sequence
 
 
-
 class AllocStatus(enum.Enum):
     """Result for BlockSpaceManager.can_allocate
 

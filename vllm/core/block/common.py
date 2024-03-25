@@ -3,7 +3,6 @@ from typing import List, Iterable, Dict
 from vllm.core.block.interfaces import Block
 
 
-
 class RefCounter:
     BlockIndex = int
     RefCount = int

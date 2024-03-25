@@ -3,7 +3,6 @@ from typing import List, Optional, Set, Iterable, TypeVar
 from vllm.core.block.interfaces import BlockAllocator, Block
 from vllm.core.block.common import RefCounter, get_all_blocks_recursively
 
-
 _BLANK_TOKEN_ID = -1
 
 DEFAULT_LAST_ACCESSED_TIME = -1
