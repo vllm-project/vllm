@@ -3,9 +3,6 @@ import pytest
 from vllm.core.interfaces import AllocStatus
 from vllm.core.block_manager_v2 import BlockSpaceManagerV2
 from ..utils import create_seq_group
-#from vllm.core.block.interfaces import NaiveBlockAllocator, NaiveBlock, BlockAllocator, Block
-#from vllm.block2 import RefCounter
-#from vllm.block2 import PrefixCachingBlock, PrefixCachingBlockAllocator
 
 
 @pytest.mark.parametrize("block_size", [16])

@@ -49,7 +49,8 @@ class BlockTable:
         self.ensure_num_empty_slots(num_empty_slots=len(token_ids))
 
         blocks = self._blocks[self._num_full_slots // self._block_size:]
-        first_chunk_size = self._block_size - self._num_full_slots % self._block_size
+        first_chunk_size = self._block_size - (self._num_full_slots %
+                                               self._block_size)
         token_blocks = [token_ids[:first_chunk_size]] + chunk_list(
             token_ids[first_chunk_size:], self._block_size)
 

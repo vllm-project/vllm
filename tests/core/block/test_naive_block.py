@@ -3,13 +3,9 @@ from typing import Optional, List
 
 from vllm.core.block.interfaces import BlockAllocator, Block
 from vllm.core.block.naive_block import NaiveBlockAllocator, NaiveBlock
-#from vllm.core.block.interfaces import NaiveBlockAllocator, NaiveBlock, BlockAllocator, Block
-#from vllm.block2 import RefCounter
-#from vllm.block2 import PrefixCachingBlock, PrefixCachingBlockAllocator
 
 
 class TestNaiveBlockAllocator:
-    # TODO tests for CoW
 
     @staticmethod
     def create_allocate_lambda(allocate_type: str,

@@ -5,7 +5,8 @@ from unittest.mock import MagicMock
 import math
 
 from vllm.core.block.interfaces import BlockAllocator, Block
-from vllm.core.block.prefix_caching_block import PrefixCachingBlock, PrefixCachingBlockAllocator
+from vllm.core.block.prefix_caching_block import (PrefixCachingBlock,
+                                                  PrefixCachingBlockAllocator)
 
 
 class TestPrefixCachingBlock:
@@ -32,10 +33,11 @@ class TestPrefixCachingBlock:
 
         if is_curr_block_full:
             # Expect hash since block is full.
-            assert block_with_prev.content_hash == PrefixCachingBlock.hash_block_tokens(
-                is_first_block=True,
-                prev_block_hash=None,
-                cur_block_token_ids=token_ids)
+            assert block_with_prev.content_hash == (
+                PrefixCachingBlock.hash_block_tokens(
+                    is_first_block=True,
+                    prev_block_hash=None,
+                    cur_block_token_ids=token_ids))
         else:
             # Do not expect hash since block is not full.
             assert block_with_prev.content_hash is None
@@ -48,7 +50,8 @@ class TestPrefixCachingBlock:
     def test_nth_block_has_correct_content_hash(seed: int, block_size: int,
                                                 is_curr_block_full: bool,
                                                 prev_block_has_hash: bool):
-        """Verify a block which is not first in the sequence has the correct hash.
+        """Verify a block which is not first in the sequence has the correct
+        hash.
         """
 
         random.seed(seed)
@@ -72,10 +75,11 @@ class TestPrefixCachingBlock:
 
         if is_curr_block_full and prev_block_has_hash:
             # Expect hash since block is full and previous block has hash.
-            assert block_with_prev.content_hash == PrefixCachingBlock.hash_block_tokens(
-                is_first_block=False,
-                prev_block_hash=prev_block_hash,
-                cur_block_token_ids=token_ids)
+            assert (block_with_prev.content_hash ==
+                    PrefixCachingBlock.hash_block_tokens(
+                        is_first_block=False,
+                        prev_block_hash=prev_block_hash,
+                        cur_block_token_ids=token_ids))
         else:
             # Do not expect hash since block is not full or the previous block
             # does not have a hash.
@@ -105,7 +109,8 @@ class TestPrefixCachingBlock:
 
         for first_chain_block, second_chain_block in zip(
                 first_chain, second_chain):
-            assert first_chain_block.content_hash == second_chain_block.content_hash
+            assert (first_chain_block.content_hash ==
+                    second_chain_block.content_hash)
 
         if not first_chain or not second_chain:
             assert first_chain == second_chain
@@ -201,7 +206,8 @@ class TestPrefixCachingBlockAllocator:
 
         # Expect all blocks to have same physical block index.
         for block in blocks:
-            assert block.physical_block_index == non_oom_block.physical_block_index
+            assert (block.physical_block_index ==
+                    non_oom_block.physical_block_index)
 
     @staticmethod
     @pytest.mark.parametrize("num_blocks", [1, 1024])
@@ -244,7 +250,8 @@ class TestPrefixCachingBlockAllocator:
         # Expect physical block indices to be the same in both chains.
         assert chain and second_chain
         for first_chain_block, second_chain_block in zip(chain, second_chain):
-            assert first_chain_block.physical_block_index == second_chain_block.physical_block_index
+            assert (first_chain_block.physical_block_index ==
+                    second_chain_block.physical_block_index)
 
     @staticmethod
     @pytest.mark.parametrize("num_blocks", [1, 1024])
@@ -305,7 +312,8 @@ class TestPrefixCachingBlockAllocator:
             allocator=allocator,
         )
 
-        # Free each block in chain, assert num free blocks includes new free block.
+        # Free each block in chain, assert num free blocks includes new free
+        # block.
         for i, block in enumerate(chain):
             assert allocator.get_num_free_blocks() == (num_blocks -
                                                        num_blocks_to_consume +
@@ -337,15 +345,15 @@ class TestPrefixCachingBlockAllocator:
             allocator=allocator,
         )
 
-        # Free each block in the first chain. Since all blocks are shared, the free count should
-        # stay constant.
+        # Free each block in the first chain. Since all blocks are shared, the
+        # free count should stay constant.
         for i, block in enumerate(first_chain):
             assert allocator.get_num_free_blocks() == (num_blocks -
                                                        num_blocks_to_consume)
             allocator.free(block)
 
-        # Free each block in the second chain. Since the refcount is now zero, the free count
-        # should increment with each free.
+        # Free each block in the second chain. Since the refcount is now zero,
+        # the free count should increment with each free.
         for i, block in enumerate(second_chain):
             assert allocator.get_num_free_blocks() == (num_blocks -
                                                        num_blocks_to_consume +

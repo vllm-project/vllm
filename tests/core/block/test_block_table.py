@@ -1,8 +1,5 @@
 import pytest
 
-#from vllm.core.block.interfaces import NaiveBlockAllocator, NaiveBlock, BlockAllocator, Block
-#from vllm.block2 import RefCounter
-#from vllm.block2 import PrefixCachingBlock, PrefixCachingBlockAllocator
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
 from vllm.utils import Device, chunk_list
@@ -67,7 +64,8 @@ def test_allocate_prefix_caching(block_size: int, sequence_len: int):
             ))
         block_tables[-1].allocate(token_ids=token_ids, device=Device.GPU)
 
-        # Expect all sequences to share allocations, except for their last block (which may be mutable).
+        # Expect all sequences to share allocations, except for their last block
+        # (which may be mutable).
         assert allocator.get_num_free_blocks(
             device=Device.GPU) == num_gpu_blocks - (
                 num_immutable_blocks_per_alloc + num_mutable_blocks_per_alloc *
@@ -179,7 +177,8 @@ def test_ensure_num_empty_slots_allocation(block_size: int, sequence_len: int,
 
     block_table.allocate(token_ids=token_ids, device=Device.GPU)
 
-    # Assert that the empty slots consume the expected number of additional blocks.
+    # Assert that the empty slots consume the expected number of additional
+    # blocks.
     assert len(
         block_table.physical_block_ids) == num_expected_blocks_before_append
     block_table.ensure_num_empty_slots(num_empty_slots)
@@ -270,7 +269,8 @@ def test_fork(seq_len: int, block_size: int, allocator_type: str):
     forked_block_table = block_table.fork()
 
     # Expect physical_block_ids and token_ids to match.
-    assert block_table.physical_block_ids == forked_block_table.physical_block_ids
+    assert (block_table.physical_block_ids ==
+            forked_block_table.physical_block_ids)
     assert block_table._get_all_token_ids(
     ) == forked_block_table._get_all_token_ids()
 

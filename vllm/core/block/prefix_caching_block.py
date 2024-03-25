@@ -117,8 +117,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
     def free(self, block: Block) -> None:
         """Free a block.
-        Check if it has a hash. If so, decr refcount ourselves. If zero, add to special list.
-        If it does not have a hash, let the hashless allocator figure it out.
+        Check if it has a hash. If so, decr refcount ourselves. If zero, add to
+        special list. If it does not have a hash, let the hashless allocator
+        figure it out.
         """
         assert isinstance(block, PrefixCachingBlock)
         # TODO remove this assertion
@@ -211,10 +212,11 @@ class PrefixCachingBlock(Block):
         self._block.append_token_ids(token_ids)
 
         # If the content hash is present, then the block can be made immutable.
-        # Register ourselves with the allocator, potentially replacing the physical block index.
+        # Register ourselves with the allocator, potentially replacing the
+        # physical block index.
         if self.content_hash is not None:
-            self.physical_block_index = self._prefix_caching_allocator.register_immutable_block(
-                self)
+            self.physical_block_index = (
+                self._prefix_caching_allocator.register_immutable_block(self))
 
     @property
     def physical_block_index(self) -> Optional[int]:

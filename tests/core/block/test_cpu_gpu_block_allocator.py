@@ -2,9 +2,6 @@ import pytest
 
 from vllm.utils import Device, chunk_list
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
-#from vllm.core.block.interfaces import NaiveBlockAllocator, NaiveBlock, BlockAllocator, Block
-#from vllm.block2 import RefCounter
-#from vllm.block2 import PrefixCachingBlock, PrefixCachingBlockAllocator
 
 
 @pytest.mark.parametrize("num_cpu_blocks", [0, 512])
