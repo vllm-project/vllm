@@ -23,12 +23,13 @@ class NaiveBlockAllocator(BlockAllocator):
 
         self._free_block_indices: Set[BlockIndex] = set(block_ids)
         self._all_block_indices = frozenset(block_ids)
+        assert len(self._all_block_indices) == num_blocks
 
         self._refcounter = RefCounter(
             all_block_indices=self._free_block_indices)
         self._create_block = create_block
         self._block_size = block_size
-        
+
         self._cow_tracker = CopyOnWriteTracker(
             self._refcounter,
             lambda _: self._allocate_new_block_index(),
@@ -102,9 +103,9 @@ class NaiveBlockAllocator(BlockAllocator):
     def all_block_ids(self):
         return self._all_block_indices
 
-    def cow_block_if_not_appendable(self, block: Block) -> Optional[BlockIndex]:
+    def cow_block_if_not_appendable(self,
+                                    block: Block) -> Optional[BlockIndex]:
         return self._cow_tracker.cow_block_if_not_appendable(block)
-
 
 
 class NaiveBlock(Block):
@@ -127,7 +128,8 @@ class NaiveBlock(Block):
         self._append_token_ids_no_cow(token_ids)
 
         if self._physical_block_index is not None:
-            self._physical_block_index = self._allocator.cow_block_if_not_appendable(self)
+            self._physical_block_index = self._allocator.cow_block_if_not_appendable(
+                self)
 
     def _append_token_ids_no_cow(self, token_ids: List[int]) -> None:
         assert self.num_empty_slots >= len(token_ids)

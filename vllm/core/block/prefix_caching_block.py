@@ -63,7 +63,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             prefix_caching_allocator=allocator,
         )
 
-
     def allocate_immutable(self, prev_block: Optional[Block],
                            token_ids: List[int]) -> Block:
         assert_prefix_caching_block_or_none(prev_block)
@@ -95,7 +94,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     def _allocate_block_index_for_block(self, block: Block) -> BlockIndex:
         # TODO
         pass
-
 
     def allocate_mutable(self, prev_block: Block) -> Block:
         """Look in freelist. If found, return.
@@ -148,7 +146,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         self._free_block_index_for_block(block.physical_block_index, block)
         block.physical_block_index = None
 
-    def _free_block_index_for_block(self, block_index: BlockIndex, block: Block) -> None:
+    def _free_block_index_for_block(self, block_index: BlockIndex,
+                                    block: Block) -> None:
         assert isinstance(block, PrefixCachingBlock)
 
         if block.content_hash is None:
@@ -159,8 +158,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # If no longer used, add the block to the unused cached blocks.
         if refcount == 0:
             assert block.content_hash not in self._unused_cached_blocks
-            self._unused_cached_blocks[
-                block.content_hash] = block_index
+            self._unused_cached_blocks[block.content_hash] = block_index
 
     def fork(self, last_block: Block) -> List[Block]:
         source_blocks = get_all_blocks_recursively(last_block)
@@ -211,7 +209,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         return self._cached_blocks[block.content_hash]
 
-    def cow_block_if_not_appendable(self, block: Block) -> Optional[BlockIndex]:
+    def cow_block_if_not_appendable(self,
+                                    block: Block) -> Optional[BlockIndex]:
         return block.physical_block_index
 
 

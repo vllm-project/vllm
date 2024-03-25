@@ -42,6 +42,7 @@ class RefCounter:
 
 
 class CopyOnWriteTracker:
+
     def __init__(
         self,
         refcounter: RefCounter,
@@ -52,8 +53,9 @@ class CopyOnWriteTracker:
         self._refcounter = refcounter
         self._allocate_new_block_index_for_block = allocate_new_block_index_for_block
         self._free_block_index_for_block = free_block_index_for_block
-        
-    def cow_block_if_not_appendable(self, block: Block) -> Optional[BlockIndex]:
+
+    def cow_block_if_not_appendable(self,
+                                    block: Block) -> Optional[BlockIndex]:
         block_index = block.physical_block_index
         if block_index is None:
             return block_index
@@ -65,17 +67,17 @@ class CopyOnWriteTracker:
 
         return block_index
 
-
     def clear_cows(self) -> Dict[BlockIndex, List[BlockIndex]]:
         cows = dict(self._copy_on_writes)
         self._copy_on_writes.clear()
         return cows
 
-
-    def _copy_on_write(self, block: Block, src_block_index: BlockIndex) -> BlockIndex:
+    def _copy_on_write(self, block: Block,
+                       src_block_index: BlockIndex) -> BlockIndex:
         self._free_block_index_for_block(src_block_index, block)
         dst_block_index = self._allocate_new_block_index_for_block(block)
         self._copy_on_writes[src_block_index].append(dst_block_index)
+
 
 def get_all_blocks_recursively(last_block: Block) -> List[Block]:
 
