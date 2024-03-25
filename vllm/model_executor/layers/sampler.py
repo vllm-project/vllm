@@ -465,6 +465,24 @@ def _sample(
     #                                   sampling_tensors)
 
 
+def _get_ranks(x: torch.Tensor, indices: List[int]) -> torch.Tensor:
+    """
+    This function calculates the ranks of the chosen tokens in a logprob tensor.
+
+    Args:
+        x (torch.Tensor): 2D logprob tensor of shape (N, M)
+                        where N is the no. of tokens and M is the vocab dim.
+        indices (List[int]): List of chosen token indices.
+
+    Returns:
+        torch.Tensor: 1D tensor of shape (N,) where N is the no. of tokens.
+                    Each element in the returned tensor represents the rank 
+                    of the chosen token in the input logprob tensor.
+    """
+    vals = x[range(len(x)), indices]
+    return (x > vals[:, None]).long().sum(1) + 1
+
+
 def _get_logprobs(
     logprobs: torch.Tensor,
     sampling_metadata: SamplingMetadata,
@@ -520,6 +538,10 @@ def _get_logprobs(
 
     batched_logprobs_query_result = batched_logprobs_query_result.cpu()
 
+    batched_ranks_query_result = _get_ranks(
+        logprobs[batched_logprobs_query_seq_indices],
+        batched_logprobs_query_token_indices)
+
     # Gather results
     result_prompt_logprobs: List[Optional[PromptLogprobs]] = []
     result_sample_logprobs: List[SampleLogprobs] = []
@@ -540,15 +562,20 @@ def _get_logprobs(
             for token_id in prompt_tokens[1:]:
                 prompt_logprobs_dict = {
                     token_id:
-                    batched_logprobs_query_result[query_result_idx].item()
+                    (batched_logprobs_query_result[query_result_idx].item(),
+                     batched_ranks_query_result[query_result_idx].item())
                 }
                 if num_logprobs > 0:
                     prompt_logprobs_dict.update(
-                        zip(top_token_ids[sample_idx, :num_logprobs].tolist(),
-                            top_logprobs[sample_idx, :num_logprobs].tolist()))
+                        zip(
+                            top_token_ids[sample_idx, :num_logprobs].tolist(),
+                            zip(
+                                top_logprobs[
+                                    sample_idx, :num_logprobs].tolist(),
+                                range(1, num_logprobs + 1))))
                 group_prompt_logprobs.append({
-                    token_id: Logprob(logprob)
-                    for token_id, logprob in prompt_logprobs_dict.items()
+                    token_id: Logprob(*logprob_rank)
+                    for token_id, logprob_rank in prompt_logprobs_dict.items()
                 })
                 sample_idx += 1
                 query_result_idx += 1
@@ -564,7 +591,8 @@ def _get_logprobs(
         for next_token_id, parent_id in zip(next_token_ids, parent_ids):
             sample_logprobs_dict = {
                 next_token_id:
-                batched_logprobs_query_result[query_result_idx].item()
+                (batched_logprobs_query_result[query_result_idx].item(),
+                 batched_ranks_query_result[query_result_idx].item())
             }
             query_result_idx += 1
             if num_logprobs > 0:
@@ -572,11 +600,13 @@ def _get_logprobs(
                     zip(
                         top_token_ids[sample_idx +
                                       parent_id, :num_logprobs].tolist(),
-                        top_logprobs[sample_idx +
-                                     parent_id, :num_logprobs].tolist()))
+                        zip(
+                            top_logprobs[sample_idx +
+                                         parent_id, :num_logprobs].tolist(),
+                            range(1, num_logprobs + 1))))
             group_sample_logprobs.append({
-                token_id: Logprob(logprob)
-                for token_id, logprob in sample_logprobs_dict.items()
+                token_id: Logprob(*logprob_rank)
+                for token_id, logprob_rank in sample_logprobs_dict.items()
             })
         result_sample_logprobs.append(group_sample_logprobs)
         sample_idx += len(seq_ids)
