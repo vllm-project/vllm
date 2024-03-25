@@ -7,8 +7,11 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from vllm.block import BlockTable, PhysicalTokenBlock
 from vllm.core.evictor import EvictionPolicy, Evictor, make_evictor
+from vllm.logger import init_logger
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
+
+logger = init_logger(__name__)
 
 
 class BlockAllocatorBase(ABC):
@@ -241,11 +244,13 @@ class BlockSpaceManager:
         self.watermark_blocks = int(watermark * num_gpu_blocks)
 
         if self.enable_caching:
+            logger.info("enable automatic prefix caching")
             self.gpu_allocator = CachedBlockAllocator(Device.GPU, block_size,
                                                       num_gpu_blocks)
             self.cpu_allocator = CachedBlockAllocator(Device.CPU, block_size,
                                                       num_cpu_blocks)
         else:
+            logger.info("disable automatic prefix caching")
             self.gpu_allocator = UncachedBlockAllocator(
                 Device.GPU, block_size, num_gpu_blocks)
             self.cpu_allocator = UncachedBlockAllocator(
