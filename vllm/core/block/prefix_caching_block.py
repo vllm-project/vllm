@@ -213,6 +213,10 @@ class PrefixCachingBlock(Block):
         return self._block.block_size
 
     @property
+    def token_ids(self) -> List[int]:
+        return self._block.token_ids
+
+    @property
     def content_hash(self) -> Optional[int]:
         """Return the content-based hash of the current block, or None if it is
         not yet defined.

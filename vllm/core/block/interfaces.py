@@ -14,6 +14,10 @@ class Block(ABC):
         pass
 
     @abstractproperty
+    def token_ids(self) -> List[int]:
+        pass
+
+    @abstractproperty
     def num_empty_slots(self) -> int:
         pass
 

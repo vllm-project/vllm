@@ -1,7 +1,6 @@
 import random
 import pytest
 from typing import Optional, List
-import random
 from unittest.mock import MagicMock
 import math
 
@@ -36,11 +35,10 @@ def test_allocate_naive(block_size: int, sequence_len: int):
         assert allocator.get_num_free_blocks(device=Device.GPU) == num_gpu_blocks - i * num_blocks_per_alloc
 
         block_tables.append(BlockTable(
-            token_ids=token_ids,
             block_size=block_size,
             block_allocator=allocator,
         ))
-        block_tables[-1].allocate(device=Device.GPU)
+        block_tables[-1].allocate(token_ids=token_ids, device=Device.GPU)
 
 
 @pytest.mark.parametrize("block_size", [16])
@@ -65,11 +63,10 @@ def test_allocate_prefix_caching(block_size: int, sequence_len: int):
     for alloc_i in range(1, 6):
 
         block_tables.append(BlockTable(
-            token_ids=token_ids,
             block_size=block_size,
             block_allocator=allocator,
         ))
-        block_tables[-1].allocate(device=Device.GPU)
+        block_tables[-1].allocate(token_ids=token_ids, device=Device.GPU)
         
         # Expect all sequences to share allocations, except for their last block (which may be mutable).
         assert allocator.get_num_free_blocks(device=Device.GPU) == num_gpu_blocks - (num_immutable_blocks_per_alloc + num_mutable_blocks_per_alloc * (alloc_i))
@@ -94,13 +91,12 @@ def test_allocate_free(block_size: int, sequence_len: int, allocator_type: str, 
     num_blocks_per_alloc = len(list(chunk_list(token_ids, block_size)))
 
     block_table = BlockTable(
-        token_ids=token_ids,
         block_size=block_size,
         block_allocator=allocator,
     )
     
     for i in range(5):
-        block_table.allocate(device=device)
+        block_table.allocate(token_ids=token_ids, device=device)
         assert allocator.get_num_free_blocks(device) == num_device_blocks - num_blocks_per_alloc
 
         block_table.free()
@@ -110,7 +106,7 @@ def test_allocate_free(block_size: int, sequence_len: int, allocator_type: str, 
 @pytest.mark.parametrize("sequence_len", [1, 16, 129])
 @pytest.mark.parametrize("append_len", [1, 16, 129])
 @pytest.mark.parametrize("allocator_type", ["naive", "prefix_caching"])
-def test_append_token_ids(block_size: int, sequence_len: int, append_len: int, allocator_type: str):
+def test_append_token_ids_allocation(block_size: int, sequence_len: int, append_len: int, allocator_type: str):
     num_gpu_blocks = 1024
 
     allocator = CpuGpuBlockAllocator.create(
@@ -124,7 +120,6 @@ def test_append_token_ids(block_size: int, sequence_len: int, append_len: int, a
     token_ids_to_append = list(range(append_len))
     
     block_table = BlockTable(
-        token_ids=token_ids,
         block_size=block_size,
         block_allocator=allocator,
     )
@@ -132,7 +127,7 @@ def test_append_token_ids(block_size: int, sequence_len: int, append_len: int, a
     num_expected_blocks_before_append = len(list(chunk_list(token_ids, block_size)))
     num_expected_appended_blocks = len(list(chunk_list(token_ids + token_ids_to_append, block_size))) - num_expected_blocks_before_append
 
-    block_table.allocate(device=Device.GPU)
+    block_table.allocate(token_ids=token_ids, device=Device.GPU)
 
     assert len(block_table.physical_block_ids) == num_expected_blocks_before_append
     block_table.append_token_ids(token_ids_to_append)
@@ -142,7 +137,7 @@ def test_append_token_ids(block_size: int, sequence_len: int, append_len: int, a
 @pytest.mark.parametrize("sequence_len", [1, 16, 129])
 @pytest.mark.parametrize("num_empty_slots", [1, 16, 129])
 @pytest.mark.parametrize("allocator_type", ["naive", "prefix_caching"])
-def test_ensure_num_empty_slots(block_size: int, sequence_len: int, num_empty_slots: int, allocator_type: str):
+def test_ensure_num_empty_slots_allocation(block_size: int, sequence_len: int, num_empty_slots: int, allocator_type: str):
     num_gpu_blocks = 1024
 
     allocator = CpuGpuBlockAllocator.create(
@@ -155,7 +150,6 @@ def test_ensure_num_empty_slots(block_size: int, sequence_len: int, num_empty_sl
     token_ids = list(range(sequence_len))
     
     block_table = BlockTable(
-        token_ids=token_ids,
         block_size=block_size,
         block_allocator=allocator,
     )
@@ -163,7 +157,7 @@ def test_ensure_num_empty_slots(block_size: int, sequence_len: int, num_empty_sl
     num_expected_blocks_before_append = len(list(chunk_list(token_ids, block_size)))
     num_expected_appended_blocks = len(list(chunk_list(token_ids + [-1] * num_empty_slots, block_size))) - num_expected_blocks_before_append
 
-    block_table.allocate(device=Device.GPU)
+    block_table.allocate(token_ids=token_ids, device=Device.GPU)
 
     # Assert that the empty slots consume the expected number of additional blocks.
     assert len(block_table.physical_block_ids) == num_expected_blocks_before_append
@@ -174,3 +168,40 @@ def test_ensure_num_empty_slots(block_size: int, sequence_len: int, num_empty_sl
     num_free_blocks = allocator.get_num_free_blocks(device=Device.GPU)
     block_table.append_token_ids(token_ids=list(range(num_empty_slots)))
     assert num_free_blocks == allocator.get_num_free_blocks(device=Device.GPU)
+
+@pytest.mark.parametrize("block_size", [1, 8])
+@pytest.mark.parametrize("sequence_len", [1, 9])
+@pytest.mark.parametrize("append_len", [1, 16, 129])
+@pytest.mark.parametrize("append_size", [1, 4, 129])
+@pytest.mark.parametrize("allocator_type", ["naive", "prefix_caching"])
+def test_append_token_ids_correct_content(block_size: int, sequence_len: int, append_len: int, allocator_type: str, append_size: int):
+    """Verify token ids are correctly appended. Appends various amounts of
+    token ids in various append sizes, and verifies the final sequence is
+    correct.
+    """
+    num_gpu_blocks = 1024
+
+    allocator = CpuGpuBlockAllocator.create(
+        allocator_type=allocator_type,
+        num_gpu_blocks=num_gpu_blocks,
+        num_cpu_blocks=1024,
+        block_size=block_size,
+    )
+
+    token_ids = list(range(sequence_len))
+    token_ids_to_append = list(range(append_len))
+    
+    block_table = BlockTable(
+        block_size=block_size,
+        block_allocator=allocator,
+    )
+    block_table.allocate(token_ids=token_ids, device=Device.GPU)
+    
+    appended_so_far = []
+    for append in chunk_list(token_ids_to_append, append_size):
+        block_table.append_token_ids(append)
+        appended_so_far.extend(append)
+
+        assert block_table._get_all_token_ids() == token_ids + appended_so_far
+    
+    assert block_table._get_all_token_ids() == token_ids + token_ids_to_append
