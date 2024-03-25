@@ -22,6 +22,8 @@ class BlockSpaceManagerV2(BlockSpaceManager):
     * Prefix caching
         * Evictor policies (unused blocks are evicted arbitrarily).
         * Test that prefix blocks are not evicted
+        * Update access time for blocks
+        * Store computed bit in block
     """
 
     def __init__(
