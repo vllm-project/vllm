@@ -140,7 +140,8 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         return []
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
-        raise NotImplementedError
+        src_block_table = self.block_tables[parent_seq.seq_id]
+        self.block_tables[child_seq.seq_id] = src_block_table.fork()
     
     def can_swap_in(self, seq_group: SequenceGroup) -> bool:
         return False
