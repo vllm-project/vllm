@@ -9,7 +9,7 @@ from vllm.utils import is_hip
 logger = init_logger(__name__)
 
 
-@lru_cache()
+@lru_cache(maxsize=None)
 def get_attn_backend(dtype: torch.dtype) -> AttentionBackend:
     if _can_use_flash_attn(dtype):
         logger.info("Using FlashAttention backend.")
