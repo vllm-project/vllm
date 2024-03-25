@@ -83,7 +83,7 @@ class LLM:
         swap_space: int = 4,
         enforce_eager: bool = False,
         max_context_len_to_capture: int = 8192,
-        disable_custom_all_reduce: bool = False,
+        disable_custom_all_reduce: bool = True,
         **kwargs,
     ) -> None:
         if "disable_log_stats" not in kwargs:

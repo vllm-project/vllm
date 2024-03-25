@@ -1,6 +1,7 @@
 import io
 import os
 import re
+import logging
 import subprocess
 import sys
 from typing import List
@@ -13,6 +14,7 @@ import torch
 from torch.utils.cpp_extension import CUDA_HOME
 
 ROOT_DIR = os.path.dirname(__file__)
+logger = logging.getLogger(__name__)
 
 # vLLM only supports Linux platform
 assert sys.platform.startswith(
@@ -54,19 +56,24 @@ class cmake_build_ext(build_ext):
     # Determine number of compilation jobs and optionally nvcc compile threads.
     #
     def compute_num_jobs(self):
-        try:
-            # os.sched_getaffinity() isn't universally available, so fall back
-            # to os.cpu_count() if we get an error here.
-            num_jobs = len(os.sched_getaffinity(0))
-        except AttributeError:
-            num_jobs = os.cpu_count()
-
-        nvcc_cuda_version = get_nvcc_cuda_version()
-        if nvcc_cuda_version >= Version("11.2"):
-            nvcc_threads = int(os.getenv("NVCC_THREADS", 8))
-            num_jobs = max(1, round(num_jobs / (nvcc_threads / 4)))
+        num_jobs = os.environ.get("MAX_JOBS", None)
+        if num_jobs is not None:
+            num_jobs = int(num_jobs)
+            logger.info(f"Using MAX_JOBS={num_jobs} as the number of jobs.")
         else:
-            nvcc_threads = None
+            try:
+                # os.sched_getaffinity() isn't universally available, so fall
+                #  back to os.cpu_count() if we get an error here.
+                num_jobs = len(os.sched_getaffinity(0))
+            except AttributeError:
+                num_jobs = os.cpu_count()
+
+        nvcc_threads = None
+        if _is_cuda():
+            nvcc_cuda_version = get_nvcc_cuda_version()
+            if nvcc_cuda_version >= Version("11.2"):
+                nvcc_threads = int(os.getenv("NVCC_THREADS", 8))
+                num_jobs = max(1, round(num_jobs / (nvcc_threads / 4)))
 
         return num_jobs, nvcc_threads
 
@@ -168,7 +175,7 @@ class cmake_build_ext(build_ext):
 
 
 def _is_cuda() -> bool:
-    return torch.version.cuda is not None
+    return torch.version.cuda is not None and not _is_neuron()
 
 
 def _is_hip() -> bool:

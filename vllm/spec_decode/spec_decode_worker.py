@@ -79,13 +79,13 @@ class SpecDecodeWorker:
 
         self.scorer: SpeculativeScorer = None
 
-    def init_model(self) -> None:
+    def init_device(self) -> None:
         """Initialize both scorer and proposer models.
         """
         # The scorer worker model is initialized first in case the proposer
         # model has a smaller TP degree than the target worker.
-        self.scorer_worker.init_model()
-        self.proposer_worker.init_model()
+        self.scorer_worker.init_device()
+        self.proposer_worker.init_device()
 
         self._metrics.init_gpu_tensors(self.rank)
         self.rejection_sampler.init_gpu_tensors(self.rank)
