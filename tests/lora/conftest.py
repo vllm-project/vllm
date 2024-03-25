@@ -2,6 +2,7 @@ import contextlib
 import gc
 import tempfile
 from collections import OrderedDict
+from time import sleep
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -27,9 +28,10 @@ def cleanup():
     destroy_model_parallel()
     with contextlib.suppress(AssertionError):
         torch.distributed.destroy_process_group()
+    ray.shutdown()
+    sleep(1)
     gc.collect()
     torch.cuda.empty_cache()
-    ray.shutdown()
 
 
 @pytest.fixture(autouse=True)
@@ -122,6 +124,11 @@ def dummy_model_gate_up() -> nn.Module:
 @pytest.fixture(scope="session")
 def sql_lora_files():
     return snapshot_download(repo_id="yard1/llama-2-7b-sql-lora-test")
+
+
+@pytest.fixture(scope="session")
+def tinyllama_lora_files():
+    return snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
 
 
 @pytest.fixture(scope="session")
