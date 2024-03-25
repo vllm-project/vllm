@@ -16,10 +16,10 @@ class BlockSpaceManagerV2(BlockSpaceManager):
 
     Missing features:
     * General features
-        * CoW implementation.
         * Swap in/swap out implementation.
         * Sliding window BlockTable
     * Prefix caching
+        * CoW implementation.
         * Evictor policies (unused blocks are evicted arbitrarily).
         * Test that prefix blocks are not evicted
         * Update access time for blocks
@@ -102,9 +102,10 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         # TODO handle sliding window.
         assert self.block_sliding_window is None
         block_table.allocate(seq.get_token_ids())
+        self.block_tables[seq.seq_id] = block_table
 
         # Assign the block table for each sequence.
-        for seq in waiting_seqs:
+        for seq in waiting_seqs[1:]:
             self.block_tables[seq.seq_id] = block_table.fork()
 
     def can_append_slot(self, seq_group: SequenceGroup) -> bool:
@@ -138,7 +139,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
 
     def get_block_table(self, seq: Sequence) -> List[int]:
         assert seq.seq_id in self.block_tables
-        return self.block_tables[seq.seq_id].physical_block_ids
+        block_ids = self.block_tables[seq.seq_id].physical_block_ids
+        assert all(b is not None for b in block_ids)
+        return block_ids
 
     def access_all_blocks_in_seq(self, seq, now):
         pass
