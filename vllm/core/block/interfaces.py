@@ -58,6 +58,7 @@ class BlockAllocator(ABC):
     def free(self, block: Block) -> None:
         pass
 
+    @abstractmethod
     def fork(self, last_block: Block) -> List[Block]:
         pass
 

@@ -1,11 +1,7 @@
 import random
 import pytest
-import random
 
 from vllm.core.block.common import RefCounter
-#from vllm.core.block.interfaces import NaiveBlockAllocator, NaiveBlock, BlockAllocator, Block
-#from vllm.block2 import RefCounter
-#from vllm.block2 import PrefixCachingBlock, PrefixCachingBlockAllocator
 
 
 class TestRefCounter:

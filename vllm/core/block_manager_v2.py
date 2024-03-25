@@ -8,6 +8,8 @@ from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
 from vllm.core.block.block_table import BlockTable
 
+SeqId = int
+
 
 class BlockSpaceManagerV2(BlockSpaceManager):
     """BlockSpaceManager implementation with improved testability over v1.
@@ -19,7 +21,6 @@ class BlockSpaceManagerV2(BlockSpaceManager):
     * Prefix caching
         * Evictor policies (unused blocks are evicted arbitrarily).
     """
-    SeqId = int
 
     def __init__(
         self,

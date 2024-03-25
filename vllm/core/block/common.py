@@ -2,10 +2,11 @@ from typing import List, Iterable, Dict
 
 from vllm.core.block.interfaces import Block
 
+BlockIndex = int
+RefCount = int
+
 
 class RefCounter:
-    BlockIndex = int
-    RefCount = int
 
     def __init__(self, all_block_indices: Iterable[BlockIndex]):
         deduped = set(all_block_indices)

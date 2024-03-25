@@ -1,19 +1,13 @@
 """A block manager that manages token blocks."""
 from itertools import count
-from typing import Dict, List, Optional, Set, Tuple
-
-from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
-from vllm.utils import Device
-from vllm.core.interfaces import BlockSpaceManager, AllocStatus
-
-from itertools import count
 from os.path import commonprefix
 from typing import Dict, List, Optional, Set, Tuple
 
 from vllm.block import BlockTable, PhysicalTokenBlock
+from vllm.core.evictor import Evictor, EvictionPolicy, make_evictor
+from vllm.core.interfaces import BlockSpaceManager, AllocStatus
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
-from vllm.core.evictor import Evictor, EvictionPolicy, make_evictor
 
 
 class BlockAllocator:

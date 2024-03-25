@@ -5,14 +5,11 @@ from vllm.core.block.interfaces import Block, BlockAllocator
 from vllm.core.block.naive_block import NaiveBlockAllocator, NaiveBlock
 from vllm.core.block.common import get_all_blocks_recursively
 
-_BLANK_TOKEN_ID = -1
-
-DEFAULT_LAST_ACCESSED_TIME = -1
+PrefixHash = int
+BlockIndex = int
 
 
 class PrefixCachingBlockAllocator(BlockAllocator):
-    PrefixHash = int
-    BlockIndex = int
 
     # TODO last access time / evictor integration
 

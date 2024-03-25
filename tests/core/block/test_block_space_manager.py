@@ -42,7 +42,7 @@ def test_can_allocate_seq_group(block_size: int, num_seqs_per_group: int,
             ],
         )
 
-        num_prompt_blocks + num_output_blocks <= num_gpu_blocks
+        assert num_prompt_blocks + num_output_blocks <= num_gpu_blocks
 
         can_allocate_result = block_manager.can_allocate(seq_group)
 
