@@ -17,6 +17,15 @@ RUN echo "FA_GFX_ARCHS is $FA_GFX_ARCHS"
 ARG FA_BRANCH="3d2b6f5"
 RUN echo "FA_BRANCH is $FA_BRANCH"
 
+# whether to build flash-attention
+# if 0, will not build flash attention
+# this is useful for gfx target where flash-attention is not supported
+# In that case, we need to use the python reference attention implementation in vllm
+ARG BUILD_FA="1"
+
+# whether to build cupy on rocm
+ARG BUILD_CUPY="1"
+
 # Install some basic utilities
 RUN apt-get update && apt-get install python3 python3-pip -y
 
@@ -50,9 +59,10 @@ ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/rocm/lib/:/libtorch/lib:
 ENV CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/libtorch/include:/libtorch/include/torch/csrc/api/include/:/opt/rocm/include/:
 
 # Install ROCm flash-attention
-RUN mkdir libs \
+RUN if [ "$BUILD_FA" = "1" ]; then \
+    mkdir libs \
     && cd libs \
-    && git clone https://github.com/ROCmSoftwarePlatform/flash-attention.git \
+    && git clone https://github.com/ROCm/flash-attention.git \
     && cd flash-attention \
     && git checkout ${FA_BRANCH} \
     && git submodule update --init \
@@ -60,22 +70,41 @@ RUN mkdir libs \
     && if [ "$BASE_IMAGE" = "rocm/pytorch:rocm5.7_ubuntu22.04_py3.10_pytorch_2.0.1" ]; then \
         patch /opt/conda/envs/py_3.10/lib/python3.10/site-packages/torch/utils/hipify/hipify_python.py hipify_patch.patch; fi \
     && python3 setup.py install \
-    && cd ..
-
-COPY ./ /app/vllm
-
-RUN python3 -m pip install --upgrade pip
-RUN python3 -m pip install xformers==0.0.23 --no-deps
+    && cd ..; \
+    fi
 
 # Error related to odd state for numpy 1.20.3 where there is no METADATA etc, but an extra LICENSES_bundled.txt.
 # Manually removed it so that later steps of numpy upgrade can continue
 RUN if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1" ]; then \
     rm -rf /opt/conda/envs/py_3.9/lib/python3.9/site-packages/numpy-1.20.3.dist-info/; fi
 
+# build cupy
+RUN if [ "$BUILD_CUPY" = "1" ]; then \
+    mkdir -p libs \
+    && cd libs \
+    && git clone -b hipgraph_enablement --recursive https://github.com/ROCm/cupy.git \
+    && cd cupy \
+    && pip install mpi4py-mpich \
+    && pip install scipy==1.9.3 \
+    && pip install cython==0.29.* \
+    && env CC=$MPI_HOME/bin/mpicc python -m pip install mpi4py \
+    && export CUPY_INSTALL_USE_HIP=1 \
+    && export ROCM_HOME=/opt/rocm \
+    && export HCC_AMDGPU_TARGET="gfx90a,gfx942,gfx1100" \
+    && pip install . \
+    && cd ..; \
+    fi
+
+COPY ./ /app/vllm
+
+RUN python3 -m pip install --upgrade pip
+RUN python3 -m pip install xformers==0.0.23 --no-deps
+
 RUN cd /app \
     && cd vllm \
     && pip install -U -r requirements-rocm.txt \
-    && bash patch_xformers.rocm.sh \
+    && if [ "$BUILD_FA" = "1" ]; then \
+       bash patch_xformers.rocm.sh; fi \
     && patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h /app/vllm/rocm_patch/rocm_bf16.patch \
     && python3 setup.py install \
     && cd ..

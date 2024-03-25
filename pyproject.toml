@@ -1,6 +1,7 @@
 [build-system]
 # Should be mirrored in requirements-build.txt
 requires = [
+    "cmake>=3.21",
     "ninja",
     "packaging",
     "setuptools >= 49.4.0",
@@ -8,6 +9,10 @@ requires = [
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+# Allow lines to be as long as 80.
+line-length = 80
 
 [tool.ruff.lint]
 select = [
@@ -29,6 +34,20 @@ ignore = [
     "F405", "F403",
     # lambda expression assignment
     "E731",
-    # line too long, handled by black formatting
-    "E501",
+    # Loop control variable not used within loop body
+    "B007",
 ]
+
+[tool.mypy]
+python_version = "3.8"
+
+ignore_missing_imports = true
+
+files = "vllm"
+# TODO(woosuk): Include the code from Megatron and HuggingFace.
+exclude = "vllm/model_executor/parallel_utils/|vllm/model_executor/models/"
+
+
+[tool.codespell]
+ignore-words-list = "dout, te, indicies"
+skip = "./tests/prompts"

@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, LoRAConfig)
+                         ParallelConfig, SchedulerConfig, LoRAConfig,
+                         TokenizerPoolConfig)
 
 
 @dataclass
@@ -26,25 +27,32 @@ class EngineArgs:
     tensor_parallel_size: int = 1
     max_parallel_loading_workers: Optional[int] = None
     block_size: int = 16
+    enable_prefix_caching: bool = False
     swap_space: int = 4  # GiB
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
-    max_paddings: int = 256
+    max_logprobs: int = 5  # OpenAI default value
     disable_log_stats: bool = False
     revision: Optional[str] = None
+    code_revision: Optional[str] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
     enforce_eager: bool = False
     max_context_len_to_capture: int = 8192
     disable_custom_all_reduce: bool = False
+    tokenizer_pool_size: int = 0
+    tokenizer_pool_type: str = "ray"
+    tokenizer_pool_extra_config: Optional[dict] = None
     enable_lora: bool = False
     max_loras: int = 1
     max_lora_rank: int = 16
     lora_extra_vocab_size: int = 256
     lora_dtype = 'auto'
     max_cpu_loras: Optional[int] = None
-    device: str = 'cuda'
+    device: str = 'auto'
+    ray_workers_use_nsight: bool = False
+    scheduler_delay_factor: float = 0.0
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -76,6 +84,13 @@ class EngineArgs:
             help='the specific model version to use. It can be a branch '
             'name, a tag name, or a commit id. If unspecified, will use '
             'the default version.')
+        parser.add_argument(
+            '--code-revision',
+            type=str,
+            default=None,
+            help='the specific revision to use for the model code on '
+            'Hugging Face Hub. It can be a branch name, a tag name, or a '
+            'commit id. If unspecified, will use the default version.')
         parser.add_argument(
             '--tokenizer-revision',
             type=str,
@@ -167,13 +182,21 @@ class EngineArgs:
             help='load model sequentially in multiple batches, '
             'to avoid RAM OOM when using tensor '
             'parallel and large models')
+        parser.add_argument(
+            '--ray-workers-use-nsight',
+            action='store_true',
+            help='If specified, use nsight to profile ray workers')
         # KV cache arguments
         parser.add_argument('--block-size',
                             type=int,
                             default=EngineArgs.block_size,
-                            choices=[8, 16, 32],
+                            choices=[8, 16, 32, 128],
                             help='token block size')
-        # TODO(woosuk): Support fine-grained seeds (e.g., seed per request).
+
+        parser.add_argument('--enable-prefix-caching',
+                            action='store_true',
+                            help='Enables automatic prefix caching')
+
         parser.add_argument('--seed',
                             type=int,
                             default=EngineArgs.seed,
@@ -198,10 +221,12 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.max_num_seqs,
                             help='maximum number of sequences per iteration')
-        parser.add_argument('--max-paddings',
-                            type=int,
-                            default=EngineArgs.max_paddings,
-                            help='maximum number of paddings in a batch')
+        parser.add_argument(
+            '--max-logprobs',
+            type=int,
+            default=EngineArgs.max_logprobs,
+            help=('max number of log probs to return logprobs is specified in'
+                  ' SamplingParams'))
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='disable logging statistics')
@@ -232,6 +257,25 @@ class EngineArgs:
                             action='store_true',
                             default=EngineArgs.disable_custom_all_reduce,
                             help='See ParallelConfig')
+        parser.add_argument('--tokenizer-pool-size',
+                            type=int,
+                            default=EngineArgs.tokenizer_pool_size,
+                            help='Size of tokenizer pool to use for '
+                            'asynchronous tokenization. If 0, will '
+                            'use synchronous tokenization.')
+        parser.add_argument('--tokenizer-pool-type',
+                            type=str,
+                            default=EngineArgs.tokenizer_pool_type,
+                            help='Type of tokenizer pool to use for '
+                            'asynchronous tokenization. Ignored '
+                            'if tokenizer_pool_size is 0.')
+        parser.add_argument('--tokenizer-pool-extra-config',
+                            type=str,
+                            default=EngineArgs.tokenizer_pool_extra_config,
+                            help='Extra config for tokenizer pool. '
+                            'This should be a JSON string that will be '
+                            'parsed into a dictionary. Ignored if '
+                            'tokenizer_pool_size is 0.')
         # LoRA related configs
         parser.add_argument('--enable-lora',
                             action='store_true',
@@ -265,13 +309,17 @@ class EngineArgs:
             help=('Maximum number of LoRAs to store in CPU memory. '
                   'Must be >= than max_num_seqs. '
                   'Defaults to max_num_seqs.'))
+        parser.add_argument("--device",
+                            type=str,
+                            default=EngineArgs.device,
+                            choices=["auto", "cuda", "neuron"],
+                            help='Device type for vLLM execution.')
         parser.add_argument(
-            "--device",
-            type=str,
-            default=EngineArgs.device,
-            choices=["cuda"],
-            help=('Device type for vLLM execution. '
-                  'Currently, only CUDA-compatible devices are supported.'))
+            '--scheduler-delay-factor',
+            type=float,
+            default=EngineArgs.scheduler_delay_factor,
+            help='Apply a delay (of delay factor multiplied by previous'
+            'prompt latency) before scheduling next prompt.')
         return parser
 
     @classmethod
@@ -287,27 +335,31 @@ class EngineArgs:
     ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig,
                DeviceConfig, Optional[LoRAConfig]]:
         device_config = DeviceConfig(self.device)
-        model_config = ModelConfig(self.model, self.tokenizer,
-                                   self.tokenizer_mode, self.trust_remote_code,
-                                   self.download_dir, self.load_format,
-                                   self.dtype, self.seed, self.revision,
-                                   self.tokenizer_revision, self.max_model_len,
-                                   self.quantization, self.enforce_eager,
-                                   self.max_context_len_to_capture)
+        model_config = ModelConfig(
+            self.model, self.tokenizer, self.tokenizer_mode,
+            self.trust_remote_code, self.download_dir, self.load_format,
+            self.dtype, self.seed, self.revision, self.code_revision,
+            self.tokenizer_revision, self.max_model_len, self.quantization,
+            self.enforce_eager, self.max_context_len_to_capture,
+            self.max_logprobs)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
                                    self.kv_quant_params_path,
                                    model_config.get_sliding_window())
-        parallel_config = ParallelConfig(self.pipeline_parallel_size,
-                                         self.tensor_parallel_size,
-                                         self.worker_use_ray,
-                                         self.max_parallel_loading_workers,
-                                         self.disable_custom_all_reduce)
+        parallel_config = ParallelConfig(
+            self.pipeline_parallel_size, self.tensor_parallel_size,
+            self.worker_use_ray, self.max_parallel_loading_workers,
+            self.disable_custom_all_reduce,
+            TokenizerPoolConfig.create_config(
+                self.tokenizer_pool_size,
+                self.tokenizer_pool_type,
+                self.tokenizer_pool_extra_config,
+            ), self.ray_workers_use_nsight)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
                                            model_config.max_model_len,
-                                           self.max_paddings)
+                                           self.scheduler_delay_factor)
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,

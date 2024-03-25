@@ -1,4 +1,5 @@
 """Sampling parameters for text generation."""
+import copy
 from enum import IntEnum
 from functools import cached_property
 from typing import Callable, List, Optional, Union
@@ -11,7 +12,8 @@ _SAMPLING_EPS = 1e-5
 class SamplingType(IntEnum):
     GREEDY = 0
     RANDOM = 1
-    BEAM = 2
+    RANDOM_SEED = 2
+    BEAM = 3
 
 
 LogitsProcessor = Callable[[List[int], torch.Tensor], torch.Tensor]
@@ -56,6 +58,7 @@ class SamplingParams:
         min_p: Float that represents the minimum probability for a token to be
             considered, relative to the probability of the most likely token.
             Must be in [0, 1]. Set to 0 to disable this.
+        seed: Random seed to use for the generation.
         use_beam_search: Whether to use beam search instead of sampling.
         length_penalty: Float that penalizes sequences based on their length.
             Used in beam search.
@@ -71,8 +74,8 @@ class SamplingParams:
         stop_token_ids: List of tokens that stop the generation when they are
             generated. The returned output will contain the stop tokens unless
             the stop tokens are special tokens.
-        include_stop_str_in_output: Whether to include the stop strings in output
-            text. Defaults to False.
+        include_stop_str_in_output: Whether to include the stop strings in
+            output text. Defaults to False.
         ignore_eos: Whether to ignore the EOS token and continue generating
             tokens after the EOS token is generated.
         max_tokens: Maximum number of tokens to generate per output sequence.
@@ -101,6 +104,7 @@ class SamplingParams:
         top_p: float = 1.0,
         top_k: int = -1,
         min_p: float = 0.0,
+        seed: Optional[int] = None,
         use_beam_search: bool = False,
         length_penalty: float = 1.0,
         early_stopping: Union[bool, str] = False,
@@ -124,6 +128,7 @@ class SamplingParams:
         self.top_p = top_p
         self.top_k = top_k
         self.min_p = min_p
+        self.seed = seed
         self.use_beam_search = use_beam_search
         self.length_penalty = length_penalty
         self.early_stopping = early_stopping
@@ -229,7 +234,23 @@ class SamplingParams:
             return SamplingType.BEAM
         if self.temperature < _SAMPLING_EPS:
             return SamplingType.GREEDY
+        if self.seed is not None:
+            return SamplingType.RANDOM_SEED
         return SamplingType.RANDOM
+
+    def clone(self) -> "SamplingParams":
+        """Deep copy excluding LogitsProcessor objects.
+
+        LogitsProcessor objects are excluded because they may contain an
+        arbitrary, nontrivial amount of data.
+        See https://github.com/vllm-project/vllm/issues/3087
+        """
+
+        logit_processor_refs = None if self.logits_processors is None else {
+            id(lp): lp
+            for lp in self.logits_processors
+        }
+        return copy.deepcopy(self, memo=logit_processor_refs)
 
     def __repr__(self) -> str:
         return (
@@ -242,6 +263,7 @@ class SamplingParams:
             f"top_p={self.top_p}, "
             f"top_k={self.top_k}, "
             f"min_p={self.min_p}, "
+            f"seed={self.seed}, "
             f"use_beam_search={self.use_beam_search}, "
             f"length_penalty={self.length_penalty}, "
             f"early_stopping={self.early_stopping}, "

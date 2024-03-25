@@ -23,6 +23,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     &silu_and_mul,
     "Activation function used in SwiGLU.");
   ops.def(
+    "gelu_and_mul",
+    &gelu_and_mul,
+    "Activation function used in GeGLU with `none` approximation.");
+  ops.def(
+    "gelu_tanh_and_mul",
+    &gelu_tanh_and_mul,
+    "Activation function used in GeGLU with `tanh` approximation.");
+  ops.def(
     "gelu_new",
     &gelu_new,
     "GELU implementation used in GPT-2.");
@@ -48,11 +56,18 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     &rotary_embedding,
     "Apply GPT-NeoX or GPT-J style rotary embedding to query and key");
 
-  // Quantization ops
+  ops.def(
+    "batched_rotary_embedding",
+    &batched_rotary_embedding,
+    "Apply GPT-NeoX or GPT-J style rotary embedding to query and key (supports multiple loras)");
+
+// Quantization ops
 #ifndef USE_ROCM
   ops.def("awq_gemm", &awq_gemm, "Quantized GEMM for AWQ");
+  ops.def("marlin_gemm", &marlin_gemm, "Marlin Optimized Quantized GEMM for GPTQ");
   ops.def("awq_dequantize", &awq_dequantize, "Dequantization for AWQ");
 #endif
+ 
   ops.def("gptq_gemm", &gptq_gemm, "Quantized GEMM for GPTQ");
   ops.def("gptq_shuffle", &gptq_shuffle, "Post processing for GPTQ");
   ops.def("squeezellm_gemm", &squeezellm_gemm, "Quantized GEMM for SqueezeLLM");
@@ -75,10 +90,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     "reshape_and_cache",
     &reshape_and_cache,
     "Reshape the key and value tensors and cache them");
-  cache_ops.def(
-    "gather_cached_kv",
-    &gather_cached_kv,
-    "Gather key and value from the cache into contiguous QKV tensors");
   cache_ops.def(
     "convert_fp8_e5m2",
     &convert_fp8_e5m2,

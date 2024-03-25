@@ -27,6 +27,7 @@ def main(args: argparse.Namespace):
         kv_cache_dtype=args.kv_cache_dtype,
         kv_quant_params_path=args.kv_quant_params_path,
         device=args.device,
+        ray_workers_use_nsight=args.ray_workers_use_nsight,
     )
 
     sampling_params = SamplingParams(
@@ -153,5 +154,10 @@ if __name__ == '__main__':
         default="cuda",
         choices=["cuda"],
         help='device type for vLLM execution, supporting CUDA only currently.')
+    parser.add_argument(
+        "--ray-workers-use-nsight",
+        action='store_true',
+        help="If specified, use nsight to profile ray workers",
+    )
     args = parser.parse_args()
     main(args)

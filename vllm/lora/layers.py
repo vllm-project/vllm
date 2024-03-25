@@ -10,7 +10,6 @@ from transformers import PretrainedConfig
 
 from vllm.config import LoRAConfig
 from vllm.lora.punica import add_lora, add_lora_slice, bgmv
-from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
@@ -20,10 +19,13 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear,
                                                QKVParallelLinear,
                                                MergedColumnParallelLinear)
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding, ParallelLMHead
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding, ParallelLMHead)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.utils import split_tensor_along_last_dim
+from vllm.model_executor.parallel_utils.utils import (
+    split_tensor_along_last_dim)
 
 if TYPE_CHECKING:
     pass
@@ -84,7 +86,8 @@ def _apply_lora_packed_nslice(
         lora_b_stacked:    3 element tuple of (num_loras, output_dim, lora_rank)
         indices:           (batch_size)
         output:            (batch_size, q_slice_size + 2*kv_slice_size)
-        output_slices:     n-1 element tuple of (slice_size...), where n is number of slices
+        output_slices:     n-1 element tuple of (slice_size...),
+                           where n is number of slices
     """
     org_output = output
     x = x.view(-1, x.shape[-1])
@@ -780,11 +783,11 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
         return self.base_layer.weight
 
 
-class SamplerWithLoRA(BaseLayerWithLoRA):
+class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
 
     def __init__(
         self,
-        base_layer: Sampler,
+        base_layer: LogitsProcessor,
         hidden_size: int,
         dtype: torch.dtype,
         device: torch.device,
@@ -796,8 +799,16 @@ class SamplerWithLoRA(BaseLayerWithLoRA):
         self.device = device
 
     @property
+    def logits_as_input(self):
+        return self.base_layer.logits_as_input
+
+    @property
     def vocab_size(self):
         return self.base_layer.vocab_size
+
+    @property
+    def scale(self):
+        return self.base_layer.scale
 
     @property
     def org_vocab_size(self):
@@ -815,9 +826,8 @@ class SamplerWithLoRA(BaseLayerWithLoRA):
     ) -> None:
         # Keep this in sync with csrc/punica/bgmv/bgmv_config.h
         if 32000 < self.base_layer.vocab_size > 33024:
-            raise ValueError(
-                "When using LoRA, vocab size must be 32000 >= vocab_size <= 33024"
-            )
+            raise ValueError("When using LoRA, vocab size must be "
+                             "32000 >= vocab_size <= 33024")
         self.lora_a_stacked = torch.zeros(
             (
                 max_loras,
@@ -962,14 +972,14 @@ def from_layer(
     return layer
 
 
-def from_layer_sampler(
-    layer: Sampler,
+def from_layer_logits_processor(
+    layer: LogitsProcessor,
     lm_head: ParallelLMHead,
     max_loras: int,
     lora_config: LoRAConfig,
     model_config: Optional[PretrainedConfig] = None,
-) -> SamplerWithLoRA:
-    ret = SamplerWithLoRA(layer, lm_head.embedding_dim, lm_head.weight.dtype,
-                          lm_head.weight.device)
+) -> LogitsProcessorWithLoRA:
+    ret = LogitsProcessorWithLoRA(layer, lm_head.embedding_dim,
+                                  lm_head.weight.dtype, lm_head.weight.device)
     ret.create_lora_weights(max_loras, lora_config, model_config)
     return ret
