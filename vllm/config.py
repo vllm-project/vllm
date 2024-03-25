@@ -14,6 +14,7 @@ from vllm.utils import get_cpu_memory, get_nvcc_cuda_version, is_hip, is_neuron
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
+
     from vllm.model_executor.tensorizer_loader import TensorizerArgs
 
 logger = init_logger(__name__)

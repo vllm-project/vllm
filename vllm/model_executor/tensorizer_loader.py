@@ -2,14 +2,13 @@ import argparse
 import dataclasses
 import io
 import os
-import warnings
 import time
 import typing
-from typing import Optional
-from typing import Type, Union
-
+import warnings
 from dataclasses import dataclass
-from tensorizer import TensorDeserializer, stream_io, DecryptionParams
+from typing import Optional, Type, Union
+
+from tensorizer import DecryptionParams, TensorDeserializer, stream_io
 from tensorizer.utils import convert_bytes, get_mem_usage, no_init_or_tensor
 from torch import nn
 
