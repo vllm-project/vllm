@@ -29,7 +29,6 @@ RUN cd /app/vllm \
 
 ENV VLLM_BUILD_WITH_NEURON 1
 RUN cd /app/vllm \
-    && touch /usr/bin/neuron-ls && chmod +x /usr/bin/neuron-ls \
     && pip install -e . \
     && cd ..
 
