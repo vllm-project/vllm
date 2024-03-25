@@ -31,9 +31,9 @@ def sample_requests(
 
     # Filter out too long sequences.
     filtered_dataset: List[Tuple[str, int, int]] = []
-    
+
     random.shuffle(dataset)
-    
+
     for i in range(len(dataset)):
         if len(filtered_dataset) == num_requests:
             break
@@ -42,7 +42,8 @@ def sample_requests(
         completion = dataset[i][1]
         completion_token_ids = tokenizer(completion).input_ids
         prompt_len = len(prompt_token_ids)
-        output_len = len(completion_token_ids) if fixed_output_len is None else fixed_output_len
+        output_len = len(completion_token_ids
+                         ) if fixed_output_len is None else fixed_output_len
         if prompt_len < 4 or output_len < 4:
             # Prune too short sequences.
             continue
@@ -50,7 +51,7 @@ def sample_requests(
             # Prune too long sequences.
             continue
         filtered_dataset.append((prompt, prompt_len, output_len))
-    
+
     return filtered_dataset
 
 
