@@ -1,162 +1,12 @@
-#"""Token blocks."""
-#from typing import List, Optional, Set, Iterable, Tuple, Dict
-#from abc import ABC, abstractmethod, abstractproperty
-#
-#from vllm.utils import Device
-#
-#_BLANK_TOKEN_ID = -1
-#
-#DEFAULT_LAST_ACCESSED_TIME = -1
-#
-#"""
-#Missing pieces:
-#- CoW
-#- Compose NaiveBlock within prefix caching block
-#- Integrate into BlockSpaceManager
-#    - CoW
-#    - Swap
-#    - append_slots logistics (who allocates)
-#
-#Sliding window could maybe be done inside the block
-#    (incr refcount of prev block when sliding window -> trigger CoW)
-#
-#How to get to upper API layer?
-#    - start with Allocate
-#        Sequence->BlockTable map
-#
-#"""
-#
-#class BlockTable:
-#    """
-#    Each sequence ID has a list of blocks.
-#    """
-#    pass
-#
-#class BlockSpaceManager2:
-#    def can_allocate(self, seq_group) -> bool:
-#        """
-#        For each sequence, get number of blocks req
-#        Get num free blocks
-#        
-#
-#        """
-#        pass
-#
-#    def allocate(self, seq):
-#        pass
-#
-#
-#class BlockSpaceManager:
-#
-#    def __init__(self):
-#        pass
-#
-#    def can_allocate(self, seq_group) -> bool:
-#        """
-#        Assume each block in seq will consume a new block
-#            (sliding window is less)
-#
-#        some notion of watermark
-#        """
-#        pass
-#
-#    def allocate(self, seq_group) -> None:
-#        """
-#        For each logical block, allocate a block.
-#            sliding window rewrites old
-#            store in block table
-#
-#        duplicate the block table of each sequence to others in seq
-#            group
-#        """
-#
-#        """
-#        Have scheduler loop over waiting sequences.
-#        """
-#        pass
-#
-#    def can_append_slot(self, seq_group) -> None:
-#        """
-#        Assume each running sequence in a group will require a new block
-#        Can we allocate that many blocks ?
-#        """
-#        pass
-#
-#    def append_slot(self, seq) -> Optional[Tuple[int, int]]:
-#        """
-#        if block table is smaller than logical blocks
-#            allocate a new one
-#                if sliding window use an old one
-#                else if block is full, try to get a cached block
-#                else if block is not full, get any block
-#            check if the last one is "appendable"
-#                if refcount == 1, maybe promote the last block
-#                if refcount > 1, allocate a new one (maybe via prefix caching)
-#            return any CoW
-#        """
-#        pass
-#
-#    def fork(self, parent_seq, child_seq) -> None:
-#        # called by scheduler::fork_seq
-#        """
-#        Copy the block table
-#        increment refcount of each.
-#        """
-#        pass
-#
-#    def can_swap_in(self, seq_group) -> bool:
-#        pass
-#
-#    def swap_in(self, seq_group) -> Dict[int, int]:
-#        """
-#        for each sequence in the group that is swapped
-#            for each cpu block in the block table
-#                if the cpu block is scheduled to be copied
-#                    increase the refcount
-#                    use the destination gpu block
-#                else schedule a copy by allocating a gpu block
-#            free the cpu block
-#
-#        return the mapping of cpu block number to gpu block number
-#        """
-#        pass
-#
-#    def can_swap_out(self, seq_group) -> bool:
-#        pass
-#
-#    def swap_out(self, seq_group) -> Dict[int, int]:
-#        pass
-#
-#    def free(self, seq) -> None:
-#        # called by scheduler::free_seq
-#        pass
-#
-#        """
-#        if seq in block tables
-#            for each block in the block table
-#                free the block (using the appropriate device allocator)
-#        """
-#
-#    def reset(self) -> None:
-#        # unused?
-#        pass
-#
-#    def get_block_table(self, seq) -> List[int]:
-#        # used to get physical mappings of seq blocks, in scheduler
-#        pass
-#
-#    def get_num_free_gpu_blocks(self) -> int:
-#        # used to print stats
-#        pass
-#
-#    def get_num_free_cpu_blocks(self) -> int:
-#        # used to print stats
-#        pass
-
-
-
-
 """A block manager that manages token blocks."""
+import enum
+from itertools import count
+from typing import Dict, List, Optional, Set, Tuple
+
+from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
+from vllm.utils import Device
+from vllm.core.interfaces import BlockSpaceManager, AllocStatus
+
 import enum
 from itertools import count
 from os.path import commonprefix
@@ -166,10 +16,110 @@ from vllm.block import BlockTable, PhysicalTokenBlock
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
 from vllm.core.evictor import Evictor, EvictionPolicy, make_evictor
-from vllm.core.block.naive_block import NaiveBlockAllocator, NaiveBlock
-from vllm.core.block.interfaces import DeviceAwareBlockAllocator, Block
 
-class BlockSpaceManager:
+
+class BlockAllocator:
+    """Manages free physical token blocks for a device.
+
+    The allocator maintains a list of free blocks and allocates a block when
+    requested. When a block is freed, its reference count is decremented. If
+    the reference count becomes zero, the block is added back to the free list.
+    """
+
+    def __init__(self,
+                 device: Device,
+                 block_size: int,
+                 num_blocks: int,
+                 eviction_policy: EvictionPolicy = EvictionPolicy.LRU,
+                 enable_caching: bool = False) -> None:
+        self.device = device
+        self.block_size = block_size
+        self.num_blocks = num_blocks
+        self.enable_caching = enable_caching
+
+        self.current_num_blocks = 0
+        self.cached_blocks: Dict[int, PhysicalTokenBlock] = {}
+
+        # Switch over to FIFO eviction when caching is disabled
+        if not self.enable_caching:
+            eviction_policy = EvictionPolicy.FIFO
+        self.evictor: Evictor = make_evictor(eviction_policy)
+
+        self.default_hash_ctr = count()
+
+    def allocate_block(self, block_hash: int,
+                       num_hashed_tokens: int) -> PhysicalTokenBlock:
+        if self.current_num_blocks == self.num_blocks:
+            block = self.evictor.evict()
+            block.block_hash = block_hash
+            block.num_hashed_tokens = num_hashed_tokens
+            return block
+        block = PhysicalTokenBlock(device=self.device,
+                                   block_number=self.current_num_blocks,
+                                   block_size=self.block_size,
+                                   block_hash=block_hash,
+                                   num_hashed_tokens=num_hashed_tokens)
+        self.current_num_blocks += 1
+        return block
+
+    def allocate(self,
+                 block_hash: Optional[int] = None,
+                 num_hashed_tokens: int = 0) -> PhysicalTokenBlock:
+        # If caching is disabled, just allocate a new block and return it
+        if not self.enable_caching:
+            block = self.allocate_block(next(self.default_hash_ctr),
+                                        num_hashed_tokens)
+            block.ref_count += 1
+            return block
+
+        if block_hash is None:
+            block_hash = next(self.default_hash_ctr)
+        if block_hash in self.evictor:
+            assert block_hash not in self.cached_blocks
+            block = self.evictor.remove(block_hash)
+            assert block.ref_count == 0
+            self.cached_blocks[block_hash] = block
+            block.ref_count += 1
+            assert block.block_hash == block_hash
+            return block
+        if block_hash not in self.cached_blocks:
+            self.cached_blocks[block_hash] = self.allocate_block(
+                block_hash, num_hashed_tokens)
+        block = self.cached_blocks[block_hash]
+        assert block.block_hash == block_hash
+        block.ref_count += 1
+        return block
+
+    def free(self, block: PhysicalTokenBlock) -> None:
+        if block.ref_count == 0:
+            raise ValueError(f"Double free! {block} is already freed.")
+        block.ref_count -= 1
+        if block.ref_count == 0:
+            assert block.block_hash not in self.evictor
+            self.evictor.add(block)
+
+            # If caching is enabled, remove the block from the cached_blocks
+            if self.enable_caching:
+                del self.cached_blocks[block.block_hash]
+
+    def get_num_free_blocks(self) -> int:
+        return self.num_blocks - self.current_num_blocks + self.evictor.num_blocks
+
+    def contains_block(self, block_hash: int) -> bool:
+        return block_hash in self.cached_blocks or block_hash in self.evictor
+
+    def update_hash(self, block_hash: int, block: PhysicalTokenBlock):
+        # If caching is enabled, update the hash of block and the cached_blocks dictionary.
+        if self.enable_caching:
+            assert not self.contains_block(block_hash)
+            old_hash = block.block_hash
+            block.block_hash = block_hash
+            del self.cached_blocks[old_hash]
+            self.cached_blocks[block_hash] = block
+
+
+
+class BlockSpaceManagerV1(BlockSpaceManager):
     """Manages the mapping between logical and physical token blocks."""
 
     def __init__(
@@ -197,23 +147,16 @@ class BlockSpaceManager:
         self.enable_caching = enable_caching
 
         self.watermark_blocks = int(watermark * num_gpu_blocks)
-        self.gpu_allocator = NaiveBlockAllocator(
-            block_size=block_size,
-            create_block=NaiveBlock,
-            # TODO determine number of GPU and CPU blocks separately.
-            num_blocks=num_gpu_blocks,
-        )
-
-        #self.gpu_allocator = BlockAllocator(Device.GPU,
-        #                                    block_size,
-        #                                    num_gpu_blocks,
-        #                                    enable_caching=enable_caching)
-        #self.cpu_allocator = BlockAllocator(Device.CPU,
-        #                                    block_size,
-        #                                    num_cpu_blocks,
-        #                                    enable_caching=enable_caching)
-        ## Mapping: seq_id -> BlockTable.
-        #self.block_tables: Dict[int, BlockTable] = {}
+        self.gpu_allocator = BlockAllocator(Device.GPU,
+                                            block_size,
+                                            num_gpu_blocks,
+                                            enable_caching=enable_caching)
+        self.cpu_allocator = BlockAllocator(Device.CPU,
+                                            block_size,
+                                            num_cpu_blocks,
+                                            enable_caching=enable_caching)
+        # Mapping: seq_id -> BlockTable.
+        self.block_tables: Dict[int, BlockTable] = {}
 
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
         # FIXME(woosuk): Here we assume that all sequences in the group share
@@ -245,10 +188,6 @@ class BlockSpaceManager:
 
         block_table: BlockTable = []
         for logical_idx in range(num_prompt_blocks):
-            # This is sequence-level logic for allocating.
-            # If sliding window, then the block table refers back to itself
-            # Otherwise it has new allocations.
-
             if (self.block_sliding_window is not None
                     and logical_idx >= self.block_sliding_window):
                 block = block_table[logical_idx % self.block_sliding_window]

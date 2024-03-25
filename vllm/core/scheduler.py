@@ -4,7 +4,7 @@ import time
 from typing import Deque, Dict, Iterable, List, Optional, Tuple, Union, Set
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
-from vllm.core.block_manager import AllocStatus, BlockSpaceManager
+from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.core.policy import PolicyFactory
 from vllm.lora.request import LoRARequest
 from vllm.logger import init_logger
@@ -88,8 +88,13 @@ class Scheduler:
 
         # Instantiate the scheduling policy.
         self.policy = PolicyFactory.get_policy(policy_name="fcfs")
+
+        BlockSpaceManagerImpl = BlockSpaceManager.get_block_space_manager_class(
+            version="v2",
+        )
+
         # Create the block space manager.
-        self.block_manager = BlockSpaceManager(
+        self.block_manager = BlockSpaceManagerImpl(
             block_size=self.cache_config.block_size,
             num_gpu_blocks=self.cache_config.num_gpu_blocks,
             num_cpu_blocks=self.cache_config.num_cpu_blocks,
