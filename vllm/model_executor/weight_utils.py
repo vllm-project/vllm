@@ -12,7 +12,7 @@ import filelock
 import huggingface_hub.constants
 import numpy as np
 import torch
-from huggingface_hub import HfFileSystem, snapshot_download, HfFileSystem
+from huggingface_hub import snapshot_download, HfFileSystem
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
 from tensorizer.serialization import TensorDeserializer
