@@ -23,8 +23,7 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 if TYPE_CHECKING:
     from transformers import LlavaConfig  # pylint: disable=ungrouped-imports
 
-    from vllm.model_executor.layers import (
-        LinearMethodBase)  # pylint: disable=ungrouped-imports
+    from vllm.model_executor.layers import LinearMethodBase  # pylint: disable=ungrouped-imports
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
