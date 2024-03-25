@@ -4,7 +4,16 @@
 
 #include "dispatch_utils.h"
 #include "reduction_utils.cuh"
-#include "attention/dtype_float16.cuh"
+#ifndef USE_ROCM
+  #include <cuda_bf16.h>
+  #include <cuda_fp16.h>
+#else
+  #include <hip/hip_bf16.h>
+  #include <hip/hip_fp16.h>
+
+  using __nv_bfloat16 = __hip_bfloat16;
+  using __nv_bfloat162 = __hip_bfloat162;
+#endif
 
 namespace vllm {
 
@@ -37,35 +46,71 @@ __global__ void rms_norm_kernel(
 }
 
 
-/* Helper POD struct to generate vectorized and packed FP16 ops
-   for appropriate overloads of fused_add_rms_norm_kernel.
+/* Converter structs for the conversion from torch types to HIP/CUDA types,
+   and the associated type conversions within HIP/CUDA. These helpers need
+   to be implemented for now because the relevant type conversion
+   operators/constructors are not consistently implemented by HIP/CUDA, so
+   a generic conversion via type casts cannot be implemented.
+
+   Each struct should have the member static constexpr bool `exists`:
+   If false, the optimized kernel is not used for the corresponding torch type.
+   If true, the struct should be fully defined as shown in the examples below. 
+ */
+template<typename torch_type>
+struct _typeConvert { static constexpr bool exists = false; };
+
+template<>
+struct _typeConvert<c10::Half> {
+  static constexpr bool exists = true;
+  using hip_type = __half;
+  using packed_hip_type = __half2;
+
+  __device__ static inline float convert(hip_type x) { return __half2float(x); }
+  __device__ static inline float2 convert(packed_hip_type x) { return __half22float2(x); }
+  __device__ static inline hip_type convert(float x) { return __float2half_rn(x); }
+  __device__ static inline packed_hip_type convert(float2 x) { return __float22half2_rn(x); }
+};
+
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
+// CUDA_ARCH < 800 does not have BF16 support
+template<>
+struct _typeConvert<c10::BFloat16> {
+  static constexpr bool exists = true;
+  using hip_type = __nv_bfloat16;
+  using packed_hip_type = __nv_bfloat162;
+
+  __device__ static inline float convert(hip_type x) { return __bfloat162float(x); }
+  __device__ static inline float2 convert(packed_hip_type x) { return __bfloat1622float2(x); }
+  __device__ static inline hip_type convert(float x) { return __float2bfloat16(x); }
+  __device__ static inline packed_hip_type convert(float2 x) { return __float22bfloat162_rn(x); }
+};
+#endif
+
+
+/* Converter POD struct to generate vectorized and packed FP16/BF16 ops
+   for appropriate specializations of fused_add_rms_norm_kernel.
    Only special member functions and functions that are necessary
    in that kernel are implemented.
  */
-template<int width>
-struct _halfVec {
+template<typename scalar_t, int width>
+struct _f16Vec {
   /* Not theoretically necessary that width is a power of 2 but should 
      almost always be the case for optimization purposes */ 
   static_assert(width > 0 && (width & (width - 1)) == 0,
                 "Width is not a positive power of 2!");
-  __half data[width];
+  using Converter = _typeConvert<scalar_t>;
+  using T1 = typename Converter::hip_type;
+  using T2 = typename Converter::packed_hip_type;
+  T1 data[width];
 
-  __device__ _halfVec() = default;
-  __device__ ~_halfVec() = default;
-  __device__ _halfVec(const _halfVec<width>&) = default;
-  __device__ _halfVec& operator=(const _halfVec<width>&) = default;
-  __device__ _halfVec(_halfVec<width>&&) = default;
-  __device__ _halfVec& operator=(_halfVec<width>&&) = default;
-
-  __device__ inline _halfVec& operator+=(const _halfVec<width>& other) {
+  __device__ inline _f16Vec& operator+=(const _f16Vec<scalar_t, width>& other) {
     if constexpr (width % 2 == 0) {
-      // Hint to compiler to use packed operations
       #pragma unroll
       for (int i = 0; i < width; i += 2) {
-        __half2 z = __half2{data[i], data[i+1]};
-        z += __half2{other.data[i], other.data[i+1]};
-        data[i] = z.x;
-        data[i+1] = z.y;
+        T2 temp{data[i], data[i+1]};
+        temp += T2{other.data[i], other.data[i+1]};
+        data[i] = temp.x;
+        data[i+1] = temp.y;
       }
     } else {
       #pragma unroll
@@ -75,15 +120,14 @@ struct _halfVec {
     return *this;
   }
 
-  __device__ inline _halfVec& operator*=(const _halfVec<width>& other) {
+  __device__ inline _f16Vec& operator*=(const _f16Vec<scalar_t, width>& other) {
     if constexpr (width % 2 == 0) {
-      // Hint to compiler to use packed operations
       #pragma unroll
       for (int i = 0; i < width; i += 2) {
-        __half2 z = __half2{data[i], data[i+1]};
-        z *= __half2{other.data[i], other.data[i+1]};
-        data[i] = z.x;
-        data[i+1] = z.y;
+        T2 temp{data[i], data[i+1]};
+        temp *= T2{other.data[i], other.data[i+1]};
+        data[i] = temp.x;
+        data[i+1] = temp.y;
       }
     } else {
       #pragma unroll
@@ -93,20 +137,23 @@ struct _halfVec {
     return *this;
   }
 
-  __device__ inline _halfVec& operator*=(const float scale) {
+  __device__ inline _f16Vec& operator*=(const float scale) {
     if constexpr (width % 2 == 0) {
-      // Hint to compiler to use packed operations
       #pragma unroll
       for (int i = 0; i < width; i += 2) {
-        float2 zf = __half22float2(__half2{data[i], data[i+1]});
-        __half2 z = __float22half2_rn(zf * scale);
-        data[i] = z.x;
-        data[i+1] = z.y;
+        float2 temp_f = Converter::convert(T2{data[i], data[i+1]});
+        temp_f.x *= scale;
+        temp_f.y *= scale;
+        T2 temp = Converter::convert(temp_f);
+        data[i] = temp.x;
+        data[i+1] = temp.y;
       }
     } else {
       #pragma unroll
-      for (int i = 0; i < width; ++i)
-        data[i] = __float2half_rn(__half2float(data[i]) * scale);
+      for (int i = 0; i < width; ++i) {
+        float temp = Converter::convert(data[i]) * scale;
+        data[i] = Converter::convert(temp);
+      }
     }
     return *this;
   }
@@ -114,56 +161,54 @@ struct _halfVec {
   __device__ inline float sum_squares() const {
     float result = 0.0f;
     if constexpr (width % 2 == 0) {
-      // Hint to compiler to use packed operations
       #pragma unroll
       for (int i = 0; i < width; i += 2) {
-        float2 z = __half22float2(__half2{data[i], data[i+1]});
+        float2 z = Converter::convert(T2{data[i], data[i+1]});
         result += z.x * z.x + z.y * z.y;
       }
     } else {
       #pragma unroll
       for (int i = 0; i < width; ++i) {
-        float x = __half2float(data[i]);
+        float x = Converter::convert(data[i]);
         result += x * x;
       }
     }
-    return result; 
+    return result;
   }
 };
 
-/* Function overload in the case of FP16 tensors.
+/* Function specialization in the case of FP16/BF16 tensors.
    Additional optimizations we can make in this case are
    packed and vectorized operations, which help with the
    memory latency bottleneck. */
 template<typename scalar_t, int width>
 __global__ std::enable_if_t<
-  (width > 0) && std::is_same_v<scalar_t, c10::Half>>
-fused_add_rms_norm_kernel(
-  c10::Half* __restrict__ input,           // [..., hidden_size]
-  c10::Half* __restrict__ residual,        // [..., hidden_size]
-  const c10::Half* __restrict__ weight,    // [hidden_size]
+  (width > 0) && _typeConvert<scalar_t>::exists> fused_add_rms_norm_kernel(
+  scalar_t* __restrict__ input,           // [..., hidden_size]
+  scalar_t* __restrict__ residual,        // [..., hidden_size]
+  const scalar_t* __restrict__ weight,    // [hidden_size]
   const float epsilon,
   const int num_tokens,
-  const int hidden_size)
-{
+  const int hidden_size) {
   // Ensures reinterpret_cast does not mutate address for alignment reasons
-  static_assert(alignof(c10::Half) == alignof(_halfVec<width>));
+  static_assert(alignof(scalar_t) == alignof(_f16Vec<scalar_t, width>));
   // Sanity checks on our vector struct and type-punned pointer arithmetic
-  static_assert(std::is_pod_v<_halfVec<width>>);
-  static_assert(sizeof(_halfVec<width>) == sizeof(c10::Half) * width);
+  static_assert(std::is_pod_v<_f16Vec<scalar_t, width>>);
+  static_assert(sizeof(_f16Vec<scalar_t, width>) == sizeof(scalar_t) * width);
+
   const int vec_hidden_size = hidden_size / width;
   __shared__ float s_variance;
   float variance = 0.0f;
   /* These and the argument pointers are all declared `restrict` as they are
      not aliased in practice. Argument pointers should not be dereferenced
      in this kernel as that would be undefined behavior */
-  auto* __restrict__ input_v = reinterpret_cast<_halfVec<width>*>(input);
-  auto* __restrict__ residual_v = reinterpret_cast<_halfVec<width>*>(residual);
-  auto* __restrict__ weight_v = reinterpret_cast<const _halfVec<width>*>(weight);
+  auto* __restrict__ input_v = reinterpret_cast<_f16Vec<scalar_t, width>*>(input);
+  auto* __restrict__ residual_v = reinterpret_cast<_f16Vec<scalar_t, width>*>(residual);
+  auto* __restrict__ weight_v = reinterpret_cast<const _f16Vec<scalar_t, width>*>(weight);
 
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
     int id = blockIdx.x * vec_hidden_size + idx;
-    _halfVec<width> temp = input_v[id];
+    _f16Vec<scalar_t, width> temp = input_v[id];
     temp += residual_v[id];
     variance += temp.sum_squares();
     residual_v[id] = temp;
@@ -180,7 +225,7 @@ fused_add_rms_norm_kernel(
 
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
     int id = blockIdx.x * vec_hidden_size + idx;
-    _halfVec<width> temp = residual_v[id];
+    _f16Vec<scalar_t, width> temp = residual_v[id];
     temp *= s_variance;
     temp *= weight_v[idx];
     input_v[id] = temp;
@@ -189,11 +234,11 @@ fused_add_rms_norm_kernel(
 
 
 /* Generic fused_add_rms_norm_kernel
-   The width field is not used but necessary for the correct
-   overloading to occur in the FP16 case.
+   The width field is not used here but necessary for other specializations.
  */
-template<typename scalar_t, int width>    // width is not used in this overload
-__global__ void fused_add_rms_norm_kernel(
+template<typename scalar_t, int width>
+__global__ std::enable_if_t<
+  (width == 0) || !_typeConvert<scalar_t>::exists> fused_add_rms_norm_kernel(
   scalar_t* __restrict__ input,           // [..., hidden_size]
   scalar_t* __restrict__ residual,        // [..., hidden_size]
   const scalar_t* __restrict__ weight,    // [hidden_size]
@@ -319,4 +364,3 @@ void fused_add_rms_norm(
       break;
   }
 }
-#undef _FUSED_RMS_MAX_BLOCKSIZE
