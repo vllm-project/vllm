@@ -214,10 +214,8 @@ if _is_cuda():
         local_zip_path = (
             f"{temp_dir}/"
             "nvidia_nccl_cu12-2.18.3-py3-none-manylinux1_x86_64.whl")
-        # check if the target directory exists
-        if not os.path.exists(target_dir):
-            logger.info(f'Creating target directory {target_dir} ...')
-            os.makedirs(target_dir)
+        # make sure the target directory exists
+        os.makedirs(target_dir, exist_ok=True)
         # Check if the file is already downloaded
         if os.path.exists(target_dir + "nvidia"):
             logger.info('library already exists.')
