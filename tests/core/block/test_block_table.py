@@ -98,6 +98,7 @@ def test_allocate_free(block_size: int, sequence_len: int, allocator_type: str, 
     for i in range(5):
         block_table.allocate(token_ids=token_ids, device=device)
         assert allocator.get_num_free_blocks(device) == num_device_blocks - num_blocks_per_alloc
+        assert all(block_id is not None for block_id in block_table.physical_block_ids)
 
         block_table.free()
         assert allocator.get_num_free_blocks(device) == num_device_blocks
@@ -210,6 +211,15 @@ def test_append_token_ids_correct_content(block_size: int, sequence_len: int, ap
 @pytest.mark.parametrize("block_size", [1, 8])
 @pytest.mark.parametrize("allocator_type", ["naive", "prefix_caching"])
 def test_fork(seq_len: int, block_size: int, allocator_type: str):
+    """Create a sequence using the specified allocator.
+        1. Assert that after forking the sequence, the free block count is the
+            same.
+        2. Assert that the forked sequence has the same physical mappings.
+        3. Then free the original sequence; verify that the free block count is
+            the same.
+        4. Finally, free the forked sequence and verify that the free block
+            count drops to zero.
+    """
     num_gpu_blocks = 1024
 
     allocator = CpuGpuBlockAllocator.create(
@@ -226,35 +236,28 @@ def test_fork(seq_len: int, block_size: int, allocator_type: str):
         block_allocator=allocator,
     )
 
-    blocks = []
-    prev_block = None
-    for token_id_chunk in chunk_list(token_ids, block_size):
-        prev_block = allocator.allocate_mutable(prev_block, device=Device.GPU)
-        prev_block.append_token_ids(token_id_chunk)
-        blocks.append(prev_block)
+    block_table.allocate(token_ids)
 
     num_free_blocks_before_fork = allocator.get_num_free_blocks(device=Device.GPU)
 
-    forked_blocks = allocator.fork(last_block=prev_block)
+    forked_block_table = block_table.fork()
 
-    assert len(forked_blocks) == len(blocks)
-
-    for forked, original in zip(forked_blocks, blocks):
-        assert forked.physical_block_index == original.physical_block_index
-        assert forked.token_ids == original.token_ids
-        assert forked != original
+    # Expect physical_block_ids and token_ids to match.
+    assert block_table.physical_block_ids == forked_block_table.physical_block_ids
+    assert block_table._get_all_token_ids() == forked_block_table._get_all_token_ids()
 
     # Do not expect any additional allocations.
     assert allocator.get_num_free_blocks(device=Device.GPU) == num_free_blocks_before_fork
 
     # Free the original blocks. Assert num free blocks does not change, since
     # refcount is nonzero.
-    for block in blocks:
-        allocator.free(block)
-        assert allocator.get_num_free_blocks(device=Device.GPU) == num_free_blocks_before_fork
+    block_table.free()
+    assert allocator.get_num_free_blocks(device=Device.GPU) == num_free_blocks_before_fork
+
+    # Expect the forked block table to be unaffected by the free.
+    assert all(block_id is not None for block_id in forked_block_table.physical_block_ids)
 
     # Free the forked blocks. Assert num free blocks does change, since
     # refcount is now zero.
-    for i, block in enumerate(forked_blocks):
-        allocator.free(block)
-        assert allocator.get_num_free_blocks(device=Device.GPU) == num_free_blocks_before_fork + (i + 1)
+    forked_block_table.free()
+    assert allocator.get_num_free_blocks(device=Device.GPU) == num_gpu_blocks
