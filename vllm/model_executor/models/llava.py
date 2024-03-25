@@ -1,14 +1,15 @@
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
 # TODO(xwjiang): We should port CLIPVisionModel's code over to not depend on
 # transformers' impl.
-from transformers import CLIPVisionModel
+from transformers import CLIPVisionModel, LlavaConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VisionLanguageConfig
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.linear import LinearMethodBase
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -19,11 +20,6 @@ from vllm.model_executor.weight_utils import (default_weight_loader,
 from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
-
-if TYPE_CHECKING:
-    from transformers import LlavaConfig  # pylint: disable=ungrouped-imports
-
-    from vllm.model_executor.layers import LinearMethodBase  # pylint: disable=ungrouped-imports
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
