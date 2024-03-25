@@ -282,6 +282,9 @@ class LLMEngine:
         # Defensive copy of SamplingParams, which are used by the sampler,
         # this doesn't deep-copy LogitsProcessor objects
         sampling_params = sampling_params.clone()
+        # inject the eos token id into the sampling_params to support min_tokens
+        # processing
+        sampling_params.eos_token_id = seq.eos_token_id
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,
@@ -713,6 +716,21 @@ class LLMEngine:
     def _check_stop(self, seq: Sequence,
                     sampling_params: SamplingParams) -> None:
         """Stop the finished sequences."""
+        # Check if the sequence has reached max_model_len.
+        if seq.get_len() > self.scheduler_config.max_model_len:
+            seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
+            return
+
+        # Check if the sequence has reached max_tokens.
+        if seq.get_output_len() == sampling_params.max_tokens:
+            seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
+            return
+
+        # Check if the minimum number of tokens has been generated yet;
+        # skip the stop string/token checks if not
+        if seq.get_output_len() < sampling_params.min_tokens:
+            return
+
         for stop_str in sampling_params.stop:
             if seq.output_text.endswith(stop_str):
                 self._finalize_sequence(seq, sampling_params, stop_str)
@@ -723,16 +741,6 @@ class LLMEngine:
                 seq.get_last_token_id())
             self._finalize_sequence(seq, sampling_params, stop_str)
             seq.status = SequenceStatus.FINISHED_STOPPED
-            return
-
-        # Check if the sequence has reached max_model_len.
-        if seq.get_len() > self.scheduler_config.max_model_len:
-            seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
-            return
-
-        # Check if the sequence has reached max_tokens.
-        if seq.get_output_len() == sampling_params.max_tokens:
-            seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
 
         # Check if the sequence has generated the EOS token.
