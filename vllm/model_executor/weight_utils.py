@@ -26,7 +26,7 @@ logger = init_logger(__name__)
 # lock files in the temp directory will be automatically deleted when the
 # system reboots, so users will not complain about annoying lock files
 temp_dir = os.environ.get('TMPDIR') or os.environ.get(
-    'TEMP') or os.environ.get('TMP')
+    'TEMP') or os.environ.get('TMP') or "/tmp/"
 
 
 class Disabledtqdm(tqdm):
