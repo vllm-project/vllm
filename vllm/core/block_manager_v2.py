@@ -18,8 +18,10 @@ class BlockSpaceManagerV2(BlockSpaceManager):
     * General features
         * CoW implementation.
         * Swap in/swap out implementation.
+        * Sliding window BlockTable
     * Prefix caching
         * Evictor policies (unused blocks are evicted arbitrarily).
+        * Test that prefix blocks are not evicted
     """
 
     def __init__(
