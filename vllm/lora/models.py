@@ -510,7 +510,7 @@ class LoRAModelManager:
         parts = module_full_name.split(".")
         module_name = parts[-1]
         replacements = self.packed_modules_mapping.get(module_name, [])
-        # When replacements is less than or equal to 1, it indicates that this 
+        # When replacements is less than or equal to 1, it indicates that this
         # module is not a packed module.
         if len(replacements) <= 1:
             return
