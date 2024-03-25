@@ -28,21 +28,17 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self.num_total_gpu_blocks = num_gpu_blocks
         self.num_total_cpu_blocks = num_cpu_blocks
 
+        assert sliding_window is None
         self.block_sliding_window = None
-        if sliding_window is not None:
-            assert sliding_window % block_size == 0, (sliding_window,
-                                                      block_size)
-            self.block_sliding_window = sliding_window // block_size
-        assert self.block_sliding_window is None
 
         self.watermark = watermark
         assert watermark >= 0.0
 
+        assert not enable_caching
         self.enable_caching = enable_caching
 
         self.watermark_blocks = int(watermark * num_gpu_blocks)
 
-        assert not self.enable_caching
         self.block_allocator = CpuGpuBlockAllocator.create(
             allocator_type="naive",
             num_gpu_blocks=num_gpu_blocks,
