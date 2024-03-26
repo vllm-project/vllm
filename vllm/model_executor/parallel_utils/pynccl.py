@@ -40,7 +40,7 @@ if so_file:
     logger.info(
         f"Loading nccl from environment variable VLLM_NCCL_SO_PATH={so_file}")
 else:
-    if torch.cuda.is_available():
+    if torch.version.cuda is not None:
         so_file = "libnccl.so"
     elif torch.version.hip is not None:
         so_file = "librccl.so"
