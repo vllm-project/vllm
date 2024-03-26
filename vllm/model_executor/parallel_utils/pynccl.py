@@ -1,4 +1,3 @@
-# ===================== pynccl.py ==================================
 # This file is a pure Python wrapper for the NCCL library.
 # The main purpose is to use NCCL combined with CUDA graph.
 # Before writing this script, we tried the following approach:
@@ -19,7 +18,6 @@
 # more flexible. We can easily switch between different versions of NCCL by
 # changing the environment variable `VLLM_NCCL_SO_PATH`, or the `so_file`
 # variable in the code.
-# ====================================================
 
 import ctypes
 import datetime
@@ -46,7 +44,7 @@ else:
         so_file = "librccl.so"
     else:
         raise ValueError("NCCL only supports CUDA and ROCm backends.")
-    logger.info(f"Loading nccl from library {so_file}")
+    logger.debug(f"Loading nccl from library {so_file}")
 
 try:
     nccl = ctypes.CDLL(so_file)
@@ -57,6 +55,7 @@ except Exception as e:
         "Otherwise please set the environment variable VLLM_NCCL_SO_PATH"
         " to point to the correct nccl library path.")
     raise e
+
 
 # === export types and functions from nccl to Python ===
 # for the original nccl definition, please check
@@ -258,6 +257,3 @@ class NCCLCommunicator:
     def __del__(self):
         dist.destroy_process_group()
         _c_ncclCommDestroy(self.comm)
-
-
-# ===================== pynccl.py =====================
