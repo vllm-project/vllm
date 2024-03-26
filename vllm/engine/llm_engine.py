@@ -740,12 +740,15 @@ class LLMEngine:
             if seq.output_text.endswith(stop_str):
                 self._finalize_sequence(seq, sampling_params, stop_str)
                 seq.status = SequenceStatus.FINISHED_STOPPED
+                seq.stop_reason = stop_str
                 return
-        if seq.get_last_token_id() in sampling_params.stop_token_ids:
+        last_token_id = seq.get_last_token_id()
+        if last_token_id in sampling_params.stop_token_ids:
             stop_str = self.get_tokenizer_for_seq(seq).convert_ids_to_tokens(
-                seq.get_last_token_id())
+                last_token_id)
             self._finalize_sequence(seq, sampling_params, stop_str)
             seq.status = SequenceStatus.FINISHED_STOPPED
+            seq.stop_reason = last_token_id
             return
 
         # Check if the sequence has generated the EOS token.

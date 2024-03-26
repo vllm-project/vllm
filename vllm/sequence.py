@@ -183,6 +183,7 @@ class Sequence:
         # Initialize the logical token blocks with the prompt token ids.
         self._append_tokens_to_blocks(prompt_token_ids)
         self.status = SequenceStatus.WAITING
+        self.stop_reason: Union[int, str, None] = None
 
         # Used for incremental detokenization
         self.prefix_offset = 0
