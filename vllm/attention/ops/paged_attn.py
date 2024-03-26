@@ -76,25 +76,12 @@ class PagedAttention:
         kv_cache_dtype: str,
         kv_quant_param: List[float],
     ) -> None:
-        if kv_quant_param is not None:
-            cache_ops.reshape_and_cache(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                slot_mapping.flatten(),
-                kv_cache_dtype,
-                *kv_quant_param,
-            )
-        else:
-            cache_ops.reshape_and_cache(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                slot_mapping.flatten(),
-                kv_cache_dtype,
-            )
+        kv_quant_param = kv_quant_param if \
+            kv_quant_param is not None else [1.0, 0.0, 1.0, 0.0]
+
+        cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
+                                    slot_mapping.flatten(), kv_cache_dtype,
+                                    *kv_quant_param)
 
     @staticmethod
     def forward_decode(
