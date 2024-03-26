@@ -70,16 +70,8 @@ def test_lora_correctness(dtype_str, h1, h2, seed, device):
     dtype = getattr(torch, dtype_str)
     torch.set_default_device(device)
 
-    wa_T_all = torch.randn(num_loras,
-                           num_layers,
-                           r,
-                           h1,
-                           dtype=dtype)
-    wb_T_all = torch.randn(num_loras,
-                           num_layers,
-                           h2,
-                           r,
-                           dtype=dtype)
+    wa_T_all = torch.randn(num_loras, num_layers, r, h1, dtype=dtype)
+    wb_T_all = torch.randn(num_loras, num_layers, h2, r, dtype=dtype)
     indices = torch.randint(num_loras, (bs, ), dtype=torch.long)
 
     for layer_idx in range(num_layers):
@@ -114,36 +106,12 @@ def test_lora_correctness_slice(dtype_str, h1, h2, seed, device):
     dtype = getattr(torch, dtype_str)
     torch.set_default_device(device)
 
-    wa_T_all_0 = torch.randn(num_loras,
-                             num_layers,
-                             r,
-                             h1,
-                             dtype=dtype)
-    wa_T_all_1 = torch.randn(num_loras,
-                             num_layers,
-                             r,
-                             h1,
-                             dtype=dtype)
-    wa_T_all_2 = torch.randn(num_loras,
-                             num_layers,
-                             r,
-                             h1,
-                             dtype=dtype)
-    wb_T_all_0 = torch.randn(num_loras,
-                             num_layers,
-                             h2 // 3,
-                             r,
-                             dtype=dtype)
-    wb_T_all_1 = torch.randn(num_loras,
-                             num_layers,
-                             h2 // 3,
-                             r,
-                             dtype=dtype)
-    wb_T_all_2 = torch.randn(num_loras,
-                             num_layers,
-                             h2 // 3,
-                             r,
-                             dtype=dtype)
+    wa_T_all_0 = torch.randn(num_loras, num_layers, r, h1, dtype=dtype)
+    wa_T_all_1 = torch.randn(num_loras, num_layers, r, h1, dtype=dtype)
+    wa_T_all_2 = torch.randn(num_loras, num_layers, r, h1, dtype=dtype)
+    wb_T_all_0 = torch.randn(num_loras, num_layers, h2 // 3, r, dtype=dtype)
+    wb_T_all_1 = torch.randn(num_loras, num_layers, h2 // 3, r, dtype=dtype)
+    wb_T_all_2 = torch.randn(num_loras, num_layers, h2 // 3, r, dtype=dtype)
 
     indices = torch.randint(num_loras, (bs, ), dtype=torch.long)
 
