@@ -8,12 +8,16 @@ import torch
 import torch.nn.functional as F
 
 from vllm.config import LoRAConfig
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
                               LogitsProcessorWithLoRA, LoRAMapping,
                               MergedColumnParallelLinearWithLoRA,
+                              MergedQKVParallelLinearWithLora,
                               QKVParallelLinearWithLora,
                               RowParallelLinearWithLoRA,
                               VocabParallelEmbeddingWithLoRA)
+# yapf: enable
 from vllm.lora.models import (LoRALayerWeights, PackedLoRALayerWeights,
                               convert_mapping)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -93,8 +97,7 @@ def populate_loras(
     lora_dict: Dict[int, LoRALayerWeights] = dict()
 
     # Dictionary that maps the lora ID to the
-    # corresponding subloras. Only useful when
-    # repeats > 1.
+    # corresponding subloras.
     sublora_dict: Dict[int, List[LoRALayerWeights]] = dict()
 
     for slot_idx, lora_id in enumerate(id_to_index):
@@ -607,7 +610,7 @@ def test_linear_parallel(dist_init, num_loras, orientation, device) -> None:
 
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
-@pytest.mark.parametrize("repeats", [2, 3])
+@pytest.mark.parametrize("repeats", [1, 2, 3])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_column_parallel_packed(dist_init, num_loras, repeats, device) -> None:
 
@@ -623,6 +626,10 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, device) -> None:
                                                 bias=False)
             linear.weight.data = torch.rand_like(linear.weight.data)
             lora_linear = MergedColumnParallelLinearWithLoRA(linear)
+        elif repeats == 3:
+            linear = QKVParallelLinear(4096, 64, 32, bias=False)
+            linear.weight.data = torch.rand_like(linear.weight.data)
+            lora_linear = MergedQKVParallelLinearWithLora(linear)
         else:
             linear = QKVParallelLinear(4096, 64, 32, bias=False)
             linear.weight.data = torch.rand_like(linear.weight.data)
