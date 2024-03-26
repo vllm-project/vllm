@@ -7,20 +7,22 @@
 # 2. We tried to use `torch.distributed`, but `torch.distributed.all_reduce`
 #  contains many other potential cuda APIs, that are not allowed during
 #  capturing the CUDA graph. For further details, please check
-# https://discuss.pytorch.org/t/pytorch-cudagraph-with-nccl-operation-failed/199366
-# 
-# Another rejected idea is to write a C/C++ binding for NCCL. It is usually doable,
-# but we often encounter issues related with nccl versions, and need to switch between
-# different versions of NCCL. A C/C++ binding is not flexible enough to handle this.
-# It requires recompilation of the code if we want to switch between different versions.
-# This current implementation, with a pure Python wrapper, is more flexible. We can
-# easily switch between different versions of NCCL by changing the environment variable,
-# or the `so_file` variable in the code.
+# https://discuss.pytorch.org/t/pytorch-cudagraph-with-nccl-operation-failed/ .
+#
+# Another rejected idea is to write a C/C++ binding for NCCL. It is usually
+# doable, but we often encounter issues related with nccl versions, and need
+# to switch between different versions of NCCL. See
+# https://github.com/NVIDIA/nccl/issues/1234 for more details.
+# A C/C++ binding is not flexible enough to handle this. It requires
+# recompilation of the code every time we want to switch between different
+# versions. This current implementation, with a **pure** Python wrapper, is
+# more flexible. We can easily switch between different versions of NCCL by
+# changing the environment variable `VLLM_NCCL_SO_PATH`, or the `so_file`
+# variable in the code.
 # ====================================================
 
 import ctypes
 import datetime
-import glob
 import logging
 import os
 
