@@ -208,9 +208,9 @@ def test_scheduler_delay_factor():
 
 def test_scheduler_with_cache():
     # Initialize the scheduler
-    max_batched_tokens = 96
+    max_batched_tokens = 80
     max_seq_group = 8
-    max_model_length = 96
+    max_model_length = 80
     max_paddings = 256
     scheduler_config = SchedulerConfig(max_batched_tokens, max_seq_group,
                                        max_model_length, max_paddings)
