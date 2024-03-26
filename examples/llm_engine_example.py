@@ -1,7 +1,7 @@
 import argparse
 from typing import List, Tuple
 
-from vllm import EngineArgs, LLMEngine, SamplingParams, RequestOutput
+from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
 
 
 def create_test_prompts() -> List[Tuple[str, SamplingParams]]:
