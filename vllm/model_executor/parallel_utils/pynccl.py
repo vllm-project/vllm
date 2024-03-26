@@ -55,8 +55,7 @@ except Exception as e:
         f"Failed to load NCCL library from {so_file} ."
         "It is expected if you are not running on NVIDIA/AMD GPUs."
         "Otherwise please set the environment variable VLLM_NCCL_SO_PATH"
-        " to point to the correct nccl library path."
-    )
+        " to point to the correct nccl library path.")
     raise e
 
 # === export types and functions from nccl to Python ===
