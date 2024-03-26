@@ -26,7 +26,9 @@ def distributed_run(fn, world_size):
 
 
 def update_env(fn):
-
+    # `multiprocessing.Process` cannot accept environment variables directly
+    # so we need to pass the environment variables as arguments
+    # and update the environment variables in the function
     def wrapper(env):
         import os
         os.environ.update(env)
