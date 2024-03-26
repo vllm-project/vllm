@@ -11,10 +11,10 @@ RUN echo "Base image is $BASE_IMAGE"
 # BASE_IMAGE for ROCm_6.0: "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1"
 
 
-ARG FA_GFX_ARCHS="gfx90a;gfx942"
+ARG FA_GFX_ARCHS="gfx90a;gfx942;gfx908"
 RUN echo "FA_GFX_ARCHS is $FA_GFX_ARCHS"
 
-ARG FA_BRANCH="3d2b6f5"
+ARG FA_BRANCH="ae7928c"
 RUN echo "FA_BRANCH is $FA_BRANCH"
 
 # whether to build flash-attention
