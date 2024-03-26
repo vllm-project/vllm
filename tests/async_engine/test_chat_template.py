@@ -1,12 +1,12 @@
-from dataclasses import dataclass
 import os
 import pathlib
+from dataclasses import dataclass
 
 import pytest
 
-from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+from vllm.transformers_utils.tokenizer import get_tokenizer
 
 chatml_jinja_path = pathlib.Path(os.path.dirname(os.path.abspath(
     __file__))).parent.parent / "examples/template_chatml.jinja"
@@ -73,7 +73,7 @@ def test_load_chat_template():
     assert template_content is not None
     # Hard coded value for template_chatml.jinja
     assert template_content == """{% for message in messages %}{{'<|im_start|>' + message['role'] + '\\n' + message['content']}}{% if (loop.last and add_generation_prompt) or not loop.last %}{{ '<|im_end|>' + '\\n'}}{% endif %}{% endfor %}
-{% if add_generation_prompt and messages[-1]['role'] != 'assistant' %}{{ '<|im_start|>assistant\\n' }}{% endif %}"""
+{% if add_generation_prompt and messages[-1]['role'] != 'assistant' %}{{ '<|im_start|>assistant\\n' }}{% endif %}"""  # noqa: E501
 
 
 def test_no_load_chat_template():
@@ -117,4 +117,6 @@ async def test_get_gen_prompt(model, template, add_generation_prompt,
         add_generation_prompt=mock_request.add_generation_prompt)
 
     # Test assertion
-    assert result == expected_output, f"The generated prompt does not match the expected output for model {model} and template {template}"
+    assert result == expected_output, (
+        f"The generated prompt does not match the expected output for "
+        f"model {model} and template {template}")

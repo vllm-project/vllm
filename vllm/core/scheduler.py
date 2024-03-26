@@ -1,16 +1,15 @@
-from collections import deque
 import enum
 import time
-from typing import Deque, Dict, Iterable, List, Optional, Tuple, Union, Set
+from collections import deque
+from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.block_manager import AllocStatus, BlockSpaceManager
 from vllm.core.policy import PolicyFactory
-from vllm.lora.request import LoRARequest
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceStatus)
-from vllm.prefix import PrefixPool
 
 logger = init_logger(__name__)
 
@@ -60,10 +59,9 @@ class SchedulerOutputs:
                 and not self.blocks_to_swap_out and not self.blocks_to_copy)
 
     def _sort_by_lora_ids(self) -> bool:
-        self.scheduled_seq_groups = sorted(
-            self.scheduled_seq_groups,
-            key=lambda g: (g.lora_request.lora_int_id
-                           if g.lora_request else 0, g.request_id))
+        self.scheduled_seq_groups = sorted(self.scheduled_seq_groups,
+                                           key=lambda g:
+                                           (g.lora_int_id, g.request_id))
 
     @property
     def lora_requests(self) -> Set[LoRARequest]:
@@ -95,10 +93,8 @@ class Scheduler:
             block_size=self.cache_config.block_size,
             num_gpu_blocks=self.cache_config.num_gpu_blocks,
             num_cpu_blocks=self.cache_config.num_cpu_blocks,
-            sliding_window=self.cache_config.sliding_window)
-
-        # Create the prefix pool to cache the prefixes.
-        self.prefix_pool = PrefixPool(self.cache_config.block_size)
+            sliding_window=self.cache_config.sliding_window,
+            enable_caching=self.cache_config.enable_prefix_caching)
 
         # Sequence groups in the WAITING state.
         self.waiting: Deque[SequenceGroup] = deque()
@@ -106,6 +102,13 @@ class Scheduler:
         self.running: Deque[SequenceGroup] = deque()
         # Sequence groups in the SWAPPED state.
         self.swapped: Deque[SequenceGroup] = deque()
+
+        # Time at previous scheduling step
+        self.prev_time = 0.0
+        # Did we schedule a prompt at previous step?
+        self.prev_prompt = False
+        # Latency of the last prompt step
+        self.last_prompt_latency = 0.0
 
     @property
     def lora_enabled(self) -> bool:
@@ -164,7 +167,7 @@ class Scheduler:
         blocks_to_copy: Dict[int, List[int]] = {}
 
         # Fix the current time.
-        now = time.monotonic()
+        now = time.time()
 
         # Join waiting sequences if possible.
         if not self.swapped:
@@ -177,13 +180,13 @@ class Scheduler:
             curr_loras = set(
                 seq_group.lora_int_id
                 for seq_group in self.running) if self.lora_enabled else None
-            seq_lens: List[int] = []
 
             # Optimization: We do not sort the waiting queue since the preempted
             # sequence groups are added to the front and the new sequence groups
             # are added to the back.
             leftover_waiting_sequences = deque()
-            while self.waiting:
+            num_batched_tokens = 0
+            while self._passed_delay(now) and self.waiting:
                 seq_group = self.waiting[0]
                 waiting_seqs = seq_group.get_seqs(
                     status=SequenceStatus.WAITING)
@@ -218,8 +221,8 @@ class Scheduler:
                 lora_int_id = 0
                 if self.lora_enabled:
                     lora_int_id = seq_group.lora_int_id
-                    if lora_int_id > 0 and lora_int_id not in curr_loras and len(
-                            curr_loras) >= self.lora_config.max_loras:
+                    if (lora_int_id > 0 and lora_int_id not in curr_loras
+                            and len(curr_loras) >= self.lora_config.max_loras):
                         # We don't have a space for another LoRA, so
                         # we ignore this request for now.
                         leftover_waiting_sequences.appendleft(seq_group)
@@ -227,8 +230,7 @@ class Scheduler:
                         continue
 
                 # If the number of batched tokens exceeds the limit, stop.
-                new_seq_lens = seq_lens + [num_prompt_tokens]
-                num_batched_tokens = len(new_seq_lens) * max(new_seq_lens)
+                num_batched_tokens += num_prompt_tokens
                 if (num_batched_tokens >
                         self.scheduler_config.max_num_batched_tokens):
                     break
@@ -239,11 +241,6 @@ class Scheduler:
                 if (num_curr_seqs + num_new_seqs >
                         self.scheduler_config.max_num_seqs):
                     break
-
-                num_paddings = num_batched_tokens - sum(new_seq_lens)
-                if num_paddings > self.scheduler_config.max_paddings:
-                    break
-                seq_lens = new_seq_lens
 
                 if lora_int_id > 0:
                     curr_loras.add(lora_int_id)
@@ -256,11 +253,11 @@ class Scheduler:
             self.waiting.extendleft(leftover_waiting_sequences)
 
             if scheduled or ignored_seq_groups:
+                self.prev_prompt = True
                 scheduler_outputs = SchedulerOutputs(
                     scheduled_seq_groups=scheduled,
                     prompt_run=True,
-                    num_batched_tokens=len(seq_lens) *
-                    max(seq_lens) if seq_lens else 0,
+                    num_batched_tokens=num_batched_tokens,
                     blocks_to_swap_in=blocks_to_swap_in,
                     blocks_to_swap_out=blocks_to_swap_out,
                     blocks_to_copy=blocks_to_copy,
@@ -313,8 +310,8 @@ class Scheduler:
                 lora_int_id = 0
                 if self.lora_enabled:
                     lora_int_id = seq_group.lora_int_id
-                    if lora_int_id > 0 and lora_int_id not in curr_loras and len(
-                            curr_loras) >= self.lora_config.max_loras:
+                    if (lora_int_id > 0 and lora_int_id not in curr_loras
+                            and len(curr_loras) >= self.lora_config.max_loras):
                         # We don't have a space for another LoRA, so
                         # we ignore this request for now.
                         leftover_swapped.appendleft(seq_group)
@@ -374,10 +371,12 @@ class Scheduler:
 
             seq_data: Dict[int, SequenceData] = {}
             block_tables: Dict[int, List[int]] = {}
+
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
+                self.block_manager.access_all_blocks_in_seq(seq, now)
 
             seq_group_metadata = SequenceGroupMetadata(
                 request_id=seq_group.request_id,
@@ -386,8 +385,15 @@ class Scheduler:
                 sampling_params=seq_group.sampling_params,
                 block_tables=block_tables,
                 lora_request=seq_group.lora_request,
-                prefix=seq_group.prefix,
+                computed_block_nums=self.block_manager.
+                get_common_computed_block_ids(seq_group),
                 state=seq_group.state,
+                # `multi_modal_data` will only be present for the 1st comm
+                # between engine and worker.
+                # the subsequent comms can still use delta, but
+                # `multi_modal_data` will be None.
+                multi_modal_data=seq_group.multi_modal_data
+                if scheduler_outputs.prompt_run else None,
             )
             seq_group_metadata_list.append(seq_group_metadata)
         return seq_group_metadata_list, scheduler_outputs
@@ -496,3 +502,22 @@ class Scheduler:
         blocks_to_swap_out.update(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             seq.status = SequenceStatus.SWAPPED
+
+    def mark_blocks_as_computed(self, seq_group: SequenceGroup):
+        self.block_manager.mark_blocks_as_computed(seq_group)
+
+    def _passed_delay(self, now: float) -> bool:
+        if self.prev_prompt:
+            self.last_prompt_latency = now - self.prev_time
+        self.prev_time, self.prev_prompt = now, False
+        # Delay scheduling prompts to let waiting queue fill up
+        if self.scheduler_config.delay_factor > 0 and self.waiting:
+            earliest_arrival_time = min(
+                [e.metrics.arrival_time for e in self.waiting])
+            passed_delay = (
+                (now - earliest_arrival_time) >
+                (self.scheduler_config.delay_factor * self.last_prompt_latency)
+                or not self.running)
+        else:
+            passed_delay = True
+        return passed_delay

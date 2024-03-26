@@ -1,13 +1,15 @@
 from typing import List, Optional, Union
 
+import torch
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
-from vllm.lora.request import LoRARequest
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
+from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
+from vllm.sequence import MultiModalData
 from vllm.utils import Counter
 
 
@@ -83,7 +85,7 @@ class LLM:
         swap_space: int = 4,
         enforce_eager: bool = False,
         max_context_len_to_capture: int = 8192,
-        disable_custom_all_reduce: bool = False,
+        disable_custom_all_reduce: bool = True,
         **kwargs,
     ) -> None:
         if "disable_log_stats" not in kwargs:
@@ -124,9 +126,9 @@ class LLM:
         prompts: Optional[Union[str, List[str]]] = None,
         sampling_params: Optional[SamplingParams] = None,
         prompt_token_ids: Optional[List[List[int]]] = None,
-        prefix_pos: Optional[Union[int, List[int]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -140,13 +142,9 @@ class LLM:
                 None, we use the default sampling parameters.
             prompt_token_ids: A list of token IDs for the prompts. If None, we
                 use the tokenizer to convert the prompts to token IDs.
-            prefix_pos: If not None, we use the given position as the prefix
-                position for each prompt. We will cache the prefix's KV
-                cache and reuse it for the next request with the same prefix.
-                This is an experimental feature, and may be replaced with
-                automatic prefix caching in the future.
             use_tqdm: Whether to use tqdm to display the progress bar.
             lora_request: LoRA request to use for generation, if any.
+            multi_modal_data: Multi modal data.
 
         Returns:
             A list of `RequestOutput` objects containing the generated
@@ -166,19 +164,27 @@ class LLM:
             # Use default sampling params.
             sampling_params = SamplingParams()
 
+        if multi_modal_data:
+            multi_modal_data.data = multi_modal_data.data.to(torch.float16)
+
         # Add requests to the engine.
         num_requests = len(prompts) if prompts is not None else len(
             prompt_token_ids)
         for i in range(num_requests):
             prompt = prompts[i] if prompts is not None else None
-            prefix_pos_i = prefix_pos[i] if prefix_pos is not None else None
             token_ids = None if prompt_token_ids is None else prompt_token_ids[
                 i]
-            self._add_request(prompt,
-                              sampling_params,
-                              token_ids,
-                              lora_request=lora_request,
-                              prefix_pos=prefix_pos_i)
+            self._add_request(
+                prompt,
+                sampling_params,
+                token_ids,
+                lora_request=lora_request,
+                # Get ith image while maintaining the batch dim.
+                multi_modal_data=MultiModalData(
+                    type=multi_modal_data.type,
+                    data=multi_modal_data.data[i].unsqueeze(0))
+                if multi_modal_data else None,
+            )
         return self._run_engine(use_tqdm)
 
     def _add_request(
@@ -187,7 +193,7 @@ class LLM:
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]],
         lora_request: Optional[LoRARequest] = None,
-        prefix_pos: Optional[int] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
     ) -> None:
         request_id = str(next(self.request_counter))
         self.llm_engine.add_request(request_id,
@@ -195,13 +201,15 @@ class LLM:
                                     sampling_params,
                                     prompt_token_ids,
                                     lora_request=lora_request,
-                                    prefix_pos=prefix_pos)
+                                    multi_modal_data=multi_modal_data)
 
     def _run_engine(self, use_tqdm: bool) -> List[RequestOutput]:
         # Initialize tqdm.
         if use_tqdm:
             num_requests = self.llm_engine.get_num_unfinished_requests()
-            pbar = tqdm(total=num_requests, desc="Processed prompts")
+            pbar = tqdm(total=num_requests,
+                        desc="Processed prompts",
+                        dynamic_ncols=True)
         # Run the engine.
         outputs: List[RequestOutput] = []
         while self.llm_engine.has_unfinished_requests():

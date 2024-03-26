@@ -53,11 +53,25 @@ void rotary_embedding(
   torch::Tensor& cos_sin_cache,
   bool is_neox);
 
+void batched_rotary_embedding(
+  torch::Tensor& positions,
+  torch::Tensor& query,
+  torch::Tensor& key,
+  int head_size,
+  torch::Tensor& cos_sin_cache,
+  bool is_neox,
+  int rot_dim,
+  torch::Tensor& cos_sin_cache_offsets);
+
 void silu_and_mul(
   torch::Tensor& out,
   torch::Tensor& input);
 
 void gelu_and_mul(
+  torch::Tensor& out,
+  torch::Tensor& input);
+
+void gelu_tanh_and_mul(
   torch::Tensor& out,
   torch::Tensor& input);
 
@@ -84,6 +98,15 @@ torch::Tensor awq_dequantize(
     int split_k_iters,
     int thx,
     int thy);
+
+torch::Tensor marlin_gemm(
+    torch::Tensor& a, 
+    torch::Tensor& b_q_weight,
+    torch::Tensor& b_scales, 
+    torch::Tensor& workspace,
+    int64_t size_m, 
+    int64_t size_n, 
+    int64_t size_k);
 #endif
 
 void squeezellm_gemm(
