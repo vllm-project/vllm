@@ -1,5 +1,3 @@
-# this script is not run with `pytest`.
-# It is run with `torchrun`.
 import multiprocessing
 import os
 
