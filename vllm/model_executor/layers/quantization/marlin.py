@@ -1,8 +1,5 @@
 from typing import Any, Dict, List, Optional
 
-import enum
-from enum import Enum
-
 import torch
 from torch.nn.parameter import Parameter
 
@@ -10,53 +7,44 @@ from vllm._C import ops
 from vllm.model_executor.layers.linear import LinearMethodBase, set_weight_attrs
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
-from magic_wand import (MARLIN_SUPPORTED_NUM_BITS,
-                        MARLIN_SUPPORTED_GROUP_SIZES, MARLIN_TILE,
-                        MARLIN_MIN_THREAD_N, MARLIN_MIN_THREAD_K,
-                        MARLIN_MAX_PARALLEL, get_pack_factor,
-                        marlin_permute_scales, marlin_repack_from_gptq,
-                        marlin_gemm)
-
 
 class MarlinConfig(QuantizationConfig):
-    """Config class for Marlin"""
+    """Config class for Marlin.
 
-    def __init__(self, weight_bits: int, group_size: int, desc_act: bool,
-                 is_sym: bool) -> None:
-        self.weight_bits = weight_bits
+    Reference: https://github.com/IST-DASLab/marlin/tree/master
+    """
+
+    def __init__(
+        self,
+        group_size: int,
+    ) -> None:
+        # Group size for the quantization.
         self.group_size = group_size
-        self.desc_act = desc_act
-        self.is_sym = is_sym
-
-        # Verify
-        if self.weight_bits not in MARLIN_SUPPORTED_NUM_BITS:
+        if self.group_size != 128 and self.group_size != -1:
             raise ValueError(
-                f"Got weight_bits = {weight_bits}, but Marlin only supports {MARLIN_SUPPORTED_NUM_BITS}"
-            )
+                "Currently, only group size 128 and -1 (channelwise) is supported for "
+                f"Marlin, but got group_size of {self.group_size}")
 
-        if self.group_size not in MARLIN_SUPPORTED_GROUP_SIZES:
-            raise ValueError(
-                f"Got group_size = {group_size}, but Marlin only supports {MARLIN_SUPPORTED_GROUP_SIZES}"
-            )
+        # 4 Bits packed into 32 bit datatype.
+        self.pack_factor = 32 // 4
 
-        if not self.is_sym:
-            raise ValueError(
-                "Marlin only supports symmetric quantized weights")
+        # Tile size used by marlin kernels.
+        self.tile_size = 16
 
-        # Init
-        self.pack_factor = get_pack_factor(weight_bits)
-        self.tile_size = MARLIN_TILE
-        self.min_thread_n = MARLIN_MIN_THREAD_N
-        self.min_thread_k = MARLIN_MIN_THREAD_K
-        self.max_parallel = MARLIN_MAX_PARALLEL
+        # Min out_features dim
+        self.min_n_threads = 64
+
+        # Min in_features dim
+        self.min_k_threads = 128
+
+        # Max parallel problems to solve at once (improves large batch performance)
+        self.max_parallel = 16
 
         # Permutation length used by the marlin kernels.
         self.perm_len = 1024
 
     def __repr__(self) -> str:
-        return (f"MarlinConfig(weight_bits={self.weight_bits}, "
-                f"group_size={self.group_size}, "
-                f"desc_act={self.desc_act})")
+        return f"MarlinConfig(group_size={self.group_size}"
 
     @classmethod
     def get_name(cls) -> str:
@@ -64,10 +52,9 @@ class MarlinConfig(QuantizationConfig):
 
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
-        return [torch.half]
+        return [torch.float16]
 
     @classmethod
-    # Need to figure it out
     def get_min_capability(cls) -> int:
         return 80
 
@@ -77,29 +64,14 @@ class MarlinConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "MarlinConfig":
-        weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
-        desc_act = cls.get_from_keys(config, ["desc_act"])
-        is_sym = cls.get_from_keys(config, ["sym"])
-        return cls(weight_bits, group_size, desc_act, is_sym)
+        return cls(group_size)
 
     def get_linear_method(self) -> "MarlinLinearMethod":
         return MarlinLinearMethod(self)
 
     def get_scaled_act_names(self) -> List[str]:
         return []
-
-
-class MarlinState(Enum):
-    REPACK = enum.auto()
-    READY = enum.auto()
-
-
-class ExllamaState(Enum):
-
-    UNUSED = enum.auto()
-    UNINITIALIZED = enum.auto()
-    READY = enum.auto()
 
 
 class MarlinLinearMethod(LinearMethodBase):
@@ -120,146 +92,92 @@ class MarlinLinearMethod(LinearMethodBase):
         output_size: int,
         params_dtype: torch.dtype,
     ) -> Dict[str, Any]:
-        # Normalize group_size
-        if self.quant_config.group_size != -1:
-            group_size = self.quant_config.group_size
-        else:
-            group_size = input_size
-
-        # Validate dtype
         if params_dtype != torch.float16:
             raise ValueError(
                 f"The params dtype must be float16, but got {params_dtype}")
 
         # Validate output_size_per_partition
-        if output_size_per_partition % self.quant_config.min_thread_n != 0:
+        if output_size_per_partition % self.quant_config.min_n_threads != 0:
             raise ValueError(
-                f"Weight output_size_per_partition = {output_size_per_partition}"
-                f" is not divisible by min_thread_n = {self.quant_config.min_thread_n}."
+                f"Weight output_size_per_partition = {output_size_per_partition} is not divisible by min_n_threads = {self.quant_config.min_n_threads}."
+            )
+        if output_size_per_partition % self.quant_config.pack_factor != 0:
+            raise ValueError(
+                f"Weight output_size_per_partition = {output_size_per_partition} is not divisible by pack_factor = {self.quant_config.pack_factor}."
             )
 
         # Validate input_size_per_partition
-        if input_size_per_partition % self.quant_config.min_thread_k != 0:
+        if input_size_per_partition % self.quant_config.min_k_threads != 0:
             raise ValueError(
-                f"Weight input_size_per_partition = {input_size_per_partition}"
-                f" is not divisible by min_thread_k = {self.quant_config.min_thread_k}."
+                f"Weight input_size_per_partition = {input_size_per_partition} is not divisible by min_k_threads = {self.quant_config.min_k_threads}."
+            )
+        if self.quant_config.group_size != -1 and input_size_per_partition % self.quant_config.group_size != 0:
+            raise ValueError(
+                f"Weight input_size_per_partition = f{input_size_per_partition} is not divisible by group_size = {self.quant_config.group_size}."
             )
 
-        if input_size_per_partition % group_size != 0:
+        # Check that we have at least 4 tiles horizontally in the shard
+        num_tiles_per_perm = self.quant_config.perm_len // (
+            self.quant_config.tile_size**2)
+        if output_size_per_partition % num_tiles_per_perm != 0:
             raise ValueError(
-                f"Weight input_size_per_partition = {input_size_per_partition}"
-                f" is not divisible by group_size = {group_size}.")
+                "Each permutation group must reside on the same gpu")
 
-        # Detect sharding of scales/zp
-
-        # By default, no sharding over "input dim"
-        is_k_full = True
-        scales_and_zp_size = input_size // group_size
-        scales_and_zp_input_dim = None
-
-        if self.quant_config.desc_act:
-            assert self.quant_config.group_size != -1
-
-            is_k_full = input_size_per_partition == input_size
-
-        else:
-            is_k_full = True  # Because of full alignment with group-size and shard of scales/zp
-
-            # If this is a row-parallel case, then shard scales/zp
-            if (input_size != input_size_per_partition
-                    and self.quant_config.group_size != -1):
-                scales_and_zp_size = input_size_per_partition // group_size
-                scales_and_zp_input_dim = 0
-
-        # Init buffers
-
-        # Quantized weights
+        # Quantized 4Bit weights packed into Int32.
         qweight = Parameter(
             torch.empty(
-                input_size_per_partition // self.quant_config.pack_factor,
-                output_size_per_partition,
+                input_size_per_partition // self.quant_config.tile_size,
+                output_size_per_partition * self.quant_config.tile_size //
+                self.quant_config.pack_factor,
+                device="cuda",
                 dtype=torch.int32,
             ),
             requires_grad=False,
         )
         set_weight_attrs(
-            qweight, {
+            qweight,
+            {
                 "input_dim": 0,
                 "output_dim": 1,
-                "packed_dim": 0,
+                "packed_dim": 1,
                 "pack_factor": self.quant_config.pack_factor,
-            })
-
-        # Activation order
-        g_idx = Parameter(
-            torch.tensor(
-                [i // group_size for i in range(input_size_per_partition)],
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
-        # Ignore warning from fused linear layers such as QKVParallelLinear.
-        set_weight_attrs(g_idx, {"input_dim": 0, "ignore_warning": True})
-
-        g_idx_sort_indices = Parameter(
-            torch.tensor(
-                g_idx.shape,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
+                "marlin_tile_size": self.quant_config.tile_size,
+            },
         )
 
-        # Scales
+        # Determine if channelwise or not
+        input_groups = 1 if self.quant_config.group_size == -1 else input_size_per_partition // self.quant_config.group_size
+
         scales = Parameter(
             torch.empty(
-                scales_and_zp_size,
+                input_groups,
                 output_size_per_partition,
+                device="cuda",
                 dtype=params_dtype,
             ),
             requires_grad=False,
         )
-        set_weight_attrs(scales, {
-            "input_dim": scales_and_zp_input_dim,
-            "output_dim": 1,
-        })
-
-        # Quantized zero-points
-        qzeros = Parameter(
-            torch.empty(
-                scales_and_zp_size,
-                output_size_per_partition // self.quant_config.pack_factor,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
         set_weight_attrs(
-            qzeros, {
-                "input_dim": scales_and_zp_input_dim,
+            scales,
+            {
+                "input_dim": None if input_groups == 1 else 0,
                 "output_dim": 1,
-                "packed_dim": 1,
-                "pack_factor": self.quant_config.pack_factor,
-            })
+            },
+        )
 
-        # Allocate marlin workspace
+        # Allocate workspace (Used for internal locking mechanism)
         max_workspace_size = (
             output_size_per_partition //
-            self.quant_config.min_thread_n) * self.quant_config.max_parallel
-        workspace = Parameter(
-            torch.zeros(max_workspace_size, device="cuda", dtype=torch.int),
-            requires_grad=False,
-        )
+            self.quant_config.min_n_threads) * self.quant_config.max_parallel
+        workspace = Parameter(torch.zeros(max_workspace_size,
+                                          device="cuda",
+                                          dtype=torch.int),
+                              requires_grad=False)
 
         return {
-            "qweight": qweight,
-            "g_idx": g_idx,
-            "g_idx_sort_indices": g_idx_sort_indices,
-            "scales": scales,
-            "qzeros": qzeros,
+            "B": qweight,
+            "s": scales,
             "workspace": workspace,
-            "input_size_per_partition": input_size_per_partition,
-            "output_size_per_partition": output_size_per_partition,
-            "is_k_full": is_k_full,
-            "marlin_state": MarlinState.REPACK,
         }
 
     def apply_weights(
@@ -268,45 +186,22 @@ class MarlinLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        reshaped_x = x.reshape(-1, x.shape[-1])
+        qweight = weights["B"]
+        scales = weights["s"]
+        workspace = weights["workspace"]
 
-        size_m = reshaped_x.shape[0]
-        size_n = weights["output_size_per_partition"]
-        size_k = weights["input_size_per_partition"]
-        out_shape = x.shape[:-1] + (size_n, )
+        x_2d = x.view(-1, x.shape[-1])
 
-        if weights["marlin_state"] == MarlinState.REPACK:
-            weights["marlin_state"] = MarlinState.READY
+        size_m = x_2d.shape[0]
+        size_k = x_2d.shape[1]
+        size_n = scales.shape[1]
 
-            if self.quant_config.desc_act:
-                weights["g_idx_sort_indices"] = torch.argsort(
-                    weights["g_idx"]).to(torch.int)
-            else:
-                # Reset g_idx related tensors
-                weights["g_idx"] = torch.empty(
-                    0, dtype=torch.int, device=weights["qweight"].device)
-                weights["g_idx_sort_indices"] = torch.empty(
-                    0, dtype=torch.int, device=weights["qweight"].device)
+        output_2d = ops.marlin_gemm(x_2d, qweight, scales, workspace, size_m,
+                                    size_n, size_k)
 
-            # Repack weights
-            weights["qweight"] = marlin_repack_from_gptq(
-                weights["qweight"],
-                weights["g_idx_sort_indices"],
-                size_k,
-                size_n,
-            )
-
-            # Permute scales
-            weights["scales"] = marlin_permute_scales(
-                weights["scales"], size_k, size_n,
-                self.quant_config.group_size)
-
-        output = marlin_gemm(reshaped_x, weights["qweight"], weights["scales"],
-                             weights["g_idx"], weights["g_idx_sort_indices"],
-                             weights["workspace"], size_m, size_n, size_k,
-                             weights["is_k_full"])
+        output = output_2d.view(x.shape[:-1] + (output_2d.shape[1], ))
 
         if bias is not None:
             output.add_(bias)  # In-place add
 
-        return output.reshape(out_shape)
+        return output
