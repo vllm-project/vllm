@@ -1,9 +1,9 @@
-from typing import Tuple, Optional
 from functools import cached_property
+from typing import Optional, Tuple
 
 import torch
-import torch.nn as nn
 import torch.jit
+import torch.nn as nn
 
 
 class RejectionSampler(nn.Module):
