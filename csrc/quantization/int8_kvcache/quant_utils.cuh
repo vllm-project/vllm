@@ -6,9 +6,6 @@
 #include <float.h>
 #include <type_traits>
 #include "../../attention/attention_dtypes.h"
-#include "../../attention/dtype_float32.cuh"
-#include "../../attention/dtype_float16.cuh"
-#include "../../attention/dtype_bfloat16.cuh"
 
 namespace vllm {
 namespace int8 {
@@ -260,6 +257,13 @@ __inline__ __device__ uint4 vec_conversion<uint4, Float8_>(const Float8_& a)
     b.z = vec_conversion<uint32_t, float2>(a.z);
     b.w = vec_conversion<uint32_t, float2>(a.w);
     return b;
+}
+
+template<>
+__inline__ __device__ __nv_bfloat16 vec_conversion<__nv_bfloat16, float>(const float &a) {
+   __nv_bfloat16 b;
+   from_float(b, a);
+   return b;
 }
 
 template<>
