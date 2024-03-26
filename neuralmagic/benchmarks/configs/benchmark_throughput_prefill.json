@@ -14,8 +14,6 @@
 			"script_name": "benchmark_throughput",
 			"script_args": {
 				"input-len": [
-					16,
-					32,
 					64,
 					128,
 					256,
@@ -43,8 +41,6 @@
 			"script_name": "benchmark_throughput",
 			"script_args": {
 				"input-len": [
-					16,
-					32,
 					64,
 					128,
 					256,
@@ -75,8 +71,6 @@
 			"script_name": "benchmark_throughput",
 			"script_args": {
 				"input-len": [
-					16,
-					32,
 					64,
 					128,
 					256,
