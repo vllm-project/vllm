@@ -271,6 +271,17 @@ RUN if [ "$BUILD_TRITON" = "1" ]; then \
     fi
 
 
+# Install gradlib
+RUN mkdir -p libs \
+    && cd libs \
+    && git clone https://github.com/ROCm/gradlib \
+    && cd gradlib \
+    && pip install . \
+    && cd .. \
+    && rm -rf gradlib \
+    && cd ..
+
+
 COPY ./ /app/vllm
 
 RUN python3 -m pip install --upgrade pip numba

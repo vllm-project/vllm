@@ -15,6 +15,7 @@ from vllm.model_executor.parallel_utils.utils import (
     divide, split_tensor_along_last_dim)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils import is_hip
+from vllm.model_executor.layers.tuned_gemm import tgemm
 
 logger = init_logger(__name__)
 
@@ -102,7 +103,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
             if bias is not None:
                 return F.linear(x, weight) + bias
             return F.linear(x, weight)
-        return F.linear(x, weight, bias)
+        return tgemm.mm(x, weight)
 
 
 class ReplicatedLinear(torch.nn.Module):
