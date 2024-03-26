@@ -22,7 +22,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         * Evictor policies (unused blocks are evicted arbitrarily).
         * Test that prefix blocks are not evicted
         * Update access time for blocks
-        * Store computed bit in block
+        * Track computed bit.
     """
 
     def __init__(
@@ -146,10 +146,24 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         pass
 
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
-        pass
+        # We ignore the sequence group as its not necessary. After the batch is
+        # formed by the scheduler, we do not need to mark blocks from individual
+        # sequence groups as computed -- all blocks in the batch can be marked
+        # as computed.
+        self.block_allocator.mark_blocks_as_computed()
 
-    def get_common_computed_block_ids(self, seq_group: SequenceGroup):
-        return []
+    def get_common_computed_block_ids(self, seqs: List[Sequence]) -> List[int]:
+        """Determine which blocks for which we skip prefill.
+
+        With prefix caching we can skip prefill for previously-generated blocks.
+        Currently, the attention implementation only supports skipping cached
+        blocks if they are a contiguous prefix of cached blocks.
+
+        This method determines which blocks can be safely skipped for all
+        sequences in the sequence group.
+        """
+        seq_block_ids = [self.block_tables[seq.seq_id].physical_block_ids for seq in seqs]
+        return self.block_allocator.get_common_computed_block_ids(seq_block_ids)
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         src_block_table = self.block_tables[parent_seq.seq_id]

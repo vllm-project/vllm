@@ -383,6 +383,8 @@ class Scheduler:
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
                 self.block_manager.access_all_blocks_in_seq(seq, now)
 
+            common_computed_block_nums = self.block_manager.get_common_computed_block_ids(seq_group.get_seqs(status=SequenceStatus.RUNNING))
+
             seq_group_metadata = SequenceGroupMetadata(
                 request_id=seq_group.request_id,
                 is_prompt=scheduler_outputs.prompt_run,
@@ -390,11 +392,17 @@ class Scheduler:
                 sampling_params=seq_group.sampling_params,
                 block_tables=block_tables,
                 lora_request=seq_group.lora_request,
-                computed_block_nums=self.block_manager.
-                get_common_computed_block_ids(seq_group),
+                computed_block_nums=common_computed_block_nums,
                 state=seq_group.state,
             )
             seq_group_metadata_list.append(seq_group_metadata)
+
+
+        # Now that the batch has been created, we can assume all blocks in the
+        # batch will have been computed before the next scheduling invocation.
+        for seq_group in scheduler_outputs.scheduled_seq_groups:
+            self.block_manager.mark_blocks_as_computed(seq_group)
+
         return seq_group_metadata_list, scheduler_outputs
 
     def fork_seq(self, parent_seq: Sequence, child_seq: Sequence) -> None:
@@ -501,9 +509,6 @@ class Scheduler:
         blocks_to_swap_out.update(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             seq.status = SequenceStatus.SWAPPED
-
-    def mark_blocks_as_computed(self, seq_group: SequenceGroup):
-        self.block_manager.mark_blocks_as_computed(seq_group)
 
     def _passed_delay(self, now: float) -> bool:
         if self.prev_prompt:

@@ -107,6 +107,22 @@ class NaiveBlockAllocator(BlockAllocator):
     def clear_copy_on_writes(self) -> Dict[BlockIndex, List[BlockIndex]]:
         return self._cow_tracker.clear_cows()
 
+    def mark_blocks_as_computed(self) -> None:
+        """Mark blocks as computed, used in prefix caching.
+
+        Since the naive allocator does not implement prefix caching, we do
+        nothing.
+        """
+        pass
+
+    def get_common_computed_block_ids(self, seq_block_ids: List[List[int]]) -> List[int]:
+        """Determine blocks that can be skipped in prefill.
+
+        Since the naive allocator does not support prefix caching, always return
+        an empty list.
+        """
+        return []
+
 
 class NaiveBlock(Block):
 

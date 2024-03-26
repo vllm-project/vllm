@@ -75,6 +75,14 @@ class BlockAllocator(ABC):
     def clear_copy_on_writes(self) -> Dict[int, List[int]]:
         pass
 
+    @abstractmethod
+    def mark_blocks_as_computed(self) -> None:
+        pass
+
+    @abstractmethod
+    def get_common_computed_block_ids(self, seq_block_ids: List[List[int]]) -> List[int]:
+        pass
+
     class NoFreeBlocksError(ValueError):
         pass
 
@@ -103,6 +111,14 @@ class DeviceAwareBlockAllocator(ABC):
     def get_num_free_blocks(self, device: Device) -> int:
         pass
 
-    #@abstractmethod
-    #def get_operations(self):
-    #    pass
+    @abstractmethod
+    def clear_copy_on_writes(self) -> Dict[int, List[int]]:
+        pass
+
+    @abstractmethod
+    def mark_blocks_as_computed(self) -> None:
+        pass
+
+    @abstractmethod
+    def get_common_computed_block_ids(self, seq_block_ids: List[List[int]]) -> List[int]:
+        pass

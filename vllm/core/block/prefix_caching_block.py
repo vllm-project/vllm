@@ -1,5 +1,7 @@
 """Token blocks."""
 from typing import List, Optional, Iterable, Dict
+from itertools import takewhile
+from os.path import commonprefix
 
 from vllm.core.block.interfaces import Block, BlockAllocator
 from vllm.core.block.naive_block import NaiveBlockAllocator, NaiveBlock
@@ -211,6 +213,30 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
     def clear_copy_on_writes(self) -> Dict[BlockIndex, List[BlockIndex]]:
         return self._cow_tracker.clear_cows()
+
+    def mark_blocks_as_computed(self) -> None:
+        """Mark blocks as computed, used in prefix caching.
+        """
+        # TODO Track computed blocks.
+        pass
+
+    def get_common_computed_block_ids(self, seq_block_ids: List[List[int]]) -> List[int]:
+        """Return the block ids that are common for a given sequence group.
+
+        Used in prefill (can skip prefill of some blocks).
+        """
+
+        # TODO: Track computed blocks.
+        computed = lambda block_id: False
+
+        # NOTE We exclude the last block to avoid the case where the entire
+        # prompt is cached. This would cause erroneous behavior in model
+        # runner.
+        ids_list = [
+            takewhile(lambda block_id: computed(block_id), seq[:-1])
+            for seq in seq_block_ids
+        ]
+        return commonprefix([ids for ids in ids_list if ids != []])
 
 
 class PrefixCachingBlock(Block):
