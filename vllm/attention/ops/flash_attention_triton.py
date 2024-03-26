@@ -466,8 +466,9 @@ def attn_fwd(
     else:
         bias_ptr = None
     if ENABLE_DROPOUT:
-        batch_philox_offset = philox_offset_base + off_z * hq \
-                              + off_h_q * seqlen_q * seqlen_k
+        batch_philox_offset = philox_offset_base \
+                              + (off_z * hq + off_h_q) \
+                              * seqlen_q * seqlen_k
     else:
         batch_philox_offset = 0
     # We can ask to return the dropout mask without actually doing any dropout.
