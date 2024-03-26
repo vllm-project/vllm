@@ -3,7 +3,6 @@ from functools import lru_cache
 import torch
 import os
 
-
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
 from vllm.utils import is_hip
@@ -36,9 +35,10 @@ def _which_attn_to_use(dtype: torch.dtype) -> str:
     Returns:
         str: XFormers, FlashAttention, or FlashAttentionTriton
     """
-     
+
     # NOTE: Defaulting to triton FA for AMD cards.
-    use_flash_attn_triton = os.environ.get('VLLM_USE_FLASH_ATTN_TRITON', "True").lower() in ("true", "1")
+    use_flash_attn_triton = os.environ.get('VLLM_USE_FLASH_ATTN_TRITON',
+                                           "True").lower() in ("true", "1")
     if not is_hip() and torch.cuda.get_device_capability()[0] < 8:
         # Volta and Turing NVIDIA GPUs.
         logger.info("Cannot use FlashAttention backend for Volta and Turing "
@@ -63,5 +63,5 @@ def _which_attn_to_use(dtype: torch.dtype) -> str:
         if is_hip() and use_flash_attn_triton:
             pass
         else:
-            return "XFormers" 
+            return "XFormers"
     return "FlashAttentionTriton" if use_flash_attn_triton else "FlashAttention"

@@ -4,35 +4,35 @@ NOTE(woosuk): At the moment, this file includes a lot of duplicated code from
 XFormers backend. The duplicated code will be removed once we use flash-attn or
 flashinfer for all the attention operations.
 """
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Type
+from typing import List, Optional, Type
 
 import torch
 
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata)
-from vllm.attention.backends.flash_attn import (FlashAttentionBackend,
-                                                   FlashAttentionMetadata)
-from vllm.attention.ops.paged_attn import (PagedAttention,
-                                           PagedAttentionMetadata)
+from vllm.attention.backends.abstract import (
+    AttentionImpl, )
+from vllm.attention.backends.flash_attn import (
+    FlashAttentionBackend,
+    FlashAttentionMetadata,
+)
+from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.attention.ops.flash_attention_triton import triton_attention
 
 
 class FlashAttentionTritonBackend(FlashAttentionBackend):
 
     @staticmethod
-    def get_impl_cls() -> Type["FlashAttentionImpl"]:
+    def get_impl_cls() -> Type["FlashAttentionTritonImpl"]:
         return FlashAttentionTritonImpl
 
 
 class FlashAttentionTritonImpl(AttentionImpl):
     """
     If the input tensors contain prompt tokens, the layout is as follows:
-    |<--------------- num_prompt_tokens -------------->|	
+    |<--------------- num_prompt_tokens -------------->|
     |<--prompt_0-->|<--prompt_1-->|...|<--prompt_N-1-->|
 
-    Otherwise, the layout is as follows:	
-    |<------------------ num_generation_tokens (M) ----------------->|	
+    Otherwise, the layout is as follows:
+    |<------------------ num_generation_tokens (M) ----------------->|
     |<--generation_0-->|..........|<--generation_M-1-->|<--padding-->|
 
     Generation tokens can contain padding when cuda-graph is used.
@@ -75,11 +75,10 @@ class FlashAttentionTritonImpl(AttentionImpl):
     def repeat_kv(self, x: torch.Tensor, n_rep: int) -> torch.Tensor:
         """torch.repeat_interleave(x, dim=1, repeats=n_rep)"""
         tokens, n_kv_heads, head_dim = x.shape
-        return (
-                x[:, :, None, :]
-                .expand(tokens, n_kv_heads, n_rep, head_dim)
-                .reshape(tokens, n_kv_heads * n_rep, head_dim)
-        )
+        return (x[:, :,
+                  None, :].expand(tokens, n_kv_heads, n_rep,
+                                  head_dim).reshape(tokens, n_kv_heads * n_rep,
+                                                    head_dim))
 
     def forward(
         self,
@@ -113,10 +112,14 @@ class FlashAttentionTritonImpl(AttentionImpl):
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
-            PagedAttention.write_to_paged_cache(key, value, key_cache,
-                                                value_cache,
-                                                attn_metadata.slot_mapping,
-                                                attn_metadata.kv_cache_dtype)
+            PagedAttention.write_to_paged_cache(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                attn_metadata.slot_mapping,
+                attn_metadata.kv_cache_dtype,
+            )
 
         if attn_metadata.is_prompt:
             # Prompt run.
