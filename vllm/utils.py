@@ -205,7 +205,7 @@ def get_ip() -> str:
 
 
 def get_distributed_init_method(ip: str, port: int) -> str:
-    return f"tcp://{ip}:{port}"
+    return f"tcp://[{ip}]:{port}"
 
 
 def get_open_port() -> int:
