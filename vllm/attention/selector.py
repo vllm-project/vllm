@@ -40,7 +40,7 @@ def _which_attn_to_use(dtype: torch.dtype) -> str:
     #       Defaulting to triton FA for AMD cards.
     use_flash_attn_triton = (os.environ.get("VLLM_USE_FLASH_ATTN_TRITON",
                                             "True").lower()
-                             in ("true", "1")) and not is_hip()
+                             in ("true", "1")) and is_hip()
 
     if not is_hip() and torch.cuda.get_device_capability()[0] < 8:
         # Volta and Turing NVIDIA GPUs.
