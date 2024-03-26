@@ -10,6 +10,7 @@ fastapi
 uvicorn[standard]
 pydantic >= 2.0  # Required for OpenAI server.
 prometheus_client >= 0.18.0
+prometheus-fastapi-instrumentator
 pynvml == 11.5.0
 triton >= 2.1.0
 outlines >= 0.0.27

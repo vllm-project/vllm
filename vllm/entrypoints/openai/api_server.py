@@ -6,7 +6,7 @@ import os
 import importlib
 import inspect
 
-from prometheus_client import make_asgi_app
+from prometheus_fastapi_instrumentator import Instrumentator
 import fastapi
 import uvicorn
 from http import HTTPStatus
@@ -48,6 +48,8 @@ async def lifespan(app: fastapi.FastAPI):
 
 
 app = fastapi.FastAPI(lifespan=lifespan)
+# Instrument the app with HTTP metrics and expose it on /metrics
+Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 
 
 class LoRAParserAction(argparse.Action):
@@ -144,11 +146,6 @@ def parse_args():
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     return parser.parse_args()
-
-
-# Add prometheus asgi middleware to route /metrics requests
-metrics_app = make_asgi_app()
-app.mount("/metrics", metrics_app)
 
 
 @app.exception_handler(RequestValidationError)
