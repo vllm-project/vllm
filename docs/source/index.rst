@@ -90,6 +90,7 @@ Documentation
 
    quantization/auto_awq
    quantization/fp8_e5m2_kv_cache
+   quantization/int8_kv_cache
 
 .. toctree::
    :maxdepth: 2
