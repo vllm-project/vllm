@@ -180,16 +180,15 @@ class TorchSDPABackendImpl(AttentionImpl):
                         dtype=query.dtype)
                     for prompt_len in attn_metadata.prompt_lens:
                         end = start + prompt_len
-                        output[
-                            start:
-                            end, :, :] = torch.nn.functional.scaled_dot_product_attention(
-                                query[:, start:end, :],
-                                key[:, start:end, :],
-                                value[:, start:end, :],
-                                attn_mask=None,
-                                dropout_p=0.0,
-                                is_causal=True,
-                                scale=self.scale).movedim(query.dim() - 2, 0)
+                        sub_out = torch.nn.functional.scaled_dot_product_attention(
+                            query[:, start:end, :],
+                            key[:, start:end, :],
+                            value[:, start:end, :],
+                            attn_mask=None,
+                            dropout_p=0.0,
+                            is_causal=True,
+                            scale=self.scale).movedim(query.dim() - 2, 0)
+                        output[start:end, :, :] = sub_out
                         start = end
             else:
                 # prefix-enabled attention
