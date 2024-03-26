@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from vllm._C import cache_ops
+from vllm.utils import is_hip
 
 COPYING_DIRECTION = [('cuda', 'cpu'), ('cuda', 'cuda'), ('cpu', 'cuda')]
 DTYPES = [torch.half, torch.bfloat16, torch.float]
