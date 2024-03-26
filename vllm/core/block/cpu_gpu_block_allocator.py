@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Dict
 from vllm.core.block.interfaces import (BlockAllocator, Block,
                                         DeviceAwareBlockAllocator)
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
@@ -95,6 +95,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
     def get_num_free_blocks(self, device: Device) -> int:
         return self._allocators[device].get_num_free_blocks()
 
-    #@abstractmethod
-    #def get_operations(self):
-    #    pass
+    def clear_copy_on_writes(self) -> Dict[int, List[int]]:
+        # CoW only supported on GPU
+        device = Device.GPU
+        return self._allocators[device].clear_copy_on_writes()

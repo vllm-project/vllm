@@ -1,4 +1,4 @@
-from typing import List, Optional, Set, Iterable, TypeVar
+from typing import List, Optional, Set, Iterable, TypeVar, Dict
 from collections import defaultdict
 
 from vllm.core.block.interfaces import BlockAllocator, Block
@@ -7,77 +7,6 @@ from vllm.core.block.common import RefCounter, CopyOnWriteTracker, get_all_block
 BlockIndex = int
 Refcount = int
 
-"""
-Freelist
-    - has refcount
-    - allocate(block)
-        - [prefix caching] look up existing by content
-        - [naive] always allocate new
-        - policy to choose which element in freelist to allocate
-        - increment refcount
-    - free(block)
-        - [prefix caching] 
-
-PrefixCachingAllocator
-
-    - allocate
-        - try content-based where refcount > 0
-        - else, try hashless one.
-        - else, try refcount=0 content-based one
-        - else, fail.
-
-When a full block goes to refcount 1->0, it is added to freelist
-When a full block goes to refcount 0->1, it is removed from the freelist
-Initial allocation attempts fullblock iff refcount > 0
-Final allocation attempts fullblock iff refcount == 0
-
-
-Seems the layers are reversed -- refcounting should be above free/allocate
-    decr(block_index)
-        if full
-            if new refcount == 0:
-                add to hashful freelist
-            else:
-                no op
-        else:
-            add to hashless freelist
-
-    incr(block_index)
-        if full:
-            if new refcount == 1:
-                remove from hashful freelist
-            else:
-                no op
-        else:
-            if new refcount == 1:
-                remove from hashless freelist
-            else:
-                no op
-
-
-lookup(block) -> Optional[block_index]
-    see if there is an existing mapping from block content to block index
-
-
-new() -> block_index:
-    take from freelist
-
-
-allocate(block) -> block_index:
-    maybe_block_index = lookup(block)
-    if maybe_block_index:
-        refcounter.increment(maybe_block_index) --> moves a block index from freelist.
-        return block_index
-
-    block_index = new() --> selects a block index from freelist.
-    refcounter.increment(block_index) --> moves a block index from freelist.
-    return block_index
-
-
-free(block_index):
-    refcounter.decrement(block_index) --> moves block index back to freelist.
-
-"""
 
 class NaiveBlockAllocator(BlockAllocator):
     def __init__(
@@ -174,6 +103,9 @@ class NaiveBlockAllocator(BlockAllocator):
     def cow_block_if_not_appendable(self,
                                     block: Block) -> Optional[BlockIndex]:
         return self._cow_tracker.cow_block_if_not_appendable(block)
+
+    def clear_copy_on_writes(self) -> Dict[BlockIndex, List[BlockIndex]]:
+        return self._cow_tracker.clear_cows()
 
 
 class NaiveBlock(Block):

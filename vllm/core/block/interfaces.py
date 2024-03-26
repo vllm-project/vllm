@@ -1,4 +1,4 @@
-from typing import List, Optional, Protocol
+from typing import List, Optional, Protocol, Dict
 from abc import ABC, abstractmethod, abstractproperty
 
 from vllm.utils import Device
@@ -71,12 +71,12 @@ class BlockAllocator(ABC):
     def all_block_ids(self) -> frozenset[int]:
         pass
 
-    class NoFreeBlocksError(ValueError):
+    @abstractmethod
+    def clear_copy_on_writes(self) -> Dict[int, List[int]]:
         pass
 
-    #@abstractmethod
-    #def get_operations(self):
-    #    pass
+    class NoFreeBlocksError(ValueError):
+        pass
 
 
 class DeviceAwareBlockAllocator(ABC):

@@ -353,3 +353,25 @@ def test_cow(block_size: int, sequence_len: int, append_len: int,
     assert allocator.get_num_free_blocks(
         Device.GPU) == num_gpu_blocks - (num_expected_non_cow_blocks +
                                          num_expected_cow_blocks)
+
+    cows = allocator.clear_copy_on_writes()
+    if sequence_len % block_size > 0:
+        # If the last block in the sequence is not full, then when appending we
+        # expect a CoW.
+        assert cows
+
+        cow_block_index = sequence_len // block_size
+        expected_src = static_block_table.physical_block_ids[cow_block_index]
+        expected_dst = appender_block_table.physical_block_ids[cow_block_index]
+
+        assert expected_src in cows
+        assert expected_dst in cows[expected_src]
+    else:
+        # Otherwise, there should be no copy-on-write.
+        assert not cows
+    
+    static_block_table.free()
+    appender_block_table.free()
+
+    # After free, expect all blocks to be freed.
+    assert allocator.get_num_free_blocks(Device.GPU) == num_gpu_blocks

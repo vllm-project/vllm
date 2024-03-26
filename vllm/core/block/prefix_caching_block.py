@@ -135,7 +135,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         special list. If it does not have a hash, let the hashless allocator
         figure it out.
         """
-        # TODO remove this assertion
+        # TODO remove this assertion ?
         assert block.physical_block_index is not None
 
         self._free_block_index_for_block(block.physical_block_index, block)
@@ -207,7 +207,10 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     def cow_block_if_not_appendable(self,
                                     block: Block) -> Optional[BlockIndex]:
         return self._cow_tracker.cow_block_if_not_appendable(block)
-        #return block.physical_block_index
+
+
+    def clear_copy_on_writes(self) -> Dict[BlockIndex, List[BlockIndex]]:
+        return self._cow_tracker.clear_cows()
 
 
 class PrefixCachingBlock(Block):
