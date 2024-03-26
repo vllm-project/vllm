@@ -344,9 +344,8 @@ class AQLMLinearMethod(LinearMethodBase):
         if ingroups == 8 and outgroups == 1 and (
             (bits == 256 and nbooks == 2) or (bits == 65536 and nbooks == 1)):
 
-            # thresholds determined by timings on an A6000
-            m_threshold = 8 if bits == 65536 else 12
-            use_gemv = math.prod(x.shape[:-1]) <= m_threshold
+            # thresholds determined by timings on an A6000, one GPU
+            use_gemv = math.prod(x.shape[:-1]) <= 6
 
             return ops.aqlm_gemm(
                 x,
