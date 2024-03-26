@@ -71,7 +71,7 @@ struct _typeConvert<c10::Half> {
   __device__ static inline packed_hip_type convert(float2 x) { return __float22half2_rn(x); }
 };
 
-#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
 // CUDA_ARCH < 800 does not have BF16 support
 template<>
 struct _typeConvert<c10::BFloat16> {
