@@ -176,7 +176,8 @@ class OpenAIServing:
             request: Union[ChatCompletionRequest, CompletionRequest],
             prompt: Optional[str] = None,
             prompt_ids: Optional[List[int]] = None,
-            truncate_prompt_tokens: Optional[conint(ge=1)] = None) -> List[int]:
+            truncate_prompt_tokens: Optional[conint(ge=1)] = None
+    ) -> List[int]:
         if not (prompt or prompt_ids):
             raise ValueError("Either prompt or prompt_ids should be provided.")
         if (prompt and prompt_ids):
