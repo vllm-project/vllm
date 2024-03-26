@@ -192,7 +192,7 @@ class ModelConfig:
                     f"({self.sparsity}).")
 
     def _verify_quantization(self) -> None:
-        supported_quantization = ["awq", "gptq", "squeezellm", "marlin"]
+        supported_quantization = ["awq", "gptq", "squeezellm", "gptq_marlin", "marlin"]
         rocm_not_supported_quantization = ["awq", "marlin"]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
@@ -211,10 +211,9 @@ class ModelConfig:
                     and hf_quant_config[marlin_format_flag]):
                 hf_quant_method = "marlin"
 
-            # If marlin specified, then use it for GPTQ models
-            # TODO: Remove the check above?
-            if (hf_quant_method == "gptq" and self.quantization == "marlin"):
-                hf_quant_method = "marlin"
+            # Use gptq_marlin if was specified
+            if hf_quant_method == "gptq" and self.quantization == "gptq_marlin":
+                hf_quant_method = "gptq_marlin"
 
             if self.quantization is None:
                 self.quantization = hf_quant_method

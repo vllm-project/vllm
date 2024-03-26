@@ -7,12 +7,14 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.layers.quantization.squeezellm import SqueezeLLMConfig
+from vllm.model_executor.layers.quantization.gptq_marlin import GPTQMarlinConfig
 from vllm.model_executor.layers.quantization.marlin import MarlinConfig
 
 _QUANTIZATION_CONFIG_REGISTRY = {
     "awq": AWQConfig,
     "gptq": GPTQConfig,
     "squeezellm": SqueezeLLMConfig,
+    "gptq_marlin": GPTQMarlinConfig,
     "marlin": MarlinConfig,
 }
 
