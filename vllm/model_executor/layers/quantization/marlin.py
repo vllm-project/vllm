@@ -14,32 +14,34 @@ from magic_wand import (MARLIN_SUPPORTED_NUM_BITS,
                         MARLIN_SUPPORTED_GROUP_SIZES, MARLIN_TILE,
                         MARLIN_MIN_THREAD_N, MARLIN_MIN_THREAD_K,
                         MARLIN_MAX_PARALLEL, get_pack_factor,
-                        marlin_repack_from_gptq, marlin_gemm)
+                        marlin_permute_scales, marlin_repack_from_gptq,
+                        marlin_gemm)
 
 
 class MarlinConfig(QuantizationConfig):
     """Config class for Marlin"""
 
-    def __init__(
-        self,
-        weight_bits: int,
-        group_size: int,
-        desc_act: bool,
-    ) -> None:
+    def __init__(self, weight_bits: int, group_size: int, desc_act: bool,
+                 is_sym: bool) -> None:
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.desc_act = desc_act
+        self.is_sym = is_sym
 
         # Verify
         if self.weight_bits not in MARLIN_SUPPORTED_NUM_BITS:
             raise ValueError(
-                "Got weight_bits = {weight_bits}, but Marlin only supports {MARLIN_SUPPORTED_NUM_BITS}"
+                f"Got weight_bits = {weight_bits}, but Marlin only supports {MARLIN_SUPPORTED_NUM_BITS}"
             )
 
         if self.group_size not in MARLIN_SUPPORTED_GROUP_SIZES:
             raise ValueError(
-                "Got group_size = {group_size}, but Marlin only supports {MARLIN_SUPPORTED_GROUP_SIZES}"
+                f"Got group_size = {group_size}, but Marlin only supports {MARLIN_SUPPORTED_GROUP_SIZES}"
             )
+
+        if not self.is_sym:
+            raise ValueError(
+                "Marlin only supports symmetric quantized weights")
 
         # Init
         self.pack_factor = get_pack_factor(weight_bits)
@@ -78,7 +80,8 @@ class MarlinConfig(QuantizationConfig):
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         desc_act = cls.get_from_keys(config, ["desc_act"])
-        return cls(weight_bits, group_size, desc_act)
+        is_sym = cls.get_from_keys(config, ["sym"])
+        return cls(weight_bits, group_size, desc_act, is_sym)
 
     def get_linear_method(self) -> "MarlinLinearMethod":
         return MarlinLinearMethod(self)
@@ -89,6 +92,13 @@ class MarlinConfig(QuantizationConfig):
 
 class MarlinState(Enum):
     REPACK = enum.auto()
+    READY = enum.auto()
+
+
+class ExllamaState(Enum):
+
+    UNUSED = enum.auto()
+    UNINITIALIZED = enum.auto()
     READY = enum.auto()
 
 
@@ -199,6 +209,20 @@ class MarlinLinearMethod(LinearMethodBase):
             requires_grad=False,
         )
 
+        # Scales
+        scales = Parameter(
+            torch.empty(
+                scales_and_zp_size,
+                output_size_per_partition,
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        set_weight_attrs(scales, {
+            "input_dim": scales_and_zp_input_dim,
+            "output_dim": 1,
+        })
+
         # Quantized zero-points
         qzeros = Parameter(
             torch.empty(
@@ -216,20 +240,6 @@ class MarlinLinearMethod(LinearMethodBase):
                 "pack_factor": self.quant_config.pack_factor,
             })
 
-        # Scales
-        scales = Parameter(
-            torch.empty(
-                scales_and_zp_size,
-                output_size_per_partition,
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
-        )
-        set_weight_attrs(scales, {
-            "input_dim": scales_and_zp_input_dim,
-            "output_dim": 1,
-        })
-
         # Allocate marlin workspace
         max_workspace_size = (
             output_size_per_partition //
@@ -243,8 +253,8 @@ class MarlinLinearMethod(LinearMethodBase):
             "qweight": qweight,
             "g_idx": g_idx,
             "g_idx_sort_indices": g_idx_sort_indices,
-            "qzeros": qzeros,
             "scales": scales,
+            "qzeros": qzeros,
             "workspace": workspace,
             "input_size_per_partition": input_size_per_partition,
             "output_size_per_partition": output_size_per_partition,
@@ -261,19 +271,24 @@ class MarlinLinearMethod(LinearMethodBase):
         reshaped_x = x.reshape(-1, x.shape[-1])
 
         size_m = reshaped_x.shape[0]
-        size_k = weights["input_size_per_partition"]
         size_n = weights["output_size_per_partition"]
-
+        size_k = weights["input_size_per_partition"]
         out_shape = x.shape[:-1] + (size_n, )
 
         if weights["marlin_state"] == MarlinState.REPACK:
+            weights["marlin_state"] = MarlinState.READY
+
             if self.quant_config.desc_act:
                 weights["g_idx_sort_indices"] = torch.argsort(
                     weights["g_idx"]).to(torch.int)
             else:
+                # Reset g_idx related tensors
+                weights["g_idx"] = torch.empty(
+                    0, dtype=torch.int, device=weights["qweight"].device)
                 weights["g_idx_sort_indices"] = torch.empty(
                     0, dtype=torch.int, device=weights["qweight"].device)
 
+            # Repack weights
             weights["qweight"] = marlin_repack_from_gptq(
                 weights["qweight"],
                 weights["g_idx_sort_indices"],
@@ -281,7 +296,10 @@ class MarlinLinearMethod(LinearMethodBase):
                 size_n,
             )
 
-            weights["marlin_state"] = MarlinState.READY
+            # Permute scales
+            weights["scales"] = marlin_permute_scales(
+                weights["scales"], size_k, size_n,
+                self.quant_config.group_size)
 
         output = marlin_gemm(reshaped_x, weights["qweight"], weights["scales"],
                              weights["g_idx"], weights["g_idx_sort_indices"],

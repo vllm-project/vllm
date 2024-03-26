@@ -20,10 +20,13 @@ logger = init_logger(__name__)
 
 
 def adjust_marlin_shard(param, shard_size, shard_offset):
+    # TODO: Remove
+    
     marlin_tile_size = getattr(param, "marlin_tile_size", None)
     if marlin_tile_size is None:
         return shard_size, shard_offset
 
+    raise Exception("error")
     return shard_size * marlin_tile_size, shard_offset * marlin_tile_size
 
 
