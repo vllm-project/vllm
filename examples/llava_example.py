@@ -72,13 +72,19 @@ if __name__ == "__main__":
                         help="image input type")
     args = parser.parse_args()
     # Download from s3
-    s3_bucket_path = "s3://anonymous@air-example-data-2/vllm_opensource_llava/"
+    s3_bucket_path = "s3://air-example-data-2/vllm_opensource_llava/"
     local_directory = "images"
 
     # Make sure the local directory exists or create it
     os.makedirs(local_directory, exist_ok=True)
 
     # Use AWS CLI to sync the directory, assume anonymous access
-    subprocess.check_call(
-        ["aws", "s3", "sync", s3_bucket_path, local_directory])
+    subprocess.check_call([
+        "aws",
+        "s3",
+        "sync",
+        s3_bucket_path,
+        local_directory,
+        "--no-sign-request",
+    ])
     main(args)
