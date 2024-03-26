@@ -331,9 +331,9 @@ void fused_add_rms_norm(
   dim3 block(std::min(hidden_size, max_block_size));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  /*If the tensor types are FP16, try to use the optimized kernel
+  /*If the tensor types are FP16/BF16, try to use the optimized kernel
     with packed + vectorized ops.
-    Max optimization is achieved with a width-8 vector of FP16s
+    Max optimization is achieved with a width-8 vector of FP16/BF16s
     since we can load at most 128 bits at once in a global memory op.
     However, we have to narrow the vectors if the hidden_size does
     not divide 8.

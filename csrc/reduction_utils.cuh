@@ -53,11 +53,8 @@ __inline__ __device__ T blockReduceSum(T val) {
 
     __syncthreads();
 
-    // Only (a subset of) the first warp needs to participate in the last warpReduce
-    if (threadIdx.x < (blockDim.x / float(warpSize))) {
-      val = shared[lane];
-      val = warpReduceSum<T, _nextPow2(maxActiveLanes)>(val);
-    }
+    val = (threadIdx.x < blockDim.x / float(WARP_SIZE)) ? shared[lane] : 0.0f;
+    val = warpReduceSum<T, _nextPow2(maxActiveLanes)>(val);
   } else {
     // A single warpReduce is equal to blockReduce
     val = warpReduceSum<T, _nextPow2(maxBlockSize)>(val);
