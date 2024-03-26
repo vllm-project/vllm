@@ -8,6 +8,14 @@
 #  contains many other potential cuda APIs, that are not allowed during
 #  capturing the CUDA graph. For further details, please check
 # https://discuss.pytorch.org/t/pytorch-cudagraph-with-nccl-operation-failed/199366
+# 
+# Another rejected idea is to write a C/C++ binding for NCCL. It is usually doable,
+# but we often encounter issues related with nccl versions, and need to switch between
+# different versions of NCCL. A C/C++ binding is not flexible enough to handle this.
+# It requires recompilation of the code if we want to switch between different versions.
+# This current implementation, with a pure Python wrapper, is more flexible. We can
+# easily switch between different versions of NCCL by changing the environment variable,
+# or the `so_file` variable in the code.
 # ====================================================
 
 import ctypes
@@ -30,9 +38,13 @@ if so_file:
     logger.info(
         f"Loading nccl from environment variable VLLM_NCCL_SO_PATH={so_file}")
 else:
-    _path = os.path.dirname(os.path.abspath(__file__))
-    so_file = glob.glob(f"{_path}/../../lib/nvidia/nccl/lib/libnccl.so.*")[0]
-    logger.info(f"Loading nccl from vLLM builtin file {so_file}")
+    if torch.cuda.version is not None:
+        so_file = "libnccl.so"
+    elif torch.hip.version is not None:
+        so_file = "librccl.so"
+    else:
+        raise ValueError("NCCL only supports CUDA and ROCm backends.")
+    logger.info(f"Loading nccl from library {so_file}")
 nccl = ctypes.CDLL(so_file)
 
 # === export types and functions from nccl to Python ===
@@ -48,7 +60,7 @@ _c_ncclGetVersion.restype = ctypes.c_int
 _c_ncclGetVersion.argtypes = [ctypes.POINTER(ctypes.c_int)]
 
 
-def ncclGetVersion() -> int:
+def ncclGetVersion() -> str:
     version = ctypes.c_int()
     result = _c_ncclGetVersion(ctypes.byref(version))
     assert result == 0
