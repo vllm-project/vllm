@@ -74,8 +74,10 @@ def test_auto_prefix_caching(model: str, block_size: int, max_num_seqs: int,
                                tokenizer.tokenizer.eos_token_id, lora_request)
 
                 num_blocks = len(prompt_token_ids) // block_size
-                for seq_id, idx in enumerate(range(num_blocks)):
+                for idx in range(num_blocks):
                     hashes[-1][-1].append(seq.hash_of_block(idx))
+
+                seq_id += 1
 
     # Check that hashes made with two prefixes with different first blocks are
     # different everywhere.

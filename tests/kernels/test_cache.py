@@ -21,7 +21,9 @@ NUM_BLOCKS = [1024, 10000]
 
 NUM_MAPPINGS = [256]  # Arbitrary values for testing
 SEEDS = [0]
-DEVICES = [i for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
+]
 KV_CACHE_DTYPE = ["auto", "fp8"]
 
 
@@ -33,7 +35,7 @@ KV_CACHE_DTYPE = ["auto", "fp8"]
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
 @torch.inference_mode()
 def test_copy_blocks(
@@ -103,7 +105,7 @@ def test_copy_blocks(
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
 @torch.inference_mode()
 def test_reshape_and_cache(
@@ -115,7 +117,7 @@ def test_reshape_and_cache(
     num_blocks: int,
     dtype: torch.dtype,
     seed: int,
-    device: int,
+    device: str,
     kv_cache_dtype: str,
 ) -> None:
     if not is_hip() and kv_cache_dtype == "fp8":
@@ -125,8 +127,6 @@ def test_reshape_and_cache(
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
     torch.set_default_device(device)
-    gpu_id = f"cuda:{device}"
-
     # Create a random slot mapping.
     num_slots = block_size * num_blocks
     slot_mapping = random.sample(range(num_slots), num_tokens)
@@ -139,7 +139,7 @@ def test_reshape_and_cache(
     key_caches, value_caches = kv_cache_factory(num_blocks, block_size, 1,
                                                 num_heads, head_size,
                                                 kv_cache_dtype, dtype, seed,
-                                                gpu_id)
+                                                device)
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Clone the KV caches.
@@ -199,7 +199,7 @@ def test_reshape_and_cache(
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
 @torch.inference_mode()
 def test_swap_blocks(
@@ -212,7 +212,7 @@ def test_swap_blocks(
     num_blocks: int,
     dtype: torch.dtype,
     seed: int,
-    device: int,
+    device: str,
     kv_cache_dtype: str,
 ) -> None:
     if kv_cache_dtype == "fp8" and "cpu" in direction:
@@ -269,7 +269,7 @@ def test_swap_blocks(
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_fp8_conversion(
     num_heads: int,
@@ -278,17 +278,16 @@ def test_fp8_conversion(
     num_blocks: int,
     dtype: torch.dtype,
     seed: int,
-    device: int,
+    device: str,
 ) -> None:
     random.seed(seed)
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    gpu_id = f"cuda:{device}"
 
     low = -224.0
     high = 224.0
     shape = (num_blocks, num_heads, head_size, block_size)
-    cache = torch.empty(shape, dtype=dtype, device=gpu_id)
+    cache = torch.empty(shape, dtype=dtype, device=device)
     cache.uniform_(low, high)
 
     cache_fp8 = torch.empty_like(cache, dtype=torch.uint8)
