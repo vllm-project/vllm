@@ -305,9 +305,6 @@ def test_cow(block_size: int, sequence_len: int, append_len: int,
     """
     num_gpu_blocks = 1024
 
-    if allocator_type == "prefix_caching":
-        pytest.skip("not yet passing test")
-
     allocator = CpuGpuBlockAllocator.create(
         allocator_type=allocator_type,
         num_gpu_blocks=num_gpu_blocks,

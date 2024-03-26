@@ -1,7 +1,7 @@
 from typing import List, Iterable, Dict, Optional
 from collections import defaultdict
 
-from vllm.core.block.interfaces import Block
+from vllm.core.block.interfaces import Block, BlockAllocator
 
 BlockIndex = int
 RefCount = int
@@ -40,19 +40,34 @@ class RefCounter:
         assert block_index in self._refcounts
         return self._refcounts[block_index]
 
+    def as_readonly(self) -> "ReadOnlyRefCounter":
+        return ReadOnlyRefCounter(self)
+
+
+class ReadOnlyRefCounter:
+    def __init__(self, refcounter: RefCounter):
+        self._refcounter = refcounter
+
+    def incr(self, block_index: BlockIndex) -> RefCount:
+        raise ValueError("Incr not allowed")
+
+    def decr(self, block_index: BlockIndex) -> RefCount:
+        raise ValueError("Decr not allowed")
+
+    def get(self, block_index: BlockIndex) -> RefCount:
+        return self._refcounter.get(block_index)
+
 
 class CopyOnWriteTracker:
 
     def __init__(
         self,
         refcounter: RefCounter,
-        allocate_new_block_index_for_block,
-        free_block_index_for_block,
+        allocator: BlockAllocator,
     ):
         self._copy_on_writes = defaultdict(list)
         self._refcounter = refcounter
-        self._allocate_new_block_index_for_block = allocate_new_block_index_for_block
-        self._free_block_index_for_block = free_block_index_for_block
+        self._allocator = allocator
 
     def cow_block_if_not_appendable(self,
                                     block: Block) -> Optional[BlockIndex]:
@@ -67,16 +82,25 @@ class CopyOnWriteTracker:
 
         return block_index
 
+    def _copy_on_write(self, block: Block,
+                       src_block_index: BlockIndex) -> BlockIndex:
+        # Decrement refcount of the old block.
+        self._allocator.free(block)
+
+        # Allocate a fresh new block.
+        dst_block_index = self._allocator.allocate_mutable(
+            prev_block=block.prev_block).physical_block_index
+
+        # Track src/dst copy.
+        self._copy_on_writes[src_block_index].append(dst_block_index)
+
+        return dst_block_index
+
+
     def clear_cows(self) -> Dict[BlockIndex, List[BlockIndex]]:
         cows = dict(self._copy_on_writes)
         self._copy_on_writes.clear()
         return cows
-
-    def _copy_on_write(self, block: Block,
-                       src_block_index: BlockIndex) -> BlockIndex:
-        self._free_block_index_for_block(src_block_index, block)
-        dst_block_index = self._allocate_new_block_index_for_block(block)
-        self._copy_on_writes[src_block_index].append(dst_block_index)
 
 
 def get_all_blocks_recursively(last_block: Block) -> List[Block]:

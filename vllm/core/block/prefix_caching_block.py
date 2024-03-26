@@ -33,15 +33,10 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         self._block_size = block_size
         self._refcounter = self._hashless_allocator.refcounter
 
-        # TODO: need to modify semantics of CopyOnWriteTracker
-        # It needs to have the prefix hash (block) as well
-        # so we need to have something like _allocate_block_index_for_block
-        # and _free_block_index_for_block
-        #self._cow_tracker = CopyOnWriteTracker(
-        #    self._refcounter,
-        #    self._allocate_new_block_index,
-        #    self._free_block_index_for_block,
-        #)
+        self._cow_tracker = CopyOnWriteTracker(
+            refcounter=self._refcounter.as_readonly(),
+            allocator=self,
+        )
 
     # Implements Block.Factory.
     def _create_block(
@@ -211,7 +206,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
     def cow_block_if_not_appendable(self,
                                     block: Block) -> Optional[BlockIndex]:
-        return block.physical_block_index
+        return self._cow_tracker.cow_block_if_not_appendable(block)
+        #return block.physical_block_index
 
 
 class PrefixCachingBlock(Block):
@@ -236,6 +232,7 @@ class PrefixCachingBlock(Block):
             block_size=block_size,
             physical_block_index=physical_block_index,
             allocator=prefix_caching_allocator,
+            _cow_target=self,
         )
 
     def append_token_ids(self, token_ids: List[int]) -> None:
@@ -307,7 +304,8 @@ class PrefixCachingBlock(Block):
         self._cached_content_hash = PrefixCachingBlock.hash_block_tokens(
             is_first_block,
             prev_block_hash,
-            cur_block_token_ids=self._block.token_ids)
+            #cur_block_token_ids=self._block.token_ids)
+            cur_block_token_ids=self.token_ids)
         return self._cached_content_hash
 
     @staticmethod

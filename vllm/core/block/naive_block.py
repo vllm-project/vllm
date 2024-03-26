@@ -7,10 +7,79 @@ from vllm.core.block.common import RefCounter, CopyOnWriteTracker, get_all_block
 BlockIndex = int
 Refcount = int
 
+"""
+Freelist
+    - has refcount
+    - allocate(block)
+        - [prefix caching] look up existing by content
+        - [naive] always allocate new
+        - policy to choose which element in freelist to allocate
+        - increment refcount
+    - free(block)
+        - [prefix caching] 
+
+PrefixCachingAllocator
+
+    - allocate
+        - try content-based where refcount > 0
+        - else, try hashless one.
+        - else, try refcount=0 content-based one
+        - else, fail.
+
+When a full block goes to refcount 1->0, it is added to freelist
+When a full block goes to refcount 0->1, it is removed from the freelist
+Initial allocation attempts fullblock iff refcount > 0
+Final allocation attempts fullblock iff refcount == 0
+
+
+Seems the layers are reversed -- refcounting should be above free/allocate
+    decr(block_index)
+        if full
+            if new refcount == 0:
+                add to hashful freelist
+            else:
+                no op
+        else:
+            add to hashless freelist
+
+    incr(block_index)
+        if full:
+            if new refcount == 1:
+                remove from hashful freelist
+            else:
+                no op
+        else:
+            if new refcount == 1:
+                remove from hashless freelist
+            else:
+                no op
+
+
+lookup(block) -> Optional[block_index]
+    see if there is an existing mapping from block content to block index
+
+
+new() -> block_index:
+    take from freelist
+
+
+allocate(block) -> block_index:
+    maybe_block_index = lookup(block)
+    if maybe_block_index:
+        refcounter.increment(maybe_block_index) --> moves a block index from freelist.
+        return block_index
+
+    block_index = new() --> selects a block index from freelist.
+    refcounter.increment(block_index) --> moves a block index from freelist.
+    return block_index
+
+
+free(block_index):
+    refcounter.decrement(block_index) --> moves block index back to freelist.
+
+"""
 
 class NaiveBlockAllocator(BlockAllocator):
-    T = TypeVar('T', bound=Block)
-
     def __init__(
         self,
         create_block: Block.Factory,
@@ -31,9 +100,8 @@ class NaiveBlockAllocator(BlockAllocator):
         self._block_size = block_size
 
         self._cow_tracker = CopyOnWriteTracker(
-            self._refcounter,
-            lambda _: self._allocate_new_block_index(),
-            lambda block_index, _: self._free_block_index(block_index),
+            refcounter=self._refcounter.as_readonly(),
+            allocator=self,
         )
 
     def allocate_immutable(self, prev_block: Optional[Block],
@@ -115,12 +183,14 @@ class NaiveBlock(Block):
                  token_ids: List[int],
                  block_size: int,
                  allocator: BlockAllocator,
-                 physical_block_index: Optional[int] = None):
+                 physical_block_index: Optional[int] = None,
+                 _cow_target: Optional[Block] = None):
         self._token_ids = []
         self._block_size = block_size
         self._prev_block = prev_block
         self._physical_block_index = physical_block_index
         self._allocator = allocator
+        self._cow_target = _cow_target if _cow_target is not None else self
 
         self._append_token_ids_no_cow(token_ids)
 
@@ -129,7 +199,7 @@ class NaiveBlock(Block):
 
         if self._physical_block_index is not None:
             self._physical_block_index = self._allocator.cow_block_if_not_appendable(
-                self)
+                self._cow_target)
 
     def _append_token_ids_no_cow(self, token_ids: List[int]) -> None:
         assert self.num_empty_slots >= len(token_ids)
