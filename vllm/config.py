@@ -527,7 +527,7 @@ class SchedulerConfig:
         max_num_batched_tokens: Optional[int],
         max_num_seqs: int,
         max_model_len: int,
-        use_v2_block_manager: bool,
+        use_v2_block_manager: bool = False,
         delay_factor: float = 0.0,
     ) -> None:
         if max_num_batched_tokens is not None:

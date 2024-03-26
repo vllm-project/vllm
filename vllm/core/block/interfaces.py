@@ -80,7 +80,8 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def get_common_computed_block_ids(self, seq_block_ids: List[List[int]]) -> List[int]:
+    def get_common_computed_block_ids(
+            self, seq_block_ids: List[List[int]]) -> List[int]:
         pass
 
     class NoFreeBlocksError(ValueError):
@@ -120,5 +121,6 @@ class DeviceAwareBlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def get_common_computed_block_ids(self, seq_block_ids: List[List[int]]) -> List[int]:
+    def get_common_computed_block_ids(
+            self, seq_block_ids: List[List[int]]) -> List[int]:
         pass

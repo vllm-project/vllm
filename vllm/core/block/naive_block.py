@@ -9,6 +9,7 @@ Refcount = int
 
 
 class NaiveBlockAllocator(BlockAllocator):
+
     def __init__(
         self,
         create_block: Block.Factory,
@@ -115,7 +116,8 @@ class NaiveBlockAllocator(BlockAllocator):
         """
         pass
 
-    def get_common_computed_block_ids(self, seq_block_ids: List[List[int]]) -> List[int]:
+    def get_common_computed_block_ids(
+            self, seq_block_ids: List[List[int]]) -> List[int]:
         """Determine blocks that can be skipped in prefill.
 
         Since the naive allocator does not support prefix caching, always return

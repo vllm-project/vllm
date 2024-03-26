@@ -4,7 +4,7 @@ Run `pytest tests/prefix_caching/test_prefix_caching.py`.
 """
 import pytest
 
-from vllm.core.block_manager import CachedBlockAllocator
+from vllm.core.block_manager_v1 import CachedBlockAllocator
 from vllm.utils import Device
 
 

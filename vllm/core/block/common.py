@@ -45,6 +45,7 @@ class RefCounter:
 
 
 class ReadOnlyRefCounter:
+
     def __init__(self, refcounter: RefCounter):
         self._refcounter = refcounter
 
@@ -95,7 +96,6 @@ class CopyOnWriteTracker:
         self._copy_on_writes[src_block_index].append(dst_block_index)
 
         return dst_block_index
-
 
     def clear_cows(self) -> Dict[BlockIndex, List[BlockIndex]]:
         cows = dict(self._copy_on_writes)

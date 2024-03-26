@@ -99,8 +99,7 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def get_common_computed_block_ids(self,
-                                      seqs: List[Sequence]) -> List[int]:
+    def get_common_computed_block_ids(self, seqs: List[Sequence]) -> List[int]:
         pass
 
     @abstractmethod

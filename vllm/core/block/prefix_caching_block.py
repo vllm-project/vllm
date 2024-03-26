@@ -210,7 +210,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                                     block: Block) -> Optional[BlockIndex]:
         return self._cow_tracker.cow_block_if_not_appendable(block)
 
-
     def clear_copy_on_writes(self) -> Dict[BlockIndex, List[BlockIndex]]:
         return self._cow_tracker.clear_cows()
 
@@ -220,7 +219,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # TODO Track computed blocks.
         pass
 
-    def get_common_computed_block_ids(self, seq_block_ids: List[List[int]]) -> List[int]:
+    def get_common_computed_block_ids(
+            self, seq_block_ids: List[List[int]]) -> List[int]:
         """Return the block ids that are common for a given sequence group.
 
         Used in prefill (can skip prefill of some blocks).

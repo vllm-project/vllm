@@ -369,12 +369,13 @@ def test_cow(block_size: int, sequence_len: int, append_len: int,
     else:
         # Otherwise, there should be no copy-on-write.
         assert not cows
-    
+
     static_block_table.free()
     appender_block_table.free()
 
     # After free, expect all blocks to be freed.
     assert allocator.get_num_free_blocks(Device.GPU) == num_gpu_blocks
+
 
 @pytest.mark.parametrize("block_size", [8])
 @pytest.mark.parametrize("sequence_len", [1, 16, 129])
@@ -382,8 +383,9 @@ def test_cow(block_size: int, sequence_len: int, append_len: int,
 @pytest.mark.parametrize("lookahead_slots", [1, 16, 129])
 @pytest.mark.parametrize("appender", ["forked", "original"])
 @pytest.mark.parametrize("allocator_type", ["naive", "prefix_caching"])
-def test_cow_lookahead_simple(block_size: int, sequence_len: int, append_len: int,
-             lookahead_slots: int, allocator_type: str, appender: str):
+def test_cow_lookahead_simple(block_size: int, sequence_len: int,
+                              append_len: int, lookahead_slots: int,
+                              allocator_type: str, appender: str):
     """Similar to test_cow, except with lookahead allocation. The assertions are
     less rigorous due to the complexity of the property under test.
     """
@@ -444,7 +446,7 @@ def test_cow_lookahead_simple(block_size: int, sequence_len: int, append_len: in
 
         assert expected_src in cows
         assert expected_dst in cows[expected_src]
-    
+
     static_block_table.free()
     appender_block_table.free()
 

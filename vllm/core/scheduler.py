@@ -383,7 +383,8 @@ class Scheduler:
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
                 self.block_manager.access_all_blocks_in_seq(seq, now)
 
-            common_computed_block_nums = self.block_manager.get_common_computed_block_ids(seq_group.get_seqs(status=SequenceStatus.RUNNING))
+            common_computed_block_nums = self.block_manager.get_common_computed_block_ids(
+                seq_group.get_seqs(status=SequenceStatus.RUNNING))
 
             seq_group_metadata = SequenceGroupMetadata(
                 request_id=seq_group.request_id,
@@ -396,7 +397,6 @@ class Scheduler:
                 state=seq_group.state,
             )
             seq_group_metadata_list.append(seq_group_metadata)
-
 
         # Now that the batch has been created, we can assume all blocks in the
         # batch will have been computed before the next scheduling invocation.

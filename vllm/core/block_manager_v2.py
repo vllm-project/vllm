@@ -162,8 +162,11 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         This method determines which blocks can be safely skipped for all
         sequences in the sequence group.
         """
-        seq_block_ids = [self.block_tables[seq.seq_id].physical_block_ids for seq in seqs]
-        return self.block_allocator.get_common_computed_block_ids(seq_block_ids)
+        seq_block_ids = [
+            self.block_tables[seq.seq_id].physical_block_ids for seq in seqs
+        ]
+        return self.block_allocator.get_common_computed_block_ids(
+            seq_block_ids)
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         src_block_table = self.block_tables[parent_seq.seq_id]
