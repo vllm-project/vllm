@@ -131,8 +131,6 @@ class CachedBlockAllocator(BlockAllocatorBase):
         # have been stored in block manager's 'cached_blocks' dict.
         # These cached blocks doesn't need allocate again, reducing
         # the memory requirement during sequence allocation.
-        if not self.enable_caching:
-            return 0
         num_cached_blocks = 0
         for logical_idx in range(len(seq.logical_token_blocks)):
             block_hash = seq.hash_of_block(logical_idx)
@@ -153,8 +151,6 @@ class CachedBlockAllocator(BlockAllocatorBase):
         #    sequence's logical blocks.
         # Only the blocks satisfy the above three conditions are computed
         # blocks, which can be treated as prefix cache during prefilling
-        if not self.enable_caching:
-            return 0
         num_computed_blocks = 0
         # Align with https://github.com/vllm-project/vllm/pull/3239
         # The last logical block always needs to be computed again
@@ -598,17 +594,26 @@ class BlockSpaceManager:
         return self.cpu_allocator.get_num_free_blocks()
 
     def get_num_cached_blocks(self, seq: Sequence) -> int:
-        return self.gpu_allocator.get_num_cached_blocks(seq)
+        if self.enable_caching:
+            return self.gpu_allocator.get_num_cached_blocks(seq)
+        else:
+            return 0
 
     def get_num_computed_blocks(self, seq: Sequence) -> int:
-        return self.gpu_allocator.get_num_computed_blocks(seq)
+        if self.enable_caching:
+            return self.gpu_allocator.get_num_computed_blocks(seq)
+        else:
+            return 0
 
     def get_num_computed_tokens(self, seq: Sequence) -> int:
         """Return the number of tokens that are already computed.
 
         NOTE: This excludes tokens from the last blocks.
         """
-        return self.block_size * self.get_num_computed_blocks(seq)
+        if self.enable_caching:
+            return self.block_size * self.get_num_computed_blocks(seq)
+        else:
+            return 0
 
     def access_all_blocks_in_seq(
         self,
