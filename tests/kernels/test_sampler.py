@@ -1,15 +1,15 @@
 import gc
 
-import torch
 import pytest
+import torch
 import triton
 import triton.language as tl
 
 from vllm.model_executor.layers.ops.sample import (
-    _uniform_to_exponential, sample, get_num_triton_sampler_splits,
-    MAX_TRITON_N_COLS)
-from vllm.model_executor.utils import set_random_seed
+    MAX_TRITON_N_COLS, _uniform_to_exponential, get_num_triton_sampler_splits,
+    sample)
 from vllm.model_executor.sampling_metadata import SamplingTensors
+from vllm.model_executor.utils import set_random_seed
 
 SINGLE_SPLIT_VOCAB_SIZE = 32000  # llama/mistral/mixtral vocab size
 MULTI_SPLIT_VOCAB_SIZE = MAX_TRITON_N_COLS + 100
