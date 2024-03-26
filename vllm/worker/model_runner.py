@@ -15,7 +15,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.parallel_utils import pynccl_utils, custom_all_reduce
+from vllm.model_executor.parallel_utils import custom_all_reduce, pynccl_utils
 from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
 from vllm.model_executor.parallel_utils.parallel_state import (
@@ -948,7 +948,8 @@ class CUDAGraphRunner:
 
 @contextlib.contextmanager
 def _maybe_pynccl():
-    if pynccl_utils.is_initialized() and not custom_all_reduce.is_initialized():
+    if pynccl_utils.is_initialized(
+    ) and not custom_all_reduce.is_initialized():
         with with_pynccl_for_all_reduce():
             yield
     else:
