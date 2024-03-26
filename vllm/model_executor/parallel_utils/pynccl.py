@@ -10,15 +10,16 @@
 # https://discuss.pytorch.org/t/pytorch-cudagraph-with-nccl-operation-failed/199366
 # ====================================================
 
-# ===================== import region =====================
-import torch
 import ctypes
-import torch.distributed as dist
-from torch.distributed import ReduceOp
 import datetime
-import os
 import glob
 import logging
+import os
+
+# ===================== import region =====================
+import torch
+import torch.distributed as dist
+from torch.distributed import ReduceOp
 
 logger = logging.getLogger(__name__)
 

@@ -1,28 +1,27 @@
 import contextlib
 import time
-from typing import Dict, List, Optional, Tuple, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.config import (DeviceConfig, ModelConfig, LoRAConfig, ParallelConfig,
+from vllm.config import (DeviceConfig, LoRAConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.logger import init_logger
+from vllm.lora.layers import LoRAMapping
+from vllm.lora.request import LoRARequest
+from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import InputMetadata, SamplingMetadata
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.parallel_utils import pynccl_utils
+from vllm.model_executor.parallel_utils import custom_all_reduce, pynccl_utils
 from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
 from vllm.model_executor.parallel_utils.parallel_state import (
     with_pynccl_for_all_reduce)
-from vllm.model_executor.parallel_utils import custom_all_reduce
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
-from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
-from vllm.lora.layers import LoRAMapping
-from vllm.lora.request import LoRARequest
-from vllm.utils import (async_tensor_h2d, CudaMemoryProfiler,
+from vllm.utils import (CudaMemoryProfiler, async_tensor_h2d,
                         is_pin_memory_available, make_tensor_with_pad,
                         maybe_expand_dim)
 

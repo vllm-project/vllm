@@ -1,13 +1,13 @@
 # this script is not run with `pytest`.
 # It is run with `torchrun`.
-import os
 import multiprocessing
+import os
+
 import pytest
 import torch
-from vllm.model_executor.parallel_utils.pynccl import (
-    NCCLCommunicator,
-    ncclGetUniqueId,
-)
+
+from vllm.model_executor.parallel_utils.pynccl import (NCCLCommunicator,
+                                                       ncclGetUniqueId)
 
 
 def distributed_run(fn, world_size):

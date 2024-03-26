@@ -1,17 +1,15 @@
 import contextlib
 import logging
-import torch
-
 from typing import Optional
+
+import torch
 from torch.distributed import ReduceOp
 
 logger = logging.getLogger(__name__)
 
 try:
-    from vllm.model_executor.parallel_utils.pynccl import (
-        NCCLCommunicator,
-        ncclGetVersion,
-    )
+    from vllm.model_executor.parallel_utils.pynccl import (NCCLCommunicator,
+                                                           ncclGetVersion)
     logger.info(f"vLLM is using nccl=={ncclGetVersion()}")
 except Exception as e:
     # in non-NVIDIA environments, we can't import the nccl module
