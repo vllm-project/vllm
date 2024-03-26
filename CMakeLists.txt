@@ -152,9 +152,6 @@ set(VLLM_EXT_SRC
   "csrc/quantization/gptq/q_gemm.cu"
   "csrc/cuda_utils_kernels.cu"
   "csrc/moe_align_block_size_kernels.cu"
-  "csrc/custom/custom_kernels.cu"
-  "csrc/custom/fused_kernels.cu"
-  "csrc/custom/custom.cpp"
   "csrc/pybind.cpp")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
@@ -169,6 +166,26 @@ define_gpu_extension_target(
   DESTINATION vllm
   LANGUAGE ${VLLM_GPU_LANG}
   SOURCES ${VLLM_EXT_SRC}
+  COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+  ARCHITECTURES ${VLLM_GPU_ARCHES}
+  WITH_SOABI)
+
+
+#
+# custom extension
+#
+
+set(CUSTOM_SRC
+"csrc/custom/custom_kernels.cu"
+"csrc/custom/fused_kernels.cu"
+"csrc/custom/custom.cu"
+)
+
+define_gpu_extension_target(
+  custom_ops
+  DESTINATION vllm
+  LANGUAGE ${VLLM_GPU_LANG}
+  SOURCES ${CUSTOM_SRC}
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
   ARCHITECTURES ${VLLM_GPU_ARCHES}
   WITH_SOABI)
@@ -271,6 +288,7 @@ add_custom_target(default)
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   message(STATUS "Enabling C extension.")
   add_dependencies(default _C)
+  add_dependencies(default custom_ops)
 endif()
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")

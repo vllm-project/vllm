@@ -325,7 +325,7 @@ def get_requirements() -> List[str]:
     return requirements
 
 
-ext_modules = []
+ext_modules = [CMakeExtension(name="vllm.custom_ops")]
 
 if _is_cuda():
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))
