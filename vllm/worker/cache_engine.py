@@ -19,9 +19,7 @@ class CacheEngine:
     as swapping and copying.
     """
 
-    def __init__(self, 
-                 cache_config: CacheConfig, 
-                 model_config: ModelConfig,
+    def __init__(self, cache_config: CacheConfig, model_config: ModelConfig,
                  parallel_config: ParallelConfig,
                  device_config: DeviceConfig) -> None:
         self.cache_config = cache_config

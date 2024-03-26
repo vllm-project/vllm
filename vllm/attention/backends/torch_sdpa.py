@@ -93,6 +93,8 @@ class TorchSDPABackendImpl(AttentionImpl):
             assert len(alibi_slopes) == num_heads
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
+        self.need_mask = (self.alibi_slopes is not None
+                          or self.sliding_window is not None)
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -142,7 +144,7 @@ class TorchSDPABackendImpl(AttentionImpl):
                     value = value.repeat_interleave(self.num_queries_per_kv,
                                                     dim=1)
 
-                if attn_metadata.attn_bias is None:
+                if self.need_mask and attn_metadata.attn_bias is None:
                     att_masks: List[torch.Tensor] = []
                     if self.alibi_slopes is not None:
                         att_masks = _make_alibi_bias(
@@ -161,15 +163,34 @@ class TorchSDPABackendImpl(AttentionImpl):
                 key = key.movedim(0, key.dim() - 2)
                 value = value.movedim(0, value.dim() - 2)
 
-                out = torch.nn.functional.scaled_dot_product_attention(
-                    query,
-                    key,
-                    value,
-                    attn_mask=attn_metadata.attn_bias,
-                    dropout_p=0.0,
-                    is_causal=False,
-                    scale=self.scale).movedim(query.dim() - 2, 0).contiguous()
-                output = out.view_as(query)
+                if self.need_mask:
+                    output = torch.nn.functional.scaled_dot_product_attention(
+                        query,
+                        key,
+                        value,
+                        attn_mask=attn_metadata.attn_bias,
+                        dropout_p=0.0,
+                        is_causal=False,
+                        scale=self.scale).movedim(query.dim() - 2,
+                                                  0).contiguous()
+                else:
+                    start = 0
+                    output = torch.empty(
+                        (num_tokens, self.num_heads, self.head_size),
+                        dtype=query.dtype)
+                    for prompt_len in attn_metadata.prompt_lens:
+                        end = start + prompt_len
+                        output[
+                            start:
+                            end, :, :] = torch.nn.functional.scaled_dot_product_attention(
+                                query[:, start:end, :],
+                                key[:, start:end, :],
+                                value[:, start:end, :],
+                                attn_mask=None,
+                                dropout_p=0.0,
+                                is_causal=True,
+                                scale=self.scale).movedim(query.dim() - 2, 0)
+                        start = end
             else:
                 # prefix-enabled attention
                 raise RuntimeError(
