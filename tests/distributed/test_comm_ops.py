@@ -2,6 +2,8 @@
 
 Run `pytest tests/distributed/test_comm_ops.py --forked`.
 """
+import os
+
 import pytest
 import ray
 import torch
@@ -16,7 +18,9 @@ from vllm.test_utils import (init_test_distributed_environment,
 @ray.remote(num_gpus=1, max_calls=1)
 def all_reduce_test_worker(tensor_parallel_size: int, rank: int,
                            distributed_init_port: str):
-    import os
+    # it is important to delete the CUDA_VISIBLE_DEVICES environment variable
+    # so that each worker can see all the GPUs
+    # they will be able to set the device to the correct GPU
     del os.environ["CUDA_VISIBLE_DEVICES"]
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
@@ -36,7 +40,9 @@ def all_reduce_test_worker(tensor_parallel_size: int, rank: int,
 @ray.remote(num_gpus=1, max_calls=1)
 def all_gather_test_worker(tensor_parallel_size: int, rank: int,
                            distributed_init_port: str):
-    import os
+    # it is important to delete the CUDA_VISIBLE_DEVICES environment variable
+    # so that each worker can see all the GPUs
+    # they will be able to set the device to the correct GPU
     del os.environ["CUDA_VISIBLE_DEVICES"]
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
@@ -62,7 +68,9 @@ def all_gather_test_worker(tensor_parallel_size: int, rank: int,
 @ray.remote(num_gpus=1, max_calls=1)
 def broadcast_tensor_dict_test_worker(tensor_parallel_size: int, rank: int,
                                       distributed_init_port: str):
-    import os
+    # it is important to delete the CUDA_VISIBLE_DEVICES environment variable
+    # so that each worker can see all the GPUs
+    # they will be able to set the device to the correct GPU
     del os.environ["CUDA_VISIBLE_DEVICES"]
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
