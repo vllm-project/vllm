@@ -2,9 +2,9 @@
 from pathlib import Path
 from typing import Union
 
+import fire
 import numpy as np
 import torch
-import fire
 
 
 def _export_sym(key_stats: dict,

@@ -173,9 +173,9 @@ def test_paged_attention(
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # KV quant parameters for kv_cache_dtype=int8.
-    # NOTE(zhangying): The four parameters only work when kv_cache_dtype is int8.
+    # NOTE(zhangying): These parameters only work when kv_cache_dtype is int8.
     # They have no influence on other kv_cache_dtypes, like auto and fp8_e5m2.
-    # For Llama-13B, we find that the key scale distribution range is [0.05, 0.15],
+    # For Llama-13B, we find that the key scale distribution in [0.05, 0.15],
     # the value scale distribution range is [0.005, 0.10],
     # the key zero point distribution range is [-1.5, 1.5],
     # the value zero point distribution range is [-2.0, 2.0].
@@ -285,9 +285,10 @@ def test_paged_attention(
     atol = get_default_atol(output) if is_hip() else 1e-3
     rtol = get_default_rtol(output) if is_hip() else 1e-5
 
-    # NOTE(zhaoyang): FP8 KV Cache will introduce quantization error,
+    # NOTE(zhaoyang): FP8 KV Cache introduces quantization error,
     # so we use a relaxed tolerance for the test.
-    # NOTE(zhangying): INT8 KV Cache will also introduce quantization error like FP8 KV Cache,
+    # NOTE(zhangying): INT8 KV Cache introduces quantization error
+    # like FP8 KV Cache,
     # so we use a relaxed tolerance for the test.
     if kv_cache_dtype == "fp8_e5m2":
         atol, rtol = 1e-2, 1e-5

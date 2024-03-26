@@ -151,7 +151,7 @@ class RayGPUExecutor(ExecutorBase):
         device_config = copy.deepcopy(self.device_config)
         lora_config = copy.deepcopy(self.lora_config)
         kv_cache_dtype = self.cache_config.cache_dtype
-        kv_quant_params_path=self.cache_config.cache_quant_params_path
+        kv_quant_params_path = self.cache_config.cache_quant_params_path
 
         # Initialize the actual workers with the Worker class.
         for rank, (worker, (node_id, _)) in enumerate(

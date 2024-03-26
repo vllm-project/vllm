@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from typing import Dict, Union
+
 import torch
 from torch import nn
 
@@ -121,9 +122,9 @@ class KVCacheObserver(GlobalAvailMixin):
             # layout: (bs, heads, seqlen, dims)
             x = x.transpose(1, 2)
         elif x.size(2) != self.num_head or x.size(3) != self.head_dim:
-            raise RuntimeError(
-                'Unexpected dimensions for x, expected (bs, num_head, seqlen, head_dim) or (bs, seqlen, num_head, head_dim)'
-            )
+            raise RuntimeError('Unexpected dimensions for x, '
+                               'expected (bs, num_head, seqlen, head_dim) '
+                               'or (bs, seqlen, num_head, head_dim)')
 
         cur_max = x.flatten(0, 1).max(0)[0].cpu()
         cur_min = x.flatten(0, 1).min(0)[0].cpu()

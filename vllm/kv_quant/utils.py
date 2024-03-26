@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from typing import Any, Dict, List, Tuple, Union
+
 import torch
 from torch import nn
 

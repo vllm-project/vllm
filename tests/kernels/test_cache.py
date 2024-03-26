@@ -141,7 +141,8 @@ def test_reshape_and_cache(
     cloned_value_cache = value_cache.clone()
 
     # Call the reshape_and_cache kernel.
-    # NOTE(zhangying): The params `1.0, 0.0, 1.0, 0.0` are to fit function argument list.
+    # NOTE(zhangying): The params `1.0, 0.0, 1.0, 0.0`
+    # are to fit function argument list.
     # They only work when the kv_cache_dtype is int8.
     cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
                                 slot_mapping, "auto", 1.0, 0.0, 1.0, 0.0)

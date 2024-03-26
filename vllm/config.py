@@ -319,7 +319,8 @@ class CacheConfig:
             vLLM execution.
         swap_space: Size of the CPU swap space per GPU (in GiB).
         cache_dtype: Data type for kv cache storage.
-        cache_quant_params_path: Path to scales and zero points of kv cache quantizaiton when cache_dtype is int8.
+        cache_quant_params_path: Path to quant params of kv cache quantizaiton 
+            when cache_dtype is int8.
     """
 
     def __init__(

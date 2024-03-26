@@ -135,9 +135,8 @@ if __name__ == '__main__':
         "--kv-quant-params-path",
         type=str,
         default=None,
-        help=
-        'Path to scales and zero points of kv cache quantizaiton when kv cache dtype is int8.'
-    )
+        help='Path to scales and zero points of kv cache quantizaiton '
+        'when kv cache dtype is int8.')
     parser.add_argument(
         '--profile',
         action='store_true',

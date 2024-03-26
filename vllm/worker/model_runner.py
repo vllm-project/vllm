@@ -89,7 +89,7 @@ class ModelRunner:
         self.kv_quant_params = self.load_kv_quant_params(
             model_config,
             kv_quant_params_path) if self.kv_cache_dtype == "int8" else None
-        
+
         self.vision_language_config = vision_language_config
 
         self.attn_backend = get_attn_backend(
@@ -104,14 +104,15 @@ class ModelRunner:
         for arch in architectures:
             if arch not in ["LlamaForCausalLM", "LLaMAForCausalLM"]:
                 raise ValueError(
-                    f"KV CACHE INT8 is not supported for model architectures {arch} for now. "
-                    f"Supported architectures: LlamaForCausalLM and LLaMAForCausalLM."
-                )
+                    "KV CACHE INT8 is not supported for model "
+                    f"architectures {arch} for now. Supported architectures: "
+                    "LlamaForCausalLM, LLaMAForCausalLM.")
         num_layers = model_config.hf_config.num_hidden_layers
         kv_quant_params = []
         if kv_quant_params_path is not None:
             for i in range(num_layers):
-                path = kv_quant_params_path + f"/layers.{i}.past_kv_scale.0.weight"
+                path = kv_quant_params_path \
+                     + f"/layers.{i}.past_kv_scale.0.weight"
                 kv_quant_param = list(np.fromfile(path, dtype=np.float32))
                 kv_quant_params.append(kv_quant_param)
         return kv_quant_params

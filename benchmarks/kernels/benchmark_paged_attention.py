@@ -75,9 +75,9 @@ def main(
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Prepare kv quant parameters for kv_cache_dtype=int8.
-    # NOTE(zhangying): The four parameters only work when kv_cache_dtype is int8.
+    # NOTE(zhangying): These parameters only work when kv_cache_dtype is int8.
     # They have no influence on other kv_cache_dtypes, like auto and fp8_e5m2.
-    # For Llama-13B, we find that the key scale distribution range is [0.05, 0.15],
+    # For Llama-13B, we find that the key scale distribution in [0.05, 0.15],
     # the value scale distribution range is [0.005, 0.10],
     # the key zero point distribution range is [-1.5, 1.5],
     # the value zero point distribution range is [-2.0, 2.0].

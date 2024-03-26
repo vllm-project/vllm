@@ -12,9 +12,9 @@ from accelerate import (infer_auto_device_map, init_empty_weights,
                         load_checkpoint_in_model)
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
+from vllm.kv_quant.calib_dataloader import get_calib_loaders
 from vllm.kv_quant.calibration import CalibrationContext
 from vllm.kv_quant.utils import collect_target_modules
-from vllm.kv_quant.calib_dataloader import get_calib_loaders
 
 LAYER_TYPE_MAP = {
     'InternLMForCausalLM': 'InternLMDecoderLayer',
