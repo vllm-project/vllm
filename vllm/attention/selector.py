@@ -31,12 +31,13 @@ def get_attn_backend(dtype: torch.dtype) -> AttentionBackend:
 
 
 def _which_attn_to_use(dtype: torch.dtype) -> str:
-    """Returns if and which flash attention to use.
+    """Returns which flash attention backend to use.
 
     Returns:
-        int: 0 for Xformers, 1 for default implementation, 2 for triton implementation.
+        str: XFormers, FlashAttention, or FlashAttentionTriton
     """
-    
+     
+    # NOTE: Defaulting to triton FA for AMD cards.
     use_flash_attn_triton = os.environ.get('VLLM_USE_FLASH_ATTN_TRITON', "True").lower() in ("true", "1")
     if not is_hip() and torch.cuda.get_device_capability()[0] < 8:
         # Volta and Turing NVIDIA GPUs.

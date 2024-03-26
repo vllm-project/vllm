@@ -440,22 +440,15 @@ def attn_fwd(
     # TODO: Do the boundary check optionally. 
     tl.store(O_block_ptr, acc, boundary_check=(0,1))
 
-def check_args(q, k, v, o, max_seqlens):
-    pass
+def check_args(q, k, v, o, varlen=True, max_seqlens=None, cu_seqlens_q=None, cu_seqlens_k=None):
     assert q.dim() == k.dim() and q.dim() == v.dim()
-
-    if self.varlen:
+    if varlen:
         assert q.dim() == 3
         total_q, nheads_q, head_size = q.shape
         total_k, nheads_k, _ = k.shape
-        assert self.cu_seqlens_q is not None
-        assert self.cu_seqlens_k is not None
-        assert len(self.cu_seqlens_q) == len(self.cu_seqlens_k)
-        # TODO: Remove once bias is supported with varlen
-        assert self.bias == None
-        # TODO:Remove once dropout is supported with varlen
-        assert self.dropout_p == 0.0
-        assert not self.return_encoded_softmax
+        assert cu_seqlens_q is not None
+        assert cu_seqlens_k is not None
+        assert len(cu_seqlens_q) == len(cu_seqlens_k)
     else:
         assert q.dim() == 4
         batch, nheads_q, seqlen_q, head_size = q.shape
@@ -475,7 +468,8 @@ class _attention(torch.autograd.Function):
     def forward(ctx, q, k, v, o, cu_seqlens_q, cu_seqlens_k, max_seqlens_q, max_seqlens_k, causal=False, sm_scale=1.0, bias=None):
         if o is None:
             o = torch.empty_like(q, dtype=v.dtype)
-        #check_args(q, k, v, o, metadata.max_seq_len)
+
+        check_args(q, k, v, o, varlen=True, cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_k)
         if True: #varlen
             total_q, nheads_q, head_size = q.shape
             total_k, nheads_k, _ = k.shape
