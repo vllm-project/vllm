@@ -1,3 +1,6 @@
+# coding=utf-8
+# Copied from
+# https://huggingface.co/databricks/dbrx-base/blob/main/configuration_dbrx.py
 """Dbrx configuration."""
 from typing import Any, Optional
 
