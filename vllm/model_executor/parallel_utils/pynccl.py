@@ -47,7 +47,17 @@ else:
     else:
         raise ValueError("NCCL only supports CUDA and ROCm backends.")
     logger.info(f"Loading nccl from library {so_file}")
-nccl = ctypes.CDLL(so_file)
+
+try:
+    nccl = ctypes.CDLL(so_file)
+except Exception as e:
+    logger.error(
+        f"Failed to load NCCL library from {so_file} ."
+        "It is expected if you are not running on NVIDIA/AMD GPUs."
+        "Otherwise please set the environment variable VLLM_NCCL_SO_PATH"
+        " to point to the correct nccl library path."
+    )
+    raise e
 
 # === export types and functions from nccl to Python ===
 # for the original nccl definition, please check
