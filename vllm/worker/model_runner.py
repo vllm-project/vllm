@@ -1,34 +1,34 @@
 import contextlib
 import time
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple, Set
 
 import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.attention import AttentionMetadata, get_attn_backend
-from vllm.config import (DeviceConfig, LoRAConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, VisionLanguageConfig)
+from vllm.config import (DeviceConfig, ModelConfig, LoRAConfig, ParallelConfig,
+                         SchedulerConfig)
 from vllm.logger import init_logger
-from vllm.lora.layers import LoRAMapping
-from vllm.lora.request import LoRARequest
-from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
-from vllm.model_executor import SamplingMetadata
+from vllm.model_executor import InputMetadata, SamplingMetadata
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.parallel_utils import cupy_utils, custom_all_reduce
+from vllm.model_executor.parallel_utils import pynccl_utils
 from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
 from vllm.model_executor.parallel_utils.parallel_state import (
-    with_cupy_nccl_for_all_reduce)
+    with_pynccl_for_all_reduce)
+from vllm.model_executor.parallel_utils import custom_all_reduce
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.sequence import (MultiModalData, SamplerOutput, SequenceData,
-                           SequenceGroupMetadata)
-from vllm.utils import (CudaMemoryProfiler, async_tensor_h2d,
+from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
+from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
+from vllm.lora.layers import LoRAMapping
+from vllm.lora.request import LoRARequest
+from vllm.utils import (async_tensor_h2d, CudaMemoryProfiler,
                         is_pin_memory_available, make_tensor_with_pad,
                         maybe_expand_dim)
 
 logger = init_logger(__name__)
 
+KVCache = Tuple[torch.Tensor, torch.Tensor]
 _PAD_SLOT_ID = -1
 LORA_WARMUP_RANK = 8
 _BATCH_SIZE_ALIGNMENT = 8
@@ -50,7 +50,6 @@ class ModelRunner:
         lora_config: Optional[LoRAConfig],
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
-        vision_language_config: Optional[VisionLanguageConfig] = None,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -85,20 +84,14 @@ class ModelRunner:
         self.graph_block_tables = None  # Set after initial profiling.
         self.pin_memory = is_pin_memory_available()
         self.kv_cache_dtype = kv_cache_dtype
-        self.vision_language_config = vision_language_config
-
-        self.attn_backend = get_attn_backend(
-            self.model_config.dtype if model_config is not None else None)
 
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
-            self.model = get_model(
-                self.model_config,
-                self.device_config,
-                lora_config=self.lora_config,
-                vision_language_config=self.vision_language_config,
-                parallel_config=self.parallel_config,
-                scheduler_config=self.scheduler_config)
+            self.model = get_model(self.model_config,
+                                   self.device_config,
+                                   lora_config=self.lora_config,
+                                   parallel_config=self.parallel_config,
+                                   scheduler_config=self.scheduler_config)
 
         self.model_memory_usage = m.consumed_memory
         logger.info(f"Loading model weights took "
@@ -134,9 +127,8 @@ class ModelRunner:
     def _prepare_prompt(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, List[int],
-               List[int], List[int], List[int], Set[LoRARequest],
-               torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, List[int], List[int],
+               List[int], List[int], Set[LoRARequest]]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[int] = []
         input_positions: List[int] = []
@@ -149,7 +141,6 @@ class ModelRunner:
         context_lens: List[int] = []
         subquery_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
-        multi_modal_input_list: List[torch.Tensor] = []
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -195,10 +186,6 @@ class ModelRunner:
                 (prompt_len - computed_len
                  if seq_group_metadata.sampling_params.prompt_logprobs else 1))
 
-            if seq_group_metadata.multi_modal_data:
-                multi_modal_input_list.append(
-                    seq_group_metadata.multi_modal_data.data)
-
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
                 # yet. In this case, we just use a dummy slot mapping.
@@ -229,7 +216,7 @@ class ModelRunner:
                 slot_mapping.append(slot)
 
         max_subquery_len = max(subquery_lens)
-        max_prompt_len = max(prompt_lens)
+        max_seq_len = max(prompt_lens)
         num_prompt_tokens = len(input_tokens)
         assert max_subquery_len > 0
 
@@ -247,16 +234,6 @@ class ModelRunner:
         context_lens_tensor = torch.tensor(context_lens,
                                            dtype=torch.int,
                                            device=self.device)
-
-        if multi_modal_input_list:
-            assert self.vision_language_config, (
-                "Multi-modal inputs are only supported by "
-                "vision language models.")
-            multi_modal_input = torch.cat(multi_modal_input_list,
-                                          dim=0).to(self.device)
-        else:
-            multi_modal_input = None
-
         # Prepare prefix block tables
         max_prompt_block_table_len = max(len(t) for t in prefix_block_tables)
         block_tables = make_tensor_with_pad(
@@ -293,7 +270,7 @@ class ModelRunner:
                      dtype=seq_start_loc.dtype,
                      out=seq_start_loc[1:])
 
-        attn_metadata = self.attn_backend.make_metadata(
+        input_metadata = InputMetadata(
             is_prompt=True,
             slot_mapping=slot_mapping,
             prompt_lens=prompt_lens,
@@ -302,7 +279,7 @@ class ModelRunner:
             num_generation_tokens=0,
             max_subquery_len=max_subquery_len,
             max_context_len=None,
-            max_prompt_len=max_prompt_len,
+            max_seq_len=max_seq_len,
             subquery_start_loc=subquery_start_loc,
             seq_start_loc=seq_start_loc,
             context_lens=context_lens_tensor,
@@ -310,15 +287,15 @@ class ModelRunner:
             use_cuda_graph=False,
             kv_cache_dtype=self.kv_cache_dtype,
         )
-        return (input_tokens, input_positions, attn_metadata, prompt_lens,
+        return (input_tokens, input_positions, input_metadata, prompt_lens,
                 subquery_lens, lora_index_mapping, lora_prompt_mapping,
-                lora_requests, multi_modal_input)
+                lora_requests)
 
     def _prepare_decode(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, List[int],
-               List[int], Set[LoRARequest]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, List[int], List[int],
+               Set[LoRARequest]]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[int] = []
         input_positions: List[int] = []
@@ -424,7 +401,7 @@ class ModelRunner:
                 device=self.device,
             )
 
-        attn_metadata = self.attn_backend.make_metadata(
+        input_metadata = InputMetadata(
             is_prompt=False,
             slot_mapping=slot_mapping,
             prompt_lens=None,
@@ -433,7 +410,7 @@ class ModelRunner:
             num_generation_tokens=len(input_tokens),
             max_subquery_len=None,
             max_context_len=max_context_len,
-            max_prompt_len=None,
+            max_seq_len=None,
             subquery_start_loc=None,
             seq_start_loc=None,
             context_lens=context_lens,
@@ -441,7 +418,7 @@ class ModelRunner:
             use_cuda_graph=use_captured_graph,
             kv_cache_dtype=self.kv_cache_dtype,
         )
-        return (input_tokens, input_positions, attn_metadata,
+        return (input_tokens, input_positions, input_metadata,
                 lora_index_mapping, lora_prompt_mapping, lora_requests)
 
     def _prepare_sample(
@@ -545,25 +522,23 @@ class ModelRunner:
     def prepare_input_tensors(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
-               Set[int], LoRAMapping, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, SamplingMetadata,
+               Set[int], LoRAMapping]:
         if self.is_driver_worker:
             # NOTE: We assume that all sequences in the group are all prompts or
             # all decodes.
             is_prompt = seq_group_metadata_list[0].is_prompt
             # Prepare input tensors.
             if is_prompt:
-                (input_tokens, input_positions, attn_metadata, prompt_lens,
+                (input_tokens, input_positions, input_metadata, prompt_lens,
                  subquery_lens, lora_index_mapping, lora_prompt_mapping,
-                 lora_requests, multi_modal_input
-                 ) = self._prepare_prompt(seq_group_metadata_list)
+                 lora_requests) = self._prepare_prompt(seq_group_metadata_list)
             else:
-                (input_tokens, input_positions, attn_metadata,
+                (input_tokens, input_positions, input_metadata,
                  lora_index_mapping, lora_prompt_mapping,
                  lora_requests) = self._prepare_decode(seq_group_metadata_list)
                 prompt_lens = []
                 subquery_lens = None
-                multi_modal_input = None
             sampling_metadata = self._prepare_sample(seq_group_metadata_list,
                                                      prompt_lens,
                                                      subquery_lens)
@@ -584,9 +559,8 @@ class ModelRunner:
                 sampling_metadata.selected_token_indices,
                 "lora_requests": lora_requests,
                 "lora_mapping": lora_mapping,
-                "multi_modal_input": multi_modal_input,
             }
-            metadata_dict.update(attn_metadata.asdict_zerocopy())
+            metadata_dict.update(input_metadata.asdict_zerocopy())
             broadcast_tensor_dict(metadata_dict, src=0)
         else:
             metadata_dict = broadcast_tensor_dict(src=0)
@@ -596,8 +570,7 @@ class ModelRunner:
                 "selected_token_indices")
             lora_mapping = metadata_dict.pop("lora_mapping")
             lora_requests = metadata_dict.pop("lora_requests")
-            multi_modal_input = metadata_dict.pop("multi_modal_input")
-            attn_metadata = self.attn_backend.make_metadata(**metadata_dict)
+            input_metadata = InputMetadata(**metadata_dict)
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
                 seq_data=None,
@@ -608,38 +581,34 @@ class ModelRunner:
                 perform_sampling=False,
             )
 
-        return (input_tokens, input_positions, attn_metadata,
-                sampling_metadata, lora_requests, lora_mapping,
-                multi_modal_input)
+        return (input_tokens, input_positions, input_metadata,
+                sampling_metadata, lora_requests, lora_mapping)
 
     @torch.inference_mode()
     def execute_model(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-        kv_caches: List[torch.Tensor],
+        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
     ) -> Optional[SamplerOutput]:
-        (input_tokens, input_positions, attn_metadata, sampling_metadata,
-         lora_requests, lora_mapping, multi_modal_input
-         ) = self.prepare_input_tensors(seq_group_metadata_list)
+        (input_tokens, input_positions, input_metadata, sampling_metadata,
+         lora_requests,
+         lora_mapping) = self.prepare_input_tensors(seq_group_metadata_list)
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
 
         # Execute the model.
-        if attn_metadata.use_cuda_graph:
+        if input_metadata.use_cuda_graph:
             graph_batch_size = input_tokens.shape[0]
             model_executable = self.graph_runners[graph_batch_size]
         else:
             model_executable = self.model
-        execute_model_kwargs = {
-            "input_ids": input_tokens,
-            "positions": input_positions,
-            "kv_caches": kv_caches,
-            "attn_metadata": attn_metadata,
-        }
-        if self.vision_language_config:
-            execute_model_kwargs.update({"image_input": multi_modal_input})
-        hidden_states = model_executable(**execute_model_kwargs)
+        hidden_states = model_executable(
+            input_ids=input_tokens,
+            positions=input_positions,
+            kv_caches=kv_caches,
+            input_metadata=input_metadata,
+        )
 
         # Compute the logits.
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
@@ -687,22 +656,10 @@ class ModelRunner:
         # Profile memory usage with max_num_sequences sequences and the total
         # number of tokens equal to max_num_batched_tokens.
         seqs: List[SequenceGroupMetadata] = []
-        # Additional GPU memory may be needed for vision encoding, which needs
-        # to be accounted for when calculating the GPU blocks for
-        # vLLM blocker manager.
-        # To exercise the worst scenario for GPU memory consumption,
-        # the number of seqs (batch_size) is chosen to maximize the number
-        # of images processed.
-        if self.vision_language_config:
-            max_num_seqs = min(
-                max_num_seqs,
-                int(max_num_batched_tokens /
-                    self.vision_language_config.image_feature_size))
         for group_id in range(max_num_seqs):
             seq_len = (max_num_batched_tokens // max_num_seqs +
                        (group_id < max_num_batched_tokens % max_num_seqs))
-            seq_data, fake_multi_modal_input = _prepare_fake_inputs(
-                seq_len, self.vision_language_config)
+            seq_data = SequenceData([0] * seq_len)
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,
@@ -711,13 +668,12 @@ class ModelRunner:
                 block_tables=None,
                 lora_request=dummy_lora_requests_per_seq[group_id]
                 if dummy_lora_requests_per_seq else None,
-                multi_modal_data=fake_multi_modal_input,
             )
             seqs.append(seq)
 
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
-        kv_caches = [None] * num_layers
+        kv_caches = [(None, None)] * num_layers
         self.execute_model(seqs, kv_caches)
         torch.cuda.synchronize()
         return
@@ -749,7 +705,7 @@ class ModelRunner:
         return self.lora_manager.list_loras()
 
     @torch.inference_mode()
-    def capture_model(self, kv_caches: List[torch.Tensor]) -> None:
+    def capture_model(self, kv_caches: List[KVCache]) -> None:
         """Cuda graph capture a model.
 
         Note that CUDA graph's performance gain is negligible if number
@@ -764,7 +720,7 @@ class ModelRunner:
         """
         # NOTE(woosuk): This is a hack to ensure that the NCCL backend is never
         # deleted before the CUDA graphs.
-        self.cupy_nccl_backend = cupy_utils.get_nccl_backend()
+        self.cupy_nccl_backend = pynccl_utils.get_nccl_backend()
 
         assert not self.model_config.enforce_eager
         logger.info("Capturing the model for CUDA graphs. This may lead to "
@@ -803,8 +759,8 @@ class ModelRunner:
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
             for batch_size in reversed(batch_size_capture_list):
-                # Create dummy attn_metadata.
-                attn_metadata = self.attn_backend.make_metadata(
+                # Create dummy input_metadata.
+                input_metadata = InputMetadata(
                     is_prompt=False,
                     slot_mapping=slot_mapping[:batch_size],
                     prompt_lens=None,
@@ -813,7 +769,7 @@ class ModelRunner:
                     num_generation_tokens=batch_size,
                     max_subquery_len=None,
                     max_context_len=self.max_context_len_to_capture,
-                    max_prompt_len=None,
+                    max_seq_len=None,
                     subquery_start_loc=None,
                     seq_start_loc=None,
                     context_lens=context_lens[:batch_size],
@@ -834,7 +790,7 @@ class ModelRunner:
                     input_tokens[:batch_size],
                     input_positions[:batch_size],
                     kv_caches,
-                    attn_metadata,
+                    input_metadata,
                     memory_pool=self.graph_memory_pool,
                 )
                 self.graph_memory_pool = graph_runner.graph.pool()
@@ -870,22 +826,20 @@ class CUDAGraphRunner:
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
+        kv_caches: List[KVCache],
+        input_metadata: InputMetadata,
         memory_pool,
-        **kwargs,
     ) -> None:
         assert self.graph is None
         # Run the model once without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
-        with _maybe_cupy_nccl():
+        with _maybe_pynccl():
             self.model(
                 input_ids,
                 positions,
                 kv_caches,
-                attn_metadata,
-                **kwargs,
+                input_metadata,
             )
         torch.cuda.synchronize()
 
@@ -894,13 +848,12 @@ class CUDAGraphRunner:
         # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
         self.graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self.graph, pool=memory_pool):  # noqa: SIM117
-            with _maybe_cupy_nccl():
+            with _maybe_pynccl():
                 hidden_states = self.model(
                     input_ids,
                     positions,
                     kv_caches,
-                    attn_metadata,
-                    **kwargs,
+                    input_metadata,
                 )
         torch.cuda.synchronize()
 
@@ -909,9 +862,9 @@ class CUDAGraphRunner:
             "input_ids": input_ids,
             "positions": positions,
             "kv_caches": kv_caches,
-            "slot_mapping": attn_metadata.slot_mapping,
-            "context_lens": attn_metadata.context_lens,
-            "block_tables": attn_metadata.block_tables,
+            "slot_mapping": input_metadata.slot_mapping,
+            "context_lens": input_metadata.context_lens,
+            "block_tables": input_metadata.block_tables,
         }
         self.output_buffers = {"hidden_states": hidden_states}
         return
@@ -920,9 +873,8 @@ class CUDAGraphRunner:
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        **kwargs,
+        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+        input_metadata: InputMetadata,
     ) -> torch.Tensor:
         # KV caches are fixed tensors, so we don't need to copy them.
         del kv_caches
@@ -930,11 +882,11 @@ class CUDAGraphRunner:
         # Copy the input tensors to the input buffers.
         self.input_buffers["input_ids"].copy_(input_ids, non_blocking=True)
         self.input_buffers["positions"].copy_(positions, non_blocking=True)
-        self.input_buffers["slot_mapping"].copy_(attn_metadata.slot_mapping,
+        self.input_buffers["slot_mapping"].copy_(input_metadata.slot_mapping,
                                                  non_blocking=True)
-        self.input_buffers["context_lens"].copy_(attn_metadata.context_lens,
+        self.input_buffers["context_lens"].copy_(input_metadata.context_lens,
                                                  non_blocking=True)
-        self.input_buffers["block_tables"].copy_(attn_metadata.block_tables,
+        self.input_buffers["block_tables"].copy_(input_metadata.block_tables,
                                                  non_blocking=True)
         # Run the graph.
         self.graph.replay()
@@ -947,9 +899,10 @@ class CUDAGraphRunner:
 
 
 @contextlib.contextmanager
-def _maybe_cupy_nccl():
-    if cupy_utils.is_initialized() and not custom_all_reduce.is_initialized():
-        with with_cupy_nccl_for_all_reduce():
+def _maybe_pynccl():
+    if pynccl_utils.is_initialized(
+    ) and not custom_all_reduce.is_initialized():
+        with with_pynccl_for_all_reduce():
             yield
     else:
         yield
@@ -968,21 +921,3 @@ def _get_graph_batch_size(batch_size: int) -> int:
     else:
         return ((batch_size + _BATCH_SIZE_ALIGNMENT - 1) //
                 _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
-
-
-def _prepare_fake_inputs(
-        seq_len: int, vision_language_config: Optional[VisionLanguageConfig]):
-    """Prepare fake inputs for profile run."""
-    if vision_language_config:
-        prompt_tokens = [
-            vision_language_config.image_token_id
-        ] * vision_language_config.image_feature_size + [0] * (
-            seq_len - vision_language_config.image_feature_size)
-        fake_image_input = MultiModalData(
-            type=MultiModalData.Type.IMAGE,
-            data=torch.zeros(vision_language_config.image_input_shape,
-                             dtype=torch.float16))
-    else:
-        prompt_tokens = [0] * seq_len
-        fake_image_input = None
-    return SequenceData(prompt_tokens), fake_image_input

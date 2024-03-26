@@ -1,16 +1,15 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Tuple, Set, Optional
 
 import torch
 import torch.distributed
 
-from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
-from vllm.lora.request import LoRARequest
+from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig, LoRAConfig)
 from vllm.model_executor import set_random_seed
-from vllm.model_executor.parallel_utils import cupy_utils
+from vllm.model_executor.parallel_utils import pynccl_utils
 from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
 from vllm.model_executor.parallel_utils.custom_all_reduce import init_custom_ar
@@ -19,6 +18,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
+from vllm.lora.request import LoRARequest
 
 
 class Worker:
@@ -39,7 +39,6 @@ class Worker:
         rank: int,
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
-        vision_language_config: Optional[VisionLanguageConfig] = None,
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
     ) -> None:
@@ -55,20 +54,13 @@ class Worker:
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
 
-        self.vision_language_config = vision_language_config
-        if self.vision_language_config:
-            assert not self.lora_config, (
-                "To be tested: vision language model with LoRA settings.")
-
-        self.model_runner = ModelRunner(
-            model_config,
-            parallel_config,
-            scheduler_config,
-            device_config,
-            lora_config=self.lora_config,
-            kv_cache_dtype=kv_cache_dtype,
-            is_driver_worker=is_driver_worker,
-            vision_language_config=vision_language_config)
+        self.model_runner = ModelRunner(model_config,
+                                        parallel_config,
+                                        scheduler_config,
+                                        device_config,
+                                        lora_config=self.lora_config,
+                                        kv_cache_dtype=kv_cache_dtype,
+                                        is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
         # self.init_cache_engine().
         self.cache_config = None
@@ -136,9 +128,6 @@ class Worker:
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
         peak_memory = self.init_gpu_memory - free_gpu_memory
-        assert peak_memory > 0, (
-            "Error in memory profiling. This happens when the GPU memory was "
-            "not properly cleaned up before initializing the vLLM instance.")
 
         cache_block_size = self.get_cache_block_size_bytes(
             block_size, cache_dtype)
@@ -273,8 +262,8 @@ def init_distributed_environment(
             init_method=distributed_init_method,
         )
 
-    if cupy_utils.is_initialized():
-        cupy_world_size = cupy_utils.get_world_size()
+    if pynccl_utils.is_initialized():
+        cupy_world_size = pynccl_utils.get_world_size()
         if cupy_world_size != parallel_config.world_size:
             raise RuntimeError(
                 "cupy.distributed is already initialized but the cupy world "
@@ -284,7 +273,7 @@ def init_distributed_environment(
         # NOTE(woosuk): We don't initialize CuPy process group when world size
         # is 1.
         # TODO(woosuk): Support multi-node connection.
-        cupy_utils.init_process_group(
+        pynccl_utils.init_process_group(
             world_size=parallel_config.world_size,
             rank=rank,
             host="localhost",
@@ -293,8 +282,8 @@ def init_distributed_environment(
 
     # A small all_reduce for warmup.
     torch.distributed.all_reduce(torch.zeros(1).cuda())
-    if cupy_utils.is_initialized():
-        cupy_utils.all_reduce(torch.zeros(1).cuda())
+    if pynccl_utils.is_initialized():
+        pynccl_utils.all_reduce(torch.zeros(1).cuda())
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
 
