@@ -72,9 +72,12 @@ class SamplingTensors:
     repetition_penalties: torch.Tensor
     sampling_seeds: torch.Tensor
     sample_indices: torch.Tensor
+    prompt_indices: torch.Tensor
     extra_seeds: Optional[torch.Tensor]
     prompt_tokens: torch.Tensor
     output_tokens: torch.Tensor
+    max_prompt_best_of: int
+    largest_num_logprobs: int
 
     @classmethod
     def from_sampling_metadata(
@@ -103,7 +106,9 @@ class SamplingTensors:
         repetition_penalties: List[float] = []
         sampling_seeds: List[int] = []
         sample_indices: List[int] = []
+        prompt_indices: List[int] = []
         prompt_best_of: List[int] = []
+        largest_num_logprobs: int = 0
         do_penalties = False
         do_top_p_top_k = False
         do_min_p = False
@@ -174,10 +179,19 @@ class SamplingTensors:
                 prompt_best_of.append(sampling_params.best_of)
                 prompt_len = sampling_metadata.prompt_lens[i]
 
-                if sampling_params.prompt_logprobs is not None:
+                if (sampling_params.prompt_logprobs is not None
+                        and sampling_params.prompt_logprobs > 0):
                     # NOTE: the sampling position is the last token
                     # in the prompt
+                    prompt_indices.extend(
+                        range(sample_indices_start_idx,
+                              sample_indices_start_idx + prompt_len - 1))
+
                     sample_indices_start_idx += prompt_len - 1
+                    largest_num_logprobs = max(largest_num_logprobs,
+                                               sampling_params.prompt_logprobs)
+            largest_num_logprobs = max(largest_num_logprobs,
+                                       sampling_params.logprobs or 0)
             for seq_id in seq_ids:
                 seq_data = sampling_metadata.seq_data[seq_id]
                 extra_entropy = extra_entropy or ()
@@ -195,8 +209,9 @@ class SamplingTensors:
         sampling_tensors = SamplingTensors.from_lists(
             temperatures, top_ps, top_ks, min_ps, presence_penalties,
             frequency_penalties, repetition_penalties, sampling_seeds,
-            sample_indices, prompt_tokens, output_tokens, vocab_size,
-            extra_seeds_to_generate, device, dtype)
+            sample_indices, prompt_indices, prompt_tokens, output_tokens,
+            prompt_best_of, vocab_size, extra_seeds_to_generate,
+            largest_num_logprobs, device, dtype)
         return (sampling_tensors, do_penalties, do_top_p_top_k, do_min_p)
 
     @classmethod
@@ -206,9 +221,10 @@ class SamplingTensors:
                    frequency_penalties: List[float],
                    repetition_penalties: List[float],
                    sampling_seeds: List[int], sample_indices: List[int],
-                   prompt_tokens: List[List[int]],
-                   output_tokens: List[List[int]], vocab_size: int,
-                   extra_seeds_to_generate: int, device: torch.device,
+                   prompt_indices: List[int], prompt_tokens: List[List[int]],
+                   output_tokens: List[List[int]], prompt_best_of: List[int],
+                   vocab_size: int, extra_seeds_to_generate: int,
+                   largest_num_logprobs: int, device: torch.device,
                    dtype: torch.dtype) -> "SamplingTensors":
         # Note that the performance will be very bad without
         # pinned memory.
@@ -223,6 +239,7 @@ class SamplingTensors:
             tokens + [vocab_size] * (output_max_len - len(tokens))
             for tokens in output_tokens
         ]
+        max_prompt_best_of = max(prompt_best_of) if prompt_best_of else 1
 
         temperatures_t = torch.tensor(
             temperatures,
@@ -268,6 +285,12 @@ class SamplingTensors:
         )
         sample_indices_t = torch.tensor(
             sample_indices,
+            device="cpu",
+            dtype=torch.long,
+            pin_memory=pin_memory,
+        )
+        prompt_indices_t = torch.tensor(
+            prompt_indices,
             device="cpu",
             dtype=torch.long,
             pin_memory=pin_memory,
@@ -322,7 +345,11 @@ class SamplingTensors:
             sampling_seeds=sampling_seeds_gpu,
             sample_indices=sample_indices_t.to(device=device,
                                                non_blocking=True),
+            prompt_indices=prompt_indices_t.to(device=device,
+                                               non_blocking=True),
             extra_seeds=extra_seeds_gpu,
+            max_prompt_best_of=max_prompt_best_of,
+            largest_num_logprobs=largest_num_logprobs,
         )
 
     @staticmethod
