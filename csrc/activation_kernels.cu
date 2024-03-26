@@ -56,6 +56,7 @@ __device__ __forceinline__ T gelu_tanh_kernel(const T& x) {
 
 // Launch activation and gating kernel.
 #define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL)                                             \
+  TORCH_CHECK(input.is_contiguous(), "input tensor must be contiguous");                  \
   int d = input.size(-1) / 2;                                                             \
   int64_t num_tokens = input.numel() / input.size(-1);                                    \
   dim3 grid(num_tokens);                                                                  \

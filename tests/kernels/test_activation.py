@@ -22,6 +22,7 @@ CUDA_DEVICES = [
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("contiguous", [True, False])
 @torch.inference_mode()
 def test_act_and_mul(
     activation: str,
@@ -30,18 +31,24 @@ def test_act_and_mul(
     dtype: torch.dtype,
     seed: int,
     device: str,
+    contiguous: bool
 ) -> None:
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
     torch.set_default_device(device)
-    x = torch.randn(num_tokens, 2 * d, dtype=dtype)
+
+    x = torch.randn(2 * d, num_tokens, dtype=dtype).t()  # non-contiguous
+    if contiguous:
+        x = x.contiguous()
+
     if activation == "silu":
         layer = SiluAndMul()
     elif activation == "gelu":
         layer = GeluAndMul(approximate="none")
     elif activation == "gelu_tanh":
         layer = GeluAndMul(approximate="tanh")
+
     out = layer(x)
     ref_out = layer._forward(x)
     # The SiLU and GELU implementations are equivalent to the native PyTorch
