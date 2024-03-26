@@ -1,4 +1,3 @@
-# This file has been modified by Neural Magic
 """Utilities for downloading and initializing model weights."""
 import filelock
 import glob
@@ -18,6 +17,7 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (get_quantization_config,
                                                      QuantizationConfig)
+# UPSTREAM SYNC: needed for sparsity
 from vllm.model_executor.layers.parameters import LazyCompressedParameter
 
 logger = init_logger(__name__)
@@ -36,7 +36,7 @@ def get_lock(model_name_or_path: str, cache_dir: Optional[str] = None):
     lock_dir = cache_dir if cache_dir is not None else _vllm_filelocks_path
     os.makedirs(os.path.dirname(lock_dir), exist_ok=True)
     lock_file_name = model_name_or_path.replace("/", "-") + ".lock"
-    lock = filelock.FileLock(os.path.join(lock_dir, lock_file_name))
+    lock = filelock.SoftFileLock(os.path.join(lock_dir, lock_file_name))
     return lock
 
 
@@ -88,7 +88,8 @@ def convert_bin_to_safetensor_file(
             raise RuntimeError(f"The output tensors do not match for key {k}")
 
 
-# TODO(rib-2): Once we define hf_sparsity_config
+# UPSTREAM SYNC: needed for sparsity
+# TODO: (MLE) load compressed models from here
 def get_sparse_config(model_config: ModelConfig):
     from vllm.model_executor.layers.sparsity import get_sparsity_config
     sparsity_cls = get_sparsity_config(model_config.sparsity)
@@ -294,11 +295,13 @@ def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
     return x
 
 
+# UPSTREAM SYNC: Parameter needed for LazyCompressedParameter
 def default_weight_loader(param: torch.nn.Parameter,
                           loaded_weight: torch.Tensor) -> None:
     """Default weight loader."""
     assert param.size() == loaded_weight.size()
     param.data.copy_(loaded_weight)
+    # UPSTREAM SYNC: needed for sparsity
     if isinstance(param, LazyCompressedParameter):
         param.compress()
 

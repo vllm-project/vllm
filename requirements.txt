@@ -1,10 +1,11 @@
+cmake>=3.21
 ninja  # For faster builds.
 psutil
 ray >= 2.9
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
 torch == 2.1.2
-transformers >= 4.38.0  # Required for Gemma.
+transformers >= 4.39.1  # Required for StarCoder2 & Llava.
 xformers == 0.0.23.post1  # Required for CUDA 12.1.
 fastapi
 uvicorn[standard]

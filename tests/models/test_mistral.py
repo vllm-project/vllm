@@ -1,4 +1,3 @@
-# This file has been modified by Neural Magic
 """Compare the outputs of HF and vLLM for Mistral models using greedy sampling.
 
 Run `pytest tests/models/test_mistral.py --forked`.
@@ -10,7 +9,8 @@ MODELS = [
 ]
 
 
-@pytest.mark.skip("running these on a10g results in process getting killed")
+# UPSTREAM SYNC: we run OOM on the A10g instances.
+@pytest.mark.skip("Not enough memory in automation testing.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [128])

@@ -5,7 +5,7 @@ import torch
 
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import in_wsl, is_neuron, STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils import is_pin_memory_available, STR_DTYPE_TO_TORCH_DTYPE
 
 logger = init_logger(__name__)
 
@@ -38,10 +38,6 @@ class CacheEngine:
         self.num_gpu_blocks = cache_config.num_gpu_blocks
         self.num_cpu_blocks = cache_config.num_cpu_blocks
 
-        # Skip initializing CUDA stream and buffer for Neuron backend.
-        if is_neuron():
-            return
-
         if cache_config.cache_dtype == "auto":
             self.dtype = model_config.dtype
         else:
@@ -50,12 +46,6 @@ class CacheEngine:
         # Initialize the cache.
         self.gpu_cache = self.allocate_gpu_cache()
         self.cpu_cache = self.allocate_cpu_cache()
-
-        # Initialize the stream for caching operations.
-        self.cache_stream = torch.cuda.Stream()
-        assert self.cache_stream != torch.cuda.current_stream()
-        # Initialize the events for stream synchronization.
-        self.events = [torch.cuda.Event() for _ in range(self.num_layers)]
 
     def get_key_block_shape(self) -> Tuple[int, int, int, int]:
         element_size = torch.tensor([], dtype=self.dtype).element_size()
@@ -96,12 +86,7 @@ class CacheEngine:
         cpu_cache: List[KVCache] = []
         key_block_shape = self.get_key_block_shape()
         value_block_shape = self.get_value_block_shape()
-        pin_memory = not in_wsl()
-        if not pin_memory:
-            # Pinning memory in WSL is not supported.
-            # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
-            logger.warning("Using 'pin_memory=False' as WSL is detected. "
-                           "This may slow down the performance.")
+        pin_memory = is_pin_memory_available()
         for _ in range(self.num_layers):
             key_blocks = torch.empty(
                 size=(self.num_cpu_blocks, *key_block_shape),
@@ -126,17 +111,13 @@ class CacheEngine:
     ) -> None:
         from vllm._C import cache_ops
 
-        with torch.cuda.stream(self.cache_stream):
-            for i in range(self.num_layers):
-                src_key_cache, src_value_cache = src[i]
-                dst_key_cache, dst_value_cache = dst[i]
-                # Copy the key blocks.
-                cache_ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
-                # Copy the value blocks.
-                cache_ops.swap_blocks(src_value_cache, dst_value_cache,
-                                      src_to_dst)
-                event = self.events[i]
-                event.record(stream=self.cache_stream)
+        for i in range(self.num_layers):
+            src_key_cache, src_value_cache = src[i]
+            dst_key_cache, dst_value_cache = dst[i]
+            # Copy the key blocks.
+            cache_ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
+            # Copy the value blocks.
+            cache_ops.swap_blocks(src_value_cache, dst_value_cache, src_to_dst)
 
     def swap_in(self, src_to_dst: Dict[int, int]) -> None:
         self._swap(self.cpu_cache, self.gpu_cache, src_to_dst)

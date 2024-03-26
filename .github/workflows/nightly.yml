@@ -24,6 +24,7 @@ jobs:
             timeout: 240
             gitref: ${{ github.ref }}
             Gi_per_thread: 4
+            nvcc_threads: 8
             python: 3.10.12
             test_skip_list:
         secrets: inherit
@@ -35,6 +36,7 @@ jobs:
             timeout: 300
             gitref: ${{ github.ref }}
             Gi_per_thread: 12
+            nvcc_threads: 1
             python: 3.11.4
             test_skip_list:
         secrets: inherit
@@ -48,6 +50,7 @@ jobs:
     #         timeout: 480
     #         gitref: '${{ github.ref }}'
     #         Gi_per_thread: 4
+    #         nvcc_threads: 8
     #         python: "3.10.12"
     #         # Always push if it is a scheduled job
     #         push_benchmark_results_to_gh_pages: "${{ github.event_name == 'schedule' || inputs.push_benchmark_results_to_gh_pages }}"
@@ -62,6 +65,7 @@ jobs:
             timeout: 720
             gitref: '${{ github.ref }}'
             Gi_per_thread: 12
+            nvcc_threads: 1
             python: "3.10.12"
             # Always push if it is a scheduled job
             push_benchmark_results_to_gh_pages: "${{ github.event_name == 'schedule' || inputs.push_benchmark_results_to_gh_pages }}"
@@ -75,5 +79,6 @@ jobs:
             timeout: 60
             gitref: '${{ github.ref }}'
             Gi_per_thread: 12
+            nvcc_threads: 1
             python: "3.10.12"
         secrets: inherit

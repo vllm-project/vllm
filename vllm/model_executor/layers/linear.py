@@ -1,5 +1,3 @@
-# This file has been modified by Neural Magic
-
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
@@ -15,6 +13,7 @@ from vllm.model_executor.parallel_utils.utils import (
     divide, split_tensor_along_last_dim)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.logger import init_logger
+# UPSTREAM SYNC: keep LazyCompressedParameter
 from vllm.model_executor.layers.parameters import LazyCompressedParameter
 
 logger = init_logger(__name__)
@@ -203,7 +202,6 @@ class ColumnParallelLinear(torch.nn.Module):
         tp_rank = get_tensor_model_parallel_rank()
         output_dim = getattr(param, "output_dim", None)
         param_data = param.data
-
         if output_dim is not None:
             shard_size = param_data.shape[output_dim]
             start_idx = tp_rank * shard_size
@@ -212,6 +210,7 @@ class ColumnParallelLinear(torch.nn.Module):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
+        # UPSTREAM SYNC: keep compress in place
         if isinstance(param, LazyCompressedParameter):
             param.compress()
 
@@ -262,6 +261,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         linear_method: Optional[LinearMethodBase] = None,
     ):
         self.output_sizes = output_sizes
+        # UPSTREAM SYNC: needed for LazyCompressedParameter
         self.loaded_shards = set()
         tp_size = get_tensor_model_parallel_world_size()
         assert all(output_size % tp_size == 0 for output_size in output_sizes)
@@ -334,10 +334,12 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     "MergedColumnParallelLinear, assume the weight is "
                     "the same for all partitions.")
 
+        # UPSTREAM SYNC: needed for LazyCompressedParameter
         self.loaded_shards.add(loaded_shard_id)
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
+        # UPSTREAM SYNC: needed for LazyCompressedParameter
         # This is super hacky for now but we basically want to only compress
         # once all of the shards are loaded, right now we just check if the
         # number of shards loaded matches the number of outputs expected,
@@ -388,6 +390,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         if total_num_kv_heads is None:
             total_num_kv_heads = total_num_heads
         self.total_num_kv_heads = total_num_kv_heads
+        # UPSTREAM SYNC: needed for LazyCompressedParameter
         self.loaded_shards = set()
         # Divide the weight matrix along the last dimension.
         tp_size = get_tensor_model_parallel_world_size()
@@ -488,11 +491,11 @@ class QKVParallelLinear(ColumnParallelLinear):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
-        self.loaded_shards.add(loaded_shard_id)
-
+        # UPSTREAM SYNC: needed for LazyCompressedParameter
         # This is super hacky for now but we basically want to only
         # compress once all of the shards are loaded, for the QKV matrix
         # this means loading shards "q", "k" and "v"
+        self.loaded_shards.add(loaded_shard_id)
         all_shards_loaded = (self.loaded_shards == set(["q", "k", "v"]))
         if all_shards_loaded and isinstance(param, LazyCompressedParameter):
             param.compress()
@@ -586,6 +589,7 @@ class RowParallelLinear(torch.nn.Module):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
+        # UPSTREAM SYNC: needed for LazyCompressedParameter
         if isinstance(param, LazyCompressedParameter):
             param.compress()
 

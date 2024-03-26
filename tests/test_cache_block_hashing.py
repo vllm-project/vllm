@@ -66,8 +66,8 @@ def test_auto_prefix_caching(model: str, block_size: int, max_num_seqs: int,
 
             hashes.append([])
             prompts = [prefix + prompt for prompt in sample_prompts]
-            # UPSTREAM SYNC: seq_id in enumerate needed to pass ruff
-            for seq_id, prompt in enumerate(prompts):
+            seq_id = 0
+            for prompt in prompts:
                 hashes[-1].append([])
                 prompt_token_ids = tokenizer.encode(prompt)
                 seq = Sequence(seq_id, prompt, prompt_token_ids, block_size,
@@ -76,6 +76,8 @@ def test_auto_prefix_caching(model: str, block_size: int, max_num_seqs: int,
                 num_blocks = len(prompt_token_ids) // block_size
                 for idx in range(num_blocks):
                     hashes[-1][-1].append(seq.hash_of_block(idx))
+
+                seq_id += 1
 
     # Check that hashes made with two prefixes with different first blocks are
     # different everywhere.

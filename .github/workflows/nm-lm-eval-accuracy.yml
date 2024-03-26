@@ -19,6 +19,10 @@ on:
         description: 'requested GiB to reserve per thread'
         type: string
         required: true
+      nvcc_threads:
+        description: "number of threads nvcc build threads"
+        type: string
+        required: true
       python:
         description: "python version, e.g. 3.10.12"
         type: string
@@ -41,6 +45,10 @@ on:
         required: true
       Gi_per_thread:
         description: 'requested GiB to reserve per thread'
+        type: string
+        required: true
+      nvcc_threads:
+        description: "number of threads nvcc build threads"
         type: string
         required: true
       python:
@@ -68,6 +76,7 @@ jobs:
         with:
           hf_token: ${{ secrets.NM_HF_TOKEN }}
           Gi_per_thread: ${{ inputs.Gi_per_thread }}
+          nvcc_threads: ${{ inputs.nvcc_threads }}
 
       - name: set python
         id: set_python
@@ -86,7 +95,6 @@ jobs:
         id: build
         uses: ./.github/actions/nm-build-vllm/
         with:
-          Gi_per_thread: ${{ inputs.Gi_per_thread }}
           python: ${{ inputs.python }}
           venv: TEST
           pypi: ${{ secrets.NM_PRIVATE_PYPI_LOCATION }}

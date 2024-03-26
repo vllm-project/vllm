@@ -1,5 +1,3 @@
-# This file has been modified by Neural Magic
-
 import os
 import subprocess
 import time

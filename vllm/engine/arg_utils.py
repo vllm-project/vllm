@@ -33,13 +33,13 @@ class EngineArgs:
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
-    max_paddings: int = 256
     max_logprobs: int = 5  # OpenAI default value
     disable_log_stats: bool = False
     revision: Optional[str] = None
     code_revision: Optional[str] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
+    # UPSTREAM SYNC: keep sparsity argument
     sparsity: Optional[str] = None
     enforce_eager: bool = False
     max_context_len_to_capture: int = 8192
@@ -55,6 +55,7 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
     ray_workers_use_nsight: bool = False
+    scheduler_delay_factor: float = 0.0
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -216,10 +217,6 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.max_num_seqs,
                             help='maximum number of sequences per iteration')
-        parser.add_argument('--max-paddings',
-                            type=int,
-                            default=EngineArgs.max_paddings,
-                            help='maximum number of paddings in a batch')
         parser.add_argument(
             '--max-logprobs',
             type=int,
@@ -241,6 +238,7 @@ class EngineArgs:
                             'None, we assume the model weights are not '
                             'quantized and use `dtype` to determine the data '
                             'type of the weights.')
+        # UPSTREAM SYNC: keep sparsity argument
         parser.add_argument(
             '--sparsity',
             '-s',
@@ -323,6 +321,12 @@ class EngineArgs:
                             default=EngineArgs.device,
                             choices=["auto", "cuda", "neuron"],
                             help='Device type for vLLM execution.')
+        parser.add_argument(
+            '--scheduler-delay-factor',
+            type=float,
+            default=EngineArgs.scheduler_delay_factor,
+            help='Apply a delay (of delay factor multiplied by previous'
+            'prompt latency) before scheduling next prompt.')
         return parser
 
     @classmethod
@@ -352,7 +356,7 @@ class EngineArgs:
             self.tokenizer_revision,
             self.max_model_len,
             self.quantization,
-            # UPSTREAM SYNC: Accept current.
+            # UPSTREAM SYNC: keep sparsity argument
             self.sparsity,
             self.enforce_eager,
             self.max_context_len_to_capture,
@@ -373,7 +377,7 @@ class EngineArgs:
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
                                            model_config.max_model_len,
-                                           self.max_paddings)
+                                           self.scheduler_delay_factor)
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,

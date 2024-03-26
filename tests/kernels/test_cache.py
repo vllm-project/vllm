@@ -51,8 +51,9 @@ def test_copy_blocks(
     kv_cache_dtype: str,
     device: str,
 ) -> None:
+    # UPSTREAM SYNC: needed to pass multi-gpu tests
     if (kv_cache_dtype == "fp8_e5m2" and device != "cuda:0"):
-        pytest.skip("Skip cuda:1 test for fp8 attention")
+        pytest.skip("Skipping multi-gpu tests for now [ bad test setup ]")
 
     random.seed(seed)
     torch.random.manual_seed(seed)

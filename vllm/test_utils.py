@@ -1,5 +1,3 @@
-# This file has been modified by Neural Magic
-
 import ray
 
 from vllm.config import ParallelConfig
@@ -30,6 +28,7 @@ def multi_process_tensor_parallel(
 ) -> None:
     # Using ray helps debugging the error when it failed
     # as compared to multiprocessing.
+    # UPSTREAM SYNC: reinit error needed for NM automation
     ray.init(ignore_reinit_error=True)
 
     distributed_init_port = get_open_port()

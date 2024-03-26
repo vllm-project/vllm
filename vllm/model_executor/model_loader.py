@@ -1,4 +1,3 @@
-# This file has been modified by Neural Magic
 """Utilities for selecting and loading models."""
 import contextlib
 from typing import Type
@@ -63,6 +62,7 @@ def get_model(model_config: ModelConfig, device_config: DeviceConfig,
                 f"method {model_config.quantization}. Supported dtypes: "
                 f"{supported_dtypes}")
         linear_method = quant_config.get_linear_method()
+    # UPSTREAM SYNC: needed to support sparsity
     if model_config.sparsity is not None:
         sparse_config = get_sparse_config(model_config)
         capability = torch.cuda.get_device_capability()

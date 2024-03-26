@@ -1,4 +1,5 @@
-# This file has been modified by Neural Magic
+# UPSTREAM SYNC: if any new models are added to this file, add them
+# to test_models_logprobs.py as well
 """Compare the outputs of HF and vLLM when using greedy sampling.
 
 Run `pytest tests/models/test_models.py --forked`.
@@ -21,10 +22,12 @@ MODELS = [
     "stabilityai/stablelm-3b-4e1t",
     "allenai/OLMo-1B",
     "bigcode/starcoder2-3b",
+    "Qwen/Qwen1.5-0.5B",
 ]
 
 
-@pytest.mark.skip("running these on a10g results in process getting killed")
+# UPSTREAM SYNC: we run OOM on the A10g instances.
+@pytest.mark.skip("Not enough memory in automation testing.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [128])

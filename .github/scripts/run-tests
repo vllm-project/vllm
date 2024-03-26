@@ -100,6 +100,8 @@ do
         coverage run --data-file=.coverage-$(basename ${TEST}) -m pytest --forked --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
     elif [[ "${TEST}" == *"models_logprobs"* ]]; then
         coverage run --data-file=.coverage-$(basename ${TEST}) -m pytest --forked --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
+    elif [[ "${TEST}" == *"basic_correctness"* ]]; then
+        coverage run --data-file=.coverage-$(basename ${TEST}) -m pytest --forked --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
     else
         coverage run --data-file=.coverage-$(basename ${TEST}) -m pytest --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
     fi

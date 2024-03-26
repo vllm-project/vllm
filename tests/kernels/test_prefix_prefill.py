@@ -30,8 +30,9 @@ def test_contexted_kv_attention(
     dtype: torch.dtype,
     device: str,
 ) -> None:
+    # UPSTREAM SYNC: needed to pass multi-gpu tests
     if device != "cuda:0":
-        pytest.skip("Skipping context fwd attention for cuda > 0 for MVP")
+        pytest.skip("Skipping multi-gpu tests for now [ bad test setup ]")
 
     random.seed(0)
     torch.manual_seed(0)

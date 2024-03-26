@@ -1,9 +1,6 @@
 name: build nm-vllm
 description: 'build nm-vllm'
 inputs:
-  Gi_per_thread:
-    description: 'requested GiB to reserve per thread'
-    required: true
   python:
     description: 'python version, e.g. 3.10.12'
     required: true

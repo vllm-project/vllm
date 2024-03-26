@@ -20,5 +20,6 @@ jobs:
         timeout: 30
         gitref: ${{ inputs.gitref }}
         Gi_per_thread: 4
+        nvcc_threads: 8
         python: ${{ matrix.python }}
     secrets: inherit
