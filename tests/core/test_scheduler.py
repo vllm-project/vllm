@@ -2,12 +2,11 @@ import time
 from typing import List
 
 import pytest  # noqa
-import time
 
 from vllm import SamplingParams
 from vllm.config import CacheConfig, SchedulerConfig
 from vllm.core.scheduler import Scheduler
-from vllm.sequence import Sequence, SequenceGroup, Logprob
+from vllm.sequence import Logprob, Sequence, SequenceGroup
 
 from .utils import create_dummy_prompt
 
