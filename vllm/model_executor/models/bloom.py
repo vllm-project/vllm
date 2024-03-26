@@ -1,7 +1,7 @@
 # coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/bloom/modeling_bloom.py
-# Copyright 2023 The CacheFlow team.
+# Copyright 2023 The vLLM team.
 # Copyright 2022 HuggingFace Inc. team and BigScience workshop.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
