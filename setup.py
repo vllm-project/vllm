@@ -1,16 +1,16 @@
 import io
+import logging
 import os
 import re
-import logging
 import subprocess
 import sys
+from shutil import which
 from typing import List
 
-from packaging.version import parse, Version
-from setuptools import setup, find_packages, Extension
-from setuptools.command.build_ext import build_ext
-from shutil import which
 import torch
+from packaging.version import Version, parse
+from setuptools import Extension, find_packages, setup
+from setuptools.command.build_ext import build_ext
 from torch.utils.cpp_extension import CUDA_HOME
 
 ROOT_DIR = os.path.dirname(__file__)

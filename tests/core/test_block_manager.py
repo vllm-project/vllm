@@ -1,6 +1,7 @@
-import pytest
 import time
 from typing import List
+
+import pytest
 
 from vllm import SamplingParams
 from vllm.block import PhysicalTokenBlock
@@ -9,8 +10,8 @@ from vllm.core.block_manager_v1 import (
     UncachedBlockAllocator,
     BlockSpaceManager,
 )
+from vllm.sequence import Logprob, Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
-from vllm.sequence import Sequence, SequenceGroup, SequenceStatus, Logprob
 
 from .utils import create_dummy_prompt
 
