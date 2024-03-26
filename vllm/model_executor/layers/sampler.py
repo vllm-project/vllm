@@ -73,6 +73,16 @@ class Sampler(nn.Module):
         # Use log_softmax to ensure numerical stability.
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
 
+        if any(sampling_params.sampling_type == SamplingType.BEAM
+               for _, sampling_params in sampling_metadata.seq_groups):
+            # Sample the next tokens.
+            sample_results = _sample(probs, logprobs, sampling_metadata)
+            # Get the logprobs query results.
+            prompt_logprobs, sample_logprobs = _get_logprobs(
+                logprobs, sampling_metadata, sample_results)
+            return _build_sampler_output(sample_results, sampling_metadata,
+                                         prompt_logprobs, sample_logprobs)
+
         if sampling_tensors.largest_num_logprobs > 0:
             top_logprobs, top_token_ids = torch.topk(
                 logprobs, sampling_tensors.largest_num_logprobs, dim=-1)
@@ -92,7 +102,7 @@ class Sampler(nn.Module):
         )
 
         return pythonize_sampler_output(
-            RawSamplerOutput(
+            raw_sampler_output=RawSamplerOutput(
                 sampled_tokens=sampled_tokens,
                 sampled_logprobs=sampled_logprobs,
                 prompt_logprobs=prompt_logprobs,
@@ -100,18 +110,9 @@ class Sampler(nn.Module):
                 sampling_tensors=sampling_tensors,
                 top_logprobs=top_logprobs,
                 top_token_ids=top_token_ids,
-                #logits=batched_seq_logits
             ),
-            sampling_metadata)
-
-        # # Sample the next tokens.
-        # sample_results = _sample(probs, logprobs, sampling_metadata,
-        #                          sampling_tensors)
-        # # Get the logprobs query results.
-        # prompt_logprobs, sample_logprobs = _get_logprobs(
-        #     logprobs, sampling_metadata, sample_results)
-        # return _build_sampler_output(sample_results, sampling_metadata,
-        #                              prompt_logprobs, sample_logprobs)
+            sampling_metadata=sampling_metadata,
+        )
 
 
 def _get_bin_counts_and_mask(
@@ -529,13 +530,8 @@ def _sample(
     probs: torch.Tensor,
     logprobs: torch.Tensor,
     sampling_metadata: SamplingMetadata,
-    sampling_tensors: SamplingTensors,
 ) -> List[Tuple[List[int], List[int]]]:
     return _sample_with_torch(probs, logprobs, sampling_metadata)
-
-    # TODO: Enable once Triton kernel & associated code is faster.
-    # return _sample_with_triton_kernel(probs, logprobs, sampling_metadata,
-    #                                   sampling_tensors)
 
 
 def _get_ranks(x: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
