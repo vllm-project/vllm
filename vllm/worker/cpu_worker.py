@@ -53,9 +53,10 @@ class CPUModelRunner(ModelRunner):
 class Worker:
     """A worker class that executes (a partition of) the model on a CPU socket.
 
-    Each worker is associated with a single CPU socket. The worker is responsible for
-    maintaining the KV cache and executing the model on the CPU. In case of
-    distributed inference, each worker is assigned a partition of the model.
+    Each worker is associated with a single CPU socket. The worker is 
+    responsible for maintaining the KV cache and executing the model on the 
+    CPU. In case of distributed inference, each worker is assigned a partition
+    of the model.
     """
 
     def __init__(
@@ -116,7 +117,8 @@ class Worker:
             block_size: The size of the cache block.
             cpu_swap_space: The size of the CPU swap space in bytes.
         """
-        # For CPU device, the block number will be calculated based on the swap_space.
+        # For CPU device, the block number will be calculated based on the
+        # swap_space.
         cache_block_size = CacheEngine.get_cache_block_size(
             block_size, cache_dtype, self.model_config, self.parallel_config)
         num_cpu_blocks = int(cpu_swap_space // cache_block_size)
@@ -190,8 +192,8 @@ class Worker:
             torch_world_size = torch.distributed.get_world_size()
             if torch_world_size != parallel_config.world_size:
                 raise RuntimeError(
-                    "torch.distributed is already initialized but the torch world "
-                    "size does not match parallel_config.world_size "
+                    "torch.distributed is already initialized but the torch "
+                    "world size does not match parallel_config.world_size "
                     f"({torch_world_size} vs. {parallel_config.world_size}).")
         elif not distributed_init_method:
             raise ValueError(

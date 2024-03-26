@@ -2,13 +2,13 @@ from typing import Dict, List, Optional
 
 import torch
 
-from vllm.lora.request import LoRARequest
-from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, LoRAConfig)
+from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
-from vllm.utils import (get_ip, get_open_port, get_distributed_init_method)
+from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 
 logger = init_logger(__name__)
 
@@ -83,7 +83,7 @@ class CPUExecutor(ExecutorBase):
                 "`swap_space` or decreasing `max_model_len` when "
                 "initializing the engine.")
 
-        # To re-use the cache management procedure, use cpu cache as 'gpu cache'.
+        # To reuse the cache management procedure, use cpu cache as 'gpu cache'.
         self.cache_config.num_gpu_blocks = num_cpu_blocks  # type: ignore
         self.cache_config.num_cpu_blocks = 0  # type: ignore
 
@@ -94,20 +94,20 @@ class CPUExecutor(ExecutorBase):
     def _verify_and_get_model_config(config: ModelConfig) -> ModelConfig:
         if (config.dtype == torch.float16):
             logger.warning(
-                f"float16 is not supported not CPU, casting to bfloat16.")
+                "float16 is not supported not CPU, casting to bfloat16.")
             config.dtype = torch.bfloat16
-        if (config.enforce_eager == False):
+        if (not config.enforce_eager):
             logger.warning(
-                f"CUDA graph is not supported on CPU, fallback to the eager mode."
-            )
+                "CUDA graph is not supported on CPU, fallback to the eager "
+                "mode.")
             config.enforce_eager = True
         return config
 
     @staticmethod
     def _verify_and_get_cache_config(config: CacheConfig) -> CacheConfig:
-        if (config.enable_prefix_caching == True):
+        if config.enable_prefix_caching:
             logger.warning(
-                f"Prefix caching is not supported not CPU, disable it.")
+                "Prefix caching is not supported not CPU, disable it.")
             config.enable_prefix_caching = False
         return config
 
