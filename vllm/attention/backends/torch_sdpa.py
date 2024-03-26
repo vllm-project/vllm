@@ -1,8 +1,10 @@
-"""Attention layer with torch scaled_dot_product_attention and PagedAttention."""
+""" Attention layer with torch scaled_dot_product_attention
+    and PagedAttention."""
 from typing import List, Optional, Tuple, Type, Dict
 from dataclasses import dataclass
 
 import torch
+from torch.nn.functional import scaled_dot_product_attention
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
@@ -112,7 +114,7 @@ class TorchSDPABackendImpl(AttentionImpl):
         kv_cache: Optional[torch.Tensor],
         attn_metadata: TorchSDPAMetadata,
     ) -> torch.Tensor:
-        """Forward pass with torch scaled_dot_product_attention and PagedAttention.
+        """Forward pass with torch SDPA and PagedAttention.
 
         Args:
             query: shape = [num_tokens, num_heads * head_size]
@@ -164,7 +166,7 @@ class TorchSDPABackendImpl(AttentionImpl):
                 value = value.movedim(0, value.dim() - 2)
 
                 if self.need_mask:
-                    output = torch.nn.functional.scaled_dot_product_attention(
+                    output = scaled_dot_product_attention(
                         query,
                         key,
                         value,
@@ -180,7 +182,7 @@ class TorchSDPABackendImpl(AttentionImpl):
                         dtype=query.dtype)
                     for prompt_len in attn_metadata.prompt_lens:
                         end = start + prompt_len
-                        sub_out = torch.nn.functional.scaled_dot_product_attention(
+                        sub_out = scaled_dot_product_attention(
                             query[:, start:end, :],
                             key[:, start:end, :],
                             value[:, start:end, :],
@@ -282,7 +284,7 @@ def _make_sliding_window_bias(
         )
         shift = 0
         mask = torch.tril(tensor, diagonal=shift).to(dtype)  # type: ignore
-        if not window_size is None:
+        if window_size is not None:
             mask = torch.triu(mask, diagonal=shift - window_size + 1)
         mask = torch.log(mask)
         attn_biases.append(mask.to(dtype))
