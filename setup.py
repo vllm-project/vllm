@@ -188,7 +188,8 @@ class cmake_build_ext(build_ext):
 
 
 def _is_cuda() -> bool:
-    return torch.version.cuda is not None and not _is_neuron()
+    return VLLM_TARGET_DEVICE == "cuda" and torch.version.cuda is not None and not _is_neuron(
+    )
 
 
 def _is_hip() -> bool:

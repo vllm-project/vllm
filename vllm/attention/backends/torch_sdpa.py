@@ -261,7 +261,10 @@ def _make_alibi_bias(
             dtype=dtype,
         )[:, :, :prompt_len].copy_(bias)
         bias.mul_(alibi_slopes[:, None, None])
-        attn_biases.append(bias.to(dtype))
+        inf_mask = torch.empty(
+            (1, prompt_len, prompt_len),
+            dtype=bias.dtype).fill_(-torch.inf).triu_(diagonal=1)
+        attn_biases.append((bias + inf_mask).to(dtype))
 
     return attn_biases
 

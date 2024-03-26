@@ -15,18 +15,15 @@ logger = init_logger(__name__)
 
 class CPUExecutor(ExecutorBase):
 
-    def __init__(
-        self,
-        model_config: ModelConfig,
-        cache_config: CacheConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        lora_config: Optional[LoRAConfig],
-    ) -> None:
+    def __init__(self, model_config: ModelConfig, cache_config: CacheConfig,
+                 parallel_config: ParallelConfig,
+                 scheduler_config: SchedulerConfig,
+                 device_config: DeviceConfig,
+                 lora_config: Optional[LoRAConfig], *args, **kwargs) -> None:
         assert device_config.device_type == "cpu"
         assert lora_config is None, "cpu backend doesn't support LoRA"
         model_config = CPUExecutor._verify_and_get_model_config(model_config)
+        cache_config = CPUExecutor._verify_and_get_cache_config(cache_config)
 
         self.model_config = model_config
         self.cache_config = cache_config
@@ -38,7 +35,6 @@ class CPUExecutor(ExecutorBase):
         # Instantiate the worker and load the model to CPU.
         self._init_worker()
 
-        # Profile the memory usage and initialize the cache.
         self._init_cache()
 
     def _init_worker(self):
@@ -105,6 +101,14 @@ class CPUExecutor(ExecutorBase):
                 f"CUDA graph is not supported on CPU, fallback to the eager mode."
             )
             config.enforce_eager = True
+        return config
+
+    @staticmethod
+    def _verify_and_get_cache_config(config: CacheConfig) -> CacheConfig:
+        if (config.enable_prefix_caching == True):
+            logger.warning(
+                f"Prefix caching is not supported not CPU, disable it.")
+            config.enable_prefix_caching = False
         return config
 
     def execute_model(self,
