@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Dict, List, Optional, Union
 
+from pydantic import conint
+
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest, ErrorResponse,
@@ -174,7 +176,7 @@ class OpenAIServing:
             request: Union[ChatCompletionRequest, CompletionRequest],
             prompt: Optional[str] = None,
             prompt_ids: Optional[List[int]] = None,
-            truncate_prompt_tokens: Optional[int] = None) -> List[int]:
+            truncate_prompt_tokens: Optional[conint(ge=1)] = None) -> List[int]:
         if not (prompt or prompt_ids):
             raise ValueError("Either prompt or prompt_ids should be provided.")
         if (prompt and prompt_ids):
