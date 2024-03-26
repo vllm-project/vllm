@@ -1,5 +1,5 @@
-from collections import Counter as CollectionsCounter
 import time
+from collections import Counter as CollectionsCounter
 from typing import Iterable, List, Optional, Tuple, Type, Union
 
 from transformers import PreTrainedTokenizer

@@ -1,6 +1,7 @@
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Counter as CollectionsCounter
+from typing import Counter as CollectionsCounter
+from typing import Dict, List
 
 import numpy as np
 from prometheus_client import (REGISTRY, Counter, Gauge, Histogram, Info,

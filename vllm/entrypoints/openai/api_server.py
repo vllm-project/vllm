@@ -5,14 +5,13 @@ import os
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 
-from prometheus_fastapi_instrumentator import Instrumentator
 import fastapi
 import uvicorn
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from prometheus_client import make_asgi_app
+from prometheus_fastapi_instrumentator import Instrumentator
 
 import vllm
 from vllm.engine.arg_utils import AsyncEngineArgs
