@@ -56,7 +56,6 @@ except Exception as e:
         " to point to the correct nccl library path.")
     raise e
 
-
 # === export types and functions from nccl to Python ===
 # for the original nccl definition, please check
 # https://github.com/NVIDIA/nccl/blob/master/src/nccl.h.in
