@@ -26,6 +26,9 @@ ARG BUILD_FA="1"
 # whether to build cupy on rocm
 ARG BUILD_CUPY="1"
 
+# whether to build triton on rocm
+ARG BUILD_TRITON="1"
+
 # Install some basic utilities
 RUN apt-get update && apt-get install python3 python3-pip -y
 
@@ -93,6 +96,17 @@ RUN if [ "$BUILD_CUPY" = "1" ]; then \
     && export HCC_AMDGPU_TARGET="gfx90a,gfx942,gfx1100" \
     && pip install . \
     && cd ..; \
+    fi
+
+# build triton
+RUN if [ "$BUILD_TRITON" = "1" ]; then \
+    mkdir -p libs \
+    && cd libs \
+    && pip uninstall -y triton \
+    && git clone https://github.com/ROCmSoftwarePlatform/triton.git \
+    && cd triton/python \
+    && pip3 install . \
+    && cd ../..; \
     fi
 
 COPY ./ /app/vllm
