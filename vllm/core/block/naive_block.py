@@ -1,8 +1,8 @@
-from typing import List, Optional, Set, Iterable, Dict
+from typing import Dict, Iterable, List, Optional, Set
 
-from vllm.core.block.interfaces import BlockAllocator, Block
-from vllm.core.block.common import (RefCounter, CopyOnWriteTracker,
+from vllm.core.block.common import (CopyOnWriteTracker, RefCounter,
                                     get_all_blocks_recursively)
+from vllm.core.block.interfaces import Block, BlockAllocator
 
 BlockIndex = int
 Refcount = int

@@ -5,11 +5,9 @@ import pytest
 
 from vllm import SamplingParams
 from vllm.block import PhysicalTokenBlock
+from vllm.core.block_manager_v1 import (BlockSpaceManager,
+                                        UncachedBlockAllocator)
 from vllm.core.interfaces import AllocStatus
-from vllm.core.block_manager_v1 import (
-    UncachedBlockAllocator,
-    BlockSpaceManager,
-)
 from vllm.sequence import Logprob, Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
 

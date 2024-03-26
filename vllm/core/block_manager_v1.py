@@ -1,16 +1,12 @@
 """A block manager that manages token blocks."""
-import enum
 from abc import ABC, abstractmethod
 from itertools import count, takewhile
 from os.path import commonprefix
 from typing import Dict, List, Optional, Set, Tuple
 
 from vllm.block import BlockTable, PhysicalTokenBlock
-from vllm.core.evictor import Evictor, EvictionPolicy, make_evictor
-from vllm.core.interfaces import BlockSpaceManager, AllocStatus
-from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
-from vllm.utils import Device
 from vllm.core.evictor import EvictionPolicy, Evictor, make_evictor
+from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.logger import init_logger
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device

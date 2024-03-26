@@ -1,9 +1,8 @@
 """A block manager that manages token blocks."""
 from typing import List, Optional
 
-from vllm.utils import Device
-from vllm.core.block.interfaces import DeviceAwareBlockAllocator, Block
-from vllm.utils import chunk_list, cdiv
+from vllm.core.block.interfaces import Block, DeviceAwareBlockAllocator
+from vllm.utils import Device, cdiv, chunk_list
 
 
 class BlockTable:

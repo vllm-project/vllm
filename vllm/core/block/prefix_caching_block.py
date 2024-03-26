@@ -1,12 +1,12 @@
 """Token blocks."""
-from typing import List, Optional, Iterable, Dict
 from itertools import takewhile
 from os.path import commonprefix
+from typing import Dict, Iterable, List, Optional
 
+from vllm.core.block.common import (CopyOnWriteTracker,
+                                    get_all_blocks_recursively)
 from vllm.core.block.interfaces import Block, BlockAllocator
-from vllm.core.block.naive_block import NaiveBlockAllocator, NaiveBlock
-from vllm.core.block.common import (get_all_blocks_recursively,
-                                    CopyOnWriteTracker)
+from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
 
 PrefixHash = int
 BlockIndex = int

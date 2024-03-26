@@ -2,7 +2,7 @@ import pytest
 
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
-from vllm.utils import Device, chunk_list, cdiv
+from vllm.utils import Device, cdiv, chunk_list
 
 
 @pytest.mark.parametrize("block_size", [16])

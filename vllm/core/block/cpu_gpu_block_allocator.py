@@ -1,9 +1,9 @@
-from typing import List, Optional, Dict
-from vllm.core.block.interfaces import (BlockAllocator, Block,
+from typing import Dict, List, Optional
+
+from vllm.core.block.interfaces import (Block, BlockAllocator,
                                         DeviceAwareBlockAllocator)
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
 from vllm.core.block.prefix_caching_block import PrefixCachingBlockAllocator
-
 from vllm.utils import Device
 
 

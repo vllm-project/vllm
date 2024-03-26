@@ -1,5 +1,5 @@
-from typing import List, Optional, Protocol, Dict
 from abc import ABC, abstractmethod, abstractproperty
+from typing import Dict, List, Optional, Protocol
 
 from vllm.utils import Device
 

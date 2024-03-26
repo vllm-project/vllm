@@ -1,10 +1,11 @@
-import random
-import pytest
-from typing import Optional, List
-from unittest.mock import MagicMock
 import math
+import random
+from typing import List, Optional
+from unittest.mock import MagicMock
 
-from vllm.core.block.interfaces import BlockAllocator, Block
+import pytest
+
+from vllm.core.block.interfaces import Block, BlockAllocator
 from vllm.core.block.prefix_caching_block import (PrefixCachingBlock,
                                                   PrefixCachingBlockAllocator)
 

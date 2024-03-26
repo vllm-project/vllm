@@ -1,7 +1,8 @@
 import pytest
 
-from vllm.core.interfaces import AllocStatus
 from vllm.core.block_manager_v2 import BlockSpaceManagerV2
+from vllm.core.interfaces import AllocStatus
+
 from ..utils import create_seq_group
 
 

@@ -1,8 +1,9 @@
-import pytest
-from typing import Optional, List
+from typing import List, Optional
 
-from vllm.core.block.interfaces import BlockAllocator, Block
-from vllm.core.block.naive_block import NaiveBlockAllocator, NaiveBlock
+import pytest
+
+from vllm.core.block.interfaces import Block, BlockAllocator
+from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
 
 
 class TestNaiveBlockAllocator:

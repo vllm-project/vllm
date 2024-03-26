@@ -2,7 +2,7 @@ import time
 from typing import Tuple
 
 from vllm import SamplingParams
-from vllm.sequence import Sequence, SequenceGroup, Logprob
+from vllm.sequence import Logprob, Sequence, SequenceGroup
 
 
 def create_dummy_prompt(

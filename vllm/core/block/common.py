@@ -1,5 +1,5 @@
-from typing import List, Iterable, Dict, Optional
 from collections import defaultdict
+from typing import Dict, Iterable, List, Optional
 
 from vllm.core.block.interfaces import Block, BlockAllocator
 

@@ -1,8 +1,8 @@
-from typing import List, Optional, Tuple, Dict
-from abc import ABC, abstractmethod
 import enum
+from abc import ABC, abstractmethod
+from typing import Dict, List, Optional, Tuple
 
-from vllm.sequence import SequenceGroup, Sequence
+from vllm.sequence import Sequence, SequenceGroup
 
 
 class AllocStatus(enum.Enum):

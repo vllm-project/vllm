@@ -1,12 +1,11 @@
 """A block manager that manages token blocks."""
 from typing import Dict, List, Optional, Tuple
 
+from vllm.core.block.block_table import BlockTable
+from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
+from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
-from vllm.core.interfaces import AllocStatus, BlockSpaceManager
-
-from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
-from vllm.core.block.block_table import BlockTable
 
 SeqId = int
 
