@@ -226,7 +226,7 @@ def with_pynccl_for_all_reduce():
     tp_size = get_tensor_model_parallel_world_size()
     if tp_size == 1:
         # No-op.
-        # NOTE(woosuk): We don't initialize CuPy when tp_size is 1.
+        # NOTE(woosuk): We don't initialize pynccl when tp_size is 1.
         yield
     else:
         global _ENABLE_PYNCCL_FOR_ALL_REDUCE

@@ -75,7 +75,7 @@ class Worker:
         self.cache_engine = None
         self.gpu_cache = None
 
-    def init_device(self, cupy_port: Optional[int] = None) -> None:
+    def init_device(self) -> None:
         if self.device_config.device.type == "cuda":
             # torch.distributed.all_reduce does not free the input tensor until
             # the synchronization point. This causes the memory usage to grow
@@ -97,8 +97,7 @@ class Worker:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
-        init_distributed_environment(self.parallel_config, self.rank,
-                                     cupy_port, self.distributed_init_method)
+        init_distributed_environment(self.parallel_config, self.rank, self.distributed_init_method)
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
@@ -250,7 +249,6 @@ class Worker:
 def init_distributed_environment(
     parallel_config: ParallelConfig,
     rank: int,
-    cupy_port: Optional[int],
     distributed_init_method: Optional[str] = None,
 ) -> None:
     """Initialize the distributed environment."""
@@ -274,21 +272,20 @@ def init_distributed_environment(
         )
 
     if pynccl_utils.is_initialized():
-        cupy_world_size = pynccl_utils.get_world_size()
-        if cupy_world_size != parallel_config.world_size:
+        pynccl_world_size = pynccl_utils.get_world_size()
+        if pynccl_world_size != parallel_config.world_size:
             raise RuntimeError(
-                "cupy.distributed is already initialized but the cupy world "
+                "pynccl is already initialized but the pynccl world "
                 "size does not match parallel_config.world_size "
-                f"({cupy_world_size} vs. {parallel_config.world_size}).")
-    elif (parallel_config.world_size > 1 and cupy_port is not None):
-        # NOTE(woosuk): We don't initialize CuPy process group when world size
+                f"({pynccl_world_size} vs. {parallel_config.world_size}).")
+    elif parallel_config.world_size > 1:
+        # NOTE(woosuk): We don't initialize pynccl process group when world size
         # is 1.
         # TODO(woosuk): Support multi-node connection.
         pynccl_utils.init_process_group(
             world_size=parallel_config.world_size,
             rank=rank,
-            host="localhost",
-            port=cupy_port,
+            init_method=distributed_init_method,
         )
 
     # A small all_reduce for warmup.

@@ -794,11 +794,11 @@ class ModelRunner:
         ]
 
         # NOTE(woosuk): There are 3 backends for all-reduce: custom all-reduce
-        # kernel, CuPy NCCL, and PyTorch NCCL. When using CUDA graph, we use
-        # either custom all-reduce kernel or CuPy NCCL. When not using CUDA
+        # kernel, pynccl, and PyTorch NCCL. When using CUDA graph, we use
+        # either custom all-reduce kernel or pynccl. When not using CUDA
         # graph, we use either custom all-reduce kernel or PyTorch NCCL.
         # We always prioritize using custom all-reduce kernel but fall back
-        # to PyTorch or CuPy NCCL if it is disabled or not supported.
+        # to PyTorch or pynccl if it is disabled or not supported.
         with custom_all_reduce.capture():
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
@@ -846,7 +846,7 @@ class ModelRunner:
         logger.info(f"Graph capturing finished in {elapsed_time:.0f} secs.")
 
     def __del__(self) -> None:
-        # Delete the CUDA graphs before deleting the CuPy NCCL communicator.
+        # Delete the CUDA graphs before deleting the pynccl communicator.
         # NOTE(woosuk): This is necessary because otherwise deadlocks can
         # happen.
         # FIXME(woosuk): This is a bit hacky. Find a more robust solution.
