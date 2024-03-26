@@ -1,7 +1,7 @@
+import os
 from functools import lru_cache
 
 import torch
-import os
 
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger

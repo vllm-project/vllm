@@ -8,14 +8,11 @@ from typing import List, Optional, Type
 
 import torch
 
-from vllm.attention.backends.abstract import (
-    AttentionImpl, )
-from vllm.attention.backends.flash_attn import (
-    FlashAttentionBackend,
-    FlashAttentionMetadata,
-)
-from vllm.attention.ops.paged_attn import PagedAttention
+from vllm.attention.backends.abstract import AttentionImpl
+from vllm.attention.backends.flash_attn import (FlashAttentionBackend,
+                                                FlashAttentionMetadata)
 from vllm.attention.ops.flash_attention_triton import triton_attention
+from vllm.attention.ops.paged_attn import PagedAttention
 
 
 class FlashAttentionTritonBackend(FlashAttentionBackend):
