@@ -74,7 +74,7 @@ Performance tips
 
 2. If using vLLM CPU backend on a bare-metal machine, it is recommended to disable the hyper-threading.
 
-3. If using vLLM CPU backend on a multi-socket machine with NUMA, beware to set CPU cores and memory nodes, to avoid the remote memory node access. ``numactl`` is an useful tool for CPU core and memory binding on NUMA platform. Besides, ``--cpuset-cpus`` and ``--cpuset-mems`` arguments of ``docker run`` are also useful.
+3. If using vLLM CPU backend on a multi-socket machine with NUMA, be aware to set CPU cores and memory nodes, to avoid the remote memory node access. ``numactl`` is an useful tool for CPU core and memory binding on NUMA platform. Besides, ``--cpuset-cpus`` and ``--cpuset-mems`` arguments of ``docker run`` are also useful.
 
 
 
