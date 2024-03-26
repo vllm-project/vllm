@@ -1,7 +1,7 @@
 from typing import Dict, List, Optional
 
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig)
+                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.executor.utils import check_block_size_valid
 from vllm.logger import init_logger
@@ -23,6 +23,7 @@ class GPUExecutor(ExecutorBase):
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
+        vision_language_config: Optional[VisionLanguageConfig],
     ) -> None:
         self.model_config = model_config
         self.cache_config = cache_config
@@ -30,6 +31,7 @@ class GPUExecutor(ExecutorBase):
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
+        self.vision_language_config = vision_language_config
 
         # Instantiate the worker and load the model to GPU.
         self._init_worker()
@@ -56,6 +58,7 @@ class GPUExecutor(ExecutorBase):
             rank=0,
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
+            vision_language_config=self.vision_language_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )

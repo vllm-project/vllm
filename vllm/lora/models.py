@@ -413,11 +413,12 @@ class LoRAModelManager:
         for module_name, module in self.model.named_modules():
             if not self._match_target_modules(module_name):
                 continue
-
+            parts = module_name.split(".")[-1]
+            packed_moduled_lst = self.packed_modules_mapping.get(parts, [])
             new_module = replace_submodule(
                 self.model, module_name,
                 from_layer(module, self.lora_slots, self.lora_config,
-                           self.model.config))
+                           packed_moduled_lst, self.model.config))
             # (yard1): TODO make this more robust
             if "lm_head" in module_name:
                 logits_processor_module = self.model.get_submodule(
@@ -510,8 +511,10 @@ class LoRAModelManager:
     def _register_packed_modules(self, module_full_name: str) -> None:
         parts = module_full_name.split(".")
         module_name = parts[-1]
-        replacements = self.packed_modules_mapping.get(module_name)
-        if not replacements:
+        replacements = self.packed_modules_mapping.get(module_name, [])
+        # When replacements is less than or equal to 1, it indicates that this
+        # module is not a packed module.
+        if len(replacements) <= 1:
             return
         prefix = ".".join(parts[:-1])
         self.packed_modules[module_full_name] = [
