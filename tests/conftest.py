@@ -1,7 +1,10 @@
+import contextlib
+import gc
 import os
 from typing import List, Optional, Tuple
 
 import pytest
+import ray
 import torch
 from PIL import Image
 from transformers import (AutoModelForCausalLM, AutoProcessor,
@@ -9,6 +12,8 @@ from transformers import (AutoModelForCausalLM, AutoProcessor,
 
 from vllm import LLM, SamplingParams
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
+from vllm.model_executor.parallel_utils.parallel_state import (
+    destroy_model_parallel)
 from vllm.sequence import MultiModalData
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -41,6 +46,22 @@ def _read_prompts(filename: str) -> List[str]:
     with open(filename, "r") as f:
         prompts = f.readlines()
         return prompts
+
+
+def cleanup():
+    destroy_model_parallel()
+    with contextlib.suppress(AssertionError):
+        torch.distributed.destroy_process_group()
+    gc.collect()
+    torch.cuda.empty_cache()
+    if ray.is_initialized():
+        ray.shutdown()
+
+
+@pytest.fixture(autouse=True)
+def cleanup_fixture():
+    yield
+    cleanup()
 
 
 @pytest.fixture(scope="session")
