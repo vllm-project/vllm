@@ -269,6 +269,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
             SequenceGroupMetadata(
                 request_id="test_1",
                 is_prompt=True,
+                is_chunked_prefill=False,
                 seq_data={
                     next(seq_id_counter): create_sequence_data(),
                 },
