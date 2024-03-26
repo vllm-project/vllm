@@ -59,8 +59,8 @@ def worker_fn_with_cudagraph():
         a = torch.ones((4, 4), device=f'cuda:{comm.rank}')
         torch.cuda.synchronize()
         with torch.cuda.graph(graph, stream=comm.stream):
-            # TODO(youkaichao)
-            # seems like this operation is not performed
+            # operation during the graph capture is recorded but not executed
+            # see https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#creating-a-graph-using-stream-capture # noqa
             comm.all_reduce(a)
         comm.stream.synchronize()
         assert a.mean().cpu().item() == comm.world_size**0
