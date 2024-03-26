@@ -19,7 +19,7 @@ You can install vLLM using pip:
 
 .. code-block:: console
 
-    $ # (Optional) Create a new conda environment.
+    $ # (Recommended) Create a new conda environment.
     $ conda create -n myenv python=3.9 -y
     $ conda activate myenv
 
@@ -28,24 +28,20 @@ You can install vLLM using pip:
 
 .. note::
 
-    As of now, vLLM's binaries are compiled on CUDA 12.1 by default.
-    However, you can install vLLM with CUDA 11.8 by running:
+    As of now, vLLM's binaries are compiled with CUDA 12.1 and public PyTorch release versions by default.
+    We also provide vLLM binaries compiled with CUDA 11.8 and public PyTorch release versions:
 
     .. code-block:: console
 
         $ # Install vLLM with CUDA 11.8.
-        $ export VLLM_VERSION=0.2.4
+        $ export VLLM_VERSION=0.3.3
         $ export PYTHON_VERSION=39
-        $ pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu118-cp${PYTHON_VERSION}-cp${PYTHON_VERSION}-manylinux1_x86_64.whl
+        $ pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu118-cp${PYTHON_VERSION}-cp${PYTHON_VERSION}-manylinux1_x86_64.whl --extra-index-url https://download.pytorch.org/whl/cu118
 
-        $ # Re-install PyTorch with CUDA 11.8.
-        $ pip uninstall torch -y
-        $ pip install torch --upgrade --index-url https://download.pytorch.org/whl/cu118
+    The compilation unfortunately introduces binary incompatibility with other CUDA versions and PyTorch versions, even for the same PyTorch version with different building configurations.
 
-        $ # Re-install xFormers with CUDA 11.8.
-        $ pip uninstall xformers -y
-        $ pip install --upgrade xformers --index-url https://download.pytorch.org/whl/cu118
-
+    Therefore, it is recommended to use install vLLM with a fresh new conda environment,.
+    If either you have a different CUDA version or you want to use an existing PyTorch installation, you need to build vLLM from source. See below for instructions.
 
 .. _build_from_source:
 
