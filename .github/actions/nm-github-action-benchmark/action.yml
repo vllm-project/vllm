@@ -25,6 +25,13 @@ inputs:
         - 'true'
         - 'false'
     required: true
+  reporting_enabled:
+    description: "When set to true, if there is a regression, do 3 things. 1. Mark the workflow as failed. 2. Add commit comments"
+    type: choice
+    options:
+        - 'true'
+        - 'false'
+    required: true
   github_token:
     description: "secrets.GITHUB_TOKEN from the caller"
     required: true
@@ -44,12 +51,12 @@ runs:
         # Push and deploy to Github pages automatically
         auto-push: ${{ inputs.auto_push == 'true' }}
         # Add a commit comment comparing the current benchmark with the previous.
-        comment-always: true
+        comment-always: ${{ inputs.reporting_enabled == 'true' }}
         # Create an alert when some value has regressed more than 10% 
         alert-threshold: "110%"
         # Mark the workflow as a failure when some alert is triggered
-        fail-on-alert: true
+        fail-on-alert: ${{ inputs.reporting_enabled == 'true' }}
         # Add a commit comment describing what triggered the alert
-        comment-on-alert: true
+        comment-on-alert: ${{ inputs.reporting_enabled == 'true' }}
         # TODO (varun): Is this a reasonable number ? 
         max-items-in-chart: 50

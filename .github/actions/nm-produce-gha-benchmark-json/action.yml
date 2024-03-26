@@ -10,6 +10,8 @@ inputs:
   smaller_is_better_output_file_path:
     description: 'Path to a file where the GHA CustomSmallerIsBetter JSON is to be stored'
     required: true
+  observation_metrics_output_file_path:
+    description: 'Path to a file where metrics that we only want to observe are stored' 
   python:
     description: 'python version, e.g. 3.10.12'
     required: true
@@ -25,7 +27,7 @@ runs:
       VENV="${{ inputs.venv }}-${COMMIT:0:7}"
       source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
       SUCCESS=0
-      python3 -m neuralmagic.benchmarks.scripts.logging.gha_benchmark_logging -i ${{inputs.vllm_benchmark_jsons_path}} --bigger-is-better-output-file-path ${{ inputs.bigger_is_better_output_file_path }} --smaller-is-better-output-file-path ${{ inputs.smaller_is_better_output_file_path }} || SUCCESS=$?
+      python3 -m neuralmagic.benchmarks.scripts.logging.gha_benchmark_logging -i ${{inputs.vllm_benchmark_jsons_path}} --bigger-is-better-metrics-output-file-path ${{ inputs.bigger_is_better_output_file_path }} --smaller-is-better-metrics-output-file-path ${{ inputs.smaller_is_better_output_file_path }} --observation-metrics-output-file-path ${{ inputs.observation_metrics_output_file_path }} || SUCCESS=$?
       echo "test=${SUCCESS}" >> "$GITHUB_OUTPUT"
       exit ${SUCCESS}
     shell: bash

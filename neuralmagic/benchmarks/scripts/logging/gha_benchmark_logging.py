@@ -10,7 +10,7 @@ from functools import reduce
 from dataclasses import dataclass
 from typing import List, Iterable, NamedTuple
 
-from .benchmark_result import (GHABenchmarkToolName, BenchmarkResult,
+from .benchmark_result import (BenchmarkMetricType, BenchmarkResult,
                                MetricTemplate)
 
 
@@ -79,12 +79,12 @@ class GHARecord:
                          extra=f"{json.dumps(extra, indent=2)}")
 
 
-class Tool_Record_T(NamedTuple):
-    tool: GHABenchmarkToolName
+class Type_Record_T(NamedTuple):
+    type: BenchmarkMetricType
     record: GHARecord
 
 
-def process(json_file_path: Path) -> Iterable[Tool_Record_T]:
+def process(json_file_path: Path) -> Iterable[Type_Record_T]:
 
     assert json_file_path.exists()
 
@@ -101,57 +101,70 @@ def process(json_file_path: Path) -> Iterable[Tool_Record_T]:
         lambda md: MetricTemplate.from_dict(md), metrics.values())
 
     return map(
-        lambda metric: Tool_Record_T(
-            metric.tool,
+        lambda metric: Type_Record_T(
+            metric.type,
             GHARecord.from_metric_template(metric, extra=hover_data)), metrics)
 
 
-def main(input_directory: Path, bigger_is_better_output_json_file_name: Path,
-         smaller_is_better_output_json_file_name: Path) -> None:
+def main(args: argparse.Namespace) -> None:
+    input_directory = Path(args.input_directory)
 
-    def dump_to_json(gha_records: List[GHARecord], output_path: Path):
+    json_file_paths = input_directory.glob('*.json')
+
+    type_records: List[Type_Record_T] = list(
+        reduce(lambda whole, part: whole + part,
+               (map(lambda json_file_path: list(process(json_file_path)),
+                    json_file_paths))))
+
+    def filter_and_dump_if_non_empty(type_records: List[Type_Record_T],
+                                     type: BenchmarkMetricType,
+                                     output_path: Path):
+        """
+        Given a list of type_record tuples, filter the records with the given
+        type.
+        If there are no records after we filter, don't dump json. otherwise,
+        dump all records as JSON.
+        """
         # Make output directory if it doesn't exist
         output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        gha_records: List[GHARecord] = list(
+            map(
+                lambda type_record: type_record.record,
+                filter(lambda type_record: type_record.type == type,
+                       type_records)))
+
+        if len(gha_records) == 0:
+            return
 
         # Make data JSON serializable
         gha_record_dicts = list(map(lambda x: x.__dict__, gha_records))
         with open(output_path, 'w+') as f:
             json.dump(gha_record_dicts, f, indent=4)
 
-    json_file_paths = input_directory.glob('*.json')
-    tool_records: List[Tool_Record_T] = list(
-        reduce(lambda whole, part: whole + part,
-               (map(lambda json_file_path: list(process(json_file_path)),
-                    json_file_paths))))
-
-    bigger_is_better: List[GHARecord] = list(
-        map(
-            lambda tool_record: tool_record.record,
-            filter(
-                lambda tool_record: tool_record.tool == GHABenchmarkToolName.
-                BiggerIsBetter, tool_records)))
-
-    smaller_is_better: List[GHARecord] = list(
-        map(
-            lambda tool_record: tool_record.record,
-            filter(
-                lambda tool_record: tool_record.tool == GHABenchmarkToolName.
-                SmallerIsBetter, tool_records)))
-
-    dump_to_json(bigger_is_better, bigger_is_better_output_json_file_name)
-    dump_to_json(smaller_is_better, smaller_is_better_output_json_file_name)
+    filter_and_dump_if_non_empty(
+        type_records, BenchmarkMetricType.BiggerIsBetter,
+        Path(args.bigger_is_better_metrics_output_file_path))
+    filter_and_dump_if_non_empty(
+        type_records, BenchmarkMetricType.SmallerIsBetter,
+        Path(args.smaller_is_better_metrics_output_file_path))
+    filter_and_dump_if_non_empty(
+        type_records, BenchmarkMetricType.Observation,
+        Path(args.observation_metrics_output_file_path))
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="""
         Process the benchmark JSONs produced by BenchmarkResult and output JSONs
-        that could be consumed by `github-action-benchmark`
+        that could be consumed by `github-action-benchmark`.
+        The JSONs are not produced if there are no metrics to report for some
+        BenchmarkMetricType.
         Reference : https://github.com/benchmark-action/github-action-benchmark
         """)
 
     parser.add_argument(
         "-i",
-        "--input-json-directory",
+        "--input-directory",
         required=True,
         type=str,
         help="""Path to the directory containing BenchmarkResult 
@@ -159,22 +172,30 @@ if __name__ == '__main__':
                 to the benchmark runner scripts like 
                 neuralmagic/benchmarks/run_benchmarks.py.""")
 
-    parser.add_argument(
-        "--bigger-is-better-output-file-path",
-        type=str,
-        required=True,
-        help="""An output file path, where the GHABenchmarkToolName 
-                BiggerIsBetter metrics are to be stored.""")
+    parser.add_argument("--bigger-is-better-metrics-output-file-path",
+                        required=True,
+                        type=str,
+                        help="""
+        An output file path, where the BenchmarkMetricType
+        BiggerIsBetter metrics are stored.
+        """)
 
-    parser.add_argument(
-        "--smaller-is-better-output-file-path",
-        type=str,
-        required=True,
-        help="""An output file path, where the GHABenchmarkToolName 
-                SmallerIsBetter metrics are to be stored""")
+    parser.add_argument("--smaller-is-better-metrics-output-file-path",
+                        required=True,
+                        type=str,
+                        help="""
+        An output file path, where the BenchmarkMetricType
+        SmallerIsBetter metrics are stored.
+        """)
+
+    parser.add_argument("--observation-metrics-output-file-path",
+                        required=True,
+                        type=str,
+                        help="""
+        An output file path, where the BenchmarkMetricType
+        Observation metrics are stored.
+        """)
 
     args = parser.parse_args()
 
-    main(Path(args.input_json_directory),
-         Path(args.bigger_is_better_output_file_path),
-         Path(args.smaller_is_better_output_file_path))
+    main(args)

@@ -30,15 +30,15 @@ jobs:
         secrets: inherit
 
     # Benchmarks
-    #AWS-AVX2-32G-A10G-24G-Benchmark:
-    #    uses: ./.github/workflows/nm-benchmark.yml
-    #    with:
-    #        label: aws-avx2-32G-a10g-24G
-    #        benchmark_config_list_file:  ./.github/data/nm_benchmark_remote_push_configs_list.txt
-    #        timeout: 60
-    #        gitref: '${{ github.ref }}'
-    #        Gi_per_thread: 12
-    #        nvcc_threads: 1
-    #        python: "3.10.12"
-    #        push_benchmark_results_to_gh_pages: "false"
-    #    secrets: inherit
+    AWS-AVX2-32G-A10G-24G-Benchmark:
+        uses: ./.github/workflows/nm-benchmark.yml
+        with:
+            label: aws-avx2-32G-a10g-24G
+            benchmark_config_list_file:  ./.github/data/nm_benchmark_remote_push_configs_list.txt
+            timeout: 60
+            gitref: '${{ github.ref }}'
+            Gi_per_thread: 12
+            nvcc_threads: 1
+            python: "3.10.12"
+            push_benchmark_results_to_gh_pages: "false"
+        secrets: inherit

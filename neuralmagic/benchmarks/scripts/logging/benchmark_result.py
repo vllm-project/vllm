@@ -22,9 +22,13 @@ from enum import Enum
 BENCHMARK_RESULTS_SCHEMA_VERSION = "0.0.0"
 
 
-class GHABenchmarkToolName(str, Enum):
-    BiggerIsBetter = "CustomBiggerIsBetter"
-    SmallerIsBetter = "CustomSmallerIsBetter"
+class BenchmarkMetricType(str, Enum):
+    # Metrics that are "better" when the value is greater e.g. throughput.
+    BiggerIsBetter = "BiggerIsBetter"
+    # Metrics that are "better" when the value is smaller e.g. latency.
+    SmallerIsBetter = "SmallerIsBetter"
+    # Metrics that are too volatile and we primarily use for observation.
+    Observation = "Observation"
 
 
 @dataclass
@@ -32,7 +36,7 @@ class MetricTemplate:
     key: str = field(default=None)
     unit: str = field(default=None)
     value: float = field(default=None)
-    tool: GHABenchmarkToolName = field(default=None)
+    type: BenchmarkMetricType = field(default=None)
 
     def from_dict(d: dict):
         template: MetricTemplate = MetricTemplate()
@@ -51,40 +55,39 @@ BenchmarkServingResultMetadataKeys = SimpleNamespace(
 
 BenchmarkServingResultMetricTemplates = SimpleNamespace(
     request_throughput=MetricTemplate("request_throughput", "prompts/s", None,
-                                      GHABenchmarkToolName.BiggerIsBetter),
+                                      BenchmarkMetricType.BiggerIsBetter),
     input_throughput=MetricTemplate("input_throughput", "tokens/s", None,
-                                    GHABenchmarkToolName.BiggerIsBetter),
+                                    BenchmarkMetricType.BiggerIsBetter),
     output_throughput=MetricTemplate("output_throughput", "tokens/s", None,
-                                     GHABenchmarkToolName.BiggerIsBetter),
-    median_request_latency=MetricTemplate(
-        "median_request_latency", "ms", None,
-        GHABenchmarkToolName.SmallerIsBetter),
+                                     BenchmarkMetricType.BiggerIsBetter),
+    median_request_latency=MetricTemplate("median_request_latency", "ms", None,
+                                          BenchmarkMetricType.SmallerIsBetter),
     p90_request_latency=MetricTemplate("p90_request_latency", "ms", None,
-                                       GHABenchmarkToolName.SmallerIsBetter),
+                                       BenchmarkMetricType.SmallerIsBetter),
     p99_request_latency=MetricTemplate("p99_request_latency", "ms", None,
-                                       GHABenchmarkToolName.SmallerIsBetter),
+                                       BenchmarkMetricType.SmallerIsBetter),
     mean_ttft_ms=MetricTemplate("mean_ttft_ms", "ms", None,
-                                GHABenchmarkToolName.SmallerIsBetter),
+                                BenchmarkMetricType.SmallerIsBetter),
     median_ttft_ms=MetricTemplate("median_ttft_ms", "ms", None,
-                                  GHABenchmarkToolName.SmallerIsBetter),
+                                  BenchmarkMetricType.SmallerIsBetter),
     p90_ttft_ms=MetricTemplate("p90_ttft_ms", "ms", None,
-                               GHABenchmarkToolName.SmallerIsBetter),
+                               BenchmarkMetricType.SmallerIsBetter),
     p99_ttft_ms=MetricTemplate("p99_ttft_ms", "ms", None,
-                               GHABenchmarkToolName.SmallerIsBetter),
+                               BenchmarkMetricType.SmallerIsBetter),
     mean_tpot_ms=MetricTemplate("mean_tpot_ms", "ms", None,
-                                GHABenchmarkToolName.SmallerIsBetter),
+                                BenchmarkMetricType.SmallerIsBetter),
     median_tpot_ms=MetricTemplate("median_tpot_ms", "ms", None,
-                                  GHABenchmarkToolName.SmallerIsBetter),
+                                  BenchmarkMetricType.SmallerIsBetter),
     p90_tpot_ms=MetricTemplate("p90_tpot_ms", "ms", None,
-                               GHABenchmarkToolName.SmallerIsBetter),
+                               BenchmarkMetricType.SmallerIsBetter),
     p99_tpot_ms=MetricTemplate("p99_tpot_ms", "ms", None,
-                               GHABenchmarkToolName.SmallerIsBetter))
+                               BenchmarkMetricType.SmallerIsBetter))
 
 BenchmarkThroughputResultMetricTemplates = SimpleNamespace(
     request_throughput=MetricTemplate("request_throughput", "prompts/s", None,
-                                      GHABenchmarkToolName.BiggerIsBetter),
+                                      BenchmarkMetricType.BiggerIsBetter),
     token_throughput=MetricTemplate("token_throughput", "tokens/s", None,
-                                    GHABenchmarkToolName.BiggerIsBetter))
+                                    BenchmarkMetricType.BiggerIsBetter))
 
 
 class BenchmarkResult:
