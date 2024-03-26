@@ -41,6 +41,7 @@ from .logging.benchmark_result import (BenchmarkResult,
 
 from neuralmagic.benchmarks.scripts.backend_request_func import (
     ASYNC_REQUEST_FUNCS,
+    AsyncRequestVLLM,
     RequestFuncInput,
     RequestFuncOutput,
 )
@@ -184,6 +185,31 @@ def calculate_metrics(
     return metrics
 
 
+def decode_generated_text(
+        backend: str,
+        outputs: List[RequestFuncOutput]) -> List[RequestFuncOutput]:
+
+    if all(
+            map(
+                lambda output: not output.success or output.generated_text is
+                not None, outputs)):
+        # Nothing to do
+        return outputs
+
+    # At the moment, all backend request functions except async_request_vllm
+    # report generated_text directly.
+    assert backend == "vllm"
+    assert all(
+        map(
+            lambda output: not output.success or output.server_response is
+            not None, outputs))
+
+    for output in outputs:
+        output.generated_text = AsyncRequestVLLM.decode_server_response(
+            output.server_response, output.prompt_len)
+    return outputs
+
+
 async def benchmark(backend: str, api_url: str, model_id: str,
                     tokenizer: PreTrainedTokenizerBase,
                     input_requests: List[Tuple[str, int, int]], best_of: int,
@@ -217,6 +243,7 @@ async def benchmark(backend: str, api_url: str, model_id: str,
                 request_func(request_func_input=request_func_input,
                              pbar=pbar)))
     outputs = await asyncio.gather(*tasks)
+    outputs = decode_generated_text(backend, outputs)
 
     if not disable_tqdm:
         pbar.close()
