@@ -97,7 +97,8 @@ class Worker:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
-        init_distributed_environment(self.parallel_config, self.rank, self.distributed_init_method)
+        init_distributed_environment(self.parallel_config, self.rank,
+                                     self.distributed_init_method)
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
