@@ -1,21 +1,20 @@
 import asyncio
 import copy
-from collections import defaultdict
 import os
 import pickle
-import importlib
+from collections import defaultdict
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, LoRAConfig)
+from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.engine.ray_utils import RayWorkerVllm, ray
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.executor.utils import check_block_size_valid
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
-from vllm.utils import (set_cuda_visible_devices, get_ip, get_open_port,
-                        get_distributed_init_method, make_async)
+from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
+                        make_async, set_cuda_visible_devices)
 
 if ray is not None:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -24,12 +23,6 @@ if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
 logger = init_logger(__name__)
-
-# A map between the device type (in device config) to its worker module.
-DEVICE_TO_WORKER_MODULE_MAP = {
-    "cuda": "vllm.worker.worker",
-    "neuron": "vllm.worker.neuron_worker",
-}
 
 # If the env var is set, it uses the Ray's compiled DAG API
 # which optimizes the control plane overhead.
@@ -47,6 +40,7 @@ class RayGPUExecutor(ExecutorBase):
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
+        vision_language_config: Optional[VisionLanguageConfig],
     ) -> None:
         self.model_config = model_config
         self.cache_config = cache_config
@@ -54,6 +48,7 @@ class RayGPUExecutor(ExecutorBase):
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
+        self.vision_language_config = vision_language_config
 
         assert self.parallel_config.worker_use_ray
         placement_group = self.parallel_config.placement_group
@@ -72,13 +67,6 @@ class RayGPUExecutor(ExecutorBase):
         self.forward_dag = None
         if USE_RAY_COMPILED_DAG:
             self.forward_dag = self._compiled_ray_dag()
-
-    def _dispatch_worker(self):
-        worker_module = DEVICE_TO_WORKER_MODULE_MAP[
-            self.device_config.device_type]
-        imported_worker = importlib.import_module(worker_module)
-        Worker = imported_worker.Worker
-        return Worker
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
@@ -155,7 +143,7 @@ class RayGPUExecutor(ExecutorBase):
 
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
-        Worker = self._dispatch_worker()
+        from vllm.worker.worker import Worker
 
         model_config = copy.deepcopy(self.model_config)
         parallel_config = copy.deepcopy(self.parallel_config)
@@ -195,13 +183,14 @@ class RayGPUExecutor(ExecutorBase):
             driver_rank,
             distributed_init_method,
             lora_config=self.lora_config,
+            vision_language_config=self.vision_language_config,
             kv_cache_dtype=kv_cache_dtype,
             is_driver_worker=True,
         )
 
         # FIXME(woosuk): We are not properly initializing cupy NCCL when
         # we have multiple nodes.
-        self._run_workers("init_model",
+        self._run_workers("init_device",
                           cupy_port=get_open_port()
                           if not model_config.enforce_eager else None)
         self._run_workers(
@@ -357,7 +346,7 @@ class RayGPUExecutor(ExecutorBase):
             raise ValueError(f"Ray version {required_version} or greater is "
                              f"required, but found {current_version}")
 
-        from ray.dag import MultiOutputNode, InputNode
+        from ray.dag import InputNode, MultiOutputNode
         assert self.parallel_config.worker_use_ray
 
         # Right now, compiled DAG requires at least 1 arg. We send

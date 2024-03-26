@@ -1,23 +1,16 @@
-import importlib
 from typing import Dict, List, Optional
 
-from vllm.lora.request import LoRARequest
-from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, LoRAConfig)
+from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.executor.utils import check_block_size_valid
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
-from vllm.utils import (get_ip, get_open_port, get_distributed_init_method,
+from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async)
 
 logger = init_logger(__name__)
-
-# A map between the device type (in device config) to its worker module.
-DEVICE_TO_WORKER_MODULE_MAP = {
-    "cuda": "vllm.worker.worker",
-    "neuron": "vllm.worker.neuron_worker",
-}
 
 
 class GPUExecutor(ExecutorBase):
@@ -30,6 +23,7 @@ class GPUExecutor(ExecutorBase):
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
+        vision_language_config: Optional[VisionLanguageConfig],
     ) -> None:
         self.model_config = model_config
         self.cache_config = cache_config
@@ -37,6 +31,7 @@ class GPUExecutor(ExecutorBase):
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
+        self.vision_language_config = vision_language_config
 
         # Instantiate the worker and load the model to GPU.
         self._init_worker()
@@ -44,17 +39,10 @@ class GPUExecutor(ExecutorBase):
         # Profile the memory usage and initialize the cache.
         self._init_cache()
 
-    def _dispatch_worker(self):
-        worker_module = DEVICE_TO_WORKER_MODULE_MAP[
-            self.device_config.device_type]
-        imported_worker = importlib.import_module(worker_module)
-        Worker = imported_worker.Worker
-        return Worker
-
     def _init_worker(self):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
-        Worker = self._dispatch_worker()
+        from vllm.worker.worker import Worker
 
         assert self.parallel_config.world_size == 1, (
             "GPUExecutor only supports single GPU.")
@@ -70,10 +58,11 @@ class GPUExecutor(ExecutorBase):
             rank=0,
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
+            vision_language_config=self.vision_language_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )
-        self.driver_worker.init_model()
+        self.driver_worker.init_device()
         self.driver_worker.load_model()
 
     def _init_cache(self) -> None:
