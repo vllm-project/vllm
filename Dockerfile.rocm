@@ -27,6 +27,9 @@ ARG BUILD_CUPY="1"
 # whether to build triton on rocm
 ARG BUILD_TRITON="1"
 
+# whether to build hipBLASLt
+ARG BUILD_HIPBLASLT="1"
+
 # Install some basic utilities
 RUN apt-get update && apt-get install -y \
     sqlite3 libsqlite3-dev libfmt-dev \
@@ -81,6 +84,16 @@ RUN if [ "$BUILD_CUPY" = "1" ]; then \
     && export HCC_AMDGPU_TARGET="gfx90a,gfx942,gfx1100" \
     && pip install . \
     && cd ..; \
+    fi
+
+RUN if [ "$BUILD_HIPBLASLT" = "1" ] ; then \
+    git clone -b develop https://github.com/ROCm/hipBLASLt \
+    && export GTest_DIR="/usr/local/lib/cmake/GTest/" \
+    && cd hipBLASLt \
+    && ./install.sh -idc --architecture 'gfx90a;gfx942' \
+    && cd ../ && rm -rf hipBLASLt \
+    && sed -i 's/, hipblaslt-dev \(.*\), hipcub-dev/, hipcub-dev/g' /var/lib/dpkg/status \
+    && sed -i 's/, hipblaslt \(.*\), hipfft/, hipfft/g' /var/lib/dpkg/status; \
     fi
 
 # build triton
