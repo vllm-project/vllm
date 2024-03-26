@@ -152,6 +152,9 @@ set(VLLM_EXT_SRC
   "csrc/quantization/gptq/q_gemm.cu"
   "csrc/cuda_utils_kernels.cu"
   "csrc/moe_align_block_size_kernels.cu"
+  "csrc/custom/custom_kernels.cu"
+  "csrc/custom/fused_kernels.cu"
+  "csrc/custom/custom.cpp"
   "csrc/pybind.cpp")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
