@@ -1,27 +1,22 @@
+import asyncio
 import enum
+import gc
 import os
 import socket
 import subprocess
 import uuid
-import gc
+import warnings
+from collections import OrderedDict
+from functools import lru_cache, partial
 from platform import uname
-from typing import List, Tuple, Union, Generic
-from packaging.version import parse, Version
+from typing import (Any, Awaitable, Callable, Generic, Hashable, List,
+                    Optional, Tuple, TypeVar, Union)
 
 import psutil
 import torch
-import asyncio
-from functools import partial, lru_cache
-from typing import (
-    Awaitable,
-    Callable,
-    TypeVar,
-)
-from collections import OrderedDict
-from typing import Any, Hashable, Optional
+from packaging.version import Version, parse
 
 from vllm.logger import init_logger
-import warnings
 
 T = TypeVar("T")
 logger = init_logger(__name__)
@@ -380,6 +375,16 @@ class CudaMemoryProfiler:
 
         # Force garbage collection
         gc.collect()
+
+
+def str_to_int_tuple(s: str) -> Tuple[int]:
+    """Convert a string to a tuple of integers."""
+    try:
+        return tuple(map(int, s.split(",")))
+    except ValueError as e:
+        raise ValueError(
+            "String must be a series of integers separated by commas "
+            f"(e.g., 1, 2, 3). Given input: {s}") from e
 
 
 def pad_to_max_length(x: List[int], max_len: int, pad: int) -> List[int]:
