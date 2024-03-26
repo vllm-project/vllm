@@ -25,15 +25,12 @@ from datetime import datetime
 from typing import AsyncGenerator, List, Tuple
 
 import numpy as np
+from backend_request_func import (ASYNC_REQUEST_FUNCS, RequestFuncInput,
+                                  RequestFuncOutput)
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
-from vllm.transformers_utils.tokenizer import get_tokenizer
 
-from backend_request_func import (
-    ASYNC_REQUEST_FUNCS,
-    RequestFuncInput,
-    RequestFuncOutput,
-)
+from vllm.transformers_utils.tokenizer import get_tokenizer
 
 
 @dataclass
@@ -293,7 +290,9 @@ def main(args: argparse.Namespace):
 
         # Save to file
         base_model_id = model_id.split("/")[-1]
-        file_name = f"{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
+        file_name = (
+            f"{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
+        )
         with open(file_name, "w") as outfile:
             json.dump(result_json, outfile)
 
@@ -341,7 +340,7 @@ if __name__ == "__main__":
         "--tokenizer",
         type=str,
         help=
-        "Name or path of the tokenizer, if not using the default model tokenizer.",
+        "Name or path of the tokenizer, if not using the default tokenizer.",
     )
     parser.add_argument(
         "--best-of",

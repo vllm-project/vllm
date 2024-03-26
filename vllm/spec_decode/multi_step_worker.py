@@ -1,13 +1,13 @@
-from typing import List, Dict, Optional, Tuple
 import copy
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
-from vllm.worker.worker import Worker
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeProposer)
 from vllm.spec_decode.util import sampler_output_to_torch
+from vllm.worker.worker import Worker
 
 
 class MultiStepWorker(Worker):
@@ -27,8 +27,8 @@ class MultiStepWorker(Worker):
 
         self._proposer: Optional[DraftModelTop1Proposer] = None
 
-    def init_model(self):
-        super().init_model()
+    def init_device(self):
+        super().init_device()
 
         self._proposer = DraftModelTop1Proposer(
             self,

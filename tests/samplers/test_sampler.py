@@ -1,46 +1,41 @@
 import random
-from typing import Tuple, List
+from typing import List, Optional, Tuple
 from unittest.mock import patch
 
 import pytest
 import torch
 from transformers import GenerationConfig, GenerationMixin
-from typing import Optional
 
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
+from vllm.utils import Counter
 from vllm.worker.model_runner import ModelRunner
 
 
 class MockLogitsSampler(Sampler):
 
-    def __init__(self, vocab_size: int, fake_logits: torch.Tensor):
-        super().__init__(vocab_size=vocab_size)
+    def __init__(self, fake_logits: torch.Tensor):
+        super().__init__()
         self.fake_logits = fake_logits
 
     def forward(self, *args, **kwargs):
-        with patch(
-                "vllm.model_executor.layers.sampler._prune_hidden_states",
-                lambda x, y: x), patch(
-                    "vllm.model_executor.layers.sampler.Sampler._get_logits",
-                    lambda *args, **kwargs: self.fake_logits):
-            return super().forward(*args, **kwargs)
+        return super().forward(*args, **kwargs)
 
 
 def _prepare_test(
     batch_size: int
 ) -> Tuple[torch.Tensor, torch.Tensor, MockLogitsSampler, ModelRunner]:
-    vocab_size = 32000
     input_tensor = torch.rand((batch_size, 1024), dtype=torch.float16)
-    fake_logits = torch.full((batch_size, vocab_size),
+    fake_logits = torch.full((batch_size, VOCAB_SIZE),
                              1e-2,
                              dtype=input_tensor.dtype)
-    sampler = MockLogitsSampler(32000, fake_logits)
+    sampler = MockLogitsSampler(fake_logits)
     model_runner = ModelRunner(None, None, None, None, None)
     return input_tensor, fake_logits, sampler, model_runner
 
 
+VOCAB_SIZE = 32000
 RANDOM_SEEDS = list(range(128))
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
@@ -70,9 +65,7 @@ def _do_sample(
     sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
                                                      prompt_lens,
                                                      subquery_lens=prompt_lens)
-    return sampler(embedding=None,
-                   hidden_states=input_tensor,
-                   sampling_metadata=sampling_metadata)
+    return sampler(logits=input_tensor, sampling_metadata=sampling_metadata)
 
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
@@ -85,8 +78,8 @@ def test_sampler_all_greedy(seed: int, device: str):
         batch_size)
 
     sampling_params = SamplingParams(temperature=0)
-    sampler_output = _do_sample(batch_size, input_tensor, sampler,
-                                model_runner, sampling_params)
+    sampler_output = _do_sample(batch_size, fake_logits, sampler, model_runner,
+                                sampling_params)
     expected = torch.argmax(fake_logits, dim=-1)
     for i, sequence_output in enumerate(sampler_output):
         for nth_output in sequence_output.samples:
@@ -111,8 +104,8 @@ def test_sampler_all_random(seed: int, device: str):
         temperature=1.0,
         n=random.randint(1, 10),
     )
-    sampler_output = _do_sample(batch_size, input_tensor, sampler,
-                                model_runner, sampling_params)
+    sampler_output = _do_sample(batch_size, fake_logits, sampler, model_runner,
+                                sampling_params)
 
     for i, sequence_output in enumerate(sampler_output):
         for nth_output in sequence_output.samples:
@@ -127,8 +120,7 @@ def test_sampler_all_random_seed(seed: int, device: str):
     set_random_seed(seed)
     torch.set_default_device(device)
     batch_size = random.randint(1, 256)
-    input_tensor, fake_logits, sampler, model_runner = _prepare_test(
-        batch_size)
+    _, fake_logits, sampler, model_runner = _prepare_test(batch_size)
 
     for i in range(batch_size):
         fake_logits[i, i] = 1e2
@@ -138,8 +130,8 @@ def test_sampler_all_random_seed(seed: int, device: str):
         n=random.randint(1, 10),
         seed=random.randint(0, 10000),
     )
-    sampler_output = _do_sample(batch_size, input_tensor, sampler,
-                                model_runner, sampling_params)
+    sampler_output = _do_sample(batch_size, fake_logits, sampler, model_runner,
+                                sampling_params)
 
     for i, sequence_output in enumerate(sampler_output):
         for nth_output in sequence_output.samples:
@@ -154,18 +146,17 @@ def test_sampler_all_random_seed_deterministic(seed: int, device: str):
     set_random_seed(seed)
     torch.set_default_device(device)
     batch_size = random.randint(1, 256)
-    input_tensor, fake_logits, sampler, model_runner = _prepare_test(
-        batch_size)
+    _, fake_logits, sampler, model_runner = _prepare_test(batch_size)
 
     sampling_params = SamplingParams(
         temperature=1.0,
         n=random.randint(1, 10),
         seed=random.randint(0, 10000),
     )
-    first_sampler_output = _do_sample(batch_size, input_tensor, sampler,
+    first_sampler_output = _do_sample(batch_size, fake_logits, sampler,
                                       model_runner, sampling_params)
 
-    second_sampler_output = _do_sample(batch_size, input_tensor, sampler,
+    second_sampler_output = _do_sample(batch_size, fake_logits, sampler,
                                        model_runner, sampling_params)
 
     assert first_sampler_output == second_sampler_output
@@ -179,20 +170,238 @@ def test_sampler_all_beam(seed: int, device: str):
     set_random_seed(seed)
     torch.set_default_device(device)
     batch_size = random.randint(1, 256)
-    input_tensor, _, sampler, model_runner = _prepare_test(batch_size)
+    _, fake_logits, sampler, model_runner = _prepare_test(batch_size)
 
     sampling_params = SamplingParams(
         temperature=0,
         best_of=2,
         use_beam_search=True,
     )
-    _do_sample(batch_size, input_tensor, sampler, model_runner,
-               sampling_params)
+    _do_sample(batch_size, fake_logits, sampler, model_runner, sampling_params)
     # no assertion here as I am not sure how to determine whether
     # the outputs are expected - in other words, this just tests
     # whether there are no exceptions in the sampler
     # when handling an all-beam search case.
     del model_runner
+
+
+@pytest.mark.parametrize("seed", RANDOM_SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_sampler_min_tokens_penalty(seed: int, device: str):
+    seq_id_counter = Counter(start=random.randint(0, 100))
+    set_random_seed(seed)
+    torch.set_default_device(device)
+
+    def create_sampling_params(min_tokens,
+                               eos_token_id=0,
+                               stop_token_ids=None):
+        sampling_params = SamplingParams(
+            min_tokens=min_tokens,
+            max_tokens=9999,  # keep higher than max of min_tokens
+            stop_token_ids=stop_token_ids,
+        )
+        sampling_params.eos_token_id = eos_token_id
+        return sampling_params
+
+    def create_sequence_data(num_input=3, num_generated=0):
+        seq_data = SequenceData(
+            random.choices(range(0, VOCAB_SIZE), k=num_input))
+        if num_generated > 0:
+            seq_data.output_token_ids = random.choices(range(0, VOCAB_SIZE),
+                                                       k=num_generated)
+        return seq_data
+
+    def generate_test_case():
+        # generate multiple seq groups but limit total batch size
+        batch_size = random.randint(1, 128)
+
+        expected_penalization = []
+        sequence_metadata_list = []
+        while batch_size > 0:
+            # 20% chance to generate prompt seq group with single sequence
+            is_prompt = random.random() < 0.2
+            num_seqs = 1 if is_prompt else random.randint(1, batch_size)
+
+            eos_token_id = random.randint(0, VOCAB_SIZE - 1)
+            min_tokens = random.randint(0, 50)
+            num_stop_tokens = random.randint(0, 8)
+            if num_stop_tokens > 0:
+                stop_token_ids = random.choices(range(0, VOCAB_SIZE - 1),
+                                                k=num_stop_tokens)
+            else:
+                stop_token_ids = None
+
+            sampling_params = create_sampling_params(
+                min_tokens=min_tokens,
+                eos_token_id=eos_token_id,
+                stop_token_ids=stop_token_ids)
+
+            seq_data = {}
+            seq_group_penalization = []
+            for _ in range(num_seqs):
+                num_input = random.randint(1, 100)
+                num_generated = random.randint(1, 100) if not is_prompt else 0
+                seq_data[next(seq_id_counter)] = create_sequence_data(
+                    num_input=num_input, num_generated=num_generated)
+                seq_group_penalization.append(num_generated < min_tokens)
+
+            expected_penalization.extend(seq_group_penalization)
+            sequence_metadata_list.append(
+                SequenceGroupMetadata(
+                    request_id=f"test_{batch_size}",
+                    is_prompt=is_prompt,
+                    seq_data=seq_data,
+                    sampling_params=sampling_params,
+                    block_tables={},
+                ))
+            batch_size -= num_seqs
+
+        return {
+            "expected_penalization": expected_penalization,
+            "seq_group_metadata_list": sequence_metadata_list,
+        }
+
+    # define some explicit test cases for edge case behavior
+    prompt_without_penalization = {
+        "expected_penalization": [False],
+        "seq_group_metadata_list": [
+            SequenceGroupMetadata(
+                request_id="test_1",
+                is_prompt=True,
+                seq_data={
+                    next(seq_id_counter): create_sequence_data(),
+                },
+                sampling_params=create_sampling_params(0),
+                block_tables={},
+            ),
+        ]
+    }
+
+    prompt_with_penalization = {
+        "expected_penalization": [True],
+        "seq_group_metadata_list": [
+            SequenceGroupMetadata(
+                request_id="test_1",
+                is_prompt=True,
+                seq_data={
+                    next(seq_id_counter): create_sequence_data(),
+                },
+                sampling_params=create_sampling_params(1),
+                block_tables={},
+            ),
+        ]
+    }
+
+    stop_penalizing_after_min_tokens = {
+        "expected_penalization": [False],
+        "seq_group_metadata_list": [
+            SequenceGroupMetadata(
+                request_id="test_1",
+                is_prompt=False,
+                seq_data={
+                    next(seq_id_counter):
+                    create_sequence_data(num_generated=1),
+                },
+                sampling_params=create_sampling_params(1),
+                block_tables={},
+            )
+        ]
+    }
+
+    stop_token_ids = [42, 99, 42, 0]  # intentional duplication
+    simple_combination = {
+        "expected_penalization": [True, False, False],
+        "seq_group_metadata_list": [
+            SequenceGroupMetadata(
+                request_id="test_1",
+                is_prompt=False,
+                seq_data={
+                    next(seq_id_counter):
+                    create_sequence_data(num_generated=1),
+                    next(seq_id_counter):
+                    create_sequence_data(num_generated=100),
+                },
+                sampling_params=create_sampling_params(
+                    2, stop_token_ids=stop_token_ids),
+                block_tables={},
+            ),
+            SequenceGroupMetadata(
+                request_id="test_2",
+                is_prompt=True,
+                seq_data={
+                    next(seq_id_counter): create_sequence_data(),
+                },
+                sampling_params=create_sampling_params(
+                    0, stop_token_ids=stop_token_ids),
+                block_tables={},
+            )
+        ]
+    }
+
+    if seed == 0:
+        test_cases = [
+            prompt_without_penalization,
+            prompt_with_penalization,
+            stop_penalizing_after_min_tokens,
+            simple_combination,
+        ]
+    else:
+        test_cases = [generate_test_case()]
+
+    def run_test_case(*,
+                      expected_penalization=None,
+                      seq_group_metadata_list=None):
+        assert expected_penalization, "Invalid test case"
+        assert seq_group_metadata_list, "Invalid test case"
+
+        batch_size = 0
+        prompt_lens = []
+        sampling_params_per_seq = []
+        for sgm in seq_group_metadata_list:
+            num_seqs = len(sgm.seq_data)
+            batch_size += num_seqs
+            sampling_params = sgm.sampling_params
+            for seq_id in sgm.seq_data:
+                prompt_lens.append(sgm.seq_data[seq_id].get_prompt_len())
+                sampling_params_per_seq.append(sampling_params)
+
+        _, fake_logits, sampler, model_runner = _prepare_test(batch_size)
+        sampling_metadata = model_runner._prepare_sample(
+            seq_group_metadata_list,
+            prompt_lens=prompt_lens,
+            subquery_lens=prompt_lens)
+        # the logits tensor is modified in-place by the sampler
+        _ = sampler(logits=fake_logits, sampling_metadata=sampling_metadata)
+
+        for logits_idx, (should_penalize, sampling_params) in enumerate(
+                zip(expected_penalization, sampling_params_per_seq)):
+
+            tokens_to_check = [sampling_params.eos_token_id]
+            if sampling_params.stop_token_ids:
+                tokens_to_check.extend(sampling_params.stop_token_ids)
+            tokens_to_check = set(tokens_to_check)
+
+            if should_penalize:
+                for token_id in tokens_to_check:
+                    assert fake_logits[logits_idx, token_id] == -float(
+                        'inf'
+                    ), f"Expected token {token_id} for logits row {logits_idx}"
+                    " to be penalized"
+                # no other tokens should be set to -inf
+                assert torch.count_nonzero(
+                    fake_logits[logits_idx, :] == -float('inf')) == len(
+                        tokens_to_check
+                    ), f"Expected only {len(tokens_to_check)} to be penalized"
+            else:
+                # no tokens should be set to -inf
+                assert torch.count_nonzero(
+                    fake_logits[logits_idx, :] ==
+                    -float('inf')) == 0, "No tokens should have been penalized"
+
+        del model_runner
+
+    for test_case in test_cases:
+        run_test_case(**test_case)
 
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
@@ -246,8 +455,7 @@ def test_sampler_mixed(seed: int, device: str):
     def test_sampling(model_runner: ModelRunner):
         sampling_metadata = model_runner._prepare_sample(
             seq_group_metadata_list, prompt_lens, subquery_lens=prompt_lens)
-        sampler_output = sampler(embedding=None,
-                                 hidden_states=input_tensor,
+        sampler_output = sampler(logits=fake_logits,
                                  sampling_metadata=sampling_metadata)
 
         for i, (sequence_output, metadata) in enumerate(
@@ -296,48 +504,6 @@ def test_sampler_mixed(seed: int, device: str):
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_sampler_logits_processors(seed: int, device: str):
-    set_random_seed(seed)
-    torch.set_default_device(device)
-    batch_size = random.randint(1, 256)
-    input_tensor, _, sampler, model_runner = _prepare_test(batch_size)
-
-    # This sample logits processor gives infinite score to the i-th token,
-    # where i is the length of the input sequence.
-    # We therefore expect the output token sequence to be [0, 1, 2, ...]
-    def pick_ith(token_ids, logits):
-        logits[len(token_ids)] = float("inf")
-        return logits
-
-    seq_group_metadata_list = []
-    prompt_lens = []
-    for i in range(batch_size):
-        seq_group_metadata_list.append(
-            SequenceGroupMetadata(
-                request_id=f"test_{i}",
-                is_prompt=True,
-                seq_data={0: SequenceData([1, 2, 3])},
-                sampling_params=SamplingParams(temperature=0,
-                                               logits_processors=[pick_ith]),
-                block_tables={0: [1]},
-            ))
-        prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
-
-    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens,
-                                                     subquery_lens=prompt_lens)
-    sampler_output = sampler(embedding=None,
-                             hidden_states=input_tensor,
-                             sampling_metadata=sampling_metadata)
-    for _, sequence_output in enumerate(sampler_output):
-        for idx, nth_output in enumerate(sequence_output.samples):
-            assert nth_output.output_token == idx
-
-    del model_runner
-
-
-@pytest.mark.parametrize("seed", RANDOM_SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_sampler_top_k_top_p(seed: int, device: str):
     set_random_seed(seed)
     batch_size = random.randint(1, 256)
@@ -352,7 +518,7 @@ def test_sampler_top_k_top_p(seed: int, device: str):
                                size=(batch_size, vocab_size),
                                device=input_tensor.device,
                                dtype=input_tensor.dtype)
-    sampler = MockLogitsSampler(32000, fake_logits)
+    sampler = MockLogitsSampler(fake_logits)
     model_runner = ModelRunner(None, None, None, None, None)
 
     generation_model = GenerationMixin()
@@ -385,15 +551,13 @@ def test_sampler_top_k_top_p(seed: int, device: str):
 
     sample_probs = None
 
-    def mock_sample(probs, logprobs, sampling_metadata):
+    def mock_sample(probs, *args, **kwargs):
         nonlocal sample_probs
         sample_probs = probs
         return [[prob.topk(1, dim=-1).indices.tolist(), [0]] for prob in probs]
 
     with patch("vllm.model_executor.layers.sampler._sample", mock_sample):
-        sampler(embedding=None,
-                hidden_states=input_tensor,
-                sampling_metadata=sampling_metadata)
+        sampler(logits=fake_logits, sampling_metadata=sampling_metadata)
     hf_probs = warpers(torch.zeros_like(fake_logits), fake_logits.clone())
     hf_probs = torch.softmax(hf_probs, dim=-1, dtype=torch.float)
     assert torch.allclose(hf_probs, sample_probs, atol=1e-5)
