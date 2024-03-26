@@ -1,11 +1,12 @@
 import argparse
 import glob
 import json
-import numpy as np
 import os
-from safetensors.torch import safe_open
-import torch
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+
+import numpy as np
+import torch
+from safetensors.torch import safe_open
 
 
 # Adapted from vllm/model_executor/weight_utils.py
