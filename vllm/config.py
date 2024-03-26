@@ -202,6 +202,7 @@ class ModelConfig:
         if hf_quant_config is not None:
 
             hf_quant_method = str(hf_quant_config["quant_method"]).lower()
+            
             # UPSTREAM SYNC: Accept current downstream.
             # If the GPTQ model is serialized in marlin format, use marlin.
             marlin_format_flag = "is_marlin_format"
@@ -209,9 +210,15 @@ class ModelConfig:
                     and marlin_format_flag in hf_quant_config
                     and hf_quant_config[marlin_format_flag]):
                 hf_quant_method = "marlin"
+
+            # If marlin specified, then use it for GPTQ models
+            # TODO: Remove the check above?
+            if (hf_quant_method == "gptq" and self.quantization == "marlin"):
+                hf_quant_method = "marlin"
+
             if self.quantization is None:
                 self.quantization = hf_quant_method
-            elif self.quantization != hf_quant_method:
+            elif self.quantization != hf_quant_method: 
                 raise ValueError(
                     "Quantization method specified in the model config "
                     f"({hf_quant_method}) does not match the quantization "
