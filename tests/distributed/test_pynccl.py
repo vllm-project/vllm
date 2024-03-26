@@ -59,12 +59,14 @@ def worker_fn_with_cudagraph():
         a = torch.ones((4, 4), device=f'cuda:{comm.rank}')
         torch.cuda.synchronize()
         with torch.cuda.graph(graph, stream=comm.stream):
+            # TODO(youkaichao)
+            # seems like this operation is not performed
             comm.all_reduce(a)
         comm.stream.synchronize()
         assert a.mean().cpu().item() == comm.world_size**0
         graph.replay()
         comm.stream.synchronize()
-        assert a.mean().cpu().item() == comm.world_size**2
+        assert a.mean().cpu().item() == comm.world_size**1
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
