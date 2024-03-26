@@ -19,7 +19,6 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         * Swap in/swap out implementation.
         * Sliding window BlockTable
     * Prefix caching
-        * CoW implementation.
         * Evictor policies (unused blocks are evicted arbitrarily).
         * Test that prefix blocks are not evicted
         * Update access time for blocks
