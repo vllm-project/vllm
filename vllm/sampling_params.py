@@ -95,8 +95,8 @@ class SamplingParams:
         logits_processors: List of functions that modify logits based on
             previously generated tokens.
         truncate_prompt_tokens: If set to an integer k, will use only the last k
-            tokens from the prompt (i.e., left truncation). Defaults to None (i.e.,
-            no truncation).
+            tokens from the prompt (i.e., left truncation). Defaults to None
+            (i.e., no truncation).
     """
 
     def __init__(
@@ -216,10 +216,10 @@ class SamplingParams:
         if self.prompt_logprobs is not None and self.prompt_logprobs < 0:
             raise ValueError(f"prompt_logprobs must be non-negative, got "
                              f"{self.prompt_logprobs}.")
-        if self.truncate_prompt_tokens is not None and self.truncate_prompt_tokens < 1:
-            raise ValueError(
-                f"truncate_prompt_tokens must be >= 1, got {self.truncate_prompt_tokens}"
-            )
+        if (self.truncate_prompt_tokens is not None
+                and self.truncate_prompt_tokens < 1):
+            raise ValueError(f"truncate_prompt_tokens must be >= 1, "
+                             f"got {self.truncate_prompt_tokens}")
 
     def _verify_beam_search(self) -> None:
         if self.best_of == 1:

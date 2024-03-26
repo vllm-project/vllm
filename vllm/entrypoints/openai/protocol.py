@@ -4,7 +4,7 @@ import time
 from typing import Dict, List, Literal, Optional, Union
 
 import torch
-from pydantic import BaseModel, Field, model_validator, conint
+from pydantic import BaseModel, Field, conint, model_validator
 
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
