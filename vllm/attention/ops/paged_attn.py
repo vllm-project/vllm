@@ -76,15 +76,25 @@ class PagedAttention:
         kv_cache_dtype: str,
         kv_quant_param: List[float],
     ) -> None:
-        cache_ops.reshape_and_cache(
-            key,
-            value,
-            key_cache,
-            value_cache,
-            slot_mapping.flatten(),
-            kv_cache_dtype,
-            *kv_quant_param,
-        )
+        if kv_quant_param is not None:
+            cache_ops.reshape_and_cache(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                slot_mapping.flatten(),
+                kv_cache_dtype,
+                *kv_quant_param,
+            )
+        else:
+            cache_ops.reshape_and_cache(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                slot_mapping.flatten(),
+                kv_cache_dtype,
+            )
 
     @staticmethod
     def forward_decode(
@@ -115,6 +125,8 @@ class PagedAttention:
         # For context len > 8192, use V2 kernel to avoid shared memory shortage.
         use_v1 = (max_context_len <= 8192
                   and (max_num_partitions == 1 or num_seqs * num_heads > 512))
+        kv_quant_param = kv_quant_param if \
+            kv_quant_param is not None else [1.0, 0.0, 1.0, 0.0]
         if use_v1:
             # Run PagedAttention V1.
             ops.paged_attention_v1(
