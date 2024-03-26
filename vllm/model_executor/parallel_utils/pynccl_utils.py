@@ -36,11 +36,10 @@ def set_pynccl_stream(stream: torch.cuda.Stream):
         pass
 
 
-def init_process_group(world_size: int, rank: int, host: str,
-                       port: int) -> None:
+def init_process_group(world_size: int, rank: int, init_method: str) -> None:
     assert not is_initialized()
     global comm
-    comm = NCCLCommunicator(init_method=f"tcp://{host}:{port}",
+    comm = NCCLCommunicator(init_method=init_method,
                             world_size=world_size,
                             rank=rank)
 
