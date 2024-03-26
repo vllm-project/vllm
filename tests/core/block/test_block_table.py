@@ -375,3 +375,78 @@ def test_cow(block_size: int, sequence_len: int, append_len: int,
 
     # After free, expect all blocks to be freed.
     assert allocator.get_num_free_blocks(Device.GPU) == num_gpu_blocks
+
+@pytest.mark.parametrize("block_size", [8])
+@pytest.mark.parametrize("sequence_len", [1, 16, 129])
+@pytest.mark.parametrize("append_len", [1, 16, 129])
+@pytest.mark.parametrize("lookahead_slots", [1, 16, 129])
+@pytest.mark.parametrize("appender", ["forked", "original"])
+@pytest.mark.parametrize("allocator_type", ["naive", "prefix_caching"])
+def test_cow_lookahead_simple(block_size: int, sequence_len: int, append_len: int,
+             lookahead_slots: int, allocator_type: str, appender: str):
+    """Similar to test_cow, except with lookahead allocation. The assertions are
+    less rigorous due to the complexity of the property under test.
+    """
+    num_gpu_blocks = 1024
+
+    allocator = CpuGpuBlockAllocator.create(
+        allocator_type=allocator_type,
+        num_gpu_blocks=num_gpu_blocks,
+        num_cpu_blocks=0,
+        block_size=block_size,
+    )
+
+    token_ids = list(range(sequence_len))
+    token_ids_to_append = list(range(append_len))
+
+    original_block_table = BlockTable(
+        block_size=block_size,
+        block_allocator=allocator,
+    )
+
+    original_block_table.allocate(token_ids=token_ids, device=Device.GPU)
+
+    # Allocate lookahead slots.
+    original_block_table.ensure_num_empty_slots(lookahead_slots)
+    original_block_ids = original_block_table.physical_block_ids
+
+    forked_block_table = original_block_table.fork()
+
+    if appender == "forked":
+        appender_block_table = forked_block_table
+        static_block_table = original_block_table
+    elif appender == "original":
+        appender_block_table = original_block_table
+        static_block_table = forked_block_table
+    else:
+        raise ValueError(f"unknown test config {appender=}")
+
+    # Write tokens.
+    appender_block_table.append_token_ids(token_ids_to_append)
+
+    # Expect the non-appending block table to have no change.
+    assert static_block_table.physical_block_ids == original_block_ids
+    assert appender_block_table.physical_block_ids != original_block_ids
+
+    cows = allocator.clear_copy_on_writes()
+
+    # Always expect copy-on-write
+    assert cows
+
+    if sequence_len % block_size > 0:
+        # If the last block in the sequence is not full, then when appending we
+        # expect a CoW.
+        assert cows
+
+        cow_block_index = sequence_len // block_size
+        expected_src = static_block_table.physical_block_ids[cow_block_index]
+        expected_dst = appender_block_table.physical_block_ids[cow_block_index]
+
+        assert expected_src in cows
+        assert expected_dst in cows[expected_src]
+    
+    static_block_table.free()
+    appender_block_table.free()
+
+    # After free, expect all blocks to be freed.
+    assert allocator.get_num_free_blocks(Device.GPU) == num_gpu_blocks
