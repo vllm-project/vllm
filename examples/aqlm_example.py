@@ -1,5 +1,6 @@
-from vllm import LLM, SamplingParams
 import argparse
+
+from vllm import LLM, SamplingParams
 
 
 def main():

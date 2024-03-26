@@ -5,6 +5,7 @@ Run `pytest tests/models/test_aqlm.py --forked`.
 
 import pytest
 import torch
+
 from vllm.model_executor.layers.quantization import (
     _QUANTIZATION_CONFIG_REGISTRY)
 

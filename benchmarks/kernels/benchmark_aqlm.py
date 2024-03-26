@@ -1,15 +1,15 @@
+import argparse
 import os
 import sys
-import argparse
 from typing import Optional
-
-from vllm.model_executor.layers.quantization.aqlm import (
-    generic_dequantize_gemm, optimized_dequantize_gemm, dequantize_weight,
-    get_int_dtype)
-from vllm._C import ops
 
 import torch
 import torch.nn.functional as F
+
+from vllm._C import ops
+from vllm.model_executor.layers.quantization.aqlm import (
+    dequantize_weight, generic_dequantize_gemm, get_int_dtype,
+    optimized_dequantize_gemm)
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 

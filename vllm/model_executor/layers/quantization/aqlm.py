@@ -1,15 +1,16 @@
 # Supports AQLM compression, see https://github.com/Vahe1994/AQLM
 # and https://arxiv.org/pdf/2401.06118.pdf
 
+import math
 from typing import Any, Dict, List, Optional
 
-import math
 import torch
-from torch.nn.parameter import Parameter
 import torch.nn.functional as F
+from torch.nn.parameter import Parameter
 
 from vllm._C import ops
-from vllm.model_executor.layers.linear import LinearMethodBase, set_weight_attrs
+from vllm.model_executor.layers.linear import (LinearMethodBase,
+                                               set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
