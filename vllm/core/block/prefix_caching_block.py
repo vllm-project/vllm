@@ -5,7 +5,8 @@ from os.path import commonprefix
 
 from vllm.core.block.interfaces import Block, BlockAllocator
 from vllm.core.block.naive_block import NaiveBlockAllocator, NaiveBlock
-from vllm.core.block.common import get_all_blocks_recursively, CopyOnWriteTracker
+from vllm.core.block.common import (get_all_blocks_recursively,
+                                    CopyOnWriteTracker)
 
 PrefixHash = int
 BlockIndex = int

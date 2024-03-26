@@ -1,8 +1,8 @@
-from typing import List, Optional, Set, Iterable, TypeVar, Dict
-from collections import defaultdict
+from typing import List, Optional, Set, Iterable, Dict
 
 from vllm.core.block.interfaces import BlockAllocator, Block
-from vllm.core.block.common import RefCounter, CopyOnWriteTracker, get_all_blocks_recursively
+from vllm.core.block.common import (RefCounter, CopyOnWriteTracker,
+                                    get_all_blocks_recursively)
 
 BlockIndex = int
 Refcount = int
@@ -148,8 +148,8 @@ class NaiveBlock(Block):
         self._append_token_ids_no_cow(token_ids)
 
         if self._physical_block_index is not None:
-            self._physical_block_index = self._allocator.cow_block_if_not_appendable(
-                self._cow_target)
+            self._physical_block_index = (
+                self._allocator.cow_block_if_not_appendable(self._cow_target))
 
     def _append_token_ids_no_cow(self, token_ids: List[int]) -> None:
         assert self.num_empty_slots >= len(token_ids)

@@ -383,8 +383,9 @@ class Scheduler:
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
                 self.block_manager.access_all_blocks_in_seq(seq, now)
 
-            common_computed_block_nums = self.block_manager.get_common_computed_block_ids(
-                seq_group.get_seqs(status=SequenceStatus.RUNNING))
+            common_computed_block_nums = (
+                self.block_manager.get_common_computed_block_ids(
+                    seq_group.get_seqs(status=SequenceStatus.RUNNING)))
 
             seq_group_metadata = SequenceGroupMetadata(
                 request_id=seq_group.request_id,

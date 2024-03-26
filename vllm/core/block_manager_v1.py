@@ -584,10 +584,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         if not self.enable_caching:
             return []
 
-        ids_list = [
-            self.get_all_computed_blocks(seq)
-            for seq in iter(seq_group.seqs_dict.values())
-        ]
+        ids_list = [self.get_all_computed_blocks(seq) for seq in seqs]
         return commonprefix([ids for ids in ids_list if ids != []])
 
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
