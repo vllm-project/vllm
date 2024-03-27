@@ -27,6 +27,10 @@ Alongside each architecture, we include some popular models that use it.
     - ChatGLM
     - :code:`THUDM/chatglm2-6b`, :code:`THUDM/chatglm3-6b`, etc.
     - ✅︎
+  * - :code:`DbrxForCausalLM`
+    - DBRX
+    - :code:`databricks/dbrx-base`, :code:`databricks/dbrx-instruct`, etc.
+    - 
   * - :code:`DeciLMForCausalLM`
     - DeciLM
     - :code:`Deci/DeciLM-7B`, :code:`Deci/DeciLM-7B-instruct`, etc.
