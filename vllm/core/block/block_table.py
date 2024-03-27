@@ -7,22 +7,29 @@ from vllm.utils import Device, cdiv, chunk_list
 class BlockTable:
     """A class to manage blocks for a specific sequence.
 
-    The BlockTable maps a sequence of tokens to a list of blocks, where each block
-    represents a contiguous memory allocation for a portion of the sequence.
-    The blocks are managed by a DeviceAwareBlockAllocator, which is responsible
-    for allocating and freeing memory for the blocks.
+    The BlockTable maps a sequence of tokens to a list of blocks, where each
+    block represents a contiguous memory allocation for a portion of the 
+    sequence. The blocks are managed by a DeviceAwareBlockAllocator, which is
+    responsible for allocating and freeing memory for the blocks.
 
     Args:
-        block_size (int): The maximum number of tokens that can be stored in a single block.
-        block_allocator (DeviceAwareBlockAllocator): The block allocator used to manage memory for the blocks.
-        _blocks (Optional[List[Block]], optional): An optional list of existing blocks to initialize the BlockTable with.
-            If not provided, an empty BlockTable is created.
+        block_size (int): The maximum number of tokens that can be stored in a
+            single block.
+        block_allocator (DeviceAwareBlockAllocator): The block allocator used to
+            manage memory for the blocks.
+        _blocks (Optional[List[Block]], optional): An optional list of existing
+            blocks to initialize the BlockTable with. If not provided, an empty
+            BlockTable is created.
 
     Attributes:
-        _block_size (int): The maximum number of tokens that can be stored in a single block.
-        _allocator (DeviceAwareBlockAllocator): The block allocator used to manage memory for the blocks.
-        _blocks (Optional[List[Block]]): The list of blocks managed by this BlockTable.
-        _num_full_slots (int): The number of tokens currently stored in the blocks.
+        _block_size (int): The maximum number of tokens that can be stored in a
+            single block.
+        _allocator (DeviceAwareBlockAllocator): The block allocator used to
+            manage memory for the blocks.
+        _blocks (Optional[List[Block]]): The list of blocks managed by this
+            BlockTable.
+        _num_full_slots (int): The number of tokens currently stored in the
+            blocks.
     """
 
     def __init__(
@@ -41,17 +48,20 @@ class BlockTable:
 
     @staticmethod
     def get_num_required_blocks(token_ids: List[int], block_size: int) -> int:
-        """Calculates the minimum number of blocks required to store a given sequence of token IDs.
+        """Calculates the minimum number of blocks required to store a given
+        sequence of token IDs.
 
         This assumes worst-case scenario, where every block requires a new
         allocation (e.g. ignoring prefix caching).
 
         Args:
             token_ids (List[int]): The sequence of token IDs to be stored.
-            block_size (int): The maximum number of tokens that can be stored in a single block.
+            block_size (int): The maximum number of tokens that can be stored in
+                a single block.
 
         Returns:
-            int: The minimum number of blocks required to store the given sequence of token IDs.
+            int: The minimum number of blocks required to store the given
+                sequence of token IDs.
         """
         return cdiv(len(token_ids), block_size)
 
@@ -60,12 +70,13 @@ class BlockTable:
                  device: Device = Device.GPU) -> None:
         """Allocates memory blocks for storing the given sequence of token IDs.
 
-        This method allocates the required number of blocks to store the given sequence of token IDs.
+        This method allocates the required number of blocks to store the given
+        sequence of token IDs.
 
         Args:
             token_ids (List[int]): The sequence of token IDs to be stored.
-            device (Device, optional): The device on which the blocks should be allocated.
-                Defaults to Device.GPU.
+            device (Device, optional): The device on which the blocks should be
+                allocated. Defaults to Device.GPU.
         """
         assert not self._is_allocated
         assert token_ids
@@ -75,14 +86,17 @@ class BlockTable:
         self._num_full_slots = len(token_ids)
 
     def append_token_ids(self, token_ids: List[int]) -> None:
-        """Appends a sequence of token IDs to the existing blocks in the BlockTable.
+        """Appends a sequence of token IDs to the existing blocks in the
+        BlockTable.
 
-        This method appends the given sequence of token IDs to the existing blocks in the BlockTable.
-        If there is not enough space in the existing blocks, new blocks are allocated using the
-        `ensure_num_empty_slots` method to accommodate the additional tokens.
+        This method appends the given sequence of token IDs to the existing
+        blocks in the BlockTable. If there is not enough space in the existing
+        blocks, new blocks are allocated using the `ensure_num_empty_slots`
+        method to accommodate the additional tokens.
 
-        The token IDs are divided into chunks of size `block_size` (except for the first chunk,
-        which may be smaller), and each chunk is appended to a separate block.
+        The token IDs are divided into chunks of size `block_size` (except for
+        the first chunk, which may be smaller), and each chunk is appended to a
+        separate block.
 
         Args:
             token_ids (List[int]): The sequence of token IDs to be appended.
@@ -103,11 +117,13 @@ class BlockTable:
         self._num_full_slots += len(token_ids)
 
     def ensure_num_empty_slots(self, num_empty_slots: int) -> None:
-        """Ensures that the BlockTable has at least the specified number of empty slots available.
+        """Ensures that the BlockTable has at least the specified number of
+        empty slots available.
 
-        This method checks if the BlockTable has enough empty slots (i.e., available space) to
-        accommodate the requested number of tokens. If not, it allocates additional blocks on the
-        GPU to ensure that the required number of empty slots is available.
+        This method checks if the BlockTable has enough empty slots (i.e.,
+        available space) to accommodate the requested number of tokens. If not,
+        it allocates additional blocks on the GPU to ensure that the required
+        number of empty slots is available.
 
         Args:
             num_empty_slots (int): The minimum number of empty slots required.
@@ -129,15 +145,17 @@ class BlockTable:
                                                  device=device))
 
     def fork(self) -> "BlockTable":
-        """Creates a new BlockTable instance with a copy of the blocks from the current instance.
+        """Creates a new BlockTable instance with a copy of the blocks from the
+        current instance.
 
-        This method creates a new BlockTable instance with the same block size, block allocator,
-        and a copy of the blocks from the current instance. The new BlockTable has its own
-        independent set of blocks, but shares the same underlying memory allocation with the
-        original BlockTable.
+        This method creates a new BlockTable instance with the same block size,
+        block allocator, and a copy of the blocks from the current instance. The
+        new BlockTable has its own independent set of blocks, but shares the
+        same underlying memory allocation with the original BlockTable.
 
         Returns:
-            BlockTable: A new BlockTable instance with a copy of the blocks from the current instance.
+            BlockTable: A new BlockTable instance with a copy of the blocks from
+                the current instance.
         """
         assert self._is_allocated
         forked_blocks = self._allocator.fork(self._blocks[-1])
@@ -150,9 +168,10 @@ class BlockTable:
     def free(self) -> None:
         """Frees the memory occupied by the blocks in the BlockTable.
 
-        This method iterates over all the blocks in the `_blocks` list and calls the `free` method
-        of the `_allocator` object to release the memory occupied by each block. After freeing all
-        the blocks, the `_blocks` list is set to `None`.
+        This method iterates over all the blocks in the `_blocks` list and calls
+        the `free` method of the `_allocator` object to release the memory
+        occupied by each block. After freeing all the blocks, the `_blocks` list
+        is set to `None`.
         """
         assert self._is_allocated
         for block in self._blocks:
@@ -161,14 +180,17 @@ class BlockTable:
 
     @property
     def physical_block_ids(self) -> List[int]:
-        """Returns a list of physical block indices for the blocks in the BlockTable.
+        """Returns a list of physical block indices for the blocks in the
+        BlockTable.
 
-        This property returns a list of integers, where each integer represents the
-        physical block index of a corresponding block in the `_blocks` list. The physical
-        block index is a unique identifier for the memory location occupied by the block.
+        This property returns a list of integers, where each integer represents
+        the physical block index of a corresponding block in the `_blocks` list.
+        The physical block index is a unique identifier for the memory location
+        occupied by the block.
 
         Returns:
-            List[int]: A list of physical block indices for the blocks in the BlockTable.
+            List[int]: A list of physical block indices for the blocks in the
+                BlockTable.
         """
         assert self._is_allocated
         return [block.physical_block_index for block in self._blocks]
@@ -214,7 +236,8 @@ class BlockTable:
 
     @property
     def num_full_slots(self) -> int:
-        """Returns the total number of tokens currently stored in the BlockTable.
+        """Returns the total number of tokens currently stored in the
+        BlockTable.
 
         Returns:
             int: The total number of tokens currently stored in the BlockTable.

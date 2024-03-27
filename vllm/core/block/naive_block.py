@@ -9,14 +9,17 @@ Refcount = int
 
 
 class NaiveBlockAllocator(BlockAllocator):
-    """A simple block allocator that manages blocks of memory without prefix caching.
+    """A simple block allocator that manages blocks of memory without prefix
+    caching.
 
     Args:
-        create_block (Block.Factory): A factory function for creating new blocks.
+        create_block (Block.Factory): A factory function for creating new
+            blocks.
         num_blocks (int): The total number of blocks to manage.
         block_size (int): The size of each block in tokens.
-        block_ids (Optional[Iterable[int]], optional): An optional iterable of block IDs.
-            If not provided, block IDs will be assigned sequentially from 0 to num_blocks - 1.
+        block_ids (Optional[Iterable[int]], optional): An optional iterable of
+            block IDs. If not provided, block IDs will be assigned sequentially
+            from 0 to num_blocks - 1.
     """
 
     def __init__(
@@ -45,11 +48,13 @@ class NaiveBlockAllocator(BlockAllocator):
 
     def allocate_immutable(self, prev_block: Optional[Block],
                            token_ids: List[int]) -> Block:
-        """Allocates a new immutable block with the given token IDs, linked to the previous block.
+        """Allocates a new immutable block with the given token IDs, linked to
+        the previous block.
 
         Args:
-            prev_block (Optional[Block]): The previous block in the sequence. If None, then the block
-                to be allocated is the first block in the sequence.
+            prev_block (Optional[Block]): The previous block in the sequence. If
+                None, then the block to be allocated is the first block in the
+                sequence.
             token_ids (List[int]): The token IDs to be stored in the new block.
 
         Returns:
@@ -63,8 +68,9 @@ class NaiveBlockAllocator(BlockAllocator):
         """Allocates a new mutable block, linked to the previous block.
 
         Args:
-            prev_block (Optional[Block]): The previous block in the sequence. If None, then the block
-                to be allocated is the first block in the sequence.
+            prev_block (Optional[Block]): The previous block in the sequence. If
+                None, then the block to be allocated is the first block in the
+                sequence.
 
         Returns:
             Block: The newly allocated mutable block.
@@ -84,13 +90,15 @@ class NaiveBlockAllocator(BlockAllocator):
         self._free_block_index(block_index)
 
     def fork(self, last_block: Block) -> List[Block]:
-        """Creates a new sequence of blocks that shares the same underlying memory as the original sequence.
+        """Creates a new sequence of blocks that shares the same underlying
+        memory as the original sequence.
 
         Args:
             last_block (Block): The last block in the original sequence.
 
         Returns:
-            List[Block]: The new sequence of blocks that shares the same memory as the original sequence.
+            List[Block]: The new sequence of blocks that shares the same memory
+                as the original sequence.
         """
         source_blocks = get_all_blocks_recursively(last_block)
 
@@ -141,14 +149,16 @@ class NaiveBlockAllocator(BlockAllocator):
 
     def cow_block_if_not_appendable(self,
                                     block: Block) -> Optional[BlockIndex]:
-        """Performs a copy-on-write operation on the given block if it is not appendable.
+        """Performs a copy-on-write operation on the given block if it is not
+        appendable.
 
         Args:
             block (Block): The block to check for copy-on-write.
 
         Returns:
-            Optional[BlockIndex]: The block index of the new block if a copy-on-write operation
-                was performed, or the original block index if no copy-on-write was necessary.
+            Optional[BlockIndex]: The block index of the new block if a copy-on
+                -write operation was performed, or the original block index if
+                no copy-on-write was necessary.
         """
         return self._cow_tracker.cow_block_if_not_appendable(block)
 
@@ -156,8 +166,8 @@ class NaiveBlockAllocator(BlockAllocator):
         """Returns the copy-on-write source->destination mapping and clears it.
 
         Returns:
-            Dict[BlockIndex, List[BlockIndex]]: A dictionary mapping source block indices to
-                lists of destination block indices.
+            Dict[BlockIndex, List[BlockIndex]]: A dictionary mapping source
+                block indices to lists of destination block indices.
         """
         return self._cow_tracker.clear_cows()
 
@@ -180,21 +190,25 @@ class NaiveBlockAllocator(BlockAllocator):
 
 
 class NaiveBlock(Block):
-    """An implementation of the Block class that does not support prefix caching.
+    """An implementation of the Block class that does not support prefix
+    caching.
 
-    The NaiveBlock class represents a block of token IDs with a fixed size. It provides
-    methods for appending token IDs to the block and manages copy-on-write operations
-    when necessary.
+    The NaiveBlock class represents a block of token IDs with a fixed size. It
+    provides methods for appending token IDs to the block and manages copy-on
+    -write operations when necessary.
 
     Args:
         prev_block (Block): The previous block in the sequence.
         token_ids (List[int]): The initial token IDs to be stored in the block.
-        block_size (int): The maximum number of token IDs that can be stored in the block.
-        allocator (BlockAllocator): The block allocator associated with this block.
-        physical_block_index (Optional[int], optional): The physical block index of this block.
-            Defaults to None, which means no allocation has been made.
-        _cow_target (Optional[Block], optional): The copy-on-write target block. If not provided,
-            it defaults to self.
+        block_size (int): The maximum number of token IDs that can be stored in
+            the block.
+        allocator (BlockAllocator): The block allocator associated with this
+            block.
+        physical_block_index (Optional[int], optional): The physical block index
+            of this block. Defaults to None, which means no allocation has been
+            made.
+        _cow_target (Optional[Block], optional): The copy-on-write target block.
+            If not provided, it defaults to self.
     """
 
     def __init__(self,
@@ -214,8 +228,8 @@ class NaiveBlock(Block):
         self._append_token_ids_no_cow(token_ids)
 
     def append_token_ids(self, token_ids: List[int]) -> None:
-        """Appends the given token IDs to the block, instructing the allocator to perform
-        a copy-on-write if necessary.
+        """Appends the given token IDs to the block, instructing the allocator
+        to perform a copy-on-write if necessary.
 
         Args:
             token_ids (List[int]): The token IDs to be appended to the block.

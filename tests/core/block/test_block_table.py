@@ -10,9 +10,10 @@ from vllm.utils import Device, cdiv, chunk_list
 def test_allocate_naive(block_size: int, sequence_len: int):
     """Test the allocation of blocks using the naive allocator.
 
-    This test creates a CpuGpuBlockAllocator with the specified block size and number of blocks.
-    It then allocates multiple BlockTables with varying sequence lengths and verifies that the
-    number of free blocks decreases as expected after each allocation.
+    This test creates a CpuGpuBlockAllocator with the specified block size and
+    number of blocks. It then allocates multiple BlockTables with varying
+    sequence lengths and verifies that the number of free blocks decreases as
+    expected after each allocation.
     """
     assert block_size > 1
     num_gpu_blocks = 1024
@@ -45,13 +46,15 @@ def test_allocate_naive(block_size: int, sequence_len: int):
 def test_allocate_prefix_caching(block_size: int, sequence_len: int):
     """Test the allocation of blocks using the prefix caching allocator.
 
-    This test creates a CpuGpuBlockAllocator with the specified block size and number of blocks,
-    using the prefix caching allocator. It then allocates multiple BlockTables with varying sequence
-    lengths and verifies that the number of free blocks decreases as expected after each allocation.
+    This test creates a CpuGpuBlockAllocator with the specified block size and
+    number of blocks, using the prefix caching allocator. It then allocates
+    multiple BlockTables with varying sequence lengths and verifies that the
+    number of free blocks decreases as expected after each allocation.
 
-    The test expects all sequences to share allocations, except for their last block, which may be
-    mutable. It calculates the expected number of immutable and mutable blocks per allocation based
-    on the sequence length and block size.
+    The test expects all sequences to share allocations, except for their last
+    block, which may be mutable. It calculates the expected number of immutable
+    and mutable blocks per allocation based on the sequence length and block
+    size.
     """
     assert block_size > 1
     num_gpu_blocks = 1024
@@ -94,12 +97,13 @@ def test_allocate_prefix_caching(block_size: int, sequence_len: int):
 @pytest.mark.parametrize("device", ["cpu", "gpu"])
 def test_allocate_free(block_size: int, sequence_len: int, allocator_type: str,
                        device: str):
-    """Test the allocation and freeing of blocks using different allocators and devices.
+    """Test the allocation and freeing of blocks using different allocators and
+    devices.
 
-    This test creates a CpuGpuBlockAllocator with the specified block size, number of blocks,
-    allocator type, and device. It then allocates a BlockTable multiple times with the same
-    sequence and verifies that the number of free blocks remains consistent after each allocation
-    and freeing.
+    This test creates a CpuGpuBlockAllocator with the specified block size,
+    number of blocks, allocator type, and device. It then allocates a BlockTable
+    multiple times with the same sequence and verifies that the number of free
+    blocks remains consistent after each allocation and freeing.
     """
     device = Device[device.upper()]
 
@@ -138,10 +142,11 @@ def test_append_token_ids_allocation(block_size: int, sequence_len: int,
                                      append_len: int, allocator_type: str):
     """Test the allocation behavior when appending token IDs to a BlockTable.
 
-    This test creates a CpuGpuBlockAllocator with the specified block size, number of blocks,
-    and allocator type. It then allocates a BlockTable with an initial sequence and appends
-    additional token IDs to it. The test verifies that the number of allocated blocks before
-    and after appending matches the expected values.
+    This test creates a CpuGpuBlockAllocator with the specified block size,
+    number of blocks, and allocator type. It then allocates a BlockTable with an
+    initial sequence and appends additional token IDs to it. The test verifies
+    that the number of allocated blocks before and after appending matches the
+    expected values.
     """
 
     num_gpu_blocks = 1024
@@ -184,13 +189,15 @@ def test_append_token_ids_allocation(block_size: int, sequence_len: int,
 def test_ensure_num_empty_slots_allocation(block_size: int, sequence_len: int,
                                            num_empty_slots: int,
                                            allocator_type: str):
-    """Test the allocation behavior when ensuring a certain number of empty slots in a BlockTable.
+    """Test the allocation behavior when ensuring a certain number of empty
+    slots in a BlockTable.
 
-    This test creates a CpuGpuBlockAllocator with the specified block size, number of blocks,
-    and allocator type. It then allocates a BlockTable with an initial sequence and ensures
-    a certain number of empty slots. The test verifies that the number of allocated blocks
-    before and after ensuring empty slots matches the expected values. It also checks that
-    filling up the empty slots does not consume additional blocks.
+    This test creates a CpuGpuBlockAllocator with the specified block size,
+    number of blocks, and allocator type. It then allocates a BlockTable with an
+    initial sequence and ensures a certain number of empty slots. The test
+    verifies that the number of allocated blocks before and after ensuring empty
+    slots matches the expected values. It also checks that filling up the empty
+    slots does not consume additional blocks.
     """
     num_gpu_blocks = 1024
 

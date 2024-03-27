@@ -62,7 +62,8 @@ class ReadOnlyRefCounter:
     modifications to the reference counts.
 
     Args:
-        refcounter (RefCounter): The RefCounter instance to create a read-only view for.
+        refcounter (RefCounter): The RefCounter instance to create a read-only
+            view for.
     """
 
     def __init__(self, refcounter: RefCounter):
@@ -81,13 +82,16 @@ class ReadOnlyRefCounter:
 class CopyOnWriteTracker:
     """A class for tracking and managing copy-on-write operations for blocks.
 
-    The CopyOnWriteTracker class maintains a mapping of source block indices to their
-    corresponding copy-on-write destination block indices. It works in conjunction with
-    a RefCounter and a BlockAllocator to handle reference counting and block allocation.
+    The CopyOnWriteTracker class maintains a mapping of source block indices to
+        their corresponding copy-on-write destination block indices. It works in
+        conjunction with a RefCounter and a BlockAllocator to handle reference
+        counting and block allocation.
 
     Args:
-        refcounter (RefCounter): The reference counter used to track block reference counts.
-        allocator (BlockAllocator): The block allocator used to allocate and free blocks.
+        refcounter (RefCounter): The reference counter used to track block
+            reference counts.
+        allocator (BlockAllocator): The block allocator used to allocate and
+            free blocks.
     """
 
     def __init__(
@@ -101,19 +105,22 @@ class CopyOnWriteTracker:
 
     def cow_block_if_not_appendable(self,
                                     block: Block) -> Optional[BlockIndex]:
-        """Performs a copy-on-write operation on the given block if it is not appendable.
+        """Performs a copy-on-write operation on the given block if it is not
+        appendable.
 
-        This method checks the reference count of the given block. If the reference count is
-        greater than 1, indicating that the block is shared, a copy-on-write operation is performed.
-        The original block is freed, and a new block is allocated with the same content.
-        The new block index is returned.
+        This method checks the reference count of the given block. If the
+        reference count is greater than 1, indicating that the block is shared,
+        a copy-on-write operation is performed. The original block is freed,
+        and a new block is allocated with the same content. The new block index
+        is returned.
 
         Args:
             block (Block): The block to check for copy-on-write.
 
         Returns:
-            Optional[BlockIndex]: The block index of the new block if a copy-on-write operation
-                was performed, or the original block index if no copy-on-write was necessary.
+            Optional[BlockIndex]: The block index of the new block if a copy-on
+                -write operation was performed, or the original block index if
+                no copy-on-write was necessary.
         """
         block_index = block.physical_block_index
         if block_index is None:
@@ -137,15 +144,17 @@ class CopyOnWriteTracker:
         return block_index
 
     def clear_cows(self) -> Dict[BlockIndex, List[BlockIndex]]:
-        """Clears the copy-on-write tracking information and returns the current state.
+        """Clears the copy-on-write tracking information and returns the current
+        state.
 
-        This method returns a dictionary mapping source block indices to lists of destination
-        block indices for the current copy-on-write operations. It then clears the internal
-        tracking information.
+        This method returns a dictionary mapping source block indices to lists
+        of destination block indices for the current copy-on-write operations.
+        It then clears the internal tracking information.
 
         Returns:
-            Dict[BlockIndex, List[BlockIndex]]: A dictionary mapping source block indices to
-                lists of destination block indices for the current copy-on-write operations.
+            Dict[BlockIndex, List[BlockIndex]]: A dictionary mapping source
+                block indices to lists of destination block indices for the
+                current copy-on-write operations.
         """
         cows = dict(self._copy_on_writes)
         self._copy_on_writes.clear()
@@ -163,7 +172,8 @@ def get_all_blocks_recursively(last_block: Block) -> List[Block]:
         last_block (Block): The last block in the sequence.
 
     Returns:
-        List[Block]: A list of all the blocks in the sequence, in the order they appear.
+        List[Block]: A list of all the blocks in the sequence, in the order they
+            appear.
     """
 
     def recurse(block: Block, lst: List[Block]) -> None:

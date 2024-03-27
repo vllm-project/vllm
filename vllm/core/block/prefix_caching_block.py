@@ -22,9 +22,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     Args:    
         num_blocks (int): The total number of blocks to manage.
         block_size (int): The size of each block in tokens.
-        block_ids(Optional[Iterable[int]], optional): An optional iterable of block IDs.
-            If not provided, block IDs will be assigned sequentially from 0 to
-            num_blocks - 1.
+        block_ids(Optional[Iterable[int]], optional): An optional iterable of
+            block IDs. If not provided, block IDs will be assigned sequentially
+            from 0 to num_blocks - 1.
     """
 
     # TODO last access time / evictor integration
@@ -162,7 +162,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         If the block has a content hash (meaning it is immutable), then we will
         keep the block around in case future allocations require it.
         """
-        assert block.physical_block_index is not None, "freeing unallocated block is undefined"
+        assert (block.physical_block_index
+                is not None), "freeing unallocated block is undefined"
 
         self._free_block_index_for_block(block.physical_block_index, block)
         block.physical_block_index = None
@@ -189,7 +190,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             last_block (Block): The last block in the original sequence.
 
         Returns:
-            List[Block]: The new sequence of blocks that shares the same memory as the original sequence.
+            List[Block]: The new sequence of blocks that shares the same memory
+                as the original sequence.
         """
         source_blocks = get_all_blocks_recursively(last_block)
 
@@ -227,15 +229,16 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         block. This means that its content can be referenced by future blocks
         having the same prefix.
 
-        Note that if we already have a cached block with the same content, we will
-        replace the newly-promoted block's mapping with the existing cached block.
+        Note that if we already have a cached block with the same content, we
+        will replace the newly-promoted block's mapping with the existing cached
+        block.
 
         Args:
             block (PrefixCachingBlock): The mutable block to be promoted.
 
         Returns:
-            BlockIndex: Either the original block index, or the block index of the
-                previously cached block matching the same content.
+            BlockIndex: Either the original block index, or the block index of
+                the previously cached block matching the same content.
         """
         assert block.content_hash is not None
         assert block.physical_block_index is not None
@@ -264,8 +267,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             block (Block): The block to check for copy-on-write.
 
         Returns:
-            Optional[BlockIndex]: The block index of the new block if a copy-on-write operation
-                was performed, or the original block index if no copy-on-write was necessary.
+            Optional[BlockIndex]: The block index of the new block if a copy-on
+                -write operation was performed, or the original block index if
+                no copy-on-write was necessary.
         """
         return self._cow_tracker.cow_block_if_not_appendable(block)
 
@@ -273,8 +277,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         """Returns the copy-on-write source->destination mapping and clears it.
 
         Returns:
-            Dict[BlockIndex, List[BlockIndex]]: A dictionary mapping source block indices to
-                lists of destination block indices.
+            Dict[BlockIndex, List[BlockIndex]]: A dictionary mapping source
+                block indices to lists of destination block indices.
         """
         return self._cow_tracker.clear_cows()
 
@@ -306,16 +310,21 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 class PrefixCachingBlock(Block):
     """A block implementation that supports prefix caching.
 
-    The PrefixCachingBlock class represents a block of token IDs with prefix caching capabilities.
-    It wraps a NaiveBlock internally and provides additional functionality for content hashing and
-    registering immutable blocks with the prefix caching allocator.
+    The PrefixCachingBlock class represents a block of token IDs with prefix
+    caching capabilities. It wraps a NaiveBlock internally and provides
+    additional functionality for content hashing and promoting immutable blocks
+    with the prefix caching allocator.
 
     Args:
-        prev_block (Optional[PrefixCachingBlock]): The previous block in the sequence.
+        prev_block (Optional[PrefixCachingBlock]): The previous block in the
+            sequence.
         token_ids (List[int]): The initial token IDs to be stored in the block.
-        block_size (int): The maximum number of token IDs that can be stored in the block.
-        prefix_caching_allocator (PrefixCachingBlockAllocator): The prefix caching block allocator associated with this block.
-        physical_block_index (Optional[int], optional): The physical block index of this block. Defaults to None.
+        block_size (int): The maximum number of token IDs that can be stored in
+            the block.
+        prefix_caching_allocator (PrefixCachingBlockAllocator): The prefix
+            caching block allocator associated with this block.
+        physical_block_index (Optional[int], optional): The physical block index
+            of this block. Defaults to None.
     """
 
     def __init__(

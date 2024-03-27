@@ -11,11 +11,12 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
     """A block allocator that can allocate blocks on both CPU and GPU memory.
 
     This class implements the `DeviceAwareBlockAllocator` interface and provides
-    functionality for allocating and managing blocks of memory on both CPU and GPU devices.
+    functionality for allocating and managing blocks of memory on both CPU and
+    GPU devices.
 
-    The `CpuGpuBlockAllocator` maintains separate memory pools for CPU and GPU blocks,
-    and allows for allocation, deallocation, forking, and swapping of blocks across
-    these memory pools.
+    The `CpuGpuBlockAllocator` maintains separate memory pools for CPU and GPU
+    blocks, and allows for allocation, deallocation, forking, and swapping of
+    blocks across these memory pools.
     """
 
     @staticmethod
@@ -25,26 +26,31 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         num_cpu_blocks: int,
         block_size: int,
     ) -> DeviceAwareBlockAllocator:
-        """Creates a CpuGpuBlockAllocator instance with the specified configuration.
+        """Creates a CpuGpuBlockAllocator instance with the specified
+        configuration.
 
-        This static method creates and returns a CpuGpuBlockAllocator instance based on
-        the provided parameters. It initializes the CPU and GPU block allocators with the
-        specified number of blocks, block size, and allocator type.
+        This static method creates and returns a CpuGpuBlockAllocator instance
+        based on the provided parameters. It initializes the CPU and GPU block
+        allocators with the specified number of blocks, block size, and
+        allocator type.
 
         Args:
-            allocator_type (str): The type of block allocator to use for CPU and GPU blocks.
-                Currently supported values are "naive" and "prefix_caching".
-            num_gpu_blocks (int): The number of blocks to allocate for GPU memory.
-            num_cpu_blocks (int): The number of blocks to allocate for CPU memory.
+            allocator_type (str): The type of block allocator to use for CPU
+                and GPU blocks. Currently supported values are "naive" and
+                "prefix_caching".
+            num_gpu_blocks (int): The number of blocks to allocate for GPU
+                memory.
+            num_cpu_blocks (int): The number of blocks to allocate for CPU
+                memory.
             block_size (int): The size of each block in number of tokens.
 
         Returns:
-            DeviceAwareBlockAllocator: A CpuGpuBlockAllocator instance with the specified
-                configuration.
+            DeviceAwareBlockAllocator: A CpuGpuBlockAllocator instance with the
+                specified configuration.
 
         Notes:
-            - The block IDs are assigned contiguously, with GPU block IDs coming before
-                CPU block IDs.
+            - The block IDs are assigned contiguously, with GPU block IDs coming
+                before CPU block IDs.
         """
         block_ids = list(range(num_gpu_blocks + num_cpu_blocks))
         gpu_block_ids = block_ids[:num_gpu_blocks]
@@ -120,15 +126,19 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
 
     def allocate_immutable(self, prev_block: Optional[Block],
                            token_ids: List[int], device: Device) -> Block:
-        """Allocates a new immutable block with the provided token IDs on the specified device.
+        """Allocates a new immutable block with the provided token IDs on the
+        specified device.
 
         Args:
-            prev_block (Optional[Block]): The previous block in the sequence. Used for prefix hashing.
-            token_ids (List[int]): The list of token IDs to be stored in the new block.
+            prev_block (Optional[Block]): The previous block in the sequence.
+                Used for prefix hashing.
+            token_ids (List[int]): The list of token IDs to be stored in the new
+                block.
             device (Device): The device on which to allocate the new block.
 
         Returns:
-            Block: The newly allocated immutable block containing the provided token IDs.
+            Block: The newly allocated immutable block containing the provided
+                token IDs.
         """
         return self._allocators[device].allocate_immutable(
             prev_block, token_ids)
@@ -143,13 +153,15 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         return allocator.free(block)
 
     def fork(self, last_block: Block) -> List[Block]:
-        """Creates a new sequence of blocks that shares the same underlying memory as the original sequence.
+        """Creates a new sequence of blocks that shares the same underlying
+            memory as the original sequence.
 
         Args:
             last_block (Block): The last block in the original sequence.
 
         Returns:
-            List[Block]: A new list of blocks that shares the same memory as the original sequence.
+            List[Block]: A new list of blocks that shares the same memory as the
+                original sequence.
         """
         allocator = self._block_ids_to_allocator[
             last_block.physical_block_index]
@@ -159,7 +171,8 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         """Returns the number of free blocks available on the specified device.
 
         Args:
-            device (Device): The device for which to query the number of free blocks.
+            device (Device): The device for which to query the number of free
+                blocks.
 
         Returns:
             int: The number of free blocks available on the specified device.
@@ -167,10 +180,12 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         return self._allocators[device].get_num_free_blocks()
 
     def clear_copy_on_writes(self) -> Dict[int, List[int]]:
-        """Clears the copy-on-write (CoW) state and returns the mapping of source to destination block IDs.
+        """Clears the copy-on-write (CoW) state and returns the mapping of
+            source to destination block IDs.
 
         Returns:
-            Dict[int, List[int]]: A dictionary mapping source block IDs to lists of destination block IDs.
+            Dict[int, List[int]]: A dictionary mapping source block IDs to lists
+                of destination block IDs.
         """
         # CoW only supported on GPU
         device = Device.GPU
