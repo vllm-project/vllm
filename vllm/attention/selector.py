@@ -36,9 +36,12 @@ def _which_attn_to_use(dtype: torch.dtype) -> str:
         str: XFormers, FlashAttention, or FlashAttentionTriton
     """
 
-    # NOTE: Defaulting to triton FA for AMD cards.
-    use_flash_attn_triton = os.environ.get('VLLM_USE_FLASH_ATTN_TRITON',
-                                           "True").lower() in ("true", "1")
+    # NOTE: Allow for switching between Triton and FA
+    #       Defaulting to triton FA for AMD cards.
+    use_flash_attn_triton = (os.environ.get("VLLM_USE_FLASH_ATTN_TRITON",
+                                            "True").lower()
+                             in ("true", "1")) and is_hip()
+
     if not is_hip() and torch.cuda.get_device_capability()[0] < 8:
         # Volta and Turing NVIDIA GPUs.
         logger.info("Cannot use FlashAttention backend for Volta and Turing "
@@ -56,12 +59,11 @@ def _which_attn_to_use(dtype: torch.dtype) -> str:
                     "torch.float16 or torch.bfloat16.")
         return "XFormers"
 
-    try:
-        import flash_attn  # noqa: F401
-    except ImportError:
-        logger.info("flash_attn is not found.")
-        if is_hip() and use_flash_attn_triton:
-            pass
-        else:
+    if not use_flash_attn_triton:
+        # Only test for flash_attn if we are using it.
+        try:
+            import flash_attn  # noqa: F401
+        except ImportError:
             return "XFormers"
+
     return "FlashAttentionTriton" if use_flash_attn_triton else "FlashAttention"
