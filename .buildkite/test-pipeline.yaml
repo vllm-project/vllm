@@ -22,10 +22,13 @@ steps:
   working_dir: "/vllm-workspace/tests/distributed"
   num_gpus: 2 # only support 1 or 2 for now.
 
-- label: Distributed Correctness Test
-  command: pytest -v -s --forked test_basic_distributed_correctness.py
+- label: Distributed Tests
   working_dir: "/vllm-workspace/tests/distributed"
   num_gpus: 2 # only support 1 or 2 for now.
+  commands:
+  - pytest -v -s --forked test_pynccl.py
+  - TEST_DIST_MODEL=facebook/opt-125m pytest -v -s --forked test_basic_distributed_correctness.py
+  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf pytest -v -s --forked test_basic_distributed_correctness.py
 
 - label: Engine Test
   command: pytest -v -s engine tokenization test_sequence.py test_config.py

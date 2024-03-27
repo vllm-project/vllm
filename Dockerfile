@@ -97,7 +97,7 @@ RUN --mount=type=cache,target=/root/.cache/pip VLLM_USE_PRECOMPILED=1 pip instal
 
 #################### RUNTIME BASE IMAGE ####################
 # We used base cuda image because pytorch installs its own cuda libraries.
-# However cupy depends on cuda libraries so we had to switch to the runtime image
+# However pynccl depends on cuda libraries so we had to switch to the runtime image
 # In the future it would be nice to get a container with pytorch and cuda without duplicating cuda
 FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04 AS vllm-base
 

@@ -188,11 +188,9 @@ class RayGPUExecutor(ExecutorBase):
             is_driver_worker=True,
         )
 
-        # FIXME(woosuk): We are not properly initializing cupy NCCL when
+        # FIXME(woosuk): We are not properly initializing pynccl when
         # we have multiple nodes.
-        self._run_workers("init_device",
-                          cupy_port=get_open_port()
-                          if not model_config.enforce_eager else None)
+        self._run_workers("init_device")
         self._run_workers(
             "load_model",
             max_concurrent_workers=self.parallel_config.
