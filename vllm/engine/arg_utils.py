@@ -162,7 +162,8 @@ class EngineArgs:
         parser.add_argument('--worker-use-ray',
                             action='store_true',
                             help='use Ray for distributed serving, will be '
-                            'automatically set when using more than 1 GPU')
+                            'automatically set when using more than 1 GPU '
+                            'unless on ROCm where the default is torchrun')
         parser.add_argument('--pipeline-parallel-size',
                             '-pp',
                             type=int,

@@ -480,6 +480,7 @@ class ParallelConfig:
         self.pipeline_parallel_size = pipeline_parallel_size
         self.tensor_parallel_size = tensor_parallel_size
         self.worker_use_ray = worker_use_ray
+        self.worker_use_torchrun = False
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
         self.tokenizer_pool_config = tokenizer_pool_config
@@ -488,7 +489,16 @@ class ParallelConfig:
 
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
         if self.world_size > 1:
-            self.worker_use_ray = True
+            if is_hip() and not self.worker_use_ray:
+                logger.info("Using torchrun for multi-GPU on "
+                            "ROCM platform. Use --worker-use-ray "
+                            "to override")
+                if not os.environ.get("RANK"):
+                    raise RuntimeError("Needs to be run in torchrun: "
+                        "torchrun --standalone --nproc_per_node=<tp> ...")
+                self.worker_use_torchrun = True
+            else:
+                self.worker_use_ray = True
         self._verify_args()
 
     def _verify_args(self) -> None:
