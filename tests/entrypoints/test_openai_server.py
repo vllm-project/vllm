@@ -138,7 +138,8 @@ def server(zephyr_lora_files):
         f"zephyr-lora2={zephyr_lora_files}",
         "--max-lora-rank",
         "64",
-        "--max-cpu-loras", "2",
+        "--max-cpu-loras",
+        "2",
         "--max-num-seqs",
         "128"
     ]

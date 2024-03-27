@@ -13,6 +13,18 @@ BlockIndex = int
 
 
 class PrefixCachingBlockAllocator(BlockAllocator):
+    """A block allocator that implements prefix caching.
+
+    The PrefixCachingBlockAllocator maintains a cache of blocks based on their content hash.
+    It reuses blocks with the same content hash to avoid redundant memory allocation.
+    The allocator also supports copy-on-write operations.
+
+    Args:
+        num_blocks (int): The total number of blocks to manage.
+        block_size (int): The size of each block in tokens.
+        block_ids (Optional[Iterable[int]], optional): An optional iterable of block IDs.
+            If not provided, block IDs will be assigned sequentially from 0 to num_blocks - 1.
+    """
 
     # TODO last access time / evictor integration
 
@@ -63,6 +75,15 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
     def allocate_immutable(self, prev_block: Optional[Block],
                            token_ids: List[int]) -> Block:
+        """Allocates an immutable block with the given token IDs, reusing cached blocks if possible.
+
+        Args:
+            prev_block (Optional[Block]): The previous block in the sequence.
+            token_ids (List[int]): The token IDs to be stored in the block.
+
+        Returns:
+            Block: The allocated immutable block.
+        """
         assert_prefix_caching_block_or_none(prev_block)
 
         block = self._create_block(
@@ -89,15 +110,15 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         return block
 
-    def _allocate_block_index_for_block(self, block: Block) -> BlockIndex:
-        # TODO
-        pass
-
     def allocate_mutable(self, prev_block: Block) -> Block:
-        """Look in freelist. If found, return.
-        Else, look in cachelist (refcount==0). If found, return.
+        """Allocates a mutable block. If there are no free blocks, this will evict unused
+        cached blocks.
 
-        Otherwise, raise :(
+        Args:
+            prev_block (Block): The previous block in the sequence.
+
+        Returns:
+            Block: The allocated mutable block.
         """
         assert_prefix_caching_block_or_none(prev_block)
 
@@ -133,13 +154,13 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         raise BlockAllocator.NoFreeBlocksError()
 
     def free(self, block: Block) -> None:
-        """Free a block.
-        Check if it has a hash. If so, decr refcount ourselves. If zero, add to
-        special list. If it does not have a hash, let the hashless allocator
-        figure it out.
+        """Decrement the refcount of the block. If the decremented refcount is zero, store the block
+        in the freelist.
+
+        If the block has a content hash (meaning it is immutable), then we will keep the block around
+        in case future allocations require it.
         """
-        # TODO remove this assertion ?
-        assert block.physical_block_index is not None
+        assert block.physical_block_index is not None, "freeing unallocated block is undefined"
 
         self._free_block_index_for_block(block.physical_block_index, block)
         block.physical_block_index = None
@@ -159,6 +180,14 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             self._unused_cached_blocks[block.content_hash] = block_index
 
     def fork(self, last_block: Block) -> List[Block]:
+        """Creates a new sequence of blocks that shares the same underlying memory as the original sequence.
+
+        Args:
+            last_block (Block): The last block in the original sequence.
+
+        Returns:
+            List[Block]: The new sequence of blocks that shares the same memory as the original sequence.
+        """
         source_blocks = get_all_blocks_recursively(last_block)
 
         forked_blocks = []
@@ -180,6 +209,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         return forked_blocks
 
     def get_num_free_blocks(self) -> int:
+        # The number of free blocks is the number of hashless free blocks
+        # plus the number of hashful blocks that are unused.
         return self._hashless_allocator.get_num_free_blocks() + len(
             self._unused_cached_blocks)
 
@@ -187,8 +218,21 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     def all_block_ids(self) -> frozenset[int]:
         return self._hashless_allocator.all_block_ids
 
-    def register_immutable_block(self,
-                                 block: "PrefixCachingBlock") -> BlockIndex:
+    def promote_to_immutable_block(self, block: "PrefixCachingBlock") -> BlockIndex:
+        """Once a mutable block is full, it can be promoted to an immutable block.
+        This means that its content can be referenced by future blocks having
+        the same prefix.
+
+        Note that if we already have a cached block with the same content, we will
+        replace the newly-promoted block's mapping with the existing cached block.
+
+        Args:
+            block (PrefixCachingBlock): The mutable block to be promoted.
+
+        Returns:
+            BlockIndex: Either the original block index, or the block index of the
+                previously cached block matching the same content.
+        """
         assert block.content_hash is not None
         assert block.physical_block_index is not None
 
@@ -209,9 +253,24 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
     def cow_block_if_not_appendable(self,
                                     block: Block) -> Optional[BlockIndex]:
+        """Performs a copy-on-write operation on the given block if it is not appendable.
+
+        Args:
+            block (Block): The block to check for copy-on-write.
+
+        Returns:
+            Optional[BlockIndex]: The block index of the new block if a copy-on-write operation
+                was performed, or the original block index if no copy-on-write was necessary.
+        """
         return self._cow_tracker.cow_block_if_not_appendable(block)
 
     def clear_copy_on_writes(self) -> Dict[BlockIndex, List[BlockIndex]]:
+        """Returns the copy-on-write source->destination mapping and clears it. 
+                                                                                
+        Returns:                                                                
+            Dict[BlockIndex, List[BlockIndex]]: A dictionary mapping source block indices to
+                lists of destination block indices.                             
+        """
         return self._cow_tracker.clear_cows()
 
     def mark_blocks_as_computed(self) -> None:
@@ -241,6 +300,19 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
 
 class PrefixCachingBlock(Block):
+    """A block implementation that supports prefix caching.
+
+    The PrefixCachingBlock class represents a block of token IDs with prefix caching capabilities.
+    It wraps a NaiveBlock internally and provides additional functionality for content hashing and
+    registering immutable blocks with the prefix caching allocator.
+
+    Args:
+        prev_block (Optional[PrefixCachingBlock]): The previous block in the sequence.
+        token_ids (List[int]): The initial token IDs to be stored in the block.
+        block_size (int): The maximum number of token IDs that can be stored in the block.
+        prefix_caching_allocator (PrefixCachingBlockAllocator): The prefix caching block allocator associated with this block.
+        physical_block_index (Optional[int], optional): The physical block index of this block. Defaults to None.
+    """
 
     def __init__(
         self,
@@ -266,8 +338,17 @@ class PrefixCachingBlock(Block):
         )
 
     def append_token_ids(self, token_ids: List[int]) -> None:
+        """Appends the given token IDs to the block and registers the block as immutable
+        if the block becomes full.
+
+        Internally, the naive block handles CoW.
+
+        Args:
+            token_ids (List[int]): The token IDs to be appended to the block.
+        """
         assert token_ids
 
+        # naive block handles CoW.
         self._block.append_token_ids(token_ids)
 
         # If the content hash is present, then the block can be made immutable.
@@ -275,7 +356,7 @@ class PrefixCachingBlock(Block):
         # physical block index.
         if self.content_hash is not None:
             self.physical_block_index = (
-                self._prefix_caching_allocator.register_immutable_block(self))
+                self._prefix_caching_allocator.promote_to_immutable_block(self))
 
     @property
     def physical_block_index(self) -> Optional[int]:

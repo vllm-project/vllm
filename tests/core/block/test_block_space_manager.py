@@ -12,10 +12,6 @@ from ..utils import create_seq_group
 @pytest.mark.parametrize("watermark", [0.0, 0.5])
 def test_can_allocate_seq_group(block_size: int, num_seqs_per_group: int,
                                 num_gpu_blocks: int, watermark: float):
-    """Sequence group that allocates > num gpu blocks fails
-    Sequence group that allocates < num gpu blocks passes
-    """
-
     block_manager = BlockSpaceManagerV2(
         block_size=block_size,
         num_gpu_blocks=num_gpu_blocks,

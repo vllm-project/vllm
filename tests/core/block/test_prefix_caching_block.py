@@ -258,11 +258,6 @@ class TestPrefixCachingBlockAllocator:
     @pytest.mark.parametrize("num_blocks", [1, 1024])
     @pytest.mark.parametrize("block_size", [1, 16])
     def test_free_prevents_oom(num_blocks: int, block_size: int):
-        """Consume all blocks using many different hashes/block content.
-
-        Do this by creating a sequence that is very long.
-        Expect next block to OOM.
-        """
         allocator = PrefixCachingBlockAllocator(num_blocks=num_blocks,
                                                 block_size=block_size)
 
@@ -328,6 +323,9 @@ class TestPrefixCachingBlockAllocator:
     @pytest.mark.parametrize("seed", list(range(20)))
     def test_get_num_free_blocks_shared(num_blocks: int, block_size: int,
                                         seed: int):
+        """Verify sharing occurs by allocating two sequences that share prefixes
+        and incrementally freeing blocks.
+        """
         random.seed(seed)
         allocator = PrefixCachingBlockAllocator(num_blocks=num_blocks,
                                                 block_size=block_size)

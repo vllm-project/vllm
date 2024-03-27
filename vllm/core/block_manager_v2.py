@@ -11,7 +11,28 @@ SeqId = int
 
 
 class BlockSpaceManagerV2(BlockSpaceManager):
-    
+    """BlockSpaceManager which manages the allocation of KV cache.
+
+    It owns responsibility for allocation, swapping, allocating memory for
+    autoregressively-generated tokens, and other advanced features such as
+    prefix caching, forking/copy-on-write, and sliding-window memory allocation.
+
+    The current implementation is partial; in particular prefix caching and
+    sliding-window are not feature complete. This class implements the design
+    described in https://github.com/vllm-project/vllm/pull/3492.
+
+    Args:
+        block_size (int): The size of each memory block.
+        num_gpu_blocks (int): The number of memory blocks allocated on GPU.
+        num_cpu_blocks (int): The number of memory blocks allocated on CPU.
+        watermark (float, optional): The threshold used for memory swapping.
+            Defaults to 0.01.
+        sliding_window (Optional[int], optional): The size of the sliding
+            window. Defaults to None.
+        enable_caching (bool, optional): Flag indicating whether caching is
+            enabled. Defaults to False.
+    """
+
     def __init__(
         self,
         block_size: int,
@@ -25,18 +46,20 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self.num_total_gpu_blocks = num_gpu_blocks
         self.num_total_cpu_blocks = num_cpu_blocks
 
-        assert sliding_window is None
+        assert sliding_window is None, "Sliding window not yet supported"
+
         self.block_sliding_window = None
 
         self.watermark = watermark
         assert watermark >= 0.0
 
-        assert not enable_caching
+        assert not enable_caching, "Prefix caching not yet supported"
         self.enable_caching = enable_caching
 
         self.watermark_blocks = int(watermark * num_gpu_blocks)
 
         self.block_allocator = CpuGpuBlockAllocator.create(
+            # Currently, only naive blocks are supported (no prefix caching).
             allocator_type="naive",
             num_gpu_blocks=num_gpu_blocks,
             num_cpu_blocks=num_cpu_blocks,
@@ -85,7 +108,6 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             block_size=self.block_size,
             block_allocator=self.block_allocator,
         )
-        # TODO handle sliding window.
         assert self.block_sliding_window is None
         block_table.allocate(seq.get_token_ids())
         self.block_tables[seq.seq_id] = block_table
@@ -115,7 +137,13 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         assert unseen_token_ids
 
         block_table.append_token_ids(unseen_token_ids)
-        # TODO CoW
+
+        # Return any copy-on-writes.
+        _ = self.block_allocator.clear_copy_on_writes()
+
+        # TODO modify append_slot to append_slots
+        # @cadedaniel will do in https://github.com/vllm-project/vllm/pull/3250
+
         return None
 
     def free(self, seq: Sequence) -> None:
