@@ -26,7 +26,7 @@ def adjust_marlin_shard(param, shard_size, shard_offset):
 
     return shard_size * marlin_tile_size, shard_offset * marlin_tile_size
 
-def run_hip_linear(x, weight):
+def run_hip_linear(x, weight, bias):
     batched = False
     if x.dim() == 3:
         inp = x.view(-1, x.size(-1))
@@ -100,7 +100,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         weight = weights["weight"]
         if is_hip():
-            return run_hip_linear(x, weight)
+            return run_hip_linear(x, weight, bias)
         if self.separate_bias_add:
             if bias is not None:
                 return F.linear(x, weight) + bias
