@@ -121,6 +121,7 @@ def zephyr_lora_files():
 
 @pytest.fixture(scope="session")
 def server(zephyr_lora_files):
+    use_v2_block_manager = True
     ray.init()
     command_args = [
         "--model",
@@ -142,6 +143,9 @@ def server(zephyr_lora_files):
         "--max-num-seqs",
         "128"
     ]
+
+    if use_v2_block_manager:
+        command_args.append("--use-v2-block-manager")
 
     server_runner = ServerRunner.remote(command_args)
     ray.get(server_runner.ready.remote())
