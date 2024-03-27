@@ -539,7 +539,7 @@ class Scheduler:
                 # the subsequent comms can still use delta, but
                 # `multi_modal_data` will be None.
                 multi_modal_data=seq_group.multi_modal_data
-                if scheduler_outputs.prompt_run else None,
+                if scheduler_outputs.num_prompt_groups > 0 else None,
             )
             seq_group_metadata_list.append(seq_group_metadata)
         return seq_group_metadata_list, scheduler_outputs
