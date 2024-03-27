@@ -1,5 +1,5 @@
 from vllm.transformers_utils.configs.chatglm import ChatGLMConfig
-from vllm.transformers_utils.configs.dbrx impoty DbrxConfig
+from vllm.transformers_utils.configs.dbrx import DbrxConfig
 # RWConfig is for the original tiiuae/falcon-40b(-instruct) and
 # tiiuae/falcon-7b(-instruct) models. Newer Falcon models will use the
 # `FalconConfig` class from the official HuggingFace transformers library.

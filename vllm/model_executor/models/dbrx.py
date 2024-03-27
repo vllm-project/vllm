@@ -6,10 +6,12 @@ import torch
 import torch.nn as nn
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               QKVParallelLinear,
-                                               RowParallelLinear,
-                                               ReplicatedLinear)
+from vllm.model_executor.layers.linear import (
+    LinearMethodBase,
+    QKVParallelLinear,
+    RowParallelLinear,
+    ReplicatedLinear,
+)
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -31,6 +33,7 @@ from vllm.model_executor.weight_utils import (
 )
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs.dbrx import DbrxConfig
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.utils import set_weight_attrs
 
@@ -153,9 +156,9 @@ class DbrxExperts(nn.Module):
             param_data[:] = loaded_weight[:, :, shard]
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        batch_size, sequence_length, hidden_size = hidden_states.shape
+        num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.d_model)
-        # router_logits: (batch * sequence_length, n_experts)
+        # router_logits: (num_tokens, n_experts)
         router_logits = self.router(hidden_states)
         final_hidden_states = fused_moe(
             hidden_states,
@@ -172,9 +175,7 @@ class DbrxExperts(nn.Module):
                 final_hidden_states
             )
 
-        return final_hidden_states.view(
-            batch_size, sequence_length, hidden_size
-        )
+        return final_hidden_states.view(num_tokens, hidden_size)
 
 
 class DbrxAttention(nn.Module):
@@ -248,7 +249,7 @@ class DbrxAttention(nn.Module):
         qkv, _ = self.Wqkv(hidden_states)
         if self.clip_qkv is not None:
             qkv.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=2)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(position_ids, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         hidden_states, _ = self.out_proj(attn_output)
@@ -276,19 +277,12 @@ class DbrxFusedNormAttention(nn.Module):
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.norm_1(hidden_states)
-<<<<<<< HEAD
-        x = self.attn(position_ids=position_ids,
-                      hidden_states=hidden_states,
-                      kv_cache=kv_cache,
-                      attn_metadata=attn_metadata)
-=======
         x = self.attn(
             position_ids=position_ids,
             hidden_states=hidden_states,
             kv_cache=kv_cache,
-            input_metadata=input_metadata,
+            attn_metadata=attn_metadata,
         )
->>>>>>> c9b1f63 (format fix)
         hidden_states = residual + x
         residual = hidden_states
         hidden_states = self.norm_2(hidden_states)
@@ -382,7 +376,10 @@ class DbrxForCausalLM(nn.Module):
             org_num_embeddings=config.vocab_size,
             padding_size=DEFAULT_VOCAB_PADDING_SIZE,
         )
-        self.sampler = Sampler(self.unpadded_vocab_size, config.vocab_size)
+        self.logits_processor = LogitsProcessor(
+            self.unpadded_vocab_size, config.vocab_size
+        )
+        self.sampler = Sampler()
 
     def forward(
         self,
@@ -392,18 +389,24 @@ class DbrxForCausalLM(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.transformer(
-            input_ids, positions, kv_caches, input_metadata
+            input_ids, positions, kv_caches, attn_metadata
         )
         return hidden_states
 
-    def sample(
-        self,
-        hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(
+    def compute_logits(
+        self, hidden_states: torch.Tensor, sampling_metadata: SamplingMetadata
+    ) -> torch.Tensor:
+        logits = self.logits_processor(
             self.lm_head.weight, hidden_states, sampling_metadata
         )
+        return logits
+
+    def sample(
+        self,
+        logits: Optional[torch.Tensor],
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[SamplerOutput]:
+        next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
     def load_weights(
