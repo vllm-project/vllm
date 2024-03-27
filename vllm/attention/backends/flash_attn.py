@@ -1,19 +1,13 @@
-"""Attention layer with Flash and PagedAttention.
-
-NOTE(woosuk): At the moment, this file includes a lot of duplicated code from
-XFormers backend. The duplicated code will be removed once we use flash-attn or
-flashinfer for all the attention operations.
-"""
+"""Attention layer with FlashAttention."""
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Type
 
 import torch
-from flash_attn import flash_attn_varlen_func
+from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 
+from vllm._C import cache_ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
-from vllm.attention.ops.paged_attn import (PagedAttention,
-                                           PagedAttentionMetadata)
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -33,8 +27,9 @@ class FlashAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        return PagedAttention.get_kv_cache_shape(num_blocks, block_size,
-                                                 num_kv_heads, head_size)
+        if block_size != 16:
+            raise ValueError("FlashAttention only supports block size 16.")
+        return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
     def swap_blocks(
@@ -42,18 +37,26 @@ class FlashAttentionBackend(AttentionBackend):
         dst_kv_cache: torch.Tensor,
         src_to_dst: Dict[int, int],
     ) -> None:
-        PagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
+        src_key_cache = src_kv_cache[0]
+        dst_key_cache = dst_kv_cache[0]
+        cache_ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
+
+        src_value_cache = src_kv_cache[1]
+        dst_value_cache = dst_kv_cache[1]
+        cache_ops.swap_blocks(src_value_cache, dst_value_cache, src_to_dst)
 
     @staticmethod
     def copy_blocks(
         kv_caches: List[torch.Tensor],
         src_to_dists: Dict[int, List[int]],
     ) -> None:
-        PagedAttention.copy_blocks(kv_caches, src_to_dists)
+        key_caches = [kv_cache[0] for kv_cache in kv_caches]
+        value_caches = [kv_cache[1] for kv_cache in kv_caches]
+        cache_ops.copy_blocks(key_caches, value_caches, src_to_dists)
 
 
 @dataclass
-class FlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
+class FlashAttentionMetadata(AttentionMetadata):
     """Metadata for FlashAttentionBackend.
 
     NOTE: Any python object stored here is not updated when it is
@@ -103,6 +106,26 @@ class FlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
 
+    # (num_tokens,). The indices of the token slots that input tokens will be
+    # stored into. E.g., if `slot_mapping` is [35, 2, 17] and the block size
+    # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
+    # in block 0, and 1st slot in block 1, respectively.
+    slot_mapping: torch.Tensor
+    # (batch_size,). The length of context (tokens stored in KV cache) per
+    # sequence. WARNING: When it is a prefill request, it doesn't include new
+    # tokens. When it is for decoding, it includes a new token.
+    context_lens: Optional[torch.Tensor]
+    # Maximum context length in the batch.
+    max_context_len: Optional[int]
+    # (batch_size, max_blocks_per_seq).
+    # Block addresses per sequence. (Seq id -> list of physical block)
+    # E.g., [0, 1, 2] means tokens are stored in 0th, 1st, and 2nd blocks
+    # in the kv cache. Each block can contain up to block_size tokens.
+    # 2nd dimensions are padded up to max_blocks_per_seq if it is cuda-graph
+    # captured.
+    block_tables: Optional[torch.Tensor]
+    kv_cache_dtype: str
+
 
 class FlashAttentionImpl(AttentionImpl):
     """
@@ -143,10 +166,10 @@ class FlashAttentionImpl(AttentionImpl):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        suppored_head_sizes = PagedAttention.get_supported_head_sizes()
+        suppored_head_sizes = [32, 64, 96, 128, 160, 192, 224, 256]
         if head_size not in suppored_head_sizes:
             raise ValueError(
-                f"Head size {head_size} is not supported by PagedAttention. "
+                f"Head size {head_size} is not supported by FlashAttention. "
                 f"Supported head sizes are: {suppored_head_sizes}.")
 
     def forward(
@@ -157,13 +180,13 @@ class FlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
     ) -> torch.Tensor:
-        """Forward pass with FlashAttention and PagedAttention.
+        """Forward pass with FlashAttention.
 
         Args:
             query: shape = [num_tokens, num_heads * head_size]
             key: shape = [num_tokens, num_kv_heads * head_size]
             value: shape = [num_tokens, num_kv_heads * head_size]
-            kv_cache = [2, num_blocks, block_size * num_kv_heads * head_size]
+            kv_cache = [2, num_blocks, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -175,16 +198,20 @@ class FlashAttentionImpl(AttentionImpl):
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
         if kv_cache is not None:
-            key_cache, value_cache = PagedAttention.split_kv_cache(
-                kv_cache, self.num_kv_heads, self.head_size)
+            key_cache = kv_cache[0]
+            value_cache = kv_cache[1]
 
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
-            PagedAttention.write_to_paged_cache(key, value, key_cache,
-                                                value_cache,
-                                                attn_metadata.slot_mapping,
-                                                attn_metadata.kv_cache_dtype)
+            cache_ops.reshape_and_cache_flash(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                attn_metadata.slot_mapping.flatten(),
+                attn_metadata.kv_cache_dtype,
+            )
 
         if attn_metadata.is_prompt:
             # Prompt run.
@@ -207,32 +234,20 @@ class FlashAttentionImpl(AttentionImpl):
                 )
             else:
                 # prefix-enabled attention
-                output = PagedAttention.forward_prefix(
-                    query,
-                    key,
-                    value,
-                    key_cache,
-                    value_cache,
-                    attn_metadata.block_tables,
-                    attn_metadata.subquery_start_loc,
-                    attn_metadata.prompt_lens_tensor,
-                    attn_metadata.context_lens,
-                    attn_metadata.max_subquery_len,
-                    self.alibi_slopes,
-                )
+                raise NotImplementedError(
+                    "Prefix-enabled attention is not supported by "
+                    "the FlashAttention backend yet.")
         else:
             # Decoding run.
-            output = PagedAttention.forward_decode(
-                query,
+            # TODO(skrider): tune num_splits heuristic
+            output = flash_attn_with_kvcache(
+                query.unsqueeze(1),
                 key_cache,
                 value_cache,
-                attn_metadata.block_tables,
-                attn_metadata.context_lens,
-                attn_metadata.max_context_len,
-                attn_metadata.kv_cache_dtype,
-                self.num_kv_heads,
-                self.scale,
-                self.alibi_slopes,
+                block_table=attn_metadata.block_tables,
+                cache_seqlens=attn_metadata.context_lens,
+                softmax_scale=self.scale,
+                alibi_slopes=self.alibi_slopes,
             )
 
         # Reshape the output tensor.
