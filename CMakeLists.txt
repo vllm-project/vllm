@@ -12,10 +12,6 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/utils.cmake)
 #
 set(PYTHON_SUPPORTED_VERSIONS "3.8" "3.9" "3.10" "3.11")
 
-# used when building pytorch-related extensions
-# TODO(youkaichao): only compute this if we are building wheels
-# TODO(youkaichao): otherwise autodetect the version from current GPUs
-set(TORCH_CUDA_ARCH_LIST "7.0;7.5;8.0;8.6;8.9;9.0")
 # Supported NVIDIA architectures.
 set(CUDA_SUPPORTED_ARCHS "7.0;7.5;8.0;8.6;8.9;9.0")
 
