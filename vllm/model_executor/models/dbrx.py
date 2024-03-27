@@ -1,41 +1,30 @@
 # coding=utf-8
-
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.model_executor.layers.linear import (
-    LinearMethodBase,
-    QKVParallelLinear,
-    RowParallelLinear,
-    ReplicatedLinear,
-)
 from vllm.model_executor.layers.fused_moe import fused_moe
-from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding,
-    ParallelLMHead,
-    DEFAULT_VOCAB_PADDING_SIZE,
-)
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
-from vllm.model_executor.parallel_utils.communication_op import (
-    tensor_model_parallel_all_reduce,
-)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.weight_utils import (
-    default_weight_loader,
-    hf_model_weights_iterator,
-)
-from vllm.sequence import SamplerOutput
-from vllm.transformers_utils.configs.dbrx import DbrxConfig
+from vllm.model_executor.layers.linear import (LinearMethodBase,
+                                               QKVParallelLinear,
+                                               ReplicatedLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.parallel_utils.communication_op import (
+    tensor_model_parallel_all_reduce)
+from vllm.model_executor.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.weight_utils import (default_weight_loader,
+                                              hf_model_weights_iterator)
+from vllm.sequence import SamplerOutput
+from vllm.transformers_utils.configs.dbrx import DbrxConfig
 
 
 class DbrxRouter(nn.Module):
@@ -84,9 +73,8 @@ class DbrxExperts(nn.Module):
         self.num_total_experts = config.ffn_config.moe_num_experts
         self.top_k = config.ffn_config.moe_top_k
         self.d_model = config.d_model
-        self.intermediate_size = (
-            config.ffn_config.ffn_hidden_size // self.tp_size
-        )
+        self.intermediate_size = (config.ffn_config.ffn_hidden_size //
+                                  self.tp_size)
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -100,8 +88,7 @@ class DbrxExperts(nn.Module):
                 self.d_model,
                 device="cuda",
                 dtype=self.params_dtype,
-            )
-        )
+            ))
         self.w2s = nn.Parameter(
             torch.empty(
                 self.num_total_experts,
@@ -109,8 +96,7 @@ class DbrxExperts(nn.Module):
                 self.intermediate_size,
                 device="cuda",
                 dtype=self.params_dtype,
-            )
-        )
+            ))
 
         set_weight_attrs(
             self.ws,
@@ -125,9 +111,8 @@ class DbrxExperts(nn.Module):
             },
         )
 
-    def weight_loader(
-        self, param: nn.Parameter, loaded_weight: torch.Tensor, weight_name: str
-    ):
+    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
+                      weight_name: str):
         tp_rank = get_tensor_model_parallel_rank()
         param_data = param.data
         shard_size = self.intermediate_size
@@ -145,9 +130,9 @@ class DbrxExperts(nn.Module):
                 loaded_weight,
                 [-1, self.intermediate_size * self.tp_size, self.d_model],
             )
-            param_data[:, shard_size : 2 * shard_size, :] = loaded_weight[
-                :, shard, :
-            ]
+            param_data[:,
+                       shard_size:2 * shard_size, :] = loaded_weight[:,
+                                                                     shard, :]
         if weight_name.endswith("w2"):
             loaded_weight = torch.reshape(
                 loaded_weight,
@@ -172,13 +157,13 @@ class DbrxExperts(nn.Module):
 
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
-                final_hidden_states
-            )
+                final_hidden_states)
 
         return final_hidden_states.view(num_tokens, hidden_size)
 
 
 class DbrxAttention(nn.Module):
+
     def __init__(
         self,
         config: DbrxConfig,
@@ -257,6 +242,7 @@ class DbrxAttention(nn.Module):
 
 
 class DbrxFusedNormAttention(nn.Module):
+
     def __init__(
         self,
         config: DbrxConfig,
@@ -290,6 +276,7 @@ class DbrxFusedNormAttention(nn.Module):
 
 
 class DbrxBlock(nn.Module):
+
     def __init__(
         self,
         config: DbrxConfig,
@@ -318,6 +305,7 @@ class DbrxBlock(nn.Module):
 
 
 class DbrxModel(nn.Module):
+
     def __init__(
         self,
         config: DbrxConfig,
@@ -329,13 +317,11 @@ class DbrxModel(nn.Module):
             config.d_model,
         )
         self.blocks = nn.ModuleList(
-            [DbrxBlock(config, linear_method) for _ in range(config.n_layers)]
-        )
+            [DbrxBlock(config, linear_method) for _ in range(config.n_layers)])
         self.norm_f = nn.LayerNorm(config.d_model, eps=1e-5)
         for module in self.modules():
-            if hasattr(module, "bias") and isinstance(
-                module.bias, nn.Parameter
-            ):
+            if hasattr(module, "bias") and isinstance(module.bias,
+                                                      nn.Parameter):
                 # Remove the bias term in Linear and LayerNorm.
                 module.register_parameter("bias", None)
 
@@ -360,6 +346,7 @@ class DbrxModel(nn.Module):
 
 
 class DbrxForCausalLM(nn.Module):
+
     def __init__(
         self,
         config: DbrxConfig,
@@ -376,9 +363,8 @@ class DbrxForCausalLM(nn.Module):
             org_num_embeddings=config.vocab_size,
             padding_size=DEFAULT_VOCAB_PADDING_SIZE,
         )
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size
-        )
+        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                config.vocab_size)
         self.sampler = Sampler()
 
     def forward(
@@ -388,17 +374,14 @@ class DbrxForCausalLM(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        hidden_states = self.transformer(
-            input_ids, positions, kv_caches, attn_metadata
-        )
+        hidden_states = self.transformer(input_ids, positions, kv_caches,
+                                         attn_metadata)
         return hidden_states
 
-    def compute_logits(
-        self, hidden_states: torch.Tensor, sampling_metadata: SamplingMetadata
-    ) -> torch.Tensor:
-        logits = self.logits_processor(
-            self.lm_head.weight, hidden_states, sampling_metadata
-        )
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head.weight, hidden_states,
+                                       sampling_metadata)
         return logits
 
     def sample(
@@ -416,17 +399,13 @@ class DbrxForCausalLM(nn.Module):
         load_format: str = "auto",
         revision: Optional[str] = None,
     ):
-        expert_params_mapping = [
-            (
-                "ws" if weight_name in ["w1", "v1"] else "w2s",
-                f"experts.mlp.{weight_name}",
-            )
-            for weight_name in ["w1", "v1", "w2"]
-        ]
+        expert_params_mapping = [(
+            "ws" if weight_name in ["w1", "v1"] else "w2s",
+            f"experts.mlp.{weight_name}",
+        ) for weight_name in ["w1", "v1", "w2"]]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in hf_model_weights_iterator(
-            model_name_or_path, cache_dir, load_format, revision
-        ):
+                model_name_or_path, cache_dir, load_format, revision):
             for param_name, weight_name in expert_params_mapping:
                 if weight_name not in name:
                     continue
@@ -437,7 +416,6 @@ class DbrxForCausalLM(nn.Module):
                 break
             else:
                 param = params_dict[name]
-                weight_loader = getattr(
-                    param, "weight_loader", default_weight_loader
-                )
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
                 weight_loader(param, loaded_weight)
