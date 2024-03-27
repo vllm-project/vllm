@@ -261,7 +261,7 @@ class Scheduler:
         # If we run out of available slots, try to preempt
         # the lowest-priority sequence groups.
         while self.running:
-            if token_budget - num_batched_decoding_tokens <= 0:
+            if token_budget - num_batched_decoding_tokens == 0:
                 break
 
             seq_group = self.running.popleft()
@@ -384,7 +384,7 @@ class Scheduler:
         while self._passed_delay(time.time()) and self.waiting:
             seq_group = self.waiting[0]
 
-            if token_budget - num_batched_tokens <= 0:
+            if token_budget - num_batched_tokens == 0:
                 leftover_waiting_sequences.appendleft(seq_group)
                 self.waiting.popleft()
                 break
@@ -481,6 +481,8 @@ class Scheduler:
 
         num_batched_tokens = (num_batched_prefill_tokens +
                               num_batched_decoding_tokens)
+        assert token_budget - num_batched_decoding_tokens >= 0
+
         scheduler_outputs = SchedulerOutputs(
             scheduled_seq_groups=prefilling_outputs.prompting_seq_groups +
             decoding_outputs.decoding_seq_groups,
