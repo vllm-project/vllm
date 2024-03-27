@@ -19,6 +19,7 @@ def test_incr(seed: int, num_incrs: int, num_blocks: int):
         value = counter.incr(block_index)
         assert value == i + 1
 
+
 @pytest.mark.parametrize("seed", list(range(20)))
 @pytest.mark.parametrize("num_incrs", [1, 100])
 @pytest.mark.parametrize("num_blocks", [1024])
