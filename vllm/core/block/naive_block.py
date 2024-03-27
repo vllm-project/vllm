@@ -75,19 +75,19 @@ class NaiveBlockAllocator(BlockAllocator):
         Returns:
             Block: The newly allocated mutable block.
         """
-        block_index = self._allocate_new_block_index()
+        block_id = self._allocate_new_block_id()
         return self._create_block(
             prev_block=prev_block,
             token_ids=[],
-            block_id=block_index,
+            block_id=block_id,
             block_size=self._block_size,
             allocator=self,
         )
 
     def free(self, block: Block) -> None:
-        block_index = block.block_id
+        block_id = block.block_id
         block.block_id = None
-        self._free_block_index(block_index)
+        self._free_block_id(block_id)
 
     def fork(self, last_block: Block) -> List[Block]:
         """Creates a new sequence of blocks that shares the same underlying
@@ -125,19 +125,19 @@ class NaiveBlockAllocator(BlockAllocator):
     def get_num_free_blocks(self) -> int:
         return len(self._free_block_indices)
 
-    def _allocate_new_block_index(self) -> BlockIndex:
+    def _allocate_new_block_id(self) -> BlockIndex:
         if not self._free_block_indices:
             raise BlockAllocator.NoFreeBlocksError()
 
-        block_index = next(iter(self._free_block_indices))
-        self._refcounter.incr(block_index)
-        self._free_block_indices.remove(block_index)
-        return block_index
+        block_id = next(iter(self._free_block_indices))
+        self._refcounter.incr(block_id)
+        self._free_block_indices.remove(block_id)
+        return block_id
 
-    def _free_block_index(self, block_index: BlockIndex) -> None:
-        refcount = self._refcounter.decr(block_index)
+    def _free_block_id(self, block_id: BlockIndex) -> None:
+        refcount = self._refcounter.decr(block_id)
         if refcount == 0:
-            self._free_block_indices.add(block_index)
+            self._free_block_indices.add(block_id)
 
     @property
     def refcounter(self):

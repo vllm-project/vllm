@@ -14,9 +14,9 @@ def test_incr(seed: int, num_incrs: int, num_blocks: int):
     all_block_indices = list(range(num_blocks))
     counter = RefCounter(all_block_indices=all_block_indices)
 
-    block_index = random.randint(0, num_blocks - 1)
+    block_id = random.randint(0, num_blocks - 1)
     for i in range(num_incrs):
-        value = counter.incr(block_index)
+        value = counter.incr(block_id)
         assert value == i + 1
 
 
@@ -29,14 +29,14 @@ def test_incr_decr(seed: int, num_incrs: int, num_blocks: int):
     all_block_indices = list(range(num_blocks))
     counter = RefCounter(all_block_indices=all_block_indices)
 
-    block_index = random.randint(0, num_blocks - 1)
+    block_id = random.randint(0, num_blocks - 1)
     for i in range(num_incrs):
-        value = counter.incr(block_index)
+        value = counter.incr(block_id)
         assert value == i + 1
 
     for i in range(num_incrs):
-        value = counter.decr(block_index)
+        value = counter.decr(block_id)
         assert value == num_incrs - (i + 1)
 
     with pytest.raises(AssertionError):
-        counter.decr(block_index)
+        counter.decr(block_id)

@@ -25,30 +25,30 @@ class RefCounter:
                               RefCount] = {index: 0
                                            for index in deduped}
 
-    def incr(self, block_index: BlockIndex) -> RefCount:
-        assert block_index in self._refcounts
-        pre_incr_refcount = self._refcounts[block_index]
+    def incr(self, block_id: BlockIndex) -> RefCount:
+        assert block_id in self._refcounts
+        pre_incr_refcount = self._refcounts[block_id]
 
         assert pre_incr_refcount >= 0
 
         post_incr_refcount = pre_incr_refcount + 1
-        self._refcounts[block_index] = post_incr_refcount
+        self._refcounts[block_id] = post_incr_refcount
         return post_incr_refcount
 
-    def decr(self, block_index: BlockIndex) -> RefCount:
-        assert block_index in self._refcounts
-        refcount = self._refcounts[block_index]
+    def decr(self, block_id: BlockIndex) -> RefCount:
+        assert block_id in self._refcounts
+        refcount = self._refcounts[block_id]
 
         assert refcount > 0
         refcount -= 1
 
-        self._refcounts[block_index] = refcount
+        self._refcounts[block_id] = refcount
 
         return refcount
 
-    def get(self, block_index: BlockIndex) -> RefCount:
-        assert block_index in self._refcounts
-        return self._refcounts[block_index]
+    def get(self, block_id: BlockIndex) -> RefCount:
+        assert block_id in self._refcounts
+        return self._refcounts[block_id]
 
     def as_readonly(self) -> "ReadOnlyRefCounter":
         return ReadOnlyRefCounter(self)
@@ -69,14 +69,14 @@ class ReadOnlyRefCounter:
     def __init__(self, refcounter: RefCounter):
         self._refcounter = refcounter
 
-    def incr(self, block_index: BlockIndex) -> RefCount:
+    def incr(self, block_id: BlockIndex) -> RefCount:
         raise ValueError("Incr not allowed")
 
-    def decr(self, block_index: BlockIndex) -> RefCount:
+    def decr(self, block_id: BlockIndex) -> RefCount:
         raise ValueError("Decr not allowed")
 
-    def get(self, block_index: BlockIndex) -> RefCount:
-        return self._refcounter.get(block_index)
+    def get(self, block_id: BlockIndex) -> RefCount:
+        return self._refcounter.get(block_id)
 
 
 class CopyOnWriteTracker:
@@ -122,26 +122,26 @@ class CopyOnWriteTracker:
                 -write operation was performed, or the original block index if
                 no copy-on-write was necessary.
         """
-        block_index = block.block_id
-        if block_index is None:
-            return block_index
+        block_id = block.block_id
+        if block_id is None:
+            return block_id
 
-        refcount = self._refcounter.get(block_index)
+        refcount = self._refcounter.get(block_id)
         assert refcount != 0
         if refcount > 1:
-            src_block_index = block_index
+            src_block_id = block_id
 
             # Decrement refcount of the old block.
             self._allocator.free(block)
 
             # Allocate a fresh new block.
-            block_index = self._allocator.allocate_mutable(
+            block_id = self._allocator.allocate_mutable(
                 prev_block=block.prev_block).block_id
 
             # Track src/dst copy.
-            self._copy_on_writes[src_block_index].append(block_index)
+            self._copy_on_writes[src_block_id].append(block_id)
 
-        return block_index
+        return block_id
 
     def clear_cows(self) -> Dict[BlockIndex, List[BlockIndex]]:
         """Clears the copy-on-write tracking information and returns the current

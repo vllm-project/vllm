@@ -96,9 +96,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         )
         assert block.content_hash is not None
 
-        cached_block_index = self._cached_blocks.get(block.content_hash, None)
-        if cached_block_index is not None:
-            block.block_id = cached_block_index
+        cached_block_id = self._cached_blocks.get(block.content_hash, None)
+        if cached_block_id is not None:
+            block.block_id = cached_block_id
             refcount = self._refcounter.incr(block.block_id)
             if refcount == 1:
                 assert block.content_hash in self._unused_cached_blocks
@@ -165,22 +165,22 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         assert (block.block_id
                 is not None), "freeing unallocated block is undefined"
 
-        self._free_block_index_for_block(block.block_id, block)
+        self._free_block_id_for_block(block.block_id, block)
         block.block_id = None
 
-    def _free_block_index_for_block(self, block_index: BlockIndex,
+    def _free_block_id_for_block(self, block_id: BlockIndex,
                                     block: Block) -> None:
         assert isinstance(block, PrefixCachingBlock)
 
         if block.content_hash is None:
             return self._hashless_allocator.free(block)
 
-        refcount = self._refcounter.decr(block_index)
+        refcount = self._refcounter.decr(block_id)
 
         # If no longer used, add the block to the unused cached blocks.
         if refcount == 0:
             assert block.content_hash not in self._unused_cached_blocks
-            self._unused_cached_blocks[block.content_hash] = block_index
+            self._unused_cached_blocks[block.content_hash] = block_id
 
     def fork(self, last_block: Block) -> List[Block]:
         """Creates a new sequence of blocks that shares the same underlying
@@ -249,7 +249,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             self._cached_blocks[
                 block.content_hash] = block.block_id
         else:
-            self._free_block_index_for_block(block.block_id, block)
+            self._free_block_id_for_block(block.block_id, block)
             # TODO need to call a function instead of refcount
             # as the block could transition from unused_cached_blocks
             # is it possible to use a NaiveAllocator for this, with the freelist

@@ -406,9 +406,9 @@ def test_cow(block_size: int, sequence_len: int, append_len: int,
         # expect a CoW.
         assert cows
 
-        cow_block_index = sequence_len // block_size
-        expected_src = static_block_table.physical_block_ids[cow_block_index]
-        expected_dst = appender_block_table.physical_block_ids[cow_block_index]
+        cow_block_id = sequence_len // block_size
+        expected_src = static_block_table.physical_block_ids[cow_block_id]
+        expected_dst = appender_block_table.physical_block_ids[cow_block_id]
 
         assert expected_src in cows
         assert expected_dst in cows[expected_src]
@@ -486,9 +486,9 @@ def test_cow_lookahead_simple(block_size: int, sequence_len: int,
         # expect a CoW.
         assert cows
 
-        cow_block_index = sequence_len // block_size
-        expected_src = static_block_table.physical_block_ids[cow_block_index]
-        expected_dst = appender_block_table.physical_block_ids[cow_block_index]
+        cow_block_id = sequence_len // block_size
+        expected_src = static_block_table.physical_block_ids[cow_block_id]
+        expected_dst = appender_block_table.physical_block_ids[cow_block_id]
 
         assert expected_src in cows
         assert expected_dst in cows[expected_src]
