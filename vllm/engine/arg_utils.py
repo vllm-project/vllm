@@ -398,7 +398,10 @@ class EngineArgs:
                                            self.max_num_seqs,
                                            model_config.max_model_len,
                                            self.use_v2_block_manager,
-                                           self.scheduler_delay_factor)
+                                           # TODO(cadedaniel) Read this value
+                                           # from SpeculativeConfig.
+                                           num_lookahead_slots=0,
+                                           delay_factor=self.scheduler_delay_factor)
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,
