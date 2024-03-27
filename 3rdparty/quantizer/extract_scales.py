@@ -323,7 +323,7 @@ if __name__ == "__main__":
         "and saves them to a JSON file compatible with later "
         "use by vLLM (pass this file to the appropriate "
         "runtime typically using the argument "
-        "--scales-path <filename>). This is only used "
+        "--quantization-param-path <filename>). This is only used "
         "if the KV cache dtype is FP8 and on ROCm (AMD GPU).")
     parser.add_argument(
         "--quantized_model",

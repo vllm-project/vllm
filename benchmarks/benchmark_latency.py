@@ -25,7 +25,7 @@ def main(args: argparse.Namespace):
         dtype=args.dtype,
         enforce_eager=args.enforce_eager,
         kv_cache_dtype=args.kv_cache_dtype,
-        scales_path=args.scales_path,
+        quantization_param_path=args.quantization_param_path,
         device=args.device,
         ray_workers_use_nsight=args.ray_workers_use_nsight,
     )
@@ -135,7 +135,7 @@ if __name__ == '__main__':
         'than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead supported for '
         'common inference criteria.')
     parser.add_argument(
-        '--scales-path',
+        '--quantization-param-path',
         type=str,
         default=None,
         help='Path to the JSON file containing the KV cache scaling factors. '

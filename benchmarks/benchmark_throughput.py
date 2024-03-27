@@ -72,7 +72,7 @@ def run_vllm(
     max_model_len: Optional[int],
     enforce_eager: bool,
     kv_cache_dtype: str,
-    scales_path: Optional[str],
+    quantization_param_path: Optional[str],
     device: str,
     enable_prefix_caching: bool,
     gpu_memory_utilization: float = 0.9,
@@ -89,7 +89,7 @@ def run_vllm(
               gpu_memory_utilization=gpu_memory_utilization,
               enforce_eager=enforce_eager,
               kv_cache_dtype=kv_cache_dtype,
-              scales_path=scales_path,
+              quantization_param_path=quantization_param_path,
               device=device,
               enable_prefix_caching=enable_prefix_caching)
 
@@ -210,14 +210,13 @@ def main(args: argparse.Namespace):
                                    args.output_len)
 
     if args.backend == "vllm":
-        elapsed_time = run_vllm(requests, args.model, args.tokenizer,
-                                args.quantization, args.tensor_parallel_size,
-                                args.seed, args.n, args.use_beam_search,
-                                args.trust_remote_code, args.dtype,
-                                args.max_model_len, args.enforce_eager,
-                                args.kv_cache_dtype, args.scales_path,
-                                args.device, args.enable_prefix_caching,
-                                args.gpu_memory_utilization)
+        elapsed_time = run_vllm(
+            requests, args.model, args.tokenizer, args.quantization,
+            args.tensor_parallel_size, args.seed, args.n, args.use_beam_search,
+            args.trust_remote_code, args.dtype, args.max_model_len,
+            args.enforce_eager, args.kv_cache_dtype,
+            args.quantization_param_path, args.device,
+            args.enable_prefix_caching, args.gpu_memory_utilization)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -312,7 +311,7 @@ if __name__ == "__main__":
         'than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead supported for '
         'common inference criteria.')
     parser.add_argument(
-        '--scales-path',
+        '--quantization-param-path',
         type=str,
         default=None,
         help='Path to the JSON file containing the KV cache scaling factors. '
