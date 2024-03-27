@@ -2,6 +2,7 @@
 # Copied from
 # https://huggingface.co/databricks/dbrx-base/blob/main/configuration_dbrx.py
 """Dbrx configuration."""
+
 from typing import Any, Optional
 
 from transformers.configuration_utils import PretrainedConfig
@@ -44,30 +45,33 @@ class DbrxAttentionConfig(PretrainedConfig):
         self.kv_n_heads = kv_n_heads
         self.rope_theta = rope_theta
 
-        for k in ['model_type']:
+        for k in ["model_type"]:
             if k in kwargs:
                 kwargs.pop(k)
         if len(kwargs) != 0:
-            raise ValueError(f'Found unknown {kwargs=}')
+            raise ValueError(f"Found unknown {kwargs=}")
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path: str,
-                        **kwargs: Any) -> 'PretrainedConfig':
+    def from_pretrained(
+        cls, pretrained_model_name_or_path: str, **kwargs: Any
+    ) -> "PretrainedConfig":
         cls._set_token_in_kwargs(kwargs)
 
-        config_dict, kwargs = cls.get_config_dict(pretrained_model_name_or_path,
-                                                  **kwargs)
+        config_dict, kwargs = cls.get_config_dict(
+            pretrained_model_name_or_path, **kwargs
+        )
 
-        if config_dict.get('model_type') == 'dbrx':
-            config_dict = config_dict['attn_config']
+        if config_dict.get("model_type") == "dbrx":
+            config_dict = config_dict["attn_config"]
 
-        if 'model_type' in config_dict and hasattr(
-                cls,
-                'model_type') and config_dict['model_type'] != cls.model_type:
+        if (
+            "model_type" in config_dict
+            and hasattr(cls, "model_type")
+            and config_dict["model_type"] != cls.model_type
+        ):
             logger.warning(
                 f"You are using a model of type {config_dict['model_type']} to instantiate a model of type "
-                +
-                f'{cls.model_type}. This is not supported for all configurations of models and can yield errors.'
+                + f"{cls.model_type}. This is not supported for all configurations of models and can yield errors."
             )
 
         return cls.from_dict(config_dict, **kwargs)
@@ -110,7 +114,7 @@ class DbrxFFNConfig(PretrainedConfig):
     ):
         super().__init__()
         if ffn_act_fn is None:
-            ffn_act_fn = {'name': 'silu'}
+            ffn_act_fn = {"name": "silu"}
         self.ffn_act_fn = ffn_act_fn
         self.ffn_hidden_size = ffn_hidden_size
         self.moe_num_experts = moe_num_experts
@@ -120,30 +124,33 @@ class DbrxFFNConfig(PretrainedConfig):
         self.moe_normalize_expert_weights = moe_normalize_expert_weights
         self.uniform_expert_assignment = uniform_expert_assignment
 
-        for k in ['model_type']:
+        for k in ["model_type"]:
             if k in kwargs:
                 kwargs.pop(k)
         if len(kwargs) != 0:
-            raise ValueError(f'Found unknown {kwargs=}')
+            raise ValueError(f"Found unknown {kwargs=}")
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path: str,
-                        **kwargs: Any) -> 'PretrainedConfig':
+    def from_pretrained(
+        cls, pretrained_model_name_or_path: str, **kwargs: Any
+    ) -> "PretrainedConfig":
         cls._set_token_in_kwargs(kwargs)
 
-        config_dict, kwargs = cls.get_config_dict(pretrained_model_name_or_path,
-                                                  **kwargs)
+        config_dict, kwargs = cls.get_config_dict(
+            pretrained_model_name_or_path, **kwargs
+        )
 
-        if config_dict.get('model_type') == 'dbrx':
-            config_dict = config_dict['ffn_config']
+        if config_dict.get("model_type") == "dbrx":
+            config_dict = config_dict["ffn_config"]
 
-        if 'model_type' in config_dict and hasattr(
-                cls,
-                'model_type') and config_dict['model_type'] != cls.model_type:
+        if (
+            "model_type" in config_dict
+            and hasattr(cls, "model_type")
+            and config_dict["model_type"] != cls.model_type
+        ):
             logger.warning(
                 f"You are using a model of type {config_dict['model_type']} to instantiate a model of type "
-                +
-                f'{cls.model_type}. This is not supported for all configurations of models and can yield errors.'
+                + f"{cls.model_type}. This is not supported for all configurations of models and can yield errors."
             )
 
         return cls.from_dict(config_dict, **kwargs)
@@ -205,12 +212,12 @@ class DbrxConfig(PretrainedConfig):
     ```
     """
 
-    model_type = 'dbrx'
+    model_type = "dbrx"
     attribute_map = {
-        'num_attention_heads': 'n_heads',
-        'hidden_size': 'd_model',
-        'num_hidden_layers': 'n_layers',
-        'max_position_embeddings': 'max_seq_len'
+        "num_attention_heads": "n_heads",
+        "hidden_size": "d_model",
+        "num_hidden_layers": "n_layers",
+        "max_position_embeddings": "max_seq_len",
     }
 
     def __init__(
@@ -256,10 +263,11 @@ class DbrxConfig(PretrainedConfig):
         self.output_router_logits = output_router_logits
         self.router_aux_loss_coef = router_aux_loss_coef
 
-        tie_word_embeddings = kwargs.pop('tie_word_embeddings', False)
+        tie_word_embeddings = kwargs.pop("tie_word_embeddings", False)
         if tie_word_embeddings:
             raise ValueError(
-                'tie_word_embeddings is not supported for Dbrx models.')
+                "tie_word_embeddings is not supported for Dbrx models."
+            )
 
         super().__init__(
             tie_word_embeddings=tie_word_embeddings,
