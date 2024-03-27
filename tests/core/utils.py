@@ -1,5 +1,5 @@
 import time
-from typing import Tuple, Optional
+from typing import Optional, Tuple
 
 from vllm import SamplingParams
 from vllm.sequence import Sequence, SequenceGroup
