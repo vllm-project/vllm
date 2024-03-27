@@ -356,6 +356,11 @@ def main(args: argparse.Namespace):
             "The '--dataset' argument will be deprecated in the next "
             "release. Please use '--dataset-name' and "
             "'--dataset-path' in the future runs.", )
+        input_requests = sample_sharegpt_requests(
+            dataset_path=args.dataset,
+            num_requests=args.num_prompts,
+            tokenizer=tokenizer,
+        )
 
     elif args.dataset_name == "sharegpt":
         input_requests = sample_sharegpt_requests(
