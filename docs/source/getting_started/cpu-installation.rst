@@ -7,12 +7,12 @@ vLLM initially supports basic model inferencing and serving on x86 CPU platform,
 
 Table of contents:
 
-#. :ref:`Requirements <requirements>`
-#. :ref:`Quick start using Dockerfile <quick_start_dockerfile>`
-#. :ref:`Build from source <build_from_source>`
-#. :ref:`Performance tips <performance_tips>`
+#. :ref:`Requirements <cpu_backend_requirements>`
+#. :ref:`Quick start using Dockerfile <cpu_backend_quick_start_dockerfile>`
+#. :ref:`Build from source <build_cpu_backend_from_source>`
+#. :ref:`Performance tips <cpu_backend_performance_tips>`
 
-.. _requirements:
+.. _cpu_backend_requirements:
 
 Requirements
 ------------
@@ -21,7 +21,7 @@ Requirements
 * Compiler: gcc/g++>=12.3.0 (recommended)
 * Instruction set architecture (ISA) requirement: AVX512 is required.
 
-.. _quick_start_dockerfile:
+.. _cpu_backend_quick_start_dockerfile:
 
 Quick start using Dockerfile
 ----------------------------
@@ -36,7 +36,7 @@ Quick start using Dockerfile
                  --cpuset-mems=<memory-node, optional> \
                  vllm-cpu-env
 
-.. _build_from_source:
+.. _build_cpu_backend_from_source:
 
 Build from source
 -----------------
@@ -67,7 +67,7 @@ Install Python packages for vLLM CPU backend building:
 
     $ VLLM_TARGET_DEVICE=cpu python setup.py install
 
-.. _performance_tips:
+.. _cpu_backend_performance_tips:
 
 Performance tips
 -----------------
