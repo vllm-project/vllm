@@ -3,7 +3,7 @@ from typing import Dict, Iterable, List, Optional
 
 from vllm.core.block.interfaces import Block, BlockAllocator
 
-BlockIndex = int
+BlockId = int
 RefCount = int
 
 
@@ -15,17 +15,17 @@ class RefCounter:
     and retrieve the reference count for a given block index.
 
     Args:
-        all_block_indices (Iterable[BlockIndex]): An iterable of block indices
+        all_block_indices (Iterable[BlockId]): An iterable of block indices
             to initialize the reference counter with.
     """
 
-    def __init__(self, all_block_indices: Iterable[BlockIndex]):
+    def __init__(self, all_block_indices: Iterable[BlockId]):
         deduped = set(all_block_indices)
-        self._refcounts: Dict[BlockIndex,
+        self._refcounts: Dict[BlockId,
                               RefCount] = {index: 0
                                            for index in deduped}
 
-    def incr(self, block_id: BlockIndex) -> RefCount:
+    def incr(self, block_id: BlockId) -> RefCount:
         assert block_id in self._refcounts
         pre_incr_refcount = self._refcounts[block_id]
 
@@ -35,7 +35,7 @@ class RefCounter:
         self._refcounts[block_id] = post_incr_refcount
         return post_incr_refcount
 
-    def decr(self, block_id: BlockIndex) -> RefCount:
+    def decr(self, block_id: BlockId) -> RefCount:
         assert block_id in self._refcounts
         refcount = self._refcounts[block_id]
 
@@ -46,7 +46,7 @@ class RefCounter:
 
         return refcount
 
-    def get(self, block_id: BlockIndex) -> RefCount:
+    def get(self, block_id: BlockId) -> RefCount:
         assert block_id in self._refcounts
         return self._refcounts[block_id]
 
@@ -69,13 +69,13 @@ class ReadOnlyRefCounter:
     def __init__(self, refcounter: RefCounter):
         self._refcounter = refcounter
 
-    def incr(self, block_id: BlockIndex) -> RefCount:
+    def incr(self, block_id: BlockId) -> RefCount:
         raise ValueError("Incr not allowed")
 
-    def decr(self, block_id: BlockIndex) -> RefCount:
+    def decr(self, block_id: BlockId) -> RefCount:
         raise ValueError("Decr not allowed")
 
-    def get(self, block_id: BlockIndex) -> RefCount:
+    def get(self, block_id: BlockId) -> RefCount:
         return self._refcounter.get(block_id)
 
 
@@ -104,7 +104,7 @@ class CopyOnWriteTracker:
         self._allocator = allocator
 
     def cow_block_if_not_appendable(self,
-                                    block: Block) -> Optional[BlockIndex]:
+                                    block: Block) -> Optional[BlockId]:
         """Performs a copy-on-write operation on the given block if it is not
         appendable.
 
@@ -118,7 +118,7 @@ class CopyOnWriteTracker:
             block (Block): The block to check for copy-on-write.
 
         Returns:
-            Optional[BlockIndex]: The block index of the new block if a copy-on
+            Optional[BlockId]: The block index of the new block if a copy-on
                 -write operation was performed, or the original block index if
                 no copy-on-write was necessary.
         """
@@ -143,7 +143,7 @@ class CopyOnWriteTracker:
 
         return block_id
 
-    def clear_cows(self) -> Dict[BlockIndex, List[BlockIndex]]:
+    def clear_cows(self) -> Dict[BlockId, List[BlockId]]:
         """Clears the copy-on-write tracking information and returns the current
         state.
 
@@ -152,7 +152,7 @@ class CopyOnWriteTracker:
         It then clears the internal tracking information.
 
         Returns:
-            Dict[BlockIndex, List[BlockIndex]]: A dictionary mapping source
+            Dict[BlockId, List[BlockId]]: A dictionary mapping source
                 block indices to lists of destination block indices for the
                 current copy-on-write operations.
         """

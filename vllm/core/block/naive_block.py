@@ -4,7 +4,7 @@ from vllm.core.block.common import (CopyOnWriteTracker, RefCounter,
                                     get_all_blocks_recursively)
 from vllm.core.block.interfaces import Block, BlockAllocator
 
-BlockIndex = int
+BlockId = int
 Refcount = int
 
 
@@ -32,7 +32,7 @@ class NaiveBlockAllocator(BlockAllocator):
         if block_ids is None:
             block_ids = range(num_blocks)
 
-        self._free_block_indices: Set[BlockIndex] = set(block_ids)
+        self._free_block_indices: Set[BlockId] = set(block_ids)
         self._all_block_indices = frozenset(block_ids)
         assert len(self._all_block_indices) == num_blocks
 
@@ -125,7 +125,7 @@ class NaiveBlockAllocator(BlockAllocator):
     def get_num_free_blocks(self) -> int:
         return len(self._free_block_indices)
 
-    def _allocate_new_block_id(self) -> BlockIndex:
+    def _allocate_new_block_id(self) -> BlockId:
         if not self._free_block_indices:
             raise BlockAllocator.NoFreeBlocksError()
 
@@ -134,7 +134,7 @@ class NaiveBlockAllocator(BlockAllocator):
         self._free_block_indices.remove(block_id)
         return block_id
 
-    def _free_block_id(self, block_id: BlockIndex) -> None:
+    def _free_block_id(self, block_id: BlockId) -> None:
         refcount = self._refcounter.decr(block_id)
         if refcount == 0:
             self._free_block_indices.add(block_id)
@@ -148,7 +148,7 @@ class NaiveBlockAllocator(BlockAllocator):
         return self._all_block_indices
 
     def cow_block_if_not_appendable(self,
-                                    block: Block) -> Optional[BlockIndex]:
+                                    block: Block) -> Optional[BlockId]:
         """Performs a copy-on-write operation on the given block if it is not
         appendable.
 
@@ -156,17 +156,17 @@ class NaiveBlockAllocator(BlockAllocator):
             block (Block): The block to check for copy-on-write.
 
         Returns:
-            Optional[BlockIndex]: The block index of the new block if a copy-on
+            Optional[BlockId]: The block index of the new block if a copy-on
                 -write operation was performed, or the original block index if
                 no copy-on-write was necessary.
         """
         return self._cow_tracker.cow_block_if_not_appendable(block)
 
-    def clear_copy_on_writes(self) -> Dict[BlockIndex, List[BlockIndex]]:
+    def clear_copy_on_writes(self) -> Dict[BlockId, List[BlockId]]:
         """Returns the copy-on-write source->destination mapping and clears it.
 
         Returns:
-            Dict[BlockIndex, List[BlockIndex]]: A dictionary mapping source
+            Dict[BlockId, List[BlockId]]: A dictionary mapping source
                 block indices to lists of destination block indices.
         """
         return self._cow_tracker.clear_cows()

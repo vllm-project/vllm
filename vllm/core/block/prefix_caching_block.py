@@ -9,7 +9,7 @@ from vllm.core.block.interfaces import Block, BlockAllocator
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
 
 PrefixHash = int
-BlockIndex = int
+BlockId = int
 
 
 class PrefixCachingBlockAllocator(BlockAllocator):
@@ -36,8 +36,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         block_ids: Optional[Iterable[int]] = None,
     ):
 
-        self._cached_blocks: Dict[PrefixHash, BlockIndex] = {}
-        self._unused_cached_blocks: Dict[PrefixHash, BlockIndex] = {}
+        self._cached_blocks: Dict[PrefixHash, BlockId] = {}
+        self._unused_cached_blocks: Dict[PrefixHash, BlockId] = {}
 
         self._hashless_allocator = NaiveBlockAllocator(
             create_block=self._create_block,
@@ -99,7 +99,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         cached_block_id = self._cached_blocks.get(block.content_hash, None)
         if cached_block_id is not None:
             block.block_id = cached_block_id
-            self._incr_refcount_cached_block(block.block_id)
+            self._incr_refcount_cached_block(block.content_hash, block.block_id)
             return block
 
         block = self.allocate_mutable(prev_block)
@@ -108,12 +108,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # TODO computed bit
 
         return block
-
-    def _incr_refcount_cached_block(self, block_id: BlockIndex) -> None:
-        refcount = self._refcounter.incr(block.block_id)
-        if refcount == 1:
-            assert block.content_hash in self._unused_cached_blocks
-            del self._unused_cached_blocks[block.content_hash]
 
     def allocate_mutable(self, prev_block: Block) -> Block:
         """Allocates a mutable block. If there are no free blocks, this will
@@ -158,6 +152,12 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # No block available in hashless allocator, nor in unused cache blocks.
         raise BlockAllocator.NoFreeBlocksError()
 
+    def _incr_refcount_cached_block(self, content_hash: int, block_id: BlockId) -> None:
+        refcount = self._refcounter.incr(block_id)
+        if refcount == 1:
+            assert content_hash in self._unused_cached_blocks
+            del self._unused_cached_blocks[content_hash]
+
     def free(self, block: Block) -> None:
         """Decrement the refcount of the block. If the decremented refcount is
         zero, store the block in the freelist.
@@ -171,7 +171,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         self._free_block_id_for_block(block.block_id, block)
         block.block_id = None
 
-    def _free_block_id_for_block(self, block_id: BlockIndex,
+    def _free_block_id_for_block(self, block_id: BlockId,
                                     block: Block) -> None:
         assert isinstance(block, PrefixCachingBlock)
 
@@ -183,6 +183,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # If no longer used, add the block to the unused cached blocks.
         if refcount == 0:
             assert block.content_hash not in self._unused_cached_blocks
+            assert block.content_hash in self._cached_blocks
             self._unused_cached_blocks[block.content_hash] = block_id
 
     def fork(self, last_block: Block) -> List[Block]:
@@ -227,7 +228,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         return self._hashless_allocator.all_block_ids
 
     def promote_to_immutable_block(self,
-                                   block: "PrefixCachingBlock") -> BlockIndex:
+                                   block: "PrefixCachingBlock") -> BlockId:
         """Once a mutable block is full, it can be promoted to an immutable
         block. This means that its content can be referenced by future blocks
         having the same prefix.
@@ -240,11 +241,12 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             block (PrefixCachingBlock): The mutable block to be promoted.
 
         Returns:
-            BlockIndex: Either the original block index, or the block index of
+            BlockId: Either the original block index, or the block index of
                 the previously cached block matching the same content.
         """
         assert block.content_hash is not None
         assert block.block_id is not None
+        assert self._refcounter.get(block.block_id) > 0
 
         # If the content hash does not have a corresponding cached block,
         # set this block as the cached block.
@@ -253,12 +255,12 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                 block.content_hash] = block.block_id
         else:
             self._free_block_id_for_block(block.block_id, block)
-            self._incr_refcount_cached_block(self._cached_blocks[block.content_hash])
+            self._incr_refcount_cached_block(block.content_hash, self._cached_blocks[block.content_hash])
 
         return self._cached_blocks[block.content_hash]
 
     def cow_block_if_not_appendable(self,
-                                    block: Block) -> Optional[BlockIndex]:
+                                    block: Block) -> Optional[BlockId]:
         """Performs a copy-on-write operation on the given block if it is not
         appendable.
 
@@ -266,17 +268,17 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             block (Block): The block to check for copy-on-write.
 
         Returns:
-            Optional[BlockIndex]: The block index of the new block if a copy-on
+            Optional[BlockId]: The block index of the new block if a copy-on
                 -write operation was performed, or the original block index if
                 no copy-on-write was necessary.
         """
         return self._cow_tracker.cow_block_if_not_appendable(block)
 
-    def clear_copy_on_writes(self) -> Dict[BlockIndex, List[BlockIndex]]:
+    def clear_copy_on_writes(self) -> Dict[BlockId, List[BlockId]]:
         """Returns the copy-on-write source->destination mapping and clears it.
 
         Returns:
-            Dict[BlockIndex, List[BlockIndex]]: A dictionary mapping source
+            Dict[BlockId, List[BlockId]]: A dictionary mapping source
                 block indices to lists of destination block indices.
         """
         return self._cow_tracker.clear_cows()
