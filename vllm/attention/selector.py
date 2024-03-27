@@ -1,11 +1,11 @@
-from typing import Type
 from functools import lru_cache
+from typing import Type
 
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
-from vllm.utils import is_hip, is_cpu
+from vllm.utils import is_cpu, is_hip
 
 logger = init_logger(__name__)
 

@@ -4,8 +4,9 @@ from typing import Dict, List, Optional
 import torch
 import torch.distributed
 
-from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, LoRAConfig)
+from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig)
+from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.parallel_utils.communication_op import (
@@ -15,7 +16,6 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
-from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
