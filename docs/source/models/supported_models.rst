@@ -22,11 +22,11 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`BaiChuanForCausalLM`
     - Baichuan
     - :code:`baichuan-inc/Baichuan2-13B-Chat`, :code:`baichuan-inc/Baichuan-7B`, etc.
-    - 
+    - ✅︎
   * - :code:`ChatGLMModel`
     - ChatGLM
     - :code:`THUDM/chatglm2-6b`, :code:`THUDM/chatglm3-6b`, etc.
-    - 
+    - ✅︎
   * - :code:`DeciLMForCausalLM`
     - DeciLM
     - :code:`Deci/DeciLM-7B`, :code:`Deci/DeciLM-7B-instruct`, etc.
