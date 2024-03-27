@@ -4,7 +4,7 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import Optional, List
+from typing import List, Optional
 
 import aiohttp
 from tqdm.asyncio import tqdm
