@@ -148,10 +148,7 @@ class Detokenizer:
                     )
                     sample_logprob.decoded_token = new_text
 
-        if seq.tokens is None:
-            seq.tokens = new_tokens
-        else:
-            seq.tokens.extend(new_tokens)
+        seq.tokens.extend(new_tokens)
         seq.prefix_offset = prefix_offset
         seq.read_offset = read_offset
         seq.output_text += new_decoded_token_text
