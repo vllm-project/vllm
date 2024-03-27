@@ -256,7 +256,7 @@ class GemmaModel(nn.Module):
         # The normalizer's data type should be downcasted to the model's
         # data type such as bfloat16, not float32.
         # See https://github.com/huggingface/transformers/pull/29402
-        normalizer = self.config.hidden_size ** 0.5
+        normalizer = self.config.hidden_size**0.5
         self.register_buffer("normalizer", torch.tensor(normalizer))
 
     def forward(
