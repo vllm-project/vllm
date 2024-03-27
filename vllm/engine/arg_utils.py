@@ -53,6 +53,9 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
     ray_workers_use_nsight: bool = False
+
+    forced_num_gpu_blocks: Optional[int] = None
+
     # Related to Vision-language models such as llava
     image_input_type: Optional[str] = None
     image_token_id: Optional[int] = None
@@ -214,6 +217,12 @@ class EngineArgs:
             help='the fraction of GPU memory to be used for '
             'the model executor, which can range from 0 to 1.'
             'If unspecified, will use the default value of 0.9.')
+        parser.add_argument(
+            '--forced-num-gpu-blocks',
+            type=int,
+            default=None,
+            help='If specified, ignore GPU profiling result and use this number'
+            'of GPU blocks. Used for testing preemption.')
         parser.add_argument('--max-num-batched-tokens',
                             type=int,
                             default=EngineArgs.max_num_batched_tokens,
@@ -372,7 +381,8 @@ class EngineArgs:
             self.max_logprobs)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
-                                   self.swap_space, self.kv_cache_dtype,
+                                   self.swap_space, self.forced_num_gpu_blocks,
+                                   self.kv_cache_dtype,
                                    model_config.get_sliding_window(),
                                    self.enable_prefix_caching)
         parallel_config = ParallelConfig(

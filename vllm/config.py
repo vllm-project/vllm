@@ -318,6 +318,8 @@ class CacheConfig:
         gpu_memory_utilization: Fraction of GPU memory to use for the
             vLLM execution.
         swap_space: Size of the CPU swap space per GPU (in GiB).
+        forced_num_gpu_blocks: Number of GPU blocks to use. This overrides the
+            profiled num_gpu_blocks if specified. Does nothing if None.
         cache_dtype: Data type for kv cache storage.
     """
 
@@ -326,6 +328,7 @@ class CacheConfig:
         block_size: int,
         gpu_memory_utilization: float,
         swap_space: int,
+        forced_num_gpu_blocks: Optional[int],
         cache_dtype: str,
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
@@ -333,6 +336,7 @@ class CacheConfig:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
         self.swap_space_bytes = swap_space * _GB
+        self.forced_num_gpu_blocks = forced_num_gpu_blocks
         self.cache_dtype = cache_dtype
         self.sliding_window = sliding_window
         self.enable_prefix_caching = enable_prefix_caching
