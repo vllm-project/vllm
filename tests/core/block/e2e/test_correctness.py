@@ -14,9 +14,9 @@ from vllm import SamplingParams
         # skip cuda graph creation for fast test.
         "enforce_eager": True,
 
-        # Allow only 2 sequences of ~1024 tokens in worst case.
+        # Allow only 5 sequences of ~1024 tokens in worst case.
         "block_size": 16,
-        "forced_num_gpu_blocks": 2 * (64 + 1),
+        "forced_num_gpu_blocks": 5 * (64 + 1),
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{
@@ -36,6 +36,9 @@ def test_v1_v2_greedy_equality_with_preemption(baseline_llm_generator,
 
     If the output token ids are equivalent, then we have confidence that the KV
     cache is not corrupted in the v2 block manager.
+
+    NOTE: We want a significant number of generated tokens so that any incorrect
+    KV mapping has time to build up error.
     """
     output_len = 1024
     temperature = 0.0
