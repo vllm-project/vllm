@@ -1,18 +1,17 @@
 """A layer that samples the next tokens from the model's outputs."""
+import itertools
 from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 
-from vllm.model_executor.parallel_utils.communication_op import (
-    tensor_model_parallel_gather)
+from vllm.model_executor.layers.ops.sample import sample as sample_triton
 from vllm.model_executor.sampling_metadata import (SamplingMetadata,
                                                    SamplingTensors)
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (Logprob, PromptLogprobs, SampleLogprobs,
                            SamplerOutput, SequenceData, SequenceGroupOutput,
                            SequenceOutput)
-from vllm.utils import is_neuron
 
 
 class Sampler(nn.Module):
@@ -30,57 +29,17 @@ class Sampler(nn.Module):
     parameters (e.g., sampling method, temperature, top-p, top-k, etc.).
     """
 
-    def __init__(self,
-                 vocab_size: int,
-                 org_vocab_size: Optional[int] = None) -> None:
-        super().__init__()
-        self.vocab_size = vocab_size
-        # Transformers-neuronx generate outputs as logits directly.
-        self.logits_as_hidden_states = is_neuron()
-        # original vocabulary size (without LoRA).
-        self.org_vocab_size = org_vocab_size or vocab_size
-
-    def _get_logits(self, hidden_states: torch.Tensor, embedding: torch.Tensor,
-                    embedding_bias: Optional[torch.Tensor]) -> torch.Tensor:
-        # Get the logits for the next tokens.
-        logits = torch.matmul(hidden_states, embedding.t())
-        if embedding_bias is not None:
-            logits += embedding_bias
-        logits = tensor_model_parallel_gather(logits)
-        # Remove paddings in vocab (if any).
-        if logits is not None:
-            logits = logits[:, :self.org_vocab_size]
-        return logits
-
     def forward(
         self,
-        embedding: torch.Tensor,
-        hidden_states: torch.Tensor,
+        logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-        embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[SamplerOutput]:
-        # Get the hidden states that we use for sampling.
-        if self.logits_as_hidden_states:
-            logits = hidden_states
-        else:
-            hidden_states = _prune_hidden_states(hidden_states,
-                                                 sampling_metadata)
-
-            # Get the logits for the next tokens.
-            logits = self._get_logits(hidden_states, embedding, embedding_bias)
-
-        # Only perform sampling in the driver worker.
-        # Note: `_get_logits` is still distributed across TP workers because
-        # the `embedding` weight is distributed across TP workers.
-        # TODO(zhuohan): Change the get_logits part to a separate stage.
-        if not sampling_metadata.perform_sampling:
-            return None
-
         assert logits is not None
         _, vocab_size = logits.shape
 
-        # Apply logits processors (if any).
-        logits = _apply_logits_processors(logits, sampling_metadata)
+        # Apply min_tokens penalty which sets stop tokens to -inf if min_tokens
+        # have not been generated yet
+        logits = _apply_min_tokens_penalty(logits, sampling_metadata)
 
         # Prepare sampling tensors with pinned memory to avoid blocking.
         (sampling_tensors, do_penalties, do_top_p_top_k,
@@ -114,21 +73,13 @@ class Sampler(nn.Module):
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
 
         # Sample the next tokens.
-        sample_results = _sample(probs, logprobs, sampling_metadata)
+        sample_results = _sample(probs, logprobs, sampling_metadata,
+                                 sampling_tensors)
         # Get the logprobs query results.
         prompt_logprobs, sample_logprobs = _get_logprobs(
             logprobs, sampling_metadata, sample_results)
         return _build_sampler_output(sample_results, sampling_metadata,
                                      prompt_logprobs, sample_logprobs)
-
-
-def _prune_hidden_states(
-    hidden_states: torch.Tensor,
-    sampling_metadata: SamplingMetadata,
-) -> torch.Tensor:
-    hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-    return hidden_states.index_select(0,
-                                      sampling_metadata.selected_token_indices)
 
 
 def _get_bin_counts_and_mask(
@@ -148,27 +99,39 @@ def _get_bin_counts_and_mask(
     return bin_counts, mask
 
 
-def _apply_logits_processors(
+def _apply_min_tokens_penalty(
     logits: torch.Tensor,
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
-    logits_row_idx = 0
-    found_logits_processors = False
+    # list of indices in logits that will be set to -inf
+    logits_to_penalize = []
+    start_idx = 0
     for seq_ids, sampling_params in sampling_metadata.seq_groups:
-        logits_processors = sampling_params.logits_processors
-        if logits_processors:
-            found_logits_processors = True
-            for seq_id in seq_ids:
-                logits_row = logits[logits_row_idx]
-                token_ids = sampling_metadata.seq_data[seq_id].output_token_ids
-                for logits_processor in logits_processors:
-                    logits_row = logits_processor(token_ids, logits_row)
-                logits[logits_row_idx] = logits_row
-                logits_row_idx += 1
-        else:
-            logits_row_idx += len(seq_ids)
-    if found_logits_processors:
-        assert logits_row_idx == logits.shape[0]
+        min_tokens = sampling_params.min_tokens
+        if min_tokens > 0:
+            seqs_to_penalize = []
+            for i, seq_id in enumerate(seq_ids):
+                seq_data = sampling_metadata.seq_data[seq_id]
+                if len(seq_data.output_token_ids) < min_tokens:
+                    seqs_to_penalize.append(i)
+
+            if seqs_to_penalize:
+                # convert to the index into logits
+                seqs_to_penalize = [start_idx + i for i in seqs_to_penalize]
+                # use set() to remove any duplicates
+                token_ids_to_penalize = set(sampling_params.stop_token_ids +
+                                            [sampling_params.eos_token_id])
+                # itertools.product pairs each seq index with every token id
+                logits_to_penalize.extend(
+                    itertools.product(seqs_to_penalize, token_ids_to_penalize))
+
+        start_idx += len(seq_ids)
+
+    if logits_to_penalize:
+        # use zip and * to group indices along each dimension
+        # eg. [ (1,2), (1,3), (5,6) ] -> ( (1,1,5), (2,3,6) )
+        logits[tuple(zip(*logits_to_penalize))] = -float("inf")
+
     return logits
 
 
@@ -375,7 +338,7 @@ def _multinomial(
     return probs.div_(q).argmax(dim=1).view(-1, num_samples)
 
 
-def _sample(
+def _sample_with_torch(
     probs: torch.Tensor,
     logprobs: torch.Tensor,
     sampling_metadata: SamplingMetadata,
@@ -394,7 +357,7 @@ def _sample(
     # Counterintiutively, having two loops here is actually faster.
     # The first loop can run without waiting on GPU<->CPU sync.
     for sampling_type in SamplingType:
-        sample_indices = categorized_sample_indices[sampling_type]
+        sample_indices = categorized_sample_indices[sampling_type][:, 0]
         num_tokens = len(sample_indices)
         if num_tokens == 0:
             continue
@@ -407,17 +370,19 @@ def _sample(
             greedy_samples = torch.argmax(logprobs[sample_indices.long()],
                                           dim=-1)
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
-            max_best_of = 1
+            max_best_of_in_batch = 1
             for seq_group, is_prompt in zip(seq_groups, is_prompts):
                 if is_prompt:
                     _, sampling_params = seq_group
-                    max_best_of = max(max_best_of, sampling_params.best_of)
+                    max_best_of_in_batch = max(max_best_of_in_batch,
+                                               sampling_params.best_of)
             seeded_args = {} if sampling_type == SamplingType.RANDOM else {
                 "seq_groups": seq_groups,
                 "generators": sampling_metadata.generators,
             }
             multinomial_samples[sampling_type] = _multinomial(
-                probs[sample_indices.long()], max_best_of, **seeded_args)
+                probs[sample_indices.long()], max_best_of_in_batch,
+                **seeded_args)
         elif sampling_type == SamplingType.BEAM:
             beam_search_logprobs = logprobs[sample_indices]
         else:
@@ -446,6 +411,118 @@ def _sample(
         for i in range(len(sampling_metadata.seq_groups))
     ]
     return sample_results
+
+
+def _sample_with_triton_kernel(
+    probs: torch.Tensor,
+    logprobs: torch.Tensor,
+    sampling_metadata: SamplingMetadata,
+    sampling_tensors: SamplingTensors,
+) -> List[Tuple[List[int], List[int]]]:
+    categorized_seq_group_ids = {t: [] for t in SamplingType}
+    categorized_sample_indices = sampling_metadata.categorized_sample_indices
+    for i, seq_group in enumerate(sampling_metadata.seq_groups):
+        _, sampling_params = seq_group
+        sampling_type = sampling_params.sampling_type
+        categorized_seq_group_ids[sampling_type].append(i)
+
+    sample_results_dict: Dict[int, Tuple[List[int], List[int]]] = {}
+    sample_metadata = {}
+    max_best_of_in_batch = 1
+
+    # Counterintiutively, having two loops here is actually faster.
+    # The first loop can run without waiting on GPU<->CPU sync.
+    for sampling_type in SamplingType:
+        sample_indices = categorized_sample_indices[sampling_type][:, 0]
+        sampled_token_indices = categorized_sample_indices[sampling_type][:, 1]
+        num_tokens = len(sample_indices)
+        if num_tokens == 0:
+            continue
+        seq_group_ids = categorized_seq_group_ids[sampling_type]
+        seq_groups = [sampling_metadata.seq_groups[i] for i in seq_group_ids]
+        is_prompts = [i < sampling_metadata.num_prompts for i in seq_group_ids]
+        sample_metadata[sampling_type] = (seq_group_ids, seq_groups,
+                                          is_prompts, sample_indices,
+                                          sampled_token_indices)
+        if sampling_type in (SamplingType.GREEDY, SamplingType.RANDOM,
+                             SamplingType.RANDOM_SEED):
+            for seq_group, is_prompt in zip(seq_groups, is_prompts):
+                if is_prompt:
+                    _, sampling_params = seq_group
+                    max_best_of_in_batch = max(max_best_of_in_batch,
+                                               sampling_params.best_of)
+        elif sampling_type == SamplingType.BEAM:
+            beam_search_logprobs = logprobs[sample_indices]
+        else:
+            raise ValueError(f"Unsupported sampling type: {sampling_type}")
+
+    sampled_tokens, _, _ = sample_triton(
+        probs=probs,
+        seeds=sampling_tensors.sampling_seeds,
+        max_best_of=max_best_of_in_batch,
+        sample_indices=sampling_tensors.sample_indices,
+        logprobs=logprobs,
+        # don't save logprobs because we have logic for that below
+        # TODO: use this instead of the CPU-based logic below
+        save_logprobs=False,
+    )
+
+    # GPU<->CPU sync happens in the loop below.
+
+    for sampling_type in SamplingType:
+        if sampling_type not in sample_metadata:
+            continue
+        (seq_group_ids, seq_groups, is_prompts, sample_indices,
+         sampled_token_indices) = sample_metadata[sampling_type]
+        if sampling_type == SamplingType.GREEDY:
+            sample_results = _greedy_sample(
+                seq_groups, sampled_tokens[sampled_token_indices][:, 0])
+        elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
+            sample_results = _random_sample(
+                seq_groups, is_prompts, sampled_tokens[sampled_token_indices])
+        elif sampling_type == SamplingType.BEAM:
+            sample_results = _beam_search_sample(seq_groups, is_prompts,
+                                                 sampling_metadata.seq_data,
+                                                 beam_search_logprobs)
+        sample_results_dict.update(zip(seq_group_ids, sample_results))
+
+    sample_results = [
+        sample_results_dict[i]
+        for i in range(len(sampling_metadata.seq_groups))
+    ]
+    return sample_results
+
+
+def _sample(
+    probs: torch.Tensor,
+    logprobs: torch.Tensor,
+    sampling_metadata: SamplingMetadata,
+    sampling_tensors: SamplingTensors,
+) -> List[Tuple[List[int], List[int]]]:
+    return _sample_with_torch(probs, logprobs, sampling_metadata)
+
+    # TODO: Enable once Triton kernel & associated code is faster.
+    # return _sample_with_triton_kernel(probs, logprobs, sampling_metadata,
+    #                                   sampling_tensors)
+
+
+def _get_ranks(x: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+    """
+    This function calculates the ranks of the chosen tokens in a logprob tensor.
+
+    Args:
+        x (torch.Tensor): 2D logprob tensor of shape (N, M)
+                        where N is the no. of tokens and M is the vocab dim.
+        indices (torch.Tensor): List of chosen token indices.
+
+    Returns:
+        torch.Tensor: 1D tensor of shape (N,) where N is the no. of tokens.
+                    Each element in the returned tensor represents the rank 
+                    of the chosen token in the input logprob tensor.
+    """
+    vals = x[torch.arange(0, len(x), device=x.device, dtype=indices.dtype),
+             indices]
+    return (x > vals[:, None]).long().sum(1).add_(1)
 
 
 def _get_logprobs(
@@ -485,11 +562,20 @@ def _get_logprobs(
         sample_idx += num_parent_seqs
     assert sample_idx == logprobs.size(0)
 
+    batched_logprobs_query_seq_indices_gpu = torch.tensor(
+        batched_logprobs_query_seq_indices, device=logprobs.device)
+    batched_logprobs_query_token_indices_gpu = torch.tensor(
+        batched_logprobs_query_token_indices, device=logprobs.device)
+
     # Batched query for logprobs of selected token
     batched_logprobs_query_result = logprobs[[
-        batched_logprobs_query_seq_indices,
-        batched_logprobs_query_token_indices
+        batched_logprobs_query_seq_indices_gpu,
+        batched_logprobs_query_token_indices_gpu
     ]]
+
+    batched_ranks_query_result = _get_ranks(
+        logprobs[batched_logprobs_query_seq_indices_gpu],
+        batched_logprobs_query_token_indices_gpu)
 
     # Batched query for logprobs of topk tokens
     if largest_num_logprobs > 0:
@@ -502,6 +588,7 @@ def _get_logprobs(
         top_logprobs, top_token_ids = None, None
 
     batched_logprobs_query_result = batched_logprobs_query_result.cpu()
+    batched_ranks_query_result = batched_ranks_query_result.cpu()
 
     # Gather results
     result_prompt_logprobs: List[Optional[PromptLogprobs]] = []
@@ -523,15 +610,20 @@ def _get_logprobs(
             for token_id in prompt_tokens[1:]:
                 prompt_logprobs_dict = {
                     token_id:
-                    batched_logprobs_query_result[query_result_idx].item()
+                    (batched_logprobs_query_result[query_result_idx].item(),
+                     batched_ranks_query_result[query_result_idx].item())
                 }
                 if num_logprobs > 0:
                     prompt_logprobs_dict.update(
-                        zip(top_token_ids[sample_idx, :num_logprobs].tolist(),
-                            top_logprobs[sample_idx, :num_logprobs].tolist()))
+                        zip(
+                            top_token_ids[sample_idx, :num_logprobs].tolist(),
+                            zip(
+                                top_logprobs[
+                                    sample_idx, :num_logprobs].tolist(),
+                                range(1, num_logprobs + 1))))
                 group_prompt_logprobs.append({
-                    token_id: Logprob(logprob)
-                    for token_id, logprob in prompt_logprobs_dict.items()
+                    token_id: Logprob(*logprob_rank)
+                    for token_id, logprob_rank in prompt_logprobs_dict.items()
                 })
                 sample_idx += 1
                 query_result_idx += 1
@@ -547,7 +639,8 @@ def _get_logprobs(
         for next_token_id, parent_id in zip(next_token_ids, parent_ids):
             sample_logprobs_dict = {
                 next_token_id:
-                batched_logprobs_query_result[query_result_idx].item()
+                (batched_logprobs_query_result[query_result_idx].item(),
+                 batched_ranks_query_result[query_result_idx].item())
             }
             query_result_idx += 1
             if num_logprobs > 0:
@@ -555,11 +648,13 @@ def _get_logprobs(
                     zip(
                         top_token_ids[sample_idx +
                                       parent_id, :num_logprobs].tolist(),
-                        top_logprobs[sample_idx +
-                                     parent_id, :num_logprobs].tolist()))
+                        zip(
+                            top_logprobs[sample_idx +
+                                         parent_id, :num_logprobs].tolist(),
+                            range(1, num_logprobs + 1))))
             group_sample_logprobs.append({
-                token_id: Logprob(logprob)
-                for token_id, logprob in sample_logprobs_dict.items()
+                token_id: Logprob(*logprob_rank)
+                for token_id, logprob_rank in sample_logprobs_dict.items()
             })
         result_sample_logprobs.append(group_sample_logprobs)
         sample_idx += len(seq_ids)

@@ -1,32 +1,32 @@
-import pytest
 import random
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Tuple
+from typing import Dict, List, Optional, Tuple
 
+import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.lora.layers import (
-    ColumnParallelLinearWithLoRA,
-    MergedColumnParallelLinearWithLoRA,
-    QKVParallelLinearWithLora,
-    VocabParallelEmbeddingWithLoRA,
-    RowParallelLinearWithLoRA,
-    SamplerWithLoRA,
-    LoRAMapping,
-    BaseLayerWithLoRA,
-)
-from vllm.lora.models import (LoRALayerWeights, convert_mapping,
-                              PackedLoRALayerWeights)
 from vllm.config import LoRAConfig
-from vllm.model_executor.layers.sampler import Sampler
+# yapf conflicts with isort for this block
+# yapf: disable
+from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
+                              LogitsProcessorWithLoRA, LoRAMapping,
+                              MergedColumnParallelLinearWithLoRA,
+                              MergedQKVParallelLinearWithLora,
+                              QKVParallelLinearWithLora,
+                              RowParallelLinearWithLoRA,
+                              VocabParallelEmbeddingWithLoRA)
+# yapf: enable
+from vllm.lora.models import (LoRALayerWeights, PackedLoRALayerWeights,
+                              convert_mapping)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
-                                               RowParallelLinear,
-                                               QKVParallelLinear)
+                                               QKVParallelLinear,
+                                               RowParallelLinear)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding, ParallelLMHead)
+    ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.utils import set_random_seed
 
 from .utils import DummyLoRAManager
@@ -97,8 +97,7 @@ def populate_loras(
     lora_dict: Dict[int, LoRALayerWeights] = dict()
 
     # Dictionary that maps the lora ID to the
-    # corresponding subloras. Only useful when
-    # repeats > 1.
+    # corresponding subloras.
     sublora_dict: Dict[int, List[LoRALayerWeights]] = dict()
 
     for slot_idx, lora_id in enumerate(id_to_index):
@@ -394,7 +393,7 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device) -> None:
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_lm_head_sampler(dist_init, num_loras, device) -> None:
+def test_lm_head_logits_processor(dist_init, num_loras, device) -> None:
 
     torch.set_default_device(device)
     max_loras = 8
@@ -402,28 +401,29 @@ def test_lm_head_sampler(dist_init, num_loras, device) -> None:
                              max_lora_rank=8,
                              lora_dtype=torch.float16)
 
-    def create_random_sampler_layer():
+    def _pretest():
         linear = ParallelLMHead(32000 + lora_config.lora_extra_vocab_size,
                                 1024, 32000)
         linear.weight.data = torch.rand_like(linear.weight.data)
         linear.weight.data[:, 32000:] = 0
-        sampler = Sampler(32000 + lora_config.lora_extra_vocab_size, 32000)
-        lora_sampler = SamplerWithLoRA(sampler, 1024, linear.weight.dtype,
-                                       linear.weight.device)
-        lora_sampler.create_lora_weights(max_loras, lora_config)
+        logits_processor = LogitsProcessor(
+            32000 + lora_config.lora_extra_vocab_size, 32000)
+        lora_logits_processor = LogitsProcessorWithLoRA(
+            logits_processor, 1024, linear.weight.dtype, linear.weight.device)
+        lora_logits_processor.create_lora_weights(max_loras, lora_config)
 
-        return linear, sampler, lora_sampler
+        return linear, logits_processor, lora_logits_processor
 
     for i in range(10):
         set_random_seed(i)
 
         id_to_index = get_random_id_to_index(num_loras, max_loras)
-        linear, sampler, lora_sampler = create_random_sampler_layer()
+        linear, logits_processor, lora_logits_processor = _pretest()
 
         # NOTE: all the generated loras share the same embeddings tensor.
         lora_dict, _ = populate_loras(
             id_to_index,
-            layer=lora_sampler,
+            layer=lora_logits_processor,
             layer_weights=linear.weight,
             generate_embeddings_tensor=1024,
         )
@@ -447,34 +447,37 @@ def test_lm_head_sampler(dist_init, num_loras, device) -> None:
             32000,
             lora_config.lora_extra_vocab_size,
         )
-        lora_sampler.set_mapping(*mapping_info, )
+        lora_logits_processor.set_mapping(*mapping_info, )
 
-        lora_result = lora_sampler._get_logits(hidden_states=torch.cat(inputs),
-                                               embedding=linear.weight,
-                                               embedding_bias=None)
+        lora_result = lora_logits_processor._get_logits(
+            hidden_states=torch.cat(inputs),
+            embedding=linear.weight,
+            embedding_bias=None)
 
         original_weight = linear.weight.clone()
 
-        linear.weight[sampler.org_vocab_size:sampler.org_vocab_size +
+        linear.weight[logits_processor.
+                      org_vocab_size:logits_processor.org_vocab_size +
                       embeddings_tensor_len] = embeddings_tensor
 
-        sampler.org_vocab_size = 32000 + lora_config.lora_extra_vocab_size
+        logits_processor.org_vocab_size = (32000 +
+                                           lora_config.lora_extra_vocab_size)
         expected_results = []
         for input_, lora_id in zip(inputs, prompt_mapping):
             lora = lora_dict[lora_id]
-            result = sampler._get_logits(hidden_states=input_,
-                                         embedding=linear.weight,
-                                         embedding_bias=None)
+            result = logits_processor._get_logits(hidden_states=input_,
+                                                  embedding=linear.weight,
+                                                  embedding_bias=None)
             result[:, 32000 + embeddings_tensor_len:] = float("-inf")
             result += input_ @ lora.lora_a @ lora.lora_b * lora.scaling
             expected_results.append(result)
         expected_result = torch.cat(expected_results)
-        sampler.org_vocab_size = 32000
+        logits_processor.org_vocab_size = 32000
 
         # Check that resetting the lora weights succeeds
 
         for slot_idx in range(max_loras):
-            lora_sampler.reset_lora(slot_idx)
+            lora_logits_processor.reset_lora(slot_idx)
 
         inputs, index_mapping, prompt_mapping = create_random_inputs(
             active_lora_ids=[0],
@@ -488,14 +491,16 @@ def test_lm_head_sampler(dist_init, num_loras, device) -> None:
         mapping_info = convert_mapping(lora_mapping, id_to_index, max_loras,
                                        32000,
                                        lora_config.lora_extra_vocab_size)
-        lora_sampler.set_mapping(*mapping_info, )
+        lora_logits_processor.set_mapping(*mapping_info, )
 
-        lora_result = lora_sampler._get_logits(hidden_states=torch.cat(inputs),
-                                               embedding=original_weight,
-                                               embedding_bias=None)[:, :32000]
-        expected_result = sampler._get_logits(hidden_states=torch.cat(inputs),
-                                              embedding=original_weight,
-                                              embedding_bias=None)
+        lora_result = lora_logits_processor._get_logits(
+            hidden_states=torch.cat(inputs),
+            embedding=original_weight,
+            embedding_bias=None)[:, :32000]
+        expected_result = logits_processor._get_logits(
+            hidden_states=torch.cat(inputs),
+            embedding=original_weight,
+            embedding_bias=None)
 
         rtol, atol = TOLERANCES[lora_result.dtype]
         assert torch.allclose(lora_result,
@@ -605,7 +610,7 @@ def test_linear_parallel(dist_init, num_loras, orientation, device) -> None:
 
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
-@pytest.mark.parametrize("repeats", [2, 3])
+@pytest.mark.parametrize("repeats", [1, 2, 3])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_column_parallel_packed(dist_init, num_loras, repeats, device) -> None:
 
@@ -621,6 +626,10 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, device) -> None:
                                                 bias=False)
             linear.weight.data = torch.rand_like(linear.weight.data)
             lora_linear = MergedColumnParallelLinearWithLoRA(linear)
+        elif repeats == 3:
+            linear = QKVParallelLinear(4096, 64, 32, bias=False)
+            linear.weight.data = torch.rand_like(linear.weight.data)
+            lora_linear = MergedQKVParallelLinearWithLora(linear)
         else:
             linear = QKVParallelLinear(4096, 64, 32, bias=False)
             linear.weight.data = torch.rand_like(linear.weight.data)

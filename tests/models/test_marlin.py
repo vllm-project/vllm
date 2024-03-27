@@ -11,9 +11,11 @@ up to 3 times to see if we pass.
 Run `pytest tests/models/test_marlin.py --forked`.
 """
 
+from dataclasses import dataclass
+
 import pytest
 import torch
-from dataclasses import dataclass
+
 from vllm.model_executor.layers.quantization import (
     _QUANTIZATION_CONFIG_REGISTRY)
 

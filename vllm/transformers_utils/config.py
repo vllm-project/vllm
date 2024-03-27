@@ -9,7 +9,7 @@ _CONFIG_REGISTRY = {
     "mpt": MPTConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
-    "starcoder2": Starcoder2Config,
+    "jais": JAISConfig,
 }
 
 
@@ -17,15 +17,6 @@ def get_config(model: str,
                trust_remote_code: bool,
                revision: Optional[str] = None,
                code_revision: Optional[str] = None) -> PretrainedConfig:
-    # FIXME(woosuk): This is a temporary fix for StarCoder2.
-    # Remove this when the model is supported by HuggingFace transformers.
-    if "bigcode" in model and "starcoder2" in model:
-        config_class = _CONFIG_REGISTRY["starcoder2"]
-        config = config_class.from_pretrained(model,
-                                              revision=revision,
-                                              code_revision=code_revision)
-        return config
-
     try:
         config = AutoConfig.from_pretrained(
             model,
@@ -49,3 +40,17 @@ def get_config(model: str,
                                               revision=revision,
                                               code_revision=code_revision)
     return config
+
+
+def get_hf_text_config(config: PretrainedConfig):
+    """Get the "sub" config relevant to llm for multi modal models.
+        No op for pure text models.
+    """
+    if hasattr(config, "text_config"):
+        # The code operates under the assumption that text_config should have
+        # `num_attention_heads` (among others). Assert here to fail early
+        # if transformers config doesn't align with this assumption.
+        assert hasattr(config.text_config, "num_attention_heads")
+        return config.text_config
+    else:
+        return config
