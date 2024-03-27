@@ -100,8 +100,6 @@ class SequenceData:
         prompt_token_ids: The token IDs of the prompt.
         output_token_ids: The token IDs of the output.
         cumulative_logprob: The cumulative log probability of the output.
-        _prefill_start: The start index of the prefill.
-        _prefill_end: The end index of the prefill.
     """
 
     def __init__(
@@ -137,9 +135,9 @@ class SequenceData:
         """Return the number of prefill tokens that are already computed."""
         return self._num_computed_tokens
 
-    def record_num_computed_tokens(self, num_computed_tokens) -> int:
+    def add_num_computed_tokens(self, num_computed_tokens_delta) -> int:
         """Record how many tokens have computed."""
-        self._num_computed_tokens = num_computed_tokens
+        self._num_computed_tokens += num_computed_tokens_delta
 
     def reset_num_computed_tokens(self) -> None:
         """Reset the number of computed tokens from this sequence. It is
@@ -148,29 +146,12 @@ class SequenceData:
         """
         self._num_computed_tokens = 0
 
-    # def advance_prefill_range(self, size: int) -> int:
-    #     """Advance the prefill range by the specified amount
-
-    #     Args:
-    #         size: The amount to advance the prefill range.
-    #     Returns:
-    #         The actual number of advanced tokens.
-    #     """
-    #     self._prefill_start = self._prefill_end
-    #     # The increased range could be larger than the seq length.
-    #     # Clamp it to the seq length.
-    #     # Note that we use prompt_len + output_len instead of
-    #     # prompt_len here. This is because during recompute
-    #     # we need to prefill for both prompt and output.
-    #     self._prefill_end = min(self._prefill_end + size, self.get_len())
-    #     return self._prefill_end - self._prefill_start
-
     def get_num_uncomputed_tokens(self) -> int:
         """Return the number of prefil tokens that are not computed."""
         # we use `get_len()` which includes prompt_len + output_len instead
         # of prompt_len here. This is because during recompute we need to
         # prefill for both prompt and output.
-        return self.get_len() - self._prefill_end
+        return self.get_len() - self.get_num_computed_tokens()
 
     def get_last_token_id(self) -> int:
         if not self.output_token_ids:
@@ -473,23 +454,9 @@ class SequenceGroup:
     def get_finished_seqs(self) -> List[Sequence]:
         return [seq for seq in self.seqs_dict.values() if seq.is_finished()]
 
-    # def advance_prefill_range(self, size: int) -> int:
-    #     """Advance the prefill range by the specified amount.
-
-    #     Args:
-    #         size: The amount to advance the prefill range.
-    #     Returns:
-    #         The actual number of advanced tokens.
-    #     """
-    #     # All sequences in the group should have the same prompt.
-    #     return [
-    #         seq.data.advance_prefill_range(size)
-    #         for seq in self.seqs_dict.values()
-    #     ][0]
-
-    def record_num_computed_tokens(self, num_computed_tokens):
+    def add_num_computed_tokens(self, num_computed_tokens_delta):
         for seq in self.seqs_dict.values():
-            seq.data.record_num_computed_tokens(num_computed_tokens)
+            seq.data.add_num_computed_tokens(num_computed_tokens_delta)
 
     def get_num_uncomputed_tokens(self) -> int:
         # All sequences in the group should have the same prompt, so the

@@ -165,7 +165,6 @@ def create_seq_group_metadata_from_prompts(
     for prompt_token_ids, cont_token_ids in zip(prompts, continuations):
         seq_data = SequenceData(prompt_token_ids=prompt_token_ids[:],
                                 output_token_ids=cont_token_ids[:])
-        seq_data.advance_prefill_range(len(prompt_token_ids))
         seq_data_lst.append(seq_data)
 
     return [

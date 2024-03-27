@@ -722,7 +722,6 @@ class ModelRunner:
                        (group_id < max_num_batched_tokens % max_num_seqs))
             seq_data, fake_multi_modal_input = _prepare_fake_inputs(
                 seq_len, self.vision_language_config)
-            seq_data.advance_prefill_range(seq_len)
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,

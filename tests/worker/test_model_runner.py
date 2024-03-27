@@ -27,7 +27,6 @@ def test_prepare_prompt(batch_size):
                 sampling_params=SamplingParams(temperature=0),
                 block_tables=block_tables,
             ))
-        seq_data.advance_prefill_range(prompt_len)
 
     expected_selected_token_indices = []
     selected_token_start_idx = 0

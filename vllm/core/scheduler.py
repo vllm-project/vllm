@@ -46,6 +46,21 @@ class SchedulerOutputs:
         blocks_to_copy: Dict[int, List[int]],
         ignored_seq_groups: List[SequenceGroup],
     ) -> None:
+        """A list of sequence groups to be scheduled as a single batch.
+
+        Args:
+            scheduled_seq_groups: A tuple of scheduled sequence group and its
+                chunk size.
+            prompt_run: True if all sequence groups are in prefill phase.
+                If False, all sequence groups are in decoding phase.
+            num_batched_tokens: Total number of batched tokens.
+            blocks_to_swap_in: Blocks to swap in. Dict of CPU -> GPU block
+                number.
+            blocks_to_swap_out: Blocks to swap out. Dict of GPU -> CPU block
+                number.
+            blocks_to_copy: Blocks to copy. Source to a list of dest blocks.
+            ignored_seq_groups: Sequence groups that are going to be ignored.
+        """
         self.scheduled_seq_groups = scheduled_seq_groups
         self.prompt_run = prompt_run
         self.num_batched_tokens = num_batched_tokens
@@ -253,7 +268,6 @@ class Scheduler:
                     curr_loras.add(lora_int_id)
                 self.waiting.popleft()
                 self._allocate(seq_group)
-                # seq_group.advance_prefill_range(num_prompt_tokens)
                 self.running.append(seq_group)
                 num_curr_seqs += num_new_seqs
                 scheduled.append(
