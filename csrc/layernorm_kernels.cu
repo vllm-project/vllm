@@ -103,7 +103,7 @@ struct _f16Vec {
   using T2 = typename Converter::packed_hip_type;
   T1 data[width];
 
-  __device__ inline _f16Vec& operator+=(const _f16Vec<scalar_t, width>& other) {
+  __device__ _f16Vec& operator+=(const _f16Vec<scalar_t, width>& other) {
     if constexpr (width % 2 == 0) {
       #pragma unroll
       for (int i = 0; i < width; i += 2) {
@@ -120,7 +120,7 @@ struct _f16Vec {
     return *this;
   }
 
-  __device__ inline _f16Vec& operator*=(const _f16Vec<scalar_t, width>& other) {
+  __device__ _f16Vec& operator*=(const _f16Vec<scalar_t, width>& other) {
     if constexpr (width % 2 == 0) {
       #pragma unroll
       for (int i = 0; i < width; i += 2) {
@@ -137,7 +137,7 @@ struct _f16Vec {
     return *this;
   }
 
-  __device__ inline _f16Vec& operator*=(const float scale) {
+  __device__ _f16Vec& operator*=(const float scale) {
     if constexpr (width % 2 == 0) {
       #pragma unroll
       for (int i = 0; i < width; i += 2) {
@@ -158,7 +158,7 @@ struct _f16Vec {
     return *this;
   }
 
-  __device__ inline float sum_squares() const {
+  __device__ float sum_squares() const {
     float result = 0.0f;
     if constexpr (width % 2 == 0) {
       #pragma unroll
