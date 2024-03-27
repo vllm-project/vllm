@@ -44,6 +44,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # of self._cached_blocks.
         self._unused_cached_blocks: Dict[PrefixHash, BlockId] = {}
 
+        # An allocator for blocks that do not have prefix hashes.
         self._hashless_allocator = NaiveBlockAllocator(
             create_block=self._create_block,
             num_blocks=num_blocks,
@@ -52,6 +53,10 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         )
 
         self._block_size = block_size
+
+        # We share the refcounter between allocators. This allows us to promote
+        # blocks originally allocated in the hashless allocator to immutable
+        # blocks.
         self._refcounter = self._hashless_allocator.refcounter
 
         self._cow_tracker = CopyOnWriteTracker(
