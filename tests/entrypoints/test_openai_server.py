@@ -120,9 +120,9 @@ def zephyr_lora_files():
 
 
 @pytest.fixture(scope="session")
-def server(zephyr_lora_files):
+def server(zephyr_lora_files, use_v2_block_manager: bool):
     ray.init()
-    server_runner = ServerRunner.remote([
+    command_args = [
         "--model",
         MODEL_NAME,
         # use half precision for speed and memory savings in CI environment
@@ -138,11 +138,15 @@ def server(zephyr_lora_files):
         f"zephyr-lora2={zephyr_lora_files}",
         "--max-lora-rank",
         "64",
-        "--max-cpu-loras",
-        "2",
+        "--max-cpu-loras", "2",
         "--max-num-seqs",
         "128"
-    ])
+    ]
+
+    if use_v2_block_manager:
+        command_args.append("--use-v2-block-manager")
+
+    server_runner = ServerRunner.remote(command_args)
     ray.get(server_runner.ready.remote())
     yield server_runner
     ray.shutdown()
@@ -157,6 +161,7 @@ def client():
     yield client
 
 
+@pytest.mark.parametrize("use_v2_block_manager", [True, False])
 async def test_check_models(server, client: openai.AsyncOpenAI):
     models = await client.models.list()
     models = models.data
@@ -173,6 +178,7 @@ async def test_check_models(server, client: openai.AsyncOpenAI):
     "model_name",
     [MODEL_NAME, "zephyr-lora", "zephyr-lora2"],
 )
+@pytest.mark.parametrize("use_v2_block_manager", [True, False])
 async def test_single_completion(server, client: openai.AsyncOpenAI,
                                  model_name: str):
     completion = await client.completions.create(model=model_name,
@@ -204,6 +210,7 @@ async def test_single_completion(server, client: openai.AsyncOpenAI,
     "model_name",
     [MODEL_NAME, "zephyr-lora"],
 )
+@pytest.mark.parametrize("use_v2_block_manager", [True, False])
 async def test_single_chat_session(server, client: openai.AsyncOpenAI,
                                    model_name: str):
     messages = [{
@@ -244,6 +251,7 @@ async def test_single_chat_session(server, client: openai.AsyncOpenAI,
 
 
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("use_v2_block_manager", [True, False])
 async def test_too_many_logprobs(server, client: openai.AsyncOpenAI,
                                  model_name: str):
     messages = [{
@@ -303,6 +311,7 @@ async def test_too_many_logprobs(server, client: openai.AsyncOpenAI,
     "model_name",
     [MODEL_NAME, "zephyr-lora"],
 )
+@pytest.mark.parametrize("use_v2_block_manager", [True, False])
 async def test_completion_streaming(server, client: openai.AsyncOpenAI,
                                     model_name: str):
     prompt = "What is an LLM?"
@@ -340,6 +349,7 @@ async def test_completion_streaming(server, client: openai.AsyncOpenAI,
     "model_name",
     [MODEL_NAME, "zephyr-lora"],
 )
+@pytest.mark.parametrize("use_v2_block_manager", [True, False])
 async def test_chat_streaming(server, client: openai.AsyncOpenAI,
                               model_name: str):
     messages = [{
@@ -390,6 +400,7 @@ async def test_chat_streaming(server, client: openai.AsyncOpenAI,
     "model_name",
     [MODEL_NAME, "zephyr-lora"],
 )
+@pytest.mark.parametrize("use_v2_block_manager", [True, False])
 async def test_batch_completions(server, client: openai.AsyncOpenAI,
                                  model_name: str):
     # test simple list
@@ -438,6 +449,7 @@ async def test_batch_completions(server, client: openai.AsyncOpenAI,
     assert texts[0] == texts[1]
 
 
+@pytest.mark.parametrize("use_v2_block_manager", [True, False])
 async def test_logits_bias(server, client: openai.AsyncOpenAI):
     prompt = "Hello, my name is"
     max_tokens = 5
@@ -485,6 +497,7 @@ async def test_logits_bias(server, client: openai.AsyncOpenAI):
     assert first_response != completion.choices[0].text
 
 
+@pytest.mark.parametrize("use_v2_block_manager", [True, False])
 async def test_guided_json_completion(server, client: openai.AsyncOpenAI):
     completion = await client.completions.create(
         model=MODEL_NAME,
@@ -503,6 +516,7 @@ async def test_guided_json_completion(server, client: openai.AsyncOpenAI):
         jsonschema.validate(instance=output_json, schema=TEST_SCHEMA)
 
 
+@pytest.mark.parametrize("use_v2_block_manager", [True, False])
 async def test_guided_json_chat(server, client: openai.AsyncOpenAI):
     messages = [{
         "role": "system",
@@ -544,6 +558,7 @@ async def test_guided_json_chat(server, client: openai.AsyncOpenAI):
     assert json1["age"] != json2["age"]
 
 
+@pytest.mark.parametrize("use_v2_block_manager", [True, False])
 async def test_guided_regex_completion(server, client: openai.AsyncOpenAI):
     completion = await client.completions.create(
         model=MODEL_NAME,
@@ -560,6 +575,7 @@ async def test_guided_regex_completion(server, client: openai.AsyncOpenAI):
         assert re.fullmatch(TEST_REGEX, completion.choices[i].text) is not None
 
 
+@pytest.mark.parametrize("use_v2_block_manager", [True, False])
 async def test_guided_regex_chat(server, client: openai.AsyncOpenAI):
     messages = [{
         "role": "system",
@@ -592,6 +608,7 @@ async def test_guided_regex_chat(server, client: openai.AsyncOpenAI):
     assert ip1 != ip2
 
 
+@pytest.mark.parametrize("use_v2_block_manager", [True, False])
 async def test_guided_choice_completion(server, client: openai.AsyncOpenAI):
     completion = await client.completions.create(
         model=MODEL_NAME,
@@ -607,6 +624,7 @@ async def test_guided_choice_completion(server, client: openai.AsyncOpenAI):
         assert completion.choices[i].text in TEST_CHOICE
 
 
+@pytest.mark.parametrize("use_v2_block_manager", [True, False])
 async def test_guided_choice_chat(server, client: openai.AsyncOpenAI):
     messages = [{
         "role": "system",
@@ -640,6 +658,7 @@ async def test_guided_choice_chat(server, client: openai.AsyncOpenAI):
     assert choice1 != choice2
 
 
+@pytest.mark.parametrize("use_v2_block_manager", [True, False])
 async def test_guided_decoding_type_error(server, client: openai.AsyncOpenAI):
     with pytest.raises(openai.BadRequestError):
         _ = await client.completions.create(
@@ -671,6 +690,7 @@ async def test_guided_decoding_type_error(server, client: openai.AsyncOpenAI):
             extra_body=dict(guided_regex=TEST_REGEX, guided_json=TEST_SCHEMA))
 
 
+@pytest.mark.parametrize("use_v2_block_manager", [True, False])
 async def test_response_format_json_object(server, client: openai.AsyncOpenAI):
     resp = await client.chat.completions.create(
         model=MODEL_NAME,
@@ -687,6 +707,7 @@ async def test_response_format_json_object(server, client: openai.AsyncOpenAI):
     assert loaded == {"result": 2}, loaded
 
 
+@pytest.mark.parametrize("use_v2_block_manager", [True, False])
 async def test_guided_grammar(server, client: openai.AsyncOpenAI):
     simple_sql_grammar = """
 start: select_statement
