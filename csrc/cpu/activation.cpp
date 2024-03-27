@@ -28,8 +28,8 @@ void activation_kernel(int num_tokens, int d, scalar_t *__restrict__ input,
         f32_ans = f32_y * f32_ans;
       }
 
-      const scalar_vec_t ans(f32_ans);
-      ans.save(output + i * d + j);
+      const scalar_vec_t result(f32_ans);
+      result.save(output + i * d + j);
     }
   }
 }
