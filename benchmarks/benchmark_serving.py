@@ -490,7 +490,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--dataset-path",
                         type=str,
-                        required=True,
+                        default=None,
                         help="Path to the dataset.")
     parser.add_argument(
         "--model",
