@@ -182,7 +182,7 @@ set(CUSTOM_SRC
 )
 
 define_gpu_extension_target(
-  custom_ops
+  _custom_C
   DESTINATION vllm
   LANGUAGE ${VLLM_GPU_LANG}
   SOURCES ${CUSTOM_SRC}
@@ -288,7 +288,7 @@ add_custom_target(default)
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   message(STATUS "Enabling C extension.")
   add_dependencies(default _C)
-  add_dependencies(default custom_ops)
+  add_dependencies(default _custom_C)
 endif()
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
