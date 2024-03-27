@@ -1,5 +1,5 @@
 #include <torch/extension.h>
-
+#include <c10/cuda/CUDAGuard.h>
 #include <cstdint>
 
 #include "type_convert.h"
@@ -90,6 +90,7 @@ void dispatch_bgmv(torch::Tensor y, torch::Tensor x, torch::Tensor w,
   CHECK_EQ(w.size(2), h_out);
   CHECK_EQ(indicies.size(0), x.size(0));
   CHECK_EQ(y.size(0), x.size(0));
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
   bool ok = false;
   if (h_in < 65536 && h_out < 65536) {
     // TODO: See if we can get rid of this massive nested switch
@@ -321,6 +322,7 @@ void dispatch_bgmv_low_level(torch::Tensor y, torch::Tensor x, torch::Tensor w,
   CHECK_EQ(w.size(2), h_out);
   CHECK_EQ(indicies.size(0), x.size(0));
   CHECK_EQ(y.size(0), x.size(0));
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
   bool ok = false;
   if (h_in < 65536 && h_out < 65536) {
     // TODO: See if we can get rid of this massive nested switch
