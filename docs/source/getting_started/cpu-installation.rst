@@ -24,9 +24,10 @@ Requirements
 .. _quick_start_dockerfile:
 
 Quick start using Dockerfile
------------------
+----------------------------
 
 .. code-block:: console
+
     $ docker build -f Dockerfile.cpu -t vllm-cpu-env --shm-size=4g .
     $ docker run -it \
                  --rm \
@@ -45,6 +46,7 @@ Build from source
 We recommend to use ``gcc/g++ >= 12.3.0`` as the default compiler to avoid potential problems. For example, on Ubuntu 22.4, you can run:
 
 .. code-block:: console
+
     $ sudo apt-get update  -y
     $ sudo apt-get install -y gcc-12 g++-12
     $ sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
@@ -54,6 +56,7 @@ We recommend to use ``gcc/g++ >= 12.3.0`` as the default compiler to avoid poten
 Install Python packages for vLLM CPU backend building:
 
 .. code-block:: console
+
     $ pip install --upgrade pip
     $ pip install wheel packaging ninja setuptools>=49.4.0 numpy
     $ pip install -v -r requirements-cpu.txt --index-url https://download.pytorch.org/whl/cpu
@@ -61,6 +64,7 @@ Install Python packages for vLLM CPU backend building:
 2. Build and install vLLM CPU backend 
 
 .. code-block:: console
+
     $ VLLM_TARGET_DEVICE=cpu python setup.py install
 
 .. _performance_tips:
