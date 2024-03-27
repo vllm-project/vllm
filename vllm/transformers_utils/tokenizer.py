@@ -174,15 +174,14 @@ def convert_prompt_ids_to_tokens(
     Note that not all tokens are converted to strings. Only the tokens that
     are necessary for incremental detokenization are converted to strings.
     """
-    # Offset a little more in case we have special tokens.
-    prefix_offset = max(
-        len(prompt_ids) - INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET - 2, 0)
     # We do not need to convert the whole prompt to tokens.
+    # Offset a little more in case we have special tokens.
     new_tokens = tokenizer.convert_ids_to_tokens(
-        prompt_ids[prefix_offset:], skip_special_tokens=skip_special_tokens)
-    prefix_offset = max(
-        len(new_tokens) - INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET, 0)
+        prompt_ids[-INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET - 2:],
+        skip_special_tokens=skip_special_tokens)
     read_offset = len(new_tokens)
+    prefix_offset = max(
+        read_offset - INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET, 0)
     return new_tokens, prefix_offset, read_offset
 
 
@@ -267,12 +266,12 @@ def detokenize_incrementally(
             spaces_between_special_tokens=spaces_between_special_tokens,
         )
 
-    if len(new_text) > len(prefix_text) and not new_text.endswith("�"):
+    if len(new_text) <= len(prefix_text) or new_text.endswith("�"):
         # utf-8 char at the end means it's a potential unfinished byte sequence
         # from byte fallback tokenization.
         # If it's in the middle, it's probably a real invalid id generated
         # by the model
-        new_text = new_text[len(prefix_text):]
-        return new_tokens, new_text, read_offset, len(output_tokens)
-    else:
         return new_tokens, "", prefix_offset, read_offset
+
+    new_text = new_text[len(prefix_text):]
+    return new_tokens, new_text, read_offset, len(output_tokens)
