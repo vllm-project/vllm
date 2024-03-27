@@ -99,10 +99,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         cached_block_id = self._cached_blocks.get(block.content_hash, None)
         if cached_block_id is not None:
             block.block_id = cached_block_id
-            refcount = self._refcounter.incr(block.block_id)
-            if refcount == 1:
-                assert block.content_hash in self._unused_cached_blocks
-                del self._unused_cached_blocks[block.content_hash]
+            self._incr_refcount_cached_block(block.block_id)
             return block
 
         block = self.allocate_mutable(prev_block)
@@ -111,6 +108,12 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # TODO computed bit
 
         return block
+
+    def _incr_refcount_cached_block(self, block_id: BlockIndex) -> None:
+        refcount = self._refcounter.incr(block.block_id)
+        if refcount == 1:
+            assert block.content_hash in self._unused_cached_blocks
+            del self._unused_cached_blocks[block.content_hash]
 
     def allocate_mutable(self, prev_block: Block) -> Block:
         """Allocates a mutable block. If there are no free blocks, this will
@@ -250,11 +253,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                 block.content_hash] = block.block_id
         else:
             self._free_block_id_for_block(block.block_id, block)
-            # TODO need to call a function instead of refcount
-            # as the block could transition from unused_cached_blocks
-            # is it possible to use a NaiveAllocator for this, with the freelist
-            # the uncached?
-            self._refcounter.incr(self._cached_blocks[block.content_hash])
+            self._incr_refcount_cached_block(self._cached_blocks[block.content_hash])
 
         return self._cached_blocks[block.content_hash]
 
