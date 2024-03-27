@@ -1,8 +1,8 @@
 # Overview of the optional performance features uinque to https://github.com/ROCm/vllm
 ## Multi-GPU torchrun
 On ROCm the default multi GPU executor is `torchrun` as opposed to `ray` on NVIDIA  
-This can be overriden by the `--worker-use-ray` flag to vllm or its benchmarks  
-To utilize torchran parallelism, the run command should be midified from  
+This can be overridden by the `--worker-use-ray` flag to vllm or its benchmarks  
+To utilize torchran parallelism, the run command should be modified from  
 `python <command>`  
 to  
 `torchrun --standalone --nnodes=1 --nproc-per-node=<world-size> <command>`
