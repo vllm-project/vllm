@@ -33,9 +33,6 @@ steps:
 - label: Entrypoints Test
   command: pytest -v -s entrypoints
 
-- label: Entrypoints Test (BlockManager v2)
-  command: pytest -v -s entrypoints_blockmanager
-
 - label: Kernels Test %N
   command: pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 4
