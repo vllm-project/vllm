@@ -4,19 +4,18 @@ import logging
 import math
 import os
 import re
-from typing import (Any, Callable, Dict, Hashable, List, Optional, Tuple, Type)
+from typing import Callable, Dict, Hashable, List, Optional, Tuple, Type
 
 import safetensors.torch
 import torch
 from torch import nn
 
 from vllm.config import LoRAConfig
-from vllm.utils import LRUCache, in_wsl
-
 from vllm.lora.layers import (BaseLayerWithLoRA, LoRAMapping, from_layer,
-                              from_layer_sampler)
+                              from_layer_logits_processor)
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.utils import parse_fine_tuned_lora_name, replace_submodule
+from vllm.utils import LRUCache, is_pin_memory_available
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +142,7 @@ class LoRAModel:
         embedding_padding_modules: Optional[List[str]] = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a dictionary of tensors."""
-        pin_memory = str(device) == "cpu" and not in_wsl()
+        pin_memory = str(device) == "cpu" and is_pin_memory_available()
         loras: Dict[str, LoRALayerWeights] = {}
         for tensor_name, tensor in tensors.items():
             module_name, is_lora_a = parse_fine_tuned_lora_name(tensor_name)
@@ -414,18 +413,22 @@ class LoRAModelManager:
         for module_name, module in self.model.named_modules():
             if not self._match_target_modules(module_name):
                 continue
-
+            parts = module_name.split(".")[-1]
+            packed_moduled_lst = self.packed_modules_mapping.get(parts, [])
             new_module = replace_submodule(
                 self.model, module_name,
                 from_layer(module, self.lora_slots, self.lora_config,
-                           self.model.config))
+                           packed_moduled_lst, self.model.config))
             # (yard1): TODO make this more robust
             if "lm_head" in module_name:
-                sampler_module = self.model.get_submodule("sampler")
+                logits_processor_module = self.model.get_submodule(
+                    "logits_processor")
                 new_module = replace_submodule(
-                    self.model, "sampler",
-                    from_layer_sampler(sampler_module, module, self.lora_slots,
-                                       self.lora_config, self.model.config))
+                    self.model, "logits_processor",
+                    from_layer_logits_processor(logits_processor_module,
+                                                module, self.lora_slots,
+                                                self.lora_config,
+                                                self.model.config))
             self.register_module(module_name, new_module)
             self._register_packed_modules(module_name)
             new_module.set_mapping(self.base_indices, self.sampler_indices,
@@ -508,8 +511,10 @@ class LoRAModelManager:
     def _register_packed_modules(self, module_full_name: str) -> None:
         parts = module_full_name.split(".")
         module_name = parts[-1]
-        replacements = self.packed_modules_mapping.get(module_name)
-        if not replacements:
+        replacements = self.packed_modules_mapping.get(module_name, [])
+        # When replacements is less than or equal to 1, it indicates that this
+        # module is not a packed module.
+        if len(replacements) <= 1:
             return
         prefix = ".".join(parts[:-1])
         self.packed_modules[module_full_name] = [
@@ -535,14 +540,14 @@ class LoRAModelManager:
                 replacement_loras)
 
 
-class LoRALRUCache(LRUCache):
+class LoRALRUCache(LRUCache[LoRAModel]):
 
     def __init__(self, capacity: int, deactivate_lora_fn: Callable[[Hashable],
                                                                    None]):
         super().__init__(capacity)
         self.deactivate_lora_fn = deactivate_lora_fn
 
-    def _on_remove(self, key: Hashable, value: Any):
+    def _on_remove(self, key: Hashable, value: LoRAModel):
         logger.debug(f"Removing LoRA. int id: {key}")
         self.deactivate_lora_fn(key)
         return super()._on_remove(key, value)

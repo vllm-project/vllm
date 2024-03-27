@@ -1,27 +1,22 @@
+import asyncio
 import enum
+import gc
 import os
 import socket
 import subprocess
 import uuid
-import gc
+import warnings
+from collections import OrderedDict
+from functools import lru_cache, partial
 from platform import uname
-from typing import List, Tuple, Union
-from packaging.version import parse, Version
+from typing import (Any, Awaitable, Callable, Generic, Hashable, List,
+                    Optional, Tuple, TypeVar, Union)
 
 import psutil
 import torch
-import asyncio
-from functools import partial
-from typing import (
-    Awaitable,
-    Callable,
-    TypeVar,
-)
-from collections import OrderedDict
-from typing import Any, Hashable, Optional
+from packaging.version import Version, parse
 
 from vllm.logger import init_logger
-import warnings
 
 T = TypeVar("T")
 logger = init_logger(__name__)
@@ -53,10 +48,10 @@ class Counter:
         self.counter = 0
 
 
-class LRUCache:
+class LRUCache(Generic[T]):
 
     def __init__(self, capacity: int):
-        self.cache = OrderedDict()
+        self.cache = OrderedDict[Hashable, T]()
         self.capacity = capacity
 
     def __contains__(self, key: Hashable) -> bool:
@@ -65,10 +60,10 @@ class LRUCache:
     def __len__(self) -> int:
         return len(self.cache)
 
-    def __getitem__(self, key: Hashable) -> Any:
+    def __getitem__(self, key: Hashable) -> T:
         return self.get(key)
 
-    def __setitem__(self, key: Hashable, value: Any) -> None:
+    def __setitem__(self, key: Hashable, value: T) -> None:
         self.put(key, value)
 
     def __delitem__(self, key: Hashable) -> None:
@@ -77,7 +72,9 @@ class LRUCache:
     def touch(self, key: Hashable) -> None:
         self.cache.move_to_end(key)
 
-    def get(self, key: Hashable, default_value: Optional[Any] = None) -> int:
+    def get(self,
+            key: Hashable,
+            default_value: Optional[T] = None) -> Optional[T]:
         if key in self.cache:
             value = self.cache[key]
             self.cache.move_to_end(key)
@@ -85,12 +82,12 @@ class LRUCache:
             value = default_value
         return value
 
-    def put(self, key: Hashable, value: Any) -> None:
+    def put(self, key: Hashable, value: T) -> None:
         self.cache[key] = value
         self.cache.move_to_end(key)
         self._remove_old_if_needed()
 
-    def _on_remove(self, key: Hashable, value: Any):
+    def _on_remove(self, key: Hashable, value: T):
         pass
 
     def remove_oldest(self):
@@ -103,7 +100,7 @@ class LRUCache:
         while len(self.cache) > self.capacity:
             self.remove_oldest()
 
-    def pop(self, key: int, default_value: Optional[Any] = None) -> Any:
+    def pop(self, key: Hashable, default_value: Optional[Any] = None) -> T:
         run_on_remove = key in self.cache
         value = self.cache.pop(key, default_value)
         if run_on_remove:
@@ -120,6 +117,7 @@ def is_hip() -> bool:
     return torch.version.hip is not None
 
 
+@lru_cache(maxsize=None)
 def is_neuron() -> bool:
     try:
         import transformers_neuronx
@@ -128,6 +126,7 @@ def is_neuron() -> bool:
     return transformers_neuronx is not None
 
 
+@lru_cache(maxsize=None)
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
     # NOTE: This import statement should be executed lazily since
@@ -151,6 +150,7 @@ def random_uuid() -> str:
     return str(uuid.uuid4().hex)
 
 
+@lru_cache(maxsize=None)
 def in_wsl() -> bool:
     # Reference: https://github.com/microsoft/WSL/issues/4071
     return "microsoft" in " ".join(uname()).lower()
@@ -205,7 +205,9 @@ def get_ip() -> str:
 
 
 def get_distributed_init_method(ip: str, port: int) -> str:
-    return f"tcp://{ip}:{port}"
+    # Brackets are not permitted in ipv4 addresses,
+    # see https://github.com/python/cpython/issues/103848
+    return f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}"
 
 
 def get_open_port() -> int:
@@ -225,6 +227,7 @@ def set_cuda_visible_devices(device_ids: List[int]) -> None:
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, device_ids))
 
 
+@lru_cache(maxsize=None)
 def get_nvcc_cuda_version() -> Optional[Version]:
     cuda_home = os.environ.get('CUDA_HOME')
     if not cuda_home:
@@ -332,7 +335,27 @@ def create_kv_caches_with_random(
     return key_caches, value_caches
 
 
-class measure_cuda_memory:
+@lru_cache
+def print_warning_once(msg: str) -> None:
+    logger.warning(msg)
+
+
+@lru_cache(maxsize=None)
+def is_pin_memory_available() -> bool:
+
+    if in_wsl():
+        # Pinning memory in WSL is not supported.
+        # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
+        print_warning_once("Using 'pin_memory=False' as WSL is detected. "
+                           "This may slow down the performance.")
+        return False
+    elif is_neuron():
+        print_warning_once("Pin memory is not supported on Neuron.")
+        return False
+    return True
+
+
+class CudaMemoryProfiler:
 
     def __init__(self, device=None):
         self.device = device
@@ -354,3 +377,54 @@ class measure_cuda_memory:
 
         # Force garbage collection
         gc.collect()
+
+
+def str_to_int_tuple(s: str) -> Tuple[int]:
+    """Convert a string to a tuple of integers."""
+    try:
+        return tuple(map(int, s.split(",")))
+    except ValueError as e:
+        raise ValueError(
+            "String must be a series of integers separated by commas "
+            f"(e.g., 1, 2, 3). Given input: {s}") from e
+
+
+def pad_to_max_length(x: List[int], max_len: int, pad: int) -> List[int]:
+    assert len(x) <= max_len
+    return x + [pad] * (max_len - len(x))
+
+
+def make_tensor_with_pad(
+    x: List[List[int]],
+    max_len: int,
+    pad: int,
+    dtype: torch.dtype,
+    device: Optional[Union[str, torch.device]],
+) -> torch.Tensor:
+    """Make a padded tensor of a 2D inputs.
+
+    The padding is applied to the end of each inner list until it reaches
+    `max_len`.
+    """
+    padded_x = [pad_to_max_length(x_i, max_len, pad) for x_i in x]
+    return torch.tensor(padded_x, dtype=dtype, device=device)
+
+
+def async_tensor_h2d(
+    data: list,
+    dtype: torch.dtype,
+    target_device: Union[str, torch.device],
+    pin_memory: bool,
+) -> torch.Tensor:
+    """Asynchronously create a tensor and copy it from host to device."""
+    t = torch.tensor(data, dtype=dtype, pin_memory=pin_memory, device="cpu")
+    return t.to(device=target_device, non_blocking=True)
+
+
+def maybe_expand_dim(tensor: torch.Tensor,
+                     target_dims: int,
+                     size: int = 1) -> torch.Tensor:
+    """Expand the tensor to the target_dims."""
+    if tensor.ndim < target_dims:
+        tensor = tensor.view(-1, *([size] * (target_dims - tensor.ndim)))
+    return tensor

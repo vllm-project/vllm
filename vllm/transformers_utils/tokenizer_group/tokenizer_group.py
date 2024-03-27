@@ -4,11 +4,11 @@ from transformers import PreTrainedTokenizer
 
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.tokenizer import (get_lora_tokenizer,
-                                               get_lora_tokenizer_async)
+                                               get_lora_tokenizer_async,
+                                               get_tokenizer)
 from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
     BaseTokenizerGroup)
 from vllm.utils import LRUCache
-from vllm.transformers_utils.tokenizer import get_tokenizer
 
 
 class TokenizerGroup(BaseTokenizerGroup):
@@ -21,10 +21,8 @@ class TokenizerGroup(BaseTokenizerGroup):
         self.enable_lora = enable_lora
         self.max_input_length = max_input_length
         self.tokenizer = get_tokenizer(self.tokenizer_id, **tokenizer_config)
-        if enable_lora:
-            self.lora_tokenizers = LRUCache(capacity=max_num_seqs)
-        else:
-            self.lora_tokenizers = None
+        self.lora_tokenizers = LRUCache[PreTrainedTokenizer](
+            capacity=max_num_seqs) if enable_lora else None
 
     def ping(self) -> bool:
         """Check if the tokenizer group is alive."""

@@ -5,11 +5,11 @@ for offline inference.
 Requires HuggingFace credentials for access to Llama2.
 """
 
-from typing import Optional, List, Tuple
+from typing import List, Optional, Tuple
 
 from huggingface_hub import snapshot_download
 
-from vllm import EngineArgs, LLMEngine, SamplingParams, RequestOutput
+from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
 from vllm.lora.request import LoRARequest
 
 
