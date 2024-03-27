@@ -27,7 +27,7 @@ Alongside each architecture, we include some popular models that use it.
     - ChatGLM
     - :code:`THUDM/chatglm2-6b`, :code:`THUDM/chatglm3-6b`, etc.
     - ✅︎
-  * - :code:`ChatGLMModel`
+  * - :code:`CohereForCausalLM`
     - Command-R
     - :code:`CohereForAI/c4ai-command-r-v01`, etc.
     - 
