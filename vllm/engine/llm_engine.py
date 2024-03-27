@@ -686,17 +686,20 @@ class LLMEngine:
             # Number of Tokens.
             if prompt_run:
                 num_prompt_tokens = sum(
-                    len(seq_group.prompt_token_ids)
-                    for seq_group in scheduler_outputs.scheduled_seq_groups)
+                    len(scheduled_seq_group.seq_group.prompt_token_ids)
+                    for scheduled_seq_group in
+                    scheduler_outputs.scheduled_seq_groups)
                 num_generation_tokens = sum(
-                    seq_group.num_seqs()
-                    for seq_group in scheduler_outputs.scheduled_seq_groups)
+                    scheduled_seq_group.seq_group.num_seqs()
+                    for scheduled_seq_group in
+                    scheduler_outputs.scheduled_seq_groups)
             else:
                 num_generation_tokens = scheduler_outputs.num_batched_tokens
 
             # Latency Timings.
             time_last_iters = []
-            for seq_group in scheduler_outputs.scheduled_seq_groups:
+            for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
+                seq_group, _ = scheduled_seq_group
                 # Time since last token.
                 # (n.b. updates seq_group.metrics.last_token_time)
                 time_last_iters.append(seq_group.get_last_latency(now))
