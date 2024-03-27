@@ -51,6 +51,7 @@ model_pairs = [
 def test_models(
     vllm_runner,
     example_prompts,
+    manual_cleanup,
     model_pair: ModelPair,
     dtype: str,
     max_tokens: int,
@@ -63,8 +64,8 @@ def test_models(
     # Note: not sure why, but deleting just the model on Ada Lovelace
     #   does not free the GPU memory. On Ampere, deleting the just model
     #   frees the memory.
-    del marlin_model.model.llm_engine.driver_worker
     del marlin_model
+    manual_cleanup()
 
     gptq_model = vllm_runner(model_pair.model_gptq, dtype=dtype)
     gptq_outputs = gptq_model.generate_greedy_logprobs(example_prompts,
@@ -74,8 +75,8 @@ def test_models(
     # Note: not sure why, but deleting just the model on Ada Lovelace
     #   does not free the GPU memory. On Ampere, deleting the just model
     #   frees the memory.
-    del gptq_model.model.llm_engine.driver_worker
     del gptq_model
+    manual_cleanup()
 
     # loop through the prompts
     for prompt_idx in range(len(example_prompts)):

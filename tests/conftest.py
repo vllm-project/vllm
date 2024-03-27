@@ -58,6 +58,11 @@ def cleanup():
         ray.shutdown()
 
 
+@pytest.fixture
+def manual_cleanup():
+    return cleanup
+
+
 @pytest.fixture(autouse=True)
 def cleanup_fixture():
     yield
@@ -274,6 +279,9 @@ class VllmRunner:
         self,
         model_name: str,
         tokenizer_name: Optional[str] = None,
+        # Use smaller max model length, otherwise bigger model cannot run due
+        # to kv cache size limit.
+        max_model_len=10000,
         dtype: str = "half",
         disable_log_stats: bool = True,
         tensor_parallel_size: int = 1,
@@ -287,6 +295,7 @@ class VllmRunner:
             swap_space=0,
             disable_log_stats=disable_log_stats,
             tensor_parallel_size=tensor_parallel_size,
+            max_model_len=max_model_len,
             **kwargs,
         )
 
