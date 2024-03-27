@@ -12,7 +12,6 @@ MODELS = ["facebook/opt-125m"]
 def test_get_prompt_logprobs(
     hf_runner,
     vllm_runner,
-    manual_cleanup,
     model,
     dtype,
     example_prompts,
@@ -25,7 +24,6 @@ def test_get_prompt_logprobs(
         max_tokens=max_tokens,
     )
     del hf_model
-    manual_cleanup()
 
     vllm_model = vllm_runner(model, dtype=dtype, max_logprobs=num_top_logprobs)
     vllm_sampling_params = SamplingParams(max_tokens=max_tokens,

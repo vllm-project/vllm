@@ -67,9 +67,8 @@ def sanitize_vllm_output(vllm_output: Tuple[List[int], str],
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
-                manual_cleanup, vllm_image_prompts, vllm_images,
-                model_and_config: tuple, dtype: str, max_tokens: int,
-                worker_use_ray: bool) -> None:
+                vllm_image_prompts, vllm_images, model_and_config: tuple,
+                dtype: str, max_tokens: int, worker_use_ray: bool) -> None:
     """Inference result should be the same between hf and vllm.
 
     All the image fixtures for the test is under tests/images.
@@ -85,7 +84,6 @@ def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
                                           max_tokens,
                                           images=hf_images)
     del hf_model
-    manual_cleanup()
 
     vllm_model = vllm_runner(model_id,
                              dtype=dtype,

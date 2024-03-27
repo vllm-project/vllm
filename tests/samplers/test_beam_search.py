@@ -24,7 +24,6 @@ def test_beam_search_single_input(
     hf_runner,
     vllm_runner,
     example_prompts,
-    manual_cleanup,
     model: str,
     dtype: str,
     max_tokens: int,
@@ -35,7 +34,6 @@ def test_beam_search_single_input(
     hf_outputs = hf_model.generate_beam_search(example_prompts, beam_width,
                                                max_tokens)
     del hf_model
-    manual_cleanup()
 
     vllm_model = vllm_runner(model, dtype=dtype)
     vllm_outputs = vllm_model.generate_beam_search(example_prompts, beam_width,

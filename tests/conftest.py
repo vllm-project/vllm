@@ -58,11 +58,6 @@ def cleanup():
         ray.shutdown()
 
 
-@pytest.fixture
-def manual_cleanup():
-    return cleanup
-
-
 @pytest.fixture(autouse=True)
 def cleanup_fixture():
     yield
@@ -267,6 +262,10 @@ class HfRunner:
             all_logprobs.append(seq_logprobs)
         return all_logprobs
 
+    def __del__(self):
+        del self.model
+        cleanup()
+
 
 @pytest.fixture
 def hf_runner():
@@ -382,6 +381,10 @@ class VllmRunner:
                                             max_tokens=max_tokens)
         outputs = self.generate(prompts, beam_search_params)
         return outputs
+
+    def __del__(self):
+        del self.model
+        cleanup()
 
 
 @pytest.fixture

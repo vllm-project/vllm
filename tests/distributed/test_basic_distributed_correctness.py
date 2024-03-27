@@ -29,7 +29,6 @@ def test_models(
     hf_runner,
     vllm_runner,
     example_prompts,
-    manual_cleanup,
     model: str,
     dtype: str,
     max_tokens: int,
@@ -37,7 +36,6 @@ def test_models(
     hf_model = hf_runner(model, dtype=dtype)
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
     del hf_model
-    manual_cleanup()
 
     vllm_model = vllm_runner(model, dtype=dtype, tensor_parallel_size=2)
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
