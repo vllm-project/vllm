@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from huggingface_hub.constants import HF_HUB_OFFLINE
+
 from vllm.config import (CacheConfig, DeviceConfig, EngineConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          SpeculativeConfig, TokenizerPoolConfig,

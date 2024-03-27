@@ -1,20 +1,18 @@
 """Utilities for downloading and initializing model weights."""
 import contextlib
-import filelock
 import fnmatch
 import glob
 import hashlib
 import json
 import os
-import requests
 from collections import defaultdict
 from typing import Any, Iterable, Iterator, List, Optional, Tuple
 
 import filelock
 import huggingface_hub.constants
 import numpy as np
+import requests
 import torch
-
 from huggingface_hub import HfFileSystem, snapshot_download
 from huggingface_hub.constants import HF_HUB_OFFLINE
 from huggingface_hub.utils import OfflineModeIsEnabled, RevisionNotFoundError
@@ -184,13 +182,15 @@ def prepare_hf_model_weights(
 
     # Find the model weights to load:
     # - check if pointing at a local directory
-    # - download weights from HuggingFace Hub (including a newer revision if it exists)
-    # - discover weights in the local HuggingFace Hub cache (fallback to this if download fails)
+    # - download weights from HuggingFace Hub (including a newer revision if it
+    #   exists)
+    # - discover weights in the local HuggingFace Hub cache (fallback to this if
+    #   download fails)
     if os.path.isdir(model_name_or_path):
         hf_folder = model_name_or_path
     else:
-        # If there is an error downloading from the HF API, we'll fallback to loading from
-        # the local cache
+        # If there is an error downloading from the HF API, we'll fallback to
+        # loading from the local cache
         local_files_only = False
         if HF_HUB_OFFLINE:
             local_files_only = True
@@ -220,17 +220,18 @@ def prepare_hf_model_weights(
                     FileNotFoundError,
                     requests.HTTPError,
             ) as error:
-                # If querying the repo fails (eg. Network is down / HF Hub is down /
-                # HF Hub returns access error / or HF_HUB_OFFLINE=1), see if we can
-                # fallback to load from locally cached files instead of crashing
+                # If querying the repo fails (eg. Network is down / HF Hub is
+                # down / HF Hub returns access error / or HF_HUB_OFFLINE=1), see
+                # if we can fallback to load from locally cached files instead
+                # of crashing
                 logger.warning(f"Error in call to HF Hub: {error}. "
                                f"Attempting to load from local cache instead.")
                 local_files_only = True
 
-        # Use file lock to prevent multiple processes from
-        # downloading the same model weights at the same time.
-        # If we fallback to local files only, we don't need the lock, but we still use
-        # snapshot_download to resolve the path to the model files in the cache
+        # Use file lock to prevent multiple processes from downloading the same
+        # model weights at the same time.  If we fallback to local files only,
+        # we don't need the lock, but we still use snapshot_download to resolve
+        # the path to the model files in the cache
         with get_lock(model_name_or_path, cache_dir
                       ) if not local_files_only else contextlib.nullcontext():
             hf_folder = snapshot_download(model_name_or_path,
