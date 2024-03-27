@@ -122,7 +122,7 @@ def zephyr_lora_files():
 @pytest.fixture(scope="session")
 def server(zephyr_lora_files):
     ray.init()
-    command_args = [
+    server_runner = ServerRunner.remote([
         "--model",
         MODEL_NAME,
         # use half precision for speed and memory savings in CI environment
@@ -142,9 +142,7 @@ def server(zephyr_lora_files):
         "2",
         "--max-num-seqs",
         "128"
-    ]
-
-    server_runner = ServerRunner.remote(command_args)
+    ])
     ray.get(server_runner.ready.remote())
     yield server_runner
     ray.shutdown()
