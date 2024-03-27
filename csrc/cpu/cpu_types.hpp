@@ -174,10 +174,10 @@ struct FP32Vec8 : public Vec<FP32Vec8> {
   float reduce_sum() const {
     AliasReg ar;
     ar.reg = reg;
-    float ans = 0;
-    unroll_loop<int, VEC_ELEM_NUM>([&ans, &ar](int i) { ans += ar.values[i]; });
+    float result = 0;
+    unroll_loop<int, VEC_ELEM_NUM>([&result, &ar](int i) { result += ar.values[i]; });
 
-    return ans;
+    return result;
   }
 
   FP32Vec8 exp() const {
