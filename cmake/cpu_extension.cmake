@@ -4,7 +4,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Define environment variables for special configurations
 #
 if(DEFINED ENV{VLLM_CPU_AVX512BF16})
-set(ENABLE_AVX512BF16 ON)
+    set(ENABLE_AVX512BF16 ON)
 endif()
 
 include_directories("${CMAKE_SOURCE_DIR}/csrc")
