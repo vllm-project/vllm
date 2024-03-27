@@ -361,8 +361,6 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
         # If the block has is None, then the block is not full.
         # If the block is not full, then we expect it to have a refcount of 1.
-        # This doesn't feel quite justified but it's not the worst assertion..
-        # (I'm thinking of beam search / CoW)
         if block_hash is None:
             assert new_block.ref_count == 1
         return new_block

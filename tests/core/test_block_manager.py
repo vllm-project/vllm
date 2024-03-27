@@ -121,7 +121,6 @@ def test_append_slot_single_seq():
     assert before_blocks - after_blocks == 1
 
 
-@pytest.mark.skip("Bug in prefix caching hash if prompt size < block size")
 def test_append_slot_cow():
     block_size = 4
     num_cpu_blocks = 4
@@ -163,7 +162,6 @@ def test_append_slot_cow():
     assert before_blocks - after_blocks == 1
 
 
-@pytest.mark.skip("Bug in prefix caching hash if prompt size < block size")
 def test_fork():
     block_size = 4
     num_cpu_blocks = 4

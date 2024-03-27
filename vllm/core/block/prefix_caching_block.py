@@ -19,7 +19,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     content hash. It reuses blocks with the same content hash to avoid redundant
     memory allocation. The allocator also supports copy-on-write operations.
 
-    Args:    
+    Args:
         num_blocks (int): The total number of blocks to manage.
         block_size (int): The size of each block in tokens.
         block_ids(Optional[Iterable[int]], optional): An optional iterable of
