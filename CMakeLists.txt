@@ -171,6 +171,25 @@ define_gpu_extension_target(
   WITH_SOABI)
 
 #
+# custom extension
+#
+
+set(VLLM_CUSTOM_EXT_SRC
+  "csrc/custom/custom.cu"
+  "csrc/custom/custom_kernels.cu"
+  "csrc/custom/fused_kernel.cu"
+)
+
+define_gpu_extension_target(
+  _custom_C
+  DESTINATION vllm
+  LANGUAGE ${VLLM_GPU_LANG}
+  SOURCES ${VLLM_CUSTOM_EXT_SRC}
+  COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+  ARCHITECTURES ${VLLM_GPU_ARCHES}
+  WITH_SOABI)
+
+#
 # _moe_C extension
 #
 
@@ -268,6 +287,9 @@ add_custom_target(default)
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   message(STATUS "Enabling C extension.")
   add_dependencies(default _C)
+  if(VLLM_GPU_LANG STREQUAL "HIP")
+    add_dependencies(default _custom_C)
+  endif()
 endif()
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
