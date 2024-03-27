@@ -570,9 +570,9 @@ if __name__ == "__main__":
         "--metadata",
         metavar="KEY=VALUE",
         nargs="*",
-        help="Key-value pairs (e.g, version=0.3.3, tp=1) of metadata "
-        "of this run to be saved in the result JSON file for record "
-        "keeping purposes.",
+        help="Key-value pairs (e.g, --metadata version=0.3.3 tp=1) "
+        "for metadata of this run to be saved in the result JSON file "
+        "for record keeping purposes.",
     )
     parser.add_argument(
         "--result-dir",
