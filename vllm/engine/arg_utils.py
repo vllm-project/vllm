@@ -3,9 +3,10 @@ import dataclasses
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, LoRAConfig,
-                         TokenizerPoolConfig)
+from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig, TokenizerPoolConfig,
+                         VisionLanguageConfig)
+from vllm.utils import str_to_int_tuple
 
 
 @dataclass
@@ -51,6 +52,11 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
     ray_workers_use_nsight: bool = False
+    # Related to Vision-language models such as llava
+    image_input_type: Optional[str] = None
+    image_token_id: Optional[int] = None
+    image_input_shape: Optional[str] = None
+    image_feature_size: Optional[int] = None
     scheduler_delay_factor: float = 0.0
 
     def __post_init__(self):
@@ -306,6 +312,31 @@ class EngineArgs:
                             default=EngineArgs.device,
                             choices=["auto", "cuda", "neuron"],
                             help='Device type for vLLM execution.')
+        # Related to Vision-language models such as llava
+        parser.add_argument(
+            '--image-input-type',
+            type=str,
+            default=None,
+            choices=[
+                t.name.lower() for t in VisionLanguageConfig.ImageInputType
+            ],
+            help=('The image input type passed into vLLM. '
+                  'Should be one of "pixel_values" or "image_features".'))
+        parser.add_argument('--image-token-id',
+                            type=int,
+                            default=None,
+                            help=('Input id for image token.'))
+        parser.add_argument(
+            '--image-input-shape',
+            type=str,
+            default=None,
+            help=('The biggest image input shape (worst for memory footprint) '
+                  'given an input type. Only used for vLLM\'s profile_run.'))
+        parser.add_argument(
+            '--image-feature-size',
+            type=int,
+            default=None,
+            help=('The image feature size along the context dimension.'))
         parser.add_argument(
             '--scheduler-delay-factor',
             type=float,
@@ -325,7 +356,8 @@ class EngineArgs:
     def create_engine_configs(
         self,
     ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig,
-               DeviceConfig, Optional[LoRAConfig]]:
+               DeviceConfig, Optional[LoRAConfig],
+               Optional[VisionLanguageConfig]]:
         device_config = DeviceConfig(self.device)
         model_config = ModelConfig(
             self.model, self.tokenizer, self.tokenizer_mode,
@@ -337,7 +369,8 @@ class EngineArgs:
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
-                                   model_config.get_sliding_window())
+                                   model_config.get_sliding_window(),
+                                   self.enable_prefix_caching)
         parallel_config = ParallelConfig(
             self.pipeline_parallel_size, self.tensor_parallel_size,
             self.worker_use_ray, self.max_parallel_loading_workers,
@@ -358,8 +391,25 @@ class EngineArgs:
             lora_dtype=self.lora_dtype,
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
+
+        if self.image_input_type:
+            if (not self.image_token_id or not self.image_input_shape
+                    or not self.image_feature_size):
+                raise ValueError(
+                    'Specify `image_token_id`, `image_input_shape` and '
+                    '`image_feature_size` together with `image_input_type`.')
+            vision_language_config = VisionLanguageConfig(
+                image_input_type=VisionLanguageConfig.
+                get_image_input_enum_type(self.image_input_type),
+                image_token_id=self.image_token_id,
+                image_input_shape=str_to_int_tuple(self.image_input_shape),
+                image_feature_size=self.image_feature_size,
+            )
+        else:
+            vision_language_config = None
+
         return (model_config, cache_config, parallel_config, scheduler_config,
-                device_config, lora_config)
+                device_config, lora_config, vision_language_config)
 
 
 @dataclass
