@@ -319,7 +319,7 @@ def get_requirements() -> List[str]:
     return requirements
 
 
-ext_modules = [CMakeExtension(name="vllm._custom_C")]
+ext_modules = []
 
 if _is_cuda():
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))
@@ -329,6 +329,7 @@ if _is_cuda():
 
 if not _is_neuron():
     ext_modules.append(CMakeExtension(name="vllm._C"))
+    ext_modules.append(CMakeExtension(name="vllm._custom_C"))
 
 package_data = {
     "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
