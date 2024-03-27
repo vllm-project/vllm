@@ -16,7 +16,7 @@ runs:
       VENV="${{ inputs.venv }}-${COMMIT:0:7}"
       source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
 
-      pip3 install git+https://github.com/EleutherAI/lm-evaluation-harness.git
+      pip3 install git+https://github.com/EleutherAI/lm-evaluation-harness.git@262f879a06aa5de869e5dd951d0ff2cf2f9ba380
       pip3 install optimum auto-gptq
 
       SUCCESS=0
