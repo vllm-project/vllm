@@ -318,9 +318,9 @@ class CacheConfig:
         gpu_memory_utilization: Fraction of GPU memory to use for the
             vLLM execution.
         swap_space: Size of the CPU swap space per GPU (in GiB).
+        cache_dtype: Data type for kv cache storage.
         forced_num_gpu_blocks: Number of GPU blocks to use. This overrides the
             profiled num_gpu_blocks if specified. Does nothing if None.
-        cache_dtype: Data type for kv cache storage.
     """
 
     def __init__(
@@ -328,8 +328,8 @@ class CacheConfig:
         block_size: int,
         gpu_memory_utilization: float,
         swap_space: int,
-        forced_num_gpu_blocks: Optional[int],
         cache_dtype: str,
+        forced_num_gpu_blocks: Optional[int] = None,
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
     ) -> None:

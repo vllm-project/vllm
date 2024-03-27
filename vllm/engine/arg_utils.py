@@ -381,8 +381,8 @@ class EngineArgs:
             self.max_logprobs)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
-                                   self.swap_space, self.forced_num_gpu_blocks,
-                                   self.kv_cache_dtype,
+                                   self.swap_space, self.kv_cache_dtype,
+                                   self.forced_num_gpu_blocks,
                                    model_config.get_sliding_window(),
                                    self.enable_prefix_caching)
         parallel_config = ParallelConfig(
