@@ -67,6 +67,7 @@ vLLM seamlessly supports many Hugging Face models, including the following archi
 - Baichuan & Baichuan2 (`baichuan-inc/Baichuan2-13B-Chat`, `baichuan-inc/Baichuan-7B`, etc.)
 - BLOOM (`bigscience/bloom`, `bigscience/bloomz`, etc.)
 - ChatGLM (`THUDM/chatglm2-6b`, `THUDM/chatglm3-6b`, etc.)
+- Command-R (`CohereForAI/c4ai-command-r-v01`, etc.)
 - DBRX (`databricks/dbrx-base`, `databricks/dbrx-instruct` etc.)
 - DeciLM (`Deci/DeciLM-7B`, `Deci/DeciLM-7B-instruct`, etc.)
 - Falcon (`tiiuae/falcon-7b`, `tiiuae/falcon-40b`, `tiiuae/falcon-rw-7b`, etc.)
