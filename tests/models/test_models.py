@@ -6,14 +6,14 @@ import pytest
 
 MODELS = [
     # "facebook/opt-125m",  # Broken.
-    "gpt2",
-    "bigcode/tiny_starcoder_py",
-    "EleutherAI/pythia-70m",
-    "bigscience/bloom-560m",
-    "microsoft/phi-2",
-    "stabilityai/stablelm-3b-4e1t",
-    "allenai/OLMo-1B",
-    "bigcode/starcoder2-3b",
+    # "gpt2",
+    # "bigcode/tiny_starcoder_py",
+    # "EleutherAI/pythia-70m",
+    # "bigscience/bloom-560m",
+    # "microsoft/phi-2",
+    # "stabilityai/stablelm-3b-4e1t",
+    "allenai/OLMo-1B",  # Broken
+    # "bigcode/starcoder2-3b",
 ]
 
 

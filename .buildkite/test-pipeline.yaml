@@ -44,7 +44,6 @@ steps:
   commands:
     - bash ../.buildkite/download-images.sh
     - pytest -v -s models --ignore=models/test_llava.py
-  soft_fail: true
 
 - label: Llava Test
   commands:
