@@ -1,5 +1,5 @@
 import time
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from vllm.lora.request import LoRARequest
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
@@ -18,6 +18,9 @@ class CompletionOutput:
         logprobs: The log probabilities of the top probability words at each
             position if the logprobs are requested.
         finish_reason: The reason why the sequence is finished.
+        stop_reason: The stop string or token id that caused the completion
+            to stop, None if the completion finished for some other reason
+            including encountering the EOS token.
         lora_request: The LoRA request that was used to generate the output.
     """
 
@@ -29,6 +32,7 @@ class CompletionOutput:
         cumulative_logprob: float,
         logprobs: Optional[SampleLogprobs],
         finish_reason: Optional[str] = None,
+        stop_reason: Union[int, str, None] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> None:
         self.index = index
@@ -37,6 +41,7 @@ class CompletionOutput:
         self.cumulative_logprob = cumulative_logprob
         self.logprobs = logprobs
         self.finish_reason = finish_reason
+        self.stop_reason = stop_reason
         self.lora_request = lora_request
 
     def finished(self) -> bool:
@@ -48,7 +53,8 @@ class CompletionOutput:
                 f"token_ids={self.token_ids}, "
                 f"cumulative_logprob={self.cumulative_logprob}, "
                 f"logprobs={self.logprobs}, "
-                f"finish_reason={self.finish_reason})")
+                f"finish_reason={self.finish_reason}, "
+                f"stop_reason={self.stop_reason})")
 
 
 class RequestOutput:
@@ -111,8 +117,8 @@ class RequestOutput:
                              seq.get_output_token_ids(),
                              seq.get_cumulative_logprob(),
                              seq.output_logprobs if include_logprobs else None,
-                             SequenceStatus.get_finished_reason(seq.status))
-            for seq in top_n_seqs
+                             SequenceStatus.get_finished_reason(seq.status),
+                             seq.stop_reason) for seq in top_n_seqs
         ]
 
         # Every sequence in the sequence group should have the same prompt.
