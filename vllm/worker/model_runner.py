@@ -170,6 +170,7 @@ class ModelRunner:
             computed_len = seq_data.get_num_computed_tokens()
             prefill_end = min(seq_data.get_prompt_len(),
                               computed_len + token_chunk_size)
+            # TODO(sang): Rename it after chunked prefill is introduced.
             prompt_tokens = seq_data.get_token_ids()[computed_len:prefill_end]
             prompt_len = len(prompt_tokens)
             # Right now, the prefill_end is always same as the length of
@@ -348,6 +349,7 @@ class ModelRunner:
 
         for seq_group_metadata in seq_group_metadata_list:
             assert not seq_group_metadata.is_prompt
+            assert seq_group_metadata.token_chunk_size == 1
 
             seq_ids = list(seq_group_metadata.seq_data.keys())
             lora_id = seq_group_metadata.lora_int_id

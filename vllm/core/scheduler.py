@@ -226,11 +226,11 @@ class Scheduler:
                     "sequence.")
                 # get_len includes output tokens if the request has been
                 # preempted.
-                num_prompt_tokens = waiting_seqs[0].get_len()
-                if num_prompt_tokens > self.prompt_limit:
+                num_prefill_tokens = waiting_seqs[0].get_len()
+                if num_prefill_tokens > self.prompt_limit:
                     logger.warning(
-                        f"Input prompt ({num_prompt_tokens} tokens) is too long"
-                        f" and exceeds limit of {self.prompt_limit}")
+                        f"Input prompt ({num_prefill_tokens} tokens) is too "
+                        f"long and exceeds limit of {self.prompt_limit}")
                     for seq in waiting_seqs:
                         seq.status = SequenceStatus.FINISHED_IGNORED
                     ignored_seq_groups.append(seq_group)
@@ -243,8 +243,8 @@ class Scheduler:
                     break
                 elif can_allocate == AllocStatus.NEVER:
                     logger.warning(
-                        f"Input prompt ({num_prompt_tokens} tokens) is too long"
-                        f" and exceeds the capacity of block_manager")
+                        f"Input prompt ({num_prefill_tokens} tokens) is too "
+                        f"long and exceeds the capacity of block_manager")
                     for seq in waiting_seqs:
                         seq.status = SequenceStatus.FINISHED_IGNORED
                     ignored_seq_groups.append(seq_group)
@@ -263,7 +263,7 @@ class Scheduler:
                         continue
 
                 # If the number of batched tokens exceeds the limit, stop.
-                num_batched_tokens += num_prompt_tokens
+                num_batched_tokens += num_prefill_tokens
                 if (num_batched_tokens >
                         self.scheduler_config.max_num_batched_tokens):
                     break
@@ -282,8 +282,9 @@ class Scheduler:
                 self.running.append(seq_group)
                 num_curr_seqs += num_new_seqs
                 scheduled.append(
-                    ScheduledSequenceGroup(seq_group=seq_group,
-                                           token_chunk_size=num_prompt_tokens))
+                    ScheduledSequenceGroup(
+                        seq_group=seq_group,
+                        token_chunk_size=num_prefill_tokens))
             self.waiting.extendleft(leftover_waiting_sequences)
 
             if scheduled or ignored_seq_groups:
@@ -444,10 +445,7 @@ class Scheduler:
         self.block_manager.fork(parent_seq, child_seq)
 
     def free_seq(self, seq: Sequence) -> None:
-        """Free a sequence from a block table.
-
-        Freed sequence can be used 
-        """
+        """Free a sequence from a block table."""
         self.block_manager.free(seq)
 
     def free_finished_seq_groups(self) -> None:
