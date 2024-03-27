@@ -35,9 +35,14 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         block_size: int,
         block_ids: Optional[Iterable[int]] = None,
     ):
+        # A mapping of prefix hash to block index. All blocks which have a
+        # prefix hash will be in this dict, even if they have refcount 0.
+        self._cached_blocks: Dict[PrefixHash, BlockIndex] = {}
 
-        self._cached_blocks: Dict[PrefixHash, BlockId] = {}
-        self._unused_cached_blocks: Dict[PrefixHash, BlockId] = {}
+        # A mapping of prefix hash to block index. All blocks which have a
+        # prefix hash AND refcount 0 will be in this dict. Thus, it is a subset
+        # of self._cached_blocks.
+        self._unused_cached_blocks: Dict[PrefixHash, BlockIndex] = {}
 
         self._hashless_allocator = NaiveBlockAllocator(
             create_block=self._create_block,
