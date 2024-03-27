@@ -73,7 +73,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
         # when alibi slopes is used. It is because of the limitation
         # from xformer API.
         # will not appear in the __repr__ and __init__
-        self.attn_bias: Optional[torch.Tensor] = None
+        self.attn_bias: Optional[List[torch.Tensor]] = None
 
 
 class TorchSDPABackendImpl(AttentionImpl):
@@ -147,52 +147,40 @@ class TorchSDPABackendImpl(AttentionImpl):
                     value = value.repeat_interleave(self.num_queries_per_kv,
                                                     dim=1)
 
-                if self.need_mask and attn_metadata.attn_bias is None:
-                    att_masks: List[torch.Tensor] = []
+                if attn_metadata.attn_bias is None:
                     if self.alibi_slopes is not None:
                         att_masks = _make_alibi_bias(
                             self.alibi_slopes, query.dtype,
                             attn_metadata.prompt_lens)  # type: ignore
-                    else:
+                    elif self.sliding_window is not None:
                         att_masks = _make_sliding_window_bias(
                             attn_metadata.prompt_lens, self.sliding_window,
                             query.dtype)  # type: ignore
-                    attn_metadata.attn_bias = _make_attention_mask(
-                        att_masks, attn_metadata.prompt_lens,
-                        attn_metadata.num_prompt_tokens,
-                        query.dtype)  # type: ignore
+                    else:
+                        att_masks = [None] * len(attn_metadata.prompt_lens)
+                    attn_metadata.attn_bias = att_masks
 
                 query = query.movedim(0, query.dim() - 2)
                 key = key.movedim(0, key.dim() - 2)
                 value = value.movedim(0, value.dim() - 2)
 
-                if self.need_mask:
-                    output = scaled_dot_product_attention(
-                        query,
-                        key,
-                        value,
-                        attn_mask=attn_metadata.attn_bias,
+                start = 0
+                output = torch.empty(
+                    (num_tokens, self.num_heads, self.head_size),
+                    dtype=query.dtype)
+                for prompt_len, mask in zip(attn_metadata.prompt_lens,
+                                            attn_metadata.attn_bias):
+                    end = start + prompt_len
+                    sub_out = scaled_dot_product_attention(
+                        query[:, start:end, :],
+                        key[:, start:end, :],
+                        value[:, start:end, :],
+                        attn_mask=mask,
                         dropout_p=0.0,
-                        is_causal=False,
-                        scale=self.scale).movedim(query.dim() - 2,
-                                                  0).contiguous()
-                else:
-                    start = 0
-                    output = torch.empty(
-                        (num_tokens, self.num_heads, self.head_size),
-                        dtype=query.dtype)
-                    for prompt_len in attn_metadata.prompt_lens:
-                        end = start + prompt_len
-                        sub_out = scaled_dot_product_attention(
-                            query[:, start:end, :],
-                            key[:, start:end, :],
-                            value[:, start:end, :],
-                            attn_mask=None,
-                            dropout_p=0.0,
-                            is_causal=True,
-                            scale=self.scale).movedim(query.dim() - 2, 0)
-                        output[start:end, :, :] = sub_out
-                        start = end
+                        is_causal=not self.need_mask,
+                        scale=self.scale).movedim(query.dim() - 2, 0)
+                    output[start:end, :, :] = sub_out
+                    start = end
             else:
                 # prefix-enabled attention
                 raise RuntimeError(
@@ -215,28 +203,6 @@ class TorchSDPABackendImpl(AttentionImpl):
 
         # Reshape the output tensor.
         return output.view(-1, self.num_heads * self.head_size)
-
-
-def _make_attention_mask(
-    att_bias: List[torch.Tensor],
-    prompt_lens: List[int],
-    prompt_token_num: int,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    assert att_bias[0].dim() == 3
-    assert len(att_bias) == len(prompt_lens)
-    head_size, _, _ = att_bias[0].size()
-    mask = torch.empty(head_size,
-                       prompt_token_num,
-                       prompt_token_num,
-                       dtype=dtype)
-    mask.fill_(-torch.inf)
-    start = 0
-    for prompt_len, sub_mask in zip(prompt_lens, att_bias):
-        end = start + prompt_len
-        mask[:, start:end, start:end] = sub_mask
-        start += prompt_len
-    return mask
 
 
 def _make_alibi_bias(
