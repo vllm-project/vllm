@@ -80,7 +80,7 @@ class LlamaMLP(nn.Module):
                               dtype=x.dtype,
                               device=x.device)
             _custom_C.LLMM_Silu(self.gate_up_proj.weight,
-                                 x.view(-1, x.size(-1)), out, 8)
+                                x.view(-1, x.size(-1)), out, 8)
             x = out.view(x.shape[0], x.shape[1], out.shape[1])
         else:
             gate_up, _ = self.gate_up_proj(x)

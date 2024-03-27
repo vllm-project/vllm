@@ -26,6 +26,7 @@ def adjust_marlin_shard(param, shard_size, shard_offset):
 
     return shard_size * marlin_tile_size, shard_offset * marlin_tile_size
 
+
 def run_hip_linear(x, weight, bias):
     batched = False
     if x.dim() == 3:
@@ -40,7 +41,8 @@ def run_hip_linear(x, weight, bias):
                           dtype=inp.dtype,
                           device='cuda')
     if inp.shape[0] == 1 and ((k == 8192 and
-        (m == 1280 or m == 7168))) or (k == 3584 and m == 8192):
+                               (m == 1280 or m == 7168))) or (k == 3584
+                                                              and m == 8192):
         _custom_C.LLMM1(weight, inp, out, 8)
     elif inp.shape[0] == 1 and k <= 8192 and k % 8 == 0 and m % 4 == 0:
         _custom_C.LLMM1(weight, inp, out, 4)
@@ -51,6 +53,7 @@ def run_hip_linear(x, weight, bias):
     if bias is not None:
         out = out + bias
     return out
+
 
 class LinearMethodBase(ABC):
     """Base class for different (maybe quantized) linear methods."""
