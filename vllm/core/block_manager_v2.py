@@ -11,19 +11,7 @@ SeqId = int
 
 
 class BlockSpaceManagerV2(BlockSpaceManager):
-    """BlockSpaceManager implementation with improved testability over v1.
-
-    Missing features:
-    * General features
-        * Swap in/swap out implementation.
-        * Sliding window BlockTable
-    * Prefix caching
-        * Evictor policies (unused blocks are evicted arbitrarily).
-        * Test that prefix blocks are not evicted
-        * Update access time for blocks
-        * Track computed bit.
-    """
-
+    
     def __init__(
         self,
         block_size: int,
@@ -120,6 +108,8 @@ class BlockSpaceManagerV2(BlockSpaceManager):
     ) -> Optional[Tuple[int, int]]:
 
         block_table = self.block_tables[seq.seq_id]
+
+        # Get unseen token ids.
         num_full_slots = block_table.num_full_slots
         unseen_token_ids = seq.get_token_ids()[num_full_slots:]
         assert unseen_token_ids
