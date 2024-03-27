@@ -1,5 +1,12 @@
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+#
+# Define environment variables for special configurations
+#
+if(DEFINED ENV{VLLM_CPU_AVX512BF16})
+set(ENABLE_AVX512BF16 ON)
+endif()
+
 include_directories("${CMAKE_SOURCE_DIR}/csrc")
 
 #
@@ -36,12 +43,15 @@ if (AVX512_FOUND)
         "-mavx512dq")
 
     find_isa(${CPUINFO} "avx512_bf16" AVX512BF16_FOUND)
-    if (AVX512BF16_FOUND AND
-        CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND 
-        CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3) 
-        list(APPEND CXX_COMPILE_FLAGS "-mavx512bf16")
+    if (AVX512BF16_FOUND OR ENABLE_AVX512BF16)
+        if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND 
+            CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3) 
+            list(APPEND CXX_COMPILE_FLAGS "-mavx512bf16")
+        else()
+            message(WARNING "Disable AVX512-BF16 ISA support, requires gcc/g++ >= 12.3")
+        endif()
     else()
-        message(WARNING "Disable AVX512-BF16 ISA support, requires gcc/g++ >= 12.3")
+        message(WARNING "Disable AVX512-BF16 ISA support, no avx512_bf16 found in local CPU flags." " If cross-compilation is required, please set env VLLM_CPU_AVX512BF16=1.")
     endif()
 else()
     message(FATAL_ERROR "vLLM CPU backend requires AVX512 ISA support.")
