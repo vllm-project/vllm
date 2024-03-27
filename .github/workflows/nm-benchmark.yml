@@ -134,7 +134,15 @@ jobs:
         with:
           name: ${{ github.run_id }}-${{ inputs.label }}
           path: benchmark-results
-          retention-days: 10
+          retention-days: 2
+
+      - name: copy benchmark results to EFS store
+        if: success()
+        uses: ./.github/actions/nm-copy-benchmark-data-to-efs
+        with:
+          label: ${{ inputs.label }}
+          src: benchmark-results
+          efs_dst: /EFS/benchmark_results
 
       # Produce GHA benchmark JSONs
       - name: make github-action-benchmark JSONs 
@@ -164,6 +172,14 @@ jobs:
           path: gh-action-benchmark-jsons 
           retention-days: 1
 
+      - name: copy gh action benchmark JSONs to EFS store
+        if: success()
+        uses: ./.github/actions/nm-copy-benchmark-data-to-efs
+        with:
+          label: ${{ inputs.label }}
+          src: gh-action-benchmark-jsons
+          efs_dst: /EFS/benchmark_results
+
   NM_GH_ACTION_BENCHMARK:
 
     needs: BENCHMARK 
@@ -192,7 +208,7 @@ jobs:
 
       - name: nm-github-action-benchmark(bigger_is_better.json)
         # Absence of the file indicates that there were no "bigger_is_better" metrics
-        if: ${{ hashFiles('downloads/bigger_is_better.json') != '' }}
+        if: (success() || failure()) && (hashFiles('downloads/bigger_is_better.json') != '')
         uses: ./.github/actions/nm-github-action-benchmark
         with:
           gh_action_benchmark_name: "bigger_is_better"
@@ -201,11 +217,11 @@ jobs:
           gh_pages_branch: "nm-gh-pages"
           auto_push: ${{ inputs.push_benchmark_results_to_gh_pages }}
           reporting_enabled: "true"
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: nm-github-action-benchmark(smaller_is_better.json)
         # Absence of the file indicates that there were no "smaller_is_better" metrics
-        if: ${{ hashFiles('downloads/smaller_is_better.json') != '' }}
+        if: (success() || failure()) && (hashFiles('downloads/smaller_is_better.json') != '')
         uses: ./.github/actions/nm-github-action-benchmark
         with:
           gh_action_benchmark_name: "smaller_is_better"
@@ -214,11 +230,11 @@ jobs:
           gh_pages_branch: "nm-gh-pages"
           auto_push: ${{ inputs.push_benchmark_results_to_gh_pages }}
           reporting_enabled: "true"
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: nm-github-action-benchmark(observation_metrics.json)
         # Absence of the file indicates that there were no "observation" metrics
-        if: ${{ hashFiles('downloads/observation_metrics.json') != '' }}
+        if: (success() || failure()) && (hashFiles('downloads/observation_metrics.json') != '')
         uses: ./.github/actions/nm-github-action-benchmark
         with:
           gh_action_benchmark_name: "observation_metrics"
@@ -231,4 +247,4 @@ jobs:
           gh_pages_branch: "nm-gh-pages"
           auto_push: ${{ inputs.push_benchmark_results_to_gh_pages }}
           reporting_enabled: "false"
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}

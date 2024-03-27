@@ -39,6 +39,13 @@ inputs:
 runs: 
   using: composite
   steps:
+    # A previous invocation of this action may have left the github pages branch in an
+    # inconsistent state.
+    - name: reset github pages branch
+      run: |
+        git update-ref refs/heads/${{ inputs.gh_pages_branch }} origin/${{ inputs.gh_pages_branch }}
+      shell: bash
+
     - name: push to gh pages
       uses: benchmark-action/github-action-benchmark@v1
       with:
@@ -47,7 +54,7 @@ runs:
         tool: ${{ inputs.gh_action_benchmark_tool }}
         gh-pages-branch: ${{ inputs.gh_pages_branch }}
         # Token required for pushing to nm-gh-pages branch 
-        github-token: ${{ inputs.github_token}}
+        github-token: ${{ inputs.github_token }}
         # Push and deploy to Github pages automatically
         auto-push: ${{ inputs.auto_push == 'true' }}
         # Add a commit comment comparing the current benchmark with the previous.
