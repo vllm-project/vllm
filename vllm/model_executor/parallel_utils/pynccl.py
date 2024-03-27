@@ -39,9 +39,9 @@ if so_file:
         f"Loading nccl from environment variable VLLM_NCCL_SO_PATH={so_file}")
 else:
     if torch.version.cuda is not None:
-        so_file = "libnccl.so"
+        so_file = "libnccl.so.2"
     elif torch.version.hip is not None:
-        so_file = "librccl.so"
+        so_file = "librccl.so.2"
     else:
         raise ValueError("NCCL only supports CUDA and ROCm backends.")
     logger.debug(f"Loading nccl from library {so_file}")
