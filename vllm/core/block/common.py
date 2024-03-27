@@ -103,8 +103,7 @@ class CopyOnWriteTracker:
         self._refcounter = refcounter
         self._allocator = allocator
 
-    def cow_block_if_not_appendable(self,
-                                    block: Block) -> Optional[BlockId]:
+    def cow_block_if_not_appendable(self, block: Block) -> Optional[BlockId]:
         """Performs a copy-on-write operation on the given block if it is not
         appendable.
 

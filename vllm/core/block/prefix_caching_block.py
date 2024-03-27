@@ -37,12 +37,12 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     ):
         # A mapping of prefix hash to block index. All blocks which have a
         # prefix hash will be in this dict, even if they have refcount 0.
-        self._cached_blocks: Dict[PrefixHash, BlockIndex] = {}
+        self._cached_blocks: Dict[PrefixHash, BlockId] = {}
 
         # A mapping of prefix hash to block index. All blocks which have a
         # prefix hash AND refcount 0 will be in this dict. Thus, it is a subset
         # of self._cached_blocks.
-        self._unused_cached_blocks: Dict[PrefixHash, BlockIndex] = {}
+        self._unused_cached_blocks: Dict[PrefixHash, BlockId] = {}
 
         self._hashless_allocator = NaiveBlockAllocator(
             create_block=self._create_block,
@@ -104,7 +104,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         cached_block_id = self._cached_blocks.get(block.content_hash, None)
         if cached_block_id is not None:
             block.block_id = cached_block_id
-            self._incr_refcount_cached_block(block.content_hash, block.block_id)
+            self._incr_refcount_cached_block(block.content_hash,
+                                             block.block_id)
             return block
 
         block = self.allocate_mutable(prev_block)
@@ -140,8 +141,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             # Clear content hash mapping; the block will be overwritten.
             del self._cached_blocks[content_hash_to_evict]
 
-            block_id = self._unused_cached_blocks.pop(
-                content_hash_to_evict)
+            block_id = self._unused_cached_blocks.pop(content_hash_to_evict)
             refcount = self._refcounter.incr(block_id)
             assert refcount == 1
             block = self._create_block(
@@ -157,7 +157,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # No block available in hashless allocator, nor in unused cache blocks.
         raise BlockAllocator.NoFreeBlocksError()
 
-    def _incr_refcount_cached_block(self, content_hash: int, block_id: BlockId) -> None:
+    def _incr_refcount_cached_block(self, content_hash: int,
+                                    block_id: BlockId) -> None:
         refcount = self._refcounter.incr(block_id)
         if refcount == 1:
             assert content_hash in self._unused_cached_blocks
@@ -177,7 +178,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         block.block_id = None
 
     def _free_block_id_for_block(self, block_id: BlockId,
-                                    block: Block) -> None:
+                                 block: Block) -> None:
         assert isinstance(block, PrefixCachingBlock)
 
         if block.content_hash is None:
@@ -256,16 +257,15 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # If the content hash does not have a corresponding cached block,
         # set this block as the cached block.
         if block.content_hash not in self._cached_blocks:
-            self._cached_blocks[
-                block.content_hash] = block.block_id
+            self._cached_blocks[block.content_hash] = block.block_id
         else:
             self._free_block_id_for_block(block.block_id, block)
-            self._incr_refcount_cached_block(block.content_hash, self._cached_blocks[block.content_hash])
+            self._incr_refcount_cached_block(
+                block.content_hash, self._cached_blocks[block.content_hash])
 
         return self._cached_blocks[block.content_hash]
 
-    def cow_block_if_not_appendable(self,
-                                    block: Block) -> Optional[BlockId]:
+    def cow_block_if_not_appendable(self, block: Block) -> Optional[BlockId]:
         """Performs a copy-on-write operation on the given block if it is not
         appendable.
 
@@ -375,7 +375,7 @@ class PrefixCachingBlock(Block):
         # physical block index.
         if self.content_hash is not None:
             self.block_id = (self._prefix_caching_allocator.
-                                         promote_to_immutable_block(self))
+                             promote_to_immutable_block(self))
 
     @property
     def block_id(self) -> Optional[int]:

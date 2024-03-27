@@ -163,8 +163,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             List[Block]: A new list of blocks that shares the same memory as the
                 original sequence.
         """
-        allocator = self._block_ids_to_allocator[
-            last_block.block_id]
+        allocator = self._block_ids_to_allocator[last_block.block_id]
         return allocator.fork(last_block)
 
     def get_num_free_blocks(self, device: Device) -> int:

@@ -207,8 +207,7 @@ class TestPrefixCachingBlockAllocator:
 
         # Expect all blocks to have same physical block index.
         for block in blocks:
-            assert (block.block_id ==
-                    non_oom_block.block_id)
+            assert (block.block_id == non_oom_block.block_id)
 
     @staticmethod
     @pytest.mark.parametrize("num_blocks", [1, 1024])
@@ -251,8 +250,7 @@ class TestPrefixCachingBlockAllocator:
         # Expect physical block indices to be the same in both chains.
         assert chain and second_chain
         for first_chain_block, second_chain_block in zip(chain, second_chain):
-            assert (first_chain_block.block_id ==
-                    second_chain_block.block_id)
+            assert (first_chain_block.block_id == second_chain_block.block_id)
 
     @staticmethod
     @pytest.mark.parametrize("num_blocks", [1, 1024])
