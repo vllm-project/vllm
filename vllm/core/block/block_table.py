@@ -193,7 +193,7 @@ class BlockTable:
                 BlockTable.
         """
         assert self._is_allocated
-        return [block.physical_block_index for block in self._blocks]
+        return [block.block_id for block in self._blocks]
 
     def _allocate_blocks_for_token_ids(self, prev_block: Optional[Block],
                                        token_ids: List[int],

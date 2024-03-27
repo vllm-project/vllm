@@ -141,7 +141,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         # Return any copy-on-writes.
         _ = self.block_allocator.clear_copy_on_writes()
 
-        # TODO modify append_slot to append_slots
+        # TODO extend append_slot interface to append_slots
         # @cadedaniel will do in https://github.com/vllm-project/vllm/pull/3250
 
         return None

@@ -66,12 +66,12 @@ class TestNaiveBlockAllocator:
         block_to_free = blocks.pop()
 
         for _ in range(100):
-            physical_block_index = block_to_free.physical_block_index
+            block_id = block_to_free.block_id
             allocator.free(block_to_free)
-            assert block_to_free.physical_block_index is None
+            assert block_to_free.block_id is None
 
             new_block = allocate_block()
-            assert new_block.physical_block_index == physical_block_index
+            assert new_block.block_id == block_id
 
             with pytest.raises(BlockAllocator.NoFreeBlocksError):
                 allocate_block()

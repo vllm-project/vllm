@@ -149,7 +149,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         Args:
             block (Block): The block to be freed.
         """
-        allocator = self._block_ids_to_allocator[block.physical_block_index]
+        allocator = self._block_ids_to_allocator[block.block_id]
         return allocator.free(block)
 
     def fork(self, last_block: Block) -> List[Block]:
@@ -164,7 +164,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
                 original sequence.
         """
         allocator = self._block_ids_to_allocator[
-            last_block.physical_block_index]
+            last_block.block_id]
         return allocator.fork(last_block)
 
     def get_num_free_blocks(self, device: Device) -> int:

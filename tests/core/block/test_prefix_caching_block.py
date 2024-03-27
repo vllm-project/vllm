@@ -207,8 +207,8 @@ class TestPrefixCachingBlockAllocator:
 
         # Expect all blocks to have same physical block index.
         for block in blocks:
-            assert (block.physical_block_index ==
-                    non_oom_block.physical_block_index)
+            assert (block.block_id ==
+                    non_oom_block.block_id)
 
     @staticmethod
     @pytest.mark.parametrize("num_blocks", [1, 1024])
@@ -251,8 +251,8 @@ class TestPrefixCachingBlockAllocator:
         # Expect physical block indices to be the same in both chains.
         assert chain and second_chain
         for first_chain_block, second_chain_block in zip(chain, second_chain):
-            assert (first_chain_block.physical_block_index ==
-                    second_chain_block.physical_block_index)
+            assert (first_chain_block.block_id ==
+                    second_chain_block.block_id)
 
     @staticmethod
     @pytest.mark.parametrize("num_blocks", [1, 1024])
@@ -278,12 +278,12 @@ class TestPrefixCachingBlockAllocator:
 
         # Expect free/allocate loop to succeed many times.
         for i in range(100):
-            physical_block_index = block_to_free.physical_block_index
+            block_id = block_to_free.block_id
             allocator.free(block_to_free)
-            assert block_to_free.physical_block_index is None, i
+            assert block_to_free.block_id is None, i
 
             new_block = allocator.allocate_mutable(prev_block=None)
-            assert new_block.physical_block_index == physical_block_index, i
+            assert new_block.block_id == block_id, i
 
             with pytest.raises(BlockAllocator.NoFreeBlocksError):
                 allocator.allocate_mutable(prev_block=None)

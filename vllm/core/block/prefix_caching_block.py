@@ -61,7 +61,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         token_ids: List[int],
         block_size: int,
         allocator: BlockAllocator,
-        physical_block_index: Optional[int] = None,
+        block_id: Optional[int] = None,
     ) -> Block:
         # Bind block to self.
         allocator = self
@@ -70,7 +70,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             prev_block=prev_block,
             token_ids=token_ids,
             block_size=block_size,
-            physical_block_index=physical_block_index,
+            block_id=block_id,
             prefix_caching_allocator=allocator,
         )
 
@@ -98,8 +98,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         cached_block_index = self._cached_blocks.get(block.content_hash, None)
         if cached_block_index is not None:
-            block.physical_block_index = cached_block_index
-            refcount = self._refcounter.incr(block.physical_block_index)
+            block.block_id = cached_block_index
+            refcount = self._refcounter.incr(block.block_id)
             if refcount == 1:
                 assert block.content_hash in self._unused_cached_blocks
                 del self._unused_cached_blocks[block.content_hash]
@@ -138,16 +138,16 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             # Clear content hash mapping; the block will be overwritten.
             del self._cached_blocks[content_hash_to_evict]
 
-            physical_block_index = self._unused_cached_blocks.pop(
+            block_id = self._unused_cached_blocks.pop(
                 content_hash_to_evict)
-            refcount = self._refcounter.incr(physical_block_index)
+            refcount = self._refcounter.incr(block_id)
             assert refcount == 1
             block = self._create_block(
                 prev_block=prev_block,
                 token_ids=[],
                 block_size=self._block_size,
                 allocator=self,
-                physical_block_index=physical_block_index,
+                block_id=block_id,
             )
             assert block.content_hash is None
             return block
@@ -162,11 +162,11 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         If the block has a content hash (meaning it is immutable), then we will
         keep the block around in case future allocations require it.
         """
-        assert (block.physical_block_index
+        assert (block.block_id
                 is not None), "freeing unallocated block is undefined"
 
-        self._free_block_index_for_block(block.physical_block_index, block)
-        block.physical_block_index = None
+        self._free_block_index_for_block(block.block_id, block)
+        block.block_id = None
 
     def _free_block_index_for_block(self, block_index: BlockIndex,
                                     block: Block) -> None:
@@ -198,14 +198,14 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         forked_blocks = []
         prev_block = None
         for block in source_blocks:
-            refcount = self._refcounter.incr(block.physical_block_index)
+            refcount = self._refcounter.incr(block.block_id)
             assert refcount != 1, "can't fork free'd block"
 
             forked_blocks.append(
                 self._create_block(
                     prev_block=prev_block,
                     token_ids=block.token_ids,
-                    physical_block_index=block.physical_block_index,
+                    block_id=block.block_id,
                     block_size=self._block_size,
                     allocator=self,
                 ))
@@ -241,15 +241,15 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                 the previously cached block matching the same content.
         """
         assert block.content_hash is not None
-        assert block.physical_block_index is not None
+        assert block.block_id is not None
 
         # If the content hash does not have a corresponding cached block,
         # set this block as the cached block.
         if block.content_hash not in self._cached_blocks:
             self._cached_blocks[
-                block.content_hash] = block.physical_block_index
+                block.content_hash] = block.block_id
         else:
-            self._free_block_index_for_block(block.physical_block_index, block)
+            self._free_block_index_for_block(block.block_id, block)
             # TODO need to call a function instead of refcount
             # as the block could transition from unused_cached_blocks
             # is it possible to use a NaiveAllocator for this, with the freelist
@@ -323,7 +323,7 @@ class PrefixCachingBlock(Block):
             the block.
         prefix_caching_allocator (PrefixCachingBlockAllocator): The prefix
             caching block allocator associated with this block.
-        physical_block_index (Optional[int], optional): The physical block index
+        block_id (Optional[int], optional): The physical block index
             of this block. Defaults to None.
     """
 
@@ -333,7 +333,7 @@ class PrefixCachingBlock(Block):
         token_ids: List[int],
         block_size: int,
         prefix_caching_allocator: PrefixCachingBlockAllocator,
-        physical_block_index: Optional[int] = None,
+        block_id: Optional[int] = None,
     ):
         assert_prefix_caching_block_or_none(prev_block)
 
@@ -345,7 +345,7 @@ class PrefixCachingBlock(Block):
             prev_block=prev_block,
             token_ids=token_ids,
             block_size=block_size,
-            physical_block_index=physical_block_index,
+            block_id=block_id,
             allocator=prefix_caching_allocator,
             _cow_target=self,
         )
@@ -368,16 +368,16 @@ class PrefixCachingBlock(Block):
         # Register ourselves with the allocator, potentially replacing the
         # physical block index.
         if self.content_hash is not None:
-            self.physical_block_index = (self._prefix_caching_allocator.
+            self.block_id = (self._prefix_caching_allocator.
                                          promote_to_immutable_block(self))
 
     @property
-    def physical_block_index(self) -> Optional[int]:
-        return self._block.physical_block_index
+    def block_id(self) -> Optional[int]:
+        return self._block.block_id
 
-    @physical_block_index.setter
-    def physical_block_index(self, value) -> None:
-        self._block.physical_block_index = value
+    @block_id.setter
+    def block_id(self, value) -> None:
+        self._block.block_id = value
 
     @property
     def is_full(self) -> bool:

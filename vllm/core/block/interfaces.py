@@ -11,7 +11,7 @@ class Block(ABC):
         pass
 
     @abstractproperty
-    def physical_block_index(self) -> Optional[int]:
+    def block_id(self) -> Optional[int]:
         pass
 
     @abstractproperty
@@ -39,7 +39,7 @@ class Block(ABC):
             token_ids: List[int],
             block_size: int,
             allocator: "BlockAllocator",
-            physical_block_index: Optional[int] = None,
+            block_id: Optional[int] = None,
         ) -> "Block":
             pass
 

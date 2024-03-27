@@ -79,14 +79,14 @@ class NaiveBlockAllocator(BlockAllocator):
         return self._create_block(
             prev_block=prev_block,
             token_ids=[],
-            physical_block_index=block_index,
+            block_id=block_index,
             block_size=self._block_size,
             allocator=self,
         )
 
     def free(self, block: Block) -> None:
-        block_index = block.physical_block_index
-        block.physical_block_index = None
+        block_index = block.block_id
+        block.block_id = None
         self._free_block_index(block_index)
 
     def fork(self, last_block: Block) -> List[Block]:
@@ -107,14 +107,14 @@ class NaiveBlockAllocator(BlockAllocator):
         for block in source_blocks:
 
             # Increment refcount for each block.
-            refcount = self._refcounter.incr(block.physical_block_index)
+            refcount = self._refcounter.incr(block.block_id)
             assert refcount != 1, "can't fork free'd block"
 
             forked_blocks.append(
                 self._create_block(
                     prev_block=prev_block,
                     token_ids=block.token_ids,
-                    physical_block_index=block.physical_block_index,
+                    block_id=block.block_id,
                     block_size=self._block_size,
                     allocator=self,
                 ))
@@ -204,7 +204,7 @@ class NaiveBlock(Block):
             the block.
         allocator (BlockAllocator): The block allocator associated with this
             block.
-        physical_block_index (Optional[int], optional): The physical block index
+        block_id (Optional[int], optional): The physical block index
             of this block. Defaults to None, which means no allocation has been
             made.
         _cow_target (Optional[Block], optional): The copy-on-write target block.
@@ -216,12 +216,12 @@ class NaiveBlock(Block):
                  token_ids: List[int],
                  block_size: int,
                  allocator: BlockAllocator,
-                 physical_block_index: Optional[int] = None,
+                 block_id: Optional[int] = None,
                  _cow_target: Optional[Block] = None):
         self._token_ids = []
         self._block_size = block_size
         self._prev_block = prev_block
-        self._physical_block_index = physical_block_index
+        self._block_id = block_id
         self._allocator = allocator
         self._cow_target = _cow_target if _cow_target is not None else self
 
@@ -236,8 +236,8 @@ class NaiveBlock(Block):
         """
         self._append_token_ids_no_cow(token_ids)
 
-        if self._physical_block_index is not None:
-            self._physical_block_index = (
+        if self._block_id is not None:
+            self._block_id = (
                 self._allocator.cow_block_if_not_appendable(self._cow_target))
 
     def _append_token_ids_no_cow(self, token_ids: List[int]) -> None:
@@ -245,12 +245,12 @@ class NaiveBlock(Block):
         self._token_ids.extend(token_ids)
 
     @property
-    def physical_block_index(self) -> Optional[int]:
-        return self._physical_block_index
+    def block_id(self) -> Optional[int]:
+        return self._block_id
 
-    @physical_block_index.setter
-    def physical_block_index(self, value: Optional[int]) -> None:
-        self._physical_block_index = value
+    @block_id.setter
+    def block_id(self, value: Optional[int]) -> None:
+        self._block_id = value
 
     @property
     def is_full(self) -> bool:

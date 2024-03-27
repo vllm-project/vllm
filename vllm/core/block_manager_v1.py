@@ -453,10 +453,6 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
             for cpu_block in block_table:
                 if cpu_block in mapping:
-                    # This is an example of logic that should be subsumed by
-                    # prefix caching. If blocks are shared in a sequence group,
-                    # there is no need for refcounting logic -- should be
-                    # handled by layer below.
                     gpu_block = mapping[cpu_block]
                     gpu_block.ref_count += 1
                 else:

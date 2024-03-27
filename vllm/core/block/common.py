@@ -122,7 +122,7 @@ class CopyOnWriteTracker:
                 -write operation was performed, or the original block index if
                 no copy-on-write was necessary.
         """
-        block_index = block.physical_block_index
+        block_index = block.block_id
         if block_index is None:
             return block_index
 
@@ -136,7 +136,7 @@ class CopyOnWriteTracker:
 
             # Allocate a fresh new block.
             block_index = self._allocator.allocate_mutable(
-                prev_block=block.prev_block).physical_block_index
+                prev_block=block.prev_block).block_id
 
             # Track src/dst copy.
             self._copy_on_writes[src_block_index].append(block_index)
