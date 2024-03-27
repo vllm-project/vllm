@@ -4,22 +4,23 @@ from typing import Iterable, List, Optional, Tuple, Type, Union
 from transformers import PreTrainedTokenizer
 
 import vllm
-from vllm.lora.request import LoRARequest
-from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, LoRAConfig)
+from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
-from vllm.executor.executor_base import ExecutorBase
 from vllm.engine.metrics import StatLogger, Stats
 from vllm.engine.ray_utils import initialize_ray_cluster
+from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
-                           SequenceGroupOutput, SequenceOutput, SequenceStatus)
+from vllm.sequence import (MultiModalData, SamplerOutput, Sequence,
+                           SequenceGroup, SequenceGroupOutput, SequenceOutput,
+                           SequenceStatus)
+from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
-from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.utils import Counter
 
 logger = init_logger(__name__)
@@ -62,6 +63,7 @@ class LLMEngine:
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
+        vision_language_config: Optional["VisionLanguageConfig"],
         executor_class: Type[ExecutorBase],
         log_stats: bool,
     ) -> None:
@@ -90,6 +92,7 @@ class LLMEngine:
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
+        self.vision_language_config = vision_language_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
@@ -102,7 +105,8 @@ class LLMEngine:
 
         self.model_executor = executor_class(model_config, cache_config,
                                              parallel_config, scheduler_config,
-                                             device_config, lora_config)
+                                             device_config, lora_config,
+                                             vision_language_config)
 
         # Ping the tokenizer to ensure liveness if it runs in a
         # different process.
@@ -170,7 +174,6 @@ class LLMEngine:
             trust_remote_code=self.model_config.trust_remote_code,
             revision=self.model_config.tokenizer_revision)
         init_kwargs.update(tokenizer_init_kwargs)
-
         self.tokenizer: BaseTokenizerGroup = get_tokenizer_group(
             self.parallel_config.tokenizer_pool_config, **init_kwargs)
 
@@ -212,6 +215,7 @@ class LLMEngine:
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
     ) -> None:
         """Add a request to the engine's request pool.
 
@@ -228,6 +232,7 @@ class LLMEngine:
                 use the tokenizer to convert the prompts to token IDs.
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
+            multi_modal_data: Multi modal data per request.
 
         Details:
             - Set arrival_time to the current time if it is None.
@@ -282,10 +287,13 @@ class LLMEngine:
         # Defensive copy of SamplingParams, which are used by the sampler,
         # this doesn't deep-copy LogitsProcessor objects
         sampling_params = sampling_params.clone()
+        # inject the eos token id into the sampling_params to support min_tokens
+        # processing
+        sampling_params.eos_token_id = seq.eos_token_id
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,
-                                  arrival_time, lora_request)
+                                  arrival_time, lora_request, multi_modal_data)
 
         # Add the sequence group to the scheduler.
         self.scheduler.add_seq_group(seq_group)
@@ -713,18 +721,6 @@ class LLMEngine:
     def _check_stop(self, seq: Sequence,
                     sampling_params: SamplingParams) -> None:
         """Stop the finished sequences."""
-        for stop_str in sampling_params.stop:
-            if seq.output_text.endswith(stop_str):
-                self._finalize_sequence(seq, sampling_params, stop_str)
-                seq.status = SequenceStatus.FINISHED_STOPPED
-                return
-        if seq.get_last_token_id() in sampling_params.stop_token_ids:
-            stop_str = self.get_tokenizer_for_seq(seq).convert_ids_to_tokens(
-                seq.get_last_token_id())
-            self._finalize_sequence(seq, sampling_params, stop_str)
-            seq.status = SequenceStatus.FINISHED_STOPPED
-            return
-
         # Check if the sequence has reached max_model_len.
         if seq.get_len() > self.scheduler_config.max_model_len:
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
@@ -733,6 +729,26 @@ class LLMEngine:
         # Check if the sequence has reached max_tokens.
         if seq.get_output_len() == sampling_params.max_tokens:
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
+            return
+
+        # Check if the minimum number of tokens has been generated yet;
+        # skip the stop string/token checks if not
+        if seq.get_output_len() < sampling_params.min_tokens:
+            return
+
+        for stop_str in sampling_params.stop:
+            if seq.output_text.endswith(stop_str):
+                self._finalize_sequence(seq, sampling_params, stop_str)
+                seq.status = SequenceStatus.FINISHED_STOPPED
+                seq.stop_reason = stop_str
+                return
+        last_token_id = seq.get_last_token_id()
+        if last_token_id in sampling_params.stop_token_ids:
+            stop_str = self.get_tokenizer_for_seq(seq).convert_ids_to_tokens(
+                last_token_id)
+            self._finalize_sequence(seq, sampling_params, stop_str)
+            seq.status = SequenceStatus.FINISHED_STOPPED
+            seq.stop_reason = last_token_id
             return
 
         # Check if the sequence has generated the EOS token.
