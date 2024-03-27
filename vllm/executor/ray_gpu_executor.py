@@ -238,7 +238,7 @@ class RayGPUExecutor(ExecutorBase):
         if self.cache_config.forced_num_gpu_blocks is not None:
             forced_num_gpu_blocks = self.cache_config.forced_num_gpu_blocks
             logger.info(f"Replacing profiled {num_gpu_blocks=} with "
-                f"{forced_num_gpu_blocks=}")
+                        f"{forced_num_gpu_blocks=}")
             num_gpu_blocks = forced_num_gpu_blocks
 
         logger.info(f"# GPU blocks: {num_gpu_blocks}, "

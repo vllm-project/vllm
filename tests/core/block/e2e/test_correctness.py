@@ -1,16 +1,13 @@
-import contextlib
-import pytest
-import ray
-import torch
-import gc
 from itertools import cycle
 
-from vllm import LLM, SamplingParams
-from vllm.model_executor.parallel_utils.parallel_state import destroy_model_parallel
-from vllm.model_executor.utils import set_random_seed
+import pytest
 
-@pytest.mark.parametrize("common_llm_kwargs", [
-    {
+from vllm import SamplingParams
+
+
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
         # Use a small model for a fast test.
         "model": "facebook/opt-125m",
 
@@ -22,15 +19,18 @@ from vllm.model_executor.utils import set_random_seed
         "forced_num_gpu_blocks": 2 * (64 + 1),
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
-@pytest.mark.parametrize("baseline_llm_kwargs", [{"use_v2_block_manager": False}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{
+    "use_v2_block_manager": False
+}])
 @pytest.mark.parametrize("test_llm_kwargs", [{"use_v2_block_manager": True}])
 @pytest.mark.parametrize("batch_size", [10])
 @pytest.mark.parametrize("seed", [1])
-def test_v1_v2_greedy_equality_with_preemption(baseline_llm_generator, test_llm_generator, batch_size):
+def test_v1_v2_greedy_equality_with_preemption(baseline_llm_generator,
+                                               test_llm_generator, batch_size):
     """Verify block manager v2 produces same outputs as block manager v1, even
     when there is preemption.
 
-    This constructs two LLM's, each with limited number of GPU blocks. The limit
+    This constructs two LLM, each with limited number of GPU blocks. The limit
     is decided such that as the sequences in the batch grow, sequences must be
     preempted and removed from cache.
 
@@ -50,10 +50,8 @@ def test_v1_v2_greedy_equality_with_preemption(baseline_llm_generator, test_llm_
         "The capital of France is",
         "The future of AI is",
     ]
-    
-    prompts = [
-        prompt for prompt, _ in zip(cycle(prompts), range(batch_size))
-    ]
+
+    prompts = [prompt for prompt, _ in zip(cycle(prompts), range(batch_size))]
 
     sampling_params = SamplingParams(
         max_tokens=output_len,
@@ -61,16 +59,20 @@ def test_v1_v2_greedy_equality_with_preemption(baseline_llm_generator, test_llm_
         temperature=temperature,
     )
 
-    print(f'Getting token ids from block manager v1')
-    baseline_token_ids = get_token_ids_from_llm_generator(baseline_llm_generator, prompts, sampling_params)
+    print('Getting token ids from block manager v1')
+    baseline_token_ids = get_token_ids_from_llm_generator(
+        baseline_llm_generator, prompts, sampling_params)
 
-    print(f'Getting token ids from block manager v2')
-    test_token_ids = get_token_ids_from_llm_generator(test_llm_generator, prompts, sampling_params)
+    print('Getting token ids from block manager v2')
+    test_token_ids = get_token_ids_from_llm_generator(test_llm_generator,
+                                                      prompts, sampling_params)
 
-    for expected_token_ids, actual_token_ids in zip(baseline_token_ids, test_token_ids):
+    for expected_token_ids, actual_token_ids in zip(baseline_token_ids,
+                                                    test_token_ids):
         assert expected_token_ids == actual_token_ids
 
     assert baseline_token_ids == test_token_ids
+
 
 def get_token_ids_from_llm_generator(llm_generator, prompts, sampling_params):
     for llm in llm_generator:
@@ -79,4 +81,3 @@ def get_token_ids_from_llm_generator(llm_generator, prompts, sampling_params):
         del llm
 
     return token_ids
-
