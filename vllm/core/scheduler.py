@@ -1,6 +1,6 @@
 import enum
 import time
-from collections import deque
+from collections import deque, namedtuple
 from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
@@ -27,11 +27,11 @@ class PreemptionMode(enum.Enum):
     RECOMPUTE = enum.auto()
 
 
-class ScheduledSequenceGroup:
-
-    def __init__(self, seq_group: SequenceGroup, chunk_size: int):
-        self.seq_group = seq_group
-        self.chunk_size = chunk_size
+# seq_group: SequenceGroup to schedule.
+# token_chunk_size: The number of prefill tokens to be processed in the next
+# step.
+ScheduledSequenceGroup = namedtuple("ScheduledSequenceGroup",
+                                    ["seq_group", "token_chunk_size"])
 
 
 class SchedulerOutputs:
@@ -50,7 +50,7 @@ class SchedulerOutputs:
 
         Args:
             scheduled_seq_groups: A tuple of scheduled sequence group and its
-                chunk size.
+                token chunk size.
             prompt_run: True if all sequence groups are in prefill phase.
                 If False, all sequence groups are in decoding phase.
             num_batched_tokens: Total number of batched tokens.
@@ -61,15 +61,24 @@ class SchedulerOutputs:
             blocks_to_copy: Blocks to copy. Source to a list of dest blocks.
             ignored_seq_groups: Sequence groups that are going to be ignored.
         """
+        # A tuple of scheduled sequence group and its chunk size.
         self.scheduled_seq_groups = scheduled_seq_groups
+        # True if all sequence groups are in prefill phase. If False, all
+        # sequence groups are in decoding phase.
         self.prompt_run = prompt_run
+        # Total number of batched tokens.
         self.num_batched_tokens = num_batched_tokens
+        # Blocks to swap in. Dict of CPU -> GPU block number.
         self.blocks_to_swap_in = blocks_to_swap_in
+        # Blocks to swap out. Dict of GPU -> CPU block number.
         self.blocks_to_swap_out = blocks_to_swap_out
+        # Blocks to copy. Source to a list of dest blocks.
         self.blocks_to_copy = blocks_to_copy
+        # Sequence groups that are going to be ignored.
+        self.ignored_seq_groups = ignored_seq_groups
+
         # Swap in and swap out should never happen at the same time.
         assert not (blocks_to_swap_in and blocks_to_swap_out)
-        self.ignored_seq_groups = ignored_seq_groups
 
         self.num_loras = len(self.lora_requests)
         if self.num_loras > 0:
@@ -215,6 +224,8 @@ class Scheduler:
                 assert len(waiting_seqs) == 1, (
                     "Waiting sequence group should have only one prompt "
                     "sequence.")
+                # get_len includes output tokens if the request has been
+                # preempted.
                 num_prompt_tokens = waiting_seqs[0].get_len()
                 if num_prompt_tokens > self.prompt_limit:
                     logger.warning(
@@ -271,8 +282,8 @@ class Scheduler:
                 self.running.append(seq_group)
                 num_curr_seqs += num_new_seqs
                 scheduled.append(
-                    ScheduledSequenceGroup(seq_group, num_prompt_tokens))
-
+                    ScheduledSequenceGroup(seq_group=seq_group,
+                                           token_chunk_size=num_prompt_tokens))
             self.waiting.extendleft(leftover_waiting_sequences)
 
             if scheduled or ignored_seq_groups:
@@ -371,7 +382,8 @@ class Scheduler:
 
         scheduler_outputs = SchedulerOutputs(
             scheduled_seq_groups=[
-                ScheduledSequenceGroup(running_group, 1)
+                ScheduledSequenceGroup(seq_group=running_group,
+                                       token_chunk_size=1)
                 for running_group in self.running
             ],
             prompt_run=False,
@@ -393,21 +405,19 @@ class Scheduler:
         # Create input data structures.
         seq_group_metadata_list: List[SequenceGroupMetadata] = []
         for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
-            seq_group = scheduled_seq_group.seq_group
-            chunk_size = scheduled_seq_group.chunk_size
-
+            seq_group, token_chunk_size = scheduled_seq_group
             seq_group.maybe_set_first_scheduled_time(now)
 
+            # seq_id -> SequenceData
             seq_data: Dict[int, SequenceData] = {}
+            # seq_id -> physical block numbers
             block_tables: Dict[int, List[int]] = {}
-            token_chunk_sizes: Dict[int, int] = {}
 
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
                 self.block_manager.access_all_blocks_in_seq(seq, now)
-                token_chunk_sizes[seq_id] = chunk_size
 
             seq_group_metadata = SequenceGroupMetadata(
                 request_id=seq_group.request_id,
@@ -415,7 +425,7 @@ class Scheduler:
                 seq_data=seq_data,
                 sampling_params=seq_group.sampling_params,
                 block_tables=block_tables,
-                token_chunk_sizes=token_chunk_sizes,
+                token_chunk_size=token_chunk_size,
                 lora_request=seq_group.lora_request,
                 computed_block_nums=self.block_manager.
                 get_common_computed_block_ids(seq_group),

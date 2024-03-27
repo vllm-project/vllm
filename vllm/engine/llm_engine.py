@@ -561,8 +561,8 @@ class LLMEngine:
                     scheduled_seq_group.seq_group)
 
         for scheduled_seq_group, outputs in zip(scheduled_seq_groups, output):
-            seq_group = scheduled_seq_group.seq_group
-            seq_group.add_num_computed_tokens(scheduled_seq_group.chunk_size)
+            seq_group, token_chunk_size = scheduled_seq_group
+            seq_group.update_num_computed_tokens(token_chunk_size)
             self._process_sequence_group_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.

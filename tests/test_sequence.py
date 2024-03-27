@@ -56,12 +56,12 @@ def test_sequence_data_prefill():
     assert seq_data.get_num_uncomputed_tokens() == 4
     assert seq_data.get_num_computed_tokens() == 0
     # advance by 2
-    seq_data.add_num_computed_tokens(2)
+    seq_data.update_num_computed_prefill_tokens(2)
     assert seq_data.get_num_uncomputed_tokens() == 2
     assert seq_data.get_num_computed_tokens() == 2
 
     # advance by 1
-    seq_data.add_num_computed_tokens(1)
+    seq_data.update_num_computed_prefill_tokens(1)
     assert seq_data.get_num_uncomputed_tokens() == 1
     assert seq_data.get_num_computed_tokens() == 3
 

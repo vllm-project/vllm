@@ -135,9 +135,9 @@ class SequenceData:
         """Return the number of prefill tokens that are already computed."""
         return self._num_computed_tokens
 
-    def add_num_computed_tokens(self, num_computed_tokens_delta) -> int:
-        """Record how many tokens have computed."""
-        self._num_computed_tokens += num_computed_tokens_delta
+    def update_num_computed_tokens(self, num_new_computed_tokens: int) -> int:
+        """Update number of tokens computed so far."""
+        self._num_computed_tokens += num_new_computed_tokens
 
     def reset_num_computed_tokens(self) -> None:
         """Reset the number of computed tokens from this sequence. It is
@@ -454,9 +454,10 @@ class SequenceGroup:
     def get_finished_seqs(self) -> List[Sequence]:
         return [seq for seq in self.seqs_dict.values() if seq.is_finished()]
 
-    def add_num_computed_tokens(self, num_computed_tokens_delta):
+    def update_num_computed_tokens(self, num_new_computed_tokens: int):
+        """Update number of tokens computed so far."""
         for seq in self.seqs_dict.values():
-            seq.data.add_num_computed_tokens(num_computed_tokens_delta)
+            seq.data.update_num_computed_tokens(num_new_computed_tokens)
 
     def get_num_uncomputed_tokens(self) -> int:
         # All sequences in the group should have the same prompt, so the
@@ -508,10 +509,11 @@ class SequenceGroupMetadata:
         sampling_params: The sampling parameters used to generate the outputs.
         block_tables: The block tables. (Seq id -> list of physical block
             numbers)
+        token_chunk_size: The number of tokens to be processed. None if
+            chunking is not required.
         state: Internal state tied to this sequence group.
         lora_request: LoRA request.
         multi_modal_data: Multi modal data.
-        token_chunk_sizes: seq_id -> token chunk size to run a model.
     """
 
     def __init__(
@@ -521,7 +523,7 @@ class SequenceGroupMetadata:
         seq_data: Dict[int, SequenceData],
         sampling_params: SamplingParams,
         block_tables: Dict[int, List[int]],
-        token_chunk_sizes: Dict[int, int],
+        token_chunk_size: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
         computed_block_nums: Optional[List[int]] = None,
         state: Optional[SequenceGroupState] = None,
@@ -536,11 +538,22 @@ class SequenceGroupMetadata:
         self.computed_block_nums = computed_block_nums
         self.multi_modal_data = multi_modal_data
         self.state = SequenceGroupState() if state is None else state
-        self.token_chunk_sizes = token_chunk_sizes
+        self._token_chunk_size = token_chunk_size
+
+        if self._token_chunk_size is None:
+            if is_prompt:
+                self._token_chunk_size = list(seq_data.values())[0].get_len()
+            else:
+                self._token_chunk_size = 1
 
     @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
+
+    @property
+    def token_chunk_size(self) -> int:
+        """Return the number of tokens to be processed (chunk size)."""
+        return self._token_chunk_size
 
 
 class SequenceOutput:

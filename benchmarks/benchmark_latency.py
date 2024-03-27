@@ -27,7 +27,7 @@ def main(args: argparse.Namespace):
         kv_cache_dtype=args.kv_cache_dtype,
         device=args.device,
         block_size=args.block_size,
-        max_chunked_prefill_len=args.max_chunked_prefill_len,
+        enable_chunked_prefill=args.enable_chunked_prefill,
         ray_workers_use_nsight=args.ray_workers_use_nsight,
     )
 
@@ -153,11 +153,11 @@ if __name__ == '__main__':
                         default=16,
                         help='block size of key/value cache')
     parser.add_argument(
-        '--max-chunked-prefill-len',
-        type=int,
-        default=-1,
-        help='max number of prefill tokens allowed in chunked prefill'
-        ', -1 means no limit')
+        '--enable-chunked-prefill',
+        type=bool,
+        default=False,
+        help='If True, the prefill requests can be chunked based on the '
+        'max_num_batched_tokens')
     parser.add_argument(
         "--ray-workers-use-nsight",
         action='store_true',

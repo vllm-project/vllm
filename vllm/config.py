@@ -523,10 +523,8 @@ class SchedulerConfig:
             and generated text).
         delay_factor: Apply a delay (of delay factor multiplied by previous
             prompt latency) before scheduling next prompt.
-        max_chunked_prefill_len: The maximum length of tokens for prefill
-            requests. Longer requests will be chunked into multiple chunks.
-            -1 means no chunking (disabled). This features is only supported
-            for flash style attention.
+        enable_chunked_prefill: If True, prefill requests can be chunked based
+            on the remaining max_num_batched_tokens.
     """
 
     def __init__(
@@ -535,7 +533,7 @@ class SchedulerConfig:
         max_num_seqs: int,
         max_model_len: int,
         delay_factor: float = 0.0,
-        max_chunked_prefill_len: int = -1,
+        enable_chunked_prefill: bool = False,
     ) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
@@ -546,8 +544,7 @@ class SchedulerConfig:
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
         self.delay_factor = delay_factor
-        self.chunked_prefill_enabled = max_chunked_prefill_len != -1
-        self.max_chunked_prefill_len = max_chunked_prefill_len
+        self.chunked_prefill_enabled = enable_chunked_prefill
         self._verify_args()
 
     def _verify_args(self) -> None:

@@ -241,7 +241,8 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
             for _ in range(num_seqs):
                 num_input = random.randint(1, 100)
                 num_generated = random.randint(1, 100) if not is_prompt else 0
-                seq_data[next(seq_id_counter)] = create_sequence_data(
+                seq_id = next(seq_id_counter)
+                seq_data[seq_id] = create_sequence_data(
                     num_input=num_input, num_generated=num_generated)
                 seq_group_penalization.append(num_generated < min_tokens)
 
@@ -262,6 +263,8 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
         }
 
     # define some explicit test cases for edge case behavior
+    seq_id = next(seq_id_counter)
+    seq_data = create_sequence_data()
     prompt_without_penalization = {
         "expected_penalization": [False],
         "seq_group_metadata_list": [
@@ -269,7 +272,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
                 request_id="test_1",
                 is_prompt=True,
                 seq_data={
-                    next(seq_id_counter): create_sequence_data(),
+                    seq_id: seq_data,
                 },
                 sampling_params=create_sampling_params(0),
                 block_tables={},
@@ -277,15 +280,15 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
         ]
     }
 
+    seq_id = next(seq_id_counter)
+    seq_data = create_sequence_data()
     prompt_with_penalization = {
         "expected_penalization": [True],
         "seq_group_metadata_list": [
             SequenceGroupMetadata(
                 request_id="test_1",
                 is_prompt=True,
-                seq_data={
-                    next(seq_id_counter): create_sequence_data(),
-                },
+                seq_data={seq_id, seq_data},
                 sampling_params=create_sampling_params(1),
                 block_tables={},
             ),
@@ -309,18 +312,18 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
     }
 
     stop_token_ids = [42, 99, 42, 0]  # intentional duplication
+    decoding_seq_data = {
+        next(seq_id_counter): create_sequence_data(num_generated=1),
+        next(seq_id_counter): create_sequence_data(num_generated=100),
+    },
+    prefill_seq_data = {next(seq_id_counter): create_sequence_data()}
     simple_combination = {
         "expected_penalization": [True, False, False],
         "seq_group_metadata_list": [
             SequenceGroupMetadata(
                 request_id="test_1",
                 is_prompt=False,
-                seq_data={
-                    next(seq_id_counter):
-                    create_sequence_data(num_generated=1),
-                    next(seq_id_counter):
-                    create_sequence_data(num_generated=100),
-                },
+                seq_data=decoding_seq_data,
                 sampling_params=create_sampling_params(
                     2, stop_token_ids=stop_token_ids),
                 block_tables={},
@@ -328,9 +331,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
             SequenceGroupMetadata(
                 request_id="test_2",
                 is_prompt=True,
-                seq_data={
-                    next(seq_id_counter): create_sequence_data(),
-                },
+                seq_data=prefill_seq_data,
                 sampling_params=create_sampling_params(
                     0, stop_token_ids=stop_token_ids),
                 block_tables={},
