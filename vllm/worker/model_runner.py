@@ -156,6 +156,7 @@ class ModelRunner:
             seq_ids = list(seq_group_metadata.seq_data.keys())
             assert len(seq_ids) == 1
             seq_id = seq_ids[0]
+            token_chunk_sizes = seq_group_metadata.token_chunk_sizes
 
             computed_block_nums = seq_group_metadata.computed_block_nums
             if (self.scheduler_config.chunked_prefill_enabled
@@ -164,8 +165,11 @@ class ModelRunner:
                     "chunked prefill cannot be used with prefix caching "
                     "now.")
 
+            chunk_size = token_chunk_sizes[seq_id]
             seq_data = seq_group_metadata.seq_data[seq_id]
-            prefill_start, prefill_end = seq_data.get_prefill_range()
+            prefill_start = seq_data.get_num_computed_tokens()
+            prefill_end = min(seq_data.get_prompt_len(),
+                              prefill_start + chunk_size)
             prompt_tokens = seq_data.get_token_ids()[prefill_start:prefill_end]
             prompt_len = len(prompt_tokens)
             # Right now, the prefill_end is always same as the length of
@@ -725,6 +729,7 @@ class ModelRunner:
                 seq_data={group_id: seq_data},
                 sampling_params=sampling_params,
                 block_tables=None,
+                token_chunk_sizes={group_id: seq_data.get_len()},
                 lora_request=dummy_lora_requests_per_seq[group_id]
                 if dummy_lora_requests_per_seq else None,
                 multi_modal_data=fake_multi_modal_input,

@@ -2,7 +2,7 @@
 import copy
 import enum
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
 from vllm.block import LogicalTokenBlock
 from vllm.lora.request import LoRARequest
@@ -115,19 +115,11 @@ class SequenceData:
         self.prompt_token_ids = prompt_token_ids
         self.output_token_ids = output_token_ids
         self.cumulative_logprob = 0.0
-        self._prefill_start: int = 0
-        self._prefill_end: int = 0
+        self._num_computed_tokens = 0
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self.output_token_ids.append(token_id)
         self.cumulative_logprob += logprob
-
-    def reset_prefill_range(self) -> None:
-        """Reset the prefill range. It is supposed to be called when a
-        sequence needs to be started from the beginning.
-        """
-        self._prefill_start = 0
-        self._prefill_end = 0
 
     def get_len(self) -> int:
         return len(self.output_token_ids) + len(self.prompt_token_ids)
@@ -141,26 +133,37 @@ class SequenceData:
     def get_token_ids(self) -> List[int]:
         return self.prompt_token_ids + self.output_token_ids
 
-    def advance_prefill_range(self, size: int) -> int:
-        """Advance the prefill range by the specified amount
+    def get_num_computed_tokens(self) -> int:
+        """Return the number of prefill tokens that are already computed."""
+        return self._num_computed_tokens
 
-        Args:
-            size: The amount to advance the prefill range.
-        Returns:
-            The actual number of advanced tokens.
+    def record_num_computed_tokens(self, num_computed_tokens) -> int:
+        """Record how many tokens have computed."""
+        self._num_computed_tokens = num_computed_tokens
+
+    def reset_num_computed_tokens(self) -> None:
+        """Reset the number of computed tokens from this sequence. It is
+        supposed to be called when a sequence needs to be started from
+        the beginning again (e.g., sequence is preempted).
         """
-        self._prefill_start = self._prefill_end
-        # The increased range could be larger than the seq length.
-        # Clamp it to the seq length.
-        # Note that we use prompt_len + output_len instead of
-        # prompt_len here. This is because during recompute
-        # we need to prefill for both prompt and output.
-        self._prefill_end = min(self._prefill_end + size, self.get_len())
-        return self._prefill_end - self._prefill_start
+        self._num_computed_tokens = 0
 
-    def get_prefill_range(self) -> Tuple[int, int]:
-        """Returns the prefill range."""
-        return self._prefill_start, self._prefill_end
+    # def advance_prefill_range(self, size: int) -> int:
+    #     """Advance the prefill range by the specified amount
+
+    #     Args:
+    #         size: The amount to advance the prefill range.
+    #     Returns:
+    #         The actual number of advanced tokens.
+    #     """
+    #     self._prefill_start = self._prefill_end
+    #     # The increased range could be larger than the seq length.
+    #     # Clamp it to the seq length.
+    #     # Note that we use prompt_len + output_len instead of
+    #     # prompt_len here. This is because during recompute
+    #     # we need to prefill for both prompt and output.
+    #     self._prefill_end = min(self._prefill_end + size, self.get_len())
+    #     return self._prefill_end - self._prefill_start
 
     def get_num_uncomputed_tokens(self) -> int:
         """Return the number of prefil tokens that are not computed."""
@@ -246,7 +249,7 @@ class Sequence:
 
     def on_recompute(self):
         """Reset the sequence states for recomputation."""
-        self.data.reset_prefill_range()
+        self.data.reset_num_computed_tokens()
 
     def _append_logical_block(self) -> None:
         block = LogicalTokenBlock(
@@ -470,19 +473,23 @@ class SequenceGroup:
     def get_finished_seqs(self) -> List[Sequence]:
         return [seq for seq in self.seqs_dict.values() if seq.is_finished()]
 
-    def advance_prefill_range(self, size: int) -> int:
-        """Advance the prefill range by the specified amount.
+    # def advance_prefill_range(self, size: int) -> int:
+    #     """Advance the prefill range by the specified amount.
 
-        Args:
-            size: The amount to advance the prefill range.
-        Returns:
-            The actual number of advanced tokens.
-        """
-        # All sequences in the group should have the same prompt.
-        return [
-            seq.data.advance_prefill_range(size)
-            for seq in self.seqs_dict.values()
-        ][0]
+    #     Args:
+    #         size: The amount to advance the prefill range.
+    #     Returns:
+    #         The actual number of advanced tokens.
+    #     """
+    #     # All sequences in the group should have the same prompt.
+    #     return [
+    #         seq.data.advance_prefill_range(size)
+    #         for seq in self.seqs_dict.values()
+    #     ][0]
+
+    def record_num_computed_tokens(self, num_computed_tokens):
+        for seq in self.seqs_dict.values():
+            seq.data.record_num_computed_tokens(num_computed_tokens)
 
     def get_num_uncomputed_tokens(self) -> int:
         # All sequences in the group should have the same prompt, so the
@@ -537,6 +544,7 @@ class SequenceGroupMetadata:
         state: Internal state tied to this sequence group.
         lora_request: LoRA request.
         multi_modal_data: Multi modal data.
+        token_chunk_sizes: seq_id -> token chunk size to run a model.
     """
 
     def __init__(
@@ -546,6 +554,7 @@ class SequenceGroupMetadata:
         seq_data: Dict[int, SequenceData],
         sampling_params: SamplingParams,
         block_tables: Dict[int, List[int]],
+        token_chunk_sizes: Dict[int, int],
         lora_request: Optional[LoRARequest] = None,
         computed_block_nums: Optional[List[int]] = None,
         state: Optional[SequenceGroupState] = None,
@@ -560,6 +569,7 @@ class SequenceGroupMetadata:
         self.computed_block_nums = computed_block_nums
         self.multi_modal_data = multi_modal_data
         self.state = SequenceGroupState() if state is None else state
+        self.token_chunk_sizes = token_chunk_sizes
 
     @property
     def lora_int_id(self) -> int:

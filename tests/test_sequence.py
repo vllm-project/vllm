@@ -55,7 +55,7 @@ def test_sequence_data_prefill():
     seq_data = SequenceData(prompt_token_ids=[1, 2, 3, 4])
     assert seq_data.get_prefill_range() == (0, 0)
     assert seq_data.get_num_uncomputed_tokens() == 4
-
+    # SANG-TODO Fix.
     # advance by 2
     assert seq_data.advance_prefill_range(2) == 2
     assert seq_data.get_num_uncomputed_tokens() == 2

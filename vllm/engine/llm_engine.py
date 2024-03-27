@@ -556,10 +556,14 @@ class LLMEngine:
         # If prefix caching is enabled, mark all blocks in the sequence groups
         # as completed so that future requests don't attempt to recompute them
         if self.cache_config.enable_prefix_caching:
-            for seq_group in scheduled_seq_groups:
-                self.scheduler.mark_blocks_as_computed(seq_group)
+            for scheduled_seq_group in scheduled_seq_groups:
+                self.scheduler.mark_blocks_as_computed(
+                    scheduled_seq_group.seq_group)
 
-        for seq_group, outputs in zip(scheduled_seq_groups, output):
+        for scheduled_seq_group, outputs in zip(scheduled_seq_groups, output):
+            seq_group = scheduled_seq_group.seq_group
+            seq_group.record_num_computed_tokens(
+                scheduled_seq_group.chunk_size)
             self._process_sequence_group_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.
@@ -567,7 +571,8 @@ class LLMEngine:
 
         # Create the outputs.
         request_outputs: List[RequestOutput] = []
-        for seq_group in scheduled_seq_groups:
+        for scheduled_seq_group in scheduled_seq_groups:
+            seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
