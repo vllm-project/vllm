@@ -8,11 +8,12 @@ change `vllm/entrypoints/openai/api_server.py` instead.
 
 import argparse
 import json
+import ssl
 from typing import AsyncGenerator
 
+import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-import uvicorn
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -86,10 +87,12 @@ if __name__ == "__main__":
                         type=str,
                         default=None,
                         help="The CA certificates file")
-    parser.add_argument("--ssl-cert-reqs",
-                        type=int,
-                        default=0,
-                        help="Whether client certificate is required")
+    parser.add_argument(
+        "--ssl-cert-reqs",
+        type=int,
+        default=int(ssl.CERT_NONE),
+        help="Whether client certificate is required (see stdlib ssl module's)"
+    )
     parser.add_argument(
         "--root-path",
         type=str,

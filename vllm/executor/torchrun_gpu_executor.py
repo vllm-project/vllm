@@ -1,15 +1,14 @@
 import os
 from typing import Dict, List, Optional
 
-from vllm.executor.gpu_executor import GPUExecutor
-from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, LoRAConfig)
+from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.executor.executor_base import ExecutorAsyncBase
+from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
-from vllm.model_executor.parallel_utils.communication_op import (
-    broadcast_object_list)
+from vllm.model_executor.parallel_utils.communication_op import broadcast_object_list
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
-from vllm.utils import (get_ip, get_open_port, get_distributed_init_method,
+from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async)
 
 logger = init_logger(__name__)
@@ -31,16 +30,18 @@ class TorchrunGPUExecutor(GPUExecutor):
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
+        vision_language_config: Optional[VisionLanguageConfig],
     ) -> None:
         self.local_rank = int(os.getenv("LOCAL_RANK", "0"))
         self.is_driver_worker = self.local_rank == 0
         super().__init__(model_config, cache_config, parallel_config,
-                         scheduler_config, device_config, lora_config)
+                         scheduler_config, device_config, lora_config,
+                         vision_language_config)
 
     def _init_worker(self):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
-        Worker = self._dispatch_worker()
+        from vllm.worker.worker import Worker
 
         assert self.parallel_config.world_size > 1, (
             "TorchrunGPUExecutor only supports multiple GPUs.")
@@ -59,7 +60,7 @@ class TorchrunGPUExecutor(GPUExecutor):
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=self.is_driver_worker,
         )
-        self.driver_worker.init_model()
+        self.driver_worker.init_device()
         self.driver_worker.load_model()
 
     def execute_model(self,

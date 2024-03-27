@@ -22,11 +22,11 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`BaiChuanForCausalLM`
     - Baichuan
     - :code:`baichuan-inc/Baichuan2-13B-Chat`, :code:`baichuan-inc/Baichuan-7B`, etc.
-    - 
+    - ✅︎
   * - :code:`ChatGLMModel`
     - ChatGLM
     - :code:`THUDM/chatglm2-6b`, :code:`THUDM/chatglm3-6b`, etc.
-    - 
+    - ✅︎
   * - :code:`DeciLMForCausalLM`
     - DeciLM
     - :code:`Deci/DeciLM-7B`, :code:`Deci/DeciLM-7B-instruct`, etc.
@@ -66,7 +66,11 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`InternLM2ForCausalLM`
     - InternLM2
     - :code:`internlm/internlm2-7b`, :code:`internlm/internlm2-chat-7b`, etc.
-    - 
+    -
+  * - :code:`JAISLMHeadModel`
+    - Jais
+    - :code:`core42/jais-13b`, :code:`core42/jais-13b-chat`, :code:`core42/jais-30b-v3`, :code:`core42/jais-30b-chat-v3`, etc.
+    -
   * - :code:`LlamaForCausalLM`
     - LLaMA, LLaMA-2, Vicuna, Alpaca, Yi
     - :code:`meta-llama/Llama-2-13b-hf`, :code:`meta-llama/Llama-2-70b-hf`, :code:`openlm-research/open_llama_13b`, :code:`lmsys/vicuna-13b-v1.3`, :code:`01-ai/Yi-6B`, :code:`01-ai/Yi-34B`, etc.

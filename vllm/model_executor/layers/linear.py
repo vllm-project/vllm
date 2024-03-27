@@ -5,16 +5,16 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
+from vllm.logger import init_logger
+from vllm.model_executor.parallel_utils.communication_op import (
+    tensor_model_parallel_all_gather, tensor_model_parallel_all_reduce)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.communication_op import (
-    tensor_model_parallel_all_reduce, tensor_model_parallel_all_gather)
 from vllm.model_executor.parallel_utils.utils import (
     divide, split_tensor_along_last_dim)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.logger import init_logger
 from vllm.utils import is_hip
-from vllm import custom_ops
+from vllm import _custom_C
 
 logger = init_logger(__name__)
 
@@ -88,9 +88,9 @@ class UnquantizedLinearMethod(LinearMethodBase):
                               device='cuda')
             if (k == 8192 and
                 (m == 1280 or m == 7168)) or (k == 3584 and m == 8192):
-                custom_ops.LLMM1(weight, inp, out, 8)
+                _custom_C.LLMM1(weight, inp, out, 8)
             elif k <= 8192 and k % 8 == 0 and m % 4 == 0:
-                custom_ops.LLMM1(weight, inp, out, 4)
+                _custom_C.LLMM1(weight, inp, out, 4)
             else:
                 out = F.linear(inp, weight)
             if batched:
