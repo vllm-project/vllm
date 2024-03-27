@@ -329,7 +329,7 @@ if _is_cuda():
 
 if not _is_neuron():
     ext_modules.append(CMakeExtension(name="vllm._C"))
-    
+
     if _is_hip():
         ext_modules.append(CMakeExtension(name="vllm._custom_C"))
 
