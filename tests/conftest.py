@@ -281,7 +281,7 @@ class VllmRunner:
         tokenizer_name: Optional[str] = None,
         # Use smaller max model length, otherwise bigger model cannot run due
         # to kv cache size limit.
-        max_model_len=10000,
+        max_model_len=1024,
         dtype: str = "half",
         disable_log_stats: bool = True,
         tensor_parallel_size: int = 1,
