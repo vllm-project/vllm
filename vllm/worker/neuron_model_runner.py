@@ -14,8 +14,6 @@ from vllm.utils import (async_tensor_h2d, is_pin_memory_available,
 
 logger = init_logger(__name__)
 
-KVCache = Tuple[torch.Tensor, torch.Tensor]
-
 
 class NeuronModelRunner:
 

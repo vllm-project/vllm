@@ -56,8 +56,8 @@ Next, you need to rewrite the :code:`forward` methods of your model by following
     -    return_dict: Optional[bool] = None,
     -) -> Union[Tuple, CausalLMOutputWithPast]:
     +    positions: torch.Tensor,
-    +    kv_caches: List[KVCache],
-    +    input_metadata: InputMetadata,
+    +    kv_caches: List[torch.Tensor],
+    +    attn_metadata: AttentionMetadata,
     +) -> Optional[SamplerOutput]:
 
 1. Update the code by considering that :code:`input_ids` and :code:`positions` are now flattened tensors.
