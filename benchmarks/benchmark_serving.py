@@ -24,6 +24,7 @@ import json
 import os
 import random
 import time
+import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from typing import AsyncGenerator, List, Tuple
@@ -350,7 +351,13 @@ def main(args: argparse.Namespace):
     tokenizer = get_tokenizer(tokenizer_id,
                               trust_remote_code=args.trust_remote_code)
 
-    if args.dataset_name == "sharegpt":
+    if args.dataset is not None:
+        warnings.warn(
+            "The '--dataset' argument will be deprecated in the next "
+            "release. Please use '--dataset-name' and "
+            "'--dataset-path' in the future runs.", )
+
+    elif args.dataset_name == "sharegpt":
         input_requests = sample_sharegpt_requests(
             dataset_path=args.dataset_path,
             num_requests=args.num_prompts,
@@ -411,15 +418,22 @@ def main(args: argparse.Namespace):
         current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
         result_json["date"] = current_dt
         result_json["backend"] = backend
-        result_json["version"] = args.version
-        result_json["tp_size"] = args.tp_size
-        result_json["pp_size"] = args.pp_size
-        result_json["device_name"] = args.device_name
         result_json["model_id"] = model_id
         result_json["tokenizer_id"] = tokenizer_id
         result_json["best_of"] = args.best_of
         result_json["use_beam_search"] = args.use_beam_search
         result_json["num_prompts"] = args.num_prompts
+
+        # Metadata
+        if args.metadata:
+            for item in args.metadata:
+                if "=" in item:
+                    kvstring = item.split("=")
+                    result_json[kvstring[0].strip()] = kvstring[1].strip()
+                else:
+                    raise ValueError(
+                        "Invalid metadata format. Please use KEY=VALUE format."
+                    )
 
         # Traffic
         result_json["request_rate"] = (
@@ -447,34 +461,6 @@ if __name__ == "__main__":
         choices=list(ASYNC_REQUEST_FUNCS.keys()),
     )
     parser.add_argument(
-        "--version",
-        type=str,
-        default="N/A",
-        help="Version of the serving backend/engine, if known. "
-        "Only used in result json for record keeping purposes.",
-    )
-    parser.add_argument(
-        "--tp-size",
-        type=str,
-        default="N/A",
-        help="Size of tensor parallelism of the model server, if known. "
-        "Only used in result json for record keeping purposes.",
-    )
-    parser.add_argument(
-        "--pp-size",
-        type=str,
-        default="N/A",
-        help="Size of pipeline parallelism of the model server, if known. "
-        "Only used in result json for record keeping purposes.",
-    )
-    parser.add_argument(
-        "--device-name",
-        type=str,
-        default="N/A",
-        help="Device name, if known. Only used in result json for record "
-        "keeping purposes.",
-    )
-    parser.add_argument(
         "--base-url",
         type=str,
         default=None,
@@ -487,6 +473,13 @@ if __name__ == "__main__":
         type=str,
         default="/v1/completions",
         help="API endpoint.",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default=None,
+        help="Path to the ShareGPT dataset, will be deprecated in the "
+        "next release.",
     )
     parser.add_argument(
         "--dataset-name",
@@ -526,21 +519,21 @@ if __name__ == "__main__":
         help="Number of prompts to process.",
     )
     parser.add_argument(
-        "--input-len",
+        "--sonnet-input-len",
         type=int,
         default=550,
         help=
         "Number of input tokens per request, used only for sonnet dataset.",
     )
     parser.add_argument(
-        "--output-len",
+        "--sonnet-output-len",
         type=int,
         default=150,
         help=
         "Number of output tokens per request, used only for sonnet dataset.",
     )
     parser.add_argument(
-        "--prefix-len",
+        "--sonnet-prefix-len",
         type=int,
         default=200,
         help=
@@ -570,6 +563,14 @@ if __name__ == "__main__":
         "--save-result",
         action="store_true",
         help="Specify to save benchmark results to a json file",
+    )
+    parser.add_argument(
+        "--metadata",
+        metavar="KEY=VALUE",
+        nargs="*",
+        help="Key-value pairs (e.g, version=0.3.3, tp=1) of metadata "
+        "of this run to be saved in the result JSON file for record "
+        "keeping purposes.",
     )
     parser.add_argument(
         "--result-dir",
