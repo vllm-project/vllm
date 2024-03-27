@@ -16,18 +16,17 @@ def main(args: argparse.Namespace):
 
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
-    llm = LLM(
-        model=args.model,
-        tokenizer=args.tokenizer,
-        quantization=args.quantization,
-        tensor_parallel_size=args.tensor_parallel_size,
-        trust_remote_code=args.trust_remote_code,
-        dtype=args.dtype,
-        enforce_eager=args.enforce_eager,
-        kv_cache_dtype=args.kv_cache_dtype,
-        device=args.device,
-        ray_workers_use_nsight=args.ray_workers_use_nsight,
-    )
+    llm = LLM(model=args.model,
+              tokenizer=args.tokenizer,
+              quantization=args.quantization,
+              tensor_parallel_size=args.tensor_parallel_size,
+              trust_remote_code=args.trust_remote_code,
+              dtype=args.dtype,
+              enforce_eager=args.enforce_eager,
+              kv_cache_dtype=args.kv_cache_dtype,
+              device=args.device,
+              ray_workers_use_nsight=args.ray_workers_use_nsight,
+              download_dir=args.download_dir)
 
     sampling_params = SamplingParams(
         n=args.n,
@@ -151,5 +150,10 @@ if __name__ == '__main__':
         action='store_true',
         help="If specified, use nsight to profile ray workers",
     )
+    parser.add_argument('--download-dir',
+                        type=str,
+                        default=None,
+                        help='directory to download and load the weights, '
+                        'default to the default cache dir of huggingface')
     args = parser.parse_args()
     main(args)
