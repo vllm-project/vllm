@@ -41,9 +41,7 @@ Quick start using Dockerfile
 Build from source
 -----------------
 
-0. Install compiler
-
-We recommend to use ``gcc/g++ >= 12.3.0`` as the default compiler to avoid potential problems. For example, on Ubuntu 22.4, you can run:
+- First, install required compiler. We recommend to use ``gcc/g++ >= 12.3.0`` as the default compiler to avoid potential problems. For example, on Ubuntu 22.4, you can run:
 
 .. code-block:: console
 
@@ -51,9 +49,7 @@ We recommend to use ``gcc/g++ >= 12.3.0`` as the default compiler to avoid poten
     $ sudo apt-get install -y gcc-12 g++-12
     $ sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
 
-1. Install packages
-
-Install Python packages for vLLM CPU backend building:
+- Second, install Python packages for vLLM CPU backend building:
 
 .. code-block:: console
 
@@ -61,7 +57,7 @@ Install Python packages for vLLM CPU backend building:
     $ pip install wheel packaging ninja setuptools>=49.4.0 numpy
     $ pip install -v -r requirements-cpu.txt --index-url https://download.pytorch.org/whl/cpu
 
-2. Build and install vLLM CPU backend 
+- Finally, build and install vLLM CPU backend: 
 
 .. code-block:: console
 
@@ -72,13 +68,13 @@ Install Python packages for vLLM CPU backend building:
 Performance tips
 -----------------
 
-0. vLLM CPU backend uses ``swap_space`` parameter to specify the KV Cache size (e.g, ``--swap-space=40`` means 40 GB space for KV cache), larger setting will allow vLLM running more requests in parallel. This parameter should be set based on the hardware configuration and memory management pattern of users.
+- vLLM CPU backend uses ``swap_space`` parameter to specify the KV Cache size (e.g, ``--swap-space=40`` means 40 GB space for KV cache), larger setting will allow vLLM running more requests in parallel. This parameter should be set based on the hardware configuration and memory management pattern of users.
 
-1. vLLM CPU backend uses OpenMP for thread-parallel computation. If you want the best performance on CPU, it will be very critical to isolate CPU cores for OpenMP threads with other thread pools (like web-service event-loop), to avoid CPU oversubscription. 
+- vLLM CPU backend uses OpenMP for thread-parallel computation. If you want the best performance on CPU, it will be very critical to isolate CPU cores for OpenMP threads with other thread pools (like web-service event-loop), to avoid CPU oversubscription. 
 
-2. If using vLLM CPU backend on a bare-metal machine, it is recommended to disable the hyper-threading.
+- If using vLLM CPU backend on a bare-metal machine, it is recommended to disable the hyper-threading.
 
-3. If using vLLM CPU backend on a multi-socket machine with NUMA, be aware to set CPU cores and memory nodes, to avoid the remote memory node access. ``numactl`` is an useful tool for CPU core and memory binding on NUMA platform. Besides, ``--cpuset-cpus`` and ``--cpuset-mems`` arguments of ``docker run`` are also useful.
+- If using vLLM CPU backend on a multi-socket machine with NUMA, be aware to set CPU cores and memory nodes, to avoid the remote memory node access. ``numactl`` is an useful tool for CPU core and memory binding on NUMA platform. Besides, ``--cpuset-cpus`` and ``--cpuset-mems`` arguments of ``docker run`` are also useful.
 
 
 
