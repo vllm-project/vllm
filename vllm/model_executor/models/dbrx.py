@@ -5,8 +5,7 @@ from typing import List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.attention import Attention
+from vllm.attention import Attention, AttentionMetadata
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                QKVParallelLinear,
                                                RowParallelLinear,
@@ -26,8 +25,6 @@ from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs.dbrx import DbrxConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.utils import set_weight_attrs
-
-KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class DbrxRouter(nn.Module):
@@ -107,6 +104,8 @@ class DbrxExperts(nn.Module):
         param_data = param.data
         shard_size = self.intermediate_size
         shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
+        # DBRX uses GLU for each experts.
+        # GLU has 3 linear layers: w1, v1 and w2.
         if weight_name.endswith("w1"):
             loaded_weight = torch.reshape(
                 loaded_weight,
@@ -213,16 +212,15 @@ class DbrxAttention(nn.Module):
         self,
         position_ids: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: KVCache,
-        input_metadata: InputMetadata,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.Wqkv(hidden_states)
         if self.clip_qkv is not None:
             qkv.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=2)
         q, k = self.rotary_emb(position_ids, q, k)
-        k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         hidden_states, _ = self.out_proj(attn_output)
         return hidden_states
 
@@ -244,15 +242,15 @@ class DbrxFusedNormAttention(nn.Module):
         self,
         position_ids: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: KVCache,
-        input_metadata: InputMetadata,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.norm_1(hidden_states)
         x = self.attn(position_ids=position_ids,
                       hidden_states=hidden_states,
                       kv_cache=kv_cache,
-                      input_metadata=input_metadata)
+                      attn_metadata=attn_metadata)
         hidden_states = residual + x
         residual = hidden_states
         hidden_states = self.norm_2(hidden_states)
@@ -274,14 +272,14 @@ class DbrxBlock(nn.Module):
         self,
         position_ids: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: KVCache,
-        input_metadata: InputMetadata,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states, residual = self.norm_attn_norm(
             position_ids=position_ids,
             hidden_states=hidden_states,
             kv_cache=kv_cache,
-            input_metadata=input_metadata,
+            attn_metadata=attn_metadata,
         )
         hidden_states = self.ffn(hidden_states)
         hidden_states = hidden_states + residual
@@ -313,8 +311,8 @@ class DbrxModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
-        kv_caches: List[KVCache],
-        input_metadata: InputMetadata,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.wte(input_ids)
         for i in range(len(self.blocks)):
@@ -323,7 +321,7 @@ class DbrxModel(nn.Module):
                 position_ids,
                 hidden_states,
                 kv_caches[i],
-                input_metadata,
+                attn_metadata,
             )
         hidden_states = self.norm_f(hidden_states)
         return hidden_states
@@ -351,8 +349,8 @@ class DbrxForCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[KVCache],
-        input_metadata: InputMetadata,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          input_metadata)
