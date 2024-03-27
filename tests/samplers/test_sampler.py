@@ -56,7 +56,6 @@ def _do_sample(
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=True,
-                is_chunked_prefill=False,
                 seq_data={0: SequenceData([1, 2, 3])},
                 sampling_params=sampling_params,
                 block_tables={0: [1]},
@@ -251,7 +250,6 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
                 SequenceGroupMetadata(
                     request_id=f"test_{batch_size}",
                     is_prompt=is_prompt,
-                    is_chunked_prefill=False,
                     seq_data=seq_data,
                     sampling_params=sampling_params,
                     block_tables={},
@@ -270,7 +268,6 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
             SequenceGroupMetadata(
                 request_id="test_1",
                 is_prompt=True,
-                is_chunked_prefill=False,
                 seq_data={
                     next(seq_id_counter): create_sequence_data(),
                 },
@@ -286,7 +283,6 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
             SequenceGroupMetadata(
                 request_id="test_1",
                 is_prompt=True,
-                is_chunked_prefill=False,
                 seq_data={
                     next(seq_id_counter): create_sequence_data(),
                 },
@@ -302,7 +298,6 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
             SequenceGroupMetadata(
                 request_id="test_1",
                 is_prompt=False,
-                is_chunked_prefill=False,
                 seq_data={
                     next(seq_id_counter):
                     create_sequence_data(num_generated=1),
@@ -320,7 +315,6 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
             SequenceGroupMetadata(
                 request_id="test_1",
                 is_prompt=False,
-                is_chunked_prefill=False,
                 seq_data={
                     next(seq_id_counter):
                     create_sequence_data(num_generated=1),
@@ -334,7 +328,6 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
             SequenceGroupMetadata(
                 request_id="test_2",
                 is_prompt=True,
-                is_chunked_prefill=False,
                 seq_data={
                     next(seq_id_counter): create_sequence_data(),
                 },
@@ -453,7 +446,6 @@ def test_sampler_mixed(seed: int, device: str):
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=True,
-                is_chunked_prefill=False,
                 seq_data={0: SequenceData([1, 2, 3])},
                 sampling_params=sampling_params,
                 block_tables={0: [1]},
@@ -543,7 +535,6 @@ def test_sampler_top_k_top_p(seed: int, device: str):
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=True,
-                is_chunked_prefill=False,
                 seq_data={0: SequenceData([1, 2, 3])},
                 sampling_params=SamplingParams(
                     temperature=1,

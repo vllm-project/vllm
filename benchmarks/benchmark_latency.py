@@ -152,7 +152,12 @@ if __name__ == '__main__':
                         type=int,
                         default=16,
                         help='block size of key/value cache')
-    parser.add_argument('--max-chunked-prefill-len', type=int, default=-1)
+    parser.add_argument(
+        '--max-chunked-prefill-len',
+        type=int,
+        default=-1,
+        help='max number of prefill tokens allowed in chunked prefill'
+        ', -1 means no limit')
     parser.add_argument(
         "--ray-workers-use-nsight",
         action='store_true',

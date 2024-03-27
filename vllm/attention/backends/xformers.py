@@ -80,8 +80,6 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     num_prompt_tokens: int
     # The number of generation tokens. Doesn't include padding.
     num_generation_tokens: int
-    # The number of chunked prefill sequences in the batch.
-    num_chunked_prefill: int
 
     # NOTE(sang): Definition of context_len, subquery_len, and seqlen.
     # |---------- N-1 iteration --------|

@@ -530,10 +530,6 @@ class SequenceGroupMetadata:
     Args:
         request_id: The ID of the request.
         is_prompt: Whether the request is at prompt stage.
-        is_chunked_prefill: Whether the request is at chunked prefill stage.
-            If a prefill request is chunked, the first ~ n-1th chunks are
-            chunked prefill requests.
-            Note that chunked_prefill is also a prompt stage.
         seq_data: The sequence data. (Seq id -> sequence data)
         sampling_params: The sampling parameters used to generate the outputs.
         block_tables: The block tables. (Seq id -> list of physical block
@@ -547,7 +543,6 @@ class SequenceGroupMetadata:
         self,
         request_id: str,
         is_prompt: bool,
-        is_chunked_prefill: bool,
         seq_data: Dict[int, SequenceData],
         sampling_params: SamplingParams,
         block_tables: Dict[int, List[int]],
@@ -558,7 +553,6 @@ class SequenceGroupMetadata:
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
-        self.is_chunked_prefill = is_chunked_prefill
         self.seq_data = seq_data
         self.sampling_params = sampling_params
         self.block_tables = block_tables

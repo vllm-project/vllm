@@ -149,7 +149,6 @@ class ModelRunner:
         context_lens: List[int] = []
         subquery_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
-        num_chunked_prefill = 0
         multi_modal_input_list: List[torch.Tensor] = []
 
         for seq_group_metadata in seq_group_metadata_list:
@@ -159,14 +158,11 @@ class ModelRunner:
             seq_id = seq_ids[0]
 
             computed_block_nums = seq_group_metadata.computed_block_nums
-            if seq_group_metadata.is_chunked_prefill:
-                num_chunked_prefill += 1
-                # TODO(sang): Both are the same thing and should be handled
-                # in the same way.
-                if computed_block_nums is not None:
-                    raise RuntimeError(
-                        "chunked prefill cannot be used with prefix caching "
-                        "now.")
+            if (self.scheduler_config.chunked_prefill_enabled
+                    and computed_block_nums is not None):
+                raise RuntimeError(
+                    "chunked prefill cannot be used with prefix caching "
+                    "now.")
 
             seq_data = seq_group_metadata.seq_data[seq_id]
             prefill_start, prefill_end = seq_data.get_prefill_range()
@@ -317,7 +313,6 @@ class ModelRunner:
             slot_mapping=slot_mapping,
             prompt_lens=prompt_lens,
             prompt_lens_tensor=prompt_lens_tensor,
-            num_chunked_prefill=num_chunked_prefill,
             num_prompt_tokens=num_prompt_tokens,
             num_generation_tokens=0,
             max_subquery_len=max_subquery_len,
@@ -447,7 +442,6 @@ class ModelRunner:
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=False,
             slot_mapping=slot_mapping,
-            num_chunked_prefill=0,
             prompt_lens=None,
             prompt_lens_tensor=None,
             num_prompt_tokens=0,
@@ -728,7 +722,6 @@ class ModelRunner:
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,
-                is_chunked_prefill=False,
                 seq_data={group_id: seq_data},
                 sampling_params=sampling_params,
                 block_tables=None,
@@ -830,7 +823,6 @@ class ModelRunner:
                 attn_metadata = self.attn_backend.make_metadata(
                     is_prompt=False,
                     slot_mapping=slot_mapping[:batch_size],
-                    num_chunked_prefill=0,
                     prompt_lens=None,
                     prompt_lens_tensor=None,
                     num_prompt_tokens=0,

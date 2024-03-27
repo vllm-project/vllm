@@ -172,7 +172,6 @@ def create_seq_group_metadata_from_prompts(
         SequenceGroupMetadata(
             request_id=str(i),
             is_prompt=len(cont_token_ids) == 0,
-            is_chunked_prefill=False,
             seq_data={i: seq_data},
             sampling_params=SamplingParams(temperature=0.0, ),
             block_tables={i: block_allocations[i][:]},
