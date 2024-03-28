@@ -60,8 +60,7 @@ class TokenizerGroup(BaseTokenizerGroup):
                 lora_request, **self.tokenizer_config) or self.tokenizer)
             self.lora_tokenizers.put(lora_request.lora_int_id, tokenizer)
             return tokenizer
-        else:
-            return self.lora_tokenizers.get(lora_request.lora_int_id)
+        return self.lora_tokenizers.get(lora_request.lora_int_id)
 
     async def get_lora_tokenizer_async(
             self,
@@ -74,5 +73,4 @@ class TokenizerGroup(BaseTokenizerGroup):
                 lora_request, **self.tokenizer_config) or self.tokenizer)
             self.lora_tokenizers.put(lora_request.lora_int_id, tokenizer)
             return tokenizer
-        else:
-            return self.lora_tokenizers.get(lora_request.lora_int_id)
+        return self.lora_tokenizers.get(lora_request.lora_int_id)
