@@ -6,7 +6,8 @@ from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
-from vllm.model_executor.parallel_utils.communication_op import broadcast_object_list
+from vllm.model_executor.parallel_utils.communication_op import (
+    broadcast_object_list)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async)

@@ -78,20 +78,21 @@ def run_vllm(
     worker_use_ray: bool = False,
 ) -> float:
     from vllm import LLM, SamplingParams
-    llm = LLM(model=model,
-              tokenizer=tokenizer,
-              quantization=quantization,
-              tensor_parallel_size=tensor_parallel_size,
-              seed=seed,
-              trust_remote_code=trust_remote_code,
-              dtype=dtype,
-              max_model_len=max_model_len,
-              gpu_memory_utilization=gpu_memory_utilization,
-              enforce_eager=enforce_eager,
-              kv_cache_dtype=kv_cache_dtype,
-              device=device,
-              enable_prefix_caching=enable_prefix_caching,
-              worker_use_ray=worker_use_ray,
+    llm = LLM(
+        model=model,
+        tokenizer=tokenizer,
+        quantization=quantization,
+        tensor_parallel_size=tensor_parallel_size,
+        seed=seed,
+        trust_remote_code=trust_remote_code,
+        dtype=dtype,
+        max_model_len=max_model_len,
+        gpu_memory_utilization=gpu_memory_utilization,
+        enforce_eager=enforce_eager,
+        kv_cache_dtype=kv_cache_dtype,
+        device=device,
+        enable_prefix_caching=enable_prefix_caching,
+        worker_use_ray=worker_use_ray,
     )
 
     # Add the requests to the engine.

@@ -494,7 +494,8 @@ class ParallelConfig:
                             "ROCM platform. Use --worker-use-ray "
                             "to override")
                 if not os.environ.get("RANK"):
-                    raise RuntimeError("Needs to be run in torchrun: "
+                    raise RuntimeError(
+                        "Needs to be run in torchrun: "
                         "torchrun --standalone --nproc_per_node=<tp> ...")
                 self.worker_use_torchrun = True
             else:
