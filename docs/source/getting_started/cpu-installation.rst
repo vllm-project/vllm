@@ -63,6 +63,11 @@ Build from source
 
     $ VLLM_TARGET_DEVICE=cpu python setup.py install
 
+.. note::
+    - BF16 is the default data type in the current CPU backend, and is compatible will all CPUs with AVX512 ISA support. AVX512_BF16 is an extension ISA provides native BF16 data type conversion and vector product instructions. The CPU backend build script will check the host CPU flags to determine whether to enable AVX512_BF16. 
+    
+    - If you want to enable AVX512_BF16 for the cross-compilation, please set environment variable VLLM_CPU_AVX512BF16=1 before the building.    
+
 .. _cpu_backend_performance_tips:
 
 Performance tips
