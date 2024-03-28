@@ -28,10 +28,17 @@ import os
 import torch
 import torch.distributed as dist
 from torch.distributed import ReduceOp
+from vllm.model_executor.parallel_utils.find_lib import get_library_path
+from vllm.utils import is_hip
 
 logger = logging.getLogger(__name__)
 
-so_file = os.environ.get("VLLM_NCCL_SO_PATH", "")
+
+if is_hip():
+    # a robust way to get the path of librccl, no matter it is librccl.so, or librccl.so.1
+    so_file = get_library_path("librccl.so")
+else:
+    so_file = os.environ.get("VLLM_NCCL_SO_PATH", "")
 
 # manually load the nccl library
 if so_file:
@@ -41,7 +48,7 @@ else:
     if torch.version.cuda is not None:
         so_file = "libnccl.so.2"
     elif torch.version.hip is not None:
-        so_file = "librccl.so.2"
+        so_file = "librccl.so.1"
     else:
         raise ValueError("NCCL only supports CUDA and ROCm backends.")
     logger.debug(f"Loading nccl from library {so_file}")
