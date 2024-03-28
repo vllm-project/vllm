@@ -15,7 +15,7 @@ from vllm.model_executor.parallel_utils.utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils import is_hip
 
-if is_hip:
+if is_hip():
     from vllm import _custom_C
 
 logger = init_logger(__name__)
