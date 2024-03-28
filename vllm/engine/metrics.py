@@ -99,12 +99,6 @@ class Metrics:
             documentation="Histogram of end to end request latency in seconds.",
             labelnames=labelnames,
             buckets=[1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0])
-        self.histogram_max_tokens = Histogram(
-            name="vllm:request_params_max_tokens",
-            documentation="Histogram of the max_tokens request parameter.",
-            labelnames=labelnames,
-            buckets=build_1_2_5_buckets(max_model_len),
-        )
         self.histogram_request_n = Histogram(
             name="vllm:request_params_n",
             documentation="Histogram of the n request parameter.",
@@ -168,7 +162,6 @@ class Stats:
     num_generation_tokens: int
     num_prompt_tokens_lst: List[int]
     num_generation_tokens_lst: List[int]
-    max_tokens: List[int]
     request_n: List[int]
     time_to_first_tokens: List[float]
     time_per_output_tokens: List[float]
@@ -240,9 +233,6 @@ class StatLogger:
                 **self.labels).observe(val)
 
         # Observe sampling params in histograms.
-        for val in stats.max_tokens:
-            self.metrics.histogram_max_tokens.labels(
-                **self.labels).observe(val)
         for n in stats.request_n:
             self.metrics.histogram_request_n.labels(**self.labels).observe(n)
 
