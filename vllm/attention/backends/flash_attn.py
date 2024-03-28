@@ -234,14 +234,15 @@ class FlashAttentionImpl(AttentionImpl):
                 )
             else:
                 # prefix-enabled attention
-                output = flash_attn_varlen_func(
+                output = flash_attn_with_kvcache(
                     q=query,
-                    k=key_cache,
-                    v=value_cache,
-                    cu_seqlens_q=attn_metadata.seq_start_loc,
-                    max_seqlen_q=attn_metadata.max_prompt_len,
+                    k_cache=key_cache,
+                    v_cache=value_cache,
+                    cache_seqlens=attn_metadata.context_lens,  # FIXME
+                    block_table=attn_metadata.block_tables,
                     softmax_scale=self.scale,
                     causal=True,
+                    window_size=self.sliding_window,
                     alibi_slopes=self.alibi_slopes,
                 )
         else:
