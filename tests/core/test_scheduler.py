@@ -11,7 +11,7 @@ from .utils import create_dummy_prompt
 
 
 def get_sequence_groups(scheduler_output):
-    return [s for s, _ in scheduler_output.scheduled_seq_groups]
+    return [s.seq_group for s in scheduler_output.scheduled_seq_groups]
 
 
 def test_scheduler_add_seq_group():

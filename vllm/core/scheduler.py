@@ -460,8 +460,9 @@ class Scheduler:
         # batch will have been computed before the next scheduling invocation.
         # This is because the engine assumes that a failure in model execution
         # will crash the vLLM instance / will not retry.
-        for seq_group in scheduler_outputs.scheduled_seq_groups:
-            self.block_manager.mark_blocks_as_computed(seq_group)
+        for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
+            self.block_manager.mark_blocks_as_computed(
+                scheduled_seq_group.seq_group)
 
         return seq_group_metadata_list, scheduler_outputs
 
