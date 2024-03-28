@@ -13,7 +13,7 @@ from .utils import create_dummy_prompt
 def test_scheduler_add_seq_group():
     block_size = 4
     scheduler_config = SchedulerConfig(100, 64, 1)
-    cache_config = CacheConfig(block_size, 1.0, 1, "auto")
+    cache_config = CacheConfig(block_size, 1.0, 1, cache_dtype="auto")
     cache_config.num_cpu_blocks = 4
     cache_config.num_gpu_blocks = 4
     scheduler = Scheduler(scheduler_config, cache_config, None)
