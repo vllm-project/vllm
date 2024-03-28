@@ -34,7 +34,7 @@ from vllm.utils import is_hip
 logger = logging.getLogger(__name__)
 
 if is_hip():
-    # a robust way to get the path of librccl, 
+    # a robust way to get the path of librccl,
     # no matter it is librccl.so, or librccl.so.1
     so_file = get_library_path("librccl.so")
 else:
