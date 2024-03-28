@@ -369,6 +369,9 @@ class Scheduler:
         return scheduler_outputs
 
     def _can_append_slots(self, seq_group: SequenceGroup) -> bool:
+        """Determine whether or not we have enough space in the KV cache to
+        continue generation of the sequence group.
+        """
         # Appending slots only occurs in decoding.
         is_prefill = False
 
@@ -449,6 +452,16 @@ class Scheduler:
         seq_group: SequenceGroup,
         blocks_to_copy: Dict[int, List[int]],
     ) -> None:
+        """Appends new slots to the sequences in the given sequence group.
+
+        Args:
+            seq_group (SequenceGroup): The sequence group containing the
+                sequences to append slots to.
+            blocks_to_copy (Dict[int, List[int]]): A dictionary mapping source
+                block indices to lists of destination block indices. This
+                dictionary is updated with the new source and destination block
+                indices for the appended slots.
+        """
         num_lookahead_slots = self._get_num_lookahead_slots(is_prefill=False)
 
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
