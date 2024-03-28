@@ -118,10 +118,17 @@ class BlockSpaceManagerV2(BlockSpaceManager):
 
     def can_append_slots(self, seq_group: SequenceGroup,
                          num_lookahead_slots: int) -> bool:
-        # Worst-case heuristic: assume each touched block will require a new
-        # allocation (either via CoW or new block). We can append slots if the
-        # number of touched blocks is less than the number of free blocks.
+        """Determine if there is enough space in the GPU KV cache to continue
+        generation of the specified sequence group.
 
+        We use a worst-case heuristic: assume each touched block will require a
+        new allocation (either via CoW or new block). We can append slots if the
+        number of touched blocks is less than the number of free blocks.
+
+        "Lookahead slots" are slots that are allocated in addition to the slots
+        for known tokens. This is used by speculative decoding when speculating
+        future tokens.
+        """
         num_touched_blocks = 0
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             block_table = self.block_tables[seq.seq_id]
