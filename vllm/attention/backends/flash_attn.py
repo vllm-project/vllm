@@ -234,9 +234,17 @@ class FlashAttentionImpl(AttentionImpl):
                 )
             else:
                 # prefix-enabled attention
-                raise NotImplementedError(
-                    "Prefix-enabled attention is not supported by "
-                    "the FlashAttention backend yet.")
+                assert self.alibi_slopes is None
+                output = flash_attn_varlen_func(
+                    q=query,
+                    k=key_cache,
+                    v=value_cache,
+                    cu_seqlens_q=attn_metadata.seq_start_loc,
+                    max_seqlen_q=attn_metadata.max_prompt_len,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    alibi_slopes=self.alibi_slopes,
+                )
         else:
             # Decoding run.
             # TODO(skrider): tune num_splits heuristic
