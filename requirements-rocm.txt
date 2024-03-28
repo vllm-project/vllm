@@ -3,7 +3,7 @@ ninja  # For faster builds.
 typing-extensions>=4.8.0
 starlette
 psutil
-ray >= 2.9
+ray == 2.9.3
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
 tokenizers>=0.15.0
