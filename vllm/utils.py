@@ -118,6 +118,13 @@ def is_hip() -> bool:
 
 
 @lru_cache(maxsize=None)
+def is_cpu() -> bool:
+    from importlib.metadata import version
+    is_cpu_flag = "cpu" in version("vllm")
+    return is_cpu_flag
+
+
+@lru_cache(maxsize=None)
 def is_neuron() -> bool:
     try:
         import transformers_neuronx
@@ -361,6 +368,9 @@ def is_pin_memory_available() -> bool:
         return False
     elif is_neuron():
         print_warning_once("Pin memory is not supported on Neuron.")
+        return False
+    elif is_cpu():
+        print_warning_once("Pin memory is not supported on CPU.")
         return False
     return True
 
