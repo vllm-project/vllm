@@ -91,6 +91,7 @@ class ModelRunner:
             self.model_config.dtype if model_config is not None else None)
 
     def load_model(self) -> None:
+        load_model_start = time.monotonic()
         with CudaMemoryProfiler() as m:
             self.model = get_model(
                 self.model_config,
@@ -102,7 +103,8 @@ class ModelRunner:
 
         self.model_memory_usage = m.consumed_memory
         logger.info(f"Loading model weights took "
-                    f"{self.model_memory_usage / float(2**30):.4f} GB")
+                    f"{self.model_memory_usage / float(2**30):.4f} GB "
+                    f"and {time.monotonic()- load_model_start:.1f}s.")
 
         if self.lora_config:
             assert hasattr(self.model, "supported_lora_modules"

@@ -404,7 +404,8 @@ class FalconForCausalLM(nn.Module):
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
-                     revision: Optional[str] = None):
+                     revision: Optional[str] = None,
+                     use_distributed_loading: bool = False):
         total_num_heads = self.config.num_attention_heads
         if self.config.new_decoder_architecture:
             total_num_kv_heads = self.config.num_kv_heads
@@ -414,8 +415,12 @@ class FalconForCausalLM(nn.Module):
             total_num_kv_heads = total_num_heads
         num_query_heads_per_kv_head = total_num_heads // total_num_kv_heads
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+        for name, loaded_weight, weight_owner in hf_model_weights_iterator(
+                model_name_or_path,
+                cache_dir,
+                load_format,
+                revision,
+                use_distributed_loading=use_distributed_loading):
             if name == "lm_head.weight":
                 # Falcon uses tied embeddings.
                 continue
@@ -423,7 +428,7 @@ class FalconForCausalLM(nn.Module):
             if name.endswith(".bias") and name not in params_dict:
                 continue
             param = params_dict[name]
-            if "query_key_value" in name:
+            if "query_key_value" in name and loaded_weight is not None:
                 output_dim = getattr(param, "output_dim", None)
                 loaded_weight_shape = loaded_weight.shape
                 if output_dim is not None:
@@ -448,4 +453,4 @@ class FalconForCausalLM(nn.Module):
 
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
-            weight_loader(param, loaded_weight)
+            weight_loader(param, loaded_weight, weight_owner=weight_owner)

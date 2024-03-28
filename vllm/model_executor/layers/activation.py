@@ -11,7 +11,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.utils import divide
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import distribute_weights, set_weight_attrs
 
 
 class SiluAndMul(nn.Module):
@@ -127,11 +127,18 @@ class ScaledActivation(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.act(x) / self.scales
 
-    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
+    def weight_loader(self,
+                      param: nn.Parameter,
+                      loaded_weight: Optional[torch.Tensor],
+                      weight_owner: Optional[int] = None):
         param_data = param.data
         if self.input_is_parallel:
             tp_rank = get_tensor_model_parallel_rank()
             shard_size = param_data.shape[0]
+            if weight_owner is not None:
+                distribute_weights(param_data, loaded_weight, weight_owner,
+                                   True, shard_size, 0)
+                return
             start_idx = tp_rank * shard_size
             loaded_weight = loaded_weight.narrow(0, start_idx, shard_size)
         assert param_data.shape == loaded_weight.shape

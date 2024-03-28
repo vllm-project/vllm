@@ -9,7 +9,7 @@ from vllm.model_executor.parallel_utils.communication_op import (
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.utils import divide
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import distribute_weights, set_weight_attrs
 
 DEFAULT_VOCAB_PADDING_SIZE = 64
 
@@ -81,8 +81,23 @@ class VocabParallelEmbedding(torch.nn.Module):
             "weight_loader": self.weight_loader
         })
 
-    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+    def weight_loader(self,
+                      param: Parameter,
+                      loaded_weight: Optional[torch.Tensor],
+                      weight_owner: Optional[int] = None):
         parallel_dim = param.parallel_dim
+        if weight_owner is not None:
+            # Perform padding operations on the parallel_dim dimension.
+            if loaded_weight is not None and loaded_weight.shape[
+                    parallel_dim] < self.num_embeddings_padded:
+                pad = [0] * (2 * loaded_weight.dim())
+                pad[-2 * (parallel_dim + 1) +
+                    1] = self.num_embeddings_padded - loaded_weight.shape[
+                        parallel_dim]
+                loaded_weight = F.pad(loaded_weight, pad, "constant", 0)
+            distribute_weights(param.data, loaded_weight, weight_owner, True,
+                               self.num_embeddings_per_partition, parallel_dim)
+            return
         assert loaded_weight.shape[parallel_dim] == self.org_vocab_size
         loaded_weight = loaded_weight[self.vocab_start_index:self.
                                       vocab_end_index]

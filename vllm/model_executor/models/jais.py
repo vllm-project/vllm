@@ -309,10 +309,15 @@ class JAISLMHeadModel(nn.Module):
         cache_dir: Optional[str] = None,
         load_format: str = "auto",
         revision: Optional[str] = None,
+        use_distributed_loading: bool = False,
     ):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+        for name, loaded_weight, weight_owner in hf_model_weights_iterator(
+                model_name_or_path,
+                cache_dir,
+                load_format,
+                revision,
+                use_distributed_loading=use_distributed_loading):
             if "lm_head.weight" in name:
                 # GPT-2 ties the weights of the embedding layer and the final
                 # linear layer.
@@ -334,7 +339,8 @@ class JAISLMHeadModel(nn.Module):
                     continue
                 if not name.endswith(".weight"):
                     continue
-                loaded_weight = loaded_weight.t()
+                loaded_weight = loaded_weight.t(
+                ) if loaded_weight is not None else None
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
-            weight_loader(param, loaded_weight)
+            weight_loader(param, loaded_weight, weight_owner=weight_owner)

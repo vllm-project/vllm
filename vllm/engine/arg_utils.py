@@ -55,6 +55,7 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
     ray_workers_use_nsight: bool = False
+    use_distributed_loading: bool = False
     forced_num_gpu_blocks: Optional[int] = None
     num_lookahead_slots: int = 0
 
@@ -182,6 +183,9 @@ class EngineArgs:
                             default=EngineArgs.max_model_len,
                             help='model context length. If unspecified, '
                             'will be automatically derived from the model.')
+        parser.add_argument('--use-distributed-loading',
+                            action='store_true',
+                            help='use distributed weight loading')
         # Parallel arguments
         parser.add_argument('--worker-use-ray',
                             action='store_true',
@@ -422,7 +426,7 @@ class EngineArgs:
             self.dtype, self.seed, self.revision, self.code_revision,
             self.tokenizer_revision, self.max_model_len, self.quantization,
             self.quantization_param_path, self.enforce_eager,
-            self.max_context_len_to_capture, self.max_logprobs)
+            self.max_context_len_to_capture, self.max_logprobs, self.use_distributed_loading)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,

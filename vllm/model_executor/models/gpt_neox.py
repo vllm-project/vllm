@@ -267,10 +267,15 @@ class GPTNeoXForCausalLM(nn.Module):
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
-                     revision: Optional[str] = None):
+                     revision: Optional[str] = None,
+                     use_distributed_loading: bool = False):
         params_dict = dict(self.named_parameters())
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+        for name, loaded_weight, weight_owner in hf_model_weights_iterator(
+                model_name_or_path,
+                cache_dir,
+                load_format,
+                revision,
+                use_distributed_loading=use_distributed_loading):
             if ("attention.bias" in name or "attention.masked_bias" in name
                     or "rotary_emb.inv_freq" in name):
                 continue
@@ -283,7 +288,7 @@ class GPTNeoXForCausalLM(nn.Module):
                 # Thus, we need weight conversion.
                 output_dim = getattr(param, "output_dim", None)
                 num_heads = self.config.num_attention_heads
-                if output_dim is not None:
+                if output_dim is not None and loaded_weight is not None:
                     loaded_weight_shape = loaded_weight.shape
                     loaded_weight = loaded_weight.view(
                         loaded_weight_shape[:output_dim] + (num_heads, 3, -1) +
@@ -294,4 +299,4 @@ class GPTNeoXForCausalLM(nn.Module):
 
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
-            weight_loader(param, loaded_weight)
+            weight_loader(param, loaded_weight, weight_owner=weight_owner)

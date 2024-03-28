@@ -300,6 +300,7 @@ class CohereForCausalLM(nn.Module):
         cache_dir: Optional[str] = None,
         load_format: str = "auto",
         revision: Optional[str] = None,
+        use_distributed_loading: bool = False,
     ):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -311,19 +312,26 @@ class CohereForCausalLM(nn.Module):
         ]
         params_dict = dict(self.named_parameters())
         loaded_params = set()
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+        for name, loaded_weight, weight_owner in hf_model_weights_iterator(
+                model_name_or_path,
+                cache_dir,
+                load_format,
+                revision,
+                use_distributed_loading=use_distributed_loading):
             for param_name, shard_name, shard_id in stacked_params_mapping:
                 if shard_name not in name:
                     continue
                 name = name.replace(shard_name, param_name)
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
+                weight_loader(param,
+                              loaded_weight,
+                              shard_id,
+                              weight_owner=weight_owner)
                 break
             else:
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                weight_loader(param, loaded_weight)
+                weight_loader(param, loaded_weight, weight_owner=weight_owner)
             loaded_params.add(name)

@@ -375,10 +375,15 @@ class ChatGLMForCausalLM(nn.Module):
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
-                     revision: Optional[str] = None):
+                     revision: Optional[str] = None,
+                     use_distributed_loading: bool = False):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+        for name, loaded_weight, weight_owner in hf_model_weights_iterator(
+                model_name_or_path,
+                cache_dir,
+                load_format,
+                revision,
+                use_distributed_loading=use_distributed_loading):
             if "rotary_pos_emb.inv_freq" in name:
                 continue
             if "word_embeddings" in name:
@@ -389,4 +394,4 @@ class ChatGLMForCausalLM(nn.Module):
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
-            weight_loader(param, loaded_weight)
+            weight_loader(param, loaded_weight, weight_owner=weight_owner)

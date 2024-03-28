@@ -71,6 +71,7 @@ class ModelConfig:
         max_context_len_to_capture: Maximum context len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
             to eager mode.
+        use_distributed_loading: Whether to use distributed weight loading.
     """
 
     def __init__(
@@ -92,6 +93,7 @@ class ModelConfig:
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
         max_logprobs: int = 5,
+        use_distributed_loading: bool = False,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -108,6 +110,7 @@ class ModelConfig:
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
         self.max_logprobs = max_logprobs
+        self.use_distributed_loading = use_distributed_loading
 
         if os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true":
             # download model from ModelScope hub,
@@ -245,6 +248,22 @@ class ModelConfig:
                 f"Total number of hidden layers ({total_num_hidden_layers}) "
                 "must be divisible by pipeline parallel size "
                 f"({pipeline_parallel_size}).")
+
+        if self.use_distributed_loading and tensor_parallel_size == 1:
+            self.use_distributed_loading = False
+            logger.info(
+                "Disabled distributed weight loading because it is not "
+                "effective without tensor parallelism.")
+
+    def verify_with_device_config(
+        self,
+        device_config: "DeviceConfig",
+    ) -> None:
+        if self.use_distributed_loading and device_config.device_type != "cuda":
+            self.use_distributed_loading = False
+            logger.info(
+                "Disabled distributed weight loading because it is not "
+                "supported on non-cuda devices.")
 
     def get_sliding_window(self) -> Optional[int]:
         """Get the sliding window size, or None if disabled.

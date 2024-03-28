@@ -45,7 +45,7 @@ from vllm.model_executor.parallel_utils.communication_op import (
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import distribute_weights, set_weight_attrs
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
@@ -106,19 +106,38 @@ class MixtralMoE(nn.Module):
             "weight_loader": self.weight_loader,
         })
 
-    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
-                      weight_name: str, expert_id: int):
+    def weight_loader(self,
+                      param: nn.Parameter,
+                      loaded_weight: Optional[torch.Tensor],
+                      weight_name: str,
+                      expert_id: int,
+                      weight_owner: Optional[int] = None):
         tp_rank = get_tensor_model_parallel_rank()
         param_data = param.data
         shard_size = self.intermediate_size
         shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
         if weight_name.endswith("w1.weight"):
-            param_data[expert_id, 0:shard_size, :] = loaded_weight[shard, :]
+            if weight_owner is None:
+                param_data[expert_id,
+                           0:shard_size, :] = loaded_weight[shard, :]
+            else:
+                distribute_weights(param_data[expert_id,
+                                              0:shard_size, :], loaded_weight,
+                                   weight_owner, True, shard_size, 0)
         if weight_name.endswith("w3.weight"):
-            param_data[expert_id,
-                       shard_size:2 * shard_size, :] = loaded_weight[shard, :]
+            if weight_owner is None:
+                param_data[expert_id, shard_size:2 *
+                           shard_size, :] = loaded_weight[shard, :]
+            else:
+                distribute_weights(
+                    param_data[expert_id, shard_size:2 * shard_size, :],
+                    loaded_weight, weight_owner, True, shard_size, 0)
         if weight_name.endswith("w2.weight"):
-            param_data[expert_id, :, :] = loaded_weight[:, shard]
+            if weight_owner is None:
+                param_data[expert_id, :, :] = loaded_weight[:, shard]
+            else:
+                distribute_weights(param_data[expert_id, :, :], loaded_weight,
+                                   weight_owner, True, shard_size, 1)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
@@ -398,7 +417,8 @@ class MixtralForCausalLM(nn.Module):
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
-                     revision: Optional[str] = None):
+                     revision: Optional[str] = None,
+                     use_distributed_loading: bool = False):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -415,12 +435,12 @@ class MixtralForCausalLM(nn.Module):
         ]
 
         params_dict = dict(self.named_parameters())
-        for name, loaded_weight in hf_model_weights_iterator(
+        for name, loaded_weight, weight_owner in hf_model_weights_iterator(
                 model_name_or_path,
                 cache_dir,
                 load_format,
                 revision,
-                fall_back_to_pt=False):
+                use_distributed_loading=use_distributed_loading):
             if "rotary_emb.inv_freq" in name:
                 continue
 
@@ -433,7 +453,10 @@ class MixtralForCausalLM(nn.Module):
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
+                weight_loader(param,
+                              loaded_weight,
+                              shard_id,
+                              weight_owner=weight_owner)
                 break
             else:
                 for param_name, weight_name, expert_id in expert_params_mapping:
@@ -445,7 +468,8 @@ class MixtralForCausalLM(nn.Module):
                     weight_loader(param,
                                   loaded_weight,
                                   weight_name,
-                                  expert_id=expert_id)
+                                  expert_id=expert_id,
+                                  weight_owner=weight_owner)
                     break
                 else:
                     # Skip loading extra bias for GPTQ models.
@@ -454,4 +478,6 @@ class MixtralForCausalLM(nn.Module):
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
-                    weight_loader(param, loaded_weight)
+                    weight_loader(param,
+                                  loaded_weight,
+                                  weight_owner=weight_owner)

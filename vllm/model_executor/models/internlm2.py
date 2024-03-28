@@ -279,15 +279,20 @@ class InternLM2ForCausalLM(nn.Module):
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
-                     revision: Optional[str] = None):
+                     revision: Optional[str] = None,
+                     use_distributed_loading: bool = False):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "w1", 0),
             ("gate_up_proj", "w3", 1),
         ]
         params_dict = dict(self.named_parameters())
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+        for name, loaded_weight, weight_owner in hf_model_weights_iterator(
+                model_name_or_path,
+                cache_dir,
+                load_format,
+                revision,
+                use_distributed_loading=use_distributed_loading):
             if "rotary_emb.inv_freq" in name:
                 continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
@@ -299,7 +304,10 @@ class InternLM2ForCausalLM(nn.Module):
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
+                weight_loader(param,
+                              loaded_weight,
+                              shard_id,
+                              weight_owner=weight_owner)
                 break
             else:
                 # Skip loading extra bias for GPTQ models.
@@ -307,23 +315,30 @@ class InternLM2ForCausalLM(nn.Module):
                     continue
                 param = params_dict[name]
                 if "wqkv" in name:
-                    config = self.config
-                    kv_groups = (config.num_attention_heads //
-                                 config.num_key_value_heads)
-                    head_dim = config.hidden_size // config.num_attention_heads
-                    loaded_weight = loaded_weight.view(-1, 2 + kv_groups,
-                                                       head_dim,
-                                                       loaded_weight.shape[-1])
-                    wq, wk, wv = torch.split(loaded_weight, [kv_groups, 1, 1],
-                                             dim=1)
-                    wq = wq.reshape(-1, wq.shape[-1])
-                    wk = wk.reshape(-1, wk.shape[-1])
-                    wv = wv.reshape(-1, wv.shape[-1])
+                    if loaded_weight is not None:
+                        config = self.config
+                        kv_groups = (config.num_attention_heads //
+                                     config.num_key_value_heads)
+                        head_dim = config.hidden_size // \
+                            config.num_attention_heads
+                        loaded_weight = loaded_weight.view(
+                            -1, 2 + kv_groups, head_dim,
+                            loaded_weight.shape[-1])
+                        wq, wk, wv = torch.split(loaded_weight,
+                                                 [kv_groups, 1, 1],
+                                                 dim=1)
+                        wq = wq.reshape(-1, wq.shape[-1])
+                        wk = wk.reshape(-1, wk.shape[-1])
+                        wv = wv.reshape(-1, wv.shape[-1])
+                    else:
+                        wq, wk, wv = None, None, None
                     weight_loader = param.weight_loader
-                    weight_loader(param, wq, 'q')
-                    weight_loader(param, wk, 'k')
-                    weight_loader(param, wv, 'v')
+                    weight_loader(param, wq, 'q', weight_owner=weight_owner)
+                    weight_loader(param, wk, 'k', weight_owner=weight_owner)
+                    weight_loader(param, wv, 'v', weight_owner=weight_owner)
                 else:
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
-                    weight_loader(param, loaded_weight)
+                    weight_loader(param,
+                                  loaded_weight,
+                                  weight_owner=weight_owner)

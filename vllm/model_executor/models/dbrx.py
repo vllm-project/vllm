@@ -20,7 +20,7 @@ from vllm.model_executor.parallel_utils.communication_op import (
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import distribute_weights, set_weight_attrs
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
@@ -111,8 +111,11 @@ class DbrxExperts(nn.Module):
             },
         )
 
-    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
-                      weight_name: str):
+    def weight_loader(self,
+                      param: nn.Parameter,
+                      loaded_weight: Optional[torch.Tensor],
+                      weight_name: str,
+                      weight_owner: Optional[int] = None):
         tp_rank = get_tensor_model_parallel_rank()
         param_data = param.data
         shard_size = self.intermediate_size
@@ -123,22 +126,35 @@ class DbrxExperts(nn.Module):
             loaded_weight = torch.reshape(
                 loaded_weight,
                 [-1, self.intermediate_size * self.tp_size, self.d_model],
-            )
-            param_data[:, 0:shard_size, :] = loaded_weight[:, shard, :]
+            ) if loaded_weight is not None else None
+            if weight_owner is None:
+                param_data[:, 0:shard_size, :] = loaded_weight[:, shard, :]
+            else:
+                distribute_weights(param_data[:,
+                                              0:shard_size, :], loaded_weight,
+                                   weight_owner, True, shard_size, 1)
         if weight_name.endswith("v1"):
             loaded_weight = torch.reshape(
                 loaded_weight,
                 [-1, self.intermediate_size * self.tp_size, self.d_model],
-            )
-            param_data[:,
-                       shard_size:2 * shard_size, :] = loaded_weight[:,
-                                                                     shard, :]
+            ) if loaded_weight is not None else None
+            if weight_owner is None:
+                param_data[:, shard_size:2 *
+                           shard_size, :] = loaded_weight[:, shard, :]
+            else:
+                distribute_weights(param_data[:, shard_size:2 * shard_size, :],
+                                   loaded_weight, weight_owner, True,
+                                   shard_size, 1)
         if weight_name.endswith("w2"):
             loaded_weight = torch.reshape(
                 loaded_weight,
                 [-1, self.intermediate_size * self.tp_size, self.d_model],
-            ).transpose(1, 2)
-            param_data[:] = loaded_weight[:, :, shard]
+            ).transpose(1, 2) if loaded_weight is not None else None
+            if weight_owner is None:
+                param_data[:] = loaded_weight[:, :, shard]
+            else:
+                distribute_weights(param_data[:], loaded_weight, weight_owner,
+                                   True, shard_size, 2)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
@@ -398,24 +414,32 @@ class DbrxForCausalLM(nn.Module):
         cache_dir: Optional[str] = None,
         load_format: str = "auto",
         revision: Optional[str] = None,
+        use_distributed_loading: bool = False,
     ):
         expert_params_mapping = [(
             "ws" if weight_name in ["w1", "v1"] else "w2s",
             f"experts.mlp.{weight_name}",
         ) for weight_name in ["w1", "v1", "w2"]]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+        for name, loaded_weight, weight_owner in hf_model_weights_iterator(
+                model_name_or_path,
+                cache_dir,
+                load_format,
+                revision,
+                use_distributed_loading=use_distributed_loading):
             for param_name, weight_name in expert_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, weight_name)
+                weight_loader(param,
+                              loaded_weight,
+                              weight_name,
+                              weight_owner=weight_owner)
                 break
             else:
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                weight_loader(param, loaded_weight)
+                weight_loader(param, loaded_weight, weight_owner=weight_owner)

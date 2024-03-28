@@ -241,6 +241,7 @@ class LLMEngine:
 
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
+        self.model_config.verify_with_device_config(self.device_config)
         self.cache_config.verify_with_parallel_config(self.parallel_config)
         if self.lora_config:
             self.lora_config.verify_with_model_config(self.model_config)

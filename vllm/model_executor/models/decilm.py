@@ -69,7 +69,8 @@ class DeciLMForCausalLM(LlamaForCausalLM):
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
-                     revision: Optional[str] = None):
+                     revision: Optional[str] = None,
+                     use_distributed_loading: bool = False):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -79,13 +80,18 @@ class DeciLMForCausalLM(LlamaForCausalLM):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+        for name, loaded_weight, weight_owner in hf_model_weights_iterator(
+                model_name_or_path,
+                cache_dir,
+                load_format,
+                revision,
+                use_distributed_loading=use_distributed_loading):
             if "rotary_emb.inv_freq" in name:
                 continue
 
             if "k_proj" in name or "v_proj" in name:
-                loaded_weight = self._degroup_weight(loaded_weight)
+                loaded_weight = self._degroup_weight(
+                    loaded_weight) if loaded_weight is not None else None
 
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
@@ -96,7 +102,10 @@ class DeciLMForCausalLM(LlamaForCausalLM):
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
+                weight_loader(param,
+                              loaded_weight,
+                              shard_id,
+                              weight_owner=weight_owner)
                 break
             else:
                 # Skip loading extra bias for GPTQ models.
@@ -105,7 +114,7 @@ class DeciLMForCausalLM(LlamaForCausalLM):
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                weight_loader(param, loaded_weight)
+                weight_loader(param, loaded_weight, weight_owner=weight_owner)
 
     def _degroup_weight(self, loaded_weight: torch.Tensor) -> torch.Tensor:
         hidden_size = self.config.hidden_size

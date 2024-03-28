@@ -4,8 +4,9 @@ import glob
 import hashlib
 import json
 import os
+import threading
 from collections import defaultdict
-from typing import Any, Iterable, Iterator, List, Optional, Tuple
+from typing import Any, Iterable, Dict, Iterator, List, Optional, Tuple
 
 import filelock
 import huggingface_hub.constants
@@ -20,6 +21,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
 from vllm.model_executor.layers.quantization.schema import QuantParamSchema
+from vllm.model_executor.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_group, get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size)
+from vllm.model_executor.utils import distribute_weights
 
 logger = init_logger(__name__)
 
@@ -237,7 +242,83 @@ def hf_model_weights_iterator(
     load_format: str = "auto",
     revision: Optional[str] = None,
     fall_back_to_pt: Optional[bool] = True,
-) -> Iterator[Tuple[str, torch.Tensor]]:
+    use_distributed_loading: bool = False,
+) -> Iterator[Tuple[str, Optional[torch.Tensor], Optional[int]]]:
+    if use_distributed_loading:
+        local_state_dict, weights_map = distributed_weights_loader(
+            model_name_or_path, cache_dir, load_format, fall_back_to_pt,
+            revision)
+        weight_names = sorted(weights_map.keys())
+        for name in weight_names:
+            weight_owner = weights_map[name]
+            loaded_weight = local_state_dict[name].to(
+                "cuda") if weight_owner == get_tensor_model_parallel_rank(
+                ) else None
+            yield name, loaded_weight, weight_owner
+        del local_state_dict
+        torch.cuda.empty_cache()
+    else:
+        hf_folder, hf_weights_files, use_safetensors = prepare_hf_model_weights(
+            model_name_or_path,
+            cache_dir=cache_dir,
+            load_format=load_format,
+            fall_back_to_pt=fall_back_to_pt,
+            revision=revision)
+
+        if load_format == "npcache":
+            # Currently np_cache only support *.bin checkpoints
+            assert use_safetensors is False
+
+            # Convert the model weights from torch tensors to numpy arrays for
+            # faster loading.
+            np_folder = os.path.join(hf_folder, "np")
+            os.makedirs(np_folder, exist_ok=True)
+            weight_names_file = os.path.join(np_folder, "weight_names.json")
+            # Use file lock to prevent multiple processes from
+            # dumping the same model weights to numpy at the same time.
+            with get_lock(model_name_or_path, cache_dir):
+                if not os.path.exists(weight_names_file):
+                    weight_names = []
+                    for bin_file in hf_weights_files:
+                        state = torch.load(bin_file, map_location="cpu")
+                        for name, param in state.items():
+                            param_path = os.path.join(np_folder, name)
+                            with open(param_path, "wb") as f:
+                                np.save(f, param.cpu().detach().numpy())
+                            weight_names.append(name)
+                    with open(weight_names_file, "w") as f:
+                        json.dump(weight_names, f)
+
+            with open(weight_names_file, "r") as f:
+                weight_names = json.load(f)
+
+            for name in weight_names:
+                param_path = os.path.join(np_folder, name)
+                with open(param_path, "rb") as f:
+                    param = np.load(f)
+                yield name, torch.from_numpy(param), None
+        elif use_safetensors:
+            for st_file in hf_weights_files:
+                with safe_open(st_file, framework="pt") as f:
+                    for name in f.keys():  # noqa: SIM118
+                        param = f.get_tensor(name)
+                        yield name, param, None
+        else:
+            for bin_file in hf_weights_files:
+                state = torch.load(bin_file, map_location="cpu")
+                for name, param in state.items():
+                    yield name, param, None
+                del state
+                torch.cuda.empty_cache()
+
+
+def distributed_weights_loader(
+    model_name_or_path: str,
+    cache_dir: Optional[str] = None,
+    load_format: str = "auto",
+    fall_back_to_pt: bool = True,
+    revision: Optional[str] = None,
+) -> Tuple[Dict[str, torch.Tensor], Dict[str, int]]:
     hf_folder, hf_weights_files, use_safetensors = prepare_hf_model_weights(
         model_name_or_path,
         cache_dir=cache_dir,
@@ -245,6 +326,12 @@ def hf_model_weights_iterator(
         fall_back_to_pt=fall_back_to_pt,
         revision=revision)
 
+    world_size = get_tensor_model_parallel_world_size()
+    tp_group = get_tensor_model_parallel_group()
+    rank = get_tensor_model_parallel_rank()
+    hf_weights_files = sorted(hf_weights_files)
+
+    local_state_dict: Dict[str, torch.Tensor] = {}
     if load_format == "npcache":
         # Currently np_cache only support *.bin checkpoints
         assert use_safetensors is False
@@ -272,24 +359,54 @@ def hf_model_weights_iterator(
         with open(weight_names_file, "r") as f:
             weight_names = json.load(f)
 
-        for name in weight_names:
+        for name_idx in range(rank, len(weight_names), world_size):
+            name = weight_names[name_idx]
             param_path = os.path.join(np_folder, name)
             with open(param_path, "rb") as f:
                 param = np.load(f)
-            yield name, torch.from_numpy(param)
+            # use pin_memory() to speed up h2d
+            local_state_dict[name] = torch.from_numpy(param).pin_memory()
     elif use_safetensors:
+        global_slice_dict = {}
         for st_file in hf_weights_files:
             with safe_open(st_file, framework="pt") as f:
                 for name in f.keys():  # noqa: SIM118
-                    param = f.get_tensor(name)
-                    yield name, param
+                    global_slice_dict[name] = f.get_slice(name)
+        # Optimization: Partitioning at the tensor level
+        # in order to achieve a more balanced IO.
+        for i, (name, tensor_slice) in enumerate(global_slice_dict.items()):
+            if i % world_size == rank:
+                # use pin_memory() to speed up h2d
+                local_state_dict[name] = tensor_slice[:].pin_memory()
     else:
-        for bin_file in hf_weights_files:
-            state = torch.load(bin_file, map_location="cpu")
+        # multi-thread loading
+        def custom_load_file(file_name):
+            state = torch.load(file_name, map_location="cpu")
             for name, param in state.items():
-                yield name, param
-            del state
-            torch.cuda.empty_cache()
+                # use pin_memory() to speed up h2d
+                local_state_dict[name] = param.pin_memory()
+
+        threads = []
+        for file_idx in range(rank, len(hf_weights_files), world_size):
+            bin_file = hf_weights_files[file_idx]
+            thread = threading.Thread(target=custom_load_file,
+                                      args=(bin_file, ))
+            threads.append(thread)
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+    # Generate weights map.
+    local_weight_names = {name: rank for name in local_state_dict}
+    all_weight_names = [None] * world_size
+    torch.distributed.all_gather_object(all_weight_names,
+                                        local_weight_names,
+                                        group=tp_group)
+    weights_map = {}
+    for d in all_weight_names:
+        weights_map.update(d)
+
+    return local_state_dict, weights_map
 
 
 def kv_cache_scales_loader(
@@ -348,8 +465,12 @@ def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
 
 
 def default_weight_loader(param: torch.Tensor,
-                          loaded_weight: torch.Tensor) -> None:
+                          loaded_weight: Optional[torch.Tensor],
+                          weight_owner: Optional[int] = None) -> None:
     """Default weight loader."""
+    if weight_owner is not None:
+        distribute_weights(param.data, loaded_weight, weight_owner, False)
+        return
     assert param.size() == loaded_weight.size()
     param.data.copy_(loaded_weight)
 

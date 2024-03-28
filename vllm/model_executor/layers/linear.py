@@ -12,7 +12,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.utils import (
     divide, split_tensor_along_last_dim)
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import distribute_weights, set_weight_attrs
 
 logger = init_logger(__name__)
 
@@ -196,15 +196,25 @@ class ColumnParallelLinear(torch.nn.Module):
         else:
             self.register_parameter("bias", None)
 
-    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+    def weight_loader(self,
+                      param: Parameter,
+                      loaded_weight: Optional[torch.Tensor],
+                      weight_owner: Optional[int] = None):
         tp_rank = get_tensor_model_parallel_rank()
         output_dim = getattr(param, "output_dim", None)
         param_data = param.data
         if output_dim is not None:
             shard_size = param_data.shape[output_dim]
+            if weight_owner is not None:
+                distribute_weights(param_data, loaded_weight, weight_owner,
+                                   True, shard_size, output_dim)
+                return
             start_idx = tp_rank * shard_size
             loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                  shard_size)
+        if weight_owner is not None:
+            distribute_weights(param_data, loaded_weight, weight_owner, False)
+            return
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
@@ -262,13 +272,18 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
     def weight_loader(self,
                       param: Parameter,
-                      loaded_weight: torch.Tensor,
-                      loaded_shard_id: Optional[int] = None):
+                      loaded_weight: Optional[torch.Tensor],
+                      loaded_shard_id: Optional[int] = None,
+                      weight_owner: Optional[int] = None):
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
         if loaded_shard_id is None:
             # Loaded weight is already packed.
             if output_dim is None:
+                if weight_owner is not None:
+                    distribute_weights(param_data, loaded_weight, weight_owner,
+                                       False)
+                    return
                 assert param_data.shape == loaded_weight.shape
                 param_data.copy_(loaded_weight)
                 return
@@ -291,8 +306,10 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                         param, shard_size, shard_offset)
 
                 loaded_weight_shard = loaded_weight.narrow(
-                    output_dim, shard_offset, shard_size)
-                self.weight_loader(param, loaded_weight_shard, shard_id)
+                    output_dim, shard_offset,
+                    shard_size) if loaded_weight is not None else None
+                self.weight_loader(param, loaded_weight_shard, shard_id,
+                                   weight_owner)
             return
 
         assert loaded_shard_id < len(self.output_sizes)
@@ -315,6 +332,10 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)
+            if weight_owner is not None:
+                distribute_weights(param_data, loaded_weight, weight_owner,
+                                   True, shard_size, output_dim)
+                return
             start_idx = tp_rank * shard_size
             loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                  shard_size)
@@ -325,6 +346,10 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     "Loading a weight without `output_dim` attribute in "
                     "MergedColumnParallelLinear, assume the weight is "
                     "the same for all partitions.")
+            if weight_owner is not None:
+                distribute_weights(param.data, loaded_weight, weight_owner,
+                                   False)
+                return
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
@@ -388,14 +413,19 @@ class QKVParallelLinear(ColumnParallelLinear):
 
     def weight_loader(self,
                       param: Parameter,
-                      loaded_weight: torch.Tensor,
-                      loaded_shard_id: Optional[str] = None):
+                      loaded_weight: Optional[torch.Tensor],
+                      loaded_shard_id: Optional[str] = None,
+                      weight_owner: Optional[int] = None):
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
 
         if loaded_shard_id is None:
             # Loaded weight is already packed.
             if output_dim is None:
+                if weight_owner is not None:
+                    distribute_weights(param_data, loaded_weight, weight_owner,
+                                       False)
+                    return
                 assert param_data.shape == loaded_weight.shape
                 param_data.copy_(loaded_weight)
                 return
@@ -421,8 +451,10 @@ class QKVParallelLinear(ColumnParallelLinear):
                         param, shard_size, shard_offset)
 
                 loaded_weight_shard = loaded_weight.narrow(
-                    output_dim, shard_offset, shard_size)
-                self.weight_loader(param, loaded_weight_shard, shard_id)
+                    output_dim, shard_offset,
+                    shard_size) if loaded_weight is not None else None
+                self.weight_loader(param, loaded_weight_shard, shard_id,
+                                   weight_owner)
             return
 
         tp_rank = get_tensor_model_parallel_rank()
@@ -452,6 +484,19 @@ class QKVParallelLinear(ColumnParallelLinear):
 
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)
+            if weight_owner is not None:
+                if loaded_weight is not None and (loaded_shard_id == "k"
+                                                  or loaded_shard_id == "v"):
+                    repeat_vector = [1] * loaded_weight.dim()
+                    repeat_vector[output_dim] = self.num_kv_head_replicas
+                    loaded_weight = torch.concatenate([
+                        weight.repeat(repeat_vector)
+                        for weight in loaded_weight.split(shard_size,
+                                                          dim=output_dim)
+                    ])
+                distribute_weights(param_data, loaded_weight, weight_owner,
+                                   True, shard_size, output_dim)
+                return
             if loaded_shard_id == "q":
                 shard_id = tp_rank
             else:
@@ -466,6 +511,10 @@ class QKVParallelLinear(ColumnParallelLinear):
                     "Loading a weight without `output_dim` attribute in "
                     "QKVParallelLinear, assume the weight is the same "
                     "for all partitions.")
+            if weight_owner is not None:
+                distribute_weights(param.data, loaded_weight, weight_owner,
+                                   False)
+                return
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
@@ -546,15 +595,25 @@ class RowParallelLinear(torch.nn.Module):
         else:
             self.register_parameter("bias", None)
 
-    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+    def weight_loader(self,
+                      param: Parameter,
+                      loaded_weight: Optional[torch.Tensor],
+                      weight_owner: Optional[int] = None):
         tp_rank = get_tensor_model_parallel_rank()
         input_dim = getattr(param, "input_dim", None)
         param_data = param.data
         if input_dim is not None:
             shard_size = param_data.shape[input_dim]
+            if weight_owner is not None:
+                distribute_weights(param_data, loaded_weight, weight_owner,
+                                   True, shard_size, input_dim)
+                return
             start_idx = tp_rank * shard_size
             loaded_weight = loaded_weight.narrow(input_dim, start_idx,
                                                  shard_size)
+        if weight_owner is not None:
+            distribute_weights(param_data, loaded_weight, weight_owner, False)
+            return
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
