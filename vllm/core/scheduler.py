@@ -94,11 +94,11 @@ class SchedulerDecodeOutputs:
         self.blocks_to_swap_out = blocks_to_swap_out
         self.blocks_to_copy = blocks_to_copy
 
-    @staticmethod
+    @classmethod
     def create_empty() -> "SchedulerDecodeOutputs":
         return SchedulerDecodeOutputs([], 0, [], [], [])
 
-    def num_decoding_seqs(self):
+    def num_decoding_seqs(self) -> int:
         return sum(
             seq_group.num_seqs(status=SequenceStatus.RUNNING)
             for seq_group in self.decoding_seq_groups)

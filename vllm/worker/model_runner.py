@@ -820,7 +820,8 @@ class ModelRunner:
                     context_lens=context_lens[:batch_size],
                     block_tables=block_tables[:batch_size],
                     use_cuda_graph=True,
-                    kv_cache_dtype=self.kv_cache_dtype)
+                    kv_cache_dtype=self.kv_cache_dtype,
+                )
 
                 if self.lora_config:
                     lora_mapping = LoRAMapping(
