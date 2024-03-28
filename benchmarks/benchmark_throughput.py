@@ -217,7 +217,8 @@ def main(args: argparse.Namespace):
                                 args.seed, args.n, args.use_beam_search,
                                 args.trust_remote_code, args.dtype,
                                 args.max_model_len, args.enforce_eager,
-                                args.kv_cache_dtype, args.device,
+                                args.kv_cache_dtype,
+                                args.quantization_param_path, args.device,
                                 args.enable_prefix_caching,
                                 args.gpu_memory_utilization, args.download_dir)
     elif args.backend == "hf":

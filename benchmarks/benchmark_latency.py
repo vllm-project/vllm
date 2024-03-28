@@ -24,6 +24,7 @@ def main(args: argparse.Namespace):
               dtype=args.dtype,
               enforce_eager=args.enforce_eager,
               kv_cache_dtype=args.kv_cache_dtype,
+              quantization_param_path=args.quantization_param_path,
               device=args.device,
               ray_workers_use_nsight=args.ray_workers_use_nsight,
               download_dir=args.download_dir)
