@@ -90,6 +90,6 @@ RUN cd /app \
     && cd ..
 
 RUN python3 -m pip install --upgrade pip
-RUN python3 -m pip install --no-cache-dir ray[all]
+RUN python3 -m pip install --no-cache-dir ray[all]==2.9.3
 
 CMD ["/bin/bash"]
