@@ -145,43 +145,45 @@ class LoRAModel:
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         loras: Dict[str, LoRALayerWeights] = {}
         for tensor_name, tensor in tensors.items():
-            module_name, is_lora_a = parse_fine_tuned_lora_name(tensor_name)
-            if module_name not in loras:
-                lora_embeddings_tensor = None
-                if embeddings:
-                    embeddings_module = next(
-                        (k for k in embedding_modules if k in module_name),
-                        None)
-                    if embeddings_module:
-                        lora_embeddings_tensor = embeddings[
-                            embedding_modules[embeddings_module]].to(
-                                device=device, dtype=dtype)
-                        if pin_memory:
-                            lora_embeddings_tensor = (
-                                lora_embeddings_tensor.pin_memory())
-                loras[module_name] = LoRALayerWeights(module_name, rank,
-                                                      lora_alpha, None, None,
-                                                      lora_embeddings_tensor)
-            if is_lora_a:
-                loras[module_name].lora_a = tensor.to(device=device,
-                                                      dtype=dtype).t()
-                if pin_memory:
-                    loras[module_name].lora_a = loras[
-                        module_name].lora_a.pin_memory()
-            else:
-                loras[module_name].lora_b = tensor.to(device=device,
-                                                      dtype=dtype).t()
-                if any(name in module_name
-                       for name in embedding_padding_modules
-                       ) and target_embedding_padding is not None:
-                    lora_b = loras[module_name].lora_b
-                    assert target_embedding_padding >= lora_b.shape[1]
-                    addition = target_embedding_padding - lora_b.shape[1]
-                    loras[module_name].lora_b = torch.nn.functional.pad(
-                        lora_b, (0, addition))
-                if pin_memory:
-                    loras[module_name].lora_b = loras[
-                        module_name].lora_b.pin_memory()
+            result = parse_fine_tuned_lora_name(tensor_name)
+            if result is not None:
+                module_name, is_lora_a = result
+                if module_name not in loras:
+                    lora_embeddings_tensor = None
+                    if embeddings:
+                        embeddings_module = next(
+                            (k for k in embedding_modules if k in module_name),
+                            None)
+                        if embeddings_module:
+                            lora_embeddings_tensor = embeddings[
+                                embedding_modules[embeddings_module]].to(
+                                    device=device, dtype=dtype)
+                            if pin_memory:
+                                lora_embeddings_tensor = (
+                                    lora_embeddings_tensor.pin_memory())
+                    loras[module_name] = LoRALayerWeights(
+                        module_name, rank, lora_alpha, None, None,
+                        lora_embeddings_tensor)
+                if is_lora_a:
+                    loras[module_name].lora_a = tensor.to(device=device,
+                                                          dtype=dtype).t()
+                    if pin_memory:
+                        loras[module_name].lora_a = loras[
+                            module_name].lora_a.pin_memory()
+                else:
+                    loras[module_name].lora_b = tensor.to(device=device,
+                                                          dtype=dtype).t()
+                    if any(name in module_name
+                           for name in embedding_padding_modules
+                           ) and target_embedding_padding is not None:
+                        lora_b = loras[module_name].lora_b
+                        assert target_embedding_padding >= lora_b.shape[1]
+                        addition = target_embedding_padding - lora_b.shape[1]
+                        loras[module_name].lora_b = torch.nn.functional.pad(
+                            lora_b, (0, addition))
+                    if pin_memory:
+                        loras[module_name].lora_b = loras[
+                            module_name].lora_b.pin_memory()
 
         for lora in loras.values():
             lora.optimize()
