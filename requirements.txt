@@ -7,6 +7,7 @@ numpy
 torch == 2.1.2
 transformers >= 4.39.1  # Required for StarCoder2 & Llava.
 xformers == 0.0.23.post1  # Required for CUDA 12.1.
+vllm-flash-attn == 2.5.6  # Requires PyTorch 2.1.2.
 fastapi
 uvicorn[standard]
 pydantic >= 2.0  # Required for OpenAI server.
@@ -14,4 +15,4 @@ prometheus_client >= 0.18.0
 pynvml == 11.5.0
 triton >= 2.1.0
 outlines == 0.0.34
-tiktoken == 0.6.0 # Required for DBRX tokenizer
+tiktoken == 0.6.0  # Required for DBRX tokenizer

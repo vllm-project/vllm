@@ -316,6 +316,13 @@ def get_requirements() -> List[str]:
     if _is_cuda():
         with open(get_path("requirements.txt")) as f:
             requirements = f.read().strip().split("\n")
+            if get_nvcc_cuda_version() <= Version("11.8"):
+                # Remove vllm-flash-attn from requirements for CUDA 11.x build
+                # as it is optional and not supported.
+                requirements = [
+                    r for r in requirements
+                    if not r.startswith("vllm-flash-attn")
+                ]
     elif _is_hip():
         with open(get_path("requirements-rocm.txt")) as f:
             requirements = f.read().strip().split("\n")
