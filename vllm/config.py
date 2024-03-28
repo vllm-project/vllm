@@ -85,12 +85,14 @@ class ModelConfig:
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
         max_logprobs: int = 5,
+        local_files_only: bool = False,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
         self.trust_remote_code = trust_remote_code
         self.download_dir = download_dir
+        self.local_files_only = local_files_only
         self.load_format = load_format
         self.seed = seed
         self.revision = revision
@@ -108,6 +110,10 @@ class ModelConfig:
             from modelscope.hub.snapshot_download import snapshot_download
 
             if not os.path.exists(model):
+                if self.local_files_only:
+                    raise ValueError(
+                        f"Unable to find cached ModelScope model for {model} "
+                        f"with local_files_only==True")
                 model_path = snapshot_download(model_id=model,
                                                cache_dir=download_dir,
                                                revision=revision)
@@ -117,8 +123,23 @@ class ModelConfig:
             self.download_dir = model_path
             self.tokenizer = model_path
 
-        self.hf_config = get_config(self.model, trust_remote_code, revision,
-                                    code_revision)
+        elif self.local_files_only:
+            # TODO: fully support local_files_only propagation through
+            # each model class's load_weights function
+            #
+            # For places where we don't propagate local_files_only, modify
+            # the env var...
+            os.environ['HF_HUB_OFFLINE'] = "1"
+            # and monkey patch...
+            import huggingface_hub
+            huggingface_hub.constants.HF_HUB_OFFLINE = True
+
+        self.hf_config = get_config(self.model,
+                                    trust_remote_code=trust_remote_code,
+                                    local_files_only=local_files_only,
+                                    cache_dir=download_dir,
+                                    revision=revision,
+                                    code_revision=code_revision)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.max_model_len = _get_and_verify_max_len(self.hf_text_config,
