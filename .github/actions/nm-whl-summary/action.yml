@@ -16,6 +16,9 @@ inputs:
   whl:
     description: 'whl file tested'
     required: true
+  tarball:
+    description: 'tar.gz file tested'
+    required: true
 runs:
   using: composite
   steps:
@@ -34,4 +37,5 @@ runs:
       echo "| branch name: | '${{ github.ref_name }}' |" >> $GITHUB_STEP_SUMMARY
       echo "| python: | ${{ inputs.python }} |" >> $GITHUB_STEP_SUMMARY
       echo "| whl: | ${{ inputs.whl }} |" >> $GITHUB_STEP_SUMMARY
+      echo "| tarball: | ${{ inputs.tarball }} |" >> $GITHUB_STEP_SUMMARY
     shell: bash

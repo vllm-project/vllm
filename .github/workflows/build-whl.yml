@@ -121,12 +121,12 @@ jobs:
                 python: ${{ inputs.python }}
                 venv: ${{ env.VENV_BUILD_BASE }}
 
-            - name: upload whl
+            - name: upload dist
               uses: actions/upload-artifact@v4
               if: success() || failure()
               with:
-                name: ${{ steps.build_whl.outputs.whl }}
-                path: dist/${{ steps.build_whl.outputs.whl }}
+                name: ${{ steps.build_whl.outputs.artifact }}
+                path: dist/
                 retention-days: 15
 
             - name: summary
@@ -137,6 +137,7 @@ jobs:
                 testmo_run_url: https://neuralmagic.testmo.net/automation/runs/view/${{ steps.create_testmo_run.outputs.id }}
                 python: ${{ inputs.python }}
                 whl: ${{ steps.build_whl.outputs.whl }}
+                tarball: ${{ steps.build_whl.outputs.tarball }}
 
             - name: complete testmo run
               uses: ./.github/actions/nm-testmo-run-complete/
