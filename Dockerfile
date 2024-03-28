@@ -38,8 +38,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # copy input files
 COPY csrc csrc
 COPY setup.py setup.py
-COPY cmake cmake
-COPY CMakeLists.txt CMakeLists.txt
 COPY requirements.txt requirements.txt
 COPY pyproject.toml pyproject.toml
 COPY vllm/__init__.py vllm/__init__.py
@@ -97,7 +95,7 @@ RUN --mount=type=cache,target=/root/.cache/pip VLLM_USE_PRECOMPILED=1 pip instal
 
 #################### RUNTIME BASE IMAGE ####################
 # We used base cuda image because pytorch installs its own cuda libraries.
-# However pynccl depends on cuda libraries so we had to switch to the runtime image
+# However cupy depends on cuda libraries so we had to switch to the runtime image
 # In the future it would be nice to get a container with pytorch and cuda without duplicating cuda
 FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04 AS vllm-base
 
@@ -126,6 +124,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 COPY --from=build /workspace/vllm/*.so /workspace/vllm/
 COPY vllm vllm
+
+ENV VLLM_USAGE_SOURCE production-docker-image
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 #################### OPENAI API SERVER ####################

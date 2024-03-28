@@ -13,7 +13,7 @@ from vllm.engine.ray_utils import initialize_ray_cluster
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor import get_architecture
+from vllm.model_executor.model_loader import get_architecture_class_name
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (MultiModalData, SamplerOutput, Sequence,
@@ -116,7 +116,7 @@ class LLMEngine:
         #If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
             usage_message.report_usage(
-                get_architecture(model_config, device_config),
+                get_architecture_class_name(model_config),
                 usage_context,
                 extra_kvs={
                     # Common configuration

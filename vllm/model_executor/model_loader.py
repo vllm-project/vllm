@@ -43,7 +43,7 @@ def _get_model_architecture(
         f"Supported architectures: {ModelRegistry.get_supported_archs()}")
 
 
-def get_architecture(model_config: ModelConfig) -> str:
+def get_architecture_class_name(model_config: ModelConfig) -> str:
     return _get_model_architecture(model_config)[1]
 
 
@@ -51,7 +51,7 @@ def get_model(model_config: ModelConfig, device_config: DeviceConfig,
               **kwargs) -> nn.Module:
     lora_config = kwargs.get("lora_config", None)
     vision_language_config = kwargs.get("vision_language_config", None)
-    model_class = _get_model_architecture(model_config)
+    model_class = _get_model_architecture(model_config)[0]
 
     # Get the (maybe quantized) linear method.
     linear_method = None

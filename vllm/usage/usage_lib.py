@@ -7,6 +7,8 @@ from enum import Enum
 from pathlib import Path
 from threading import Thread
 from typing import Dict, Optional
+import time
+from uuid import uuid4
 
 import cpuinfo
 import pkg_resources
@@ -97,6 +99,8 @@ class UsageMessage:
         # NOTE: vLLM's server _only_ support flat KV pair.
         # Do not use nested fields.
 
+        self.uuid = str(uuid4())
+
         # Environment Information
         self.provider: Optional[str] = None
         self.num_cpu: Optional[int] = None
@@ -122,10 +126,16 @@ class UsageMessage:
                      model_architecture: str,
                      usage_context: UsageContext,
                      extra_kvs: Dict[str, any] = None) -> None:
-        t = Thread(target=self._report_usage_once,
+        t = Thread(target=self._report_usage_worker,
                    args=(model_architecture, usage_context, extra_kvs or {}),
                    daemon=True)
         t.start()
+
+    def _report_usage_worker(self, model_architecture: str,
+                             usage_context: UsageContext,
+                             extra_kvs: Dict[str, any]) -> None:
+        self._report_usage_once(model_architecture, usage_context, extra_kvs)
+        self._report_continous_usage()
 
     def _report_usage_once(self, model_architecture: str,
                            usage_context: UsageContext,
@@ -164,6 +174,22 @@ class UsageMessage:
             data.update(extra_kvs)
 
         self._write_to_file(data)
+        self._send_to_server(data)
+
+    def _report_continous_usage(self):
+        """Report usage every 10 minutes.
+
+        This helps us to collect more data points for uptime of vLLM usages.
+        This function can also help send over performance metrics over time.
+        """
+        while True:
+            time.sleep(600)
+            data = {"uuid": self.uuid, "log_time": _get_current_timestamp_ns()}
+
+            self._write_to_file(data)
+            self._send_to_server(data)
+
+    def _send_to_server(self, data):
         try:
             requests.post(_USAGE_STATS_SERVER, json=data)
         except requests.exceptions.RequestException:
