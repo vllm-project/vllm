@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
-from vllm.core.block_manager import AllocStatus, BlockSpaceManager
+from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.core.policy import PolicyFactory
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -126,8 +126,13 @@ class Scheduler:
 
         # Instantiate the scheduling policy.
         self.policy = PolicyFactory.get_policy(policy_name="fcfs")
+
+        BlockSpaceManagerImpl = BlockSpaceManager.get_block_space_manager_class(
+            version="v2" if self.scheduler_config.
+            use_v2_block_manager else "v1")
+
         # Create the block space manager.
-        self.block_manager = BlockSpaceManager(
+        self.block_manager = BlockSpaceManagerImpl(
             block_size=self.cache_config.block_size,
             num_gpu_blocks=self.cache_config.num_gpu_blocks,
             num_cpu_blocks=self.cache_config.num_cpu_blocks,
@@ -428,6 +433,10 @@ class Scheduler:
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
                 self.block_manager.access_all_blocks_in_seq(seq, now)
 
+            common_computed_block_nums = (
+                self.block_manager.get_common_computed_block_ids(
+                    seq_group.get_seqs(status=SequenceStatus.RUNNING)))
+
             seq_group_metadata = SequenceGroupMetadata(
                 request_id=seq_group.request_id,
                 is_prompt=scheduler_outputs.prompt_run,
@@ -436,8 +445,7 @@ class Scheduler:
                 block_tables=block_tables,
                 token_chunk_size=token_chunk_size,
                 lora_request=seq_group.lora_request,
-                computed_block_nums=self.block_manager.
-                get_common_computed_block_ids(seq_group),
+                computed_block_nums=common_computed_block_nums,
                 state=seq_group.state,
                 # `multi_modal_data` will only be present for the 1st comm
                 # between engine and worker.
@@ -447,6 +455,14 @@ class Scheduler:
                 if scheduler_outputs.prompt_run else None,
             )
             seq_group_metadata_list.append(seq_group_metadata)
+
+        # Now that the batch has been created, we can assume all blocks in the
+        # batch will have been computed before the next scheduling invocation.
+        # This is because the engine assumes that a failure in model execution
+        # will crash the vLLM instance / will not retry.
+        for seq_group in scheduler_outputs.scheduled_seq_groups:
+            self.block_manager.mark_blocks_as_computed(seq_group)
+
         return seq_group_metadata_list, scheduler_outputs
 
     def fork_seq(self, parent_seq: Sequence, child_seq: Sequence) -> None:
@@ -555,9 +571,6 @@ class Scheduler:
         blocks_to_swap_out.update(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             seq.status = SequenceStatus.SWAPPED
-
-    def mark_blocks_as_computed(self, seq_group: SequenceGroup):
-        self.block_manager.mark_blocks_as_computed(seq_group)
 
     def _passed_delay(self, now: float) -> bool:
         if self.prev_prompt:
