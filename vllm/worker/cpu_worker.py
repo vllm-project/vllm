@@ -135,10 +135,10 @@ class Worker:
         self.cpu_cache = self.cache_engine.cpu_cache
         self.model_runner.block_size = self.cache_engine.block_size
 
-        # To reuse the cache management procedure, use cpu cache as 'gpu cache'.
         assert self.gpu_cache is not None
-        assert self.cpu_cache is None
+        assert self.cpu_cache is not None
 
+        # To reuse the cache management procedure, use cpu cache as 'gpu cache'.
         # Populate the cache to warmup the memory
         for layer_cache in self.gpu_cache:
             layer_cache.fill_(0)
