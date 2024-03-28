@@ -26,7 +26,9 @@ def main(args: argparse.Namespace):
               kv_cache_dtype=args.kv_cache_dtype,
               device=args.device,
               ray_workers_use_nsight=args.ray_workers_use_nsight,
-              download_dir=args.download_dir)
+              enable_chunked_prefill=args.enable_chunked_prefill,
+              download_dir=args.download_dir,
+              block_size=args.block_size)
 
     sampling_params = SamplingParams(
         n=args.n,
@@ -145,6 +147,16 @@ if __name__ == '__main__':
         default="cuda",
         choices=["cuda"],
         help='device type for vLLM execution, supporting CUDA only currently.')
+    parser.add_argument('--block-size',
+                        type=int,
+                        default=16,
+                        help='block size of key/value cache')
+    parser.add_argument(
+        '--enable-chunked-prefill',
+        type=bool,
+        default=False,
+        help='If True, the prefill requests can be chunked based on the '
+        'max_num_batched_tokens')
     parser.add_argument(
         "--ray-workers-use-nsight",
         action='store_true',

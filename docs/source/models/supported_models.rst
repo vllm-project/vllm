@@ -119,6 +119,10 @@ Alongside each architecture, we include some popular models that use it.
     - Qwen2
     - :code:`Qwen/Qwen2-beta-7B`, :code:`Qwen/Qwen2-beta-7B-Chat`, etc.
     - ✅︎
+  * - :code:`Qwen2MoeForCausalLM`
+    - Qwen2MoE
+    - :code:`Qwen/Qwen1.5-MoE-A2.7B`, :code:`Qwen/Qwen1.5-MoE-A2.7B-Chat`, etc.
+    - 
   * - :code:`StableLmForCausalLM`
     - StableLM
     - :code:`stabilityai/stablelm-3b-4e1t/` , :code:`stabilityai/stablelm-base-alpha-7b-v2`, etc.

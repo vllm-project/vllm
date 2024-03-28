@@ -62,6 +62,7 @@ class EngineArgs:
     image_input_shape: Optional[str] = None
     image_feature_size: Optional[int] = None
     scheduler_delay_factor: float = 0.0
+    enable_chunked_prefill: bool = False
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -364,6 +365,12 @@ class EngineArgs:
             default=EngineArgs.scheduler_delay_factor,
             help='Apply a delay (of delay factor multiplied by previous'
             'prompt latency) before scheduling next prompt.')
+        parser.add_argument(
+            '--enable-chunked-prefill',
+            type=bool,
+            default=False,
+            help='If True, the prefill requests can be chunked based on the '
+            'max_num_batched_tokens')
         return parser
 
     @classmethod
@@ -408,7 +415,8 @@ class EngineArgs:
             model_config.max_model_len,
             self.use_v2_block_manager,
             num_lookahead_slots=self.num_lookahead_slots,
-            delay_factor=self.scheduler_delay_factor)
+            delay_factor=self.scheduler_delay_factor,
+            enable_chunked_prefill=self.enable_chunked_prefill,)
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,
