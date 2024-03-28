@@ -23,8 +23,9 @@ wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/r
 # wait for server to start, timeout after 600 seconds
 timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
 python3 benchmarks/benchmark_serving.py \
-    --backend openai \
-    --dataset ./ShareGPT_V3_unfiltered_cleaned_split.json \
+    --backend vllm \
+    --dataset-name sharegpt \
+    --dataset-path ./ShareGPT_V3_unfiltered_cleaned_split.json \
     --model meta-llama/Llama-2-7b-chat-hf \
     --num-prompts 20 \
     --endpoint /v1/completions \
