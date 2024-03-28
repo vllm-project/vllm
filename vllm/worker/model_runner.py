@@ -150,39 +150,58 @@ class ModelRunner:
         subquery_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
         multi_modal_input_list: List[torch.Tensor] = []
+
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
             assert len(seq_ids) == 1
             seq_id = seq_ids[0]
 
+            computed_block_nums = seq_group_metadata.computed_block_nums
+            if (self.scheduler_config is not None
+                    and self.scheduler_config.chunked_prefill_enabled
+                    and computed_block_nums is not None):
+                raise RuntimeError(
+                    "chunked prefill cannot be used with prefix caching "
+                    "now.")
+
+            token_chunk_size = seq_group_metadata.token_chunk_size
             seq_data = seq_group_metadata.seq_data[seq_id]
-            prompt_tokens = seq_data.get_token_ids()
+            computed_len = seq_data.get_num_computed_tokens()
+            # We should use get_len here because in case of preemption
+            # it contains output tokens.
+            prefill_end = min(seq_data.get_len(),
+                              computed_len + token_chunk_size)
+            # TODO(sang): Rename it after chunked prefill is introduced.
+            prompt_tokens = seq_data.get_token_ids()[computed_len:prefill_end]
             prompt_len = len(prompt_tokens)
+            # Right now, the prefill_end is always same as the length of
+            # sequence. However, once chunked prefill is introduced, this
+            # assumption can be changed.
+            assert prefill_end == seq_data.get_len()
             prompt_lens.append(prompt_len)
-            computed_len = 0
 
             # NOTE: This only works for oooooooxxx style attention.
-            computed_block_nums = seq_group_metadata.computed_block_nums
             if computed_block_nums is not None and len(
                     computed_block_nums) > 0 and self.sliding_window is None:
                 # Prefix is not supported with sliding_window
                 computed_len = len(computed_block_nums) * self.block_size
                 prompt_tokens = prompt_tokens[computed_len:]
                 prefix_block_tables.append(computed_block_nums)
-                context_len = computed_len
             else:
                 prefix_block_tables.append([])
-                context_len = 0
+                # Right now, prefill start is always 0. However, this
+                # assumption can be changed once chunked prefill is introduced.
+                assert computed_len == 0
+
             # actual prompt lens
-            context_lens.append(context_len)
+            context_lens.append(computed_len)
             subquery_lens.append(prompt_len - computed_len)
 
             input_tokens.extend(prompt_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
-            input_positions.extend(
-                list(range(computed_len, computed_len + len(prompt_tokens))))
+            input_positions.extend(list(range(computed_len, prefill_end)))
 
             lora_id = seq_group_metadata.lora_int_id
 
@@ -218,7 +237,8 @@ class ModelRunner:
                     "Prefix caching is currently not supported with "
                     "sliding window attention")
                 start_idx = max(0, prompt_len - self.sliding_window)
-            for i in range(computed_len, prompt_len):
+
+            for i in range(computed_len, prefill_end):
                 if i < start_idx:
                     slot_mapping.append(_PAD_SLOT_ID)
                     continue
@@ -331,6 +351,7 @@ class ModelRunner:
 
         for seq_group_metadata in seq_group_metadata_list:
             assert not seq_group_metadata.is_prompt
+            assert seq_group_metadata.token_chunk_size == 1
 
             seq_ids = list(seq_group_metadata.seq_data.keys())
             lora_id = seq_group_metadata.lora_int_id

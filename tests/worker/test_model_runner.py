@@ -18,15 +18,16 @@ def test_prepare_prompt(batch_size):
         # make sure all tokens fit into one block
         prompt_len = i % (model_runner.block_size - 1) + 1
         prompt_lens.append(prompt_len)
-        seq_data = list(range(prompt_len))
-        seq_group_metadata_list.append(
-            SequenceGroupMetadata(
-                request_id=f"test_{i}",
-                is_prompt=True,
-                seq_data={0: SequenceData(seq_data)},
-                sampling_params=SamplingParams(temperature=0),
-                block_tables=block_tables,
-            ))
+        seq_data = SequenceData(list(range(prompt_len)))
+        seq_group_metadata = SequenceGroupMetadata(
+            request_id=f"test_{i}",
+            is_prompt=True,
+            seq_data={0: seq_data},
+            sampling_params=SamplingParams(temperature=0),
+            block_tables=block_tables,
+        )
+        assert seq_group_metadata.token_chunk_size == seq_data.get_len()
+        seq_group_metadata_list.append(seq_group_metadata)
 
     expected_selected_token_indices = []
     selected_token_start_idx = 0
@@ -131,14 +132,16 @@ def test_prepare_decode_cuda_graph(batch_size):
         prompt_len = i % (model_runner.block_size - 1) + 1
         prompt_lens.append(prompt_len)
         seq_data = list(range(prompt_len))
-        seq_group_metadata_list.append(
-            SequenceGroupMetadata(
-                request_id=f"test_{i}",
-                is_prompt=False,
-                seq_data={0: SequenceData(seq_data)},
-                sampling_params=SamplingParams(temperature=0),
-                block_tables={0: [1]},
-            ))
+        seq_data = SequenceData(seq_data)
+        seq_group_metadata = SequenceGroupMetadata(
+            request_id=f"test_{i}",
+            is_prompt=False,
+            seq_data={0: seq_data},
+            sampling_params=SamplingParams(temperature=0),
+            block_tables={0: [1]},
+        )
+        assert seq_group_metadata.token_chunk_size == 1
+        seq_group_metadata_list.append(seq_group_metadata)
 
     input_tokens, input_positions, attn_metadata, _, _, _ = (
         model_runner._prepare_decode(seq_group_metadata_list))
