@@ -53,8 +53,8 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
     ray_workers_use_nsight: bool = False
-
     forced_num_gpu_blocks: Optional[int] = None
+    num_lookahead_slots: int = 0
 
     # Related to Vision-language models such as llava
     image_input_type: Optional[str] = None
@@ -398,9 +398,7 @@ class EngineArgs:
                                            self.max_num_seqs,
                                            model_config.max_model_len,
                                            self.use_v2_block_manager,
-                                           # TODO(cadedaniel) Read this value
-                                           # from SpeculativeConfig.
-                                           num_lookahead_slots=0,
+                                           num_lookahead_slots=self.num_lookahead_slots,
                                            delay_factor=self.scheduler_delay_factor)
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
