@@ -440,8 +440,11 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             blocks.update(self.block_tables[seq.seq_id])
         return list(blocks)
 
-    def can_swap_in(self, seq_group: SequenceGroup, num_lookahead_slots: int=0) -> bool:
-        assert (num_lookahead_slots == 0), "BlockSpaceManagerV1 does not support lookahead allocation"
+    def can_swap_in(self,
+                    seq_group: SequenceGroup,
+                    num_lookahead_slots: int = 0) -> bool:
+        assert (num_lookahead_slots == 0
+                ), "BlockSpaceManagerV1 does not support lookahead allocation"
         blocks = self._get_physical_blocks(seq_group)
         num_swapped_seqs = seq_group.num_seqs(status=SequenceStatus.SWAPPED)
         num_free_blocks = self.gpu_allocator.get_num_free_blocks()
@@ -451,9 +454,12 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         num_required_blocks = len(blocks) + num_swapped_seqs
         return num_free_blocks - num_required_blocks >= self.watermark_blocks
 
-    def swap_in(self, seq_group: SequenceGroup, num_lookahead_slots: int=0) -> Dict[int, int]:
-        assert (num_lookahead_slots == 0), "BlockSpaceManagerV1 does not support lookahead allocation"
-        
+    def swap_in(self,
+                seq_group: SequenceGroup,
+                num_lookahead_slots: int = 0) -> Dict[int, int]:
+        assert (num_lookahead_slots == 0
+                ), "BlockSpaceManagerV1 does not support lookahead allocation"
+
         # CPU block -> GPU block.
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):

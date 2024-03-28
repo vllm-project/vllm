@@ -61,11 +61,13 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def can_swap_in(self, seq_group: SequenceGroup, num_lookahead_slots: int) -> bool:
+    def can_swap_in(self, seq_group: SequenceGroup,
+                    num_lookahead_slots: int) -> bool:
         pass
 
     @abstractmethod
-    def swap_in(self, seq_group: SequenceGroup, num_lookahead_slots: int) -> Dict[int, int]:
+    def swap_in(self, seq_group: SequenceGroup,
+                num_lookahead_slots: int) -> Dict[int, int]:
         pass
 
     @abstractmethod

@@ -379,7 +379,7 @@ class Scheduler:
             seq_group=seq_group,
             num_lookahead_slots=self._get_num_lookahead_slots(is_prefill),
         )
-    
+
     def _can_swap_in(self, seq_group: SequenceGroup) -> bool:
         # Swapping in is considered decode.
         is_prefill = False
