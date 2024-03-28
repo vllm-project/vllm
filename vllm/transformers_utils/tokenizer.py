@@ -232,9 +232,13 @@ def detokenize_incrementally(
              all_input_ids[:-1],
              skip_special_tokens=skip_special_tokens)
 
-    # Put new_token_id in a list so skip_special_tokens is respected
-    new_tokens = tokenizer.convert_ids_to_tokens(
-        [new_token_id], skip_special_tokens=skip_special_tokens)
+    # If the new token id is out of bounds, return an empty string.
+    if new_token_id >= len(tokenizer):
+        new_tokens = [""]
+    else:
+        # Put new_token_id in a list so skip_special_tokens is respected
+        new_tokens = tokenizer.convert_ids_to_tokens(
+            [new_token_id], skip_special_tokens=skip_special_tokens)
     output_tokens = prev_tokens + new_tokens
 
     # If this is the first iteration, return all tokens.
