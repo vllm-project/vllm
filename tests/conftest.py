@@ -256,6 +256,8 @@ class VllmRunner:
         dtype: str = "half",
         disable_log_stats: bool = True,
         tensor_parallel_size: int = 1,
+        block_size: int = 16,
+        enable_chunked_prefill: bool = False,
         **kwargs,
     ) -> None:
         self.model = LLM(
@@ -266,6 +268,8 @@ class VllmRunner:
             swap_space=0,
             disable_log_stats=disable_log_stats,
             tensor_parallel_size=tensor_parallel_size,
+            block_size=block_size,
+            enable_chunked_prefill=enable_chunked_prefill,
             **kwargs,
         )
 
