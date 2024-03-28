@@ -22,6 +22,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.logger import init_logger
+from vllm.model_executor.tensorizer_loader import TensorizerArgs
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
@@ -49,6 +50,7 @@ app = fastapi.FastAPI(lifespan=lifespan)
 
 def parse_args():
     parser = make_arg_parser()
+    parser = TensorizerArgs.add_cli_args(parser)
     return parser.parse_args()
 
 

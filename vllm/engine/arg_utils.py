@@ -8,6 +8,8 @@ from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
                          VisionLanguageConfig)
 from vllm.utils import str_to_int_tuple
 
+from vllm.model_executor.tensorizer_loader import TensorizerArgs
+
 
 @dataclass
 class EngineArgs:
@@ -61,6 +63,7 @@ class EngineArgs:
     image_token_id: Optional[int] = None
     image_input_shape: Optional[str] = None
     image_feature_size: Optional[int] = None
+    tensorizer_args: Optional[TensorizerArgs] = None
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: bool = False
 
@@ -128,7 +131,9 @@ class EngineArgs:
             '--load-format',
             type=str,
             default=EngineArgs.load_format,
-            choices=['auto', 'pt', 'safetensors', 'npcache', 'dummy'],
+            choices=[
+                'auto', 'pt', 'safetensors', 'npcache', 'dummy', 'tensorizer'
+            ],
             help='The format of the model weights to load. '
             '"auto" will try to load the weights in the safetensors format '
             'and fall back to the pytorch bin format if safetensors format '
@@ -138,7 +143,10 @@ class EngineArgs:
             '"npcache" will load the weights in pytorch format and store '
             'a numpy cache to speed up the loading. '
             '"dummy" will initialize the weights with random values, '
-            'which is mainly for profiling.')
+            'which is mainly for profiling.'
+            '"tensorizer" will load the weights using tensorizer from CoreWeave'
+            'which assumes tensorizer_uri is set to the location of the '
+            'serialized weights.')
         parser.add_argument(
             '--dtype',
             type=str,
@@ -368,9 +376,16 @@ class EngineArgs:
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace) -> 'EngineArgs':
         # Get the list of attributes of this dataclass.
-        attrs = [attr.name for attr in dataclasses.fields(cls)]
+        attrs = [
+            attr.name for attr in dataclasses.fields(cls)
+            if attr.name != "tensorizer_args"
+        ]
         # Set the attributes from the parsed arguments.
         engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
+
+        engine_args.tensorizer_args = TensorizerArgs.from_cli_args(args) if (
+            engine_args.load_format == "tensorizer") else None
+
         return engine_args
 
     def create_engine_configs(
@@ -385,7 +400,7 @@ class EngineArgs:
             self.dtype, self.seed, self.revision, self.code_revision,
             self.tokenizer_revision, self.max_model_len, self.quantization,
             self.enforce_eager, self.max_context_len_to_capture,
-            self.max_logprobs)
+            self.tensorizer_args, self.max_logprobs)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,

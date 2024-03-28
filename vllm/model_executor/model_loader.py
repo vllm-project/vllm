@@ -3,13 +3,17 @@ import contextlib
 from typing import Type
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from vllm.config import DeviceConfig, ModelConfig
 from vllm.model_executor.models import ModelRegistry
+from vllm.model_executor.tensorizer_loader import (ParameterizedLoadFormat,
+                                                   _is_vllm_model,
+                                                   load_with_tensorizer)
 from vllm.model_executor.models.llava import LlavaForConditionalGeneration
 from vllm.model_executor.weight_utils import (get_quant_config,
                                               initialize_dummy_weights)
+
 
 _VISION_MODEL_CLASSES = [
     LlavaForConditionalGeneration,
@@ -39,7 +43,8 @@ def _get_model_architecture(model_config: ModelConfig) -> Type[nn.Module]:
             return model_cls
     raise ValueError(
         f"Model architectures {architectures} are not supported for now. "
-        f"Supported architectures: {ModelRegistry.get_supported_archs()}")
+        f"Supported architectures: {ModelRegistry.get_supported_archs()}"
+    )
 
 
 def get_model(model_config: ModelConfig, device_config: DeviceConfig,
@@ -72,7 +77,11 @@ def get_model(model_config: ModelConfig, device_config: DeviceConfig,
         # Create a model instance.
         # The weights will be initialized as empty tensors.
         with torch.device(device_config.device):
-            if hasattr(model_class, "supported_lora_modules"):
+            if model_config.load_format == "tensorizer" and _is_vllm_model(
+                    model_config):
+                model = load_with_tensorizer(model_class, model_config)
+                return model.eval()
+            elif hasattr(model_class, "supported_lora_modules"):
                 model = model_class(model_config.hf_config, linear_method,
                                     lora_config)
             elif lora_config:
@@ -80,7 +89,8 @@ def get_model(model_config: ModelConfig, device_config: DeviceConfig,
                     f"Model {model_class.__name__} does not support LoRA, "
                     "but LoRA is enabled. Support for this model may "
                     "be added in the future. If this is important to you, "
-                    "please open an issue on github.")
+                    "please open an issue on github."
+                )
             else:
                 if model_class not in _VISION_MODEL_CLASSES:
                     model = model_class(model_config.hf_config, linear_method)
@@ -93,6 +103,17 @@ def get_model(model_config: ModelConfig, device_config: DeviceConfig,
             initialize_dummy_weights(model)
         else:
             # Load the weights from the cached or downloaded files.
-            model.load_weights(model_config.model, model_config.download_dir,
-                               model_config.load_format, model_config.revision)
+            if model_config.load_format == "tensorizer":
+                # Provide a dynamic load format for `model.load_weights`
+                # to retain tensorizer args from CLI.
+                model_config.load_format = ParameterizedLoadFormat(
+                    model_config.load_format)
+                model_config.load_format.params = model_config.tensorizer_args
+
+            model.load_weights(
+                model_config.model,
+                model_config.download_dir,
+                model_config.load_format,
+                model_config.revision,
+            )
     return model.eval()

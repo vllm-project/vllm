@@ -15,6 +15,8 @@ from vllm.utils import get_cpu_memory, get_nvcc_cuda_version, is_hip, is_neuron
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
+    from vllm.model_executor.tensorizer_loader import TensorizerArgs
+
 logger = init_logger(__name__)
 
 _GB = 1 << 30
@@ -84,6 +86,7 @@ class ModelConfig:
         quantization: Optional[str] = None,
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
+        tensorizer_args: Optional["TensorizerArgs"] = None,
         max_logprobs: int = 5,
     ) -> None:
         self.model = model
@@ -99,6 +102,7 @@ class ModelConfig:
         self.quantization = quantization
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
+        self.tensorizer_args = tensorizer_args
         self.max_logprobs = max_logprobs
 
         if os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true":
@@ -131,13 +135,14 @@ class ModelConfig:
     def _verify_load_format(self) -> None:
         load_format = self.load_format.lower()
         supported_load_format = [
-            "auto", "pt", "safetensors", "npcache", "dummy"
+            "auto", "pt", "safetensors", "npcache", "dummy", "tensorizer"
         ]
         rocm_not_supported_load_format = []
         if load_format not in supported_load_format:
             raise ValueError(
                 f"Unknown load format: {self.load_format}. Must be one of "
-                "'auto', 'pt', 'safetensors', 'npcache', or 'dummy'.")
+                "'auto', 'pt', 'safetensors', 'npcache', 'tensorizer', or "
+                "'dummy'.")
         if is_hip() and load_format in rocm_not_supported_load_format:
             rocm_supported_load_format = [
                 f for f in supported_load_format
