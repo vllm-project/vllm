@@ -113,6 +113,7 @@ class SequenceData:
         self.prompt_token_ids = prompt_token_ids
         self.output_token_ids = output_token_ids
         self.cumulative_logprob = 0.0
+        # The number of tokens that are computed (that run against the model).
         self._num_computed_tokens = 0
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
@@ -229,7 +230,7 @@ class Sequence:
     def num_hashed_tokens_of_block(self, logical_idx: int):
         return logical_idx * self.block_size + self.block_size
 
-    def on_recompute(self):
+    def reset_state_for_recompute(self):
         """Reset the sequence states for recomputation."""
         self.data.reset_num_computed_tokens()
 

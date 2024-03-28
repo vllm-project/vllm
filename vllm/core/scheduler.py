@@ -1,6 +1,7 @@
 import enum
 import time
-from collections import deque, namedtuple
+from collections import deque
+from dataclasses import dataclass
 from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
@@ -30,8 +31,14 @@ class PreemptionMode(enum.Enum):
 # seq_group: SequenceGroup to schedule.
 # token_chunk_size: The number of prefill tokens to be processed in the next
 # step.
-ScheduledSequenceGroup = namedtuple("ScheduledSequenceGroup",
-                                    ["seq_group", "token_chunk_size"])
+@dataclass
+class ScheduledSequenceGroup:
+    # A sequence group that's scheduled.
+    seq_group: SequenceGroup
+    # The total chunk size (number of tokens) to process for next iteration.
+    # 1 for decoding. Same as prompt tokens for prefill, but if prefill is
+    # chunked, it can be smaller than that.
+    token_chunk_size: int
 
 
 class SchedulerOutputs:
@@ -62,25 +69,25 @@ class SchedulerOutputs:
             ignored_seq_groups: Sequence groups that are going to be ignored.
         """
         # A tuple of scheduled sequence group and its chunk size.
-        self.scheduled_seq_groups = scheduled_seq_groups
+        self.scheduled_seq_groups: ScheduledSequenceGroup = scheduled_seq_groups
         # True if all sequence groups are in prefill phase. If False, all
         # sequence groups are in decoding phase.
-        self.prompt_run = prompt_run
+        self.prompt_run: bool = prompt_run
         # Total number of batched tokens.
-        self.num_batched_tokens = num_batched_tokens
+        self.num_batched_tokens: int = num_batched_tokens
         # Blocks to swap in. Dict of CPU -> GPU block number.
-        self.blocks_to_swap_in = blocks_to_swap_in
+        self.blocks_to_swap_in: Dict[int, int] = blocks_to_swap_in
         # Blocks to swap out. Dict of GPU -> CPU block number.
-        self.blocks_to_swap_out = blocks_to_swap_out
+        self.blocks_to_swap_out: Dict[int, int] = blocks_to_swap_out
         # Blocks to copy. Source to a list of dest blocks.
-        self.blocks_to_copy = blocks_to_copy
+        self.blocks_to_copy: Dict[int, List[int]] = blocks_to_copy
         # Sequence groups that are going to be ignored.
-        self.ignored_seq_groups = ignored_seq_groups
+        self.ignored_seq_groups: List[SequenceGroup] = ignored_seq_groups
 
         # Swap in and swap out should never happen at the same time.
         assert not (blocks_to_swap_in and blocks_to_swap_out)
 
-        self.num_loras = len(self.lora_requests)
+        self.num_loras: int = len(self.lora_requests)
         if self.num_loras > 0:
             self._sort_by_lora_ids()
 
@@ -406,7 +413,8 @@ class Scheduler:
         # Create input data structures.
         seq_group_metadata_list: List[SequenceGroupMetadata] = []
         for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
-            seq_group, token_chunk_size = scheduled_seq_group
+            seq_group = scheduled_seq_group.seq_group
+            token_chunk_size = scheduled_seq_group.token_chunk_size
             seq_group.maybe_set_first_scheduled_time(now)
 
             # seq_id -> SequenceData
@@ -509,7 +517,7 @@ class Scheduler:
         for seq in seqs:
             seq.status = SequenceStatus.WAITING
             self.free_seq(seq)
-            seq.on_recompute()
+            seq.reset_state_for_recompute()
         # NOTE: For FCFS, we insert the preempted sequence group to the front
         # of the waiting queue.
         self.waiting.appendleft(seq_group)

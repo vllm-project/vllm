@@ -27,7 +27,8 @@ def main(args: argparse.Namespace):
               device=args.device,
               ray_workers_use_nsight=args.ray_workers_use_nsight,
               enable_chunked_prefill=args.enable_chunked_prefill,
-              download_dir=args.download_dir)
+              download_dir=args.download_dir,
+              block_size=args.block_size)
 
     sampling_params = SamplingParams(
         n=args.n,

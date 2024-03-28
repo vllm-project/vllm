@@ -561,7 +561,8 @@ class LLMEngine:
                     scheduled_seq_group.seq_group)
 
         for scheduled_seq_group, outputs in zip(scheduled_seq_groups, output):
-            seq_group, token_chunk_size = scheduled_seq_group
+            seq_group = scheduled_seq_group.seq_group
+            token_chunk_size = scheduled_seq_group.token_chunk_size
             seq_group.update_num_computed_tokens(token_chunk_size)
             self._process_sequence_group_outputs(seq_group, outputs)
 
@@ -699,7 +700,7 @@ class LLMEngine:
             # Latency Timings.
             time_last_iters = []
             for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
-                seq_group, _ = scheduled_seq_group
+                seq_group = scheduled_seq_group.seq_group
                 # Time since last token.
                 # (n.b. updates seq_group.metrics.last_token_time)
                 time_last_iters.append(seq_group.get_last_latency(now))
