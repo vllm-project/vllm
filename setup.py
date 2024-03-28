@@ -79,7 +79,8 @@ class cmake_build_ext(build_ext):
             nvcc_threads = os.getenv("NVCC_THREADS", None)
             if nvcc_threads is not None:
                 nvcc_threads = int(nvcc_threads)
-                logger.info(f"Using NVCC_THREADS={nvcc_threads} as the number of nvcc threads.")
+                logger.info(f"Using NVCC_THREADS={nvcc_threads} as the number"
+                            " of nvcc threads.")
             else:
                 nvcc_threads = 1
             num_jobs = max(1, num_jobs // nvcc_threads)
