@@ -56,6 +56,8 @@ class cmake_build_ext(build_ext):
     # Determine number of compilation jobs and optionally nvcc compile threads.
     #
     def compute_num_jobs(self):
+        # `num_jobs` is either the value of the MAX_JOBS environment variable
+        # (if defined) or the number of CPUs available.
         num_jobs = os.environ.get("MAX_JOBS", None)
         if num_jobs is not None:
             num_jobs = int(num_jobs)
@@ -69,11 +71,19 @@ class cmake_build_ext(build_ext):
                 num_jobs = os.cpu_count()
 
         nvcc_threads = None
-        if _is_cuda():
-            nvcc_cuda_version = get_nvcc_cuda_version()
-            if nvcc_cuda_version >= Version("11.2"):
-                nvcc_threads = int(os.getenv("NVCC_THREADS", 8))
-                num_jobs = max(1, round(num_jobs / (nvcc_threads / 4)))
+        if _is_cuda() and get_nvcc_cuda_version() >= Version("11.2"):
+            # `nvcc_threads` is either the value of the NVCC_THREADS
+            # environment variable (if defined) or 1.
+            # when it is set, we reduce `num_jobs` to avoid
+            # overloading the system.
+            nvcc_threads = os.getenv("NVCC_THREADS", None)
+            if nvcc_threads is not None:
+                nvcc_threads = int(nvcc_threads)
+                logger.info(f"Using NVCC_THREADS={nvcc_threads} as the number"
+                            " of nvcc threads.")
+            else:
+                nvcc_threads = 1
+            num_jobs = max(1, num_jobs // nvcc_threads)
 
         return num_jobs, nvcc_threads
 
