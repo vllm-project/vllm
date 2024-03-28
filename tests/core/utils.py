@@ -1,5 +1,5 @@
 import time
-from typing import Tuple
+from typing import Optional, Tuple
 
 from vllm import SamplingParams
 from vllm.sequence import Sequence, SequenceGroup
@@ -8,7 +8,7 @@ from vllm.sequence import Sequence, SequenceGroup
 def create_dummy_prompt(
         request_id: str,
         prompt_length: int,
-        block_size: int = None) -> Tuple[Sequence, SequenceGroup]:
+        block_size: Optional[int] = None) -> Tuple[Sequence, SequenceGroup]:
     if not block_size:
         block_size = prompt_length
 

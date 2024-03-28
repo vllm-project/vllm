@@ -218,6 +218,7 @@ class ModelRunner:
                     "Prefix caching is currently not supported with "
                     "sliding window attention")
                 start_idx = max(0, prompt_len - self.sliding_window)
+
             for i in range(computed_len, prompt_len):
                 if i < start_idx:
                     slot_mapping.append(_PAD_SLOT_ID)
@@ -819,8 +820,7 @@ class ModelRunner:
                     context_lens=context_lens[:batch_size],
                     block_tables=block_tables[:batch_size],
                     use_cuda_graph=True,
-                    kv_cache_dtype=self.kv_cache_dtype,
-                )
+                    kv_cache_dtype=self.kv_cache_dtype)
 
                 if self.lora_config:
                     lora_mapping = LoRAMapping(
