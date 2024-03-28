@@ -1,7 +1,7 @@
 """Utilities for selecting and loading neuron models."""
 import importlib
 import os
-from typing import Optional, Tuple, Type
+from typing import Optional, Type
 
 import torch
 import torch.nn as nn
@@ -96,8 +96,7 @@ class NeuronCasualLM(nn.Module):
         self.model.to_neuron()
 
 
-def _get_model_architecture(
-        config: PretrainedConfig) -> Tuple[Type[nn.Module], str]:
+def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
         if arch in _NEURON_SUPPORTED_MODELS:
