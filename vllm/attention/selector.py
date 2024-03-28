@@ -39,12 +39,8 @@ def _can_use_flash_attn(dtype: torch.dtype) -> bool:
         return False
 
     try:
-        import flash_attn  # noqa: F401
+        import vllm_flash_attn  # noqa: F401
     except ImportError:
-        logger.info("flash_attn is not found.")
+        logger.info("vllm_flash_attn is not found.")
         return False
-    # TODO(woosuk): Remove this once our custom build of flash_attn becomes
-    # available.
-    logger.info("FlashAttention backend is disabled for now since it requires "
-                "our custom build of flash_attn.")
-    return False
+    return True
