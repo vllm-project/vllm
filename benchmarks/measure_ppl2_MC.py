@@ -59,7 +59,7 @@ def vllm_init(args):
         trust_remote_code=args.trust_remote_code,
         dtype=args.dtype,
         kv_cache_dtype=args.kv_cache_dtype,
-        scales_path=args.kv_cache_scales_path if args.kv_cache_scales_path!='' else None,
+        #scales_path=args.kv_cache_scales_path if args.kv_cache_scales_path!='' else None,
         enforce_eager = args.enforce_eager
     )
 

@@ -14,6 +14,7 @@ class SamplingType(IntEnum):
     RANDOM = 1
     RANDOM_SEED = 2
     BEAM = 3
+    FORCED = 4
 
 
 LogitsProcessor = Callable[[List[int], torch.Tensor], torch.Tensor]
@@ -58,6 +59,8 @@ class SamplingParams:
         min_p: Float that represents the minimum probability for a token to be
             considered, relative to the probability of the most likely token.
             Must be in [0, 1]. Set to 0 to disable this.
+        ppl_measurement: Measure perplexity towards the deterministic string 
+            instead of probabilistic regressing.
         seed: Random seed to use for the generation.
         use_beam_search: Whether to use beam search instead of sampling.
         length_penalty: Float that penalizes sequences based on their length.
@@ -79,8 +82,6 @@ class SamplingParams:
         ignore_eos: Whether to ignore the EOS token and continue generating
             tokens after the EOS token is generated.
         max_tokens: Maximum number of tokens to generate per output sequence.
-        min_tokens: Minimum number of tokens to generate per output sequence
-            before EOS or stop_token_ids can be generated
         logprobs: Number of log probabilities to return per output token.
             Note that the implementation follows the OpenAI API: The return
             result includes the log probabilities on the `logprobs` most likely
@@ -106,6 +107,8 @@ class SamplingParams:
         top_p: float = 1.0,
         top_k: int = -1,
         min_p: float = 0.0,
+        ppl_measurement: bool = False,
+        future_context: Optional[List[int]] = None,
         seed: Optional[int] = None,
         use_beam_search: bool = False,
         length_penalty: float = 1.0,
@@ -115,7 +118,6 @@ class SamplingParams:
         include_stop_str_in_output: bool = False,
         ignore_eos: bool = False,
         max_tokens: Optional[int] = 16,
-        min_tokens: int = 0,
         logprobs: Optional[int] = None,
         prompt_logprobs: Optional[int] = None,
         skip_special_tokens: bool = True,
@@ -131,6 +133,8 @@ class SamplingParams:
         self.top_p = top_p
         self.top_k = top_k
         self.min_p = min_p
+        self.ppl_measurement = ppl_measurement
+        self.future_context = future_context
         self.seed = seed
         self.use_beam_search = use_beam_search
         self.length_penalty = length_penalty
@@ -147,7 +151,6 @@ class SamplingParams:
             self.stop_token_ids = list(stop_token_ids)
         self.ignore_eos = ignore_eos
         self.max_tokens = max_tokens
-        self.min_tokens = min_tokens
         self.logprobs = logprobs
         self.prompt_logprobs = prompt_logprobs
         self.skip_special_tokens = skip_special_tokens
@@ -165,8 +168,6 @@ class SamplingParams:
                 self.top_k = -1
                 self.min_p = 0.0
                 self._verify_greedy_sampling()
-        # injected by the engine
-        self.eos_token_id = None
 
     def _verify_args(self) -> None:
         if self.n < 1:
@@ -197,13 +198,6 @@ class SamplingParams:
         if self.max_tokens is not None and self.max_tokens < 1:
             raise ValueError(
                 f"max_tokens must be at least 1, got {self.max_tokens}.")
-        if self.min_tokens < 0:
-            raise ValueError(f"min_tokens must be greater than or equal to 0, "
-                             f"got {self.min_tokens}.")
-        if self.max_tokens is not None and self.min_tokens > self.max_tokens:
-            raise ValueError(
-                f"min_tokens must be less than or equal to "
-                f"max_tokens={self.max_tokens}, got {self.min_tokens}.")
         if self.logprobs is not None and self.logprobs < 0:
             raise ValueError(
                 f"logprobs must be non-negative, got {self.logprobs}.")
@@ -243,6 +237,8 @@ class SamplingParams:
 
     @cached_property
     def sampling_type(self) -> SamplingType:
+        if self.ppl_measurement:
+            return SamplingType.FORCED
         if self.use_beam_search:
             return SamplingType.BEAM
         if self.temperature < _SAMPLING_EPS:
@@ -276,6 +272,7 @@ class SamplingParams:
             f"top_p={self.top_p}, "
             f"top_k={self.top_k}, "
             f"min_p={self.min_p}, "
+            f"ppl_measurement={self.ppl_measurement}, "
             f"seed={self.seed}, "
             f"use_beam_search={self.use_beam_search}, "
             f"length_penalty={self.length_penalty}, "
@@ -285,7 +282,6 @@ class SamplingParams:
             f"include_stop_str_in_output={self.include_stop_str_in_output}, "
             f"ignore_eos={self.ignore_eos}, "
             f"max_tokens={self.max_tokens}, "
-            f"min_tokens={self.min_tokens}, "
             f"logprobs={self.logprobs}, "
             f"prompt_logprobs={self.prompt_logprobs}, "
             f"skip_special_tokens={self.skip_special_tokens}, "
