@@ -127,7 +127,6 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
             )
         else:
             self.shared_expert = None
-
         self.shared_expert_gate = torch.nn.Linear(config.hidden_size,
                                                   1,
                                                   bias=False)
