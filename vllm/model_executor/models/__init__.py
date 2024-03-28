@@ -17,6 +17,8 @@ _MODELS = {
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
     "ChatGLMForConditionalGeneration": ("chatglm", "ChatGLMForCausalLM"),
+    "CohereForCausalLM": ("commandr", "CohereForCausalLM"),
+    "DbrxForCausalLM": ("dbrx", "DbrxForCausalLM"),
     "DeciLMForCausalLM": ("decilm", "DeciLMForCausalLM"),
     "DeepseekForCausalLM": ("deepseek", "DeepseekForCausalLM"),
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
@@ -29,6 +31,8 @@ _MODELS = {
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
     "JAISLMHeadModel": ("jais", "JAISLMHeadModel"),
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
+    "LlavaForConditionalGeneration":
+    ("llava", "LlavaForConditionalGeneration"),
     # For decapoda-research/llama-*
     "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
     "MistralForCausalLM": ("llama", "LlamaForCausalLM"),
@@ -47,6 +51,7 @@ _MODELS = {
     "StableLMEpochForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "StableLmForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
+    "XverseForCausalLM": ("xverse", "XverseForCausalLM"),
 }
 
 # Models not supported by ROCm.

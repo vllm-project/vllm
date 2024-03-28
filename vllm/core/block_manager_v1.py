@@ -1,5 +1,4 @@
 """A block manager that manages token blocks."""
-import enum
 from abc import ABC, abstractmethod
 from itertools import count, takewhile
 from os.path import commonprefix
@@ -7,6 +6,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from vllm.block import BlockTable, PhysicalTokenBlock
 from vllm.core.evictor import EvictionPolicy, Evictor, make_evictor
+from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.logger import init_logger
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
@@ -196,21 +196,7 @@ class UncachedBlockAllocator(BlockAllocatorBase):
             "Invalid codepath for uncached block allocator.")
 
 
-class AllocStatus(enum.Enum):
-    """Result for BlockSpaceManager.can_allocate
-
-    1. Ok: seq_group can be allocated now.
-    2. Later: seq_group cannot be allocated.
-      The capacity of allocator is larger than seq_group required.
-    3. Never: seq_group can never be allocated.
-      The seq_group is too large to allocated in GPU.
-    """
-    OK = enum.auto()
-    LATER = enum.auto()
-    NEVER = enum.auto()
-
-
-class BlockSpaceManager:
+class BlockSpaceManagerV1(BlockSpaceManager):
     """Manages the mapping between logical and physical token blocks."""
 
     def __init__(
@@ -355,6 +341,11 @@ class BlockSpaceManager:
         self,
         seq: Sequence,
     ) -> PhysicalTokenBlock:
+        # Called before a new block is appended.
+        # This is in charge of allocating a new physical block (to be appended).
+
+        # None if the last block is not full. Otherwise, we set it to the
+        # content hash.
         if not self.enable_caching:
             return self.gpu_allocator.allocate()
         block_hash: Optional[int] = None
@@ -362,7 +353,14 @@ class BlockSpaceManager:
             block_hash = seq.hash_of_block(len(seq.logical_token_blocks) - 1)
         num_hashed_tokens = seq.num_hashed_tokens_of_block(
             len(seq.logical_token_blocks) - 1)
+
+        # num_hashed_tokens is used to compute future hashes
+        # (e.g. in the hashing function, it is used to ask the sequence for
+        # prefix tokens)
         new_block = self.gpu_allocator.allocate(block_hash, num_hashed_tokens)
+
+        # If the block has is None, then the block is not full.
+        # If the block is not full, then we expect it to have a refcount of 1.
         if block_hash is None:
             assert new_block.ref_count == 1
         return new_block
@@ -576,16 +574,16 @@ class BlockSpaceManager:
             for b in takewhile(lambda b: b.computed, block_table[:-1])
         ]
 
-    def get_common_computed_block_ids(self,
-                                      seq_group: SequenceGroup) -> List[int]:
+    def get_common_computed_block_ids(self, seqs: List[Sequence]) -> List[int]:
+        """Return the block ids that are common for a given sequence group.
+
+        Used in prefill (can skip prefill of some blocks).
+        """
         # Can return non-empty result only with prefix caching enabled.
         if not self.enable_caching:
             return []
 
-        ids_list = [
-            self.get_all_computed_blocks(seq)
-            for seq in iter(seq_group.seqs_dict.values())
-        ]
+        ids_list = [self.get_all_computed_blocks(seq) for seq in seqs]
         return commonprefix([ids for ids in ids_list if ids != []])
 
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):

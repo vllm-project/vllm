@@ -9,8 +9,8 @@ from transformers import GenerationConfig, GenerationMixin
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
-from vllm.worker.model_runner import ModelRunner
 from vllm.utils import Counter
+from vllm.worker.model_runner import ModelRunner
 
 
 class MockLogitsSampler(Sampler):

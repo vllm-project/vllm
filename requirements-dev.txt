@@ -24,6 +24,10 @@ openai
 requests
 ray
 peft
+awscli
 
 # Benchmarking
 aiohttp
+
+# Multimodal
+pillow
