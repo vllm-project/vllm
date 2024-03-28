@@ -94,7 +94,7 @@ class CPUExecutor(ExecutorBase):
     def _verify_and_get_model_config(config: ModelConfig) -> ModelConfig:
         if (config.dtype == torch.float16):
             logger.warning(
-                "float16 is not supported not CPU, casting to bfloat16.")
+                "float16 is not supported on CPU, casting to bfloat16.")
             config.dtype = torch.bfloat16
         if (not config.enforce_eager):
             logger.warning(
