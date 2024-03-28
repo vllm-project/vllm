@@ -88,7 +88,7 @@ class BlockAllocator(ABC):
         pass
 
 
-class DeviceAwareBlockAllocator(ABC):
+class DeviceAwareBlockAllocator(BlockAllocator):
 
     @abstractmethod
     def allocate_mutable(self, prev_block: Optional[Block],
@@ -101,26 +101,5 @@ class DeviceAwareBlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def free(self, block: Block) -> None:
-        pass
-
-    @abstractmethod
-    def fork(self, last_block: Block) -> List[Block]:
-        pass
-
-    @abstractmethod
     def get_num_free_blocks(self, device: Device) -> int:
-        pass
-
-    @abstractmethod
-    def clear_copy_on_writes(self) -> Dict[int, List[int]]:
-        pass
-
-    @abstractmethod
-    def mark_blocks_as_computed(self) -> None:
-        pass
-
-    @abstractmethod
-    def get_common_computed_block_ids(
-            self, seq_block_ids: List[List[int]]) -> List[int]:
         pass

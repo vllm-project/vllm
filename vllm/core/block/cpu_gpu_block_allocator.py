@@ -201,3 +201,6 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         device = Device.GPU
         return self._allocators[device].get_common_computed_block_ids(
             seq_block_ids)
+
+    def all_block_ids(self) -> frozenset[int]:
+        return frozenset(self._block_ids_to_allocator.keys())

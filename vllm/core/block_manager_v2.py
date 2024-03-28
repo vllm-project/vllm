@@ -160,6 +160,8 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         return block_ids
 
     def access_all_blocks_in_seq(self, seq, now):
+        # TODO add prefix caching support.
+        # Tracked here https://github.com/vllm-project/vllm/issues/3667
         pass
 
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):

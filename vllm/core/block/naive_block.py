@@ -14,7 +14,10 @@ class NaiveBlockAllocator(BlockAllocator):
 
     Args:
         create_block (Block.Factory): A factory function for creating new
-            blocks.
+            blocks. This is used when a NaiveBlockAllocator is composed within
+            a prefix caching allocator -- the naive block allocator must
+            construct prefix caching blocks (but shouldn't know anything else
+            about them).
         num_blocks (int): The total number of blocks to manage.
         block_size (int): The size of each block in tokens.
         block_ids (Optional[Iterable[int]], optional): An optional iterable of
@@ -85,9 +88,10 @@ class NaiveBlockAllocator(BlockAllocator):
         )
 
     def free(self, block: Block) -> None:
-        block_id = block.block_id
+        self._free_block_id(block.block_id)
+
+        # Mark the block as having no allocation.
         block.block_id = None
-        self._free_block_id(block_id)
 
     def fork(self, last_block: Block) -> List[Block]:
         """Creates a new sequence of blocks that shares the same underlying
