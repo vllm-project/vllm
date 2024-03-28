@@ -5,8 +5,9 @@ import pytest
 
 from vllm import SamplingParams
 from vllm.block import PhysicalTokenBlock
-from vllm.core.block_manager import (AllocStatus, BlockSpaceManager,
-                                     UncachedBlockAllocator)
+from vllm.core.block_manager_v1 import (BlockSpaceManagerV1,
+                                        UncachedBlockAllocator)
+from vllm.core.interfaces import AllocStatus
 from vllm.sequence import Logprob, Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
 
@@ -63,10 +64,10 @@ def test_allocate():
     block_size = 4
     num_cpu_blocks = 4
     num_gpu_blocks = 4
-    block_manager = BlockSpaceManager(block_size,
-                                      num_cpu_blocks,
-                                      num_gpu_blocks,
-                                      watermark=0)
+    block_manager = BlockSpaceManagerV1(block_size,
+                                        num_cpu_blocks,
+                                        num_gpu_blocks,
+                                        watermark=0)
 
     # Allocate same sequence group to all available gpu blocks.
     for i in range(num_gpu_blocks):
@@ -77,10 +78,10 @@ def test_allocate():
 
     # Allocate same sequence group to all available gpu blocks.
     # Use watermark to reserve one gpu block.
-    block_manager = BlockSpaceManager(block_size,
-                                      num_cpu_blocks,
-                                      num_gpu_blocks,
-                                      watermark=1 / num_gpu_blocks)
+    block_manager = BlockSpaceManagerV1(block_size,
+                                        num_cpu_blocks,
+                                        num_gpu_blocks,
+                                        watermark=1 / num_gpu_blocks)
     for i in range(num_gpu_blocks - 1):
         _, seq_group = create_dummy_prompt(str(i), block_size)
         assert block_manager.can_allocate(seq_group)
@@ -92,10 +93,10 @@ def test_append_slot_single_seq():
     block_size = 4
     num_cpu_blocks = 4
     num_gpu_blocks = 4
-    block_manager = BlockSpaceManager(block_size,
-                                      num_cpu_blocks,
-                                      num_gpu_blocks,
-                                      watermark=0)
+    block_manager = BlockSpaceManagerV1(block_size,
+                                        num_cpu_blocks,
+                                        num_gpu_blocks,
+                                        watermark=0)
 
     # Allocate single seq to gpu block.
     prompt, seq_group = create_dummy_prompt("1", block_size)
@@ -124,10 +125,10 @@ def test_append_slot_cow():
     block_size = 4
     num_cpu_blocks = 4
     num_gpu_blocks = 4
-    block_manager = BlockSpaceManager(block_size=block_size,
-                                      num_cpu_blocks=num_cpu_blocks,
-                                      num_gpu_blocks=num_gpu_blocks,
-                                      watermark=0)
+    block_manager = BlockSpaceManagerV1(block_size=block_size,
+                                        num_cpu_blocks=num_cpu_blocks,
+                                        num_gpu_blocks=num_gpu_blocks,
+                                        watermark=0)
 
     # Allocate prompt to gpu block. There is one slot left in the block.
     prompt = Sequence(seq_id=1,
@@ -165,10 +166,10 @@ def test_fork():
     block_size = 4
     num_cpu_blocks = 4
     num_gpu_blocks = 4
-    block_manager = BlockSpaceManager(block_size,
-                                      num_cpu_blocks,
-                                      num_gpu_blocks,
-                                      watermark=0)
+    block_manager = BlockSpaceManagerV1(block_size,
+                                        num_cpu_blocks,
+                                        num_gpu_blocks,
+                                        watermark=0)
 
     prompt, seq_group = create_dummy_prompt("1",
                                             block_size - 1,
@@ -192,10 +193,10 @@ def test_swap():
     block_size = 4
     num_cpu_blocks = 4
     num_gpu_blocks = 4
-    block_manager = BlockSpaceManager(block_size,
-                                      num_cpu_blocks,
-                                      num_gpu_blocks,
-                                      watermark=0)
+    block_manager = BlockSpaceManagerV1(block_size,
+                                        num_cpu_blocks,
+                                        num_gpu_blocks,
+                                        watermark=0)
 
     prompt, seq_group = create_dummy_prompt("1", prompt_length=block_size - 1)
     prompt.status = SequenceStatus.WAITING
@@ -238,10 +239,10 @@ def test_free():
     block_size = 4
     num_cpu_blocks = 4
     num_gpu_blocks = 4
-    block_manager = BlockSpaceManager(block_size,
-                                      num_cpu_blocks,
-                                      num_gpu_blocks,
-                                      watermark=0)
+    block_manager = BlockSpaceManagerV1(block_size,
+                                        num_cpu_blocks,
+                                        num_gpu_blocks,
+                                        watermark=0)
 
     prompt, seq_group = create_dummy_prompt("1", block_size)
     block_manager.allocate(seq_group)
@@ -262,10 +263,10 @@ def test_reset():
     block_size = 4
     num_cpu_blocks = 4
     num_gpu_blocks = 4
-    block_manager = BlockSpaceManager(block_size,
-                                      num_cpu_blocks,
-                                      num_gpu_blocks,
-                                      watermark=0)
+    block_manager = BlockSpaceManagerV1(block_size,
+                                        num_cpu_blocks,
+                                        num_gpu_blocks,
+                                        watermark=0)
 
     # Allocate same seq group on all available gpu blocks.
     original_blocks = block_manager.get_num_free_gpu_blocks()
@@ -289,11 +290,11 @@ def test_sliding_window_multi_seq():
     num_cpu_blocks = 8
     num_gpu_blocks = 8
     sliding_window = 2
-    block_manager = BlockSpaceManager(block_size,
-                                      num_cpu_blocks,
-                                      num_gpu_blocks,
-                                      sliding_window=sliding_window,
-                                      watermark=0)
+    block_manager = BlockSpaceManagerV1(block_size,
+                                        num_cpu_blocks,
+                                        num_gpu_blocks,
+                                        sliding_window=sliding_window,
+                                        watermark=0)
 
     assert block_manager.get_num_free_gpu_blocks() == num_gpu_blocks
 
