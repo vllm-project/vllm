@@ -98,6 +98,11 @@ def test_v1_v2_greedy_equality_with_preemption(baseline_llm_generator,
 @pytest.mark.parametrize("seed", [1])
 def test_v1_v2_greedy_equality_with_cow(baseline_llm_generator,
                                         test_llm_generator, batch_size):
+    """Verify beam search equality with block manager v1 and v2.
+
+    This requires copy-on-writes; if the v1 and v2 output is the same, then
+    we have some confidence cow is working.
+    """
     output_len = 128
     temperature = 0.0
 
@@ -182,12 +187,18 @@ def test_v1_v2_greedy_equality_with_cow(baseline_llm_generator,
 def test_lookahead_greedy_equality_with_preemption(baseline_llm_generator,
                                                    test_llm_generator,
                                                    batch_size):
+    """Verify vLLM produces the same output with greedy sampling, when lookahead
+    scheduling is used vs. not.
+
+    Lookahead scheduling is not expected to modify the output, as it simply
+    allocates empty slots ahead of the known token ids in a sliding fashion.
+
+    This test constrains the total number of blocks to force preemption. It also
+    varies the block size so that the lookahead size is less than and greater
+    than the block size.
+    """
     output_len = 128
     temperature = 0.0
-
-    # We want to ensure equality even with preemption.
-    # We force the total block size to be 1 + cdiv(output_len, block_size)
-    # so that only one sequence can fit at a time (once the sequences grow).
 
     prompts = [
         "Hello, my name is",
