@@ -103,7 +103,7 @@ def test_append_slot_single_seq():
     block_manager.allocate(seq_group)
 
     # Nothing to append. Sequence has no new logical blocks.
-    assert block_manager.can_append_slot(seq_group)
+    assert block_manager.can_append_slots(seq_group)
     before_blocks = block_manager.get_num_free_gpu_blocks()
     assert not block_manager.append_slot(prompt)
     after_blocks = block_manager.get_num_free_gpu_blocks()
@@ -114,7 +114,7 @@ def test_append_slot_single_seq():
         token_id = i + 5
         prompt.append_token_id(token_id, {token_id: Logprob(0.0)})
 
-    assert block_manager.can_append_slot(seq_group)
+    assert block_manager.can_append_slots(seq_group)
     before_blocks = block_manager.get_num_free_gpu_blocks()
     assert not block_manager.append_slot(prompt)
     after_blocks = block_manager.get_num_free_gpu_blocks()
@@ -150,7 +150,7 @@ def test_append_slot_cow():
     child.append_token_id(token_id, {token_id: Logprob(0.0)})
     block_manager.fork(prompt, child)
 
-    assert block_manager.can_append_slot(seq_group)
+    assert block_manager.can_append_slots(seq_group)
     before_blocks = block_manager.get_num_free_gpu_blocks()
 
     maybe_src_dst_block = block_manager.append_slot(child)

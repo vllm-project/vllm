@@ -116,7 +116,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         for seq in waiting_seqs[1:]:
             self.block_tables[seq.seq_id] = block_table.fork()
 
-    def can_append_slot(self, seq_group: SequenceGroup) -> bool:
+    def can_append_slots(self, seq_group: SequenceGroup, num_lookahead_slots: int) -> bool:
         # Simple heuristic: If there is at least one free block
         # for each sequence, we can append.
         num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(
