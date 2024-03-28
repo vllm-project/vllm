@@ -166,7 +166,8 @@ class Worker:
 
         while not out_of_memory:
             try:
-                # Adjust profile_run to take and use a batch_size argument for embedding profiling
+                # Adjust profile_run to take and use a batch_size argument
+                # for embedding profiling
                 self.model_runner.profile_run(
                     max_num_batched_tokens=initial_batch_size * max_model_len)
                 # If successful, increment the batch size
@@ -174,9 +175,10 @@ class Worker:
                 initial_batch_size *= step_size
             except RuntimeError as e:
                 if "CUDA out of memory" in str(e):
-                    out_of_memory = True  # Exit the loop if a CUDA OOM error is encountered
+                    # Exit the loop if a CUDA OOM error is encountered
+                    out_of_memory = True
                 else:
-                    raise  # Reraise unexpected errors
+                    raise  # Re-raise unexpected errors
 
             torch.cuda.synchronize()
             # Clear the CUDA memory after each attempt to ensure a fresh start

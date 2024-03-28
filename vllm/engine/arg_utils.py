@@ -414,7 +414,7 @@ class EngineArgs:
             vision_language_config = None
 
         return (model_config, cache_config, parallel_config, scheduler_config,
-                device_config, lora_config)
+                device_config, lora_config, vision_language_config)
 
 
 @dataclass

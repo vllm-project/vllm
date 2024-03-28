@@ -595,19 +595,17 @@ class BlockSpaceManager:
 
 
 class DummyBlockSpaceManager:
-    """A no-operation version of BlockSpaceManager for use in environments where block management is not required.
+    """A no-operation version of BlockSpaceManager for use in environments
+    where block management is not required.
 
-    This class provides the same interface as BlockSpaceManager, but its methods perform no actions. It's designed
-    to be used in scenarios where the overhead of block management is unnecessary, such as in an embedding server
-    environment."""
+    This class provides the same interface as BlockSpaceManager, but its
+    methods perform no actions. It's designed to be used in scenarios where
+    the overhead of block management is unnecessary, such as in an embedding
+    mode environment."""
 
     def __init__(
         self,
-        block_size: int,
-        num_gpu_blocks: int,
-        num_cpu_blocks: int,
-        watermark: float = 0.01,
-        sliding_window: Optional[int] = None,
+        **kwargs,
     ) -> None:
         pass
 
@@ -649,3 +647,23 @@ class DummyBlockSpaceManager:
 
     def can_append_slot(self, seq_group: SequenceGroup) -> bool:
         return True
+
+    def access_all_blocks_in_seq(
+        self,
+        seq: Sequence,
+        access_time: float,
+    ) -> None:
+        pass
+
+    def get_common_computed_block_ids(self,
+                                      seq_group: SequenceGroup) -> List[int]:
+        return []
+
+    def get_num_free_gpu_blocks(self) -> int:
+        return 1
+
+    def get_num_free_cpu_blocks(self) -> int:
+        return 1
+
+    def mark_blocks_as_computed(self, seq_group: SequenceGroup):
+        pass

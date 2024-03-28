@@ -4,7 +4,8 @@ from collections import deque
 from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
-from vllm.core.block_manager import AllocStatus, BlockSpaceManager, DummyBlockSpaceManager
+from vllm.core.block_manager import (AllocStatus, BlockSpaceManager,
+                                     DummyBlockSpaceManager)
 from vllm.core.policy import PolicyFactory
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -94,7 +95,9 @@ class Scheduler:
         # Instantiate the scheduling policy.
         self.policy = PolicyFactory.get_policy(policy_name="fcfs")
         # Decide on the block manager class based on embedding mode
-        block_manager_class = DummyBlockSpaceManager if self.scheduler_config.embedding_mode else BlockSpaceManager
+        block_manager_class = (DummyBlockSpaceManager
+                               if self.scheduler_config.embedding_mode else
+                               BlockSpaceManager)
         self.block_manager = block_manager_class(
             block_size=cache_config.block_size,
             num_gpu_blocks=cache_config.num_gpu_blocks,

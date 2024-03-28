@@ -279,42 +279,33 @@ class LlamaModel(nn.Module):
         return hidden_states
 
     def _last_token_pool(self, last_hidden_states: torch.Tensor,
-                         attention_mask: torch.Tensor) -> torch.Tensor:
-        # Abated from https://huggingface.co/intfloat/e5-mistral-7b-instruct
-        # With only GPU operations
-        left_padding_mask = attention_mask[:, -1].all(dim=0)
+                         prompt_lens_tensor: torch.Tensor) -> torch.Tensor:
+        # Calculate cumulative lengths to get the start index of each sequence
+        # in the flattened tensor
+        cum_lengths = torch.cumsum(prompt_lens_tensor, dim=0)
 
-        sequence_lengths = attention_mask.sum(dim=1) - 1
+        # Calculate the flat indices for the last token of each sequence
+        last_token_flat_indices = cum_lengths - 1
 
-        # Prepare indexing for gathering the last valid token based on sequence_lengths.
-        batch_indices = torch.arange(last_hidden_states.size(0),
-                                     device=last_hidden_states.device)
-
-        last_tokens = torch.where(
-            left_padding_mask,
-            last_hidden_states[:,
-                               -1],  # For left-padded sequences, select the last token directly.
-            last_hidden_states[
-                batch_indices,
-                sequence_lengths]  # For others, select based on sequence_lengths.
-        )
+        # Ensure last_token_flat_indices is compatible for direct indexing
+        # Select the last tokens based on the calculated flat indices
+        last_tokens = last_hidden_states[last_token_flat_indices]
 
         return last_tokens
 
     def embedding(
         self,
-        input_ids: torch.Tensor,
+        attn_metadata: AttentionMetadata,
         hidden_states: torch.Tensor,
     ) -> Optional[SamplerOutput]:
-        # _make_tensor_with_pad uses 0 to pad
-        attention_mask = (input_ids != 0).long()
-        outputs = self._last_token_pool(hidden_states, attention_mask)
+        outputs = self._last_token_pool(hidden_states,
+                                        attn_metadata.prompt_lens_tensor)
 
         seq_outputs = []
         for output in outputs:
             seq_outputs.append(
                 EmbeddingSequenceGroupOutput(embeddings=output.tolist()))
-        return seq_outputs
+        return SamplerOutput(outputs=seq_outputs)
 
     def load_weights(
         self,
@@ -336,11 +327,12 @@ class LlamaModel(nn.Module):
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
                 continue
-            if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
+            if ("rotary_emb.cos_cached" in name
+                    or "rotary_emb.sin_cached" in name):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            for param_name, weight_name, shard_id in stacked_params_mapping:
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)

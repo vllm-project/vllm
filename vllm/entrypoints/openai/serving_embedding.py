@@ -13,35 +13,12 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.outputs import EmbeddingRequestOutput
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_completion import parse_prompt_format
 from vllm.sampling_params import SamplingParams
 
 logger = init_logger(__name__)
 
 TypeTokenIDs = List[int]
-
-
-def parse_prompt_format(prompt) -> Tuple[bool, list]:
-    # get the prompt, openai supports the following
-    # "a string, array of strings, array of tokens, or array of token arrays."
-    prompt_is_tokens = False
-    prompts = [prompt]  # case 1: a string
-    if isinstance(prompt, list):
-        if len(prompt) == 0:
-            raise ValueError("please provide at least one prompt")
-        elif isinstance(prompt[0], str):
-            prompt_is_tokens = False
-            prompts = prompt  # case 2: array of strings
-        elif isinstance(prompt[0], int):
-            prompt_is_tokens = True
-            prompts = [prompt]  # case 3: array of tokens
-        elif isinstance(prompt[0], list) and isinstance(prompt[0][0], int):
-            prompt_is_tokens = True
-            prompts = prompt  # case 4: array of token arrays
-        else:
-            raise ValueError(
-                "prompt must be a string, array of strings, array of tokens, or array of token arrays"
-            )
-    return prompt_is_tokens, prompts
 
 
 def request_output_to_embedding_response(

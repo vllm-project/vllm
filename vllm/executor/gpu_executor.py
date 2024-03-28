@@ -37,7 +37,10 @@ class GPUExecutor(ExecutorBase):
         self._init_worker()
 
         # Profile the memory usage and initialize the cache.
-        self._init_cache()
+        if not self.model_config.embedding_mode:
+            self._init_cache()
+        else:
+            self._init_embedding()
 
     def _init_worker(self):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
@@ -75,20 +78,6 @@ class GPUExecutor(ExecutorBase):
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """
-        # No need to init cache engine or use CUDA graph in embedding mode
-        if self.model_config.embedding_mode:
-            # Get the maximum number of tokens that can be allocated on GPU.
-            max_batch_size = self.driver_worker.profile_max_batched_tokens_for_embedding()
-
-            self.scheduler_config.max_num_batched_tokens = (
-                    max_batch_size * self.model_config.max_model_len *
-                    self.cache_config.gpu_memory_utilization)
-            logger.info(f"max_num_batched_tokens: "
-                        f"{self.scheduler_config.max_num_batched_tokens}"
-                        f"max_batch_size: {max_batch_size}")
-
-            return
-
         # Get the maximum number of blocks that can be allocated on GPU and CPU.
         num_gpu_blocks, num_cpu_blocks = (
             self.driver_worker.profile_num_available_blocks(
@@ -113,6 +102,31 @@ class GPUExecutor(ExecutorBase):
         # Warm up the model. This includes capturing the model into CUDA graph
         # if enforce_eager is False.
         self.driver_worker.warm_up_model()
+
+    def _init_embedding(self):
+        """Initializes the maximum number of tokens can be batched by GPU.
+
+        In embedding mode, there's no need to initialize the cache engine
+        or use CUDA graph optimizations. This method calculates the maximum
+        batch size based on the GPU's capacity to handle tokens for embedding
+        purposes.
+        """
+        # Get the maximum number of tokens that can be allocated on GPU.
+        max_batch_size = self.driver_worker.profile_max_batched_tokens_for_embedding(
+        )
+
+        # NOTE(changsu): Identifying a margin threshold of 0.8 offers sufficient
+        # leeway to effectively handle memory demands while minimizing the risk
+        # of OOM errors.
+        self.scheduler_config.max_num_batched_tokens = int(
+            max_batch_size * self.model_config.max_model_len * 0.8)
+        logger.info(f"max_num_batched_tokens: "
+                    f"{self.scheduler_config.max_num_batched_tokens}, "
+                    f"max_batch_size: {max_batch_size}")
+
+        # Set it to 1 for computing KV cache in _get_stats
+        self.cache_config.num_gpu_blocks = 1
+        self.cache_config.num_cpu_blocks = 1
 
     def execute_model(self,
                       seq_group_metadata_list: List[SequenceGroupMetadata],

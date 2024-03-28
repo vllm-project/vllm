@@ -16,9 +16,9 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
                           RequestOutputFactory)
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (EmbeddingSequenceGroupOutput, MultiModalData, SamplerOutput, Sequence,
-                           SequenceGroup, SequenceGroupOutput, SequenceOutput,
-                           SequenceStatus)
+from vllm.sequence import (EmbeddingSequenceGroupOutput, MultiModalData,
+                           SamplerOutput, Sequence, SequenceGroup,
+                           SequenceGroupOutput, SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
@@ -666,22 +666,16 @@ class LLMEngine:
         now = time.time()
 
         # KV Cache Usage in %.
-        if not self.model_config.embedding_mode:
-            num_total_gpu = self.cache_config.num_gpu_blocks
-            num_free_gpu = self.scheduler.block_manager.get_num_free_gpu_blocks(
-            )
-            gpu_cache_usage = 1.0 - (num_free_gpu / num_total_gpu)
+        num_total_gpu = self.cache_config.num_gpu_blocks
+        num_free_gpu = self.scheduler.block_manager.get_num_free_gpu_blocks()
+        gpu_cache_usage = 1.0 - (num_free_gpu / num_total_gpu)
 
-            num_total_cpu = self.cache_config.num_cpu_blocks
-            cpu_cache_usage = 0.
-            if num_total_cpu > 0:
-                num_free_cpu = self.scheduler.block_manager.get_num_free_cpu_blocks(
-                )
-                cpu_cache_usage = 1.0 - (num_free_cpu / num_total_cpu)
-        else:
-            # No need to log KV cache usage in embedding mode
-            gpu_cache_usage = 0
-            cpu_cache_usage = 0
+        num_total_cpu = self.cache_config.num_cpu_blocks
+        cpu_cache_usage = 0.
+        if num_total_cpu > 0:
+            num_free_cpu = self.scheduler.block_manager.get_num_free_cpu_blocks(
+            )
+            cpu_cache_usage = 1.0 - (num_free_cpu / num_total_cpu)
 
         # Scheduler State
         num_running = len(self.scheduler.running)

@@ -587,7 +587,7 @@ class SamplerOutput:
     """For each sequence group, we generate a list of SequenceOutput object,
     each of which contains one possible candidate for the next token.
 
-    This datastructure implements methods so it can be used like a list, but
+    This data structure implements methods so it can be used like a list, but
     also has optional fields for device tensors.
     """
 

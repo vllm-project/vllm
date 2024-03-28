@@ -638,7 +638,7 @@ class ModelRunner:
 
         if self.model_config.embedding_mode:
             num_layers = self.model_config.get_num_layers(self.parallel_config)
-            kv_caches = [(None, None)] * num_layers
+            kv_caches = [None] * num_layers
 
         execute_model_kwargs = {
             "input_ids": input_tokens,
@@ -650,6 +650,11 @@ class ModelRunner:
             execute_model_kwargs.update({"image_input": multi_modal_input})
         hidden_states = model_executable(**execute_model_kwargs)
 
+        if self.model_config.embedding_mode:
+            # Get embedding vectors.
+            return self.model.embedding(attn_metadata=attn_metadata,
+                                        hidden_states=hidden_states)
+
         # Compute the logits.
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
 
@@ -657,16 +662,11 @@ class ModelRunner:
         if not sampling_metadata.perform_sampling:
             return None
 
-        if self.model_config.embedding_mode:
-            # Get embedding vectors.
-            output = self.model.embedding(input_ids=input_tokens,
-                                          hidden_states=hidden_states)
-        else:
-            # Sample the next token.
-            output = self.model.sample(
-                hidden_states=hidden_states,
-                sampling_metadata=sampling_metadata,
-            )
+        # Sample the next token.
+        output = self.model.sample(
+            logits=logits,
+            sampling_metadata=sampling_metadata,
+        )
         return output
 
     @torch.inference_mode()

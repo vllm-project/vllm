@@ -175,7 +175,7 @@ class EmbeddingRequestOutput:
         request_id (str): A unique identifier for the embedding request.
         outputs (EmbeddingOutput): The embedding results for the given input.
         prompt_token_ids (List[int]): A list of token IDs used in the prompt.
-        finished (bool): A flag indicating whether the embedding process is completed.
+        finished (bool): A flag indicating whether the embedding is completed.
     """
 
     def __init__(self, request_id: str, outputs: 'EmbeddingOutput',
@@ -198,8 +198,8 @@ class EmbeddingRequestOutput:
         """
         Returns a string representation of an EmbeddingRequestOutput instance.
 
-        The representation includes the request_id and the number of outputs, providing
-        a quick overview of the embedding request's results.
+        The representation includes the request_id and the number of outputs,
+        providing a quick overview of the embedding request's results.
 
         Returns:
             str: A string representation of the EmbeddingRequestOutput instance.
