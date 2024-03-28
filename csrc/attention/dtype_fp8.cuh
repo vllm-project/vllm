@@ -8,7 +8,7 @@
 #endif
 
 namespace vllm {
-#ifdef ENABLE_FP8_E5M2
+#if defined(ENABLE_FP8_E5M2) || defined(ENABLE_FP8_E4M3)
 // fp8 vector types for quantization of kv cache
 
 template<>
