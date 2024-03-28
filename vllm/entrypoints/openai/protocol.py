@@ -1,10 +1,13 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
+import contextlib
 import time
-from typing import Dict, List, Literal, Optional, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 import torch
-from pydantic import BaseModel, Field, model_validator
+from annotated_types import Len
+from pydantic import (BaseModel, BeforeValidator, Field, TypeAdapter,
+                      ValidationError, model_validator)
 
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
@@ -59,10 +62,32 @@ class ResponseFormat(BaseModel):
     type: str = Literal["text", "json_object"]
 
 
+class TextContent(BaseModel):
+    type: str = Literal["text"]
+    text: str
+
+
+SingleTextContentList = Annotated[List[TextContent], Len(1, 1)]
+
+
+def try_flatten_text_content(value: Any) -> str:
+    if not isinstance(value, str):
+        # The OpenAI API allows complex contents in chat messages. While
+        # we do not fully support them at the moment, we can allow simple
+        # cases where just a single text content is passed in a message.
+        with contextlib.suppress(ValidationError):
+            single_text_content_list = TypeAdapter(
+                SingleTextContentList).validate_python(value)
+            return single_text_content_list[0].text
+    return value
+
+
 class ChatCompletionRequest(BaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
-    messages: List[Dict[str, str]]
+    messages: List[Dict[str,
+                        Annotated[str,
+                                  BeforeValidator(try_flatten_text_content)]]]
     model: str
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
@@ -187,7 +212,7 @@ class ChatCompletionRequest(BaseModel):
         guide_count = sum([
             "guided_json" in data and data["guided_json"] is not None,
             "guided_regex" in data and data["guided_regex"] is not None,
-            "guided_choice" in data and data["guided_choice"] is not None
+            "guided_choice" in data and data["guided_choice"] is not None,
         ])
         if guide_count > 1:
             raise ValueError(
@@ -317,7 +342,7 @@ class CompletionRequest(BaseModel):
         guide_count = sum([
             "guided_json" in data and data["guided_json"] is not None,
             "guided_regex" in data and data["guided_regex"] is not None,
-            "guided_choice" in data and data["guided_choice"] is not None
+            "guided_choice" in data and data["guided_choice"] is not None,
         ])
         if guide_count > 1:
             raise ValueError(
