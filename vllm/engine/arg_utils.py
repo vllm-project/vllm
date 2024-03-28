@@ -416,7 +416,8 @@ class EngineArgs:
             self.use_v2_block_manager,
             num_lookahead_slots=self.num_lookahead_slots,
             delay_factor=self.scheduler_delay_factor,
-            enable_chunked_prefill=self.enable_chunked_prefill,)
+            enable_chunked_prefill=self.enable_chunked_prefill,
+        )
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,
