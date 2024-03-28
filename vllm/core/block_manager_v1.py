@@ -230,13 +230,12 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         self.watermark_blocks = int(watermark * num_gpu_blocks)
 
         if self.enable_caching:
-            logger.info("enable automatic prefix caching")
+            logger.info("Automatic prefix caching is enabled.")
             self.gpu_allocator = CachedBlockAllocator(Device.GPU, block_size,
                                                       num_gpu_blocks)
             self.cpu_allocator = CachedBlockAllocator(Device.CPU, block_size,
                                                       num_cpu_blocks)
         else:
-            logger.info("disable automatic prefix caching")
             self.gpu_allocator = UncachedBlockAllocator(
                 Device.GPU, block_size, num_gpu_blocks)
             self.cpu_allocator = UncachedBlockAllocator(

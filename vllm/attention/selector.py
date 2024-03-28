@@ -41,6 +41,8 @@ def _can_use_flash_attn(dtype: torch.dtype) -> bool:
     try:
         import flash_attn  # noqa: F401
     except ImportError:
-        logger.info("flash_attn is not found.")
+        logger.info(
+            "Cannot use FlashAttention because the package is not found. "
+            "Please install it for better performance.")
         return False
     return True
