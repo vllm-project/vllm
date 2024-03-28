@@ -3,11 +3,11 @@ import json
 import logging
 import os
 import platform
+import time
 from enum import Enum
 from pathlib import Path
 from threading import Thread
 from typing import Dict, Optional
-import time
 from uuid import uuid4
 
 import cpuinfo
