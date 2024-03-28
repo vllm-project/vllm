@@ -130,12 +130,12 @@ The JSON configs to run scheduled/event-triggered benchmarks can be found at `<n
 	- `python3 -m neuralmagic.benchmarks.run_benchmarks -i <path-to-config-file> -o <path-to-output-dir>`
 
    - **GHA Action**:
-    - `echo '{"label":"<machine-label>", "timeout":"<max-time-machine-should-run>", "gitref":"<github-branch>", "benchmark_config_list_file":"<path-to-txt-file-listing-config-file-paths>", "python" : "<python-version>", "Gi_per_thread" : "<num-gb-per-thread-for-building-nm-vllm>" }' | gh workflow run nm-benchmark.yml --ref <github-branch> --json`
-	 - Example `echo '{"label":"aws-avx2-32G-a10g-24G", "timeout":"1080", "gitref":"varun/flakiness-experiments", "benchmark_config_list_file":".github/data/nm_benchmark_configs_minimal_test_list.txt", "python" : "3.10.12", "Gi_per_thread" : "12" }' | gh workflow run nm-benchmark.yml --ref varun/flakiness-experiments --json`
+    - `echo '{"label":"<machine-label>", "timeout":"<max-time-machine-should-run>", "gitref":"<github-branch>", "benchmark_config_list_file":"<path-to-txt-file-listing-config-file-paths>", "python" : "<python-version>", "Gi_per_thread" : "<num-gb-per-thread-for-building-nm-vllm>", "nvcc_threads" : "<num-nvcc-build-threads-to-use>" }' | gh workflow run nm-benchmark.yml --ref <github-branch> --json`
+	 - Example `echo '{"label":"aws-avx2-32G-a10g-24G", "timeout":"180", "gitref":"varun/flakiness-experiments", "benchmark_config_list_file":".github/data/nm_benchmark_configs_minimal_test_list.txt", "python" : "3.10.12", "Gi_per_thread" : "12", "nvcc_threads" : "1"}' | gh workflow run nm-benchmark.yml --ref varun/flakiness-experiments --json`
 	 
 # How To Add A Benchmark
 
-There are 3 Steps in making a Benchmark.
+There are 5 Steps in making a Benchmark.
 ### The Script
 Write your metrics generation script.
 
@@ -178,6 +178,9 @@ As an example, the `script/benchmark_throughput.py` creates the BenchmarkResult 
    result.store("./output.json")
 ```
 BenchmarkResult constructor takes all the general information about the environment. Then, invoke the `add_metric` method to add the observed metrics. Finally, store the benchmark results as a JSON by invoking the `store` method.
+
+# Permanent Storage
+As of 2024-03-28, all benchmark run results are stored on EFS. For access, please reach out to Andy Linfoot / Varun / Dan Huang.
 
 # About sparsity
 The benchmark configs have a `sparsity` field. Populate this field with proper sparsity identifiers to inform vllm about model sparsity.
