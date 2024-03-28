@@ -208,10 +208,10 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         src_block_table = self.block_tables[parent_seq.seq_id]
         self.block_tables[child_seq.seq_id] = src_block_table.fork()
 
-    def can_swap_in(self, seq_group: SequenceGroup) -> bool:
+    def can_swap_in(self, seq_group: SequenceGroup, num_lookahead_slots: int) -> bool:
         return False
 
-    def swap_in(self, seq_group: SequenceGroup) -> Dict[int, int]:
+    def swap_in(self, seq_group: SequenceGroup, num_lookahead_slots: int) -> Dict[int, int]:
         raise NotImplementedError
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:

@@ -328,7 +328,7 @@ class Scheduler:
                         continue
 
                 # If the sequence group cannot be swapped in, stop.
-                if not self.block_manager.can_swap_in(seq_group):  # TODO
+                if not self._can_swap_in(seq_group):
                     break
 
                 # The total number of sequences in the RUNNING state should not
@@ -376,6 +376,15 @@ class Scheduler:
         is_prefill = False
 
         return self.block_manager.can_append_slots(
+            seq_group=seq_group,
+            num_lookahead_slots=self._get_num_lookahead_slots(is_prefill),
+        )
+    
+    def _can_swap_in(self, seq_group: SequenceGroup) -> bool:
+        # Swapping in is considered decode.
+        is_prefill = False
+
+        return self.block_manager.can_swap_in(
             seq_group=seq_group,
             num_lookahead_slots=self._get_num_lookahead_slots(is_prefill),
         )
