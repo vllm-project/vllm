@@ -328,7 +328,12 @@ function (define_gpu_extension_target GPU_MOD_NAME)
     ${GPU_INCLUDE_DIRECTORIES})
 
   target_link_libraries(${GPU_MOD_NAME} PRIVATE torch ${torch_python_LIBRARY}
-    ${CUDA_CUDA_LIB} ${CUDA_LIBRARIES} ${GPU_LIBRARIES})
+    ${GPU_LIBRARIES})
+
+  if (GPU_LANGUAGE STREQUAL "HIP" OR GPU_LANGUAGE STREQUAL "CUDA")
+    target_link_libraries(${GPU_MOD_NAME} PRIVATE
+      ${CUDA_CUDA_LIB} ${CUDA_LIBRARIES})
+  endif()
 
   install(TARGETS ${GPU_MOD_NAME} LIBRARY DESTINATION ${GPU_DESTINATION})
 endfunction()
