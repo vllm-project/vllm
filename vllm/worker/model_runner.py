@@ -168,7 +168,9 @@ class ModelRunner:
             token_chunk_size = seq_group_metadata.token_chunk_size
             seq_data = seq_group_metadata.seq_data[seq_id]
             computed_len = seq_data.get_num_computed_tokens()
-            prefill_end = min(seq_data.get_prompt_len(),
+            # We should use get_len here because in case of preemption
+            # it contains output tokens.
+            prefill_end = min(seq_data.get_len(),
                               computed_len + token_chunk_size)
             # TODO(sang): Rename it after chunked prefill is introduced.
             prompt_tokens = seq_data.get_token_ids()[computed_len:prefill_end]
