@@ -15,7 +15,7 @@ bench_latency_exit_code=$?
 python3 benchmarks/benchmark_throughput.py --input-len 256 --output-len 256 2>&1 | tee benchmark_throughput.txt
 bench_throughput_exit_code=$?
 
-# run python-based benchmark perplexity
+# run python-based benchmark minimal measure perplexity
 python3 benchmarks/measure_pplv2_MC.py --model=meta-llama/Llama-2-7b-hf --data=tests/prompts/wiki.test.raw --context-size=1024 --sample-size=512 --patch-size=1 2>&1 | tee benchmark_measure_pplv2.txt
 
 # run server-based benchmarks and upload the result to buildkite
