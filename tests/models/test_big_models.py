@@ -1,28 +1,25 @@
 """Compare the outputs of HF and vLLM when using greedy sampling.
 
-This test only tests small models. Big models such as 7B should be tested from
-test_big_models.py because it could use a larger instance to run tests.
+This tests bigger models and use half precision.
 
-Run `pytest tests/models/test_models.py`.
+Run `pytest tests/models/test_big_models.py`.
 """
 import pytest
 
 MODELS = [
-    "facebook/opt-125m",
-    "gpt2",
-    "bigcode/tiny_starcoder_py",
-    "EleutherAI/pythia-70m",
-    "bigscience/bloom-560m",
-    "microsoft/phi-2",
-    "stabilityai/stablelm-3b-4e1t",
-    # "allenai/OLMo-1B",  # Broken
-    "bigcode/starcoder2-3b",
+    "meta-llama/Llama-2-7b-hf",
+    # "mistralai/Mistral-7B-v0.1",  # Broken
+    # "Deci/DeciLM-7b",  # Broken
+    # "tiiuae/falcon-7b",  # Broken
+    "EleutherAI/gpt-j-6b",
+    "mosaicml/mpt-7b",
+    # "Qwen/Qwen1.5-0.5B"  # Broken,
 ]
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["float"])
-@pytest.mark.parametrize("max_tokens", [96])
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [32])
 def test_models(
     hf_runner,
     vllm_runner,
@@ -31,9 +28,6 @@ def test_models(
     dtype: str,
     max_tokens: int,
 ) -> None:
-    # To pass the small model tests, we need full precision.
-    assert dtype == "float"
-
     hf_model = hf_runner(model, dtype=dtype)
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
     del hf_model

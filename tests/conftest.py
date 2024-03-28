@@ -1,3 +1,5 @@
+import contextlib
+import gc
 import os
 from typing import List, Optional, Tuple
 
@@ -9,6 +11,8 @@ from transformers import (AutoModelForCausalLM, AutoProcessor,
 
 from vllm import LLM, SamplingParams
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
+from vllm.model_executor.parallel_utils.parallel_state import (
+    destroy_model_parallel)
 from vllm.sequence import MultiModalData
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -41,6 +45,20 @@ def _read_prompts(filename: str) -> List[str]:
     with open(filename, "r") as f:
         prompts = f.readlines()
         return prompts
+
+
+def cleanup():
+    destroy_model_parallel()
+    with contextlib.suppress(AssertionError):
+        torch.distributed.destroy_process_group()
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
+@pytest.fixture(autouse=True)
+def cleanup_fixture():
+    yield
+    cleanup()
 
 
 @pytest.fixture(scope="session")
@@ -241,6 +259,10 @@ class HfRunner:
             all_logprobs.append(seq_logprobs)
         return all_logprobs
 
+    def __del__(self):
+        del self.model
+        cleanup()
+
 
 @pytest.fixture
 def hf_runner():
@@ -253,6 +275,9 @@ class VllmRunner:
         self,
         model_name: str,
         tokenizer_name: Optional[str] = None,
+        # Use smaller max model length, otherwise bigger model cannot run due
+        # to kv cache size limit.
+        max_model_len=1024,
         dtype: str = "half",
         disable_log_stats: bool = True,
         tensor_parallel_size: int = 1,
@@ -268,6 +293,7 @@ class VllmRunner:
             swap_space=0,
             disable_log_stats=disable_log_stats,
             tensor_parallel_size=tensor_parallel_size,
+            max_model_len=max_model_len,
             block_size=block_size,
             enable_chunked_prefill=enable_chunked_prefill,
             **kwargs,
@@ -356,6 +382,10 @@ class VllmRunner:
                                             max_tokens=max_tokens)
         outputs = self.generate(prompts, beam_search_params)
         return outputs
+
+    def __del__(self):
+        del self.model
+        cleanup()
 
 
 @pytest.fixture

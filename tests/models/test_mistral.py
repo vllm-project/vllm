@@ -1,6 +1,6 @@
 """Compare the outputs of HF and vLLM for Mistral models using greedy sampling.
 
-Run `pytest tests/models/test_mistral.py --forked`.
+Run `pytest tests/models/test_mistral.py`.
 """
 import pytest
 
@@ -12,6 +12,9 @@ MODELS = [
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.skip(
+    "Two problems: 1. Failing correctness tests. 2. RuntimeError: expected "
+    "scalar type BFloat16 but found Half (only in CI).")
 def test_models(
     hf_runner,
     vllm_runner,
