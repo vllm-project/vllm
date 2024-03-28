@@ -533,6 +533,8 @@ class SchedulerConfig:
         delay_factor: Apply a delay (of delay factor multiplied by previous
             prompt latency) before scheduling next prompt.
         use_v2_block_manager: Whether to use the BlockSpaceManagerV2 or not.
+        enable_chunked_prefill: If True, prefill requests can be chunked based
+            on the remaining max_num_batched_tokens.
     """
 
     def __init__(
@@ -542,6 +544,7 @@ class SchedulerConfig:
         max_model_len: int,
         use_v2_block_manager: bool = False,
         delay_factor: float = 0.0,
+        enable_chunked_prefill: bool = False,
     ) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
@@ -553,6 +556,7 @@ class SchedulerConfig:
         self.max_model_len = max_model_len
         self.delay_factor = delay_factor
         self.use_v2_block_manager = use_v2_block_manager
+        self.chunked_prefill_enabled = enable_chunked_prefill
         self._verify_args()
 
     def _verify_args(self) -> None:
