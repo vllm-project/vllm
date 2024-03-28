@@ -234,7 +234,6 @@ class FlashAttentionImpl(AttentionImpl):
                 )
             else:
                 # prefix-enabled attention
-                assert self.alibi_slopes is None
                 output = flash_attn_varlen_func(
                     q=query,
                     k=key_cache,
