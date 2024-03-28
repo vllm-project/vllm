@@ -341,7 +341,10 @@ if not _is_neuron():
     ext_modules.append(CMakeExtension(name="vllm._C"))
 
 package_data = {
-    "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
+    "vllm": [
+        "py.typed", "model_executor/layers/fused_moe/configs/*.json",
+        "default_logging_config.json"
+    ]
 }
 if os.environ.get("VLLM_USE_PRECOMPILED"):
     package_data["vllm"].append("*.so")
