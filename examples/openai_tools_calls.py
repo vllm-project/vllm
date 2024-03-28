@@ -210,6 +210,7 @@ def run_conversation(question: str, tool_choice_param):
                     function_response = function_to_call()
             else:
                 print("The model halucinated a function : %s" % function_name)
+                continue
 
             messages.append({
                 "tool_call_id": tool_call.id,

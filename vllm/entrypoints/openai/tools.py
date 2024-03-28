@@ -31,7 +31,7 @@ class ToolsCallsTemplate:
 
     def render_toolresponse(self, message: ChatCompletionToolMessage,
                             tool_params: VllmToolsTemplate) -> str:
-        return tool_params.response_token_start + message.content + tool_params.response_token_end + "\n"
+        return tool_params.response_token_start + str(message.content) + tool_params.response_token_end + "\n"
 
     def render_tool(self, tool: ChatCompletionToolParam,
                     tool_params: VllmToolsTemplate) -> str:
@@ -73,7 +73,8 @@ class OpenAIToolsPrompter:
     https://platform.openai.com/docs/assistants/tools
     """
 
-    def __init__(self):
+    def __init__(self, privileged: bool):
+        self.privileged = privileged
         self.template = ToolsCallsTemplate()
 
     def content_from_assistant(self, message: ChatCompletionAssistantMessage,
@@ -196,9 +197,7 @@ class ChatPromptCapture:
         """ Convert the extracted text to json function calls. """
         if self.named_function_call:
             if self._add_calls_list(self.content) == 0:
-                logger.warning(
-                    "Error in parsing the function call. This should not happen since it's guided generation : %s"
-                    % str(exc))
+                return
         else:
             calls_list = self.content.split(self.tool_params.call_token_start)
             for v_call in calls_list:
@@ -209,12 +208,20 @@ class ChatPromptCapture:
                 self._add_calls_list(content)
 
     def _add_calls_list(self, content: str) -> int:
+        """ Returns the number of added tools calls. """
         count = len(self.calls_list)
         if len(content) > 1:
             try:
                 call_data = json.loads(content)
-            except json.decoder.JSONDecodeError:
+            except json.decoder.JSONDecodeError as exc:
                 # Simply ignore invalid functions calls...
+                if self.named_function_call:
+                    logger.warning(
+                        "Error in parsing the function call. This should not happen since it's guided generation : %s"
+                        % str(exc))
+                else:
+                    logger.warning(
+                        "Error in parsing the function call. The model have probably generated a wrong synthax : %s" % str(exc))
                 return 0
             if isinstance(call_data, List):
                 for call_elem in call_data:
@@ -224,6 +231,8 @@ class ChatPromptCapture:
             elif isinstance(call_data, Dict):
                 if "name" in call_data:
                     self.calls_list.append(call_data)
+            if self.prompter.privileged:
+                logger.info("Catched tool call : %s" % str(call_data))
         return len(self.calls_list) - count
 
     def to_ChatCompletionMessageToolCall(

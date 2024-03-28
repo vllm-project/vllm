@@ -93,7 +93,8 @@ class OpenAIServingCompletion(OpenAIServing):
                  lora_modules: Optional[List[LoRA]] = None):
         super().__init__(engine=engine,
                          served_model=served_model,
-                         lora_modules=lora_modules)
+                         lora_modules=lora_modules,
+                         privileged=False)
 
     async def create_completion(self, request: CompletionRequest,
                                 raw_request: Request):

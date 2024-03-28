@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Dict, List, Optional, Union
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.transformers_utils.tokenizer import get_tokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (CompletionRequest,
                                               ChatCompletionRequest,
@@ -28,7 +28,9 @@ class OpenAIServing:
     def __init__(self,
                  engine: AsyncLLMEngine,
                  served_model: str,
-                 lora_modules=Optional[List[LoRA]]):
+                 lora_modules=Optional[List[LoRA]],
+                 privileged: bool = False):
+        self.privileged = privileged
         self.engine = engine
         self.served_model = served_model
         if lora_modules is None:
@@ -43,7 +45,7 @@ class OpenAIServing:
             ]
 
         self.max_model_len = 0
-        self.tokenizer = None
+        self.tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast] = None
 
         try:
             event_loop = asyncio.get_running_loop()
@@ -122,6 +124,8 @@ class OpenAIServing:
             message: str,
             err_type: str = "BadRequestError",
             status_code: HTTPStatus = HTTPStatus.BAD_REQUEST) -> ErrorResponse:
+        if self.privileged:
+            logger.warning("Error response : %s" % message)
         return ErrorResponse(message=message,
                              type=err_type,
                              code=status_code.value)

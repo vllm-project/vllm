@@ -75,32 +75,33 @@ class FunctionDefinition(BaseModel):
 
 
 class ChatCompletionToolParam(BaseModel):
-    type: str = Literal["function"]
+    type: str = "function"
     function: FunctionDefinition = None
 
 
 class ChatCompletionSystemMessage(BaseModel):
-    role: Literal["system"]
+    role: str = "system"
     content: str
     name: Optional[str] = None
 
 
 class ChatCompletionUserMessage(BaseModel):
-    role: Literal["user"]
+    role: str = "user"
     content: Union[str, List[str]]
     name: Optional[str] = None
 
 
 class ChatCompletionAssistantMessage(BaseModel):
-    role: Literal["assistant"]
+    role: str = "assistant"
     content: Optional[str] = None
     name: Optional[str] = None
     tool_calls: Optional[List[ChatCompletionMessageToolCall]] = None
 
 
 class ChatCompletionToolMessage(BaseModel):
-    role: Literal["tool"]
-    content: str
+    role: str = "tool"
+    content: Optional[str] = None
+    name: Optional[str] = None
     tool_call_id: str
 
 
@@ -148,10 +149,10 @@ End of functions instructions.
 
 class ChatCompletionRequest(BaseModel):
     model: str
-    messages: List[Union[ChatCompletionToolMessage,
+    messages: List[Union[ChatCompletionSystemMessage,
                          ChatCompletionAssistantMessage,
                          ChatCompletionUserMessage,
-                         ChatCompletionSystemMessage]]
+                         ChatCompletionToolMessage]]
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
     n: Optional[int] = 1

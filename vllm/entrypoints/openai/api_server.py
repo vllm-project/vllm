@@ -171,7 +171,7 @@ def _loadServingServices():
     if openai_serving_completion is not None:
         del openai_serving_completion
 
-    openai_tools_prompter = OpenAIToolsPrompter(
+    openai_tools_prompter = OpenAIToolsPrompter(privileged=args.privileged
     ) if args.enable_api_tools else None
     openai_serving_chat = OpenAIServingChat(
         engine=vllm_engine,
@@ -192,7 +192,10 @@ app.mount("/metrics", metrics_app)
 
 
 @app.exception_handler(RequestValidationError)
-async def validation_exception_handler(_, exc):
+async def validation_exception_handler(req: Request, exc: Exception):
+    if "--privileged" in sys.argv:
+        logger.warning("Request error (headers) : %s" % str(dict(req.headers)))
+        logger.warning("Request error (body) : %s" % str((await req.body()).decode("utf-8")))
     err = openai_serving_chat.create_error_response(message=str(exc))
     return JSONResponse(err.model_dump(), status_code=HTTPStatus.BAD_REQUEST)
 

@@ -33,8 +33,8 @@ class OpenAIServingChat(OpenAIServing):
                  privileged: bool = False):
         super().__init__(engine=engine,
                          served_model=served_model,
-                         lora_modules=lora_modules)
-        self.privileged = privileged
+                         lora_modules=lora_modules,
+                         privileged=privileged)
         self.response_role = response_role
         self.default_tools_template = VllmToolsTemplate()
         self.openai_tools_prompter = openai_tools_prompter
