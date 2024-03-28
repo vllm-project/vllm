@@ -1,9 +1,9 @@
-import torch
-import subprocess
-
 import logging
 import os
 import re
+import subprocess
+
+import torch
 
 logger = logging.getLogger(__name__)
 
