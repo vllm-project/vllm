@@ -201,6 +201,13 @@ class EngineArgs:
         parser.add_argument('--use-v2-block-manager',
                             action='store_true',
                             help='Use BlockSpaceMangerV2')
+        parser.add_argument('--num-lookahead-slots',
+                            type=int,
+                            default=EngineArgs.num_lookahead_slots,
+                            help='Experimental scheduling config necessary for '
+                            'speculative decoding. This will be replaced by '
+                            'speculative config in the future; it is present '
+                            'to enable correctness tests until then.')
 
         parser.add_argument('--seed',
                             type=int,
