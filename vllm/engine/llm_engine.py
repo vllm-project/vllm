@@ -164,7 +164,7 @@ class LLMEngine:
     def from_engine_args(
         cls,
         engine_args: EngineArgs,
-        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
     ) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.
@@ -187,10 +187,12 @@ class LLMEngine:
             executor_class = GPUExecutor
 
         # Create the LLM engine.
-        engine = cls(*engine_configs,
-                     executor_class=executor_class,
-                     log_stats=not engine_args.disable_log_stats,
-                     usage_context=usage_context)
+        engine = cls(
+            *engine_configs,
+            executor_class=executor_class,
+            log_stats=not engine_args.disable_log_stats,
+            usage_context=usage_context,
+        )
         return engine
 
     def __reduce__(self):

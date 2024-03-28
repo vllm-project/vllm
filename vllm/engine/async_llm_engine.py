@@ -324,7 +324,7 @@ class AsyncLLMEngine:
         cls,
         engine_args: AsyncEngineArgs,
         start_engine_loop: bool = True,
-        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
     ) -> "AsyncLLMEngine":
         """Creates an async LLM engine from the engine arguments."""
         # Create the engine configs.
@@ -345,15 +345,17 @@ class AsyncLLMEngine:
             from vllm.executor.gpu_executor import GPUExecutorAsync
             executor_class = GPUExecutorAsync
         # Create the async LLM engine.
-        engine = cls(parallel_config.worker_use_ray,
-                     engine_args.engine_use_ray,
-                     *engine_configs,
-                     executor_class,
-                     log_requests=not engine_args.disable_log_requests,
-                     log_stats=not engine_args.disable_log_stats,
-                     max_log_len=engine_args.max_log_len,
-                     start_engine_loop=start_engine_loop,
-                     usage_context=usage_context)
+        engine = cls(
+            parallel_config.worker_use_ray,
+            engine_args.engine_use_ray,
+            *engine_configs,
+            executor_class,
+            log_requests=not engine_args.disable_log_requests,
+            log_stats=not engine_args.disable_log_stats,
+            max_log_len=engine_args.max_log_len,
+            start_engine_loop=start_engine_loop,
+            usage_context=usage_context,
+        )
         return engine
 
     @property
