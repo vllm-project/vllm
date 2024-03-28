@@ -15,11 +15,11 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.parallel_utils import cupy_utils, custom_all_reduce
+from vllm.model_executor.parallel_utils import custom_all_reduce, pynccl_utils
 from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
 from vllm.model_executor.parallel_utils.parallel_state import (
-    with_cupy_nccl_for_all_reduce)
+    with_pynccl_for_all_reduce)
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (MultiModalData, SamplerOutput, SequenceData,
                            SequenceGroupMetadata)
@@ -764,7 +764,7 @@ class ModelRunner:
         """
         # NOTE(woosuk): This is a hack to ensure that the NCCL backend is never
         # deleted before the CUDA graphs.
-        self.cupy_nccl_backend = cupy_utils.get_nccl_backend()
+        self.pynccl_backend = pynccl_utils.get_nccl_backend()
 
         assert not self.model_config.enforce_eager
         logger.info("Capturing the model for CUDA graphs. This may lead to "
@@ -794,11 +794,11 @@ class ModelRunner:
         ]
 
         # NOTE(woosuk): There are 3 backends for all-reduce: custom all-reduce
-        # kernel, CuPy NCCL, and PyTorch NCCL. When using CUDA graph, we use
-        # either custom all-reduce kernel or CuPy NCCL. When not using CUDA
+        # kernel, pynccl, and PyTorch NCCL. When using CUDA graph, we use
+        # either custom all-reduce kernel or pynccl. When not using CUDA
         # graph, we use either custom all-reduce kernel or PyTorch NCCL.
         # We always prioritize using custom all-reduce kernel but fall back
-        # to PyTorch or CuPy NCCL if it is disabled or not supported.
+        # to PyTorch or pynccl if it is disabled or not supported.
         with custom_all_reduce.capture():
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
@@ -846,12 +846,14 @@ class ModelRunner:
         logger.info(f"Graph capturing finished in {elapsed_time:.0f} secs.")
 
     def __del__(self) -> None:
-        # Delete the CUDA graphs before deleting the CuPy NCCL communicator.
+        # Delete the CUDA graphs before deleting the pynccl communicator.
         # NOTE(woosuk): This is necessary because otherwise deadlocks can
         # happen.
         # FIXME(woosuk): This is a bit hacky. Find a more robust solution.
+        # TODO(youkaichao): when we get enough user feedback that pynccl is
+        # more stable than cupy, we can remove this, e.g. in v0.4.1.
         self.graph_runners.clear()
-        self.cupy_nccl_backend = None
+        self.pynccl_backend = None
 
     @property
     def vocab_size(self) -> int:
@@ -879,7 +881,7 @@ class CUDAGraphRunner:
         # Run the model once without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
-        with _maybe_cupy_nccl():
+        with _maybe_pynccl():
             self.model(
                 input_ids,
                 positions,
@@ -894,7 +896,7 @@ class CUDAGraphRunner:
         # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
         self.graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self.graph, pool=memory_pool):  # noqa: SIM117
-            with _maybe_cupy_nccl():
+            with _maybe_pynccl():
                 hidden_states = self.model(
                     input_ids,
                     positions,
@@ -947,9 +949,10 @@ class CUDAGraphRunner:
 
 
 @contextlib.contextmanager
-def _maybe_cupy_nccl():
-    if cupy_utils.is_initialized() and not custom_all_reduce.is_initialized():
-        with with_cupy_nccl_for_all_reduce():
+def _maybe_pynccl():
+    if pynccl_utils.is_initialized(
+    ) and not custom_all_reduce.is_initialized():
+        with with_pynccl_for_all_reduce():
             yield
     else:
         yield

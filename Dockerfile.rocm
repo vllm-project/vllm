@@ -23,9 +23,6 @@ RUN echo "FA_BRANCH is $FA_BRANCH"
 # In that case, we need to use the python reference attention implementation in vllm
 ARG BUILD_FA="1"
 
-# whether to build cupy on rocm
-ARG BUILD_CUPY="1"
-
 # Install some basic utilities
 RUN apt-get update && apt-get install python3 python3-pip -y
 
@@ -77,23 +74,6 @@ RUN if [ "$BUILD_FA" = "1" ]; then \
 # Manually removed it so that later steps of numpy upgrade can continue
 RUN if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1" ]; then \
     rm -rf /opt/conda/envs/py_3.9/lib/python3.9/site-packages/numpy-1.20.3.dist-info/; fi
-
-# build cupy
-RUN if [ "$BUILD_CUPY" = "1" ]; then \
-    mkdir -p libs \
-    && cd libs \
-    && git clone -b hipgraph_enablement --recursive https://github.com/ROCm/cupy.git \
-    && cd cupy \
-    && pip install mpi4py-mpich \
-    && pip install scipy==1.9.3 \
-    && pip install cython==0.29.* \
-    && env CC=$MPI_HOME/bin/mpicc python -m pip install mpi4py \
-    && export CUPY_INSTALL_USE_HIP=1 \
-    && export ROCM_HOME=/opt/rocm \
-    && export HCC_AMDGPU_TARGET="gfx90a,gfx942,gfx1100" \
-    && pip install . \
-    && cd ..; \
-    fi
 
 COPY ./ /app/vllm
 
