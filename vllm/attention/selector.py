@@ -17,11 +17,11 @@ def get_attn_backend(dtype: torch.dtype) -> AttentionBackend:
         from vllm.attention.backends.flash_attn import (  # noqa: F401
             FlashAttentionBackend)
         return FlashAttentionBackend
-    elif _which_attn_to_use(dtype) == "FlashAttentionTriton":
-        logger.info("Using FlashAttentionTriton backend.")
-        from vllm.attention.backends.flash_attn_triton import (  # noqa: F401
-            FlashAttentionTritonBackend)
-        return FlashAttentionTritonBackend
+    elif _which_attn_to_use(dtype) == "TritonFlashAttention":
+        logger.info("Using TritonFlashAttention backend.")
+        from vllm.attention.backends.triton_flash_attn import (  # noqa: F401
+            TritonFlashAttentionBackend)
+        return TritonFlashAttentionBackend
     else:
         logger.info("Using XFormers backend.")
         from vllm.attention.backends.xformers import (  # noqa: F401
@@ -33,12 +33,12 @@ def _which_attn_to_use(dtype: torch.dtype) -> str:
     """Returns which flash attention backend to use.
 
     Returns:
-        str: XFormers, FlashAttention, or FlashAttentionTriton
+        str: XFormers, FlashAttention, or TritonFlashAttention
     """
 
     # NOTE: Allow for switching between Triton and FA
     #       Defaulting to triton FA for AMD cards.
-    use_flash_attn_triton = (os.environ.get("VLLM_USE_FLASH_ATTN_TRITON",
+    use_triton_flash_attn = (os.environ.get("VLLM_USE_TRITON_FLASH_ATTN",
                                             "True").lower()
                              in ("true", "1")) and is_hip()
 
@@ -59,11 +59,11 @@ def _which_attn_to_use(dtype: torch.dtype) -> str:
                     "torch.float16 or torch.bfloat16.")
         return "XFormers"
 
-    if not use_flash_attn_triton:
+    if not use_triton_flash_attn:
         # Only test for flash_attn if we are using it.
         try:
             import flash_attn  # noqa: F401
         except ImportError:
             return "XFormers"
 
-    return "FlashAttentionTriton" if use_flash_attn_triton else "FlashAttention"
+    return "TritonFlashAttention" if use_triton_flash_attn else "FlashAttention"

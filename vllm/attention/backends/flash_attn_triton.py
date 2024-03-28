@@ -15,14 +15,14 @@ from vllm.attention.ops.flash_attention_triton import triton_attention
 from vllm.attention.ops.paged_attn import PagedAttention
 
 
-class FlashAttentionTritonBackend(FlashAttentionBackend):
+class TritonFlashAttentionBackend(FlashAttentionBackend):
 
     @staticmethod
-    def get_impl_cls() -> Type["FlashAttentionTritonImpl"]:
-        return FlashAttentionTritonImpl
+    def get_impl_cls() -> Type["TritonFlashAttentionImpl"]:
+        return TritonFlashAttentionImpl
 
 
-class FlashAttentionTritonImpl(AttentionImpl):
+class TritonFlashAttentionImpl(AttentionImpl):
     """
     If the input tensors contain prompt tokens, the layout is as follows:
     |<--------------- num_prompt_tokens -------------->|
