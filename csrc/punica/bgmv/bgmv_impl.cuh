@@ -289,6 +289,9 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
       int64_t y_offset, int64_t full_y_size, int64_t batch_size,               \
       int64_t num_layers, int64_t layer_idx, float scale);
 
+#define INST_BGMV_ONESIDE(in_T, out_T, W_T, feat_in, feat_out)                 \
+  INST_BGMV(feat_in, feat_out, in_T, out_T, W_T)
+
 #define INST_BGMV_TWOSIDE(in_T, out_T, W_T, narrow, wide)                      \
   INST_BGMV(narrow, wide, in_T, out_T, W_T)                                    \
   INST_BGMV(wide, narrow, in_T, out_T, W_T)

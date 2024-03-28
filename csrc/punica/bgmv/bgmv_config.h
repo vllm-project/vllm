@@ -61,11 +61,66 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, narrow, 49152) \
 // Keep above in sync with vllm/lora/layers::SamplerWithLoRA
 
+// Used for defining kernels going from the variety of dim in to the narrow dim out
+    // one, because the kernel has this flexibility so add support for it
+    // but mainly, using it for the column parallel LoRA A from S-LoRA which splits the rank dim, but all_gathers before LoRA B 
+#define FOR_INST_BGMV_NARROW(f, in_T, out_T, W_T, narrow) \
+    f(in_T, out_T, W_T, 128, narrow) \
+    f(in_T, out_T, W_T, 256, narrow) \
+    f(in_T, out_T, W_T, 512, narrow) \
+    f(in_T, out_T, W_T, 768, narrow) \
+    f(in_T, out_T, W_T, 1024, narrow) \
+    f(in_T, out_T, W_T, 1280, narrow) \
+    f(in_T, out_T, W_T, 1728, narrow) \
+    f(in_T, out_T, W_T, 1792, narrow) \
+    f(in_T, out_T, W_T, 2048, narrow) \
+    f(in_T, out_T, W_T, 2560, narrow) \
+    f(in_T, out_T, W_T, 2752, narrow) \
+    f(in_T, out_T, W_T, 2816, narrow) \
+    f(in_T, out_T, W_T, 3072, narrow) \
+    f(in_T, out_T, W_T, 3456, narrow) \
+    f(in_T, out_T, W_T, 3584, narrow) \
+    f(in_T, out_T, W_T, 4096, narrow) \
+    f(in_T, out_T, W_T, 5120, narrow) \
+    f(in_T, out_T, W_T, 5504, narrow) \
+    f(in_T, out_T, W_T, 5632, narrow) \
+    f(in_T, out_T, W_T, 6144, narrow) \
+    f(in_T, out_T, W_T, 6912, narrow) \
+    f(in_T, out_T, W_T, 7168, narrow) \
+    f(in_T, out_T, W_T, 8192, narrow) \
+    f(in_T, out_T, W_T, 9216, narrow) \
+    f(in_T, out_T, W_T, 10240, narrow) \
+    f(in_T, out_T, W_T, 11008, narrow) \
+    f(in_T, out_T, W_T, 12288, narrow) \
+    f(in_T, out_T, W_T, 13824, narrow) \
+    f(in_T, out_T, W_T, 13696, narrow) \
+    f(in_T, out_T, W_T, 14336, narrow) \
+    f(in_T, out_T, W_T, 16384, narrow) \
+    f(in_T, out_T, W_T, 20480, narrow) \
+    f(in_T, out_T, W_T, 22016, narrow) \
+    f(in_T, out_T, W_T, 24576, narrow) \
+    f(in_T, out_T, W_T, 28672, narrow) \
+    f(in_T, out_T, W_T, 32000, narrow) \
+    f(in_T, out_T, W_T, 32256, narrow) \
+    f(in_T, out_T, W_T, 32512, narrow) \
+    f(in_T, out_T, W_T, 32768, narrow) \
+    f(in_T, out_T, W_T, 33024, narrow) \
+    f(in_T, out_T, W_T, 36864, narrow) \
+    f(in_T, out_T, W_T, 49152, narrow) \
+// Keep above in sync with vllm/lora/layers::SamplerWithLoRA
+
+
 // Keep this in sync with vllm/config::LoRAConfig
 #define FOR_BGMV_WIDE_NARROW(f, in_T, out_T, W_T) \
     FOR_BGMV_WIDE(f, in_T, out_T, W_T, 8)  \
     FOR_BGMV_WIDE(f, in_T, out_T, W_T, 16) \
     FOR_BGMV_WIDE(f, in_T, out_T, W_T, 32) \
     FOR_BGMV_WIDE(f, in_T, out_T, W_T, 64)
+
+
+#define FOR_INST_BGMV_WIDE_NARROW(f, in_T, out_T, W_T) \
+    FOR_INST_BGMV_NARROW(f, in_T, out_T, W_T, 1) \
+    FOR_INST_BGMV_NARROW(f, in_T, out_T, W_T, 2) \
+    FOR_INST_BGMV_NARROW(f, in_T, out_T, W_T, 4) \
 
 // clang-format on
