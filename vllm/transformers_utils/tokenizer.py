@@ -4,11 +4,47 @@ from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
 
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
+from vllm.transformers_utils.tokenizers import *
+from vllm.utils import make_async
 
 logger = init_logger(__name__)
 
-# A fast LLaMA tokenizer with the pre-processed `tokenizer.json` file.
-_FAST_LLAMA_TOKENIZER = "hf-internal-testing/llama-tokenizer"
+
+def get_cached_tokenizer(
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
+) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
+    """Get tokenizer with cached properties.
+
+    This will patch the tokenizer object in place.
+
+    By default, transformers will recompute multiple tokenizer properties
+    each time they are called, leading to a significant slowdown. This
+    function caches these properties for faster access."""
+
+    tokenizer_all_special_ids = set(tokenizer.all_special_ids)
+    tokenizer_all_special_tokens_extended = (
+        tokenizer.all_special_tokens_extended)
+    tokenizer_all_special_tokens = set(tokenizer.all_special_tokens)
+
+    class CachedTokenizer(tokenizer.__class__):
+
+        @property
+        def all_special_ids(self):
+            return tokenizer_all_special_ids
+
+        @property
+        def all_special_tokens(self):
+            return tokenizer_all_special_tokens
+
+        @property
+        def all_special_tokens_extended(self):
+            return tokenizer_all_special_tokens_extended
+
+    CachedTokenizer.__name__ = f"Cached{tokenizer.__class__.__name__}"
+
+    tokenizer.__class__ = CachedTokenizer
+    return tokenizer
 
 
 def get_tokenizer(
@@ -26,13 +62,6 @@ def get_tokenizer(
                 "Cannot use the fast tokenizer in slow tokenizer mode.")
         kwargs["use_fast"] = False
 
-    if ("llama" in tokenizer_name.lower() and kwargs.get("use_fast", True)
-            and tokenizer_name != _FAST_LLAMA_TOKENIZER):
-        logger.info(
-            "For some LLaMA V1 models, initializing the fast tokenizer may "
-            "take a long time. To reduce the initialization time, consider "
-            f"using '{_FAST_LLAMA_TOKENIZER}' instead of the original "
-            "tokenizer.")
     try:
         tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_name,
@@ -40,13 +69,6 @@ def get_tokenizer(
             trust_remote_code=trust_remote_code,
             tokenizer_revision=tokenizer_revision,
             **kwargs)
-    except TypeError as e:
-        # The LLaMA tokenizer causes a protobuf error in some environments.
-        err_msg = (
-            "Failed to load the tokenizer. If you are using a LLaMA V1 model "
-            f"consider using '{_FAST_LLAMA_TOKENIZER}' instead of the "
-            "original tokenizer.")
-        raise RuntimeError(err_msg) from e
     except ValueError as e:
         # If the error pertains to the tokenizer class not existing or not
         # currently being imported, suggest using the --trust-remote-code flag.
@@ -61,12 +83,45 @@ def get_tokenizer(
             raise RuntimeError(err_msg) from e
         else:
             raise e
+    except AttributeError as e:
+        if "BaichuanTokenizer" in str(e):
+            # This is for the error "'BaichuanTokenizer' object has no
+            # attribute 'sp_model'".
+            tokenizer = BaichuanTokenizer.from_pretrained(
+                tokenizer_name,
+                *args,
+                trust_remote_code=trust_remote_code,
+                tokenizer_revision=tokenizer_revision,
+                **kwargs)
+        else:
+            raise e
 
     if not isinstance(tokenizer, PreTrainedTokenizerFast):
         logger.warning(
             "Using a slow tokenizer. This might cause a significant "
             "slowdown. Consider using a fast tokenizer instead.")
+    return get_cached_tokenizer(tokenizer)
+
+
+def get_lora_tokenizer(lora_request: LoRARequest, *args,
+                       **kwargs) -> Optional[PreTrainedTokenizer]:
+    if lora_request is None:
+        return None
+    try:
+        tokenizer = get_tokenizer(lora_request.lora_local_path, *args,
+                                  **kwargs)
+    except OSError as e:
+        # No tokenizer was found in the LoRA folder,
+        # use base model tokenizer
+        logger.warning(
+            f"No tokenizer found in {lora_request.lora_local_path}, "
+            "using base model tokenizer instead. "
+            f"(Exception: {str(e)})")
+        tokenizer = None
     return tokenizer
+
+
+get_lora_tokenizer_async = make_async(get_lora_tokenizer)
 
 
 def _convert_tokens_to_string_with_added_encoders(
@@ -103,6 +158,34 @@ def _convert_tokens_to_string_with_added_encoders(
         return "".join(sub_texts)
 
 
+# 5 is an arbitrary value that should work for all
+# tokenizers (bigger = more conservative).
+INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET = 5
+
+
+def convert_prompt_ids_to_tokens(
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    prompt_ids: List[int],
+    skip_special_tokens: bool = False,
+) -> Tuple[List[str], int, int]:
+    """Converts the prompt ids to tokens and returns the tokens and offsets
+    for incremental detokenization.
+
+    Note that not all tokens are converted to strings. Only the tokens that
+    are necessary for incremental detokenization are converted to strings.
+    """
+    # Offset a little more in case we have special tokens.
+    prefix_offset = max(
+        len(prompt_ids) - INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET - 2, 0)
+    # We do not need to convert the whole prompt to tokens.
+    new_tokens = tokenizer.convert_ids_to_tokens(
+        prompt_ids[prefix_offset:], skip_special_tokens=skip_special_tokens)
+    prefix_offset = max(
+        len(new_tokens) - INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET, 0)
+    read_offset = len(new_tokens)
+    return new_tokens, prefix_offset, read_offset
+
+
 # Based on
 # https://github.com/huggingface/text-generation-inference/blob/v0.9.4/server/text_generation_server/models/model.py#L62C9-L62C15
 # under Apache 2.0 license
@@ -110,31 +193,53 @@ def detokenize_incrementally(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     all_input_ids: List[int],
     prev_tokens: Optional[List[str]],
-    prefix_offset: int = 0,
-    read_offset: int = 0,
+    prefix_offset: int,
+    read_offset: int,
     skip_special_tokens: bool = False,
     spaces_between_special_tokens: bool = True,
 ) -> Tuple[List[str], str, int, int]:
+    """Detokenizes the input ids incrementally and returns the new tokens
+    and the new text.
+
+    If `prev_tokens` is None, this function will convert the input ids to
+    tokens and return the tokens and the new text. Otherwise, it will return the
+    new tokens and the new text.
+
+    This function will also return the new prefix offset and the new read
+    offset to be used in the next iteration.
+
+    The offsets are necessary to defeat cleanup algorithms in the decode which
+    decide to add a space or not depending on the surrounding ids.
+
+    Args:
+        tokenizer: The tokenizer to use.
+        all_input_ids: The input ids. The last id is the new token id.
+        prev_tokens: The previous tokens. If None, this function will convert
+            the input ids to tokens and return the tokens and the new text.
+        prefix_offset: The prefix offset.
+        read_offset: The read offset.
+        skip_special_tokens: Whether to skip special tokens.
+        spaces_between_special_tokens: Whether to add spaces between special
+            tokens.
+    """
     new_token_id = all_input_ids[-1]
     # This is the first iteration for this sequence
-    if prev_tokens is None:
-        new_tokens = tokenizer.convert_ids_to_tokens(
-            all_input_ids, skip_special_tokens=skip_special_tokens)
-        output_tokens = new_tokens
-        # 5 is an arbitrary value that should work for all
-        # tokenizers (bigger = more conservative).
-        # Subtract 1 extra to account for the generated token.
-        prefix_offset = max(len(output_tokens) - 6, 0)
-        # If the first new token is a special token, we can't skip 1 extra token
-        if skip_special_tokens and new_token_id in tokenizer.all_special_ids:
-            read_offset = max(len(output_tokens), 0)
-        else:
-            read_offset = max(len(output_tokens) - 1, 0)
-    else:
-        # Put new_token_id in a list so skip_special_tokens is respected
-        new_tokens = tokenizer.convert_ids_to_tokens(
-            [new_token_id], skip_special_tokens=skip_special_tokens)
-        output_tokens = prev_tokens + new_tokens
+    is_first_iter = prev_tokens is None
+    if is_first_iter:
+        (prev_tokens, prefix_offset,
+         read_offset) = convert_prompt_ids_to_tokens(
+             tokenizer,
+             all_input_ids[:-1],
+             skip_special_tokens=skip_special_tokens)
+
+    # Put new_token_id in a list so skip_special_tokens is respected
+    new_tokens = tokenizer.convert_ids_to_tokens(
+        [new_token_id], skip_special_tokens=skip_special_tokens)
+    output_tokens = prev_tokens + new_tokens
+
+    # If this is the first iteration, return all tokens.
+    if is_first_iter:
+        new_tokens = output_tokens
 
     # The prefix text is necessary only to defeat cleanup algorithms in
     # the decode which decide to add a space or not depending on the

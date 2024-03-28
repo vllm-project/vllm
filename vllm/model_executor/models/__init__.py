@@ -1,37 +1,101 @@
-from vllm.model_executor.models.aquila import AquilaForCausalLM
-from vllm.model_executor.models.baichuan import (BaiChuanForCausalLM,
-                                                 BaichuanForCausalLM)
-from vllm.model_executor.models.bloom import BloomForCausalLM
-from vllm.model_executor.models.falcon import FalconForCausalLM
-from vllm.model_executor.models.gpt2 import GPT2LMHeadModel
-from vllm.model_executor.models.gpt_bigcode import GPTBigCodeForCausalLM
-from vllm.model_executor.models.gpt_j import GPTJForCausalLM
-from vllm.model_executor.models.gpt_neox import GPTNeoXForCausalLM
-from vllm.model_executor.models.internlm import InternLMForCausalLM
-from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.model_executor.models.mistral import MistralForCausalLM
-from vllm.model_executor.models.mpt import MptForCausalLM
-from vllm.model_executor.models.opt import OPTForCausalLM
-from vllm.model_executor.models.qwen import QWenLMHeadModel
-from vllm.model_executor.models.chatglm import ChatGLMForCausalLM
-from vllm.model_executor.models.yi import YiForCausalLM
+import importlib
+from typing import List, Optional, Type
+
+import torch.nn as nn
+
+from vllm.logger import init_logger
+from vllm.utils import is_hip
+
+logger = init_logger(__name__)
+
+# Architecture -> (module, class).
+_MODELS = {
+    "AquilaModel": ("llama", "LlamaForCausalLM"),
+    "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
+    "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),  # baichuan-7b
+    "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),  # baichuan-13b
+    "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
+    "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
+    "ChatGLMForConditionalGeneration": ("chatglm", "ChatGLMForCausalLM"),
+    "CohereForCausalLM": ("commandr", "CohereForCausalLM"),
+    "DbrxForCausalLM": ("dbrx", "DbrxForCausalLM"),
+    "DeciLMForCausalLM": ("decilm", "DeciLMForCausalLM"),
+    "DeepseekForCausalLM": ("deepseek", "DeepseekForCausalLM"),
+    "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
+    "GemmaForCausalLM": ("gemma", "GemmaForCausalLM"),
+    "GPT2LMHeadModel": ("gpt2", "GPT2LMHeadModel"),
+    "GPTBigCodeForCausalLM": ("gpt_bigcode", "GPTBigCodeForCausalLM"),
+    "GPTJForCausalLM": ("gpt_j", "GPTJForCausalLM"),
+    "GPTNeoXForCausalLM": ("gpt_neox", "GPTNeoXForCausalLM"),
+    "InternLMForCausalLM": ("llama", "LlamaForCausalLM"),
+    "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
+    "JAISLMHeadModel": ("jais", "JAISLMHeadModel"),
+    "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
+    "LlavaForConditionalGeneration":
+    ("llava", "LlavaForConditionalGeneration"),
+    # For decapoda-research/llama-*
+    "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
+    "MistralForCausalLM": ("llama", "LlamaForCausalLM"),
+    "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
+    "QuantMixtralForCausalLM": ("mixtral_quant", "MixtralForCausalLM"),
+    # transformers's mpt class has lower case
+    "MptForCausalLM": ("mpt", "MPTForCausalLM"),
+    "MPTForCausalLM": ("mpt", "MPTForCausalLM"),
+    "OLMoForCausalLM": ("olmo", "OLMoForCausalLM"),
+    "OPTForCausalLM": ("opt", "OPTForCausalLM"),
+    "OrionForCausalLM": ("orion", "OrionForCausalLM"),
+    "PhiForCausalLM": ("phi", "PhiForCausalLM"),
+    "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
+    "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
+    "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
+    "RWForCausalLM": ("falcon", "FalconForCausalLM"),
+    "StableLMEpochForCausalLM": ("stablelm", "StablelmForCausalLM"),
+    "StableLmForCausalLM": ("stablelm", "StablelmForCausalLM"),
+    "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
+    "XverseForCausalLM": ("xverse", "XverseForCausalLM"),
+}
+
+# Models not supported by ROCm.
+_ROCM_UNSUPPORTED_MODELS = []
+
+# Models partially supported by ROCm.
+# Architecture -> Reason.
+_ROCM_PARTIALLY_SUPPORTED_MODELS = {
+    "Qwen2ForCausalLM":
+    "Sliding window attention is not yet supported in ROCm's flash attention",
+    "MistralForCausalLM":
+    "Sliding window attention is not yet supported in ROCm's flash attention",
+    "MixtralForCausalLM":
+    "Sliding window attention is not yet supported in ROCm's flash attention",
+}
+
+
+class ModelRegistry:
+
+    @staticmethod
+    def load_model_cls(model_arch: str) -> Optional[Type[nn.Module]]:
+        if model_arch not in _MODELS:
+            return None
+        if is_hip():
+            if model_arch in _ROCM_UNSUPPORTED_MODELS:
+                raise ValueError(
+                    f"Model architecture {model_arch} is not supported by "
+                    "ROCm for now.")
+            if model_arch in _ROCM_PARTIALLY_SUPPORTED_MODELS:
+                logger.warning(
+                    f"Model architecture {model_arch} is partially supported "
+                    "by ROCm: " + _ROCM_PARTIALLY_SUPPORTED_MODELS[model_arch])
+
+        module_name, model_cls_name = _MODELS[model_arch]
+        module = importlib.import_module(
+            f"vllm.model_executor.models.{module_name}")
+        return getattr(module, model_cls_name, None)
+
+    @staticmethod
+    def get_supported_archs() -> List[str]:
+        return list(_MODELS.keys())
+
 
 __all__ = [
-    "AquilaForCausalLM",
-    "BaiChuanForCausalLM",
-    "BaichuanForCausalLM",
-    "BloomForCausalLM",
-    "ChatGLMForCausalLM",
-    "FalconForCausalLM",
-    "GPT2LMHeadModel",
-    "GPTBigCodeForCausalLM",
-    "GPTJForCausalLM",
-    "GPTNeoXForCausalLM",
-    "InternLMForCausalLM",
-    "LlamaForCausalLM",
-    "MptForCausalLM",
-    "OPTForCausalLM",
-    "QWenLMHeadModel",
-    "MistralForCausalLM",
-    "YiForCausalLM",
+    "ModelRegistry",
 ]

@@ -28,4 +28,4 @@ jobs:
         pip install toml==0.10.2
     - name: Running yapf
       run: |
-        yapf --diff --recursive vllm tests
+        yapf --diff --recursive .

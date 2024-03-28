@@ -6,7 +6,7 @@ TOKENS=$2
 
 docker run --gpus all --shm-size 1g -p $PORT:80 \
            -v $PWD/data:/data \
-           ghcr.io/huggingface/text-generation-inference:0.8 \
+           ghcr.io/huggingface/text-generation-inference:1.4.0 \
            --model-id $MODEL \
            --sharded false  \
            --max-input-length 1024 \

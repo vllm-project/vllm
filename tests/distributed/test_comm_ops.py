@@ -2,34 +2,28 @@
 
 Run `pytest tests/distributed/test_comm_ops.py --forked`.
 """
-from multiprocessing import Process
+import os
 
 import pytest
+import ray
 import torch
 
-from vllm.config import ParallelConfig
-from vllm.engine.ray_utils import get_open_port
 from vllm.model_executor.parallel_utils.communication_op import (
-    tensor_model_parallel_all_reduce,
-    tensor_model_parallel_all_gather,
-)
-from vllm.worker.worker import _init_distributed_environment
+    broadcast_tensor_dict, tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce)
+from vllm.test_utils import (init_test_distributed_environment,
+                             multi_process_tensor_parallel)
 
 
-def init_test_distributed_environment(pipeline_parallel_size: int,
-                                      tensor_parallel_size: int, rank: int,
-                                      distributed_init_port: str):
-    parallel_config = ParallelConfig(pipeline_parallel_size,
-                                     tensor_parallel_size,
-                                     worker_use_ray=True)
-    distributed_init_method = f"tcp://localhost:{distributed_init_port}"
-    torch.cuda.set_device(rank)
-    _init_distributed_environment(parallel_config, rank,
-                                  distributed_init_method)
-
-
+@ray.remote(num_gpus=1, max_calls=1)
 def all_reduce_test_worker(tensor_parallel_size: int, rank: int,
                            distributed_init_port: str):
+    # it is important to delete the CUDA_VISIBLE_DEVICES environment variable
+    # so that each worker can see all the GPUs
+    # they will be able to set the device to the correct GPU
+    del os.environ["CUDA_VISIBLE_DEVICES"]
+    device = torch.device(f"cuda:{rank}")
+    torch.cuda.set_device(device)
     init_test_distributed_environment(1, tensor_parallel_size, rank,
                                       distributed_init_port)
     num_elements = 8
@@ -43,8 +37,15 @@ def all_reduce_test_worker(tensor_parallel_size: int, rank: int,
     assert torch.allclose(t, expected)
 
 
+@ray.remote(num_gpus=1, max_calls=1)
 def all_gather_test_worker(tensor_parallel_size: int, rank: int,
                            distributed_init_port: str):
+    # it is important to delete the CUDA_VISIBLE_DEVICES environment variable
+    # so that each worker can see all the GPUs
+    # they will be able to set the device to the correct GPU
+    del os.environ["CUDA_VISIBLE_DEVICES"]
+    device = torch.device(f"cuda:{rank}")
+    torch.cuda.set_device(device)
     init_test_distributed_environment(1, tensor_parallel_size, rank,
                                       distributed_init_port)
     num_dimensions = 3
@@ -64,19 +65,46 @@ def all_gather_test_worker(tensor_parallel_size: int, rank: int,
         assert torch.allclose(t, expected)
 
 
+@ray.remote(num_gpus=1, max_calls=1)
+def broadcast_tensor_dict_test_worker(tensor_parallel_size: int, rank: int,
+                                      distributed_init_port: str):
+    # it is important to delete the CUDA_VISIBLE_DEVICES environment variable
+    # so that each worker can see all the GPUs
+    # they will be able to set the device to the correct GPU
+    del os.environ["CUDA_VISIBLE_DEVICES"]
+    device = torch.device(f"cuda:{rank}")
+    torch.cuda.set_device(device)
+    init_test_distributed_environment(1, tensor_parallel_size, rank,
+                                      distributed_init_port)
+    test_dict = {
+        "a": torch.arange(8, dtype=torch.float32, device="cuda"),
+        "b": torch.arange(16, dtype=torch.int8, device="cuda"),
+        "c": "test",
+        "d": [1, 2, 3],
+        "e": {
+            "a": 1,
+            "b": 2
+        },
+    }
+
+    if rank == 0:
+        broadcast_tensor_dict(test_dict, src=0)
+    else:
+        recv_dict = broadcast_tensor_dict(src=0)
+        assert len(recv_dict) == len(test_dict)
+        assert torch.allclose(recv_dict["a"], test_dict["a"])
+        assert torch.allclose(recv_dict["b"], test_dict["b"])
+        assert recv_dict["c"] == test_dict["c"]
+        assert recv_dict["d"] == test_dict["d"]
+        assert recv_dict["e"] == test_dict["e"]
+
+
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
                     reason="Need at least 2 GPUs to run the test.")
 @pytest.mark.parametrize("tensor_parallel_size", [2])
-@pytest.mark.parametrize("test_target",
-                         [all_reduce_test_worker, all_gather_test_worker])
+@pytest.mark.parametrize("test_target", [
+    all_reduce_test_worker, all_gather_test_worker,
+    broadcast_tensor_dict_test_worker
+])
 def test_multi_process_tensor_parallel(tensor_parallel_size, test_target):
-    distributed_init_port = get_open_port()
-    processes = []
-    for rank in range(tensor_parallel_size):
-        p = Process(target=test_target,
-                    args=(tensor_parallel_size, rank, distributed_init_port))
-        p.start()
-        processes.append(p)
-    for p in processes:
-        p.join()
-    assert all(p.exitcode == 0 for p in processes)
+    multi_process_tensor_parallel(tensor_parallel_size, test_target)

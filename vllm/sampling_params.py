@@ -1,7 +1,9 @@
 """Sampling parameters for text generation."""
+import copy
 from enum import IntEnum
 from functools import cached_property
 from typing import Callable, List, Optional, Union
+
 import torch
 
 _SAMPLING_EPS = 1e-5
@@ -10,7 +12,8 @@ _SAMPLING_EPS = 1e-5
 class SamplingType(IntEnum):
     GREEDY = 0
     RANDOM = 1
-    BEAM = 2
+    RANDOM_SEED = 2
+    BEAM = 3
 
 
 LogitsProcessor = Callable[[List[int], torch.Tensor], torch.Tensor]
@@ -42,9 +45,9 @@ class SamplingParams:
             model to use new tokens, while values < 0 encourage the model to
             repeat tokens.
         repetition_penalty: Float that penalizes new tokens based on whether
-            they appear in the generated text so far. Values > 1 encourage the
-            model to use new tokens, while values < 1 encourage the model to
-            repeat tokens.
+            they appear in the prompt and the generated text so far. Values > 1
+            encourage the model to use new tokens, while values < 1 encourage
+            the model to repeat tokens.
         temperature: Float that controls the randomness of the sampling. Lower
             values make the model more deterministic, while higher values make
             the model more random. Zero means greedy sampling.
@@ -52,6 +55,10 @@ class SamplingParams:
             to consider. Must be in (0, 1]. Set to 1 to consider all tokens.
         top_k: Integer that controls the number of top tokens to consider. Set
             to -1 to consider all tokens.
+        min_p: Float that represents the minimum probability for a token to be
+            considered, relative to the probability of the most likely token.
+            Must be in [0, 1]. Set to 0 to disable this.
+        seed: Random seed to use for the generation.
         use_beam_search: Whether to use beam search instead of sampling.
         length_penalty: Float that penalizes sequences based on their length.
             Used in beam search.
@@ -66,10 +73,14 @@ class SamplingParams:
             The returned output will not contain the stop strings.
         stop_token_ids: List of tokens that stop the generation when they are
             generated. The returned output will contain the stop tokens unless
-            the stop tokens are sepcial tokens.
+            the stop tokens are special tokens.
+        include_stop_str_in_output: Whether to include the stop strings in
+            output text. Defaults to False.
         ignore_eos: Whether to ignore the EOS token and continue generating
             tokens after the EOS token is generated.
         max_tokens: Maximum number of tokens to generate per output sequence.
+        min_tokens: Minimum number of tokens to generate per output sequence
+            before EOS or stop_token_ids can be generated
         logprobs: Number of log probabilities to return per output token.
             Note that the implementation follows the OpenAI API: The return
             result includes the log probabilities on the `logprobs` most likely
@@ -94,13 +105,17 @@ class SamplingParams:
         temperature: float = 1.0,
         top_p: float = 1.0,
         top_k: int = -1,
+        min_p: float = 0.0,
+        seed: Optional[int] = None,
         use_beam_search: bool = False,
         length_penalty: float = 1.0,
         early_stopping: Union[bool, str] = False,
         stop: Optional[Union[str, List[str]]] = None,
         stop_token_ids: Optional[List[int]] = None,
+        include_stop_str_in_output: bool = False,
         ignore_eos: bool = False,
-        max_tokens: int = 16,
+        max_tokens: Optional[int] = 16,
+        min_tokens: int = 0,
         logprobs: Optional[int] = None,
         prompt_logprobs: Optional[int] = None,
         skip_special_tokens: bool = True,
@@ -115,6 +130,8 @@ class SamplingParams:
         self.temperature = temperature
         self.top_p = top_p
         self.top_k = top_k
+        self.min_p = min_p
+        self.seed = seed
         self.use_beam_search = use_beam_search
         self.length_penalty = length_penalty
         self.early_stopping = early_stopping
@@ -130,11 +147,13 @@ class SamplingParams:
             self.stop_token_ids = list(stop_token_ids)
         self.ignore_eos = ignore_eos
         self.max_tokens = max_tokens
+        self.min_tokens = min_tokens
         self.logprobs = logprobs
         self.prompt_logprobs = prompt_logprobs
         self.skip_special_tokens = skip_special_tokens
         self.spaces_between_special_tokens = spaces_between_special_tokens
         self.logits_processors = logits_processors
+        self.include_stop_str_in_output = include_stop_str_in_output
         self._verify_args()
         if self.use_beam_search:
             self._verify_beam_search()
@@ -142,7 +161,12 @@ class SamplingParams:
             self._verify_non_beam_search()
             if self.temperature < _SAMPLING_EPS:
                 # Zero temperature means greedy sampling.
+                self.top_p = 1.0
+                self.top_k = -1
+                self.min_p = 0.0
                 self._verify_greedy_sampling()
+        # injected by the engine
+        self.eos_token_id = None
 
     def _verify_args(self) -> None:
         if self.n < 1:
@@ -167,9 +191,19 @@ class SamplingParams:
         if self.top_k < -1 or self.top_k == 0:
             raise ValueError(f"top_k must be -1 (disable), or at least 1, "
                              f"got {self.top_k}.")
-        if self.max_tokens < 1:
+        if not 0.0 <= self.min_p <= 1.0:
+            raise ValueError("min_p must be in [0, 1], got "
+                             f"{self.min_p}.")
+        if self.max_tokens is not None and self.max_tokens < 1:
             raise ValueError(
                 f"max_tokens must be at least 1, got {self.max_tokens}.")
+        if self.min_tokens < 0:
+            raise ValueError(f"min_tokens must be greater than or equal to 0, "
+                             f"got {self.min_tokens}.")
+        if self.max_tokens is not None and self.min_tokens > self.max_tokens:
+            raise ValueError(
+                f"min_tokens must be less than or equal to "
+                f"max_tokens={self.max_tokens}, got {self.min_tokens}.")
         if self.logprobs is not None and self.logprobs < 0:
             raise ValueError(
                 f"logprobs must be non-negative, got {self.logprobs}.")
@@ -206,10 +240,6 @@ class SamplingParams:
         if self.best_of > 1:
             raise ValueError("best_of must be 1 when using greedy sampling."
                              f"Got {self.best_of}.")
-        if self.top_p < 1.0 - _SAMPLING_EPS:
-            raise ValueError("top_p must be 1 when using greedy sampling.")
-        if self.top_k != -1:
-            raise ValueError("top_k must be -1 when using greedy sampling.")
 
     @cached_property
     def sampling_type(self) -> SamplingType:
@@ -217,25 +247,47 @@ class SamplingParams:
             return SamplingType.BEAM
         if self.temperature < _SAMPLING_EPS:
             return SamplingType.GREEDY
+        if self.seed is not None:
+            return SamplingType.RANDOM_SEED
         return SamplingType.RANDOM
 
+    def clone(self) -> "SamplingParams":
+        """Deep copy excluding LogitsProcessor objects.
+
+        LogitsProcessor objects are excluded because they may contain an
+        arbitrary, nontrivial amount of data.
+        See https://github.com/vllm-project/vllm/issues/3087
+        """
+
+        logit_processor_refs = None if self.logits_processors is None else {
+            id(lp): lp
+            for lp in self.logits_processors
+        }
+        return copy.deepcopy(self, memo=logit_processor_refs)
+
     def __repr__(self) -> str:
-        return (f"SamplingParams(n={self.n}, "
-                f"best_of={self.best_of}, "
-                f"presence_penalty={self.presence_penalty}, "
-                f"frequency_penalty={self.frequency_penalty}, "
-                f"repetition_penalty={self.repetition_penalty}, "
-                f"temperature={self.temperature}, "
-                f"top_p={self.top_p}, "
-                f"top_k={self.top_k}, "
-                f"use_beam_search={self.use_beam_search}, "
-                f"length_penalty={self.length_penalty}, "
-                f"early_stopping={self.early_stopping}, "
-                f"stop={self.stop}, "
-                f"ignore_eos={self.ignore_eos}, "
-                f"max_tokens={self.max_tokens}, "
-                f"logprobs={self.logprobs}, "
-                f"prompt_logprobs={self.prompt_logprobs}, "
-                f"skip_special_tokens={self.skip_special_tokens}, "
-                "spaces_between_special_tokens="
-                f"{self.spaces_between_special_tokens})")
+        return (
+            f"SamplingParams(n={self.n}, "
+            f"best_of={self.best_of}, "
+            f"presence_penalty={self.presence_penalty}, "
+            f"frequency_penalty={self.frequency_penalty}, "
+            f"repetition_penalty={self.repetition_penalty}, "
+            f"temperature={self.temperature}, "
+            f"top_p={self.top_p}, "
+            f"top_k={self.top_k}, "
+            f"min_p={self.min_p}, "
+            f"seed={self.seed}, "
+            f"use_beam_search={self.use_beam_search}, "
+            f"length_penalty={self.length_penalty}, "
+            f"early_stopping={self.early_stopping}, "
+            f"stop={self.stop}, "
+            f"stop_token_ids={self.stop_token_ids}, "
+            f"include_stop_str_in_output={self.include_stop_str_in_output}, "
+            f"ignore_eos={self.ignore_eos}, "
+            f"max_tokens={self.max_tokens}, "
+            f"min_tokens={self.min_tokens}, "
+            f"logprobs={self.logprobs}, "
+            f"prompt_logprobs={self.prompt_logprobs}, "
+            f"skip_special_tokens={self.skip_special_tokens}, "
+            "spaces_between_special_tokens="
+            f"{self.spaces_between_special_tokens})")

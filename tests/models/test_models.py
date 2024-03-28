@@ -8,6 +8,7 @@ MODELS = [
     "facebook/opt-125m",
     "meta-llama/Llama-2-7b-hf",
     "mistralai/Mistral-7B-v0.1",
+    "Deci/DeciLM-7b",
     "tiiuae/falcon-7b",
     "gpt2",
     "bigcode/tiny_starcoder_py",
@@ -15,6 +16,11 @@ MODELS = [
     "EleutherAI/pythia-70m",
     "bigscience/bloom-560m",
     "mosaicml/mpt-7b",
+    "microsoft/phi-2",
+    "stabilityai/stablelm-3b-4e1t",
+    "allenai/OLMo-1B",
+    "bigcode/starcoder2-3b",
+    "Qwen/Qwen1.5-0.5B",
 ]
 
 

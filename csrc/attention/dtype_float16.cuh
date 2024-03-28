@@ -21,6 +21,10 @@
 #include "attention_generic.cuh"
 #include "dtype_float32.cuh"
 
+#ifdef USE_ROCM
+  #include <hip/hip_fp16.h>
+#endif
+
 #include <stdint.h>
 
 namespace vllm {
@@ -63,21 +67,47 @@ struct FloatVec<uint4> {
 
 // Utility functions for type conversions.
 inline __device__ uint32_t h0_h0(uint16_t a) {
+#ifndef USE_ROCM
   uint32_t b;
   asm volatile("mov.b32 %0, {%1, %1};" : "=r"(b) : "h"(a));
   return b;
+#else
+  union {
+   uint32_t u32;
+   uint16_t u16[2];
+  } tmp;
+  tmp.u16[0] = a;
+  tmp.u16[1] = a;
+  return tmp.u32;
+#endif
 }
 
 inline __device__ float half_to_float(uint16_t h) {
   float f;
+#ifndef USE_ROCM
   asm volatile("cvt.f32.f16 %0, %1;\n" : "=f"(f) : "h"(h));
+#else
+  asm volatile("v_cvt_f32_f16 %0, %1;" : "=v"(f) : "v"(h));
+#endif
   return f;
 }
 
 inline __device__ float2 half2_to_float2(uint32_t v) {
+#ifndef USE_ROCM
   uint16_t lo, hi;
   asm volatile("mov.b32 {%0, %1}, %2;\n" : "=h"(lo), "=h"(hi) : "r"(v));
   return make_float2(half_to_float(lo), half_to_float(hi));
+#else
+  union {
+    uint32_t u32;
+    uint16_t u16[2];
+  } tmp;
+  tmp.u32 = v;
+  float2 ret;
+  ret.x = half_to_float(tmp.u16[0]);
+  ret.y = half_to_float(tmp.u16[1]);
+  return ret;
+#endif
 }
 
 inline __device__ uint16_t float_to_half(float f) {
@@ -85,7 +115,11 @@ inline __device__ uint16_t float_to_half(float f) {
     uint32_t u32;
     uint16_t u16[2];
   } tmp;
+#ifndef USE_ROCM
   asm volatile("cvt.rn.f16.f32 %0, %1;\n" : "=h"(tmp.u16[0]) : "f"(f));
+#else
+  asm volatile("v_cvt_f16_f32 %0, %1;\n" : "=v"(tmp.u32) : "v"(f));
+#endif
   return tmp.u16[0];
 }
 
@@ -94,12 +128,16 @@ inline __device__ uint32_t float2_to_half2(float2 f) {
     uint32_t u32;
     uint16_t u16[2];
   } tmp;
-
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
-  asm volatile("cvt.rn.f16x2.f32 %0, %1, %2;\n" : "=r"(tmp.u32) : "f"(f.y), "f"(f.x));
+#ifndef USE_ROCM
+  #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+    asm volatile("cvt.rn.f16x2.f32 %0, %1, %2;\n" : "=r"(tmp.u32) : "f"(f.y), "f"(f.x));
+  #else
+    asm volatile("cvt.rn.f16.f32 %0, %1;\n" : "=h"(tmp.u16[0]) : "f"(f.x));
+    asm volatile("cvt.rn.f16.f32 %0, %1;\n" : "=h"(tmp.u16[1]) : "f"(f.y));
+  #endif
 #else
-  asm volatile("cvt.rn.f16.f32 %0, %1;\n" : "=h"(tmp.u16[0]) : "f"(f.x));
-  asm volatile("cvt.rn.f16.f32 %0, %1;\n" : "=h"(tmp.u16[1]) : "f"(f.y));
+  tmp.u16[0] = float_to_half(f.x);
+  tmp.u16[1] = float_to_half(f.y);
 #endif
   return tmp.u32;
 }
@@ -107,13 +145,21 @@ inline __device__ uint32_t float2_to_half2(float2 f) {
 // Vector addition.
 inline __device__ uint16_t add(uint16_t a, uint16_t b) {
   uint16_t c;
+#ifndef USE_ROCM
   asm volatile("add.f16 %0, %1, %2;\n" : "=h"(c) : "h"(a), "h"(b));
+#else
+  asm volatile("v_add_f16 %0, %1, %2;\n" : "=v"(c) : "v"(a), "v"(b));
+#endif
   return c;
 }
 
 inline __device__ uint32_t add(uint32_t a, uint32_t b) {
   uint32_t c;
+#ifndef USE_ROCM
   asm volatile("add.f16x2 %0, %1, %2;\n" : "=r"(c) : "r"(a), "r"(b));
+#else
+  asm volatile("v_pk_add_f16 %0, %1, %2;\n" : "=v"(c) : "v"(a), "v"(b));
+#endif
   return c;
 }
 
@@ -158,14 +204,22 @@ inline __device__ Float8_ add(uint4 a, Float8_ fb) {
 template<>
 inline __device__ uint16_t mul(uint16_t a, uint16_t b) {
   uint16_t c;
+#ifndef USE_ROCM
   asm volatile("mul.f16 %0, %1, %2;\n" : "=h"(c) : "h"(a), "h"(b));
+#else
+  asm volatile("v_mul_f16 %0, %1, %2;\n" : "=v"(c) : "v"(a), "v"(b));
+#endif
   return c;
 }
 
 template<>
 inline __device__ uint32_t mul(uint32_t a, uint32_t b) {
   uint32_t c;
+#ifndef USE_ROCM
   asm volatile("mul.f16x2 %0, %1, %2;\n" : "=r"(c) : "r"(a), "r"(b));
+#else
+  asm volatile("v_pk_mul_f16 %0, %1, %2;\n" : "=v"(c) : "v"(a), "v"(b));
+#endif
   return c;
 }
 
@@ -272,7 +326,11 @@ inline __device__ Float8_ mul(uint16_t a, uint4 b) {
 // Vector fused multiply-add.
 inline __device__ uint32_t fma(uint32_t a, uint32_t b, uint32_t c) {
   uint32_t d;
+#ifndef USE_ROCM
   asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(d) : "r"(a), "r"(b), "r"(c));
+#else
+  asm volatile("v_pk_fma_f16 %0, %1, %2, %3;\n" : "=v"(d) : "v"(a), "v"(b), "v"(c));
+#endif
   return d;
 }
 
