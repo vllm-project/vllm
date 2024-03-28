@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
@@ -15,7 +15,6 @@ class ExecutorBase(ABC):
     that can execute the model on multiple devices.
     """
 
-    @abstractmethod
     def __init__(
         self,
         model_config: ModelConfig,
@@ -26,7 +25,19 @@ class ExecutorBase(ABC):
         lora_config: Optional[LoRAConfig],
         vision_language_config: Optional[VisionLanguageConfig],
     ) -> None:
-        raise NotImplementedError
+        self.model_config = model_config
+        self.cache_config = cache_config
+        self.lora_config = lora_config
+        self.parallel_config = parallel_config
+        self.scheduler_config = scheduler_config
+        self.device_config = device_config
+        self.vision_language_config = vision_language_config
+
+        self._init_executor()
+
+    @abstractmethod
+    def _init_executor(self) -> None:
+        pass
 
     @abstractmethod
     def execute_model(self,
@@ -46,7 +57,7 @@ class ExecutorBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list_loras(self) -> List[int]:
+    def list_loras(self) -> Set[int]:
         raise NotImplementedError
 
     @abstractmethod
@@ -54,6 +65,13 @@ class ExecutorBase(ABC):
         """Checks if the executor is healthy. If not, it should raise an
         exception."""
         raise NotImplementedError
+
+    def shutdown(self) -> None:
+        """Shutdown the executor."""
+        return
+
+    def __del__(self):
+        self.shutdown()
 
 
 class ExecutorAsyncBase(ExecutorBase):
@@ -69,8 +87,7 @@ class ExecutorAsyncBase(ExecutorBase):
         """Executes one model step on the given sequences."""
         raise NotImplementedError
 
-    @abstractmethod
     async def check_health_async(self) -> None:
         """Checks if the executor is healthy. If not, it should raise an
         exception."""
-        raise NotImplementedError
+        self.check_health()

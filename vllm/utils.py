@@ -7,6 +7,7 @@ import subprocess
 import uuid
 import warnings
 from collections import OrderedDict
+from collections.abc import Iterable
 from functools import lru_cache, partial
 from platform import uname
 from typing import (Any, Awaitable, Callable, Generic, Hashable, List,
@@ -223,7 +224,7 @@ def get_open_port() -> int:
             return s.getsockname()[1]
 
 
-def set_cuda_visible_devices(device_ids: List[int]) -> None:
+def set_cuda_visible_devices(device_ids: Iterable[int]) -> None:
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, device_ids))
 
 
