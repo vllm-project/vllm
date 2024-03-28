@@ -8,7 +8,7 @@ Note: Marlin internally uses locks to synchronize the threads. This can
 result in very slight nondeterminism for Marlin. As a result, we re-run the test
 up to 3 times to see if we pass.
 
-Run `pytest tests/models/test_marlin.py --forked`.
+Run `pytest tests/models/test_marlin.py`.
 """
 
 from dataclasses import dataclass

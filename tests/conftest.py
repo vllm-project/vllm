@@ -4,7 +4,6 @@ import os
 from typing import List, Optional, Tuple
 
 import pytest
-import ray
 import torch
 from PIL import Image
 from transformers import (AutoModelForCausalLM, AutoProcessor,
@@ -54,8 +53,6 @@ def cleanup():
         torch.distributed.destroy_process_group()
     gc.collect()
     torch.cuda.empty_cache()
-    if ray.is_initialized():
-        ray.shutdown()
 
 
 @pytest.fixture(autouse=True)

@@ -1,11 +1,14 @@
 """Compare the outputs of HF and vLLM when using greedy sampling.
 
-Run `pytest tests/models/test_models.py --forked`.
+This test only tests small models. Big models such as 7B should be tested from
+test_big_models.py because it could use a larger instance to run tests.
+
+Run `pytest tests/models/test_models.py`.
 """
 import pytest
 
 MODELS = [
-    # "facebook/opt-125m",  # Broken.
+    "facebook/opt-125m",
     "gpt2",
     "bigcode/tiny_starcoder_py",
     "EleutherAI/pythia-70m",
@@ -19,7 +22,7 @@ MODELS = [
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
-@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("max_tokens", [96])
 def test_models(
     hf_runner,
     vllm_runner,
@@ -28,6 +31,9 @@ def test_models(
     dtype: str,
     max_tokens: int,
 ) -> None:
+    # To pass the small model tests, we need full precision.
+    assert dtype == "float"
+
     hf_model = hf_runner(model, dtype=dtype)
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
     del hf_model

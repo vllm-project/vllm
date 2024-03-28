@@ -2,7 +2,7 @@
 
 This tests bigger models and use half precision.
 
-Run `pytest tests/models/test_big_models.py --forked`.
+Run `pytest tests/models/test_big_models.py`.
 """
 import pytest
 
@@ -19,7 +19,7 @@ MODELS = [
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("max_tokens", [5])
+@pytest.mark.parametrize("max_tokens", [128])
 def test_models(
     hf_runner,
     vllm_runner,

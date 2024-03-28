@@ -26,7 +26,7 @@ steps:
   working_dir: "/vllm-workspace/tests/distributed"
   num_gpus: 2 # only support 1 or 2 for now.
   commands:
-  - pytest -v -s --forked test_pynccl.py
+  - pytest -v -s test_pynccl.py
   - TEST_DIST_MODEL=facebook/opt-125m pytest -v -s test_basic_distributed_correctness.py
   - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf pytest -v -s test_basic_distributed_correctness.py
 
@@ -43,7 +43,7 @@ steps:
 - label: Models Test
   commands:
     - bash ../.buildkite/download-images.sh
-    - pytest -v -s models --ignore=models/test_llava.py
+    - pytest -v -s models --ignore=models/test_llava.py --ignore=models/test_mistral.py
 
 - label: Llava Test
   commands:

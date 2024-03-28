@@ -119,7 +119,7 @@ def zephyr_lora_files():
     return snapshot_download(repo_id=LORA_NAME)
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def server(zephyr_lora_files):
     ray.init()
     server_runner = ServerRunner.remote([
@@ -148,7 +148,7 @@ def server(zephyr_lora_files):
     ray.shutdown()
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def client():
     client = openai.AsyncOpenAI(
         base_url="http://localhost:8000/v1",
