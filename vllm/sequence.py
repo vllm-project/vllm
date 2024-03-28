@@ -196,6 +196,8 @@ class Sequence:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
     def hash_of_block(self, logical_idx: int) -> int:
+        # TODO This can produce incorrect hash when block size > prompt size
+
         # Compute the number of tokens in the sequence
         # TODO: The current hashing function is O(L^2). We should optimize
         # this in the future.
