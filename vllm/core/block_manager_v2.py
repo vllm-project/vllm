@@ -117,12 +117,22 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             self.block_tables[seq.seq_id] = block_table.fork()
 
     def can_append_slots(self, seq_group: SequenceGroup, num_lookahead_slots: int) -> bool:
-        # Simple heuristic: If there is at least one free block
-        # for each sequence, we can append.
-        num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(
-            Device.GPU)
-        num_seqs = seq_group.num_seqs(status=SequenceStatus.RUNNING)
-        return num_seqs <= num_free_gpu_blocks
+        # Worst-case heuristic: assume each touched block will require a new
+        # allocation (either via CoW or new block). We can append slots if the
+        # number of touched blocks is less than the number of free blocks.
+
+        num_touched_blocks = 0
+        for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+            block_table = self.block_tables[seq.seq_id]
+            num_new_tokens = seq.get_len() - block_table.num_full_slots
+
+            num_touched_blocks += (block_table.get_num_blocks_touched_by_new_tokens(
+                # NOTE: we treat lookahead slots as new tokens for the
+                # worst-case estimation.
+                num_new_tokens + num_lookahead_slots))
+
+        num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(Device.GPU)
+        return num_touched_blocks <= num_free_gpu_blocks
 
     def append_slot(
         self,

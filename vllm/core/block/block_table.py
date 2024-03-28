@@ -243,3 +243,9 @@ class BlockTable:
             int: The total number of tokens currently stored in the BlockTable.
         """
         return self._num_full_slots
+
+    def get_num_blocks_touched_by_new_tokens(self, num_new_tokens: int) -> int:
+        first_chunk_size = self._block_size - (self._num_full_slots %
+                                               self._block_size)
+        remainder = max(num_new_tokens - first_chunk_size, 0)
+        return cdiv(first_chunk_size, self._block_size) + cdiv(remainder, self._block_size)
