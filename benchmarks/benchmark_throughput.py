@@ -79,21 +79,22 @@ def run_vllm(
     worker_use_ray: bool = False,
 ) -> float:
     from vllm import LLM, SamplingParams
-    llm = LLM(model=model,
-              tokenizer=tokenizer,
-              quantization=quantization,
-              tensor_parallel_size=tensor_parallel_size,
-              seed=seed,
-              trust_remote_code=trust_remote_code,
-              dtype=dtype,
-              max_model_len=max_model_len,
-              gpu_memory_utilization=gpu_memory_utilization,
-              enforce_eager=enforce_eager,
-              kv_cache_dtype=kv_cache_dtype,
-              device=device,
-              enable_prefix_caching=enable_prefix_caching,
-              download_dir=download_dir,
-              worker_use_ray=worker_use_ray,
+    llm = LLM(
+        model=model,
+        tokenizer=tokenizer,
+        quantization=quantization,
+        tensor_parallel_size=tensor_parallel_size,
+        seed=seed,
+        trust_remote_code=trust_remote_code,
+        dtype=dtype,
+        max_model_len=max_model_len,
+        gpu_memory_utilization=gpu_memory_utilization,
+        enforce_eager=enforce_eager,
+        kv_cache_dtype=kv_cache_dtype,
+        device=device,
+        enable_prefix_caching=enable_prefix_caching,
+        download_dir=download_dir,
+        worker_use_ray=worker_use_ray,
     )
 
     # Add the requests to the engine.
@@ -213,15 +214,13 @@ def main(args: argparse.Namespace):
                                    args.output_len)
 
     if args.backend == "vllm":
-        elapsed_time = run_vllm(requests, args.model, args.tokenizer,
-                                args.quantization, args.tensor_parallel_size,
-                                args.seed, args.n, args.use_beam_search,
-                                args.trust_remote_code, args.dtype,
-                                args.max_model_len, args.enforce_eager,
-                                args.kv_cache_dtype, args.device,
-                                args.enable_prefix_caching,
-                                args.gpu_memory_utilization, args.download_dir,
-                                args.worker_use_ray)
+        elapsed_time = run_vllm(
+            requests, args.model, args.tokenizer, args.quantization,
+            args.tensor_parallel_size, args.seed, args.n, args.use_beam_search,
+            args.trust_remote_code, args.dtype, args.max_model_len,
+            args.enforce_eager, args.kv_cache_dtype, args.device,
+            args.enable_prefix_caching, args.gpu_memory_utilization,
+            args.download_dir, args.worker_use_ray)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
