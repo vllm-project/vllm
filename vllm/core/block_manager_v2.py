@@ -134,10 +134,11 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(Device.GPU)
         return num_touched_blocks <= num_free_gpu_blocks
 
-    def append_slot(
+    def append_slots(
         self,
         seq: Sequence,
-    ) -> Optional[Tuple[int, int]]:
+        num_lookahead_slots: int,
+    ) -> Dict[int, List[int]]:
 
         block_table = self.block_tables[seq.seq_id]
 
@@ -148,13 +149,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
 
         block_table.append_token_ids(unseen_token_ids)
 
-        # Return any copy-on-writes.
-        _ = self.block_allocator.clear_copy_on_writes()
-
-        # TODO extend append_slot interface to append_slots
-        # @cadedaniel will do in https://github.com/vllm-project/vllm/pull/3250
-
-        return None
+        # Return any new copy-on-writes.
+        new_cows = self.block_allocator.clear_copy_on_writes()
+        return new_cows
 
     def free(self, seq: Sequence) -> None:
         if seq.seq_id not in self.block_tables:

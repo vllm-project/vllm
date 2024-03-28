@@ -1,6 +1,6 @@
 import enum
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 
 from vllm.sequence import Sequence, SequenceGroup
 
@@ -48,10 +48,11 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def append_slot(
+    def append_slots(
         self,
         seq: Sequence,
-    ) -> Optional[Tuple[int, int]]:
+        num_lookahead_slots: int,
+    ) -> Dict[int, List[int]]:
         pass
 
     @abstractmethod

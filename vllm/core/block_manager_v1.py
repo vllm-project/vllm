@@ -367,10 +367,11 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             assert new_block.ref_count == 1
         return new_block
 
-    def append_slot(
+    def append_slots(
         self,
         seq: Sequence,
-    ) -> Optional[Tuple[int, int]]:
+        num_lookahead_slots: int =0,
+    ) -> Dict[int, List[int]]:
         """Allocate a physical slot for a new token."""
         logical_blocks = seq.logical_token_blocks
         block_table = self.block_tables[seq.seq_id]
@@ -389,7 +390,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 # Allocate a new physical block.
                 new_block = self._allocate_last_physical_block(seq)
                 block_table.append(new_block)
-                return None
+                return {}
 
         # We want to append the token to the last physical block.
         last_block = block_table[-1]
@@ -402,7 +403,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 maybe_new_block = self._maybe_promote_last_block(
                     seq, last_block)
                 block_table[-1] = maybe_new_block
-            return None
+            return {}
         else:
             # The last block is shared with other sequences.
             # Copy on Write: Allocate a new block and copy the tokens.
@@ -410,7 +411,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
             block_table[-1] = new_block
             self.gpu_allocator.free(last_block)
-            return last_block.block_number, new_block.block_number
+            return {last_block.block_number: [new_block.block_number]}
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         # NOTE: fork does not allocate a new physical block.
