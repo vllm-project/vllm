@@ -36,6 +36,16 @@ steps:
 - label: Entrypoints Test
   command: pytest -v -s entrypoints
 
+- label: Examples Test
+  working_dir: "/vllm-workspace/examples"
+  commands:
+    # install aws cli for llava_example.py
+    - pip install awscli
+    - python3 offline_inference.py
+    - python3 offline_inference_with_prefix.py
+    - python3 llm_engine_example.py
+    - python3 llava_example.py
+
 - label: Kernels Test %N
   command: pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 4

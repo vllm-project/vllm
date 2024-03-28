@@ -97,8 +97,8 @@ class Worker:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
-        init_distributed_environment(self.parallel_config, self.rank,
-                                     self.distributed_init_method)
+        init_distributed_environment(self.parallel_config, self.local_rank,
+                                     self.rank, self.distributed_init_method)
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
@@ -249,6 +249,7 @@ class Worker:
 
 def init_distributed_environment(
     parallel_config: ParallelConfig,
+    local_rank: int,
     rank: int,
     distributed_init_method: Optional[str] = None,
 ) -> None:
@@ -282,9 +283,9 @@ def init_distributed_environment(
     elif parallel_config.world_size > 1:
         # NOTE(woosuk): We don't initialize pynccl process group when world size
         # is 1.
-        # TODO(woosuk): Support multi-node connection.
         pynccl_utils.init_process_group(
             world_size=parallel_config.world_size,
+            local_rank=local_rank,
             rank=rank,
             init_method=distributed_init_method,
         )
