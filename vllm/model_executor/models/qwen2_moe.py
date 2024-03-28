@@ -25,6 +25,7 @@
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from transformers import PretrainedConfig
 
@@ -34,14 +35,14 @@ from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                MergedColumnParallelLinear,
-                                               ReplicatedLinear,
                                                QKVParallelLinear,
+                                               ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding, ParallelLMHead)
+    ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_reduce)
 from vllm.model_executor.parallel_utils.parallel_state import (
@@ -50,8 +51,6 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
-
-import torch.nn.functional as F
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -131,8 +130,9 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
         else:
             self.shared_expert = None
 
-        self.shared_expert_gate = torch.nn.Linear(config.hidden_size, 1, bias=False)
-
+        self.shared_expert_gate = torch.nn.Linear(config.hidden_size,
+                                                  1,
+                                                  bias=False)
 
     def pack_params(self):
         w1 = []
@@ -160,7 +160,8 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
         if self.shared_expert is not None:
             shared_output = self.shared_expert(hidden_states)
             if self.shared_expert_gate is not None:
-                shared_output = F.sigmoid(self.shared_expert_gate(hidden_states)) * shared_output
+                shared_output = F.sigmoid(
+                    self.shared_expert_gate(hidden_states)) * shared_output
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
@@ -239,9 +240,9 @@ class Qwen2MoeAttention(nn.Module):
             rope_scaling=rope_scaling,
         )
         self.attn = Attention(self.num_heads,
-                                   self.head_dim,
-                                   self.scaling,
-                                   num_kv_heads=self.num_kv_heads)
+                              self.head_dim,
+                              self.scaling,
+                              num_kv_heads=self.num_kv_heads)
 
     def forward(
         self,
@@ -281,8 +282,10 @@ class Qwen2MoeDecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             linear_method=linear_method,
         )
-        if (config.num_experts is not None and (layer_idx + 1) % config.decoder_sparse_step == 0):
-            self.mlp = Qwen2MoeSparseMoeBlock(config=config, linear_method=linear_method)
+        if (config.num_experts is not None
+                and (layer_idx + 1) % config.decoder_sparse_step == 0):
+            self.mlp = Qwen2MoeSparseMoeBlock(config=config,
+                                              linear_method=linear_method)
         else:
             self.mlp = Qwen2MoeMLP(
                 hidden_size=config.hidden_size,
