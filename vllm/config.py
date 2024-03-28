@@ -71,6 +71,8 @@ class ModelConfig:
         max_context_len_to_capture: Maximum context len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
             to eager mode.
+        enable_tokenizer: If False, will not enable tokenizer in the LLM engine.
+            User needs to feed prompt IDs for inference.
     """
 
     def __init__(
@@ -92,6 +94,7 @@ class ModelConfig:
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
         max_logprobs: int = 5,
+        enable_tokenizer: bool = True,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -108,6 +111,7 @@ class ModelConfig:
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
         self.max_logprobs = max_logprobs
+        self.enable_tokenizer = enable_tokenizer
 
         if os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true":
             # download model from ModelScope hub,
@@ -132,7 +136,8 @@ class ModelConfig:
         self.max_model_len = _get_and_verify_max_len(self.hf_text_config,
                                                      max_model_len)
         self._verify_load_format()
-        self._verify_tokenizer_mode()
+        if self.enable_tokenizer:
+            self._verify_tokenizer_mode()
         self._verify_quantization()
         self._verify_cuda_graph()
 
