@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Type
 
 import torch
-from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
+from vllm_flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 
 from vllm._C import cache_ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -254,6 +254,7 @@ class FlashAttentionImpl(AttentionImpl):
                 block_table=attn_metadata.block_tables,
                 cache_seqlens=attn_metadata.context_lens,
                 softmax_scale=self.scale,
+                causal=True,
                 alibi_slopes=self.alibi_slopes,
             )
 
