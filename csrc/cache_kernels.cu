@@ -240,8 +240,8 @@ __global__ void reshape_and_cache_flash_kernel(
                               + block_offset * num_heads * head_size
                               + head_idx * head_size
                               + head_offset;
-    k_cache[tgt_value_idx] = __ldg(&key[src_key_idx]);
-    v_cache[tgt_value_idx] = __ldg(&value[src_value_idx]);
+    k_cache[tgt_value_idx] = key[src_key_idx];
+    v_cache[tgt_value_idx] = value[src_value_idx];
   }
 }
 
