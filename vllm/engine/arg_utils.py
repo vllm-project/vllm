@@ -201,13 +201,14 @@ class EngineArgs:
         parser.add_argument('--use-v2-block-manager',
                             action='store_true',
                             help='Use BlockSpaceMangerV2')
-        parser.add_argument('--num-lookahead-slots',
-                            type=int,
-                            default=EngineArgs.num_lookahead_slots,
-                            help='Experimental scheduling config necessary for '
-                            'speculative decoding. This will be replaced by '
-                            'speculative config in the future; it is present '
-                            'to enable correctness tests until then.')
+        parser.add_argument(
+            '--num-lookahead-slots',
+            type=int,
+            default=EngineArgs.num_lookahead_slots,
+            help='Experimental scheduling config necessary for '
+            'speculative decoding. This will be replaced by '
+            'speculative config in the future; it is present '
+            'to enable correctness tests until then.')
 
         parser.add_argument('--seed',
                             type=int,
@@ -401,12 +402,13 @@ class EngineArgs:
                 self.tokenizer_pool_type,
                 self.tokenizer_pool_extra_config,
             ), self.ray_workers_use_nsight)
-        scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
-                                           self.max_num_seqs,
-                                           model_config.max_model_len,
-                                           self.use_v2_block_manager,
-                                           num_lookahead_slots=self.num_lookahead_slots,
-                                           delay_factor=self.scheduler_delay_factor)
+        scheduler_config = SchedulerConfig(
+            self.max_num_batched_tokens,
+            self.max_num_seqs,
+            model_config.max_model_len,
+            self.use_v2_block_manager,
+            num_lookahead_slots=self.num_lookahead_slots,
+            delay_factor=self.scheduler_delay_factor)
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,

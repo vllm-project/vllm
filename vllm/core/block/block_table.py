@@ -248,4 +248,5 @@ class BlockTable:
         first_chunk_size = self._block_size - (self._num_full_slots %
                                                self._block_size)
         remainder = max(num_new_tokens - first_chunk_size, 0)
-        return cdiv(first_chunk_size, self._block_size) + cdiv(remainder, self._block_size)
+        return cdiv(first_chunk_size, self._block_size) + cdiv(
+            remainder, self._block_size)

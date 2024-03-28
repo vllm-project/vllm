@@ -44,7 +44,8 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def can_append_slots(self, seq_group: SequenceGroup, num_lookahead_slots: int) -> bool:
+    def can_append_slots(self, seq_group: SequenceGroup,
+                         num_lookahead_slots: int) -> bool:
         pass
 
     @abstractmethod

@@ -76,6 +76,7 @@ def test_v1_v2_greedy_equality_with_preemption(baseline_llm_generator,
 
     assert baseline_token_ids == test_token_ids
 
+
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -84,7 +85,7 @@ def test_v1_v2_greedy_equality_with_preemption(baseline_llm_generator,
 
         # skip cuda graph creation for fast test.
         "enforce_eager": True,
-        
+
         # Use a large block size to trigger more copy-on-writes.
         "block_size": 32,
     }])
@@ -95,7 +96,8 @@ def test_v1_v2_greedy_equality_with_preemption(baseline_llm_generator,
 @pytest.mark.parametrize("test_llm_kwargs", [{"use_v2_block_manager": True}])
 @pytest.mark.parametrize("batch_size", [10])
 @pytest.mark.parametrize("seed", [1])
-def test_v1_v2_greedy_equality_with_cow(baseline_llm_generator, test_llm_generator, batch_size):
+def test_v1_v2_greedy_equality_with_cow(baseline_llm_generator,
+                                        test_llm_generator, batch_size):
     output_len = 128
     temperature = 0.0
 
@@ -136,7 +138,7 @@ def test_v1_v2_greedy_equality_with_cow(baseline_llm_generator, test_llm_generat
     [{
         # Use a small model for a fast test.
         "model": "facebook/opt-125m",
-        
+
         # Our prompts will generate 128 tokens; since the prompts themselves are
         # small, we don't need much KV space beyond 128.
         "max_model_len": 160,
@@ -147,31 +149,39 @@ def test_v1_v2_greedy_equality_with_cow(baseline_llm_generator, test_llm_generat
         # Lookahead scheduling only supported in v2 block manager.
         "use_v2_block_manager": True,
     }])
-@pytest.mark.parametrize("per_test_common_llm_kwargs", [{
-    "block_size": 16,
+@pytest.mark.parametrize(
+    "per_test_common_llm_kwargs",
+    [
+        {
+            "block_size": 16,
 
-    # Allow only 2 sequences of ~128 tokens in worst case.
-    # Note 8 = 128/block_size
-    "forced_num_gpu_blocks": 2 * (8 + 1),
-}, {
-    "block_size": 8,
+            # Allow only 2 sequences of ~128 tokens in worst case.
+            # Note 8 = 128/block_size
+            "forced_num_gpu_blocks": 2 * (8 + 1),
+        },
+        {
+            "block_size": 8,
 
-    # Allow only 2 sequences of ~128 tokens in worst case.
-    # Note 16 = 128/block_size
-    "forced_num_gpu_blocks": 2 * (16 + 1),
-}])
+            # Allow only 2 sequences of ~128 tokens in worst case.
+            # Note 16 = 128/block_size
+            "forced_num_gpu_blocks": 2 * (16 + 1),
+        }
+    ])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{
     "num_lookahead_slots": 0,
 }])
-@pytest.mark.parametrize("test_llm_kwargs", [{
-    # We run one test with block_size < lookahead_slots, one test with
-    # block_size > lookahead_slots
-    "num_lookahead_slots": 10,
-}])
+@pytest.mark.parametrize(
+    "test_llm_kwargs",
+    [{
+        # We run one test with block_size < lookahead_slots, one test with
+        # block_size > lookahead_slots
+        "num_lookahead_slots": 10,
+    }])
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("seed", [1])
 def test_lookahead_greedy_equality_with_preemption(baseline_llm_generator,
-                                               test_llm_generator, batch_size):
+                                                   test_llm_generator,
+                                                   batch_size):
     output_len = 128
     temperature = 0.0
 

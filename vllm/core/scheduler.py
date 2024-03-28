@@ -269,7 +269,8 @@ class Scheduler:
                     blocks_to_swap_out=blocks_to_swap_out,
                     blocks_to_copy=blocks_to_copy,
                     ignored_seq_groups=ignored_seq_groups,
-                    num_lookahead_slots=self._get_num_lookahead_slots(is_prefill=True),
+                    num_lookahead_slots=self._get_num_lookahead_slots(
+                        is_prefill=True),
                 )
                 return scheduler_outputs
 
@@ -327,7 +328,7 @@ class Scheduler:
                         continue
 
                 # If the sequence group cannot be swapped in, stop.
-                if not self.block_manager.can_swap_in(seq_group): # TODO
+                if not self.block_manager.can_swap_in(seq_group):  # TODO
                     break
 
                 # The total number of sequences in the RUNNING state should not
@@ -362,10 +363,10 @@ class Scheduler:
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
             ignored_seq_groups=[],
-            num_lookahead_slots=self._get_num_lookahead_slots(is_prefill=False),
+            num_lookahead_slots=self._get_num_lookahead_slots(
+                is_prefill=False),
         )
         return scheduler_outputs
-
 
     def _can_append_slots(self, seq_group: SequenceGroup) -> bool:
         # Appending slots only occurs in decoding.
@@ -457,7 +458,6 @@ class Scheduler:
                 if src not in blocks_to_copy:
                     blocks_to_copy[src] = []
                 blocks_to_copy[src].extend(dests)
-
 
     def _preempt(
         self,

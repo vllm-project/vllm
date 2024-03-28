@@ -2,7 +2,7 @@
 from abc import ABC, abstractmethod
 from itertools import count, takewhile
 from os.path import commonprefix
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set
 
 from vllm.block import BlockTable, PhysicalTokenBlock
 from vllm.core.evictor import EvictionPolicy, Evictor, make_evictor
@@ -293,8 +293,11 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             self.block_tables[seq.seq_id] = block_table.copy()
 
-    def can_append_slots(self, seq_group: SequenceGroup, num_lookahead_slots: int=0) -> bool:
-        assert (num_lookahead_slots == 0), "lookahead allocation not supported in BlockSpaceManagerV1"
+    def can_append_slots(self,
+                         seq_group: SequenceGroup,
+                         num_lookahead_slots: int = 0) -> bool:
+        assert (num_lookahead_slots == 0
+                ), "lookahead allocation not supported in BlockSpaceManagerV1"
 
         # Simple heuristic: If there is at least one free block
         # for each sequence, we can append.
@@ -370,7 +373,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
     def append_slots(
         self,
         seq: Sequence,
-        num_lookahead_slots: int =0,
+        num_lookahead_slots: int = 0,
     ) -> Dict[int, List[int]]:
         """Allocate a physical slot for a new token."""
         logical_blocks = seq.logical_token_blocks

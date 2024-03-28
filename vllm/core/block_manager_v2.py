@@ -1,5 +1,5 @@
 """A block manager that manages token blocks."""
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
@@ -116,7 +116,8 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         for seq in waiting_seqs[1:]:
             self.block_tables[seq.seq_id] = block_table.fork()
 
-    def can_append_slots(self, seq_group: SequenceGroup, num_lookahead_slots: int) -> bool:
+    def can_append_slots(self, seq_group: SequenceGroup,
+                         num_lookahead_slots: int) -> bool:
         # Worst-case heuristic: assume each touched block will require a new
         # allocation (either via CoW or new block). We can append slots if the
         # number of touched blocks is less than the number of free blocks.
@@ -126,12 +127,14 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             block_table = self.block_tables[seq.seq_id]
             num_new_tokens = seq.get_len() - block_table.num_full_slots
 
-            num_touched_blocks += (block_table.get_num_blocks_touched_by_new_tokens(
-                # NOTE: we treat lookahead slots as new tokens for the
-                # worst-case estimation.
-                num_new_tokens + num_lookahead_slots))
+            num_touched_blocks += (
+                block_table.get_num_blocks_touched_by_new_tokens(
+                    # NOTE: we treat lookahead slots as new tokens for the
+                    # worst-case estimation.
+                    num_new_tokens + num_lookahead_slots))
 
-        num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(Device.GPU)
+        num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(
+            Device.GPU)
         return num_touched_blocks <= num_free_gpu_blocks
 
     def append_slots(
