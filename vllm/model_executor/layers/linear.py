@@ -5,7 +5,6 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
-from vllm import _custom_C
 from vllm.logger import init_logger
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_gather, tensor_model_parallel_all_reduce)
@@ -15,6 +14,9 @@ from vllm.model_executor.parallel_utils.utils import (
     divide, split_tensor_along_last_dim)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils import is_hip
+
+if is_hip:
+    from vllm import _custom_C
 
 logger = init_logger(__name__)
 

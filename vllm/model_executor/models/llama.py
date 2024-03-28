@@ -27,7 +27,6 @@ import torch
 from torch import nn
 from transformers import LlamaConfig
 
-from vllm import _custom_C
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import LoRAConfig
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -48,6 +47,9 @@ from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 from vllm.utils import is_hip
+
+if is_hip():
+    from vllm import _custom_C
 
 
 class LlamaMLP(nn.Module):
