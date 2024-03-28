@@ -35,6 +35,12 @@ COPY requirements-build.txt requirements-build.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements-build.txt
 
+# install sscahe to speed up compilation leveraging local or remote caching
+RUN wget https://github.com/mozilla/sccache/releases/download/v0.7.7/sccache-dist-v0.7.7-x86_64-unknown-linux-musl.tar.gz  && \
+    tar -xvf sccache-dist-v0.7.7-x86_64-unknown-linux-musl.tar.gz && \
+    mv sccache-dist-v0.7.7-x86_64-unknown-linux-musl/sccache-dist /usr/local/bin/sccache && \
+    chmod +x /usr/local/bin/sccache
+
 # copy input files
 COPY csrc csrc
 COPY setup.py setup.py
@@ -56,7 +62,8 @@ ENV NVCC_THREADS=$nvcc_threads
 # make sure punica kernels are built (for LoRA)
 ENV VLLM_INSTALL_PUNICA_KERNELS=1
 
-RUN python3 setup.py build_ext --inplace
+RUN --mount=type=cache,target=/root/.cache/sccache \
+    python3 setup.py build_ext --inplace
 #################### EXTENSION Build IMAGE ####################
 
 #################### FLASH_ATTENTION Build IMAGE ####################
