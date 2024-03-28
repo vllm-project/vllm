@@ -113,7 +113,7 @@ class LLMEngine:
                                              device_config, lora_config,
                                              vision_language_config)
 
-        #If usage stat is enabled, collect relevant info.
+        # If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
             usage_message.report_usage(
                 get_architecture_class_name(model_config),
@@ -128,11 +128,13 @@ class LLMEngine:
                     cache_config.block_size,
                     "gpu_memory_utilization":
                     cache_config.gpu_memory_utilization,
+
                     # Quantization
                     "quantization":
                     model_config.quantization,
                     "kv_cache_dtype":
                     cache_config.cache_dtype,
+
                     # Feature flags
                     "enable_lora":
                     bool(lora_config),

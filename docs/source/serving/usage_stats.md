@@ -1,5 +1,13 @@
 # Usage Stats Collection
 
+vLLM collects usage data by default. This data is used to help engineers working on the project to better understand which hardware and model configuration is widely used, so we can prioritize our attention to the workload that matters. The data is collected is anonymous, transparent, and does not contain any sensitive information. The collected data is also going to be publically released so that the community can benefit from the insights.
+
+## What data is collected?
+
+You can see the up to date list of data collected by vLLM in the [usage_lib.py](https://github.com/vllm-project/vllm/blob/main/vllm/usage/usage_lib.py).
+
+Here is an example as of v0.4.0:
+
 ```json
 {
   "uuid": "fbe880e9-084d-4cab-a395-8984c50f1109",
@@ -29,4 +37,22 @@
   "enforce_eager": false,
   "disable_custom_all_reduce": true
 }
+```
+
+You can preview the data being collected by running the following command:
+
+```bash
+tail ~/.config/vllm/usage_stats.json
+```
+
+## Opt-out of Usage Stats Collection
+
+You can opt-out the collection through either the existence of environment variable (`VLLM_NO_USAGE_STATS` or `DO_NOT_TRACK`)
+or the existence of the file `~/.config/vllm/do_not_track`.
+
+```bash
+# any of the following way can disable the usage stats collection
+export VLLM_NO_USAGE_STATS=1
+export DO_NOT_TRACK=1
+mkdir -p ~/.config/vllm && touch ~/.config/vllm/do_not_track
 ```
