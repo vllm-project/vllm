@@ -11,7 +11,7 @@ import torch
 from vllm.attention.backends.abstract import AttentionImpl
 from vllm.attention.backends.flash_attn import (FlashAttentionBackend,
                                                 FlashAttentionMetadata)
-from vllm.attention.ops.flash_attention_triton import triton_attention
+from vllm.attention.ops.triton_flash_attention import triton_attention
 from vllm.attention.ops.paged_attn import PagedAttention
 
 
