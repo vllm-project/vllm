@@ -15,8 +15,8 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.usage.usage_lib import UsageContext
 from vllm.sequence import MultiModalData
+from vllm.usage.usage_lib import UsageContext
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = int(

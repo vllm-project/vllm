@@ -10,8 +10,8 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import MultiModalData
-from vllm.utils import Counter
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import Counter
 
 
 class LLM:

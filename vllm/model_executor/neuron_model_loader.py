@@ -1,7 +1,7 @@
 """Utilities for selecting and loading neuron models."""
 import importlib
 import os
-from typing import Optional, Type, Tuple
+from typing import Optional, Tuple, Type
 
 import torch
 import torch.nn as nn
