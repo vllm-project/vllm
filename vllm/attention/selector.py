@@ -43,4 +43,8 @@ def _can_use_flash_attn(dtype: torch.dtype) -> bool:
     except ImportError:
         logger.info("flash_attn is not found.")
         return False
-    return True
+    # TODO(woosuk): Remove this once our custom build of flash_attn becomes
+    # available.
+    logger.info("FlashAttention backend is disabled for now since it requires "
+                "our custom build of flash_attn.")
+    return False
