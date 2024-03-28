@@ -188,8 +188,6 @@ class RayGPUExecutor(ExecutorBase):
             is_driver_worker=True,
         )
 
-        # FIXME(woosuk): We are not properly initializing pynccl when
-        # we have multiple nodes.
         self._run_workers("init_device")
         self._run_workers(
             "load_model",
