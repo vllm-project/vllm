@@ -234,16 +234,19 @@ class FlashAttentionImpl(AttentionImpl):
                 )
             else:
                 # prefix-enabled attention
-                output = flash_attn_with_kvcache(
+                output = flash_attn_varlen_func(
                     q=query,
-                    k_cache=key_cache,
-                    v_cache=value_cache,
-                    cache_seqlens=attn_metadata.context_lens,  # FIXME
-                    block_table=attn_metadata.block_tables,
+                    k=key_cache,
+                    v=value_cache,
+                    cu_seqlens_q=attn_metadata.seq_start_loc,
+                    cu_seqlens_k=attn_metadata.context_lens,  # FIXME
+                    max_seqlen_q=attn_metadata.max_prompt_len,
+                    max_seqlen_k=attn_metadata.max_context_len,
                     softmax_scale=self.scale,
                     causal=True,
                     window_size=self.sliding_window,
                     alibi_slopes=self.alibi_slopes,
+                    block_table=attn_metadata.block_tables,
                 )
         else:
             # Decoding run.
