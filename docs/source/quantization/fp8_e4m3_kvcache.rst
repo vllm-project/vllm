@@ -13,10 +13,10 @@ scaling factors of a finer granularity (e.g. per-channel).
 
 These scaling factors can be specified by passing an optional quantization param JSON to the LLM engine at load time. If 
 this JSON is not specified, scaling factors default to 1.0. These scaling factors are typically obtained when running an
-unquantized model through a quantizer tool (e.g. AMD quantizer or nVIDIA AMMO).
+unquantized model through a quantizer tool (e.g. AMD quantizer or NVIDIA AMMO [pip install --no-cache-dir --extra-index-url https://pypi.nvidia.com nvidia-ammo]).
 
 Studies have shown that FP8 E4M3 quantization typically only minimally degrades inference accuracy. The most recent 
-silicon offerings e.g. AMD MI300, nVIDIA Hopper or later support native hardware conversion to/from fp32, fp16, bf16, etc. 
+silicon offerings e.g. AMD MI300, NVIDIA Hopper or later support native hardware conversion to/from fp32, fp16, bf16, etc. 
 Thus, LLM inference is greatly accelerated with minimal accuracy loss.
 
 
@@ -27,6 +27,7 @@ Here is an example of how to enable this feature:
 
         from vllm import LLM, SamplingParams
         sampling_params = SamplingParams(temperature=1.2, top_p=0.9)
+        # llm=LLM(model="meta-llama/Llama-2-7b-chat-hf", # if local:
         llm = LLM(model="/data/models/llama-2-7b-chat-hf",
                   kv_cache_dtype="fp8",
                   quantization_param_path="./tests/fp8_kv/llama2-7b-fp8-kv/kv_cache_scales.json")
