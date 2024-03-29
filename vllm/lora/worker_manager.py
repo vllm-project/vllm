@@ -4,11 +4,11 @@ from typing import Any, Dict, List, Optional, Set, Type
 
 import torch
 
+from vllm.config import LoRAConfig
+from vllm.lora.layers import LoRAMapping
 from vllm.lora.models import (LoRAModel, LoRAModelManager,
                               LRUCacheLoRAModelManager, create_lora_manager)
 from vllm.lora.request import LoRARequest
-from vllm.lora.layers import LoRAMapping
-from vllm.config import LoRAConfig
 
 logger = logging.getLogger(__name__)
 

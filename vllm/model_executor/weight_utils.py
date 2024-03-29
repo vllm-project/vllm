@@ -1,23 +1,23 @@
 """Utilities for downloading and initializing model weights."""
-import filelock
+import fnmatch
 import glob
 import hashlib
-import fnmatch
 import json
 import os
 from collections import defaultdict
 from typing import Any, Iterator, List, Optional, Tuple
 
-from huggingface_hub import snapshot_download, HfFileSystem
+import filelock
 import numpy as np
-from safetensors.torch import load_file, save_file, safe_open
 import torch
+from huggingface_hub import HfFileSystem, snapshot_download
+from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import (get_quantization_config,
-                                                     QuantizationConfig)
+from vllm.model_executor.layers.quantization import (QuantizationConfig,
+                                                     get_quantization_config)
 
 logger = init_logger(__name__)
 

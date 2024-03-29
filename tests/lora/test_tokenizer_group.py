@@ -1,8 +1,10 @@
 import pytest
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
+
 from vllm.lora.request import LoRARequest
-from vllm.transformers_utils.tokenizer_group import get_tokenizer_group
 from vllm.transformers_utils.tokenizer import get_lora_tokenizer
+from vllm.transformers_utils.tokenizer_group import get_tokenizer_group
+
 from ..conftest import get_tokenizer_pool_config
 
 

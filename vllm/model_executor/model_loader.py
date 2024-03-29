@@ -7,8 +7,13 @@ import torch.nn as nn
 
 from vllm.config import DeviceConfig, ModelConfig
 from vllm.model_executor.models import ModelRegistry
+from vllm.model_executor.models.llava import LlavaForConditionalGeneration
 from vllm.model_executor.weight_utils import (get_quant_config,
                                               initialize_dummy_weights)
+
+_VISION_MODEL_CLASSES = [
+    LlavaForConditionalGeneration,
+]
 
 
 @contextlib.contextmanager
@@ -40,6 +45,7 @@ def _get_model_architecture(model_config: ModelConfig) -> Type[nn.Module]:
 def get_model(model_config: ModelConfig, device_config: DeviceConfig,
               **kwargs) -> nn.Module:
     lora_config = kwargs.get("lora_config", None)
+    vision_language_config = kwargs.get("vision_language_config", None)
     model_class = _get_model_architecture(model_config)
 
     # Get the (maybe quantized) linear method.
@@ -76,7 +82,11 @@ def get_model(model_config: ModelConfig, device_config: DeviceConfig,
                     "be added in the future. If this is important to you, "
                     "please open an issue on github.")
             else:
-                model = model_class(model_config.hf_config, linear_method)
+                if model_class not in _VISION_MODEL_CLASSES:
+                    model = model_class(model_config.hf_config, linear_method)
+                else:
+                    model = model_class(model_config.hf_config,
+                                        vision_language_config, linear_method)
         if model_config.load_format == "dummy":
             # NOTE(woosuk): For accurate performance evaluation, we assign
             # random values to the weights.

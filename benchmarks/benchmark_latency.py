@@ -16,18 +16,19 @@ def main(args: argparse.Namespace):
 
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
-    llm = LLM(
-        model=args.model,
-        tokenizer=args.tokenizer,
-        quantization=args.quantization,
-        tensor_parallel_size=args.tensor_parallel_size,
-        trust_remote_code=args.trust_remote_code,
-        dtype=args.dtype,
-        enforce_eager=args.enforce_eager,
-        kv_cache_dtype=args.kv_cache_dtype,
-        device=args.device,
-        ray_workers_use_nsight=args.ray_workers_use_nsight,
-    )
+    llm = LLM(model=args.model,
+              tokenizer=args.tokenizer,
+              quantization=args.quantization,
+              tensor_parallel_size=args.tensor_parallel_size,
+              trust_remote_code=args.trust_remote_code,
+              dtype=args.dtype,
+              enforce_eager=args.enforce_eager,
+              kv_cache_dtype=args.kv_cache_dtype,
+              device=args.device,
+              ray_workers_use_nsight=args.ray_workers_use_nsight,
+              enable_chunked_prefill=args.enable_chunked_prefill,
+              download_dir=args.download_dir,
+              block_size=args.block_size)
 
     sampling_params = SamplingParams(
         n=args.n,
@@ -146,10 +147,25 @@ if __name__ == '__main__':
         default="cuda",
         choices=["cuda"],
         help='device type for vLLM execution, supporting CUDA only currently.')
+    parser.add_argument('--block-size',
+                        type=int,
+                        default=16,
+                        help='block size of key/value cache')
+    parser.add_argument(
+        '--enable-chunked-prefill',
+        type=bool,
+        default=False,
+        help='If True, the prefill requests can be chunked based on the '
+        'max_num_batched_tokens')
     parser.add_argument(
         "--ray-workers-use-nsight",
         action='store_true',
         help="If specified, use nsight to profile ray workers",
     )
+    parser.add_argument('--download-dir',
+                        type=str,
+                        default=None,
+                        help='directory to download and load the weights, '
+                        'default to the default cache dir of huggingface')
     args = parser.parse_args()
     main(args)

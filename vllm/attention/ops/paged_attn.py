@@ -3,8 +3,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 
-from vllm._C import cache_ops
-from vllm._C import ops
+from vllm._C import cache_ops, ops
 from vllm.attention.ops.prefix_prefill import context_attention_fwd
 
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.

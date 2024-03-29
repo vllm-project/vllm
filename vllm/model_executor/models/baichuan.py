@@ -26,17 +26,18 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.config import LoRAConfig
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding, ParallelLMHead)
+    ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -282,11 +283,30 @@ class BaiChuanModel(nn.Module):
 
 
 class BaiChuanBaseForCausalLM(nn.Module):
+    packed_modules_mapping = {
+        "W_pack": ["W_pack"],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+    # LoRA specific attributes
+    supported_lora_modules = [
+        "W_pack",
+        "o_proj",
+        "gate_up_proj",
+        "down_proj",
+    ]
+    embedding_modules = {}
+    embedding_padding_modules = []
 
-    def __init__(self,
-                 config,
-                 position_embedding: str,
-                 linear_method: Optional[LinearMethodBase] = None):
+    def __init__(
+        self,
+        config,
+        position_embedding: str,
+        linear_method: Optional[LinearMethodBase] = None,
+        lora_config: Optional[LoRAConfig] = None,
+    ):
         super().__init__()
         self.config = config
         self.linear_method = linear_method
@@ -371,19 +391,25 @@ class BaiChuanBaseForCausalLM(nn.Module):
 class BaichuanForCausalLM(BaiChuanBaseForCausalLM):
     """Baichuan 13B and Baichuan2 7B/13B."""
 
-    def __init__(self,
-                 config,
-                 linear_method: Optional[LinearMethodBase] = None):
+    def __init__(
+        self,
+        config,
+        linear_method: Optional[LinearMethodBase] = None,
+        lora_config: Optional[LoRAConfig] = None,
+    ):
         if config.hidden_size == 4096:  # baichuan2 7b
-            super().__init__(config, "ROPE", linear_method)
+            super().__init__(config, "ROPE", linear_method, lora_config)
         else:  # baichuan 13b, baichuan2 13b
-            super().__init__(config, "ALIBI", linear_method)
+            super().__init__(config, "ALIBI", linear_method, lora_config)
 
 
 class BaiChuanForCausalLM(BaiChuanBaseForCausalLM):
     """Baichuan 7B."""
 
-    def __init__(self,
-                 config,
-                 linear_method: Optional[LinearMethodBase] = None):
-        super().__init__(config, "ROPE", linear_method)
+    def __init__(
+        self,
+        config,
+        linear_method: Optional[LinearMethodBase] = None,
+        lora_config: Optional[LoRAConfig] = None,
+    ):
+        super().__init__(config, "ROPE", linear_method, lora_config)

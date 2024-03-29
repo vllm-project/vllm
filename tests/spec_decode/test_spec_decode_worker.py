@@ -1,18 +1,20 @@
-import torch
 import random
-import pytest
 from unittest.mock import MagicMock
 
+import pytest
+import torch
+
+from vllm.model_executor.layers.rejection_sampler import RejectionSampler
+from vllm.model_executor.utils import set_random_seed
+from vllm.spec_decode.interfaces import SpeculativeProposals
+from vllm.spec_decode.metrics import (AsyncMetricsCollector,
+                                      SpecDecodeWorkerMetrics)
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.spec_decode_worker import (SpecDecodeWorker,
                                                  split_num_cache_blocks_evenly)
-from vllm.spec_decode.interfaces import SpeculativeProposals
-from vllm.model_executor.utils import set_random_seed
-from vllm.model_executor.layers.rejection_sampler import RejectionSampler
-from .utils import (mock_worker, create_batch, ExecuteModelData,
-                    create_sampler_output_list)
-from vllm.spec_decode.metrics import (SpecDecodeWorkerMetrics,
-                                      AsyncMetricsCollector)
+
+from .utils import (ExecuteModelData, create_batch, create_sampler_output_list,
+                    mock_worker)
 
 
 @pytest.mark.parametrize('k', [1, 2, 6])
