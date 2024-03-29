@@ -28,31 +28,66 @@ class PreemptionMode(enum.Enum):
     RECOMPUTE = enum.auto()
 
 
+# seq_group: SequenceGroup to schedule.
+# token_chunk_size: The number of prefill tokens to be processed in the next
+# step.
+@dataclass
+class ScheduledSequenceGroup:
+    # A sequence group that's scheduled.
+    seq_group: SequenceGroup
+    # The total chunk size (number of tokens) to process for next iteration.
+    # 1 for decoding. Same as prompt tokens for prefill, but if prefill is
+    # chunked, it can be smaller than that.
+    token_chunk_size: int
+
+
 class SchedulerOutputs:
 
     def __init__(
         self,
-        scheduled_seq_groups: Iterable[SequenceGroup],
+        scheduled_seq_groups: Iterable[ScheduledSequenceGroup],
         num_prefill_groups: int,
         num_batched_tokens: int,
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
         ignored_seq_groups: List[SequenceGroup],
-        lora_enabled: bool = False,
     ) -> None:
-        self.scheduled_seq_groups = scheduled_seq_groups
+        """A list of sequence groups to be scheduled as a single batch.
+
+        Args:
+            scheduled_seq_groups: A tuple of scheduled sequence group and its
+                token chunk size.
+            prompt_run: True if all sequence groups are in prefill phase.
+                If False, all sequence groups are in decoding phase.
+            num_batched_tokens: Total number of batched tokens.
+            blocks_to_swap_in: Blocks to swap in. Dict of CPU -> GPU block
+                number.
+            blocks_to_swap_out: Blocks to swap out. Dict of GPU -> CPU block
+                number.
+            blocks_to_copy: Blocks to copy. Source to a list of dest blocks.
+            ignored_seq_groups: Sequence groups that are going to be ignored.
+        """
+        # A tuple of scheduled sequence group and its chunk size.
+        self.scheduled_seq_groups: ScheduledSequenceGroup = scheduled_seq_groups
+        # Number of prefill groups scheduled.
         self.num_prefill_groups = num_prefill_groups
-        self.num_batched_tokens = num_batched_tokens
-        self.blocks_to_swap_in = blocks_to_swap_in
-        self.blocks_to_swap_out = blocks_to_swap_out
-        self.blocks_to_copy = blocks_to_copy
+        # Total number of batched tokens.
+        self.num_batched_tokens: int = num_batched_tokens
+        # Blocks to swap in. Dict of CPU -> GPU block number.
+        self.blocks_to_swap_in: Dict[int, int] = blocks_to_swap_in
+        # Blocks to swap out. Dict of GPU -> CPU block number.
+        self.blocks_to_swap_out: Dict[int, int] = blocks_to_swap_out
+        # Blocks to copy. Source to a list of dest blocks.
+        self.blocks_to_copy: Dict[int, List[int]] = blocks_to_copy
+        # Sequence groups that are going to be ignored.
+        self.ignored_seq_groups: List[SequenceGroup] = ignored_seq_groups
+
         # Swap in and swap out should never happen at the same time.
         assert not (blocks_to_swap_in and blocks_to_swap_out)
-        self.ignored_seq_groups = ignored_seq_groups
 
-        if lora_enabled:
-            self.num_loras = len(self.lora_requests)
+        self.num_loras: int = len(self.lora_requests)
+        if self.num_loras > 0:
             self._sort_by_lora_ids()
 
     def is_empty(self) -> bool:
@@ -61,13 +96,13 @@ class SchedulerOutputs:
                 and not self.blocks_to_swap_out and not self.blocks_to_copy)
 
     def _sort_by_lora_ids(self) -> bool:
-        self.scheduled_seq_groups = sorted(self.scheduled_seq_groups,
-                                           key=lambda g:
-                                           (g.lora_int_id, g.request_id))
+        self.scheduled_seq_groups = sorted(
+            self.scheduled_seq_groups,
+            key=lambda g: (g.seq_group.lora_int_id, g.seq_group.request_id))
 
     @property
     def lora_requests(self) -> Set[LoRARequest]:
-        return {g.lora_request for g in self.scheduled_seq_groups}
+        return {g.seq_group.lora_request for g in self.scheduled_seq_groups}
 
 
 @dataclass
@@ -503,9 +538,13 @@ class Scheduler:
         # Create input data structures.
         seq_group_metadata_list: List[SequenceGroupMetadata] = []
         for i, seq_group in enumerate(scheduler_outputs.scheduled_seq_groups):
+            seq_group = scheduled_seq_group.seq_group
+            token_chunk_size = scheduled_seq_group.token_chunk_size
             seq_group.maybe_set_first_scheduled_time(now)
 
+            # seq_id -> SequenceData
             seq_data: Dict[int, SequenceData] = {}
+            # seq_id -> physical block numbers
             block_tables: Dict[int, List[int]] = {}
 
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
@@ -527,6 +566,7 @@ class Scheduler:
                 seq_data=seq_data,
                 sampling_params=seq_group.sampling_params,
                 block_tables=block_tables,
+                token_chunk_size=token_chunk_size,
                 lora_request=seq_group.lora_request,
                 computed_block_nums=common_computed_block_nums,
                 state=seq_group.state,
@@ -543,8 +583,9 @@ class Scheduler:
         # batch will have been computed before the next scheduling invocation.
         # This is because the engine assumes that a failure in model execution
         # will crash the vLLM instance / will not retry.
-        for seq_group in scheduler_outputs.scheduled_seq_groups:
-            self.block_manager.mark_blocks_as_computed(seq_group)
+        for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
+            self.block_manager.mark_blocks_as_computed(
+                scheduled_seq_group.seq_group)
 
         return seq_group_metadata_list, scheduler_outputs
 
@@ -552,6 +593,7 @@ class Scheduler:
         self.block_manager.fork(parent_seq, child_seq)
 
     def free_seq(self, seq: Sequence) -> None:
+        """Free a sequence from a block table."""
         self.block_manager.free(seq)
 
     def free_finished_seq_groups(self) -> None:
@@ -614,7 +656,8 @@ class Scheduler:
         assert len(seqs) == 1
         for seq in seqs:
             seq.status = SequenceStatus.WAITING
-            self.block_manager.free(seq)
+            self.free_seq(seq)
+            seq.reset_state_for_recompute()
         # NOTE: For FCFS, we insert the preempted sequence group to the front
         # of the waiting queue.
         self.waiting.appendleft(seq_group)

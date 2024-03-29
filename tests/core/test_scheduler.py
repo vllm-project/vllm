@@ -17,6 +17,10 @@ def get_sequence_groups(scheduler_output):
     return [s.seq_group for s in scheduler_output.scheduled_seq_groups]
 
 
+def get_sequence_groups(scheduler_output):
+    return [s.seq_group for s in scheduler_output.scheduled_seq_groups]
+
+
 def test_scheduler_add_seq_group():
     block_size = 4
     scheduler_config = SchedulerConfig(100, 64, 1)

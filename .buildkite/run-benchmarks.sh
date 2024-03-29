@@ -49,7 +49,9 @@ sed -n '$p' benchmark_throughput.txt >> benchmark_results.md # last line
 echo "### Serving Benchmarks" >> benchmark_results.md
 sed -n '1p' benchmark_serving.txt >> benchmark_results.md # first line
 echo "" >> benchmark_results.md
-tail -n 13 benchmark_serving.txt >> benchmark_results.md # last 13 lines
+echo '```' >> benchmark_results.md
+tail -n 20 benchmark_serving.txt >> benchmark_results.md # last 20 lines
+echo '```' >> benchmark_results.md
 
 # upload the results to buildkite
 /workspace/buildkite-agent annotate --style "info" --context "benchmark-results" < benchmark_results.md
