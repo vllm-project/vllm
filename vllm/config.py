@@ -772,10 +772,13 @@ def _get_and_verify_max_len(
         "max_seq_length",
         "seq_len",
     ]
+    max_len_key = None
     for key in possible_keys:
-        max_len_key = getattr(hf_config, key, None)
-        if max_len_key is not None:
-            derived_max_model_len = min(derived_max_model_len, max_len_key)
+        max_len = getattr(hf_config, key, None)
+        if max_len is not None:
+            max_len_key = key if max_len < derived_max_model_len \
+                else max_len_key
+            derived_max_model_len = min(derived_max_model_len, max_len)
     if derived_max_model_len == float("inf"):
         if max_model_len is not None:
             # If max_model_len is specified, we use it.
