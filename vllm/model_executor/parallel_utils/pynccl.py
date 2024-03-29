@@ -21,7 +21,6 @@
 
 import ctypes
 import datetime
-import logging
 import os
 
 # ===================== import region =====================
@@ -29,7 +28,9 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ReduceOp
 
-logger = logging.getLogger(__name__)
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 so_file = os.environ.get("VLLM_NCCL_SO_PATH", "")
 
