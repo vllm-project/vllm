@@ -6,6 +6,7 @@
 # Put it simple, this is for control-plane communication.
 
 from abc import ABC, abstractmethod
+from typing import Any, List, Optional
 
 
 class Coordinator(ABC):
@@ -15,6 +16,12 @@ class Coordinator(ABC):
     2. The rank of the current process inside the world.
     3. The local rank of the current process inside the node.
     4. The local world size inside the node.
+    5. The current group the process belongs to.
+
+    Note that if the `group` is provided, the coordinator should only
+    synchronize the processes in the group. If you want to not only coordinate all the processes
+    but also coordinate groups of processes, you can create multiple coordinators. In that case,
+    the coordinator with all the processes must be initialized first.
 
     To avoid confusion in argument passing, all arguments are set
     to be keyword-only.
@@ -31,12 +38,13 @@ class Coordinator(ABC):
     """
 
     def __init__(self, *, rank: int, world_size: int, local_rank: int,
-                 local_world_size: int, **kwargs):
+                 local_world_size: int, group: List[int], **kwargs):
         self.rank = rank
         self.world_size = world_size
         self.local_rank = local_rank
         self.local_world_size = local_world_size
         self._initialize = False
+        self.group = sorted(group)
 
     def initialize(self):
         """Initialize the coordinator. This is set to be a separate method
@@ -58,21 +66,33 @@ class Coordinator(ABC):
         """Get the rank of the current process inside the world."""
         return self.rank
 
-    def get_local_rank(self) -> int:
-        """Get the local rank of the current process inside the node."""
-        return self.local_rank
+    def is_master(self) -> bool:
+        """Check if the current process is the master process."""
+        return self.rank == 0
 
     def get_local_world_size(self) -> int:
         """Get the local world size inside the node."""
         return self.local_world_size
 
-    def is_master(self) -> bool:
-        """Check if the current process is the master process."""
-        return self.rank == 0
+    def get_local_rank(self) -> int:
+        """Get the local rank of the current process inside the node."""
+        return self.local_rank
 
     def is_local_master(self) -> bool:
         """Check if the current process is the local master process."""
         return self.local_rank == 0
+
+    def get_group_size(self) -> int:
+        """Get the size of the group."""
+        return len(self.group)
+    
+    def get_group_rank(self) -> int:
+        """Get the rank of the current process inside the group."""
+        return self.group.index(self.rank)
+
+    def is_group_master(self) -> bool:
+        """Check if the current process is the group master process."""
+        return self.get_group_rank() == 0
 
     @abstractmethod
     def barrier(self):

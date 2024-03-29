@@ -5,13 +5,14 @@ import os
 
 import torch
 import torch.distributed as dist
+from typing import List, Optional
 
 from vllm.interfaces.coordinator import Coordinator
 
 
 class TorchDistributedCoordinator(Coordinator):
 
-    def __init__(self):
+    def __init__(self, group: Optional[List[int]] = None):
         assert 'RANK' in os.environ, \
             'RANK not found in environment'
         assert 'WORLD_SIZE' in os.environ, \
@@ -28,11 +29,13 @@ class TorchDistributedCoordinator(Coordinator):
         world_size = int(os.environ['WORLD_SIZE'])
         local_rank = int(os.environ['LOCAL_RANK'])
         local_world_size = int(os.environ['LOCAL_WORLD_SIZE'])
+        group = group or list(range(world_size))
         super().__init__(rank=rank,
                          world_size=world_size,
                          local_rank=local_rank,
-                         local_world_size=local_world_size)
-        self.group = None
+                         local_world_size=local_world_size,
+                         group=group)
+        self.process_group = None
 
     def initialize(self):
         # in `torch.distributed`, we can only initialize the process group once
@@ -43,17 +46,17 @@ class TorchDistributedCoordinator(Coordinator):
         # to avoid interfering with other process groups.
         if not dist.is_initialized():
             dist.init_process_group(backend='gloo')
-            self.group = dist.group.WORLD
+            self.process_group = dist.group.WORLD
         else:
-            self.group = dist.new_group(backend='gloo')
+            self.process_group = dist.new_group(ranks=self.group, backend='gloo')
         super().initialize()
 
     def barrier(self):
-        dist.barrier(group=self.group)
+        dist.barrier(group=self.process_group)
 
     def broadcast(self, message: bytearray, src: int = 0):
         tensor = torch.tensor(list(message), dtype=torch.uint8)
-        dist.broadcast(tensor, src=src, group=self.group)
+        dist.broadcast(tensor, src=src, group=self.process_group)
         data = tensor.tolist()
         for i in range(len(message)):
             message[i] = data[i]
