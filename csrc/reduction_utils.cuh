@@ -53,7 +53,7 @@ __inline__ __device__ T blockReduceSum(T val) {
 
     __syncthreads();
 
-    val = (threadIdx.x < blockDim.x / float(WARP_SIZE)) ? shared[lane] : 0.0f;
+    val = (threadIdx.x < blockDim.x / float(WARP_SIZE)) ? shared[lane] : (T)(0.0f);
     val = warpReduceSum<T, _nextPow2(maxActiveLanes)>(val);
   } else {
     // A single warpReduce is equal to blockReduce

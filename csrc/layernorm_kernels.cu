@@ -73,6 +73,7 @@ struct _typeConvert<c10::Half> {
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
 // CUDA_ARCH < 800 does not have BF16 support
+// TODO: Add in ROCm support once public headers handle bf16 maturely
 template<>
 struct _typeConvert<c10::BFloat16> {
   static constexpr bool exists = true;
@@ -89,9 +90,8 @@ struct _typeConvert<c10::BFloat16> {
 
 /* Vector POD struct to generate vectorized and packed FP16/BF16 ops
    for appropriate specializations of fused_add_rms_norm_kernel.
-   Only special member functions and functions that are necessary
-   in that kernel are implemented. Alignment to 16 bytes is required
-   to use 128-bit global memory ops.
+   Only functions that are necessary in that kernel are implemented.
+   Alignment to 16 bytes is required to use 128-bit global memory ops.
  */
 template<typename scalar_t, int width>
 struct alignas(16) _f16Vec {
