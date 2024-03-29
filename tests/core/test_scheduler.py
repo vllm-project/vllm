@@ -9,7 +9,6 @@ from vllm.core.interfaces import AllocStatus
 from vllm.core.scheduler import Scheduler
 from vllm.lora.request import LoRARequest
 from vllm.sequence import Logprob, SequenceGroup
-from vllm.utils import merge_dicts
 
 from .utils import create_dummy_prompt
 
@@ -325,9 +324,158 @@ def test_prefill_schedule():
 
 
 def test_decode_schedule():
-    pass
+    """
+    Test token budget respected.
+    """
+    scheduler = initialize_scheduler()
+    for i in range(3):
+        _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
+        scheduler.add_seq_group(seq_group)
+    _, out = scheduler.schedule()
+    # prefill scheduled now.
+    assert len(out.scheduled_seq_groups) == 3
+
+    # 0 token budget == nothing is scheduled.
+    output = scheduler._schedule_decodes(0)
+    assert len(output.seq_groups) == 0
+    assert output.num_preempted_seqs == 0
+    assert output.num_batched_tokens == 0
+
+    # 2 token budget == 2 decodes scheduled
+    output = scheduler._schedule_decodes(2)
+    assert len(output.seq_groups) == 2
+    assert output.num_preempted_seqs == 0
+    assert output.num_batched_tokens == 2
+    assert output.blocks_to_swap_out == {}
+    assert output.blocks_to_copy == {}
+
+    # NOTE: max_num_seqs not respected with decodes.
+    """
+    Test decodes cannot be scheduled and preempted.
+    """
+    scheduler = initialize_scheduler()
+    for i in range(3):
+        _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
+        scheduler.add_seq_group(seq_group)
+    _, out = scheduler.schedule()
+    # prefill scheduled now.
+    assert len(out.scheduled_seq_groups) == 3
+
+    scheduler.block_manager.can_append_slot = MagicMock()
+
+    def cannot_append_second_group(seq_group):
+        return seq_group.request_id != "1"
+
+    scheduler.block_manager.can_append_slot.side_effect = (
+        cannot_append_second_group)
+
+    # 1 cannot be scheduled, and the lowest priority (request 2)
+    # should be preempted. 1 will also be preempted.
+    output = scheduler._schedule_decodes(100)
+    assert len(output.seq_groups) == 1
+    assert output.seq_groups[0].seq_group.request_id == "0"
+    assert output.num_preempted_seqs == 2
+    assert output.num_batched_tokens == 1
+    # Both should be preempted, not swapped.
+    assert output.blocks_to_swap_out == {}
+    # Nothing is copied.
+    assert output.blocks_to_copy == {}
+
+    # Since both are preempted, prefill scheduling should schedule them.
+    output = scheduler._schedule_prefills(1000)
+    assert len(output.seq_groups) == 2
+    """
+    Test best_of > 1 swap out blocks
+    """
+    scheduler = initialize_scheduler()
+    for i in range(3):
+        _, seq_group = create_dummy_prompt(str(i), prompt_length=60, best_of=2)
+        scheduler.add_seq_group(seq_group)
+    _, out = scheduler.schedule()
+    # prefill scheduled now.
+    assert len(out.scheduled_seq_groups) == 3
+
+    # The last request should be swapped out.
+    scheduler.block_manager.can_append_slot = MagicMock()
+
+    def cannot_append_second_group(seq_group):
+        return seq_group.request_id != "2"
+
+    scheduler.block_manager.can_append_slot.side_effect = (
+        cannot_append_second_group)
+    scheduler.block_manager.swap_out = MagicMock()
+    expected_swap_mapping = {"5": "7"}
+    scheduler.block_manager.swap_out.return_value = expected_swap_mapping
+
+    output = scheduler._schedule_decodes(100)
+    assert len(output.seq_groups) == 2
+    assert output.seq_groups[0].seq_group.request_id == "0"
+    assert output.seq_groups[1].seq_group.request_id == "1"
+    assert output.num_preempted_seqs == 1
+    assert output.num_batched_tokens == 2
+    # Both should be preempted, not swapped.
+    assert output.blocks_to_swap_out == expected_swap_mapping
+    # Nothing is copied.
+    assert output.blocks_to_copy == {}
+    """
+    Verify blocks_to_copy is updated.
+    """
+    scheduler = initialize_scheduler()
+    _, seq_group = create_dummy_prompt(str(i), prompt_length=60, best_of=2)
+    scheduler.add_seq_group(seq_group)
+    _, out = scheduler.schedule()
+    # prefill scheduled now.
+    assert len(out.scheduled_seq_groups) == 1
+
+    # The last request should be swapped out.
+    scheduler.block_manager.append_slot = MagicMock()
+    scheduler.block_manager.append_slot.return_value = (
+        2,
+        3,
+    )
+
+    output = scheduler._schedule_decodes(100)
+    assert len(output.seq_groups) == 1
+    assert output.num_preempted_seqs == 0
+    assert output.num_batched_tokens == 1
+    # Nothing is preempted.
+    assert output.blocks_to_swap_out == {}
+    # Since append_slot returns the source -> dist mapping, it should
+    # applied.
+    assert output.blocks_to_copy == {2: [3]}
 
 
 def test_swapped_schedule():
-    pass
+    scheduler = initialize_scheduler(max_num_seq=6)
+    # best_of=2 * 3 == 6 sequences.
+    for i in range(3):
+        _, seq_group = create_dummy_prompt(str(i), prompt_length=60, best_of=2)
+        scheduler.add_seq_group(seq_group)
+    _, out = scheduler.schedule()
+    # prefill scheduled now.
+    assert len(out.scheduled_seq_groups) == 3
 
+    # The last request should be swapped out.
+    scheduler.block_manager.can_append_slot = MagicMock()
+
+    def cannot_append_second_group(seq_group):
+        return seq_group.request_id != "2"
+
+    scheduler.block_manager.can_append_slot.side_effect = (
+        cannot_append_second_group)
+
+    _, out = scheduler.schedule()
+    assert len(out.scheduled_seq_groups) == 2
+    assert out.num_batched_tokens == 2
+    assert out.blocks_to_swap_out != {}
+    assert out.blocks_to_swap_in == {}
+
+    # Add 1 more task. Swap should be prioritized over prefill.
+    _, seq_group = create_dummy_prompt(str(i), prompt_length=60, best_of=2)
+    scheduler.add_seq_group(seq_group)
+    _, out = scheduler.schedule()
+    assert len(out.scheduled_seq_groups) == 3
+    # 3 decodes. It is swapped in.
+    assert out.num_batched_tokens == 3
+    assert out.blocks_to_swap_in != {}
+    assert out.blocks_to_swap_out == {}

@@ -1,6 +1,6 @@
 import enum
 import time
-from collections import deque, defaultdict
+from collections import deque
 from dataclasses import dataclass
 from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
@@ -12,7 +12,6 @@ from vllm.lora.request import LoRARequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceStatus)
 from vllm.utils import merge_dicts
-
 
 logger = init_logger(__name__)
 
@@ -315,14 +314,10 @@ class Scheduler:
                                       blocks_to_copy=blocks_to_copy,
                                       num_batched_tokens=num_batched_tokens)
 
-    def _schedule_swapped(self, token_budget: int) -> SchedulerSwappedOutputs:
+    def _schedule_swapped(self) -> SchedulerSwappedOutputs:
         """Schedule sequence groups in a swapped stage.
 
-        Note that only decodes can be swapped at the moment.
-        
-        Args:
-            token_budget: The maximum number of tokens that can be scheduled
-                in the current batch.
+        Note that only decodes can be swapped.
         """
         # Blocks that need to be swapped or copied before model execution.
         blocks_to_swap_in: Dict[int, int] = {}
@@ -332,7 +327,6 @@ class Scheduler:
         num_batched_tokens = 0
         now = time.time()
         self.swapped = self.policy.sort_by_priority(now, self.swapped)
-
         num_curr_seqs = sum(seq_group.get_max_num_running_seqs()
                             for seq_group in self.running)
         curr_loras = set(
@@ -364,13 +358,6 @@ class Scheduler:
                     self.scheduler_config.max_num_seqs):
                 break
 
-            new_token_size = (
-                seq_group.num_seqs(status=SequenceStatus.RUNNING) *
-                self.num_decoding_tokens_per_seq)
-
-            if num_batched_tokens + new_token_size > token_budget:
-                break
-
             if lora_int_id > 0 and curr_loras is not None:
                 curr_loras.add(lora_int_id)
             self.swapped.popleft()
@@ -378,9 +365,12 @@ class Scheduler:
             self._append_slot(seq_group, blocks_to_copy)
             logger.debug(f"scheduled s -> r {seq_group.request_id}")
             num_curr_seqs += num_new_seqs
-            seq_groups.append(seq_group)
+            seq_groups.append(
+                ScheduledSequenceGroup(seq_group, token_chunk_size=1))
             # NOTE: It assumes only decoding requests can be swapped.
-            num_batched_tokens += new_token_size
+            num_batched_tokens += (
+                seq_group.num_seqs(status=SequenceStatus.RUNNING) *
+                self.num_decoding_tokens_per_seq)
 
         self.swapped.extendleft(leftover_swapped)
 
@@ -526,13 +516,11 @@ class Scheduler:
         if decodes.num_preempted_seqs > 0:
             swapped_in = SchedulerSwappedOutputs.create_empty()
         else:
-            swapped_in = self._schedule_swapped(token_budget)
-        token_budget -= decodes.num_batched_tokens
+            swapped_in = self._schedule_swapped()
 
         num_batched_tokens = (prefills.num_batched_tokens +
                               decodes.num_batched_tokens +
                               swapped_in.num_batched_tokens)
-        assert token_budget >= 0
 
         scheduler_outputs = SchedulerOutputs(
             scheduled_seq_groups=prefills.seq_groups + decodes.seq_groups +
