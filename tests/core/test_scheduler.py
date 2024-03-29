@@ -9,6 +9,7 @@ from vllm.core.interfaces import AllocStatus
 from vllm.core.scheduler import Scheduler
 from vllm.lora.request import LoRARequest
 from vllm.sequence import Logprob, SequenceGroup
+from vllm.utils import merge_dicts
 
 from .utils import create_dummy_prompt
 
@@ -211,22 +212,22 @@ def test_scheduler_delay_factor():
     assert seq_group_meta[0].request_id == '1'
 
 
+def initialize_scheduler(*,
+                         max_num_seq=1000,
+                         max_token_budget=1000,
+                         max_model_len=1000,
+                         lora_config=None):
+    block_size = 4
+    scheduler_config = SchedulerConfig(max_token_budget, max_num_seq,
+                                       max_model_len)
+    cache_config = CacheConfig(block_size, 1.0, 1, "auto")
+    cache_config.num_cpu_blocks = 8
+    cache_config.num_gpu_blocks = 8
+    scheduler = Scheduler(scheduler_config, cache_config, lora_config)
+    return scheduler
+
+
 def test_prefill_schedule():
-
-    def initialize_scheduler(*,
-                             max_num_seq=1000,
-                             max_token_budget=1000,
-                             max_model_len=1000,
-                             lora_config=None):
-        block_size = 4
-        scheduler_config = SchedulerConfig(max_token_budget, max_num_seq,
-                                           max_model_len)
-        cache_config = CacheConfig(block_size, 1.0, 1, "auto")
-        cache_config.num_cpu_blocks = 8
-        cache_config.num_gpu_blocks = 8
-        scheduler = Scheduler(scheduler_config, cache_config, lora_config)
-        return scheduler
-
     """
     Test prompt longer than max_prompt_len is aborted.
     """
@@ -235,7 +236,7 @@ def test_prefill_schedule():
     scheduler.add_seq_group(seq_group)
     output = scheduler._schedule_prefills(100)
     assert len(output.ignored_seq_groups) == 1
-    assert len(output.prefill_seq_groups) == 0
+    assert len(output.seq_groups) == 0
     assert output.num_batched_tokens == 0
     """
     Test token budget respected.
@@ -248,13 +249,13 @@ def test_prefill_schedule():
     # 0 token budget == nothing is scheduled.
     output = scheduler._schedule_prefills(0)
     assert len(output.ignored_seq_groups) == 0
-    assert len(output.prefill_seq_groups) == 0
+    assert len(output.seq_groups) == 0
     assert output.num_batched_tokens == 0
 
     # 60 token budget == 1 request scheduled.
     output = scheduler._schedule_prefills(60)
     assert len(output.ignored_seq_groups) == 0
-    assert len(output.prefill_seq_groups) == 1
+    assert len(output.seq_groups) == 1
     assert output.num_batched_tokens == 60
     """
     Test max seq respected.
@@ -265,7 +266,7 @@ def test_prefill_schedule():
         scheduler.add_seq_group(seq_group)
     output = scheduler._schedule_prefills(1000)
     assert len(output.ignored_seq_groups) == 0
-    assert len(output.prefill_seq_groups) == 2
+    assert len(output.seq_groups) == 2
     assert output.num_batched_tokens == 120
     """
     Test max lora is respected and prioritized.
@@ -291,12 +292,12 @@ def test_prefill_schedule():
     # Schedule 2 requests (0 and 2)
     output = scheduler._schedule_prefills(120)
     assert len(output.ignored_seq_groups) == 0
-    assert len(output.prefill_seq_groups) == 2
+    assert len(output.seq_groups) == 2
     assert output.num_batched_tokens == 120
     # The second lora request should be scheduled first.
     output = scheduler._schedule_prefills(60)
-    assert len(output.prefill_seq_groups) == 1
-    assert output.prefill_seq_groups[0].seq_group.request_id == "1"
+    assert len(output.seq_groups) == 1
+    assert output.seq_groups[0].seq_group.request_id == "1"
     """
     Test sequence cannot be scheduled due to block manager has no capacity.
     """
@@ -308,7 +309,7 @@ def test_prefill_schedule():
     scheduler.block_manager.can_allocate.return_value = AllocStatus.LATER
     output = scheduler._schedule_prefills(1000)
     assert len(output.ignored_seq_groups) == 0
-    assert len(output.prefill_seq_groups) == 0
+    assert len(output.seq_groups) == 0
     assert output.num_batched_tokens == 0
 
     scheduler = initialize_scheduler()
@@ -319,7 +320,7 @@ def test_prefill_schedule():
     scheduler.block_manager.can_allocate.return_value = AllocStatus.NEVER
     output = scheduler._schedule_prefills(1000)
     assert len(output.ignored_seq_groups) == 3
-    assert len(output.prefill_seq_groups) == 0
+    assert len(output.seq_groups) == 0
     assert output.num_batched_tokens == 0
 
 
@@ -329,3 +330,4 @@ def test_decode_schedule():
 
 def test_swapped_schedule():
     pass
+
