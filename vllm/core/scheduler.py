@@ -1,6 +1,7 @@
 import enum
 import time
 from collections import deque
+from dataclasses import dataclass
 from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
@@ -32,7 +33,7 @@ class SchedulerOutputs:
     def __init__(
         self,
         scheduled_seq_groups: Iterable[SequenceGroup],
-        num_prompt_groups: int,
+        num_prefill_groups: int,
         num_batched_tokens: int,
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
@@ -41,7 +42,7 @@ class SchedulerOutputs:
         lora_enabled: bool = False,
     ) -> None:
         self.scheduled_seq_groups = scheduled_seq_groups
-        self.num_prompt_groups = num_prompt_groups
+        self.num_prefill_groups = num_prefill_groups
         self.num_batched_tokens = num_batched_tokens
         self.blocks_to_swap_in = blocks_to_swap_in
         self.blocks_to_swap_out = blocks_to_swap_out
@@ -69,65 +70,51 @@ class SchedulerOutputs:
         return {g.lora_request for g in self.scheduled_seq_groups}
 
 
+@dataclass
 class SchedulerDecodeOutputs:
-    """Outputs of the decoding phase of the scheduler.
-
-    Attributes:
-        decoding_seq_groups: Selected sequence groups for decoding.
-        num_preempted_seqs: The number of preempted sequences.
-        blocks_to_swap_in: The blocks to swap in.
-        blocks_to_swap_out: The blocks to swap out.
-        blocks_to_copy: The blocks to copy.
-    """
-
-    def __init__(
-        self,
-        decoding_seq_groups: List[SequenceGroup],
-        num_preempted_seqs: int,
-        blocks_to_swap_in: Dict[int, int],
-        blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, List[int]],
-    ) -> None:
-        self.decoding_seq_groups = decoding_seq_groups
-        self.num_preempted_seqs = num_preempted_seqs
-        self.blocks_to_swap_in = blocks_to_swap_in
-        self.blocks_to_swap_out = blocks_to_swap_out
-        self.blocks_to_copy = blocks_to_copy
+    """Outputs of the decoding phase of the scheduler."""
+    # Selected sequence groups for decoding.
+    decoding_seq_groups: List[SequenceGroup]
+    # The number of preempted sequences.
+    num_preempted_seqs: int
+    # The blocks to swap in.
+    blocks_to_swap_in: Dict[int, int]
+    # The blocks to swap out.
+    blocks_to_swap_out: Dict[int, int]
+    # The blocks to copy.
+    blocks_to_copy: Dict[int, List[int]]
+    # # The number of batched tokens.
+    num_batched_tokens: int
 
     @classmethod
-    def create_empty() -> "SchedulerDecodeOutputs":
-        return SchedulerDecodeOutputs([], 0, [], [], [])
+    def create_empty(cls) -> "SchedulerDecodeOutputs":
+        return SchedulerDecodeOutputs(
+            decoding_seq_groups=[],
+            num_preempted_seqs=0,
+            blocks_to_swap_in={},
+            blocks_to_swap_out={},
+            blocks_to_copy={},
+            num_batched_tokens=0,
+        )
 
-    def num_decoding_seqs(self) -> int:
-        return sum(
-            seq_group.num_seqs(status=SequenceStatus.RUNNING)
-            for seq_group in self.decoding_seq_groups)
 
+@dataclass
+class SchedulerPrefillOutputs:
+    """Outputs of the prefill phase of the scheduler."""
+    # Selected sequence groups for prefill.
+    prefill_seq_groups: List[SequenceGroup]
+    # Ignored sequence groups.
+    ignored_seq_groups: List[SequenceGroup]
+    # The number of batched tokens.
+    num_batched_tokens: int
 
-class SchedulePrefillOutputs:
-    """Outputs of the prefilling phase of the scheduler.
-
-    Attributes:
-        num_batched_tokens: The number of batched tokens.
-        chunk_prefilling_seq_groups: Selected sequence groups for chunked
-            prefilling.
-        prompting_seq_groups: Selected sequence groups for prompting.
-        ignored_seq_groups: Ignored sequence groups.
-    """
-
-    def __init__(
-        self,
-        prompting_seq_groups: List[SequenceGroup],
-        ignored_seq_groups: List[SequenceGroup],
-    ) -> None:
-        self.prompting_seq_groups = prompting_seq_groups
-        self.ignored_seq_groups = ignored_seq_groups
-
-    def num_prompting_groups(self):
-        return len(self.prompting_seq_groups)
-
-    def num_selected_groups(self):
-        return len(self.prompting_seq_groups)
+    @classmethod
+    def create_empty(cls) -> "SchedulerPrefillOutputs":
+        return SchedulerPrefillOutputs(
+            prefill_seq_groups=[],
+            ignored_seq_groups=[],
+            num_batched_tokens=0,
+        )
 
 
 class Scheduler:
@@ -233,16 +220,15 @@ class Scheduler:
     def get_num_unfinished_seq_groups(self) -> int:
         return len(self.waiting) + len(self.running) + len(self.swapped)
 
-    def _schedule_decoding(
+    def _schedule_decodes(
             self, token_budget: int) -> Tuple[int, SchedulerDecodeOutputs]:
-        """Schedule sequence groups for decoding.
+        """Schedule sequence groups in a decoding stage.
 
-        First schedule the sequence groups in the RUNNING state.
-        Then schedule the sequence groups in the SWAPPED state.
+        Note that only decode requests can be swapped at the moment.
 
         Args:
-            num_batched_decoding_tokens: The number of batched decoding tokens.
-            token_budget: The number of available token slots.
+            token_budget: The maximum number of tokens that can be scheduled
+                in the current batch.
         """
         # Blocks that need to be swapped or copied before model execution.
         blocks_to_swap_in: Dict[int, int] = {}
@@ -251,14 +237,13 @@ class Scheduler:
 
         decoding_seq_groups: List[SequenceGroup] = []
         preempted: List[SequenceGroup] = []
-        num_batched_decoding_tokens = 0
+        num_batched_tokens = 0
 
-        # Fix the current time.
-        now = time.time()
         # NOTE(woosuk): Preemption happens only when there is no available slot
         # to keep all the sequence groups in the RUNNING state.
         # In this case, the policy is responsible for deciding which sequence
         # groups to preempt.
+        now = time.time()
         self.running = self.policy.sort_by_priority(now, self.running)
 
         # Step 1: Schedule as many decoding requests as possible.
@@ -266,7 +251,7 @@ class Scheduler:
         # If we run out of available slots, try to preempt
         # the lowest-priority sequence groups.
         while self.running:
-            if token_budget - num_batched_decoding_tokens == 0:
+            if token_budget - num_batched_tokens == 0:
                 break
 
             seq_group = self.running.popleft()
@@ -287,17 +272,22 @@ class Scheduler:
                 self._append_slot(seq_group, blocks_to_copy)
                 decoding_seq_groups.append(seq_group)
                 logger.debug(f"scheduled r -> r {seq_group.request_id}")
-                num_batched_decoding_tokens += (
+                num_batched_tokens += (
                     seq_group.num_seqs(status=SequenceStatus.RUNNING) *
                     self.num_decoding_tokens_per_seq)
 
         # If any sequence group is preempted, do not swap in any sequence group.
         if preempted:
-            return num_batched_decoding_tokens, SchedulerDecodeOutputs(
-                decoding_seq_groups, len(preempted), blocks_to_swap_in,
-                blocks_to_swap_out, blocks_to_copy)
+            return SchedulerDecodeOutputs(
+                decoding_seq_groups=decoding_seq_groups,
+                num_preempted_seqs=len(preempted),
+                blocks_to_swap_in=blocks_to_swap_in,
+                blocks_to_swap_out=blocks_to_swap_out,
+                blocks_to_copy=blocks_to_copy,
+                num_batched_tokens=num_batched_tokens)
 
         # Step 2: Swap in the sequence groups in the SWAPPED state if possible.
+        # All the swapped requests are in a decoding stage.
         self.swapped = self.policy.sort_by_priority(now, self.swapped)
 
         num_curr_seqs = sum(seq_group.get_max_num_running_seqs()
@@ -340,20 +330,24 @@ class Scheduler:
             logger.debug(f"scheduled s -> r {seq_group.request_id}")
             num_curr_seqs += num_new_seqs
             decoding_seq_groups.append(seq_group)
-            num_batched_decoding_tokens += (
+            num_batched_tokens += (
                 seq_group.num_seqs(status=SequenceStatus.RUNNING) *
                 self.num_decoding_tokens_per_seq)
 
         self.swapped.extendleft(leftover_swapped)
 
-        return num_batched_decoding_tokens, SchedulerDecodeOutputs(
-            decoding_seq_groups, len(preempted), blocks_to_swap_in,
-            blocks_to_swap_out, blocks_to_copy)
+        return SchedulerDecodeOutputs(decoding_seq_groups=decoding_seq_groups,
+                                      num_preempted_seqs=len(preempted),
+                                      blocks_to_swap_in=blocks_to_swap_in,
+                                      blocks_to_swap_out=blocks_to_swap_out,
+                                      blocks_to_copy=blocks_to_copy,
+                                      num_batched_tokens=num_batched_tokens)
 
-    def _schedule_prefilling(
-            self, token_budget: int,
-            num_curr_seqs: int) -> Tuple[int, SchedulePrefillOutputs]:
-        """Schedule sequence groups for (chunked) prefilling.
+    def _schedule_prefills(
+            self, token_budget: int) -> Tuple[int, SchedulerPrefillOutputs]:
+        """Schedule sequence groups in prefill stages.
+
+        Note that preempted requests are also considered as prefills.
 
         Args:
             token_budget: The number of available token slots.
@@ -361,16 +355,10 @@ class Scheduler:
 
         Returns:
             num_batched_tokens: The number of batched prefill tokens.
-            SchedulePrefillOutputs: The outputs of the prefilling phase.
+            SchedulerPrefillOutputs: The outputs of the prefilling phase.
         """
         ignored_seq_groups: List[SequenceGroup] = []
-        prompting_seq_groups: List[SequenceGroup] = []
-        num_prompting_seqs: int = 0
-
-        # If any request in swapped state, try not schedule any prefilling.
-        if self.swapped:
-            return SchedulePrefillOutputs(prompting_seq_groups,
-                                          ignored_seq_groups)
+        prefill_seq_groups: List[SequenceGroup] = []
 
         # Step 1: Schedule the waiting requests.
         # The total number of sequences on the fly, including the
@@ -452,56 +440,57 @@ class Scheduler:
                 curr_loras.add(lora_int_id)
             self.waiting.popleft()
             self._allocate(seq_group)
-            prompting_seq_groups.append(seq_group)
+            prefill_seq_groups.append(seq_group)
             num_batched_tokens += num_prompt_tokens
             num_curr_seqs += num_new_seqs
-            num_prompting_seqs += 1
 
         self.waiting.extendleft(leftover_waiting_sequences)
-        if len(prompting_seq_groups) > 0:
+        if len(prefill_seq_groups) > 0:
             self.prev_prompt = True
 
-        return num_batched_tokens, SchedulePrefillOutputs(
-            prompting_seq_groups, ignored_seq_groups)
+        return SchedulerPrefillOutputs(
+            prefill_seq_groups=prefill_seq_groups,
+            ignored_seq_groups=ignored_seq_groups,
+            num_batched_tokens=num_batched_tokens)
 
     def _schedule(self) -> SchedulerOutputs:
         token_budget = self.scheduler_config.max_num_batched_tokens
 
-        # First schedule as many prefilling requests as possible,
-        # then schedule decoding requests.
-        num_curr_seqs = sum(
-            seq_group.num_seqs(status=SequenceStatus.RUNNING)
-            for seq_group in self.running)
-        (num_batched_prefill_tokens,
-         prefilling_outputs) = self._schedule_prefilling(
-             token_budget, num_curr_seqs)
-        token_budget -= num_batched_prefill_tokens
-
-        if len(prefilling_outputs.prompting_seq_groups) > 0:
-            decoding_outputs = SchedulerDecodeOutputs.create_empty()
-            num_batched_decoding_tokens = 0
+        if self.swapped:
+            # If requests are swapped, prefill cannot be scheduled because
+            # it means there's no available blocks.
+            prefills = SchedulerPrefillOutputs.create_empty()
         else:
-            (num_batched_decoding_tokens,
-             decoding_outputs) = self._schedule_decoding(token_budget)
+            # First schedule as many prefilling requests as possible,
+            # then schedule decoding requests.
+            prefills = self._schedule_prefills(token_budget)
+        token_budget -= prefills.num_batched_tokens
 
-        num_batched_tokens = (num_batched_prefill_tokens +
-                              num_batched_decoding_tokens)
-        assert token_budget - num_batched_decoding_tokens >= 0
+        # Don't schedule decodes if prefills are scheduled.
+        # This policy is to maximize the throughput.
+        if len(prefills.prefill_seq_groups) > 0:
+            decodes = SchedulerDecodeOutputs.create_empty()
+        else:
+            decodes = self._schedule_decodes(token_budget)
+
+        num_batched_tokens = (prefills.num_batched_tokens +
+                              decodes.num_batched_tokens)
+        assert token_budget - num_batched_tokens >= 0
 
         scheduler_outputs = SchedulerOutputs(
-            scheduled_seq_groups=prefilling_outputs.prompting_seq_groups +
-            decoding_outputs.decoding_seq_groups,
-            num_prompt_groups=prefilling_outputs.num_selected_groups(),
+            scheduled_seq_groups=prefills.prefill_seq_groups +
+            decodes.decoding_seq_groups,
+            num_prefill_groups=len(prefills.prefill_seq_groups),
             num_batched_tokens=num_batched_tokens,
-            blocks_to_swap_in=decoding_outputs.blocks_to_swap_in,
-            blocks_to_swap_out=decoding_outputs.blocks_to_swap_out,
-            blocks_to_copy=decoding_outputs.blocks_to_copy,
-            ignored_seq_groups=prefilling_outputs.ignored_seq_groups,
+            blocks_to_swap_in=decodes.blocks_to_swap_in,
+            blocks_to_swap_out=decodes.blocks_to_swap_out,
+            blocks_to_copy=decodes.blocks_to_copy,
+            ignored_seq_groups=prefills.ignored_seq_groups,
             lora_enabled=self.lora_enabled,
         )
 
-        self.running.extend(prefilling_outputs.prompting_seq_groups)
-        self.running.extend(decoding_outputs.decoding_seq_groups)
+        self.running.extend(prefills.prefill_seq_groups)
+        self.running.extend(decodes.decoding_seq_groups)
         return scheduler_outputs
 
     def schedule(self) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs]:
@@ -531,7 +520,7 @@ class Scheduler:
 
             # It assumes the scheduled_seq_groups is ordered by
             # prefill < decoding.
-            is_prompt = i < scheduler_outputs.num_prompt_groups
+            is_prompt = i < scheduler_outputs.num_prefill_groups
             seq_group_metadata = SequenceGroupMetadata(
                 request_id=seq_group.request_id,
                 is_prompt=is_prompt,
@@ -546,7 +535,7 @@ class Scheduler:
                 # the subsequent comms can still use delta, but
                 # `multi_modal_data` will be None.
                 multi_modal_data=seq_group.multi_modal_data
-                if scheduler_outputs.num_prompt_groups > 0 else None,
+                if scheduler_outputs.num_prefill_groups > 0 else None,
             )
             seq_group_metadata_list.append(seq_group_metadata)
 
