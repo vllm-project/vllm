@@ -10,6 +10,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import MultiModalData
+from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter
 
 
@@ -108,7 +109,8 @@ class LLM:
             disable_custom_all_reduce=disable_custom_all_reduce,
             **kwargs,
         )
-        self.llm_engine = LLMEngine.from_engine_args(engine_args)
+        self.llm_engine = LLMEngine.from_engine_args(
+            engine_args, usage_context=UsageContext.LLM_CLASS)
         self.request_counter = Counter()
 
     def get_tokenizer(

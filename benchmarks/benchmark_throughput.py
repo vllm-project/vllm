@@ -183,13 +183,15 @@ def run_mii(
     tensor_parallel_size: int,
     output_len: int,
 ) -> float:
-    from mii import pipeline
-    llm = pipeline(model, tensor_parallel=tensor_parallel_size)
+    from mii import client, serve
+    llm = serve(model, tensor_parallel=tensor_parallel_size)
     prompts = [prompt for prompt, _, _ in requests]
 
     start = time.perf_counter()
-    llm(prompts, max_new_tokens=output_len)
+    llm.generate(prompts, max_new_tokens=output_len)
     end = time.perf_counter()
+    client = client(model)
+    client.terminate_server()
     return end - start
 
 
