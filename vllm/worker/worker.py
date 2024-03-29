@@ -97,8 +97,9 @@ class Worker:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
-        init_distributed_environment(self.parallel_config,
-                                     self.rank, self.distributed_init_method, self.local_rank)
+        init_distributed_environment(self.parallel_config, self.rank,
+                                     self.distributed_init_method,
+                                     self.local_rank)
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
@@ -251,7 +252,7 @@ def init_distributed_environment(
     parallel_config: ParallelConfig,
     rank: int,
     distributed_init_method: Optional[str] = None,
-    local_rank: int=-1,
+    local_rank: int = -1,
 ) -> None:
     """Initialize the distributed environment."""
     if torch.distributed.is_initialized():

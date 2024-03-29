@@ -19,7 +19,8 @@ def init_test_distributed_environment(
     init_distributed_environment(
         parallel_config,
         rank,
-        distributed_init_method=distributed_init_method, local_rank=local_rank)
+        distributed_init_method=distributed_init_method,
+        local_rank=local_rank)
 
 
 def multi_process_tensor_parallel(
