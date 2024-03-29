@@ -1,20 +1,16 @@
 import time
 from typing import List
+from unittest.mock import MagicMock
 
 import pytest  # noqa
 
-from vllm.config import CacheConfig, SchedulerConfig
+from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
+from vllm.core.interfaces import AllocStatus
 from vllm.core.scheduler import Scheduler
+from vllm.lora.request import LoRARequest
 from vllm.sequence import Logprob, SequenceGroup
 
 from .utils import create_dummy_prompt
-
-# Test ignored seq groups
-# 
-
-
-def get_sequence_groups(scheduler_output):
-    return [s.seq_group for s in scheduler_output.scheduled_seq_groups]
 
 
 def get_sequence_groups(scheduler_output):
@@ -213,3 +209,123 @@ def test_scheduler_delay_factor():
     seq_group_meta, out = scheduler.schedule()
     assert out.num_prefill_groups > 0
     assert seq_group_meta[0].request_id == '1'
+
+
+def test_prefill_schedule():
+
+    def initialize_scheduler(*,
+                             max_num_seq=1000,
+                             max_token_budget=1000,
+                             max_model_len=1000,
+                             lora_config=None):
+        block_size = 4
+        scheduler_config = SchedulerConfig(max_token_budget, max_num_seq,
+                                           max_model_len)
+        cache_config = CacheConfig(block_size, 1.0, 1, "auto")
+        cache_config.num_cpu_blocks = 8
+        cache_config.num_gpu_blocks = 8
+        scheduler = Scheduler(scheduler_config, cache_config, lora_config)
+        return scheduler
+
+    """
+    Test prompt longer than max_prompt_len is aborted.
+    """
+    scheduler = initialize_scheduler(max_model_len=30)
+    _, seq_group = create_dummy_prompt(0, prompt_length=60)
+    scheduler.add_seq_group(seq_group)
+    output = scheduler._schedule_prefills(100)
+    assert len(output.ignored_seq_groups) == 1
+    assert len(output.prefill_seq_groups) == 0
+    assert output.num_batched_tokens == 0
+    """
+    Test token budget respected.
+    """
+    scheduler = initialize_scheduler()
+    for i in range(2):
+        _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
+        scheduler.add_seq_group(seq_group)
+
+    # 0 token budget == nothing is scheduled.
+    output = scheduler._schedule_prefills(0)
+    assert len(output.ignored_seq_groups) == 0
+    assert len(output.prefill_seq_groups) == 0
+    assert output.num_batched_tokens == 0
+
+    # 60 token budget == 1 request scheduled.
+    output = scheduler._schedule_prefills(60)
+    assert len(output.ignored_seq_groups) == 0
+    assert len(output.prefill_seq_groups) == 1
+    assert output.num_batched_tokens == 60
+    """
+    Test max seq respected.
+    """
+    scheduler = initialize_scheduler(max_num_seq=2)
+    for i in range(3):
+        _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
+        scheduler.add_seq_group(seq_group)
+    output = scheduler._schedule_prefills(1000)
+    assert len(output.ignored_seq_groups) == 0
+    assert len(output.prefill_seq_groups) == 2
+    assert output.num_batched_tokens == 120
+    """
+    Test max lora is respected and prioritized.
+    """
+    lora_config = LoRAConfig(max_lora_rank=8, max_loras=1)
+    scheduler = initialize_scheduler(lora_config=lora_config)
+    for i in range(2):
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=60,
+                                           lora_request=LoRARequest(
+                                               lora_name=str(i),
+                                               lora_int_id=i + 1,
+                                               lora_local_path="abc"))
+        scheduler.add_seq_group(seq_group)
+    # Add two more requests to verify lora is prioritized.
+    # 0: Lora, 1: Lora, 2: regular, 3: regular
+    # In the first iteration, index 0, 2 is scheduled.
+    # If a request is not scheduled because it hits max lora, it is
+    # prioritized. Verify that.
+    for i in range(2, 4):
+        _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
+        scheduler.add_seq_group(seq_group)
+    # Schedule 2 requests (0 and 2)
+    output = scheduler._schedule_prefills(120)
+    assert len(output.ignored_seq_groups) == 0
+    assert len(output.prefill_seq_groups) == 2
+    assert output.num_batched_tokens == 120
+    # The second lora request should be scheduled first.
+    output = scheduler._schedule_prefills(60)
+    assert len(output.prefill_seq_groups) == 1
+    assert output.prefill_seq_groups[0].seq_group.request_id == "1"
+    """
+    Test sequence cannot be scheduled due to block manager has no capacity.
+    """
+    scheduler = initialize_scheduler()
+    for i in range(3):
+        _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
+        scheduler.add_seq_group(seq_group)
+    scheduler.block_manager.can_allocate = MagicMock()
+    scheduler.block_manager.can_allocate.return_value = AllocStatus.LATER
+    output = scheduler._schedule_prefills(1000)
+    assert len(output.ignored_seq_groups) == 0
+    assert len(output.prefill_seq_groups) == 0
+    assert output.num_batched_tokens == 0
+
+    scheduler = initialize_scheduler()
+    for i in range(3):
+        _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
+        scheduler.add_seq_group(seq_group)
+    scheduler.block_manager.can_allocate = MagicMock()
+    scheduler.block_manager.can_allocate.return_value = AllocStatus.NEVER
+    output = scheduler._schedule_prefills(1000)
+    assert len(output.ignored_seq_groups) == 3
+    assert len(output.prefill_seq_groups) == 0
+    assert output.num_batched_tokens == 0
+
+
+def test_decode_schedule():
+    pass
+
+
+def test_swapped_schedule():
+    pass
