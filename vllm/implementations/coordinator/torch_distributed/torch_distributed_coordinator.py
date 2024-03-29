@@ -61,3 +61,8 @@ class TorchDistributedCoordinator(Coordinator):
         data = tensor.tolist()
         for i in range(len(message)):
             message[i] = data[i]
+
+    def __del__(self):
+        # `dist` module might have been already destroyed
+        if hasattr(dist, 'destroy_process_group'):
+            dist.destroy_process_group(self.process_group)
