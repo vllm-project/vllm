@@ -5,7 +5,7 @@ starlette
 requests
 py-cpuinfo
 psutil
-ray >= 2.9
+ray == 2.9.3
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
 tokenizers>=0.15.0
