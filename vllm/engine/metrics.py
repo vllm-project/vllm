@@ -54,14 +54,6 @@ class Metrics:
             labelnames=labelnames)
 
         # Raw stats from last model iteration
-        self.counter_prompt_tokens = Counter(
-            name="vllm:prompt_tokens_total",
-            documentation="Number of prefill tokens processed.",
-            labelnames=labelnames)
-        self.counter_generation_tokens = Counter(
-            name="vllm:generation_tokens_total",
-            documentation="Number of generation tokens processed.",
-            labelnames=labelnames)
         self.counter_request_success = Counter(
             name="vllm:request_success",
             documentation="Count of successfully processed requests.",
@@ -117,6 +109,16 @@ class Metrics:
             documentation="Average generation throughput in tokens/s.",
             labelnames=labelnames,
         )
+        # Deprecated in favor of vllm:request_prompt_tokens_sum
+        self.counter_prompt_tokens = Counter(
+            name="vllm:prompt_tokens_total",
+            documentation="Number of prefill tokens processed.",
+            labelnames=labelnames)
+        # Deprecated in favor of vllm:request_generation_tokens_sum
+        self.counter_generation_tokens = Counter(
+            name="vllm:generation_tokens_total",
+            documentation="Number of generation tokens processed.",
+            labelnames=labelnames)
 
 
 # end-metrics-definitions
