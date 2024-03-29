@@ -49,9 +49,6 @@ class GPTQMarlinConfig(QuantizationConfig):
         self.min_thread_k = MARLIN_MIN_THREAD_K
         self.max_parallel = MARLIN_MAX_PARALLEL
 
-        # Permutation length used by the marlin kernels.
-        self.perm_len = 1024
-
     def __repr__(self) -> str:
         return (f"GPTQMarlinConfig(weight_bits={self.weight_bits}, "
                 f"group_size={self.group_size}, "
@@ -145,7 +142,6 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         # Detect sharding of scales/zp
 
         # By default, no sharding over "input dim"
-        is_k_full = True
         scales_and_zp_size = input_size // group_size
         scales_and_zp_input_dim = None
 
