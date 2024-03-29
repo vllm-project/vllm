@@ -95,6 +95,10 @@ class Coordinator(ABC):
         """Check if the current process is the group master process."""
         return self.get_group_rank() == 0
 
+    def get_group_master_rank(self) -> int:
+        """Get the rank of the group master process."""
+        return self.group[0]
+
     @abstractmethod
     def barrier(self):
         """Synchronize all the processes."""
@@ -109,3 +113,7 @@ class Coordinator(ABC):
         Note: this is an in-place operation, the message is modified in-place.
         """
         raise NotImplementedError
+
+    def __del__(self):
+        """Finalize the coordinator."""
+        pass

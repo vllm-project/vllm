@@ -29,11 +29,9 @@ class Communicator(object):
     requirements of the corresponding application.
     """
 
-    def __init__(self, coordinator: Coordinator, group: List[int]):
+    def __init__(self, coordinator: Coordinator):
         self.coordinator = coordinator
-        self.group = group
         assert self.coordinator.is_initialized()
-        assert self.coordinator.get_rank() in self.group
 
     def broadcast(self,
                   tensor_in: torch.Tensor,
@@ -66,3 +64,6 @@ class Communicator(object):
                    stream: Optional[Any] = None):
         raise NotImplementedError(
             f"all_gather is not implemented in {self.__class__.__name__}")
+
+    def __del__(self):
+        pass
