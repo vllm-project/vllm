@@ -206,6 +206,7 @@ class NCCLCommunicator:
         store=None,
         group_name: str = "",
         pg_options=None,
+        local_rank: int = -1,
     ):
         if not dist.is_initialized():
             backend = backend or "nccl"
@@ -219,25 +220,27 @@ class NCCLCommunicator:
                                     store=store,
                                     group_name=group_name,
                                     pg_options=pg_options)
-        self.world_size = dist.get_world_size()
         self.rank = dist.get_rank()
-        torch.cuda.set_device(self.rank)
-        if self.rank == 0:
+        self.world_size = dist.get_world_size()
+        if local_rank == -1:
+            local_rank = self.rank
+        self.local_rank = local_rank
+        torch.cuda.set_device(local_rank)
+        if rank == 0:
             self.unique_id = ncclGetUniqueId()
         else:
             self.unique_id = NcclUniqueId()
-        tensor = torch.ByteTensor(list(self.unique_id.internal)).cuda(
-            self.rank)
+        tensor = torch.ByteTensor(list(
+            self.unique_id.internal)).cuda(local_rank)
         dist.broadcast(tensor, src=0)
         byte_list = tensor.cpu().tolist()
-        self.unique_id = NcclUniqueId()
         for i, byte in enumerate(byte_list):
             self.unique_id.internal[i] = byte
         self.comm = ctypes.c_void_p()
-        result = _c_ncclCommInitRank(ctypes.byref(self.comm), self.world_size,
-                                     self.unique_id, self.rank)
+        result = _c_ncclCommInitRank(ctypes.byref(self.comm), world_size,
+                                     self.unique_id, rank)
         assert result == 0
-        self.stream = torch.cuda.Stream(device=f"cuda:{self.rank}")
+        self.stream = torch.cuda.Stream(device=f"cuda:{local_rank}")
 
     def all_reduce(self,
                    tensor: torch.Tensor,
@@ -254,5 +257,7 @@ class NCCLCommunicator:
         assert result == 0
 
     def __del__(self):
-        dist.destroy_process_group()
+        # `dist` module might have been already destroyed
+        if hasattr(dist, 'destroy_process_group'):
+            dist.destroy_process_group()
         _c_ncclCommDestroy(self.comm)

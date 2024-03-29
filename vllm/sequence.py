@@ -113,6 +113,8 @@ class SequenceData:
         self.prompt_token_ids = prompt_token_ids
         self.output_token_ids = output_token_ids
         self.cumulative_logprob = 0.0
+        # The number of tokens that are computed (that run against the model).
+        self._num_computed_tokens = 0
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self.output_token_ids.append(token_id)
@@ -129,6 +131,28 @@ class SequenceData:
 
     def get_token_ids(self) -> List[int]:
         return self.prompt_token_ids + self.output_token_ids
+
+    def get_num_computed_tokens(self) -> int:
+        """Return the number of prefill tokens that are already computed."""
+        return self._num_computed_tokens
+
+    def update_num_computed_tokens(self, num_new_computed_tokens: int) -> int:
+        """Update number of tokens computed so far."""
+        self._num_computed_tokens += num_new_computed_tokens
+
+    def reset_num_computed_tokens(self) -> None:
+        """Reset the number of computed tokens from this sequence. It is
+        supposed to be called when a sequence needs to be started from
+        the beginning again (e.g., sequence is preempted).
+        """
+        self._num_computed_tokens = 0
+
+    def get_num_uncomputed_tokens(self) -> int:
+        """Return the number of prefil tokens that are not computed."""
+        # we use `get_len()` which includes prompt_len + output_len instead
+        # of prompt_len here. This is because during recompute we need to
+        # prefill for both prompt and output.
+        return self.get_len() - self.get_num_computed_tokens()
 
     def get_last_token_id(self) -> int:
         if not self.output_token_ids:
@@ -207,6 +231,10 @@ class Sequence:
 
     def num_hashed_tokens_of_block(self, logical_idx: int):
         return logical_idx * self.block_size + self.block_size
+
+    def reset_state_for_recompute(self):
+        """Reset the sequence states for recomputation."""
+        self.data.reset_num_computed_tokens()
 
     def _append_logical_block(self) -> None:
         block = LogicalTokenBlock(
@@ -430,6 +458,18 @@ class SequenceGroup:
     def get_finished_seqs(self) -> List[Sequence]:
         return [seq for seq in self.seqs_dict.values() if seq.is_finished()]
 
+    def update_num_computed_tokens(self, num_new_computed_tokens: int):
+        """Update number of tokens computed so far."""
+        for seq in self.seqs_dict.values():
+            seq.data.update_num_computed_tokens(num_new_computed_tokens)
+
+    def get_num_uncomputed_tokens(self) -> int:
+        # All sequences in the group should have the same prompt, so the
+        # number of unfinished prefill tokens are the same across all
+        # sequences.
+        return list(
+            self.seqs_dict.values())[0].data.get_num_uncomputed_tokens()
+
     def num_seqs(self, status: Optional[SequenceStatus] = None) -> int:
         return len(self.get_seqs(status))
 
@@ -473,6 +513,8 @@ class SequenceGroupMetadata:
         sampling_params: The sampling parameters used to generate the outputs.
         block_tables: The block tables. (Seq id -> list of physical block
             numbers)
+        token_chunk_size: The number of tokens to be processed. None if
+            chunking is not required.
         state: Internal state tied to this sequence group.
         lora_request: LoRA request.
         multi_modal_data: Multi modal data.
@@ -485,6 +527,7 @@ class SequenceGroupMetadata:
         seq_data: Dict[int, SequenceData],
         sampling_params: SamplingParams,
         block_tables: Dict[int, List[int]],
+        token_chunk_size: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
         computed_block_nums: Optional[List[int]] = None,
         state: Optional[SequenceGroupState] = None,
@@ -499,10 +542,22 @@ class SequenceGroupMetadata:
         self.computed_block_nums = computed_block_nums
         self.multi_modal_data = multi_modal_data
         self.state = SequenceGroupState() if state is None else state
+        self._token_chunk_size = token_chunk_size
+
+        if self._token_chunk_size is None:
+            if is_prompt:
+                self._token_chunk_size = list(seq_data.values())[0].get_len()
+            else:
+                self._token_chunk_size = 1
 
     @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
+
+    @property
+    def token_chunk_size(self) -> int:
+        """Return the number of tokens to be processed (chunk size)."""
+        return self._token_chunk_size
 
 
 class SequenceOutput:

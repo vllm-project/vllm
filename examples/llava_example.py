@@ -78,7 +78,13 @@ if __name__ == "__main__":
     # Make sure the local directory exists or create it
     os.makedirs(local_directory, exist_ok=True)
 
-    # Use AWS CLI to sync the directory
-    subprocess.check_call(
-        ["aws", "s3", "sync", s3_bucket_path, local_directory])
+    # Use AWS CLI to sync the directory, assume anonymous access
+    subprocess.check_call([
+        "aws",
+        "s3",
+        "sync",
+        s3_bucket_path,
+        local_directory,
+        "--no-sign-request",
+    ])
     main(args)
