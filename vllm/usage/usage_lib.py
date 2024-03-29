@@ -11,7 +11,6 @@ from typing import Dict, Optional
 from uuid import uuid4
 
 import cpuinfo
-import pkg_resources
 import psutil
 import requests
 import torch
@@ -161,8 +160,9 @@ class UsageMessage:
         ])
 
         # vLLM information
+        import vllm  # delayed import to prevent circular import
         self.context = usage_context.value
-        self.vllm_version = pkg_resources.get_distribution("vllm").version
+        self.vllm_version = vllm.__version__
         self.model_architecture = model_architecture
 
         # Metadata
