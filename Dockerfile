@@ -36,6 +36,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements-build.txt
 
 # install sscahe to speed up compilation leveraging local or remote caching
+# install wget first
+RUN apt-get update -y && apt-get install -y wget
 RUN wget https://github.com/mozilla/sccache/releases/download/v0.7.7/sccache-dist-v0.7.7-x86_64-unknown-linux-musl.tar.gz  && \
     tar -xvf sccache-dist-v0.7.7-x86_64-unknown-linux-musl.tar.gz && \
     mv sccache-dist-v0.7.7-x86_64-unknown-linux-musl/sccache-dist /usr/local/bin/sccache && \
