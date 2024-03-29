@@ -252,6 +252,8 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             "workspace": workspace,
             "input_size_per_partition": input_size_per_partition,
             "output_size_per_partition": output_size_per_partition,
+            "input_size": input_size,
+            "output_size": output_size,
             "is_k_full": is_k_full,
             "marlin_state": GPTQMarlinState.REPACK,
         }
@@ -265,9 +267,12 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         reshaped_x = x.reshape(-1, x.shape[-1])
 
         size_m = reshaped_x.shape[0]
-        size_n = weights["output_size_per_partition"]
-        size_k = weights["input_size_per_partition"]
-        out_shape = x.shape[:-1] + (size_n, )
+        part_size_n = weights["output_size_per_partition"]
+        part_size_k = weights["input_size_per_partition"]
+        full_size_n = weights["output_size"]
+        full_size_k = weights["input_size"]
+
+        out_shape = x.shape[:-1] + (part_size_n, )
 
         if weights["marlin_state"] == GPTQMarlinState.REPACK:
             weights["marlin_state"] = GPTQMarlinState.READY
@@ -287,7 +292,11 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
                 g_idx_sort_indices = torch.argsort(weights["g_idx"]).to(
                     torch.int)
 
+                sorted_g_idx = weights["g_idx"][g_idx_sort_indices]
+
+                replace_tensor("g_idx", sorted_g_idx)
                 replace_tensor("g_idx_sort_indices", g_idx_sort_indices)
+
             else:
                 # Reset g_idx related tensors
                 empty_g_idx = torch.empty(0,
@@ -303,21 +312,26 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             marlin_qweight = marlin_repack_from_gptq(
                 weights["qweight"],
                 weights["g_idx_sort_indices"],
-                size_k,
-                size_n,
+                part_size_k,
+                part_size_n,
             )
             replace_tensor("qweight", marlin_qweight)
 
             # Permute scales
-            marlin_scales = marlin_permute_scales(weights["scales"], size_k,
-                                                  size_n,
+            scales_size_k = part_size_k
+            scales_size_n = part_size_n
+            if self.quant_config.desc_act:
+                scales_size_k = full_size_k
+
+            marlin_scales = marlin_permute_scales(weights["scales"],
+                                                  scales_size_k, scales_size_n,
                                                   self.quant_config.group_size)
             replace_tensor("scales", marlin_scales)
 
         output = marlin_gemm(reshaped_x, weights["qweight"], weights["scales"],
                              weights["g_idx"], weights["g_idx_sort_indices"],
-                             weights["workspace"], size_m, size_n, size_k,
-                             weights["is_k_full"])
+                             weights["workspace"], size_m, part_size_n,
+                             part_size_k, weights["is_k_full"])
 
         if bias is not None:
             output.add_(bias)  # In-place add
