@@ -222,14 +222,6 @@ class LLMEngine:
         self.tokenizer: BaseTokenizerGroup = get_tokenizer_group(
             self.parallel_config.tokenizer_pool_config, **init_kwargs)
 
-        if len(self.get_tokenizer()) != self.model_config.get_vocab_size():
-            logger.warning(
-                f"The tokenizer's vocabulary size {len(self.get_tokenizer())}"
-                f" does not match the model's vocabulary size "
-                f"{self.model_config.get_vocab_size()}. This might "
-                f"cause an error in decoding. Please change config.json "
-                "to match the tokenizer's vocabulary size.")
-
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
         self.cache_config.verify_with_parallel_config(self.parallel_config)
