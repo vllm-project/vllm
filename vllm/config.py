@@ -775,11 +775,6 @@ def _get_and_verify_max_len(
     for key in possible_keys:
         max_len_key = getattr(hf_config, key, None)
         if max_len_key is not None:
-            # Command-R has a separate key for the maximum context window
-            # length of the model.
-            if key == "model_max_length":
-                derived_max_model_len = max_len_key
-                continue
             derived_max_model_len = min(derived_max_model_len, max_len_key)
     if derived_max_model_len == float("inf"):
         if max_model_len is not None:
@@ -806,10 +801,18 @@ def _get_and_verify_max_len(
     if max_model_len is None:
         max_model_len = derived_max_model_len
     elif max_model_len > derived_max_model_len:
-        raise ValueError(
-            f"User-specified max_model_len ({max_model_len}) is greater than "
-            f"the derived max_model_len ({max_len_key}={derived_max_model_len}"
-            " in model's config.json). This may lead to incorrect model "
-            "outputs or CUDA errors. Make sure the value is correct and "
-            "within the model context size.")
+        # Some models might have a separate key for specifying model_max_length
+        # that will be bigger than derived_max_model_len. We compare user input
+        # with model_max_length and allow this override when it's smaller.
+        model_max_length = getattr(hf_config, "model_max_length", None)
+        if model_max_length is not None and max_model_len <= model_max_length:
+            pass
+        else:
+            raise ValueError(
+                f"User-specified max_model_len ({max_model_len}) is greater "
+                f"than the derived max_model_len "
+                f"({max_len_key}={derived_max_model_len} in model's "
+                "config.json). This may lead to incorrect model outputs or "
+                "CUDA errors. Make sure the value is correct and within the "
+                "model context size.")
     return int(max_model_len)
