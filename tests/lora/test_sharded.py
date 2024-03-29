@@ -7,6 +7,7 @@ import os
 import socket
 from collections import defaultdict
 import copy
+from typing import List
 
 from vllm.engine.ray_utils import RayWorkerVllm, initialize_ray_cluster
 
@@ -18,7 +19,10 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm import EngineArgs
 
 from vllm.model_executor.parallel_utils.parallel_state import (
-    ensure_model_parallel_initialized)
+    ensure_model_parallel_initialized, 
+    get_tensor_model_parallel_rank, 
+    get_tensor_model_parallel_world_size
+)
 from vllm.model_executor.parallel_utils.communication_op import (broadcast)
 from vllm.lora.fully_sharded_layers import *
 
@@ -130,6 +134,7 @@ class Worker:
 
     @torch.inference_mode()
     def test_column_parallel_packed_lora(self, num_loras, repeats, dtype):
+        self.lora_config.fully_sharded_loras = True
         set_random_seed(2028374)
         device = torch.device(f'cuda:{torch.distributed.get_rank()}')
         id_to_index = get_random_id_to_index(num_loras,
@@ -259,6 +264,7 @@ class Worker:
 
     @torch.inference_mode()
     def test_lora(self, num_loras, orientation, dtype):
+        self.lora_config.fully_sharded_loras = True
         set_random_seed(129383)
         device = torch.device(f'cuda:{torch.distributed.get_rank()}')
         id_to_index = get_random_id_to_index(num_loras,
@@ -427,11 +433,13 @@ class Worker:
                   f'partially sharded col: {sum(times)/steps} ms')
 
         ############     TEST FULLY SHARDED ROW     ############
+        self.lora_config.fully_sharded_loras = True
         linear, lora_linear = self.create_random_linear_parallel_layer(
             'row', torch.float16, device, fully_sharded=True)
         lora_linear.set_mapping(*mapping_info, )
         fs_times = self.profile_linear(lora_linear, inputs, steps)
 
+        self.lora_config.fully_sharded_loras = False
         linear, lora_linear = self.create_random_linear_parallel_layer(
             'row', torch.float16, device, fully_sharded=False)
         lora_linear.set_mapping(*mapping_info, )
@@ -444,12 +452,14 @@ class Worker:
                   f'partially sharded row: {sum(times)/steps} ms')
 
         ############     TEST FULLY SHARDED MERGED COL     ############
+        self.lora_config.fully_sharded_loras = True
         linear, lora_linear = self.create_column_parallel_packed_layer(
             2, torch.float16, device, fully_sharded=True)
         linear.gather_output = True
         lora_linear.set_mapping(*mapping_info, )
         fs_times = self.profile_linear(lora_linear, inputs, steps)
 
+        self.lora_config.fully_sharded_loras = False
         linear, lora_linear = self.create_column_parallel_packed_layer(
             2, torch.float16, device, fully_sharded=False)
         linear.gather_output = True
@@ -464,12 +474,14 @@ class Worker:
                   f'partially sharded merged col: {sum(times)/steps} ms')
 
         ############     TEST FULLY SHARDED QKV     ############
+        self.lora_config.fully_sharded_loras = True
         linear, lora_linear = self.create_column_parallel_packed_layer(
             3, torch.float16, device, fully_sharded=True)
         linear.gather_output = True
         lora_linear.set_mapping(*mapping_info, )
         fs_times = self.profile_linear(lora_linear, inputs, steps)
 
+        self.lora_config.fully_sharded_loras = False
         linear, lora_linear = self.create_column_parallel_packed_layer(
             3, torch.float16, device, fully_sharded=False)
         linear.gather_output = True
@@ -749,12 +761,13 @@ def main():
     if ray_usage != "1":
         os.environ["RAY_USAGE_STATS_ENABLED"] = "0"
 
-    # test_sharded_layers(rank=8, tp_size=2, max_loras=8, orientation='col')
-    # test_sharded_layers(rank=32, tp_size=2, max_loras=8, repeats=3)
-    # test_sharded_layers(rank=32, tp_size=2, max_loras=8, repeats=2)
+    test_sharded_layers(rank=8, tp_size=2, max_loras=8, orientation='row')
+    test_sharded_layers(rank=16, tp_size=2, max_loras=8, orientation='col')
+    test_sharded_layers(rank=32, tp_size=2, max_loras=8, repeats=2)
+    test_sharded_layers(rank=64, tp_size=2, max_loras=8, repeats=3)
 
     # test_sharded_layers(rank=8, tp_size=2, max_loras=16, speed=True)
-    test_sharded_layers(rank=16, tp_size=2, max_loras=16, speed=True)
+    # test_sharded_layers(rank=16, tp_size=2, max_loras=16, speed=True)
     # test_sharded_layers(rank=32, tp_size=2, max_loras=16, speed=True)
     # test_sharded_layers(rank=64, tp_size=2, max_loras=16, speed=True)
 

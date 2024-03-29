@@ -25,7 +25,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.utils import (
-    split_tensor_along_last_dim)
+    split_tensor_along_last_dim, divide)
 
 if TYPE_CHECKING:
     pass
@@ -292,10 +292,15 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
             max_loras: int,
             lora_config: LoRAConfig,
             model_config: Optional[PretrainedConfig] = None) -> None:
+        self.lora_config = lora_config
+        tp_size = get_tensor_model_parallel_world_size()
+        lora_a_output_size_per_partition = lora_config.max_lora_rank if not \
+            lora_config.fully_sharded_loras else divide(lora_config.max_lora_rank,
+                                                        tp_size)
         self.lora_a_stacked = torch.zeros(
             max_loras,
             1,
-            lora_config.max_lora_rank,
+            lora_a_output_size_per_partition,
             self.base_layer.weight.shape[1],
             dtype=lora_config.lora_dtype,
             device=self.base_layer.weight.device,
@@ -325,6 +330,12 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
         embeddings_tensor: Optional[torch.Tensor],
     ):
         self.reset_lora(index)
+
+        if self.lora_config.fully_sharded_loras:
+            tp_rank = get_tensor_model_parallel_rank()
+            shard_size = self.lora_a_stacked.shape[2]
+            start_idx = tp_rank * shard_size
+            lora_a = lora_a[:, start_idx:start_idx + shard_size]
 
         self.lora_a_stacked[index,
                             0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
@@ -403,6 +414,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             max_loras: int,
             lora_config: LoRAConfig,
             model_config: Optional[PretrainedConfig] = None) -> None:
+        self.lora_config = lora_config
         n_slices = 2
         if not (len(self.base_layer.output_sizes) == n_slices
                 and self.base_layer.output_sizes[0]
@@ -411,12 +423,17 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 "LoRAColumnParallelLinear2Slice requires 2 slices with "
                 "the same size.")
         self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
+
+        lora_a_output_size_per_partition = lora_config.max_lora_rank if not \
+            lora_config.fully_sharded_loras else divide(lora_config.max_lora_rank, 
+                                                       self.tp_size)
 
         self.lora_a_stacked = tuple(
             torch.zeros(
                 max_loras,
                 1,
-                lora_config.max_lora_rank,
+                lora_a_output_size_per_partition,
                 self.base_layer.weight.shape[1],
                 dtype=lora_config.lora_dtype,
                 device=self.base_layer.weight.device,
@@ -450,10 +467,17 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         self.reset_lora(index)
 
         if self.tp_size > 1:
-            tensor_model_parallel_rank = get_tensor_model_parallel_rank()
+            if self.lora_config.fully_sharded_loras:
+                output_shard_size = self.lora_a_stacked[0].shape[2]
+                output_start_idx = self.tp_rank * output_shard_size
+                lora_a = [
+                    lora_a[i][:, output_start_idx:output_start_idx +
+                              output_shard_size] for i in range(2)
+                ]
+
             shard_size = self.output_dim
-            start_idx = tensor_model_parallel_rank * shard_size
-            end_idx = (tensor_model_parallel_rank + 1) * shard_size
+            start_idx = self.tp_rank * shard_size
+            end_idx = (self.tp_rank + 1) * shard_size
             lora_b = lora_b[0][:,
                                start_idx:end_idx], lora_b[1][:,
                                                              start_idx:end_idx]
@@ -507,21 +531,25 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
             max_loras: int,
             lora_config: LoRAConfig,
             model_config: Optional[PretrainedConfig] = None) -> None:
+        self.lora_config = lora_config
         self.tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
+        self.tp_rank = get_tensor_model_parallel_rank()
         self.q_proj_shard_size = (self.base_layer.num_heads *
                                   self.base_layer.head_size)
         self.kv_proj_shard_size = (self.base_layer.num_kv_heads *
                                    self.base_layer.head_size)
-        self.q_shard_id = tp_rank
-        self.kv_shard_id = tp_rank // self.base_layer.num_kv_head_replicas
+        self.q_shard_id = self.tp_rank
+        self.kv_shard_id = self.tp_rank // self.base_layer.num_kv_head_replicas
 
+        lora_a_output_size_per_partition = lora_config.max_lora_rank if not \
+            lora_config.fully_sharded_loras else divide(lora_config.max_lora_rank, 
+                                                       self.tp_size)
         # q, k, v
         self.lora_a_stacked = (
             torch.zeros(
                 max_loras,
                 1,
-                lora_config.max_lora_rank,
+                lora_a_output_size_per_partition,
                 self.base_layer.weight.shape[1],
                 dtype=lora_config.lora_dtype,
                 device=self.base_layer.weight.device,
@@ -529,7 +557,7 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
             torch.zeros(
                 max_loras,
                 1,
-                lora_config.max_lora_rank,
+                lora_a_output_size_per_partition,
                 self.base_layer.weight.shape[1],
                 dtype=lora_config.lora_dtype,
                 device=self.base_layer.weight.device,
@@ -537,7 +565,7 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
             torch.zeros(
                 max_loras,
                 1,
-                lora_config.max_lora_rank,
+                lora_a_output_size_per_partition,
                 self.base_layer.weight.shape[1],
                 dtype=lora_config.lora_dtype,
                 device=self.base_layer.weight.device,
@@ -629,6 +657,13 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
                     index, 0, :lora_b[2].shape[1], :lora_b[2].shape[0]].copy_(
                         lora_b[2].T, non_blocking=True)
 
+        if self.lora_config.fully_sharded_loras:
+            shard_size = [self.lora_a_stacked[i].shape[2] for i in range(3)]
+            start_idx = [self.tp_rank * shard_size[i] for i in range(3)]
+            lora_a = [
+                lora_a[i][:,start_idx[i]:start_idx[i] + shard_size[i]] 
+                if lora_a[i] is not None else None for i in range(3)
+            ]
         if lora_a[0] is not None:
             self.lora_a_stacked[0][
                 index, 0, :lora_a[0].shape[1], :lora_a[0].shape[0]].copy_(
@@ -668,6 +703,8 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
             max_loras: int,
             lora_config: LoRAConfig,
             model_config: Optional[PretrainedConfig] = None) -> None:
+        self.lora_config = lora_config
+        self.tp_rank = get_tensor_model_parallel_rank()
         self.lora_a_stacked = torch.zeros(
             (
                 max_loras,
@@ -678,11 +715,16 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
             dtype=lora_config.lora_dtype,
             device=self.base_layer.weight.device,
         )
+        tp_size = get_tensor_model_parallel_world_size()
+        lora_b_output_size_per_partition = self.base_layer.weight.shape[0] if not \
+            lora_config.fully_sharded_loras else \
+                divide(self.base_layer.weight.shape[0], tp_size)
+
         self.lora_b_stacked = torch.zeros(
             (
                 max_loras,
                 1,
-                self.base_layer.weight.shape[0],
+                lora_b_output_size_per_partition,
                 lora_config.max_lora_rank,
             ),
             dtype=lora_config.lora_dtype,
@@ -709,6 +751,12 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
             start_idx = tensor_model_parallel_rank * shard_size
             end_idx = (tensor_model_parallel_rank + 1) * shard_size
             lora_a = lora_a[start_idx:end_idx, :]
+
+            if self.lora_config.fully_sharded_loras:
+                shard_size = self.lora_b_stacked.shape[2]
+                start_idx = tensor_model_parallel_rank * shard_size
+                end_idx = (tensor_model_parallel_rank + 1) * shard_size
+                lora_b = lora_b[:, start_idx:end_idx]
 
         self.lora_a_stacked[index,
                             0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
