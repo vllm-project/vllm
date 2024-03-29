@@ -95,23 +95,26 @@ class WorkerMonitor(threading.Thread):
     def run(self) -> None:
         # Blocks until any worker exits
         dead_sentinels = wait([p.sentinel for p in self.workers])
-        if self._close:
-            return
-        self._close = True
+        if not self._close:
+            self._close = True
 
-        # Kill / cleanup all workers
+            # Kill / cleanup all workers
+            for worker in self.workers:
+                if worker.sentinel in dead_sentinels:
+                    worker.join(1)
+                if worker.exitcode is not None and worker.exitcode != 0:
+                    logger.error(
+                        f"Worker {worker.name} pid {worker.pid} died, "
+                        f"exit code: {worker.exitcode}")
+            # Cleanup any remaining workers
+            logger.info("Killing local vLLM worker processes")
+            for worker in self.workers:
+                worker.kill_worker()
+            # Must be done after worker task queues are all closed
+            self.result_handler.close()
+
         for worker in self.workers:
-            if worker.sentinel in dead_sentinels:
-                worker.join(1)
-            if worker.exitcode is not None and worker.exitcode != 0:
-                logger.error(f"Worker {worker.name} pid {worker.pid} died, "
-                             f"exit code: {worker.exitcode}")
-        # Cleanup any remaining workers
-        logger.info("Killing local vLLM worker processes")
-        for worker in self.workers:
-            worker.kill_worker()
-        # Must be done after worker task queues are all closed
-        self.result_handler.close()
+            worker.join(2)
 
     def close(self):
         if self._close:
