@@ -24,6 +24,8 @@ Here is an example of how to enable this feature:
 
 .. code-block:: python
 
+        # two float8_e4m3fn kv cache scaling factor files are provided at tests/fp8_kv,
+        # refer to tests/fp8_kv/README.md to generate kv_cache_scales.json of your own.
 
         from vllm import LLM, SamplingParams
         sampling_params = SamplingParams(temperature=1.2, top_p=0.9)
