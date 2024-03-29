@@ -200,6 +200,27 @@ async def test_single_completion(server, client: openai.AsyncOpenAI,
 
 
 @pytest.mark.parametrize(
+    # first test base model, then test loras
+    "model_name",
+    [MODEL_NAME, "zephyr-lora", "zephyr-lora2"],
+)
+async def test_zero_logprobs(server, client: openai.AsyncOpenAI,
+                             model_name: str):
+    # test using token IDs
+    completion = await client.completions.create(
+        model=MODEL_NAME,
+        prompt=[0, 0, 0, 0, 0],
+        max_tokens=5,
+        temperature=0.0,
+        logprobs=0,
+    )
+    choice = completion.choices[0]
+    assert choice.logprobs is not None
+    assert choice.logprobs.token_logprobs is not None
+    assert choice.logprobs.top_logprobs is None
+
+
+@pytest.mark.parametrize(
     # just test 1 lora hereafter
     "model_name",
     [MODEL_NAME, "zephyr-lora"],
