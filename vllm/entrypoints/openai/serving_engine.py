@@ -68,14 +68,6 @@ class OpenAIServing:
             tokenizer_mode=engine_model_config.tokenizer_mode,
             trust_remote_code=engine_model_config.trust_remote_code)
 
-        if len(self.tokenizer) != engine_model_config.get_vocab_size():
-            logger.warning(
-                f"The tokenizer's vocabulary size {len(self.tokenizer)}"
-                f" does not match the model's vocabulary size "
-                f"{engine_model_config.get_vocab_size()}. This might "
-                f"cause an error in decoding. Please change config.json "
-                "to match the tokenizer's vocabulary size.")
-
     async def show_available_models(self) -> ModelList:
         """Show available models. Right now we only have one model."""
         model_cards = [
