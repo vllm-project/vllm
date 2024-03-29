@@ -198,7 +198,9 @@ class ModelConfig:
                     f"({self.sparsity}).")
 
     def _verify_quantization(self) -> None:
-        supported_quantization = ["awq", "gptq", "squeezellm", "gptq_marlin", "marlin"]
+        supported_quantization = [
+            "awq", "gptq", "squeezellm", "gptq_marlin", "marlin"
+        ]
         rocm_not_supported_quantization = ["awq", "marlin"]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()

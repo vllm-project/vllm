@@ -1,4 +1,3 @@
-import gc
 from typing import Any, Dict, List, Optional
 
 import enum
@@ -7,9 +6,10 @@ from enum import Enum
 import torch
 from torch.nn.parameter import Parameter
 
-from vllm._C import ops
-from vllm.model_executor.layers.linear import LinearMethodBase, set_weight_attrs
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.linear import (LinearMethodBase,
+                                               set_weight_attrs)
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 
 from magic_wand import (MARLIN_SUPPORTED_NUM_BITS,
                         MARLIN_SUPPORTED_GROUP_SIZES, MARLIN_TILE,
@@ -31,14 +31,12 @@ class GPTQMarlinConfig(QuantizationConfig):
 
         # Verify
         if self.weight_bits not in MARLIN_SUPPORTED_NUM_BITS:
-            raise ValueError(
-                f"Got weight_bits = {weight_bits}, but Marlin only supports {MARLIN_SUPPORTED_NUM_BITS}"
-            )
+            raise ValueError(f"Got weight_bits = {weight_bits}, but Marlin "
+                             f"only supports {MARLIN_SUPPORTED_NUM_BITS}")
 
         if self.group_size not in MARLIN_SUPPORTED_GROUP_SIZES:
-            raise ValueError(
-                f"Got group_size = {group_size}, but Marlin only supports {MARLIN_SUPPORTED_GROUP_SIZES}"
-            )
+            raise ValueError(f"Got group_size = {group_size}, but Marlin "
+                             f"only supports {MARLIN_SUPPORTED_GROUP_SIZES}")
 
         if not self.is_sym:
             raise ValueError(
@@ -128,16 +126,16 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         # Validate output_size_per_partition
         if output_size_per_partition % self.quant_config.min_thread_n != 0:
             raise ValueError(
-                f"Weight output_size_per_partition = {output_size_per_partition}"
-                f" is not divisible by min_thread_n = {self.quant_config.min_thread_n}."
-            )
+                f"Weight output_size_per_partition = "
+                f"{output_size_per_partition} is not divisible by "
+                f" min_thread_n = {self.quant_config.min_thread_n}.")
 
         # Validate input_size_per_partition
         if input_size_per_partition % self.quant_config.min_thread_k != 0:
             raise ValueError(
-                f"Weight input_size_per_partition = {input_size_per_partition}"
-                f" is not divisible by min_thread_k = {self.quant_config.min_thread_k}."
-            )
+                f"Weight input_size_per_partition = "
+                f"{input_size_per_partition} is not divisible "
+                f"by min_thread_k = {self.quant_config.min_thread_k}.")
 
         if input_size_per_partition % group_size != 0:
             raise ValueError(
@@ -152,12 +150,17 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         scales_and_zp_input_dim = None
 
         if self.quant_config.desc_act:
+            # Act-order case
             assert self.quant_config.group_size != -1
 
             is_k_full = input_size_per_partition == input_size
 
         else:
-            is_k_full = True  # Because of full alignment with group-size and shard of scales/zp
+            # No act-order case
+
+            # K is always full due to full alignment with
+            # group-size and shard of scales/zp
+            is_k_full = True
 
             # If this is a row-parallel case, then shard scales/zp
             if (input_size != input_size_per_partition
@@ -269,7 +272,6 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         size_m = reshaped_x.shape[0]
         part_size_n = weights["output_size_per_partition"]
         part_size_k = weights["input_size_per_partition"]
-        full_size_n = weights["output_size"]
         full_size_k = weights["input_size"]
 
         out_shape = x.shape[:-1] + (part_size_n, )
