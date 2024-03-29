@@ -1,4 +1,5 @@
 import datetime
+import importlib.metadata
 import json
 import logging
 import os
@@ -11,7 +12,6 @@ from typing import Dict, Optional
 from uuid import uuid4
 
 import cpuinfo
-import pkg_resources
 import psutil
 import requests
 import torch
@@ -162,7 +162,7 @@ class UsageMessage:
 
         # vLLM information
         self.context = usage_context.value
-        self.vllm_version = pkg_resources.get_distribution("vllm").version
+        self.vllm_version = importlib.metadata.version("vllm")
         self.model_architecture = model_architecture
 
         # Metadata
