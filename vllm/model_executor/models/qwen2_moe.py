@@ -34,12 +34,9 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               MergedColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               ReplicatedLinear,
-                                               RowParallelLinear,
-                                               UnquantizedLinearMethod)
+from vllm.model_executor.layers.linear import (
+    LinearMethodBase, MergedColumnParallelLinear, QKVParallelLinear,
+    ReplicatedLinear, RowParallelLinear, UnquantizedLinearMethod)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
