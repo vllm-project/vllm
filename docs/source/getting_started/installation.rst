@@ -61,6 +61,15 @@ You can also build and install vLLM from source:
     $ pip install -e .  # This may take 5-10 minutes.
 
 .. tip::
+    To avoid your system being overloaded, you can limit the number of compilation jobs
+    to be run simultaneously, via the environment variable `MAX_JOBS`. For example:
+
+    .. code-block:: console
+
+        $ export MAX_JOBS=6
+        $ pip install -e .
+
+.. tip::
     If you have trouble building vLLM, we recommend using the NVIDIA PyTorch Docker image.
 
     .. code-block:: console

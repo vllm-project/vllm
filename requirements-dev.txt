@@ -4,6 +4,7 @@ toml==0.10.2
 tomli==2.0.1
 ruff==0.1.5
 codespell==2.2.6
+isort==5.13.2
 
 # type checking
 mypy==0.991
@@ -16,12 +17,17 @@ pytest
 pytest-forked
 pytest-asyncio
 pytest-rerunfailures
+pytest-shard
 httpx
 einops # required for MPT
 openai
 requests
 ray
 peft
+awscli
 
 # Benchmarking
 aiohttp
+
+# Multimodal
+pillow

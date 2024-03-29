@@ -1,9 +1,9 @@
-import torch
 import pytest
+import torch
 
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 
-from .utils import mock_worker, create_seq_group_metadata_from_prompts
+from .utils import create_seq_group_metadata_from_prompts, mock_worker
 
 
 @pytest.mark.parametrize('num_target_seq_ids', [100])

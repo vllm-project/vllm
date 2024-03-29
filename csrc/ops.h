@@ -53,11 +53,25 @@ void rotary_embedding(
   torch::Tensor& cos_sin_cache,
   bool is_neox);
 
+void batched_rotary_embedding(
+  torch::Tensor& positions,
+  torch::Tensor& query,
+  torch::Tensor& key,
+  int head_size,
+  torch::Tensor& cos_sin_cache,
+  bool is_neox,
+  int rot_dim,
+  torch::Tensor& cos_sin_cache_offsets);
+
 void silu_and_mul(
   torch::Tensor& out,
   torch::Tensor& input);
 
 void gelu_and_mul(
+  torch::Tensor& out,
+  torch::Tensor& input);
+
+void gelu_tanh_and_mul(
   torch::Tensor& out,
   torch::Tensor& input);
 

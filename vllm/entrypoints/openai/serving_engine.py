@@ -3,16 +3,16 @@ import json
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Dict, List, Optional, Union
-from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import get_tokenizer
+
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.openai.protocol import (CompletionRequest,
-                                              ChatCompletionRequest,
-                                              ErrorResponse, LogProbs,
-                                              ModelCard, ModelList,
+from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              CompletionRequest, ErrorResponse,
+                                              LogProbs, ModelCard, ModelList,
                                               ModelPermission)
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import Logprob
+from vllm.transformers_utils.tokenizer import get_tokenizer
 
 logger = init_logger(__name__)
 
@@ -67,6 +67,14 @@ class OpenAIServing:
             engine_model_config.tokenizer,
             tokenizer_mode=engine_model_config.tokenizer_mode,
             trust_remote_code=engine_model_config.trust_remote_code)
+
+        if len(self.tokenizer) != engine_model_config.get_vocab_size():
+            logger.warning(
+                f"The tokenizer's vocabulary size {len(self.tokenizer)}"
+                f" does not match the model's vocabulary size "
+                f"{engine_model_config.get_vocab_size()}. This might "
+                f"cause an error in decoding. Please change config.json "
+                "to match the tokenizer's vocabulary size.")
 
     async def show_available_models(self) -> ModelList:
         """Show available models. Right now we only have one model."""

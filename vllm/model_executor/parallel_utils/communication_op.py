@@ -4,15 +4,12 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 from torch.distributed import ProcessGroup
 
-from vllm.model_executor.parallel_utils import cupy_utils
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-    get_tensor_model_parallel_group,
-    is_cupy_nccl_enabled_for_all_reduce,
-)
+from vllm.model_executor.parallel_utils import pynccl_utils
 from vllm.model_executor.parallel_utils.custom_all_reduce import (
     custom_all_reduce)
+from vllm.model_executor.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_group, get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size, is_pynccl_enabled_for_all_reduce)
 
 
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
@@ -33,9 +30,9 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     out = custom_all_reduce(input_)
     if out is not None:
         return out
-    if is_cupy_nccl_enabled_for_all_reduce():
+    if is_pynccl_enabled_for_all_reduce():
         # TODO: support multiple parallel groups.
-        cupy_utils.all_reduce(input_)
+        pynccl_utils.all_reduce(input_)
     else:
         torch.distributed.all_reduce(input_,
                                      group=get_tensor_model_parallel_group())
@@ -177,7 +174,7 @@ def broadcast_tensor_dict(
         for key, value in metadata_list:
             if isinstance(value, TensorMetadata):
                 tensor = tensor_dict[key]
-                torch.distributed.broadcast(tensor, src=src)
+                torch.distributed.broadcast(tensor, src=src, group=group)
     else:
         recv_metadata_list = [None]
         torch.distributed.broadcast_object_list(recv_metadata_list,

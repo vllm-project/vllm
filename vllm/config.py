@@ -1,14 +1,19 @@
-from typing import Optional, Union, ClassVar
-from dataclasses import dataclass
+import enum
+import json
 import os
-from packaging.version import Version
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, ClassVar, Optional, Union
 
 import torch
+from packaging.version import Version
 from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
-from vllm.transformers_utils.config import get_config
-from vllm.utils import get_cpu_memory, is_hip, is_neuron, get_nvcc_cuda_version
+from vllm.transformers_utils.config import get_config, get_hf_text_config
+from vllm.utils import get_cpu_memory, get_nvcc_cuda_version, is_hip, is_neuron
+
+if TYPE_CHECKING:
+    from ray.util.placement_group import PlacementGroup
 
 logger = init_logger(__name__)
 
@@ -99,7 +104,9 @@ class ModelConfig:
         if os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true":
             # download model from ModelScope hub,
             # lazy import so that modelscope is not required for normal use.
-            from modelscope.hub.snapshot_download import snapshot_download  # pylint: disable=C
+            # pylint: disable=C.
+            from modelscope.hub.snapshot_download import snapshot_download
+
             if not os.path.exists(model):
                 model_path = snapshot_download(model_id=model,
                                                cache_dir=download_dir,
@@ -112,8 +119,9 @@ class ModelConfig:
 
         self.hf_config = get_config(self.model, trust_remote_code, revision,
                                     code_revision)
-        self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
-        self.max_model_len = _get_and_verify_max_len(self.hf_config,
+        self.hf_text_config = get_hf_text_config(self.hf_config)
+        self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
+        self.max_model_len = _get_and_verify_max_len(self.hf_text_config,
                                                      max_model_len)
         self._verify_load_format()
         self._verify_tokenizer_mode()
@@ -136,7 +144,7 @@ class ModelConfig:
                 if (f not in rocm_not_supported_load_format)
             ]
             raise ValueError(
-                f"load format \'{load_format}\' is not supported in ROCm. "
+                f"load format '{load_format}' is not supported in ROCm. "
                 f"Supported load format are "
                 f"{rocm_supported_load_format}")
 
@@ -165,13 +173,18 @@ class ModelConfig:
         # Parse quantization method from the HF model config, if available.
         hf_quant_config = getattr(self.hf_config, "quantization_config", None)
         if hf_quant_config is not None:
-
             hf_quant_method = str(hf_quant_config["quant_method"]).lower()
+
             # If the GPTQ model is serialized in marlin format, use marlin.
             if (hf_quant_method == "gptq"
                     and "is_marlin_format" in hf_quant_config
                     and hf_quant_config["is_marlin_format"]):
+                logger.info("The model is serialized in Marlin format. "
+                            "Using Marlin kernel.")
                 hf_quant_method = "marlin"
+                if self.quantization == "gptq":
+                    self.quantization = hf_quant_method
+
             if self.quantization is None:
                 self.quantization = hf_quant_method
             elif self.quantization != hf_quant_method:
@@ -207,7 +220,7 @@ class ModelConfig:
         self,
         parallel_config: "ParallelConfig",
     ) -> None:
-        total_num_attention_heads = self.hf_config.num_attention_heads
+        total_num_attention_heads = self.hf_text_config.num_attention_heads
         tensor_parallel_size = parallel_config.tensor_parallel_size
         if total_num_attention_heads % tensor_parallel_size != 0:
             raise ValueError(
@@ -215,7 +228,7 @@ class ModelConfig:
                 " must be divisible by tensor parallel size "
                 f"({tensor_parallel_size}).")
 
-        total_num_hidden_layers = self.hf_config.num_hidden_layers
+        total_num_hidden_layers = self.hf_text_config.num_hidden_layers
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         if total_num_hidden_layers % pipeline_parallel_size != 0:
             raise ValueError(
@@ -224,19 +237,29 @@ class ModelConfig:
                 f"({pipeline_parallel_size}).")
 
     def get_sliding_window(self) -> Optional[int]:
-        return getattr(self.hf_config, "sliding_window", None)
+        """Get the sliding window size, or None if disabled.
+        """
+
+        # Some models, like Qwen2 and Qwen1.5, use `use_sliding_window` in
+        # addition to sliding window size. We check if that field is present
+        # and if it's False, return None.
+        if (hasattr(self.hf_text_config, "use_sliding_window")
+                and not self.hf_text_config.use_sliding_window):
+            return None
+        return getattr(self.hf_text_config, "sliding_window", None)
 
     def get_vocab_size(self) -> int:
-        return self.hf_config.vocab_size
+        return self.hf_text_config.vocab_size
 
     def get_hidden_size(self) -> int:
-        return self.hf_config.hidden_size
+        return self.hf_text_config.hidden_size
 
     def get_head_size(self) -> int:
-        if hasattr(self.hf_config, "head_dim"):
-            return self.hf_config.head_dim
+        if hasattr(self.hf_text_config, "head_dim"):
+            return self.hf_text_config.head_dim
         # FIXME(woosuk): This may not be true for all models.
-        return self.hf_config.hidden_size // self.hf_config.num_attention_heads
+        return (self.hf_text_config.hidden_size //
+                self.hf_text_config.num_attention_heads)
 
     def get_total_num_kv_heads(self) -> int:
         """Returns the total number of KV heads."""
@@ -248,11 +271,16 @@ class ModelConfig:
         new_decoder_arch_falcon = (
             self.hf_config.model_type in falcon_model_types
             and getattr(self.hf_config, "new_decoder_architecture", False))
-        if not new_decoder_arch_falcon and getattr(self.hf_config,
+        if not new_decoder_arch_falcon and getattr(self.hf_text_config,
                                                    "multi_query", False):
             # Multi-query attention, only one KV head.
             # Currently, tensor parallelism is not supported in this case.
             return 1
+
+        # For DBRX and MPT
+        if self.hf_config.model_type in ["dbrx", "mpt"]:
+            return getattr(self.hf_config.attn_config, "kv_n_heads",
+                           self.hf_config.num_attention_heads)
 
         attributes = [
             # For Falcon:
@@ -264,13 +292,13 @@ class ModelConfig:
             "multi_query_group_num",
         ]
         for attr in attributes:
-            num_kv_heads = getattr(self.hf_config, attr, None)
+            num_kv_heads = getattr(self.hf_text_config, attr, None)
             if num_kv_heads is not None:
                 return num_kv_heads
 
         # For non-grouped-query attention models, the number of KV heads is
         # equal to the number of attention heads.
-        return self.hf_config.num_attention_heads
+        return self.hf_text_config.num_attention_heads
 
     def get_num_kv_heads(self, parallel_config: "ParallelConfig") -> int:
         """Returns the number of KV heads per GPU."""
@@ -283,7 +311,7 @@ class ModelConfig:
                    total_num_kv_heads // parallel_config.tensor_parallel_size)
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
-        total_num_hidden_layers = self.hf_config.num_hidden_layers
+        total_num_hidden_layers = self.hf_text_config.num_hidden_layers
         return total_num_hidden_layers // parallel_config.pipeline_parallel_size
 
 
@@ -296,6 +324,8 @@ class CacheConfig:
             vLLM execution.
         swap_space: Size of the CPU swap space per GPU (in GiB).
         cache_dtype: Data type for kv cache storage.
+        forced_num_gpu_blocks: Number of GPU blocks to use. This overrides the
+            profiled num_gpu_blocks if specified. Does nothing if None.
     """
 
     def __init__(
@@ -304,12 +334,14 @@ class CacheConfig:
         gpu_memory_utilization: float,
         swap_space: int,
         cache_dtype: str,
+        forced_num_gpu_blocks: Optional[int] = None,
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
         self.swap_space_bytes = swap_space * _GB
+        self.forced_num_gpu_blocks = forced_num_gpu_blocks
         self.cache_dtype = cache_dtype
         self.sliding_window = sliding_window
         self.enable_prefix_caching = enable_prefix_caching
@@ -371,6 +403,58 @@ class CacheConfig:
             logger.warning("Possibly too large swap space. " + msg)
 
 
+@dataclass
+class TokenizerPoolConfig:
+    """Configuration for the tokenizer pool.
+    
+    Args:
+        pool_size: Number of tokenizer workers in the pool.
+        pool_type: Type of the pool.
+        extra_config: Additional config for the pool.
+            The way the config will be used depends on the
+            pool type.
+    """
+    pool_size: int
+    pool_type: str
+    extra_config: dict
+
+    def __post_init__(self):
+        if self.pool_type not in ("ray", ):
+            raise ValueError(f"Unknown pool type: {self.pool_type}")
+        if not isinstance(self.extra_config, dict):
+            raise ValueError("extra_config must be a dictionary.")
+
+    @classmethod
+    def create_config(
+        cls, tokenizer_pool_size: int, tokenizer_pool_type: str,
+        tokenizer_pool_extra_config: Optional[Union[str, dict]]
+    ) -> Optional["TokenizerPoolConfig"]:
+        """Create a TokenizerPoolConfig from the given parameters.
+        
+        If tokenizer_pool_size is 0, return None.
+        
+        Args:
+            tokenizer_pool_size: Number of tokenizer workers in the pool.
+            tokenizer_pool_type: Type of the pool.
+            tokenizer_pool_extra_config: Additional config for the pool.
+                The way the config will be used depends on the
+                pool type. This can be a JSON string (will be parsed).
+        """
+        if tokenizer_pool_size:
+            if isinstance(tokenizer_pool_extra_config, str):
+                tokenizer_pool_extra_config_parsed = json.loads(
+                    tokenizer_pool_extra_config)
+            else:
+                tokenizer_pool_extra_config_parsed = (
+                    tokenizer_pool_extra_config or {})
+            tokenizer_pool_config = cls(tokenizer_pool_size,
+                                        tokenizer_pool_type,
+                                        tokenizer_pool_extra_config_parsed)
+        else:
+            tokenizer_pool_config = None
+        return tokenizer_pool_config
+
+
 class ParallelConfig:
     """Configuration for the distributed execution.
 
@@ -385,6 +469,8 @@ class ParallelConfig:
             parallel and large models.
         disable_custom_all_reduce: Disable the custom all-reduce kernel and
             fall back to NCCL.
+        tokenizer_pool_config: Config for the tokenizer pool.
+            If None, will use synchronous tokenization.
         ray_workers_use_nsight: Whether to profile Ray workers with nsight, see
             https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler.
     """
@@ -396,26 +482,21 @@ class ParallelConfig:
         worker_use_ray: bool,
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
+        tokenizer_pool_config: Optional[TokenizerPoolConfig] = None,
         ray_workers_use_nsight: bool = False,
+        placement_group: Optional["PlacementGroup"] = None,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
-        if is_neuron():
-            # For Neuron device support, here we assign TP=1 to avoid sharding
-            # within vLLM directly. Transformer-neuronx would take
-            # neuron_tp_degree attribute, and distribute the workload
-            # to multiple NeuronCores.
-            self.tensor_parallel_size = 1
-            self.neuron_tp_degree = tensor_parallel_size
-        else:
-            self.tensor_parallel_size = tensor_parallel_size
+        self.tensor_parallel_size = tensor_parallel_size
         self.worker_use_ray = worker_use_ray
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
+        self.tokenizer_pool_config = tokenizer_pool_config
         self.ray_workers_use_nsight = ray_workers_use_nsight
+        self.placement_group = placement_group
 
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
-        # Ray worker is not supported for Neuron backend.
-        if self.world_size > 1 and not is_neuron():
+        if self.world_size > 1:
             self.worker_use_ray = True
         self._verify_args()
 
@@ -438,15 +519,6 @@ class ParallelConfig:
             raise ValueError("Unable to use nsight profiling unless workers "
                              "run with Ray.")
 
-        # FIXME(woosuk): Fix the stability issues and re-enable the custom
-        # all-reduce kernel.
-        if not self.disable_custom_all_reduce and self.world_size > 1:
-            self.disable_custom_all_reduce = True
-            logger.info(
-                "Custom all-reduce kernels are temporarily disabled due to "
-                "stability issues. We will re-enable them once the issues are "
-                "resolved.")
-
 
 class SchedulerConfig:
     """Scheduler configuration.
@@ -458,7 +530,11 @@ class SchedulerConfig:
             iteration.
         max_model_len: Maximum length of a sequence (including prompt
             and generated text).
-        max_paddings: Maximum number of paddings to be added to a batch.
+        delay_factor: Apply a delay (of delay factor multiplied by previous
+            prompt latency) before scheduling next prompt.
+        use_v2_block_manager: Whether to use the BlockSpaceManagerV2 or not.
+        enable_chunked_prefill: If True, prefill requests can be chunked based
+            on the remaining max_num_batched_tokens.
     """
 
     def __init__(
@@ -466,7 +542,9 @@ class SchedulerConfig:
         max_num_batched_tokens: Optional[int],
         max_num_seqs: int,
         max_model_len: int,
-        max_paddings: int,
+        use_v2_block_manager: bool = False,
+        delay_factor: float = 0.0,
+        enable_chunked_prefill: bool = False,
     ) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
@@ -476,7 +554,9 @@ class SchedulerConfig:
             self.max_num_batched_tokens = max(max_model_len, 2048)
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
-        self.max_paddings = max_paddings
+        self.delay_factor = delay_factor
+        self.use_v2_block_manager = use_v2_block_manager
+        self.chunked_prefill_enabled = enable_chunked_prefill
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -500,12 +580,12 @@ class DeviceConfig:
     def __init__(self, device: str = "auto") -> None:
         if device == "auto":
             # Automated device type detection
-            if torch.cuda.is_available():
-                self.device_type = "cuda"
-            elif is_neuron():
+            if is_neuron():
                 self.device_type = "neuron"
             else:
-                raise RuntimeError("No supported device detected.")
+                # We don't call torch.cuda.is_available() here to
+                # avoid initializing CUDA before workers are forked
+                self.device_type = "cuda"
         else:
             # Device type is assigned explicitly
             self.device_type = device
@@ -516,10 +596,6 @@ class DeviceConfig:
         else:
             # Set device with device type
             self.device = torch.device(self.device_type)
-
-    @property
-    def is_neuron(self):
-        return self.device_type == "neuron"
 
 
 @dataclass
@@ -570,6 +646,48 @@ class LoRAConfig:
                 "LoRA is enabled.")
 
 
+@dataclass
+class VisionLanguageConfig:
+    """Configs the input data format and how models should run for
+    vision language models."""
+
+    class ImageInputType(enum.Enum):
+        """Image input type into the vision language model.
+
+        An image roughly goes through the following transformation:
+        Raw image --> pixel values --> image features --> image embeddings.
+
+        The difference between different image input types is where the
+        image encoder (pixel values --> image features) is run.
+        Different image input types also correspond to different tensor shapes.
+
+        For example, for Llava, PIXEL_VALUES: (1, 3, 336, 336).
+        IMAGE_FEATURES: (1, 576, 1024).
+        """
+        PIXEL_VALUES = enum.auto()
+        IMAGE_FEATURES = enum.auto()
+
+    image_input_type: ImageInputType
+    # The input id corresponding to image token.
+    image_token_id: int
+    # Used for running `run_prefill_max_token`.
+    # For models that support varying resolution, this corresponds to
+    # worst case scenario (biggest supported resolution).
+    image_input_shape: tuple
+    image_feature_size: int
+
+    @classmethod
+    def get_image_input_enum_type(
+            cls, value: str) -> "VisionLanguageConfig.ImageInputType":
+        """Get the image input type from a string."""
+        try:
+            return cls.ImageInputType[value.upper()]
+        except KeyError as e:
+            raise ValueError(f"{value} is not a valid choice. "
+                             f"Expecting to choose from "
+                             f"{[x.name for x in cls.ImageInputType]}.") from e
+
+
 _STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.float16,
     "float16": torch.float16,
@@ -614,7 +732,7 @@ def _get_and_verify_dtype(
             k for k, v in _STR_DTYPE_TO_TORCH_DTYPE.items()
             if (k not in _ROCM_NOT_SUPPORTED_DTYPE)
         ]
-        raise ValueError(f"dtype \'{dtype}\' is not supported in ROCm. "
+        raise ValueError(f"dtype '{dtype}' is not supported in ROCm. "
                          f"Supported dtypes are {rocm_supported_dtypes}")
 
     # Verify the dtype.

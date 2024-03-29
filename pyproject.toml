@@ -1,6 +1,7 @@
 [build-system]
 # Should be mirrored in requirements-build.txt
 requires = [
+    "cmake>=3.21",
     "ninja",
     "packaging",
     "setuptools >= 49.4.0",
@@ -33,8 +34,6 @@ ignore = [
     "F405", "F403",
     # lambda expression assignment
     "E731",
-    # .strip() with multi-character strings
-    "B005",
     # Loop control variable not used within loop body
     "B007",
 ]
@@ -51,4 +50,8 @@ exclude = "vllm/model_executor/parallel_utils/|vllm/model_executor/models/"
 
 [tool.codespell]
 ignore-words-list = "dout, te, indicies"
-skip = "./tests/prompts"
+skip = "./tests/prompts,./benchmarks/sonnet.txt"
+
+[tool.isort]
+use_parentheses = true
+skip_gitignore = true
