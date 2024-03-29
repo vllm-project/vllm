@@ -25,6 +25,7 @@ requests
 ray
 peft
 awscli
+ai2-olmo # required for OLMo
 
 # Benchmarking
 aiohttp

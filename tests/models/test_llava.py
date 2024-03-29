@@ -85,9 +85,6 @@ def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
                                           images=hf_images)
     del hf_model
 
-    gc.collect()
-    torch.cuda.empty_cache()
-
     vllm_model = vllm_runner(model_id,
                              dtype=dtype,
                              worker_use_ray=worker_use_ray,

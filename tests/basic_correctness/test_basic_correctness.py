@@ -1,6 +1,6 @@
 """Compare the short outputs of HF and vLLM when using greedy sampling.
 
-Run `pytest tests/basic_correctness/test_basic_correctness.py --forked`.
+Run `pytest tests/basic_correctness/test_basic_correctness.py`.
 """
 import pytest
 

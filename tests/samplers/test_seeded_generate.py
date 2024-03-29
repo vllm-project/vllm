@@ -1,6 +1,6 @@
 """Verify that seeded random sampling is deterministic.
 
-Run `pytest tests/samplers/test_seeded_generate.py --forked`.
+Run `pytest tests/samplers/test_seeded_generate.py`.
 """
 import copy
 import random
