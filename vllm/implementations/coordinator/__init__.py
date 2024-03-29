@@ -1,4 +1,3 @@
-from vllm.interfaces.coordinator import Coordinator
 from enum import Enum, auto
 
 class CoordinatorType(Enum):
