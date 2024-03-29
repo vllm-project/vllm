@@ -48,7 +48,9 @@ import math
 from transformers import LlamaTokenizer
 
 from vllm import LLM, SamplingParams
+from vllm.logger import init_logger
 
+logger = init_logger(__name__)
 
 def get_wikitext2_text(tokenizer):
     with open(args.data) as f:
@@ -90,19 +92,19 @@ def vllm_predict(CONT, llm, sampl_par):
 
 def main(args: argparse.Namespace):
 
-    print(f"### Initialising @ {datetime.datetime.now()}")
+    logger.info(f"Initialising @ {datetime.datetime.now()}")
     my_ppl = 0.0
 
     my_tokenizer = LlamaTokenizer.from_pretrained(args.model)
-    print("Loaded the tokenizer.")
+    logger.info("Loaded the tokenizer.")
 
-    print("*** Initializing the engine.")
+    logger.info("Initializing the engine.")
     my_llm, my_sampl_par = vllm_init(args)
-    print(my_sampl_par)
-    print("*** Initialized the engine.")
+    logger.info(my_sampl_par)
+    logger.info("Initialized the engine.")
 
     my_test_enc, my_test_text = get_wikitext2_text(my_tokenizer)
-    print("Loaded the test data.")
+    logger.info("Loaded the test data.")
 
     my_n_samples = args.sample_size
 
@@ -113,7 +115,7 @@ def main(args: argparse.Namespace):
 
     num_tokens_generated = 0
     starting_time = datetime.datetime.now()
-    print(f"### Starting generation @ {starting_time} \
+    logger.info(f"Starting generation @ {starting_time} \
 will try to process {my_n_patches} patche(s), \
 generating {my_n_samples} tokens in each patch \
 from the initial context of {args.context_size} tokens.")
@@ -132,14 +134,14 @@ from the initial context of {args.context_size} tokens.")
         LOGPROBS = vllm_predict(CONTEXT, my_llm, my_sampl_par)
         num_tokens_generated += len(LOGPROBS[0].outputs[0].token_ids)
         my_ppl -= LOGPROBS[0].outputs[0].cumulative_logprob
-        print(f"Iteration {c+1} of {my_n_patches} Intermediate Estimates:\n\
+        logger.info(f"Iteration {c+1} of {my_n_patches} Intermediate Estimates:\n\
 \tCross-entropy_intermediate={my_ppl/num_tokens_generated}\n\
 \tPerplexity_intermediate={math.exp(my_ppl/num_tokens_generated)}")
     ending_time = datetime.datetime.now()
-    print(f"### Done @ {ending_time} after processing for \
+    logger.info(f"Done @ {ending_time} after processing for \
 {ending_time-starting_time} generated {num_tokens_generated} tokens.")
 
-    print(f"Integral Cross-Entropy={my_ppl} Average Cross-Entropy=\
+    logger.info(f"Integral Cross-Entropy={my_ppl} Average Cross-Entropy=\
 {my_ppl/num_tokens_generated} PPL={math.exp(my_ppl/num_tokens_generated)}")
 
 
