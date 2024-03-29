@@ -35,6 +35,9 @@ COPY requirements-build.txt requirements-build.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements-build.txt
 
+# install compiler cache to speed up compilation leveraging local or remote caching
+RUN apt-get update -y && apt-get install -y ccache
+
 # copy input files
 COPY csrc csrc
 COPY setup.py setup.py
@@ -56,7 +59,9 @@ ENV NVCC_THREADS=$nvcc_threads
 # make sure punica kernels are built (for LoRA)
 ENV VLLM_INSTALL_PUNICA_KERNELS=1
 
-RUN python3 setup.py build_ext --inplace
+ENV CCACHE_DIR=/root/.cache/ccache
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    python3 setup.py build_ext --inplace
 #################### EXTENSION Build IMAGE ####################
 
 #################### FLASH_ATTENTION Build IMAGE ####################
