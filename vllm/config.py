@@ -765,6 +765,8 @@ def _get_and_verify_max_len(
         "max_seq_len",
         # ChatGLM2
         "seq_length",
+        # Command-R
+        "model_max_length",
         # Others
         "max_sequence_length",
         "max_seq_length",
@@ -773,6 +775,11 @@ def _get_and_verify_max_len(
     for key in possible_keys:
         max_len_key = getattr(hf_config, key, None)
         if max_len_key is not None:
+            # Command-R has a separate key for the maximum context window
+            # length of the model.
+            if key == "model_max_length":
+                derived_max_model_len = max_len_key
+                continue
             derived_max_model_len = min(derived_max_model_len, max_len_key)
     if derived_max_model_len == float("inf"):
         if max_model_len is not None:
