@@ -216,8 +216,8 @@ async def test_zero_logprobs(server, client: openai.AsyncOpenAI,
     )
     choice = completion.choices[0]
     assert choice.logprobs is not None
-    assert choice.token_logprobs is not None
-    assert choice.top_logprobs is None
+    assert choice.logprobs.token_logprobs is not None
+    assert choice.logprobs.top_logprobs is None
 
 
 @pytest.mark.parametrize(
