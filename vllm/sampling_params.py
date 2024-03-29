@@ -16,6 +16,7 @@ class SamplingType(IntEnum):
     BEAM = 3
     FORCED = 4
 
+
 LogitsProcessor = Callable[[List[int], torch.Tensor], torch.Tensor]
 """LogitsProcessor is a function that takes a list of previously generated
 tokens and a tensor of the logits for the next token, and returns a modified

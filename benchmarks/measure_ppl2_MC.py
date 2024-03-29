@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-
 """
 This is a script that produces a realistic PPL measurement 
 for the quantized KV cache system by processing a sequence of 
 non-overlapping patches of the reference text. Generation of the 
-consequtive symbols in each patch is governed (forced)
+consecutive symbols in each patch is governed (forced)
 by the reference text.
 
 The initial context size for the system is set by the parameter 
@@ -42,17 +41,12 @@ should result in PPL ~ PPL=3.8968611189957523
 
 """
 
-import numpy as np
-from transformers import LlamaForCausalLM, LlamaTokenizer
-import pandas as pd
-import torch
-import sys
+from transformers import LlamaTokenizer
 import datetime
-import json
 import argparse
 from vllm import LLM, SamplingParams
 import math
-import operator
+
 
 def get_wikitext2_text(tokenizer):
     with open(args.data) as f:
@@ -60,6 +54,7 @@ def get_wikitext2_text(tokenizer):
         test_enc = tokenizer(test_text)
 
     return test_enc, test_text
+
 
 def vllm_init(args):
 
@@ -70,31 +65,31 @@ def vllm_init(args):
         trust_remote_code=args.trust_remote_code,
         dtype=args.dtype,
         kv_cache_dtype=args.kv_cache_dtype,
-        #scales_path=args.kv_cache_scales_path if args.kv_cache_scales_path!='' else None,
-        enforce_eager = args.enforce_eager
-    )
+        #scales_path=args.kv_cache_scales_path
+        #   if args.kv_cache_scales_path!='' else None,
+        enforce_eager=args.enforce_eager)
 
-    sampling_params = SamplingParams(
-        n=1, 
-        temperature=0.0, 
-        top_p=1,
-        use_beam_search=False,
-        ignore_eos=True,
-        ppl_measurement=True,
-        future_context=[],
-        presence_penalty=0.0
-    )
+    sampling_params = SamplingParams(n=1,
+                                     temperature=0.0,
+                                     top_p=1,
+                                     use_beam_search=False,
+                                     ignore_eos=True,
+                                     ppl_measurement=True,
+                                     future_context=[],
+                                     presence_penalty=0.0)
 
     return llm, sampling_params
 
+
 def vllm_predict(CONT, llm, sampl_par):
-    result=llm.generate( prompt_token_ids=CONT,sampling_params=sampl_par)
+    result = llm.generate(prompt_token_ids=CONT, sampling_params=sampl_par)
     return result
+
 
 def main(args: argparse.Namespace):
 
-    print (f"### Initialising @ {datetime.datetime.now()}")
-    my_ppl=0.0
+    print(f"### Initialising @ {datetime.datetime.now()}")
+    my_ppl = 0.0
 
     my_tokenizer = LlamaTokenizer.from_pretrained(args.model)
     print("Loaded the tokenizer.")
@@ -105,40 +100,58 @@ def main(args: argparse.Namespace):
     print("*** Initialized the engine.")
 
     my_test_enc, my_test_text = get_wikitext2_text(my_tokenizer)
-    print("Loaded the test data.") 
+    print("Loaded the test data.")
 
     my_n_samples = args.sample_size
 
-    my_n_patches=math.ceil((len(my_test_enc['input_ids'])-args.context_size-1)/my_n_samples)
-    if args.patch_size!=None:
-       my_n_patches=args.patch_size
+    my_n_patches = math.ceil(
+        (len(my_test_enc['input_ids']) - args.context_size - 1) / my_n_samples)
+    if args.patch_size is not None:
+        my_n_patches = args.patch_size
 
     num_tokens_generated = 0
-    starting_time=datetime.datetime.now()
-    print (f"### Starting generation @ {starting_time} will try to process {my_n_patches} patches, generating {my_n_samples} token in each patch from the initial context of {args.context_size} tokens.")
+    starting_time = datetime.datetime.now()
+    print(
+        f"### Starting generation @ {starting_time} will try to process {my_n_patches} patches, generating {my_n_samples} token in each patch from the initial context of {args.context_size} tokens."
+    )
     for c in range(my_n_patches):
         CONTEXT = []
-        my_sampl_par.future_context=[]
-        CONTEXT.append(my_test_enc['input_ids'][c*my_n_samples:c*my_n_samples+args.context_size])
-        upper_boundary=min((c+1)*my_n_samples+args.context_size,len(my_test_enc['input_ids']))
-        my_sampl_par.future_context.append(my_test_enc['input_ids'][c*my_n_samples+args.context_size:upper_boundary])
-        my_sampl_par.max_tokens=len(my_sampl_par.future_context[0])
+        my_sampl_par.future_context = []
+        CONTEXT.append(
+            my_test_enc['input_ids'][c * my_n_samples:c * my_n_samples +
+                                     args.context_size])
+        upper_boundary = min((c + 1) * my_n_samples + args.context_size,
+                             len(my_test_enc['input_ids']))
+        my_sampl_par.future_context.append(
+            my_test_enc['input_ids'][c * my_n_samples +
+                                     args.context_size:upper_boundary])
+        my_sampl_par.max_tokens = len(my_sampl_par.future_context[0])
         LOGPROBS = vllm_predict(CONTEXT, my_llm, my_sampl_par)
         num_tokens_generated += len(LOGPROBS[0].outputs[0].token_ids)
-        my_ppl-=LOGPROBS[0].outputs[0].cumulative_logprob
+        my_ppl -= LOGPROBS[0].outputs[0].cumulative_logprob
 
-        print(f"Iteration {c+1} of {my_n_patches} Intermediate Estimates:\n\tCross-entropy_intermediate={my_ppl/num_tokens_generated}\n\tPerplexity_intermediate={math.exp(my_ppl/num_tokens_generated)}")
+        print(
+            f"Iteration {c+1} of {my_n_patches} Intermediate Estimates:\n\tCross-entropy_intermediate={my_ppl/num_tokens_generated}\n\tPerplexity_intermediate={math.exp(my_ppl/num_tokens_generated)}"
+        )
     ending_time = datetime.datetime.now()
-    print (f"### Done @ {ending_time} after processing for {ending_time-starting_time} generated {num_tokens_generated} tokens.")
+    print(
+        f"### Done @ {ending_time} after processing for {ending_time-starting_time} generated {num_tokens_generated} tokens."
+    )
 
-    print(f"Integral Cross-Entropy={my_ppl} Average Cross-Entropy={my_ppl/num_tokens_generated} PPL={math.exp(my_ppl/num_tokens_generated)}")
+    print(
+        f"Integral Cross-Entropy={my_ppl} Average Cross-Entropy={my_ppl/num_tokens_generated} PPL={math.exp(my_ppl/num_tokens_generated)}"
+    )
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-    description='Benchmark the latency of processing a single batch of '
+        description='Benchmark the latency of processing a single batch of '
         'requests till completion.')
     parser.add_argument('--model', type=str, default='facebook/opt-125m')
-    parser.add_argument('--data', type=str, default='./wikitext/wikitext-2-v1/test-00000-of-00001.parquet')
+    parser.add_argument(
+        '--data',
+        type=str,
+        default='./wikitext/wikitext-2-v1/test-00000-of-00001.parquet')
     parser.add_argument('--context-size', type=int, default=4096)
     parser.add_argument('--kv-cache-scales-path', type=str, default='')
     parser.add_argument('--tensor-parallel-size', '-tp', type=int, default=1)
@@ -162,7 +175,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--kv-cache-dtype",
         type=str,
-        choices=['auto', 'fp8_e5m2','fp8'],
+        choices=['auto', 'fp8_e5m2', 'fp8'],
         default='auto',
         help=
         'Data type for kv cache storage. If "auto", will use model data type.')
