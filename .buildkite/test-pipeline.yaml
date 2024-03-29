@@ -33,10 +33,11 @@ steps:
   num_gpus: 2 # only support 1 or 2 for now.
   commands:
   - pytest -v -s test_pynccl.py
-  - TEST_DIST_MODEL=facebook/opt-125m pytest -v -s test_basic_distributed_correctness.py
-  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf pytest -v -s test_basic_distributed_correctness.py
-  - TEST_DIST_MODEL=facebook/opt-125m pytest -v -s test_chunked_prefill_distributed.py
-  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf pytest -v -s test_chunked_prefill_distributed.py
+  # Use spawn to avoid CUDA re-init issues
+  - TEST_DIST_MODEL=facebook/opt-125m MULTIPROC_METHOD=spawn pytest -v -s test_basic_distributed_correctness.py
+  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf MULTIPROC_METHOD=spawn pytest -v -s test_basic_distributed_correctness.py
+  - TEST_DIST_MODEL=facebook/opt-125m MULTIPROC_METHOD=spawn pytest -v -s test_chunked_prefill_distributed.py
+  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf MULTIPROC_METHOD=spawn pytest -v -s test_chunked_prefill_distributed.py
 
 - label: Engine Test
   command: pytest -v -s engine tokenization test_sequence.py test_config.py

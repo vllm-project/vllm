@@ -1,5 +1,6 @@
 import asyncio
 import multiprocessing
+import os
 import threading
 import traceback
 import uuid
@@ -17,7 +18,8 @@ _TERMINATE = "TERMINATE"  # sentinel
 
 # Use dedicated multiprocess context for workers.
 # Both spawn and fork work
-mp = multiprocessing.get_context("fork")
+mp_method = os.getenv("MULTIPROC_METHOD", "fork")
+mp = multiprocessing.get_context(mp_method)
 
 
 @dataclass

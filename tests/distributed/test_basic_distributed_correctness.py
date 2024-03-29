@@ -25,6 +25,7 @@ MODELS = [
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
+@pytest.mark.parametrize("worker_use_ray", [False, True])
 def test_models(
     hf_runner,
     vllm_runner,
@@ -32,17 +33,17 @@ def test_models(
     model: str,
     dtype: str,
     max_tokens: int,
+    worker_use_ray: bool,
 ) -> None:
 
     hf_model = hf_runner(model, dtype=dtype)
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
     del hf_model
 
-    vllm_model = vllm_runner(
-        model,
-        dtype=dtype,
-        tensor_parallel_size=2,
-    )
+    vllm_model = vllm_runner(model,
+                             dtype=dtype,
+                             tensor_parallel_size=2,
+                             worker_use_ray=worker_use_ray)
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
 
