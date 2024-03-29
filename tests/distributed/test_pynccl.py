@@ -14,7 +14,9 @@ def distributed_run(fn, world_size):
     for i in range(number_of_processes):
         env = os.environ.copy()
         env['RANK'] = str(i)
+        env['LOCAL_RANK'] = str(i)
         env['WORLD_SIZE'] = str(number_of_processes)
+        env['LOCAL_WORLD_SIZE'] = str(number_of_processes)
         env['MASTER_ADDR'] = 'localhost'
         env['MASTER_PORT'] = '12345'
         p = multiprocessing.Process(target=fn, args=(env, ))

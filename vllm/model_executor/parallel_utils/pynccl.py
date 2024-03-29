@@ -202,11 +202,11 @@ class NCCLCommunicator:
         init_method=None,
         timeout=datetime.timedelta(seconds=10),
         world_size: int = -1,
-        local_rank: int = -1,
         rank: int = -1,
         store=None,
         group_name: str = "",
         pg_options=None,
+        local_rank: int = -1,
     ):
         if not dist.is_initialized():
             backend = backend or "nccl"
@@ -220,6 +220,11 @@ class NCCLCommunicator:
                                     store=store,
                                     group_name=group_name,
                                     pg_options=pg_options)
+        self.rank = dist.get_rank()
+        self.world_size = dist.get_world_size()
+        if local_rank == -1:
+            local_rank = self.rank
+        self.local_rank = local_rank
         torch.cuda.set_device(local_rank)
         if rank == 0:
             self.unique_id = ncclGetUniqueId()
