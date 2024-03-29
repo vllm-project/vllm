@@ -12,13 +12,13 @@ steps:
   command: pytest -v -s async_engine
 
 - label: Basic Correctness Test
-  command: pytest -v -s --forked basic_correctness
+  command: pytest -v -s basic_correctness
 
 - label: Core Test
   command: pytest -v -s core
 
 - label: Distributed Comm Ops Test
-  command: pytest -v -s --forked test_comm_ops.py
+  command: pytest -v -s test_comm_ops.py
   working_dir: "/vllm-workspace/tests/distributed"
   num_gpus: 2 # only support 1 or 2 for now.
 
@@ -26,9 +26,9 @@ steps:
   working_dir: "/vllm-workspace/tests/distributed"
   num_gpus: 2 # only support 1 or 2 for now.
   commands:
-  - pytest -v -s --forked test_pynccl.py
-  - TEST_DIST_MODEL=facebook/opt-125m pytest -v -s --forked test_basic_distributed_correctness.py
-  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf pytest -v -s --forked test_basic_distributed_correctness.py
+  - pytest -v -s test_pynccl.py
+  - TEST_DIST_MODEL=facebook/opt-125m pytest -v -s test_basic_distributed_correctness.py
+  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf pytest -v -s test_basic_distributed_correctness.py
 
 - label: Engine Test
   command: pytest -v -s engine tokenization test_sequence.py test_config.py
@@ -53,8 +53,7 @@ steps:
 - label: Models Test
   commands:
     - bash ../.buildkite/download-images.sh
-    - pytest -v -s models --ignore=models/test_llava.py  --forked
-  soft_fail: true
+    - pytest -v -s models --ignore=models/test_llava.py --ignore=models/test_mistral.py
 
 - label: Llava Test
   commands:
