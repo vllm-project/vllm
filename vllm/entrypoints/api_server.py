@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams
+from vllm.usage.usage_lib import UsageContext
 from vllm.utils import random_uuid
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
@@ -100,9 +101,9 @@ if __name__ == "__main__":
         help="FastAPI root_path when app is behind a path based routing proxy")
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
-
     engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine = AsyncLLMEngine.from_engine_args(engine_args)
+    engine = AsyncLLMEngine.from_engine_args(
+        engine_args, usage_context=UsageContext.API_SERVER)
 
     app.root_path = args.root_path
     uvicorn.run(app,

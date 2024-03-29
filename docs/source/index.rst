@@ -73,6 +73,7 @@ Documentation
    serving/deploying_with_docker
    serving/distributed_serving
    serving/metrics
+   serving/usage_stats
    serving/integrations
 
 .. toctree::

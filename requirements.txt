@@ -5,6 +5,9 @@ ray >= 2.9
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
 torch == 2.1.2
+requests
+psutil
+py-cpuinfo
 transformers >= 4.39.1  # Required for StarCoder2 & Llava.
 xformers == 0.0.23.post1  # Required for CUDA 12.1.
 fastapi

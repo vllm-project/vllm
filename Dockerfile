@@ -132,5 +132,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY --from=build /workspace/vllm/*.so /workspace/vllm/
 COPY vllm vllm
 
+ENV VLLM_USAGE_SOURCE production-docker-image
+
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 #################### OPENAI API SERVER ####################

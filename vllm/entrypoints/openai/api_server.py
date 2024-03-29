@@ -22,6 +22,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.logger import init_logger
+from vllm.usage.usage_lib import UsageContext
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
@@ -151,9 +152,9 @@ if __name__ == "__main__":
         served_model = args.served_model_name
     else:
         served_model = args.model
-
     engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine = AsyncLLMEngine.from_engine_args(engine_args)
+    engine = AsyncLLMEngine.from_engine_args(
+        engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
     openai_serving_chat = OpenAIServingChat(engine, served_model,
                                             args.response_role,
                                             args.lora_modules,
