@@ -3,7 +3,7 @@
 """
 This is a script that produces a realistic PPL measurement 
 for the quantized KV cache system by processing a sequence of 
-non-overlapping patches of the reference text.Generation of the 
+non-overlapping patches of the reference text. Generation of the 
 consequtive symbols in each patch is governed (forced)
 by the reference text.
 
@@ -28,6 +28,17 @@ Running llama-2-7b model
     --sample-size=512
 )
 should result in PPL ~ 6.524227946419175
+
+Running llama-2-7b model 
+( 
+    ./vllm/benchmarks/measure_ppl2_MC.py 
+    --model=/data/models/llama-2-7b-chat-hf 
+    --data=./vllm/tests/prompts/wiki.test.raw 
+    --context-size=1024 
+    --sample-size=512
+    --patch-size=1
+)
+should result in PPL ~ PPL=3.8968611189957523
 
 """
 
