@@ -5,7 +5,7 @@
 # vendors, e.g. NCCL from NVIDIA, RCCL from AMD.
 # Put it simple, this is for data-plane communication.
 
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 import torch
 from torch.distributed import ReduceOp

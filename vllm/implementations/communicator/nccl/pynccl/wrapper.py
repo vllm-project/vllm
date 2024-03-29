@@ -22,6 +22,8 @@
 import ctypes
 from dataclasses import dataclass
 
+from tying import Any, List
+
 # === export types and functions from nccl to Python ===
 # for the original nccl definition, please check
 # https://github.com/NVIDIA/nccl/blob/master/src/nccl.h.in
@@ -31,6 +33,7 @@ ncclComm_t = ctypes.c_void_p
 ncclUniqueId = ctypes.c_byte * 128
 cudaStream_t = ctypes.c_void_p
 buffer_type = ctypes.c_void_p
+
 
 # enums
 class ncclDataType_t(ctypes.c_int):
@@ -60,32 +63,40 @@ class ncclRedOp_t(ctypes.c_int):
     ncclAvg = 4
     ncclNumOps = 5
 
+
 @dataclass
 class Function:
     name: str
     restype: Any
     argtypes: List[Any]
 
+
 class NCCLLibrary:
     exported_functions = [
         # ncclResult_t  ncclGetVersion(int *version);
-        Function("ncclGetVersion", ncclResult_t, [ctypes.POINTER(ctypes.c_int)]),
+        Function("ncclGetVersion", ncclResult_t,
+                 [ctypes.POINTER(ctypes.c_int)]),
         # ncclResult_t ncclGetUniqueId(ncclUniqueId* uniqueId);
-        Function("ncclGetUniqueId", ncclResult_t, [ctypes.POINTER(ncclUniqueId)]),
+        Function("ncclGetUniqueId", ncclResult_t,
+                 [ctypes.POINTER(ncclUniqueId)]),
         # ncclResult_t  ncclCommInitRank(
         #   ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank);
         # note that ncclComm_t is a pointer type, so the first argument
         # is a pointer to a pointer
-        Function("ncclCommInitRank", ncclResult_t,
-                [ctypes.POINTER(ncclComm_t), ctypes.c_int, ncclUniqueId, ctypes.c_int]),
+        Function("ncclCommInitRank", ncclResult_t, [
+            ctypes.POINTER(ncclComm_t), ctypes.c_int, ncclUniqueId,
+            ctypes.c_int
+        ]),
         # ncclResult_t  ncclAllReduce(
         #   const void* sendbuff, void* recvbuff, size_t count,
         #   ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm,
         #   cudaStream_t stream);
-        # note that cudaStream_t is a pointer type, so the last argument is a pointer
-        Function("ncclAllReduce", ncclResult_t,
-                [buffer_type, buffer_type, ctypes.c_size_t, ncclDataType_t,
-                ncclRedOp_t, ncclComm_t, cudaStream_t]),
+        # note that cudaStream_t is a pointer type, so the last argument
+        # is a pointer
+        Function("ncclAllReduce", ncclResult_t, [
+            buffer_type, buffer_type, ctypes.c_size_t, ncclDataType_t,
+            ncclRedOp_t, ncclComm_t, cudaStream_t
+        ]),
         # ncclResult_t  ncclCommDestroy(ncclComm_t comm);
         Function("ncclCommDestroy", ncclResult_t, [ncclComm_t]),
     ]
@@ -98,7 +109,7 @@ class NCCLLibrary:
             f.restype = func.restype
             f.argtypes = func.argtypes
             self._funcs[func.name] = f
-    
+
     def ncclGetVersion(self) -> str:
         version = ctypes.c_int()
         result = self._funcs["ncclGetVersion"](ctypes.byref(version))
@@ -110,26 +121,33 @@ class NCCLLibrary:
         patch = version_str[3:].lstrip("0")
         return f"{major}.{minor}.{patch}"
 
-    def ncclGetUniqueId(self) -> NcclUniqueId:
-        unique_id = NcclUniqueId()
+    def ncclGetUniqueId(self) -> ncclUniqueId:
+        unique_id = ncclUniqueId()
         result = self._funcs["ncclGetUniqueId"](ctypes.byref(unique_id))
         assert result == 0
         return unique_id
 
-    def ncclCommInitRank(self, world_size: int, unique_id: NcclUniqueId, rank: int) -> ncclComm_t:
+    def ncclCommInitRank(self, world_size: int, unique_id: ncclUniqueId,
+                         rank: int) -> ncclComm_t:
         comm = ncclComm_t()
-        result = self._funcs["ncclCommInitRank"](ctypes.byref(comm), world_size, unique_id, rank)
+        result = self._funcs["ncclCommInitRank"](ctypes.byref(comm),
+                                                 world_size, unique_id, rank)
         assert result == 0
         return comm
 
-    def ncclAllReduce(self, sendbuff: buffer_type, recvbuff: buffer_type, count: int,
-                      datatype: ncclDataType_t, op: ncclRedOp_t, comm: ncclComm_t,
-                      stream: cudaStream_t) -> None:
-        result = self._funcs["ncclAllReduce"](sendbuff, recvbuff, count, datatype, op, comm, stream)
+    def ncclAllReduce(self, sendbuff: buffer_type, recvbuff: buffer_type,
+                      count: int, datatype: ncclDataType_t, op: ncclRedOp_t,
+                      comm: ncclComm_t, stream: cudaStream_t) -> None:
+        result = self._funcs["ncclAllReduce"](sendbuff, recvbuff, count,
+                                              datatype, op, comm, stream)
         assert result == 0
 
     def ncclCommDestroy(self, comm: ncclComm_t) -> None:
         result = self._funcs["ncclCommDestroy"](comm)
         assert result == 0
 
-__all__ = ["NCCLLibrary", "ncclDataType_t", "ncclRedOp_t", "ncclUniqueId", "ncclComm_t", "cudaStream_t", "buffer_type"]
+
+__all__ = [
+    "NCCLLibrary", "ncclDataType_t", "ncclRedOp_t", "ncclUniqueId",
+    "ncclComm_t", "cudaStream_t", "buffer_type"
+]

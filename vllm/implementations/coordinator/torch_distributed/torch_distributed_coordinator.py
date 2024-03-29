@@ -2,10 +2,10 @@
 # PyTorch's distributed package.
 
 import os
+from typing import List, Optional
 
 import torch
 import torch.distributed as dist
-from typing import List, Optional
 
 from vllm.interfaces.coordinator import Coordinator
 

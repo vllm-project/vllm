@@ -1,5 +1,6 @@
 from enum import Enum, auto
 
+
 class CoordinatorType(Enum):
     TORCH_DISTRIBUTED = auto()
 

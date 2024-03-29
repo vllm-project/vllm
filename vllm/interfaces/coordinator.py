@@ -114,6 +114,7 @@ class Coordinator(ABC):
         """
         raise NotImplementedError
 
+    @abstractmethod
     def __del__(self):
-        """Finalize the coordinator."""
-        pass
+        """Release the resources."""
+        raise NotImplementedError

@@ -1,24 +1,32 @@
-from vllm.implementations.communicator.nccl.pynccl.wrapper import NCCLLibrary, ncclDataType_t, ncclRedOp_t, ncclUniqueId, cudaStream_t, buffer_type, ncclComm_t
-from typing import Optional
-from contextlib import contextmanager
+import ctypes
 import logging
+import os
+from contextlib import contextmanager
+from typing import Any, Optional
 
-from vllm.interfaces.coordinator import Coordinator
+import torch
+
+from vllm.implementations.communicator.nccl.pynccl.wrapper import (
+    NCCLLibrary, buffer_type, cudaStream_t, ncclComm_t, ncclDataType_t,
+    ncclRedOp_t, ncclUniqueId)
 from vllm.interfaces.communicator import Communicator, ReduceOp
+from vllm.interfaces.coordinator import Coordinator
 
 logger = logging.getLogger(__name__)
-
 
 # script to manage the path of the nccl library
 
 so_file: Optional[str] = None
 
+
 def set_pynccl_path(path: str) -> None:
     global so_file
     so_file = path
 
+
 def get_pynccl_path() -> Optional[str]:
     return so_file
+
 
 @contextmanager
 def change_pynccl_path(path: str) -> None:
@@ -34,21 +42,23 @@ class NCCLCommunicator(Communicator):
     def __init__(
         self,
         coordinator: Coordinator,
-        path_of_nccl: str=None,
+        path_of_nccl: str = None,
     ):
         if "CUDA_VISIBLE_DEVICES" in os.environ:
             visible_gpus = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
             assert len(visible_gpus) >= coordinator.get_group_size(), \
-                f"Number of visible GPUs {len(visible_gpus)} is less than the number of processes in the group {coordinator.group}."
+                (f"Number of visible GPUs {len(visible_gpus)} is less than"
+                f" the number of processes in the group {coordinator.group}.")
 
         super().__init__(coordinator)
 
-        # search priority: 
+        # search priority:
         # 1. path_of_nccl (passed in the constructor of NCCLCommunicator)
         # 2. so_file (set by users calling `set_pynccl_path`)
         # 3. VLLM_NCCL_SO_PATH environment variable
         # 4. default path
-        path_of_nccl = path_of_nccl or so_file or os.environ.get("VLLM_NCCL_SO_PATH", "")
+        path_of_nccl = path_of_nccl or so_file or os.environ.get(
+            "VLLM_NCCL_SO_PATH", "")
         if not path_of_nccl:
             # not set yet, try a decent guess as default
             if torch.version.cuda is not None:
@@ -65,22 +75,27 @@ class NCCLCommunicator(Communicator):
             logger.error(
                 f"Failed to load NCCL library from {path_of_nccl} ."
                 "It is expected if you are not running on NVIDIA/AMD GPUs."
-                "Otherwise please set the environment variable VLLM_NCCL_SO_PATH"
+                "Otherwise please set environment variable VLLM_NCCL_SO_PATH"
                 " to point to the correct nccl library path.")
             raise e
-        
+
         logger.info(f"vLLM is using nccl=={self.lib.ncclGetVersion()}")
-        torch.cuda.set_device(coordinator.get_local_rank())
+        local_rank = coordinator.get_local_rank()
+        torch.cuda.set_device(local_rank)
         self.stream = torch.cuda.Stream(device=f"cuda:{local_rank}")
         if coordinator.is_group_master():
             # get a unique id by calling nccl library
             self.unique_id = self.lib.ncclGetUniqueId()
         else:
             # default initialization of unique_id
-            self.unique_id = NcclUniqueId()
-        coordinator.broadcast(self.unique_id, src=coordinator.get_group_master_rank())
+            self.unique_id = ncclUniqueId()
+        coordinator.broadcast(self.unique_id,
+                              src=coordinator.get_group_master_rank())
         self.comm = ncclComm_t()
-        result = self.lib.ncclCommInitRank(ctypes.byref(self.comm), coordinator.get_group_size(), self.unique_id, coordinator.get_group_rank())
+        result = self.lib.ncclCommInitRank(ctypes.byref(self.comm),
+                                           coordinator.get_group_size(),
+                                           self.unique_id,
+                                           coordinator.get_group_rank())
         assert result == 0
 
     @staticmethod
@@ -120,8 +135,8 @@ class NCCLCommunicator(Communicator):
             stream = self.stream
         result = self.lib.ncclAllReduce(buffer_type(tensor_in.data_ptr()),
                                         buffer_type(tensor_out.data_ptr()),
-                                        tensor_in.numel(),
-                                        dtype, op, self.comm,
+                                        tensor_in.numel(), dtype, op,
+                                        self.comm,
                                         cudaStream_t(stream.cuda_stream))
         assert result == 0
 
