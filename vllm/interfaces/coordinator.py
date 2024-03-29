@@ -6,7 +6,7 @@
 # Put it simple, this is for control-plane communication.
 
 from abc import ABC, abstractmethod
-from typing import Any, List, Optional
+from typing import List
 
 
 class Coordinator(ABC):
@@ -19,9 +19,10 @@ class Coordinator(ABC):
     5. The current group the process belongs to.
 
     Note that if the `group` is provided, the coordinator should only
-    synchronize the processes in the group. If you want to not only coordinate all the processes
-    but also coordinate groups of processes, you can create multiple coordinators. In that case,
-    the coordinator with all the processes must be initialized first.
+    synchronize the processes in the group. If you want to not only
+    coordinate **all** the processes but also coordinate **subgroups**
+    of processes, you can create multiple coordinators. In that case,
+    the coordinator with only one group must be initialized first.
 
     To avoid confusion in argument passing, all arguments are set
     to be keyword-only.
@@ -85,7 +86,7 @@ class Coordinator(ABC):
     def get_group_size(self) -> int:
         """Get the size of the group."""
         return len(self.group)
-    
+
     def get_group_rank(self) -> int:
         """Get the rank of the current process inside the group."""
         return self.group.index(self.rank)

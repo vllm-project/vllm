@@ -48,7 +48,8 @@ class TorchDistributedCoordinator(Coordinator):
             dist.init_process_group(backend='gloo')
             self.process_group = dist.group.WORLD
         else:
-            self.process_group = dist.new_group(ranks=self.group, backend='gloo')
+            self.process_group = dist.new_group(ranks=self.group,
+                                                backend='gloo')
         super().initialize()
 
     def barrier(self):
