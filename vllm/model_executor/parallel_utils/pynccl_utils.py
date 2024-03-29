@@ -1,11 +1,12 @@
 import contextlib
-import logging
 from typing import Optional
 
 import torch
 from torch.distributed import ReduceOp
 
-logger = logging.getLogger(__name__)
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 try:
     from vllm.model_executor.parallel_utils.pynccl import (NCCLCommunicator,

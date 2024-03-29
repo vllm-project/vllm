@@ -1,16 +1,16 @@
-import logging
 from abc import ABC, abstractmethod, abstractproperty
 from typing import Any, Dict, List, Optional, Set, Type
 
 import torch
 
 from vllm.config import LoRAConfig
+from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.models import (LoRAModel, LoRAModelManager,
                               LRUCacheLoRAModelManager, create_lora_manager)
 from vllm.lora.request import LoRARequest
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 
 class AbstractWorkerLoRAManager(ABC):

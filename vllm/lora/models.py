@@ -1,6 +1,5 @@
 import copy
 import json
-import logging
 import math
 import os
 import re
@@ -11,13 +10,14 @@ import torch
 from torch import nn
 
 from vllm.config import LoRAConfig
+from vllm.logger import init_logger
 from vllm.lora.layers import (BaseLayerWithLoRA, LoRAMapping, from_layer,
                               from_layer_logits_processor)
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.utils import parse_fine_tuned_lora_name, replace_submodule
 from vllm.utils import LRUCache, is_pin_memory_available
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 _GLOBAL_LORA_ID = 0
 
