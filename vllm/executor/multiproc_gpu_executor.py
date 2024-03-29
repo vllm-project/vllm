@@ -1,5 +1,6 @@
 import asyncio
 import os
+from functools import partial
 from typing import Any, Dict, Optional, Tuple
 
 from vllm.engine.local_worker_utils import (LocalWorkerVllm, ResultHandler,
@@ -11,6 +12,12 @@ from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async, set_cuda_visible_devices)
 
 logger = init_logger(__name__)
+
+
+def _create_worker(*args, **kwargs):
+    # Import within worker process to avoid CUDA init issues
+    from vllm.worker.worker import Worker
+    return Worker(*args, **kwargs)
 
 
 class MultiProcGPUExecutor(MultiGPUExecutor):
@@ -42,18 +49,20 @@ class MultiProcGPUExecutor(MultiGPUExecutor):
             self.workers = [
                 LocalWorkerVllm(
                     result_handler,
-                    model_config=self.model_config,
-                    parallel_config=self.parallel_config,
-                    scheduler_config=self.scheduler_config,
-                    device_config=self.device_config,
-                    cache_config=self.cache_config,
-                    local_rank=rank,
-                    rank=rank,
-                    distributed_init_method=distributed_init_method,
-                    lora_config=self.lora_config,
-                    vision_language_config=self.vision_language_config,
-                    tensorizer_config=self.tensorizer_config,
-                ) for rank in range(1, world_size)
+                    partial(
+                        _create_worker,
+                        model_config=self.model_config,
+                        parallel_config=self.parallel_config,
+                        scheduler_config=self.scheduler_config,
+                        device_config=self.device_config,
+                        cache_config=self.cache_config,
+                        local_rank=rank,
+                        rank=rank,
+                        distributed_init_method=distributed_init_method,
+                        lora_config=self.lora_config,
+                        vision_language_config=self.vision_language_config,
+                        tensorizer_config=self.tensorizer_config,
+                    )) for rank in range(1, world_size)
             ]
 
             for worker in self.workers:

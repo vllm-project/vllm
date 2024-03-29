@@ -6,7 +6,7 @@ import traceback
 import uuid
 from dataclasses import dataclass
 from multiprocessing.connection import wait
-from typing import Dict, Generic, List, Optional, TypeVar, Union
+from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar, Union
 
 from vllm.logger import init_logger
 
@@ -128,13 +128,13 @@ class LocalWorkerVllm(mp.Process):
     """Local process wrapper for vllm.worker.Worker 
     for handling single-node multi-GPU tensor parallel."""
 
-    def __init__(self, result_handler: ResultHandler, *args, **kwargs) -> None:
+    def __init__(self, result_handler: ResultHandler,
+                 worker_factory: Callable[[], Any]) -> None:
         super().__init__(daemon=True)
         self._task_queue = mp.Queue()
         self.result_queue = result_handler.result_queue
         self.tasks = result_handler.tasks
-        self.worker_args = args
-        self.worker_kwargs = kwargs
+        self.worker_factory = worker_factory
         self.worker = None
 
     def _enqueue_task(self, future: Union[ResultFuture, asyncio.Future],
@@ -174,10 +174,8 @@ class LocalWorkerVllm(mp.Process):
         logger = init_logger(__name__)
 
         del self.tasks  # Not used in forked process
-        from vllm.worker.worker import Worker
-        self.worker = Worker(*self.worker_args, **self.worker_kwargs)
-        del self.worker_args
-        del self.worker_kwargs
+        self.worker = self.worker_factory()
+        del self.worker_factory
 
         # Accept tasks from the engine in task_queue
         # and return task output in result_queue
