@@ -41,11 +41,13 @@ should result in PPL ~ PPL=3.8968611189957523
 
 """
 
-from transformers import LlamaTokenizer
-import datetime
 import argparse
-from vllm import LLM, SamplingParams
+import datetime
 import math
+
+from transformers import LlamaTokenizer
+
+from vllm import LLM, SamplingParams
 
 
 def get_wikitext2_text(tokenizer):
@@ -111,9 +113,10 @@ def main(args: argparse.Namespace):
 
     num_tokens_generated = 0
     starting_time = datetime.datetime.now()
-    print(
-        f"### Starting generation @ {starting_time} will try to process {my_n_patches} patches, generating {my_n_samples} token in each patch from the initial context of {args.context_size} tokens."
-    )
+    print(f"### Starting generation @ {starting_time} \
+will try to process {my_n_patches} patche(s), \
+generating {my_n_samples} tokens in each patch \
+from the initial context of {args.context_size} tokens.")
     for c in range(my_n_patches):
         CONTEXT = []
         my_sampl_par.future_context = []
@@ -129,18 +132,15 @@ def main(args: argparse.Namespace):
         LOGPROBS = vllm_predict(CONTEXT, my_llm, my_sampl_par)
         num_tokens_generated += len(LOGPROBS[0].outputs[0].token_ids)
         my_ppl -= LOGPROBS[0].outputs[0].cumulative_logprob
-
-        print(
-            f"Iteration {c+1} of {my_n_patches} Intermediate Estimates:\n\tCross-entropy_intermediate={my_ppl/num_tokens_generated}\n\tPerplexity_intermediate={math.exp(my_ppl/num_tokens_generated)}"
-        )
+        print(f"Iteration {c+1} of {my_n_patches} Intermediate Estimates:\n\
+\tCross-entropy_intermediate={my_ppl/num_tokens_generated}\n\
+\tPerplexity_intermediate={math.exp(my_ppl/num_tokens_generated)}")
     ending_time = datetime.datetime.now()
-    print(
-        f"### Done @ {ending_time} after processing for {ending_time-starting_time} generated {num_tokens_generated} tokens."
-    )
+    print(f"### Done @ {ending_time} after processing for \
+{ending_time-starting_time} generated {num_tokens_generated} tokens.")
 
-    print(
-        f"Integral Cross-Entropy={my_ppl} Average Cross-Entropy={my_ppl/num_tokens_generated} PPL={math.exp(my_ppl/num_tokens_generated)}"
-    )
+    print(f"Integral Cross-Entropy={my_ppl} Average Cross-Entropy=\
+{my_ppl/num_tokens_generated} PPL={math.exp(my_ppl/num_tokens_generated)}")
 
 
 if __name__ == "__main__":
