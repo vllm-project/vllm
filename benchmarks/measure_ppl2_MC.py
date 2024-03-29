@@ -52,6 +52,7 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+
 def get_wikitext2_text(tokenizer):
     with open(args.data) as f:
         test_text = "\n".join(line.strip() for line in f)
@@ -134,7 +135,8 @@ from the initial context of {args.context_size} tokens.")
         LOGPROBS = vllm_predict(CONTEXT, my_llm, my_sampl_par)
         num_tokens_generated += len(LOGPROBS[0].outputs[0].token_ids)
         my_ppl -= LOGPROBS[0].outputs[0].cumulative_logprob
-        logger.info(f"Iteration {c+1} of {my_n_patches} Intermediate Estimates:\n\
+        logger.info(f"Iteration {c+1} of {my_n_patches} Intermediate \
+Estimates:\n\
 \tCross-entropy_intermediate={my_ppl/num_tokens_generated}\n\
 \tPerplexity_intermediate={math.exp(my_ppl/num_tokens_generated)}")
     ending_time = datetime.datetime.now()
