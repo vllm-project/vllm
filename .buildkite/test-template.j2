@@ -53,6 +53,8 @@ steps:
                     nvidia.com/gpu: "{{ step.num_gpus or default_num_gpu }}"
                 {% endif %}
                 env:
+                  - name: VLLM_USAGE_SOURCE
+                    value: ci-test
                   - name: HF_TOKEN
                     valueFrom:
                       secretKeyRef:

@@ -8,7 +8,7 @@ Note: Marlin internally uses locks to synchronize the threads. This can
 result in very slight nondeterminism for Marlin. As a result, we re-run the test
 up to 3 times to see if we pass.
 
-Run `pytest tests/models/test_marlin.py --forked`.
+Run `pytest tests/models/test_marlin.py`.
 """
 
 from dataclasses import dataclass
@@ -63,7 +63,6 @@ def test_models(
     # Note: not sure why, but deleting just the model on Ada Lovelace
     #   does not free the GPU memory. On Ampere, deleting the just model
     #   frees the memory.
-    del marlin_model.model.llm_engine.driver_worker
     del marlin_model
 
     gptq_model = vllm_runner(model_pair.model_gptq, dtype=dtype)
@@ -74,7 +73,6 @@ def test_models(
     # Note: not sure why, but deleting just the model on Ada Lovelace
     #   does not free the GPU memory. On Ampere, deleting the just model
     #   frees the memory.
-    del gptq_model.model.llm_engine.driver_worker
     del gptq_model
 
     # loop through the prompts

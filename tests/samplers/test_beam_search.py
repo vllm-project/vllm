@@ -1,6 +1,6 @@
 """Compare the outputs of HF and vLLM when using beam search.
 
-Run `pytest tests/samplers/test_beam_search.py --forked`.
+Run `pytest tests/samplers/test_beam_search.py`.
 """
 import gc
 

@@ -23,7 +23,7 @@ def graph_allreduce(world_size, rank, distributed_init_port):
     del os.environ["CUDA_VISIBLE_DEVICES"]
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
-    init_test_distributed_environment(1, world_size, rank, rank,
+    init_test_distributed_environment(1, world_size, rank,
                                       distributed_init_port)
 
     custom_ar.init_custom_ar()
@@ -58,7 +58,7 @@ def eager_allreduce(world_size, rank, distributed_init_port):
     del os.environ["CUDA_VISIBLE_DEVICES"]
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
-    init_test_distributed_environment(1, world_size, rank, rank,
+    init_test_distributed_environment(1, world_size, rank,
                                       distributed_init_port)
 
     sz = 1024
