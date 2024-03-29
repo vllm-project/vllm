@@ -32,18 +32,28 @@ class TorchDistributedCoordinator(Coordinator):
                          world_size=world_size,
                          local_rank=local_rank,
                          local_world_size=local_world_size)
+        self.group = None
 
     def initialize(self):
-        assert not dist.is_initialized()
-        dist.init_process_group(backend='gloo')
+        # in `torch.distributed`, we can only initialize the process group once
+        # if the process group is already initialized, we should not initialize
+        # it again, but need to use `new_group` to create a new group.
+        # in either case, `self.group` contains all the processes. It's just we
+        # use `gloo` backend ourselves inside this coordinator,
+        # to avoid interfering with other process groups.
+        if not dist.is_initialized():
+            dist.init_process_group(backend='gloo')
+            self.group = dist.group.WORLD
+        else:
+            self.group = dist.new_group(backend='gloo')
         super().initialize()
 
     def barrier(self):
-        dist.barrier()
+        dist.barrier(group=self.group)
 
     def broadcast(self, message: bytearray, src: int = 0):
         tensor = torch.tensor(list(message), dtype=torch.uint8)
-        dist.broadcast(tensor, src=src)
+        dist.broadcast(tensor, src=src, group=self.group)
         data = tensor.tolist()
         for i in range(len(message)):
             message[i] = data[i]
