@@ -29,17 +29,9 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ReduceOp
 
-from vllm.model_executor.parallel_utils.find_lib import get_library_path
-from vllm.utils import is_hip
-
 logger = logging.getLogger(__name__)
 
-if is_hip():
-    # a robust way to get the path of librccl,
-    # no matter it is librccl.so, or librccl.so.1
-    so_file = get_library_path("librccl.so")
-else:
-    so_file = os.environ.get("VLLM_NCCL_SO_PATH", "")
+so_file = os.environ.get("VLLM_NCCL_SO_PATH", "")
 
 # manually load the nccl library
 if so_file:
@@ -229,6 +221,7 @@ class NCCLCommunicator:
                                     pg_options=pg_options)
         self.world_size = dist.get_world_size()
         self.rank = dist.get_rank()
+        # this also caused invalid device ordinal (why we need two init process group? one from pytorch.dist, one from this place, again, duplicated)
         torch.cuda.set_device(self.rank)
         if self.rank == 0:
             self.unique_id = ncclGetUniqueId()
@@ -263,4 +256,5 @@ class NCCLCommunicator:
 
     def __del__(self):
         dist.destroy_process_group()
+        # AttributeError: 'NCCLCommunicator' object has no attribute 'comm'
         _c_ncclCommDestroy(self.comm)
