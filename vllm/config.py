@@ -211,26 +211,41 @@ class ModelConfig:
         quant_cfg = getattr(self.hf_config, "quantization_config", None)
         if quant_cfg is not None:
             quant_method = quant_cfg.get("quant_method", "").lower()
-            # compat: autogptq >=0.8.0 use checkpoint_format: str
-            # compat: autogptq <=0.7.1 is_marlin_format: bool
-            is_format_marlin = (quant_cfg.get("checkpoint_format") == "marlin"
-                                or quant_cfg.get("is_marlin_format", False))
 
-            # Use marlin if the GPTQ model is serialized in marlin format.
-            if quant_method == "gptq" and is_format_marlin:
-                logger.info("The model is serialized in Marlin format. "
-                            "Using Marlin kernel.")
-                quant_method = "marlin"
-                if self.quantization == "gptq":
-                    self.quantization = quant_method
+            # Process marlin
+            if is_marlin_supported() and quant_method == "gptq":
+                # If the GPTQ model is serialized in marlin format,
+                # then use "marlin".
+                #   compat: autogptq >=0.8.0 use checkpoint_format: str
+                #   compat: autogptq <=0.7.1 is_marlin_format: bool
+                is_format_marlin = (
+                    quant_cfg.get("checkpoint_format") == "marlin"
+                    or quant_cfg.get("is_marlin_format", False))
+                if is_format_marlin:
+                    # TODO: Switch this case to use gptq_marlin as well
+                    # (after some more testings)
+                    logger.info("The model is serialized in Marlin format. "
+                                "Using marlin kernel.")
+                    quant_method = "marlin"
+                    if self.quantization == "gptq":
+                        # This forces Marlin
+                        self.quantization = quant_method
 
-            # If GPTQ was specified explicitly,
-            # then use GPTQ (and not gptq_marlin)
-            if self.quantization == "gptq" and hf_quant_method == "gptq_marlin":
+                # If GPTQ model can be converted to Marlin on-the-fly,
+                # then use "gptq_marlin"
+                elif is_marlin_compatible(quant_cfg.get["bits"],
+                                          quant_cfg.get["group_size"],
+                                          quant_cfg.get["sym"]):
+                    logger.info("The model is compatible with gptq_marlin. "
+                                "Using gptq_marlin kernel")
+                    quant_method = "gptq_marlin"
+
+            # If GPTQ was specified explicitly, then use GPTQ
+            if self.quantization == "gptq" and quant_method == "gptq_marlin":
                 logger.warning(
                     "gptq quantization was specified. Consider using "
                     "gptq_marlin instead for better performance results.")
-                hf_quant_method = "gptq"
+                quant_method = "gptq"
 
             # Verify
             if self.quantization is None:
