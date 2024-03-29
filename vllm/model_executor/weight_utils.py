@@ -283,9 +283,8 @@ def kv_cache_scales_loader(
     previously serialized to disk. Used by the model to populate the appropriate
     KV cache scaling factors. The serialization should represent a dictionary
     whose keys are the TP ranks and values are another dictionary mapping layers
-    to their KV cache scaling factors.
-    Keep this function in sync with the output
-    of 3rdparty/quantization/extract_scales.py
+    to their KV cache scaling factors. Keep this function in sync with output of
+    examples/fp8/3rdparty/quantizer/extract_scales.py
     """
     try:
         with open(filename) as f:

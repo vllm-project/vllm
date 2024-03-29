@@ -15,7 +15,7 @@ build-backend = "setuptools.build_meta"
 line-length = 80
 exclude = [
     # External file, leaving license intact
-    "3rdparty/quantizer/quantize.py"
+    "examples/fp8/3rdparty/quantizer/quantize.py"
 ]
 
 [tool.ruff.lint]
