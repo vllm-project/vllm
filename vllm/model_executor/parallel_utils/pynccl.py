@@ -252,5 +252,7 @@ class NCCLCommunicator:
         assert result == 0
 
     def __del__(self):
-        dist.destroy_process_group()
+        # `dist` module might have been already destroyed
+        if hasattr(dist, 'destroy_process_group'):
+            dist.destroy_process_group()
         _c_ncclCommDestroy(self.comm)
