@@ -10,14 +10,13 @@ from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
 from vllm._C import ops
-
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.quantization.awq import (AWQConfig,
                                                          AWQLinearMethod)
 from vllm.model_executor.layers.quantization.gptq import (ExllamaState,
                                                           GPTQConfig,
                                                           GPTQLinearMethod)
-from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.model_executor.parallel_utils.parallel_state import (
     destroy_model_parallel, initialize_model_parallel)

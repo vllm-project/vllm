@@ -4,8 +4,8 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm._C import ops
-from vllm.model_executor.layers.fused_moe import (moe_align_block_size,
-                                                  fused_moe, fused_topk)
+from vllm.model_executor.layers.fused_moe import (fused_moe, fused_topk,
+                                                  moe_align_block_size)
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (

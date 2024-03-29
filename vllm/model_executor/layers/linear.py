@@ -5,8 +5,8 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
-from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_gather, tensor_model_parallel_all_reduce)
 from vllm.model_executor.parallel_utils.parallel_state import (
