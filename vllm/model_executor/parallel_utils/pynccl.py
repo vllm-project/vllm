@@ -221,7 +221,6 @@ class NCCLCommunicator:
                                     pg_options=pg_options)
         self.world_size = dist.get_world_size()
         self.rank = dist.get_rank()
-        # this also caused invalid device ordinal (why we need two init process group? one from pytorch.dist, one from this place, again, duplicated)
         torch.cuda.set_device(self.rank)
         if self.rank == 0:
             self.unique_id = ncclGetUniqueId()
@@ -256,5 +255,4 @@ class NCCLCommunicator:
 
     def __del__(self):
         dist.destroy_process_group()
-        # AttributeError: 'NCCLCommunicator' object has no attribute 'comm'
         _c_ncclCommDestroy(self.comm)
