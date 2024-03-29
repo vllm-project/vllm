@@ -13,6 +13,8 @@ from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import (get_cpu_memory, get_nvcc_cuda_version, is_cpu, is_hip,
                         is_neuron)
 
+from magic_wand import is_marlin_supported, is_marlin_compatible
+
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
@@ -222,6 +224,15 @@ class ModelConfig:
                 if self.quantization == "gptq":
                     self.quantization = quant_method
 
+            # If GPTQ was specified explicitly,
+            # then use GPTQ (and not gptq_marlin)
+            if self.quantization == "gptq" and hf_quant_method == "gptq_marlin":
+                logger.warning(
+                    "gptq quantization was specified. Consider using "
+                    "gptq_marlin instead for better performance results.")
+                hf_quant_method = "gptq"
+
+            # Verify
             if self.quantization is None:
                 self.quantization = quant_method
             elif self.quantization != quant_method:
@@ -241,7 +252,8 @@ class ModelConfig:
                 raise ValueError(
                     f"{self.quantization} quantization is currently not "
                     f"supported in ROCm.")
-            if self.quantization != "marlin":
+            if (self.quantization != "marlin"
+                    and self.quantization != "gptq_marlin"):
                 logger.warning(
                     f"{self.quantization} quantization is not fully "
                     "optimized yet. The speed can be slower than "

@@ -11,12 +11,10 @@ from vllm.model_executor.layers.linear import (LinearMethodBase,
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
-from magic_wand import (MARLIN_SUPPORTED_NUM_BITS,
-                        MARLIN_SUPPORTED_GROUP_SIZES, MARLIN_TILE,
-                        MARLIN_MIN_THREAD_N, MARLIN_MIN_THREAD_K,
-                        MARLIN_MAX_PARALLEL, get_pack_factor,
-                        marlin_permute_scales, marlin_repack_from_gptq,
-                        marlin_gemm)
+from magic_wand import (MARLIN_TILE, MARLIN_MIN_THREAD_N, MARLIN_MIN_THREAD_K,
+                        MARLIN_MAX_PARALLEL, is_marlin_compatible,
+                        get_pack_factor, marlin_permute_scales,
+                        marlin_repack_from_gptq, marlin_gemm)
 
 
 class GPTQMarlinConfig(QuantizationConfig):
@@ -30,17 +28,11 @@ class GPTQMarlinConfig(QuantizationConfig):
         self.is_sym = is_sym
 
         # Verify
-        if self.weight_bits not in MARLIN_SUPPORTED_NUM_BITS:
-            raise ValueError(f"Got weight_bits = {weight_bits}, but Marlin "
-                             f"only supports {MARLIN_SUPPORTED_NUM_BITS}")
-
-        if self.group_size not in MARLIN_SUPPORTED_GROUP_SIZES:
-            raise ValueError(f"Got group_size = {group_size}, but Marlin "
-                             f"only supports {MARLIN_SUPPORTED_GROUP_SIZES}")
-
-        if not self.is_sym:
-            raise ValueError(
-                "Marlin only supports symmetric quantized weights")
+        if not is_marlin_compatible(self.weight_bits, self.group_size,
+                                    self.is_sym):
+            raise ValueError(f"Marlin does not support quant config with: "
+                             f" weight_bits = {weight_bits}, group_size = "
+                             f"{group_size}, is_sym = {is_sym}")
 
         # Init
         self.pack_factor = get_pack_factor(weight_bits)
