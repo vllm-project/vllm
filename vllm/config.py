@@ -164,19 +164,18 @@ class ModelConfig:
                 "either 'auto' or 'slow'.")
         self.tokenizer_mode = tokenizer_mode
 
-    def _is_marlin_serialized(self, hf_quant_method: str, hf_quant_config: dict) -> bool:
+    def _is_marlin_serialized(self, hf_quant_method: str,
+                              hf_quant_config: dict) -> bool:
         # AutoGPTQ model is serialized as Marlin.
-        gptq_is_marlin_serialized = (
-            hf_quant_method == "gptq"
-            and "is_marlin_format" in hf_quant_config
-            and hf_quant_config["is_marlin_format"])
+        gptq_is_marlin_serialized = (hf_quant_method == "gptq"
+                                     and "is_marlin_format" in hf_quant_config
+                                     and hf_quant_config["is_marlin_format"])
 
         # AutoAWQ model is serialized as Marlin.
-        awq_is_marlin_serialized = (
-            hf_quant_method == "awq"
-            and "version" in hf_quant_config
-            and hf_quant_config["version"] == "marlin")
-        
+        awq_is_marlin_serialized = (hf_quant_method == "awq"
+                                    and "version" in hf_quant_config
+                                    and hf_quant_config["version"] == "marlin")
+
         return gptq_is_marlin_serialized or awq_is_marlin_serialized
 
     def _verify_quantization(self) -> None:

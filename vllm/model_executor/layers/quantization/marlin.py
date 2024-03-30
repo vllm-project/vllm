@@ -9,6 +9,7 @@ from vllm.model_executor.layers.linear import (LinearMethodBase,
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
+
 class MarlinConfig(QuantizationConfig):
     """Config class for Marlin.
 
@@ -48,7 +49,7 @@ class MarlinConfig(QuantizationConfig):
         self.perm_len = 1024
 
         # Auto-GPTQ and Auto-AWQ have different names for the weights
-        # and scales of the Marlin serialized model. This allows us to 
+        # and scales of the Marlin serialized model. This allows us to
         # handle models from either framework.
         if source_framework == "gptq":
             self.qweight_name = "B"
@@ -59,7 +60,8 @@ class MarlinConfig(QuantizationConfig):
         else:
             raise ValueError(
                 f"Unknown source framework for Marlin serialized model of "
-                f"{source_framework}. Only auto_gptq and auto_awq are supported.")
+                f"{source_framework}. Only gptq and awq are supported."
+            )
 
     def __repr__(self) -> str:
         return f"MarlinConfig(group_size={self.group_size})"
@@ -200,7 +202,7 @@ class MarlinLinearMethod(LinearMethodBase):
         workspace = Parameter(torch.zeros(max_workspace_size,
                                           device="cuda",
                                           dtype=torch.int),
-                                          requires_grad=False)
+                              requires_grad=False)
 
         return {
             self.quant_config.qweight_name: qweight,
