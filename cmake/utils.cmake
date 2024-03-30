@@ -240,9 +240,12 @@ macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
       endif()
 
       if (_SM)
-        set(_VIRT "")
+        # -real suffix let CMake to only generate elf code for the kernels.
+        # we want this, otherwise the added ptx (default) will increase binary size.
+        set(_VIRT "-real")
         set(_CODE_ARCH ${_SM})
       else()
+        # -virtual suffix let CMake to generate ptx code for the kernels.
         set(_VIRT "-virtual")
         set(_CODE_ARCH ${_CODE})
       endif()
