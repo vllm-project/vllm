@@ -71,7 +71,7 @@ class ModelConfig:
         max_context_len_to_capture: Maximum context len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
             to eager mode.
-        disable_tokenizer: If False, tokenization and detokenization are disabled.
+        disable_tokenizer: If true, tokenization and detokenization are disabled.
     """
 
     def __init__(
