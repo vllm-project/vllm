@@ -40,7 +40,7 @@ You can install vLLM using pip:
 
     In order to be performant, vLLM has to compile many cuda kernels. The compilation unfortunately introduces binary incompatibility with other CUDA versions and PyTorch versions, even for the same PyTorch version with different building configurations.
 
-    Therefore, it is recommended to use install vLLM with a fresh new conda environment. If either you have a different CUDA version or you want to use an existing PyTorch installation, you need to build vLLM from source. See below for instructions.
+    Therefore, it is recommended to install vLLM with a **fresh new** conda environment. If either you have a different CUDA version or you want to use an existing PyTorch installation, you need to build vLLM from source. See below for instructions.
 
 .. _build_from_source:
 
@@ -72,7 +72,14 @@ You can also build and install vLLM from source:
         $ # Use `--ipc=host` to make sure the shared memory is large enough.
         $ docker run --gpus all -it --rm --ipc=host nvcr.io/nvidia/pytorch:23.10-py3
 
-    If you don't want to use docker, it is recommended to have a full installation of CUDA Toolkit. You can download and install it from `the official website <https://developer.nvidia.com/cuda-12-1-0-download-archive>`_. After installation, set the environment variable `CUDA_HOME` to the installation path of CUDA Toolkit, and make sure that the `nvcc` compiler is in your `PATH`, e.g. `export CUDA_HOME=/usr/local/cuda ; export PATH="${CUDA_HOME}/bin:$PATH" ;` Here is a sanity check to verify that the CUDA Toolkit is correctly installed:
+    If you don't want to use docker, it is recommended to have a full installation of CUDA Toolkit. You can download and install it from `the official website <https://developer.nvidia.com/cuda-12-1-0-download-archive>`_. After installation, set the environment variable `CUDA_HOME` to the installation path of CUDA Toolkit, and make sure that the `nvcc` compiler is in your `PATH`, e.g.:
+
+    .. code-block:: console
+
+        $ export CUDA_HOME=/usr/local/cuda
+        $ export PATH="${CUDA_HOME}/bin:$PATH"
+
+    Here is a sanity check to verify that the CUDA Toolkit is correctly installed:
 
     .. code-block:: console
 
