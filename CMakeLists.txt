@@ -70,10 +70,11 @@ find_package(Torch REQUIRED)
 # config is used for standalone C++ binaries that link against torch).
 # The `libtorch_python.so` library defines some of the glue code between
 # torch/python via pybind and is required by VLLM extensions for this
-# reason. So, add it by manually using `append_torchlib_if_found` from
-# torch's cmake setup.
+# reason. So, add it by manually with `find_library` using torch's
+# installed library path.
 #
-append_torchlib_if_found(torch_python)
+find_library(torch_python_LIBRARY torch_python PATHS
+  "${TORCH_INSTALL_PREFIX}/lib")
 
 #
 # Set up GPU language and check the torch version and warn if it isn't
