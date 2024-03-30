@@ -26,6 +26,7 @@ def get_cached_tokenizer(
     tokenizer_all_special_tokens_extended = (
         tokenizer.all_special_tokens_extended)
     tokenizer_all_special_tokens = set(tokenizer.all_special_tokens)
+    tokenizer_len = len(tokenizer)
 
     class CachedTokenizer(tokenizer.__class__):
 
@@ -40,6 +41,9 @@ def get_cached_tokenizer(
         @property
         def all_special_tokens_extended(self):
             return tokenizer_all_special_tokens_extended
+
+        def __len__(self):
+            return tokenizer_len
 
     CachedTokenizer.__name__ = f"Cached{tokenizer.__class__.__name__}"
 
