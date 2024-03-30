@@ -1,10 +1,12 @@
 import asyncio
 import multiprocessing
 import os
+import sys
 import threading
 import traceback
 import uuid
 from dataclasses import dataclass
+from io import TextIOBase
 from multiprocessing.connection import wait
 from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar, Union
 
@@ -15,6 +17,10 @@ logger = init_logger(__name__)
 T = TypeVar('T')
 
 _TERMINATE = "TERMINATE"  # sentinel
+
+# ANSI color codes
+CYAN = '\033[1;36m'
+RESET = '\033[0;0m'
 
 # Use dedicated multiprocess context for workers.
 # Both spawn and fork work
@@ -172,9 +178,11 @@ class LocalWorkerVllm(mp.Process):
         self.kill()
 
     def run(self) -> None:
-        # Re-init logger in forked process, to include worker-specific prefix
-        global logger
-        logger = init_logger(__name__)
+        # Add process-specific prefix to stdout and stderr
+        process_name = mp.current_process().name
+        pid = os.getpid()
+        _add_prefix(sys.stdout, process_name, pid)
+        _add_prefix(sys.stderr, process_name, pid)
 
         del self.tasks  # Not used in forked process
         self.worker = self.worker_factory()
@@ -205,3 +213,30 @@ class LocalWorkerVllm(mp.Process):
             logger.exception("Worker failed")
 
         logger.info("Worker exiting")
+
+
+def _add_prefix(file: TextIOBase, worker_name: str, pid: int) -> None:
+    """Prepend output with process-specific prefix"""
+
+    prefix = f"{CYAN}({worker_name} pid={pid}){RESET} "
+    file_write = file.write
+
+    def write_with_prefix(s: str):
+        if not s:
+            return
+        if file.start_new_line:
+            file_write(prefix)
+        idx = 0
+        while (next_idx := s.find('\n', idx)) != -1:
+            next_idx += 1
+            file_write(s[idx:next_idx])
+            if next_idx == len(s):
+                file.start_new_line = True
+                return
+            file_write(prefix)
+            idx = next_idx
+        file_write(s[idx:])
+        file.start_new_line = False
+
+    file.start_new_line = True
+    file.write = write_with_prefix
