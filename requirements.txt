@@ -8,7 +8,7 @@ torch == 2.1.2
 requests
 psutil
 py-cpuinfo
-transformers >= 4.39.1  # Required for StarCoder2 & Llava.
+transformers >= 4.39.2  # Required for StarCoder2 & Llava.
 xformers == 0.0.23.post1  # Required for CUDA 12.1.
 fastapi
 uvicorn[standard]
