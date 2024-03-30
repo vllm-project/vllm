@@ -240,7 +240,7 @@ macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
       endif()
 
       if (_SM)
-        set(_VIRT "")
+        set(_VIRT "-real")
         set(_CODE_ARCH ${_SM})
       else()
         set(_VIRT "-virtual")
