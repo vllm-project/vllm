@@ -295,8 +295,8 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
         self.lora_config = lora_config
         tp_size = get_tensor_model_parallel_world_size()
         lora_a_output_size_per_partition = lora_config.max_lora_rank if not \
-            lora_config.fully_sharded_loras else divide(lora_config.max_lora_rank,
-                                                        tp_size)
+            lora_config.fully_sharded_loras else \
+                divide(lora_config.max_lora_rank, tp_size)
         self.lora_a_stacked = torch.zeros(
             max_loras,
             1,
@@ -426,8 +426,8 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         self.tp_rank = get_tensor_model_parallel_rank()
 
         lora_a_output_size_per_partition = lora_config.max_lora_rank if not \
-            lora_config.fully_sharded_loras else divide(lora_config.max_lora_rank, 
-                                                       self.tp_size)
+            lora_config.fully_sharded_loras else \
+                divide(lora_config.max_lora_rank, self.tp_size)
 
         self.lora_a_stacked = tuple(
             torch.zeros(
@@ -542,8 +542,8 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
         self.kv_shard_id = self.tp_rank // self.base_layer.num_kv_head_replicas
 
         lora_a_output_size_per_partition = lora_config.max_lora_rank if not \
-            lora_config.fully_sharded_loras else divide(lora_config.max_lora_rank, 
-                                                       self.tp_size)
+            lora_config.fully_sharded_loras else \
+                divide(lora_config.max_lora_rank, self.tp_size)
         # q, k, v
         self.lora_a_stacked = (
             torch.zeros(
@@ -661,8 +661,9 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
             shard_size = [self.lora_a_stacked[i].shape[2] for i in range(3)]
             start_idx = [self.tp_rank * shard_size[i] for i in range(3)]
             lora_a = [
-                lora_a[i][:,start_idx[i]:start_idx[i] + shard_size[i]] 
-                if lora_a[i] is not None else None for i in range(3)
+                lora_a[i][:, start_idx[i]:start_idx[i] +
+                          shard_size[i]] if lora_a[i] is not None else None
+                for i in range(3)
             ]
         if lora_a[0] is not None:
             self.lora_a_stacked[0][
@@ -716,9 +717,9 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
             device=self.base_layer.weight.device,
         )
         tp_size = get_tensor_model_parallel_world_size()
-        lora_b_output_size_per_partition = self.base_layer.weight.shape[0] if not \
-            lora_config.fully_sharded_loras else \
-                divide(self.base_layer.weight.shape[0], tp_size)
+        lora_b_output_size_per_partition = self.base_layer.weight.shape[0] \
+            if not lora_config.fully_sharded_loras else \
+                    divide(self.base_layer.weight.shape[0], tp_size)
 
         self.lora_b_stacked = torch.zeros(
             (

@@ -19,13 +19,15 @@ if TYPE_CHECKING:
 
 
 class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
+
     def apply_weights(self, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.linear_method.apply_weights(
             self.base_layer.linear_weights, x, bias)
 
         x = x.view(-1, x.shape[-1])
-        output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape
+        output, out_orig_shape = output.view(-1,
+                                             output.shape[-1]), output.shape
         buffer = torch.zeros((x.shape[0], self.lora_a_stacked.shape[2]),
                              dtype=torch.float32,
                              device=x.device)
@@ -42,16 +44,16 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
 
 
 def mcp_apply_weights(x, bias, layer):
-    n = len(layer.lora_a_stacked) # expecting 2 for column parallel and 3 for qkv
+    n = len(
+        layer.lora_a_stacked)  # expecting 2 for column parallel and 3 for qkv
     output = layer.base_layer.linear_method.apply_weights(
         layer.base_layer.linear_weights, x, bias)
 
     x = x.view(-1, x.shape[-1])
     output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape
-    buffers = torch.zeros(
-        (n, x.shape[0], layer.lora_a_stacked[0].shape[2]),
-        dtype=torch.float32,
-        device=x.device)
+    buffers = torch.zeros((n, x.shape[0], layer.lora_a_stacked[0].shape[2]),
+                          dtype=torch.float32,
+                          device=x.device)
     for idx in range(n):
         bgmv(buffers[idx], x, layer.lora_a_stacked[idx],
              layer.indices[:layer.indices_len[0]], 0, 1.0)
@@ -70,26 +72,31 @@ def mcp_apply_weights(x, bias, layer):
     # now have column partitioned and packed output
     return output
 
+
 class MergedColumnParallelLinearWithShardedLoRA(
         MergedColumnParallelLinearWithLoRA):
+
     def apply_weights(self, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
         return mcp_apply_weights(x, bias, self)
 
 
 class QKVParallelLinearWithShardedLora(QKVParallelLinearWithLora):
+
     def apply_weights(self, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
         return mcp_apply_weights(x, bias, self)
 
 
 class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
+
     def apply_weights(self, x: torch.Tensor) -> torch.Tensor:
         output = self.base_layer.linear_method.apply_weights(
             self.base_layer.linear_weights, x)
 
         x = x.view(-1, x.shape[-1])
-        output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape
+        output, out_orig_shape = output.view(-1,
+                                             output.shape[-1]), output.shape
         buffer = torch.zeros((x.shape[0], self.lora_a_stacked.shape[2]),
                              dtype=torch.float32,
                              device=x.device)

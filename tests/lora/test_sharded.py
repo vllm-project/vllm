@@ -19,10 +19,8 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm import EngineArgs
 
 from vllm.model_executor.parallel_utils.parallel_state import (
-    ensure_model_parallel_initialized, 
-    get_tensor_model_parallel_rank, 
-    get_tensor_model_parallel_world_size
-)
+    ensure_model_parallel_initialized, get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.communication_op import (broadcast)
 from vllm.lora.fully_sharded_layers import *
 
@@ -341,36 +339,10 @@ class Worker:
         print('Complete. All tests passed!')
 
     @torch.inference_mode()
-    def profile_sampler(self, sampler, linear, inputs, steps):
-        # warm up
-        for _ in range(100):
-            result = sampler._get_logits(hidden_states=inputs,
-                                         embedding=linear.weight,
-                                         embedding_bias=None)
-
-        start_events = [
-            torch.cuda.Event(enable_timing=True) for _ in range(steps)
-        ]
-        end_events = [
-            torch.cuda.Event(enable_timing=True) for _ in range(steps)
-        ]
-
-        for i in range(steps):
-            start_events[i].record()
-            result = sampler._get_logits(hidden_states=inputs,
-                                         embedding=linear.weight,
-                                         embedding_bias=None)
-            end_events[i].record()
-
-        torch.cuda.synchronize()
-        times = [s.elapsed_time(e) for s, e in zip(start_events, end_events)]
-        return times
-
-    @torch.inference_mode()
     def profile_linear(self, lora_linear, inputs, steps):
         # warm up
         for _ in range(100):
-            lora_result = lora_linear(inputs)
+            lora_linear(inputs)
 
         start_events = [
             torch.cuda.Event(enable_timing=True) for _ in range(steps)
@@ -381,7 +353,7 @@ class Worker:
 
         for i in range(steps):
             start_events[i].record()
-            lora_result = lora_linear(inputs)
+            lora_linear(inputs)
             end_events[i].record()
 
         torch.cuda.synchronize()

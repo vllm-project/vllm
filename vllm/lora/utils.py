@@ -2,7 +2,8 @@ import logging
 from typing import Tuple, Optional
 from vllm.config import LoRAConfig
 from transformers import PretrainedConfig
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear,
                                                QKVParallelLinear,
@@ -13,10 +14,10 @@ from vllm.lora.layers import (BaseLayerWithLoRA,
                               RowParallelLinearWithLoRA,
                               QKVParallelLinearWithLora,
                               MergedColumnParallelLinearWithLoRA)
-from vllm.lora.fully_sharded_layers import (ColumnParallelLinearWithShardedLoRA,
-                                            RowParallelLinearWithShardedLoRA,
-                                            QKVParallelLinearWithShardedLora,
-                                            MergedColumnParallelLinearWithShardedLoRA)
+from vllm.lora.fully_sharded_layers import (
+    ColumnParallelLinearWithShardedLoRA, RowParallelLinearWithShardedLoRA,
+    QKVParallelLinearWithShardedLora,
+    MergedColumnParallelLinearWithShardedLoRA)
 
 from torch import nn
 
@@ -33,7 +34,8 @@ def from_layer(
             VocabParallelEmbedding: VocabParallelEmbeddingWithLoRA,
             ColumnParallelLinear: ColumnParallelLinearWithShardedLoRA,
             QKVParallelLinear: QKVParallelLinearWithShardedLora,
-            MergedColumnParallelLinear: MergedColumnParallelLinearWithShardedLoRA,
+            MergedColumnParallelLinear:
+            MergedColumnParallelLinearWithShardedLoRA,
             RowParallelLinear: RowParallelLinearWithShardedLoRA,
         }
     else:

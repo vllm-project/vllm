@@ -17,10 +17,10 @@ from vllm.lora.layers import (
     LoRAMapping,
     BaseLayerWithLoRA,
 )
-from vllm.lora.fully_sharded_layers import (ColumnParallelLinearWithShardedLoRA,
-                                            RowParallelLinearWithShardedLoRA,
-                                            QKVParallelLinearWithShardedLora,
-                                            MergedColumnParallelLinearWithShardedLoRA)
+from vllm.lora.fully_sharded_layers import (
+    ColumnParallelLinearWithShardedLoRA, RowParallelLinearWithShardedLoRA,
+    QKVParallelLinearWithShardedLora,
+    MergedColumnParallelLinearWithShardedLoRA)
 from vllm.lora.models import (LoRALayerWeights, convert_mapping,
                               PackedLoRALayerWeights)
 from vllm.config import LoRAConfig
@@ -513,7 +513,8 @@ def test_lm_head_sampler(dist_init, num_loras, device) -> None:
 @pytest.mark.parametrize("orientation", ["row", "column"])
 @pytest.mark.parametrize("fully_shard", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_linear_parallel(dist_init, num_loras, orientation, fully_shard, device) -> None:
+def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
+                         device) -> None:
 
     torch.set_default_device(device)
     max_loras = 8
@@ -616,7 +617,8 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard, device)
 @pytest.mark.parametrize("repeats", [2, 3])
 @pytest.mark.parametrize("fully_shard", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard, device) -> None:
+def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
+                                device) -> None:
 
     torch.set_default_device(device)
     max_loras = 8
@@ -631,7 +633,8 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard, devi
                                                 bias=False)
             linear.weight.data = torch.rand_like(linear.weight.data)
             lora_linear = MergedColumnParallelLinearWithLoRA(linear) if not \
-                fully_shard else MergedColumnParallelLinearWithShardedLoRA(linear)
+                fully_shard else \
+                MergedColumnParallelLinearWithShardedLoRA(linear)
         else:
             linear = QKVParallelLinear(4096, 64, 32, bias=False)
             linear.weight.data = torch.rand_like(linear.weight.data)
