@@ -60,8 +60,7 @@ class MarlinConfig(QuantizationConfig):
         else:
             raise ValueError(
                 f"Unknown source framework for Marlin serialized model of "
-                f"{source_framework}. Only gptq and awq are supported."
-            )
+                f"{source_framework}. Only gptq and awq are supported.")
 
     def __repr__(self) -> str:
         return f"MarlinConfig(group_size={self.group_size})"
