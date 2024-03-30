@@ -9,7 +9,6 @@ from vllm.model_executor.layers.linear import (LinearMethodBase,
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
-
 class MarlinConfig(QuantizationConfig):
     """Config class for Marlin.
 
@@ -19,6 +18,7 @@ class MarlinConfig(QuantizationConfig):
     def __init__(
         self,
         group_size: int,
+        source_framework: str,
     ) -> None:
         # Group size for the quantization.
         self.group_size = group_size
@@ -47,6 +47,20 @@ class MarlinConfig(QuantizationConfig):
         # Permutation length used by the marlin kernels.
         self.perm_len = 1024
 
+        # Auto-GPTQ and Auto-AWQ have different names for the weights
+        # and scales of the Marlin serialized model. This allows us to 
+        # handle models from either framework.
+        if source_framework == "gptq":
+            self.qweight_name = "B"
+            self.scales_name = "s"
+        elif source_framework == "awq":
+            self.qweight_name = "qweight"
+            self.scales_name = "scales"
+        else:
+            raise ValueError(
+                f"Unknown source framework for Marlin serialized model of "
+                f"{source_framework}. Only auto_gptq and auto_awq are supported.")
+
     def __repr__(self) -> str:
         return f"MarlinConfig(group_size={self.group_size})"
 
@@ -70,7 +84,8 @@ class MarlinConfig(QuantizationConfig):
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "MarlinConfig":
         group_size = cls.get_from_keys(config, ["group_size"])
-        return cls(group_size)
+        framework = cls.get_from_keys(config, ["quant_method"])
+        return cls(group_size, framework)
 
     def get_linear_method(self) -> "MarlinLinearMethod":
         return MarlinLinearMethod(self)
@@ -185,11 +200,11 @@ class MarlinLinearMethod(LinearMethodBase):
         workspace = Parameter(torch.zeros(max_workspace_size,
                                           device="cuda",
                                           dtype=torch.int),
-                              requires_grad=False)
+                                          requires_grad=False)
 
         return {
-            "B": qweight,
-            "s": scales,
+            self.quant_config.qweight_name: qweight,
+            self.quant_config.scales_name: scales,
             "workspace": workspace,
         }
 
@@ -199,8 +214,8 @@ class MarlinLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        qweight = weights["B"]
-        scales = weights["s"]
+        qweight = weights[self.quant_config.qweight_name]
+        scales = weights[self.quant_config.scales_name]
         workspace = weights["workspace"]
 
         x_2d = x.view(-1, x.shape[-1])

@@ -164,6 +164,21 @@ class ModelConfig:
                 "either 'auto' or 'slow'.")
         self.tokenizer_mode = tokenizer_mode
 
+    def _is_marlin_serialized(self, hf_quant_method: str, hf_quant_config: dict) -> bool:
+        # AutoGPTQ model is serialized as Marlin.
+        gptq_is_marlin_serialized = (
+            hf_quant_method == "gptq"
+            and "is_marlin_format" in hf_quant_config
+            and hf_quant_config["is_marlin_format"])
+
+        # AutoAWQ model is serialized as Marlin.
+        awq_is_marlin_serialized = (
+            hf_quant_method == "awq"
+            and "version" in hf_quant_config
+            and hf_quant_config["version"] == "marlin")
+        
+        return gptq_is_marlin_serialized or awq_is_marlin_serialized
+
     def _verify_quantization(self) -> None:
         supported_quantization = ["awq", "gptq", "squeezellm", "marlin"]
         rocm_not_supported_quantization = ["awq", "marlin"]
@@ -175,15 +190,12 @@ class ModelConfig:
         if hf_quant_config is not None:
             hf_quant_method = str(hf_quant_config["quant_method"]).lower()
 
-            # If the GPTQ model is serialized in marlin format, use marlin.
-            if (hf_quant_method == "gptq"
-                    and "is_marlin_format" in hf_quant_config
-                    and hf_quant_config["is_marlin_format"]):
+            # If the model is serialized in Marlin format, use Marlin kernel.
+            if self._is_marlin_serialized(hf_quant_method, hf_quant_config):
                 logger.info("The model is serialized in Marlin format. "
                             "Using Marlin kernel.")
                 hf_quant_method = "marlin"
-                if self.quantization == "gptq":
-                    self.quantization = hf_quant_method
+                self.quantization = "marlin"
 
             if self.quantization is None:
                 self.quantization = hf_quant_method
