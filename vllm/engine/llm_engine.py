@@ -112,9 +112,13 @@ class LLMEngine:
         self.speculative_config = speculative_config
         self.log_stats = log_stats
 
-        if self.model_config.enable_tokenizer:
+        if not self.model_config.disable_tokenizer:
             self.detokenizer = Detokenizer(self.tokenizer)
             self._init_tokenizer()
+        else:
+            self.detokenizer = None
+            self.tokenizer = None
+
         self.seq_counter = Counter()
 
         self.model_executor = executor_class(
@@ -163,7 +167,7 @@ class LLMEngine:
                     parallel_config.disable_custom_all_reduce,
                 })
 
-        if self.model_config.enable_tokenizer:
+        if self.tokenizer:
             # Ping the tokenizer to ensure liveness if it runs in a
             # different process.
             self.tokenizer.ping()
@@ -336,7 +340,7 @@ class LLMEngine:
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
         eos_token_id = None
-        if self.model_config.enable_tokenizer:
+        if self.tokenizer:
             eos_token_id = self.tokenizer.get_lora_tokenizer(lora_request).eos_token_id
         seq = Sequence(seq_id, prompt, prompt_token_ids, block_size,
                        eos_token_id, lora_request)
@@ -481,7 +485,7 @@ class LLMEngine:
             child_seqs.append((parent, parent))
 
         for seq, _ in child_seqs:
-            if seq_group.sampling_params.detokenize:
+            if seq_group.sampling_params.detokenize and self.detokenizer:
                 self.detokenizer.decode_sequence_inplace(
                     seq, seq_group.sampling_params)
             self._check_stop(seq, seq_group.sampling_params)
