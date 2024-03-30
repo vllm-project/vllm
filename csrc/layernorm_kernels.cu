@@ -231,6 +231,7 @@ __global__ std::enable_if_t<
   }
 }
 
+
 /* Generic fused_add_rms_norm_kernel
    The width field is not used here but necessary for other specializations.
  */
