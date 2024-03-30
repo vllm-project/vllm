@@ -17,7 +17,7 @@ class ModelPair:
     model_gptq: str
 
 
-# 
+# Model Id // Expected Kernel
 MODELS_QUANT_TYPE = [
     # compat: autogptq <=0.7.1 is_marlin_format: bool
     ("neuralmagic/TinyLlama-1.1B-Chat-v1.0-marlin", "marlin"),
