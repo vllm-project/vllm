@@ -281,7 +281,7 @@ endmacro()
 #                              not provided.
 # COMPILE_FLAGS <flags>      - Extra compiler flags passed to NVCC/hip.
 # INCLUDE_DIRECTORIES <dirs> - Extra include directories.
-# LINK_LIBRARIES <libraries> - Extra link libraries.
+# LIBRARIES <libraries>      - Extra link libraries.
 # WITH_SOABI                 - Generate library with python SOABI suffix name.
 #
 # Note: optimization level/debug info is set via cmake build type.
@@ -327,8 +327,17 @@ function (define_gpu_extension_target GPU_MOD_NAME)
   target_include_directories(${GPU_MOD_NAME} PRIVATE csrc
     ${GPU_INCLUDE_DIRECTORIES})
 
-  target_link_libraries(${GPU_MOD_NAME} PRIVATE ${TORCH_LIBRARIES}
+  target_link_libraries(${GPU_MOD_NAME} PRIVATE torch ${torch_python_LIBRARY}
     ${GPU_LIBRARIES})
+
+  # Don't use `TORCH_LIBRARIES` for CUDA since it pulls in a bunch of
+  # dependencies that are not necessary and may not be installed.
+  if (GPU_LANGUAGE STREQUAL "CUDA")
+    target_link_libraries(${GPU_MOD_NAME} PRIVATE ${CUDA_CUDA_LIB}
+      ${CUDA_LIBRARIES})
+  else()
+    target_link_libraries(${GPU_MOD_NAME} PRIVATE ${TORCH_LIBRARIES})
+  endif()
 
   install(TARGETS ${GPU_MOD_NAME} LIBRARY DESTINATION ${GPU_DESTINATION})
 endfunction()
