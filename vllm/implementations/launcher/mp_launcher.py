@@ -1,6 +1,8 @@
-from vllm.interfaces.launcher import Launcher, SubClassOfDistributedTask
-from multiprocessing import Process
 import uuid
+from multiprocessing import Process
+
+from vllm.interfaces.launcher import Launcher, SubClassOfDistributedTask
+
 
 class MPLauncher(Launcher):
     # this is intended to work in single node
@@ -19,7 +21,7 @@ class MPLauncher(Launcher):
             env['MASTER_ADDR'] = 'localhost'
             env['MASTER_PORT'] = '29500'
         tasks = []
-        for i in range(n_tasks):
+        for i in range(self.n_tasks):
             p = Process(target=task_type, args=(envs[i], (), {}))
             p.start()
             tasks.append(p)
