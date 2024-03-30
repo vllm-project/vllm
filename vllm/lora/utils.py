@@ -1,9 +1,55 @@
 import logging
-from typing import Tuple
+from typing import Tuple, Optional
+from vllm.config import LoRAConfig
+from transformers import PretrainedConfig
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               RowParallelLinear,
+                                               QKVParallelLinear,
+                                               MergedColumnParallelLinear)
+from vllm.lora.layers import (BaseLayerWithLoRA,
+                              VocabParallelEmbeddingWithLoRA,
+                              ColumnParallelLinearWithLoRA,
+                              RowParallelLinearWithLoRA,
+                              QKVParallelLinearWithLora,
+                              MergedColumnParallelLinearWithLoRA)
+from vllm.lora.fully_sharded_layers import (ColumnParallelLinearWithShardedLoRA,
+                                            RowParallelLinearWithShardedLoRA,
+                                            QKVParallelLinearWithShardedLora,
+                                            MergedColumnParallelLinearWithShardedLoRA)
 
 from torch import nn
 
 logger = logging.getLogger(__name__)
+
+
+def from_layer(
+        layer: nn.Module,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: Optional[PretrainedConfig] = None) -> BaseLayerWithLoRA:
+    if lora_config.fully_sharded_loras:
+        supported_layer_types = {
+            VocabParallelEmbedding: VocabParallelEmbeddingWithLoRA,
+            ColumnParallelLinear: ColumnParallelLinearWithShardedLoRA,
+            QKVParallelLinear: QKVParallelLinearWithShardedLora,
+            MergedColumnParallelLinear: MergedColumnParallelLinearWithShardedLoRA,
+            RowParallelLinear: RowParallelLinearWithShardedLoRA,
+        }
+    else:
+        supported_layer_types = {
+            VocabParallelEmbedding: VocabParallelEmbeddingWithLoRA,
+            ColumnParallelLinear: ColumnParallelLinearWithLoRA,
+            QKVParallelLinear: QKVParallelLinearWithLora,
+            MergedColumnParallelLinear: MergedColumnParallelLinearWithLoRA,
+            RowParallelLinear: RowParallelLinearWithLoRA,
+        }
+    for src_layer_type, lora_layer_type in supported_layer_types.items():
+        if type(layer) is src_layer_type:  # pylint: disable=unidiomatic-typecheck
+            ret = lora_layer_type(layer)
+            ret.create_lora_weights(max_loras, lora_config, model_config)
+            return ret
+    return layer
 
 
 def replace_submodule(model: nn.Module, module_name: str,

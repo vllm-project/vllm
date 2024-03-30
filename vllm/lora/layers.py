@@ -996,26 +996,6 @@ class SamplerWithLoRA(BaseLayerWithLoRA):
         return type(self.base_layer).forward(self, *args, **kwargs)
 
 
-def from_layer(
-        layer: nn.Module,
-        max_loras: int,
-        lora_config: LoRAConfig,
-        model_config: Optional[PretrainedConfig] = None) -> BaseLayerWithLoRA:
-    supported_layer_types = {
-        VocabParallelEmbedding: VocabParallelEmbeddingWithLoRA,
-        ColumnParallelLinear: ColumnParallelLinearWithLoRA,
-        QKVParallelLinear: QKVParallelLinearWithLora,
-        MergedColumnParallelLinear: MergedColumnParallelLinearWithLoRA,
-        RowParallelLinear: RowParallelLinearWithLoRA,
-    }
-    for src_layer_type, lora_layer_type in supported_layer_types.items():
-        if type(layer) is src_layer_type:  # pylint: disable=unidiomatic-typecheck
-            ret = lora_layer_type(layer)
-            ret.create_lora_weights(max_loras, lora_config, model_config)
-            return ret
-    return layer
-
-
 def from_layer_sampler(
     layer: Sampler,
     lm_head: ParallelLMHead,

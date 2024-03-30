@@ -25,8 +25,7 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
             self.base_layer.linear_weights, x, bias)
 
         x = x.view(-1, x.shape[-1])
-        output, out_orig_shape = output.view(-1,
-                                             output.shape[-1]), output.shape
+        output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape
         buffer = torch.zeros((x.shape[0], self.lora_a_stacked.shape[2]),
                              dtype=torch.float32,
                              device=x.device)
@@ -89,6 +88,8 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         output = self.base_layer.linear_method.apply_weights(
             self.base_layer.linear_weights, x)
 
+        x = x.view(-1, x.shape[-1])
+        output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape
         buffer = torch.zeros((x.shape[0], self.lora_a_stacked.shape[2]),
                              dtype=torch.float32,
                              device=x.device)
@@ -107,4 +108,5 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
                                 self.indices[:self.indices_len[0]], 0, 1.0,
                                 start_idx, shard_size)
 
+        output = output.view(*out_orig_shape)
         return output

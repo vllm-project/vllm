@@ -715,7 +715,7 @@ def profile_expand(S, R):
     steps = 5000
     # warm up
     for _ in range(100):
-        lora_result = bgmv(out, x, w, indices, 0, 1.0)
+        bgmv(out, x, w, indices, 0, 1.0)
         # return
 
     start_events = [torch.cuda.Event(enable_timing=True) for _ in range(steps)]
@@ -723,7 +723,7 @@ def profile_expand(S, R):
 
     for i in range(steps):
         start_events[i].record()
-        lora_result = bgmv(out, x, w, indices, 0, 1.0)
+        bgmv(out, x, w, indices, 0, 1.0)
         end_events[i].record()
 
     torch.cuda.synchronize()
@@ -740,7 +740,7 @@ def profile_shrink(S, R):
     steps = 5000
     # warm up
     for _ in range(100):
-        lora_result = bgmv(out, x, w, indices, 0, 1.0)
+        bgmv(out, x, w, indices, 0, 1.0)
         # return
 
     start_events = [torch.cuda.Event(enable_timing=True) for _ in range(steps)]
@@ -748,7 +748,7 @@ def profile_shrink(S, R):
 
     for i in range(steps):
         start_events[i].record()
-        lora_result = bgmv(out, x, w, indices, 0, 1.0)
+        bgmv(out, x, w, indices, 0, 1.0)
         end_events[i].record()
 
     torch.cuda.synchronize()
