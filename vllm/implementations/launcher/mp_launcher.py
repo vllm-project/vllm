@@ -15,6 +15,7 @@ class MPLauncher(Launcher):
         # and deserialized before being passed to tasks
         launch_id = str(uuid.uuid4())
         envs = [{} for _ in range(self.n_tasks)]
+        port = str(get_open_port())
         for i, env in enumerate(envs):
             env['LAUNCH_ID'] = launch_id
             env['WORLD_SIZE'] = str(self.n_tasks)
@@ -22,7 +23,7 @@ class MPLauncher(Launcher):
             env['LOCAL_WORLD_SIZE'] = str(self.n_tasks)
             env['LOCAL_RANK'] = str(i)
             env['MASTER_ADDR'] = 'localhost'
-            env['MASTER_PORT'] = str(get_open_port())
+            env['MASTER_PORT'] = port
         tasks = []
         for i in range(self.n_tasks):
             p = Process(target=task_type, args=(envs[i], (), kwargs))
