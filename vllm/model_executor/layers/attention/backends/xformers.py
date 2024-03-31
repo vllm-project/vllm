@@ -51,6 +51,7 @@ class XFormersBackend:
         key_cache: Optional[torch.Tensor],
         value_cache: Optional[torch.Tensor],
         input_metadata: InputMetadata,
+        attn_sink_stuff=None
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
@@ -69,6 +70,7 @@ class XFormersBackend:
         batch_size, seq_len, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)
+        key_orig = key
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
@@ -170,6 +172,12 @@ class XFormersBackend:
                     self.alibi_slopes,
                 )
         else:
+            # attention sinks
+            use_attn_sinks = True
+            rotate_fn, positions, context_len = attn_sink_stuff
+            if use_attn_sinks:
+                key = rotate_fn(positions, key_orig, context_len)
+
             # Decoding run.
             output = PagedAttentionImpl.forward_decode(
                 query,
