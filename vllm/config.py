@@ -67,25 +67,24 @@ class ModelConfig:
             to eager mode.
     """
 
-    def __init__(
-        self,
-        model: str,
-        tokenizer: str,
-        tokenizer_mode: str,
-        trust_remote_code: bool,
-        download_dir: Optional[str],
-        load_format: str,
-        dtype: Union[str, torch.dtype],
-        seed: int,
-        revision: Optional[str] = None,
-        code_revision: Optional[str] = None,
-        tokenizer_revision: Optional[str] = None,
-        max_model_len: Optional[int] = None,
-        quantization: Optional[str] = None,
-        enforce_eager: bool = False,
-        max_context_len_to_capture: Optional[int] = None,
-        max_logprobs: int = 5,
-    ) -> None:
+    def __init__(self,
+                 model: str,
+                 tokenizer: str,
+                 tokenizer_mode: str,
+                 trust_remote_code: bool,
+                 download_dir: Optional[str],
+                 load_format: str,
+                 dtype: Union[str, torch.dtype],
+                 seed: int,
+                 revision: Optional[str] = None,
+                 code_revision: Optional[str] = None,
+                 tokenizer_revision: Optional[str] = None,
+                 max_model_len: Optional[int] = None,
+                 quantization: Optional[str] = None,
+                 enforce_eager: bool = False,
+                 max_context_len_to_capture: Optional[int] = None,
+                 max_logprobs: int = 5,
+                 guided_decoding_backend: str = 'outlines') -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
@@ -100,6 +99,7 @@ class ModelConfig:
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
         self.max_logprobs = max_logprobs
+        self.guided_decoding_backend = guided_decoding_backend
 
         if os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true":
             # download model from ModelScope hub,

@@ -64,6 +64,8 @@ class EngineArgs:
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: bool = False
 
+    guided_decoding_backend: str = 'outlines'
+
     def __post_init__(self):
         if self.tokenizer is None:
             self.tokenizer = self.model
@@ -163,6 +165,13 @@ class EngineArgs:
                             default=EngineArgs.max_model_len,
                             help='model context length. If unspecified, '
                             'will be automatically derived from the model.')
+        parser.add_argument(
+            '--guided-decoding-backend',
+            type=str,
+            default='outlines',
+            choices=['outlines', 'lm-format-enforcer'],
+            help='Which engine will be used for guided decoding'
+            ' (JSON schema / regex etc)')
         # Parallel arguments
         parser.add_argument('--worker-use-ray',
                             action='store_true',
@@ -385,7 +394,7 @@ class EngineArgs:
             self.dtype, self.seed, self.revision, self.code_revision,
             self.tokenizer_revision, self.max_model_len, self.quantization,
             self.enforce_eager, self.max_context_len_to_capture,
-            self.max_logprobs)
+            self.max_logprobs, self.guided_decoding_backend)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,

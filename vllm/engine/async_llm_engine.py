@@ -309,6 +309,8 @@ class AsyncLLMEngine:
         self.log_requests = log_requests
         self.max_log_len = max_log_len
         self.engine = self._init_engine(*args, **kwargs)
+        model_config = args[0]
+        self.guided_decoding_backend = model_config.guided_decoding_backend
 
         self.background_loop = None
         # We need to keep a reference to unshielded
