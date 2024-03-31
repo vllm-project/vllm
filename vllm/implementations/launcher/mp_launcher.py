@@ -10,7 +10,8 @@ class MPLauncher(Launcher):
         self.n_tasks = n_tasks
 
     def launch(self, task_type: SubClassOfDistributedTask, *args, **kwargs):
-        # be cautious that `args` and `kwargs` might well be serialized and deserialized before being passed to tasks
+        # be cautious that `args` and `kwargs` might well be serialized
+        # and deserialized before being passed to tasks
         launch_id = str(uuid.uuid4())
         envs = [{} for _ in range(self.n_tasks)]
         for i, env in enumerate(envs):

@@ -21,8 +21,7 @@
 
 import ctypes
 from dataclasses import dataclass
-
-from tying import Any, List
+from typing import Any, List
 
 # === export types and functions from nccl to Python ===
 # for the original nccl definition, please check
@@ -30,7 +29,12 @@ from tying import Any, List
 
 ncclResult_t = ctypes.c_int
 ncclComm_t = ctypes.c_void_p
-ncclUniqueId = ctypes.c_byte * 128
+
+
+class ncclUniqueId(ctypes.Structure):
+    _fields_ = [("internal", ctypes.c_byte * 128)]
+
+
 cudaStream_t = ctypes.c_void_p
 buffer_type = ctypes.c_void_p
 

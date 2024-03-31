@@ -1,4 +1,3 @@
-import ctypes
 import logging
 import os
 from contextlib import contextmanager
@@ -7,8 +6,8 @@ from typing import Any, Optional
 import torch
 
 from vllm.implementations.communicator.nccl.pynccl.wrapper import (
-    NCCLLibrary, buffer_type, cudaStream_t, ncclComm_t, ncclDataType_t,
-    ncclRedOp_t, ncclUniqueId)
+    NCCLLibrary, buffer_type, cudaStream_t, ncclDataType_t, ncclRedOp_t,
+    ncclUniqueId)
 from vllm.interfaces.communicator import Communicator, ReduceOp
 from vllm.interfaces.coordinator import Coordinator
 
@@ -89,14 +88,13 @@ class NCCLCommunicator(Communicator):
         else:
             # default initialization of unique_id
             self.unique_id = ncclUniqueId()
-        coordinator.broadcast(self.unique_id,
-                              src=coordinator.get_group_master_rank())
-        self.comm = ncclComm_t()
-        result = self.lib.ncclCommInitRank(ctypes.byref(self.comm),
-                                           coordinator.get_group_size(),
-                                           self.unique_id,
-                                           coordinator.get_group_rank())
-        assert result == 0
+        data = bytearray(self.unique_id.internal)
+        coordinator.broadcast(data, src=coordinator.get_group_master_rank())
+        for i in range(len(data)):
+            self.unique_id.internal[i] = data[i]
+        nrank = coordinator.get_group_size()
+        rank = coordinator.get_group_rank()
+        self.comm = self.lib.ncclCommInitRank(nrank, self.unique_id, rank)
 
     @staticmethod
     def convert_reduce_op(op: ReduceOp) -> ncclRedOp_t:
@@ -133,12 +131,10 @@ class NCCLCommunicator(Communicator):
         dtype = self.convert_data_type(tensor_in.dtype)
         if stream is None:
             stream = self.stream
-        result = self.lib.ncclAllReduce(buffer_type(tensor_in.data_ptr()),
-                                        buffer_type(tensor_out.data_ptr()),
-                                        tensor_in.numel(), dtype, op,
-                                        self.comm,
-                                        cudaStream_t(stream.cuda_stream))
-        assert result == 0
+        self.lib.ncclAllReduce(buffer_type(tensor_in.data_ptr()),
+                               buffer_type(tensor_out.data_ptr()),
+                               tensor_in.numel(), dtype, op, self.comm,
+                               cudaStream_t(stream.cuda_stream))
 
     def __del__(self):
         self.lib.ncclCommDestroy(self.comm)
