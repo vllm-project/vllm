@@ -9,8 +9,8 @@ class MPLauncher(Launcher):
     def __init__(self, n_tasks: int):
         self.n_tasks = n_tasks
 
-    def launch(self, task_type: SubClassOfDistributedTask, *args, **kwargs):
-        # be cautious that `args` and `kwargs` might well be serialized
+    def launch(self, *, task_type: SubClassOfDistributedTask, **kwargs):
+        # be cautious that `kwargs` might well be serialized
         # and deserialized before being passed to tasks
         launch_id = str(uuid.uuid4())
         envs = [{} for _ in range(self.n_tasks)]
@@ -24,7 +24,7 @@ class MPLauncher(Launcher):
             env['MASTER_PORT'] = '29500'
         tasks = []
         for i in range(self.n_tasks):
-            p = Process(target=task_type, args=(envs[i], args, kwargs))
+            p = Process(target=task_type, args=(envs[i], (), kwargs))
             p.start()
             tasks.append(p)
         for task in tasks:
