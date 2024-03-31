@@ -5,6 +5,7 @@ from vllm.implementations.launcher.mp_launcher import MPLauncher
 from vllm.implementations.coordinator import CoordinatorType
 from vllm.implementations.communicator import CommunicatorType
 from vllm.implementations.distributed_tasks.global_coordinator_task import GlobalCoordinatorDistributedTask
+from vllm.implementations.distributed_tasks.group_coordinator_task import GroupCoordinatorDistributedTask
 
 class AllReduceDistributedTask(GlobalCoordinatorDistributedTask):
     def post_init_distributed(self, **kwargs):
@@ -49,4 +50,25 @@ def test_pynccl_with_cudagraph():
         task_type=CUDAGraphAllReduceDistributedTask,
         coordinator_type=CoordinatorType.TORCH_DISTRIBUTED,
         communicator_type=CommunicatorType.PYNCCL,
+    )
+
+class GroupedAllReduceDistributedTask(GroupCoordinatorDistributedTask):
+    def post_init_distributed(self, **kwargs):
+        rank = self.global_coordinator.get_local_rank()
+        tensor = torch.ones(16, 1024, 1024, dtype=torch.float32).cuda() * rank
+        self.communicator.all_reduce(tensor_in=tensor)
+        result = tensor.mean().cpu().item()
+        if rank in [0, 1]:
+            assert result == 1
+        else:
+            assert result == 5
+
+@pytest.mark.skipif(torch.cuda.device_count() < 4,
+                    reason="Need at least 4 GPUs to run the test.")
+def test_grouped_pynccl():
+    MPLauncher(n_tasks=4).launch(
+        task_type=GroupedAllReduceDistributedTask,
+        coordinator_type=CoordinatorType.TORCH_DISTRIBUTED,
+        communicator_type=CommunicatorType.PYNCCL,
+        groups=[[0, 1], [2, 3]],
     )

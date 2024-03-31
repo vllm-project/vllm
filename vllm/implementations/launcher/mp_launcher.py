@@ -2,6 +2,7 @@ import uuid
 from multiprocessing import Process
 
 from vllm.interfaces.launcher import Launcher, SubClassOfDistributedTask
+from vllm.utils import get_open_port
 
 
 class MPLauncher(Launcher):
@@ -21,7 +22,7 @@ class MPLauncher(Launcher):
             env['LOCAL_WORLD_SIZE'] = str(self.n_tasks)
             env['LOCAL_RANK'] = str(i)
             env['MASTER_ADDR'] = 'localhost'
-            env['MASTER_PORT'] = '29500'
+            env['MASTER_PORT'] = str(get_open_port())
         tasks = []
         for i in range(self.n_tasks):
             p = Process(target=task_type, args=(envs[i], (), kwargs))
