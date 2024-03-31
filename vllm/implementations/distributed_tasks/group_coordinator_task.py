@@ -19,9 +19,7 @@ class GroupCoordinatorDistributedTask(DistributedTask):
         self.global_coordinator: Coordinator = coordinator_cls()
         self.global_coordinator.initialize()
 
-        group = [g for g in groups
-                 if self.global_coordinator.get_rank() in g][0]
-        self.group_coordinator: Coordinator = coordinator_cls(group)
+        self.group_coordinator: Coordinator = coordinator_cls(groups)
         self.group_coordinator.initialize()
 
         self.communicator: Communicator = communicator_cls(

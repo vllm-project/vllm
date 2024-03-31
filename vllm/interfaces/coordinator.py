@@ -39,13 +39,14 @@ class Coordinator(ABC):
     """
 
     def __init__(self, *, rank: int, world_size: int, local_rank: int,
-                 local_world_size: int, group: List[int], **kwargs):
+                 local_world_size: int, groups: List[List[int]], **kwargs):
         self.rank = rank
         self.world_size = world_size
         self.local_rank = local_rank
         self.local_world_size = local_world_size
         self._initialize = False
-        self.group = sorted(group)
+        self.groups = groups
+        self.group = [g for g in groups if self.rank in g][0]
 
     def initialize(self):
         """Initialize the coordinator. This is set to be a separate method
