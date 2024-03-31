@@ -48,6 +48,11 @@ class TorchDistributedCoordinator(Coordinator):
             dist.init_process_group(backend='gloo')
             self.process_group = dist.group.WORLD
         else:
+            # each time we create a new group, we need **all the processes**
+            # to call `new_group`. For example, when we have 4 processes,
+            # and we want to create two groups, [0, 1] and [2, 3],
+            # 1. [0, 1, 2, 3] should call `new_group` with ranks=[0, 1]
+            # 2. [0, 1, 2, 3] should call `new_group` with ranks=[2, 3]
             for group in self.groups:
                 result_group = dist.new_group(ranks=group, backend='gloo')
                 if self.rank in group:
