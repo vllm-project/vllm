@@ -158,20 +158,17 @@ class LlamaAttention(nn.Module):
         use_attn_sinks = True
         llama_context_len = 4096
         if use_attn_sinks and not input_metadata.is_prompt:
+            k_original = k
             # streamingLLM: use pos in cache
             positions = torch.clamp(positions, max=llama_context_len - 1)
             q = self.rotary_emb._forward_single(positions, q, llama_context_len)
-            # k = self.rotary_emb._forward_single(positions, k, llama_context_len)
+            k = self.rotary_emb._forward_single(positions, k, llama_context_len)
         else:
+            k_original = None
             q, k = self.rotary_emb(positions, q, k)
         
         k_cache, v_cache = kv_cache
-        if use_attn_sinks and not input_metadata.is_prompt:
-            attn_sink_stuff = (self.rotary_emb._forward_single, positions, llama_context_len)
-        else:
-            attn_sink_stuff = None
-
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata, attn_sink_stuff)
+        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata, k_original)
         output, _ = self.o_proj(attn_output)
         return output
 
