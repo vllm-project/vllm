@@ -341,7 +341,8 @@ class LLMEngine:
         seq_id = next(self.seq_counter)
         eos_token_id = None
         if self.tokenizer:
-            eos_token_id = self.tokenizer.get_lora_tokenizer(lora_request).eos_token_id
+            eos_token_id = self.tokenizer.get_lora_tokenizer(
+                lora_request).eos_token_id
         seq = Sequence(seq_id, prompt, prompt_token_ids, block_size,
                        eos_token_id, lora_request)
 
@@ -486,8 +487,8 @@ class LLMEngine:
 
         for seq, _ in child_seqs:
             if seq_group.sampling_params.detokenize and self.detokenizer:
-                self.detokenizer.decode_sequence_inplace(
-                    seq, seq_group.sampling_params)
+                self.detokenizer.decode_sequence_inplace(seq,
+                                                         seq_group.sampling_params)
             self._check_stop(seq, seq_group.sampling_params)
 
         # Non-beam search case
