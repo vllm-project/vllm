@@ -77,6 +77,11 @@ class ExecutorBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def halt_model(self) -> None:
+        """Releases parallel workers from model loop."""
+        pass
+
+    @abstractmethod
     def add_lora(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError
 
@@ -107,6 +112,11 @@ class ExecutorAsyncBase(ExecutorBase):
     ) -> SamplerOutput:
         """Executes one model step on the given sequences."""
         raise NotImplementedError
+
+    @abstractmethod
+    async def halt_model_async(self) -> None:
+        """Releases parallel workers from model loop."""
+        pass
 
     async def check_health_async(self) -> None:
         """Checks if the executor is healthy. If not, it should raise an

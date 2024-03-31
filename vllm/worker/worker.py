@@ -211,8 +211,11 @@ class Worker(WorkerBase):
         blocks_to_swap_out: Optional[Dict[int, int]] = None,
         blocks_to_copy: Optional[Dict[int, List[int]]] = None,
     ) -> Optional[SamplerOutput]:
-        if self.is_driver_worker:
-            assert seq_group_metadata_list is not None
+        assert self.is_driver_worker
+        if seq_group_metadata_list is None:
+            data = {}
+            num_seq_groups = 0
+        else:
             num_seq_groups = len(seq_group_metadata_list)
             assert blocks_to_swap_in is not None
             assert blocks_to_swap_out is not None
@@ -223,23 +226,36 @@ class Worker(WorkerBase):
                 "blocks_to_swap_out": blocks_to_swap_out,
                 "blocks_to_copy": blocks_to_copy,
             }
-            broadcast_tensor_dict(data, src=0)
-        else:
-            data = broadcast_tensor_dict(src=0)
-            num_seq_groups = data["num_seq_groups"]
-            blocks_to_swap_in = data["blocks_to_swap_in"]
-            blocks_to_swap_out = data["blocks_to_swap_out"]
-            blocks_to_copy = data["blocks_to_copy"]
+        broadcast_tensor_dict(data, src=0)
 
         self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
 
         # If there is no input, we don't need to execute the model.
         if num_seq_groups == 0:
-            return {}
+            return None
 
-        output = self.model_runner.execute_model(seq_group_metadata_list,
-                                                 self.gpu_cache)
-        return output
+        return self.model_runner.execute_model(seq_group_metadata_list,
+                                               self.gpu_cache)
+
+    @torch.inference_mode()
+    def execute_model_parallel(self) -> None:
+        """Execute model loop in parallel worker."""
+        assert not self.is_driver_worker
+        while True:
+            data = broadcast_tensor_dict(src=0)
+            num_seq_groups = data.get("num_seq_groups", 0)
+            blocks_to_swap_in = data.get("blocks_to_swap_in")
+            blocks_to_swap_out = data.get("blocks_to_swap_out")
+            blocks_to_copy = data.get("blocks_to_copy")
+
+            self.cache_swap(blocks_to_swap_in, blocks_to_swap_out,
+                            blocks_to_copy)
+
+            # If there is no input, we don't need to execute the model.
+            if num_seq_groups == 0:
+                return None
+
+            self.model_runner.execute_model(None, self.gpu_cache)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)

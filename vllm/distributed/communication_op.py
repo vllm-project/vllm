@@ -147,14 +147,14 @@ def broadcast_tensor_dict(
 ) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
     """Broadcast the input tensor dictionary."""
     group = group or torch.distributed.group.WORLD
-    ranks = torch.distributed.get_process_group_ranks(group)
-    assert src in ranks, f"Invalid src rank ({src})"
 
     # Bypass the function if we are using only 1 GPU.
     world_size = torch.distributed.get_world_size(group=group)
     if world_size == 1:
         return tensor_dict
 
+    ranks = torch.distributed.get_process_group_ranks(group)
+    assert src in ranks, f"Invalid src rank ({src})"
     rank = torch.distributed.get_rank()
     if rank == src:
         metadata_list: List[Tuple[Any, Any]] = []
