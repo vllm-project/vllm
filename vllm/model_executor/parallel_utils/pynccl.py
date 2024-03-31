@@ -21,7 +21,6 @@
 
 import ctypes
 import datetime
-import logging
 import os
 
 # ===================== import region =====================
@@ -29,7 +28,9 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ReduceOp
 
-logger = logging.getLogger(__name__)
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 so_file = os.environ.get("VLLM_NCCL_SO_PATH", "")
 
@@ -41,7 +42,7 @@ else:
     if torch.version.cuda is not None:
         so_file = "libnccl.so.2"
     elif torch.version.hip is not None:
-        so_file = "librccl.so.2"
+        so_file = "librccl.so.1"
     else:
         raise ValueError("NCCL only supports CUDA and ROCm backends.")
     logger.debug(f"Loading nccl from library {so_file}")

@@ -111,7 +111,7 @@ class RequestOutput:
         # NOTE: We need omit logprobs here explicitly because the sequence
         # always has the logprobs of the sampled tokens even if the
         # logprobs are not requested.
-        include_logprobs = seq_group.sampling_params.logprobs
+        include_logprobs = seq_group.sampling_params.logprobs is not None
         outputs = [
             CompletionOutput(seqs.index(seq), seq.output_text,
                              seq.get_output_token_ids(),
