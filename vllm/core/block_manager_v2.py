@@ -21,6 +21,24 @@ class BlockSpaceManagerV2(BlockSpaceManager):
     sliding-window are not feature complete. This class implements the design
     described in https://github.com/vllm-project/vllm/pull/3492.
 
+    Lookahead slots
+        The block manager has the notion of a "lookahead slot". These are slots
+        in the KV cache that are allocated for a sequence. Unlike the other
+        allocated slots, the content of these slots is undefined -- the worker
+        may use the memory allocations in any ways.
+
+        In practice, a worker could use these lookahead slots to run multiple
+        forward passes for a single scheduler invocation. Each successive
+        forward pass would write KV activations to the corresponding lookahead
+        slot. This allows low inter-token latency use-cases, where the overhead
+        of continuous batching is amortized over >1 generated tokens.
+
+        Speculative decoding uses lookahead slots to store KV activations of
+        proposal tokens.
+
+        See https://github.com/vllm-project/vllm/pull/3250 for more information
+        on lookahead scheduling.
+
     Args:
         block_size (int): The size of each memory block.
         num_gpu_blocks (int): The number of memory blocks allocated on GPU.
@@ -126,19 +144,21 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         number of touched blocks is less than the number of free blocks.
 
         "Lookahead slots" are slots that are allocated in addition to the slots
-        for known tokens. This is used by speculative decoding when speculating
-        future tokens.
+        for known tokens. The contents of the lookahead slots are not defined.
+        This is used by speculative decoding when speculating future tokens.
         """
+
         num_touched_blocks = 0
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             block_table = self.block_tables[seq.seq_id]
-            num_new_tokens = seq.get_len() - block_table.num_full_slots
 
+            num_unseen_tokens = len(
+                block_table.get_unseen_token_ids(seq.get_token_ids()))
             num_touched_blocks += (
                 block_table.get_num_blocks_touched_by_new_tokens(
                     # NOTE: we treat lookahead slots as new tokens for the
                     # worst-case estimation.
-                    num_new_tokens + num_lookahead_slots))
+                    num_unseen_tokens + num_lookahead_slots))
 
         num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(
             Device.GPU)
@@ -152,10 +172,10 @@ class BlockSpaceManagerV2(BlockSpaceManager):
 
         block_table = self.block_tables[seq.seq_id]
 
-        # Get unseen token ids.
-        num_full_slots = block_table.num_full_slots
-        unseen_token_ids = seq.get_token_ids()[num_full_slots:]
-        assert unseen_token_ids
+        unseen_token_ids = block_table.get_unseen_token_ids(
+            seq.get_token_ids())
+        assert unseen_token_ids, ("append slots called on sequence without "
+                                  "unseen tokens")
 
         block_table.append_token_ids(unseen_token_ids)
 

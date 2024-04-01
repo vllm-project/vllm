@@ -195,6 +195,25 @@ class BlockTable:
         assert self._is_allocated
         return [block.block_id for block in self._blocks]
 
+    def get_unseen_token_ids(self, sequence_token_ids: List[int]) -> List[int]:
+        """Get the number of "unseen" tokens in the sequence.
+
+        Unseen tokens are tokens in the sequence corresponding to this block
+        table, but are not yet appended to this block table.
+
+        Args:
+            sequence_token_ids (List[int]): The list of token ids in the
+                sequence.
+
+        Returns:
+            List[int]: The postfix of sequence_token_ids that has not yet been
+                appended to the block table.
+        """
+
+        # Since the block table is append-only, the unseen token ids are the
+        # ones after the appended ones.
+        return sequence_token_ids[self.num_full_slots:]
+
     def _allocate_blocks_for_token_ids(self, prev_block: Optional[Block],
                                        token_ids: List[int],
                                        device: Device) -> List[Block]:

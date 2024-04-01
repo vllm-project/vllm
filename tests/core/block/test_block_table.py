@@ -498,3 +498,48 @@ def test_cow_lookahead_simple(block_size: int, sequence_len: int,
 
     # After free, expect all blocks to be freed.
     assert allocator.get_num_free_blocks(Device.GPU) == num_gpu_blocks
+
+@pytest.mark.parametrize("block_size", [1, 8])
+@pytest.mark.parametrize("sequence_len", [1, 16, 129])
+@pytest.mark.parametrize("num_new_tokens", [1, 16, 129])
+@pytest.mark.parametrize("allocator_type", ["naive", "prefix_caching"])
+def test_num_blocks_touched_by_new_tokens(block_size: int, sequence_len: int,
+                                     num_new_tokens: int, allocator_type: str):
+    """Verify correct calculation of num_blocks_touched_by_new_tokens.
+
+    This is done by using copy-on-write, which requires any modified block to
+    be copied before write if the refcount > 1. We set the refcount>1 by forking
+    a sequence, then measure the free blocks before and after an append. If the
+    number of consumed blocks equals what `get_num_blocks_touched_by_new_tokens`
+    returns, then the calculation is correct.
+    """
+
+    num_gpu_blocks = 1024
+
+    allocator = CpuGpuBlockAllocator.create(
+        allocator_type=allocator_type,
+        num_gpu_blocks=num_gpu_blocks,
+        num_cpu_blocks=0,
+        block_size=block_size,
+    )
+
+    token_ids = list(range(sequence_len))
+    token_ids_to_append = list(range(num_new_tokens))
+
+    block_table = BlockTable(
+        block_size=block_size,
+        block_allocator=allocator,
+    )
+    
+    block_table.allocate(token_ids=token_ids, device=Device.GPU)
+    forked = block_table.fork()
+
+    expected_num_touched_blocks = block_table.get_num_blocks_touched_by_new_tokens(
+        num_new_tokens
+    )
+
+    num_free_blocks_before_append = allocator.get_num_free_blocks(Device.GPU)
+    block_table.append_token_ids(token_ids_to_append)
+    num_consumed_blocks = num_free_blocks_before_append - allocator.get_num_free_blocks(Device.GPU)
+
+    assert num_consumed_blocks == expected_num_touched_blocks

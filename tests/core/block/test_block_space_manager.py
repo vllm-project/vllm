@@ -48,3 +48,22 @@ def test_can_allocate_seq_group(block_size: int, num_seqs_per_group: int,
             assert can_allocate_result == AllocStatus.OK
         else:
             assert can_allocate_result == AllocStatus.LATER
+
+
+def test_asd():
+    block_size = 16
+    num_gpu_blocks = 16
+    watermark = 0.1
+    block_manager = BlockSpaceManagerV2(
+        block_size=block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        num_cpu_blocks=0,
+        watermark=watermark,
+    )
+
+    """
+    Create sequence.
+    Set to running.
+    Can append slots -- true if the number of blocks touched by 
+        new tokens plus lookahead is less than free blocks.
+    """
