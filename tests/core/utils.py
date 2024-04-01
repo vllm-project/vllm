@@ -24,7 +24,7 @@ def create_dummy_prompt(
 
 
 def create_seq_group(
-    seq_prompt_lens=1024,
+    seq_prompt_len=1024,
     seq_output_lens=(128, ),
     request_id='0',
     seq_id_start=0,
@@ -32,7 +32,7 @@ def create_seq_group(
 
     assert len(seq_output_lens) > 0
 
-    prompt_token_ids = [0] * seq_prompt_lens
+    prompt_token_ids = [0] * seq_prompt_len
 
     seqs = []
     for seq_id_offset, output_len in enumerate(seq_output_lens):

@@ -1,5 +1,5 @@
 """A block manager that manages token blocks."""
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
@@ -20,6 +20,24 @@ class BlockSpaceManagerV2(BlockSpaceManager):
     The current implementation is partial; in particular prefix caching and
     sliding-window are not feature complete. This class implements the design
     described in https://github.com/vllm-project/vllm/pull/3492.
+
+    Lookahead slots
+        The block manager has the notion of a "lookahead slot". These are slots
+        in the KV cache that are allocated for a sequence. Unlike the other
+        allocated slots, the content of these slots is undefined -- the worker
+        may use the memory allocations in any way.
+
+        In practice, a worker could use these lookahead slots to run multiple
+        forward passes for a single scheduler invocation. Each successive
+        forward pass would write KV activations to the corresponding lookahead
+        slot. This allows low inter-token latency use-cases, where the overhead
+        of continuous batching scheduling is amortized over >1 generated tokens.
+
+        Speculative decoding uses lookahead slots to store KV activations of
+        proposal tokens.
+
+        See https://github.com/vllm-project/vllm/pull/3250 for more information
+        on lookahead scheduling.
 
     Args:
         block_size (int): The size of each memory block.
@@ -116,35 +134,51 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         for seq in waiting_seqs[1:]:
             self.block_tables[seq.seq_id] = block_table.fork()
 
-    def can_append_slot(self, seq_group: SequenceGroup) -> bool:
-        # Simple heuristic: If there is at least one free block
-        # for each sequence, we can append.
+    def can_append_slots(self, seq_group: SequenceGroup,
+                         num_lookahead_slots: int) -> bool:
+        """Determine if there is enough space in the GPU KV cache to continue
+        generation of the specified sequence group.
+
+        We use a worst-case heuristic: assume each touched block will require a
+        new allocation (either via CoW or new block). We can append slots if the
+        number of touched blocks is less than the number of free blocks.
+
+        "Lookahead slots" are slots that are allocated in addition to the slots
+        for known tokens. The contents of the lookahead slots are not defined.
+        This is used by speculative decoding when speculating future tokens.
+        """
+
+        num_touched_blocks = 0
+        for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+            block_table = self.block_tables[seq.seq_id]
+
+            num_touched_blocks += (
+                block_table.get_num_blocks_touched_by_append_slots(
+                    token_ids=block_table.get_unseen_token_ids(
+                        seq.get_token_ids()),
+                    num_lookahead_slots=num_lookahead_slots,
+                ))
+
         num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(
             Device.GPU)
-        num_seqs = seq_group.num_seqs(status=SequenceStatus.RUNNING)
-        return num_seqs <= num_free_gpu_blocks
+        return num_touched_blocks <= num_free_gpu_blocks
 
-    def append_slot(
+    def append_slots(
         self,
         seq: Sequence,
-    ) -> Optional[Tuple[int, int]]:
+        num_lookahead_slots: int,
+    ) -> Dict[int, List[int]]:
 
         block_table = self.block_tables[seq.seq_id]
 
-        # Get unseen token ids.
-        num_full_slots = block_table.num_full_slots
-        unseen_token_ids = seq.get_token_ids()[num_full_slots:]
-        assert unseen_token_ids
+        block_table.append_token_ids(
+            token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
+            num_lookahead_slots=num_lookahead_slots,
+        )
 
-        block_table.append_token_ids(unseen_token_ids)
-
-        # Return any copy-on-writes.
-        _ = self.block_allocator.clear_copy_on_writes()
-
-        # TODO extend append_slot interface to append_slots
-        # @cadedaniel will do in https://github.com/vllm-project/vllm/pull/3250
-
-        return None
+        # Return any new copy-on-writes.
+        new_cows = self.block_allocator.clear_copy_on_writes()
+        return new_cows
 
     def free(self, seq: Sequence) -> None:
         if seq.seq_id not in self.block_tables:
@@ -191,10 +225,12 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         src_block_table = self.block_tables[parent_seq.seq_id]
         self.block_tables[child_seq.seq_id] = src_block_table.fork()
 
-    def can_swap_in(self, seq_group: SequenceGroup) -> bool:
+    def can_swap_in(self, seq_group: SequenceGroup,
+                    num_lookahead_slots: int) -> bool:
         return False
 
-    def swap_in(self, seq_group: SequenceGroup) -> Dict[int, int]:
+    def swap_in(self, seq_group: SequenceGroup,
+                num_lookahead_slots: int) -> Dict[int, int]:
         raise NotImplementedError
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:

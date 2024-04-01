@@ -85,7 +85,9 @@ class BlockTable:
                                                            device=device)
         self._num_full_slots = len(token_ids)
 
-    def append_token_ids(self, token_ids: List[int]) -> None:
+    def append_token_ids(self,
+                         token_ids: List[int],
+                         num_lookahead_slots: int = 0) -> None:
         """Appends a sequence of token IDs to the existing blocks in the
         BlockTable.
 
@@ -102,14 +104,13 @@ class BlockTable:
             token_ids (List[int]): The sequence of token IDs to be appended.
         """
         assert self._is_allocated
+        assert token_ids, "can't append empty token ids"
 
-        self.ensure_num_empty_slots(num_empty_slots=len(token_ids))
+        self.ensure_num_empty_slots(num_empty_slots=len(token_ids) +
+                                    num_lookahead_slots)
 
         blocks = self._blocks[self._num_full_slots // self._block_size:]
-        first_chunk_size = self._block_size - (self._num_full_slots %
-                                               self._block_size)
-        token_blocks = [token_ids[:first_chunk_size]] + chunk_list(
-            token_ids[first_chunk_size:], self._block_size)
+        token_blocks = self._chunk_token_blocks_for_append(token_ids)
 
         for block, token_block in zip(blocks, token_blocks):
             block.append_token_ids(token_block)
@@ -195,6 +196,25 @@ class BlockTable:
         assert self._is_allocated
         return [block.block_id for block in self._blocks]
 
+    def get_unseen_token_ids(self, sequence_token_ids: List[int]) -> List[int]:
+        """Get the number of "unseen" tokens in the sequence.
+
+        Unseen tokens are tokens in the sequence corresponding to this block
+        table, but are not yet appended to this block table.
+
+        Args:
+            sequence_token_ids (List[int]): The list of token ids in the
+                sequence.
+
+        Returns:
+            List[int]: The postfix of sequence_token_ids that has not yet been
+                appended to the block table.
+        """
+
+        # Since the block table is append-only, the unseen token ids are the
+        # ones after the appended ones.
+        return sequence_token_ids[self.num_full_slots:]
+
     def _allocate_blocks_for_token_ids(self, prev_block: Optional[Block],
                                        token_ids: List[int],
                                        device: Device) -> List[Block]:
@@ -243,3 +263,29 @@ class BlockTable:
             int: The total number of tokens currently stored in the BlockTable.
         """
         return self._num_full_slots
+
+    def get_num_blocks_touched_by_append_slots(
+            self, token_ids: List[int], num_lookahead_slots: int) -> int:
+        """Determine how many blocks will be "touched" by appending the token
+        ids.
+
+        This is required for the scheduler to determine whether a sequence can
+        continue generation, or if it must be preempted.
+        """
+
+        all_token_ids = token_ids + [-1] * num_lookahead_slots
+        token_blocks = self._chunk_token_blocks_for_append(all_token_ids)
+        return len(token_blocks)
+
+    def _chunk_token_blocks_for_append(
+            self, token_ids: List[int]) -> List[List[int]]:
+        """Split the token ids into block-sized chunks so they can be easily
+        appended to blocks. The first such "token block" may have less token ids
+        than the block size, since the last allocated block may be partially
+        full.
+        """
+        first_chunk_size = self._block_size - (self._num_full_slots %
+                                               self._block_size)
+        token_blocks = [token_ids[:first_chunk_size]] + chunk_list(
+            token_ids[first_chunk_size:], self._block_size)
+        return token_blocks

@@ -103,9 +103,9 @@ def test_append_slot_single_seq():
     block_manager.allocate(seq_group)
 
     # Nothing to append. Sequence has no new logical blocks.
-    assert block_manager.can_append_slot(seq_group)
+    assert block_manager.can_append_slots(seq_group)
     before_blocks = block_manager.get_num_free_gpu_blocks()
-    assert not block_manager.append_slot(prompt)
+    assert not block_manager.append_slots(prompt)
     after_blocks = block_manager.get_num_free_gpu_blocks()
     assert before_blocks == after_blocks
 
@@ -114,9 +114,9 @@ def test_append_slot_single_seq():
         token_id = i + 5
         prompt.append_token_id(token_id, {token_id: Logprob(0.0)})
 
-    assert block_manager.can_append_slot(seq_group)
+    assert block_manager.can_append_slots(seq_group)
     before_blocks = block_manager.get_num_free_gpu_blocks()
-    assert not block_manager.append_slot(prompt)
+    assert not block_manager.append_slots(prompt)
     after_blocks = block_manager.get_num_free_gpu_blocks()
     assert before_blocks - after_blocks == 1
 
@@ -150,13 +150,13 @@ def test_append_slot_cow():
     child.append_token_id(token_id, {token_id: Logprob(0.0)})
     block_manager.fork(prompt, child)
 
-    assert block_manager.can_append_slot(seq_group)
+    assert block_manager.can_append_slots(seq_group)
     before_blocks = block_manager.get_num_free_gpu_blocks()
 
-    maybe_src_dst_block = block_manager.append_slot(child)
-    assert maybe_src_dst_block is not None
-    src_block, dst_block = maybe_src_dst_block
-    assert src_block != dst_block
+    cows = block_manager.append_slots(child)
+    assert cows
+    for src_block, dst_blocks in cows.items():
+        assert src_block not in dst_blocks
 
     after_blocks = block_manager.get_num_free_gpu_blocks()
     assert before_blocks - after_blocks == 1
@@ -184,7 +184,7 @@ def test_fork():
     token_id = 4
     # Append token to child. Block is shared so copy on write occurs.
     child.append_token_id(token_id, {token_id: Logprob(0.0)})
-    block_manager.append_slot(child)
+    block_manager.append_slots(child)
     assert block_manager.get_block_table(
         prompt) != block_manager.get_block_table(child)
 
@@ -325,7 +325,7 @@ def test_sliding_window_multi_seq():
     token_id = 4
     # Append token to child. Block is shared so copy on write occurs.
     child.append_token_id(token_id, {token_id: Logprob(0.0)})
-    block_manager.append_slot(child)
+    block_manager.append_slots(child)
 
     # assert the number of blocks allocated is correct
     # we will use now one block more. Each seq will use 2 blocks,
@@ -335,7 +335,7 @@ def test_sliding_window_multi_seq():
 
     token_id = 5
     parent.append_token_id(token_id, {token_id: Logprob(0.0)})
-    block_manager.append_slot(parent)
+    block_manager.append_slots(parent)
 
     # assert the number of blocks allocated is correct
     # no change, because both sequences are still just sharing one block
