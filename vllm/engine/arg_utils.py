@@ -7,9 +7,8 @@ from vllm.config import (CacheConfig, DeviceConfig, EngineConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          SpeculativeConfig, TokenizerPoolConfig,
                          VisionLanguageConfig)
-from vllm.utils import str_to_int_tuple
-
 from vllm.model_executor.tensorizer_loader import TensorizerArgs
+from vllm.utils import str_to_int_tuple
 
 
 @dataclass

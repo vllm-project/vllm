@@ -7,13 +7,12 @@ from torch import nn
 
 from vllm.config import DeviceConfig, ModelConfig
 from vllm.model_executor.models import ModelRegistry
+from vllm.model_executor.models.llava import LlavaForConditionalGeneration
 from vllm.model_executor.tensorizer_loader import (ParameterizedLoadFormat,
                                                    _is_vllm_model,
                                                    load_with_tensorizer)
-from vllm.model_executor.models.llava import LlavaForConditionalGeneration
 from vllm.model_executor.weight_utils import (get_quant_config,
                                               initialize_dummy_weights)
-
 
 _VISION_MODEL_CLASSES = [
     LlavaForConditionalGeneration,
@@ -44,8 +43,7 @@ def _get_model_architecture(
             return (model_cls, arch)
     raise ValueError(
         f"Model architectures {architectures} are not supported for now. "
-        f"Supported architectures: {ModelRegistry.get_supported_archs()}"
-    )
+        f"Supported architectures: {ModelRegistry.get_supported_archs()}")
 
 
 def get_architecture_class_name(model_config: ModelConfig) -> str:
@@ -94,8 +92,7 @@ def get_model(model_config: ModelConfig, device_config: DeviceConfig,
                     f"Model {model_class.__name__} does not support LoRA, "
                     "but LoRA is enabled. Support for this model may "
                     "be added in the future. If this is important to you, "
-                    "please open an issue on github."
-                )
+                    "please open an issue on github.")
             else:
                 if model_class not in _VISION_MODEL_CLASSES:
                     model = model_class(model_config.hf_config, linear_method)
