@@ -537,29 +537,39 @@ def test_num_blocks_touched_by_append_slots(block_size: int, sequence_len: int,
 
     block_table.allocate(token_ids=token_ids, device=Device.GPU)
 
-    # Add lookahead before fork.
+    # Add lookahead before fork so both sequences have the same lookahead
+    # blocks.
     block_table.ensure_num_empty_slots(num_empty_slots=num_lookahead_slots)
 
-    #breakpoint()
-
+    # Fork sequence so that every block has refcount > 1.
     _ = block_table.fork()
 
+    # Determine how many blocks should be touched.
     expected_num_touched_blocks = (
         block_table.get_num_blocks_touched_by_append_slots(
-            token_ids=token_ids_to_append, num_lookahead_slots=num_lookahead_slots))
-
+            token_ids=token_ids_to_append,
+            num_lookahead_slots=num_lookahead_slots))
+    
+    # Measure how many blocks are touched by measuring num_free_blocks before
+    # and after the append.
+    #
+    # We expect append_token_ids to CoW all mutated blocks that have refcount>1.
     num_free_blocks_before_append = allocator.get_num_free_blocks(Device.GPU)
     block_table.append_token_ids(token_ids_to_append, num_lookahead_slots)
     num_consumed_blocks = (num_free_blocks_before_append -
                            allocator.get_num_free_blocks(Device.GPU))
 
     # TODO(cade) ensure equality here.
-    # The reason we have < is because lookahead blocks are not copied eagerly; they
-    # are copied on first write. This will cause issues for beam search +
-    # speculative decoding. This is acceptable for now as it is a large effort to
-    # combine the two. To fix this, we can ensure single sequence ownership of
-    # lookahead blocks by appending empty slots to each block, which will trigger
-    # the CoW.
+    # The reason we have < is because lookahead blocks are not copied eagerly;
+    # they are copied on first write. This will cause issues for beam search +
+    # speculative decoding. This is acceptable for now as it is a large effort
+    # to combine the two. To fix this, we can ensure single sequence ownership
+    # of lookahead blocks by appending empty slots to each block, which will
+    # trigger the CoW.
     #
-    # Until then, we can accept that the consumed tokens are <= the expected tokens.
-    assert num_consumed_blocks <= expected_num_touched_blocks
+    # Until then, we can accept that the consumed tokens are <= the expected
+    # tokens.
+    if num_lookahead_slots > 0:
+        assert num_consumed_blocks <= expected_num_touched_blocks
+    else:
+        assert num_consumed_blocks == expected_num_touched_blocks

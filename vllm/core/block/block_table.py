@@ -85,7 +85,9 @@ class BlockTable:
                                                            device=device)
         self._num_full_slots = len(token_ids)
 
-    def append_token_ids(self, token_ids: List[int], num_lookahead_slots: int = 0) -> None:
+    def append_token_ids(self,
+                         token_ids: List[int],
+                         num_lookahead_slots: int = 0) -> None:
         """Appends a sequence of token IDs to the existing blocks in the
         BlockTable.
 
@@ -104,13 +106,11 @@ class BlockTable:
         assert self._is_allocated
         assert token_ids, "can't append empty token ids"
 
-        self.ensure_num_empty_slots(num_empty_slots=len(token_ids) + num_lookahead_slots)
+        self.ensure_num_empty_slots(num_empty_slots=len(token_ids) +
+                                    num_lookahead_slots)
 
         blocks = self._blocks[self._num_full_slots // self._block_size:]
-        first_chunk_size = self._block_size - (self._num_full_slots %
-                                               self._block_size)
-        token_blocks = [token_ids[:first_chunk_size]] + chunk_list(
-            token_ids[first_chunk_size:], self._block_size)
+        token_blocks = self._chunk_token_blocks_for_append(token_ids)
 
         for block, token_block in zip(blocks, token_blocks):
             block.append_token_ids(token_block)
@@ -272,9 +272,20 @@ class BlockTable:
         This is required for the scheduler to determine whether a sequence can
         continue generation, or if it must be preempted.
         """
-        num_slots_to_append = len(token_ids) + num_lookahead_slots
+
+        all_token_ids = token_ids + [-1] * num_lookahead_slots
+        token_blocks = self._chunk_token_blocks_for_append(all_token_ids)
+        return len(token_blocks)
+
+    def _chunk_token_blocks_for_append(
+            self, token_ids: List[int]) -> List[List[int]]:
+        """Split the token ids into blocks so they can be appended to the
+        allocated blocks. The first such "token block" may have less token ids
+        than the block size, since the last allocated block may be partially
+        full.
+        """
         first_chunk_size = self._block_size - (self._num_full_slots %
                                                self._block_size)
-        remainder = max(num_slots_to_append - first_chunk_size, 0)
-        return cdiv(first_chunk_size, self._block_size) + cdiv(
-            remainder, self._block_size)
+        token_blocks = [token_ids[:first_chunk_size]] + chunk_list(
+            token_ids[first_chunk_size:], self._block_size)
+        return token_blocks
