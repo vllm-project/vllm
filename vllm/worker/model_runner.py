@@ -22,6 +22,7 @@ from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.utils import in_wsl, measure_cuda_memory
+from vllm.core.block_manager import BlockSpaceManager
 
 logger = init_logger(__name__)
 
@@ -43,7 +44,7 @@ class ModelRunner:
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
         kv_cache_dtype: Optional[str] = "auto",
-        is_driver_worker: bool = False,
+        is_driver_worker: bool = False
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -581,6 +582,7 @@ class ModelRunner:
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+        block_manager: Optional[BlockSpaceManager] = None
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, input_metadata, sampling_metadata,
          lora_requests,
@@ -602,6 +604,7 @@ class ModelRunner:
             positions=input_positions,
             kv_caches=kv_caches,
             input_metadata=input_metadata,
+            block_manager=block_manager
         )
 
         # Sample the next token.
