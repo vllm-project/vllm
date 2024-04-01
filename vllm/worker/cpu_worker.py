@@ -132,7 +132,7 @@ class CPUCacheEngine:
         return dtype_size * total
 
 
-class Worker:
+class CPUWorker:
     """A worker class that executes (a partition of) the model on a CPU socket.
 
     Each worker is associated with a single CPU socket. The worker is 

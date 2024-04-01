@@ -22,8 +22,8 @@ class CPUExecutor(ExecutorBase):
                  lora_config: Optional[LoRAConfig], *args, **kwargs) -> None:
         assert device_config.device_type == "cpu"
         assert lora_config is None, "cpu backend doesn't support LoRA"
-        model_config = CPUExecutor._verify_and_get_model_config(model_config)
-        cache_config = CPUExecutor._verify_and_get_cache_config(cache_config)
+        model_config = _verify_and_get_model_config(model_config)
+        cache_config = _verify_and_get_cache_config(cache_config)
 
         self.model_config = model_config
         self.cache_config = cache_config
@@ -37,14 +37,14 @@ class CPUExecutor(ExecutorBase):
         self._init_cache()
 
     def _init_worker(self):
-        from vllm.worker.cpu_worker import Worker
+        from vllm.worker.cpu_worker import CPUWorker
 
         assert self.parallel_config.world_size == 1, (
             "CPUExecutor only supports single CPU socket currently.")
 
         distributed_init_method = get_distributed_init_method(
             get_ip(), get_open_port())
-        self.driver_worker = Worker(
+        self.driver_worker = CPUWorker(
             self.model_config,
             self.parallel_config,
             self.scheduler_config,
@@ -66,11 +66,10 @@ class CPUExecutor(ExecutorBase):
             cache_dtype=self.cache_config.cache_dtype,
         )
 
-        logger.info(f"# CPU blocks: {num_cpu_blocks}, "
-                    f"# GPU blocks: {0}")
+        logger.info(f"# CPU blocks: {num_cpu_blocks}")
         if num_cpu_blocks <= 0:
             raise ValueError("No available memory for the cache blocks. "
-                             "Try increasing `swap_space` when "
+                             "Try increasing `cpu_kvcache_space` when "
                              "initializing the engine.")
 
         max_seq_len = self.cache_config.block_size * num_cpu_blocks
@@ -89,27 +88,6 @@ class CPUExecutor(ExecutorBase):
 
         # Initialize the cache.
         self.driver_worker.init_cache_engine(cache_config=self.cache_config)
-
-    @staticmethod
-    def _verify_and_get_model_config(config: ModelConfig) -> ModelConfig:
-        if config.dtype == torch.float16:
-            logger.warning(
-                "float16 is not supported on CPU, casting to bfloat16.")
-            config.dtype = torch.bfloat16
-        if not config.enforce_eager:
-            logger.warning(
-                "CUDA graph is not supported on CPU, fallback to the eager "
-                "mode.")
-            config.enforce_eager = True
-        return config
-
-    @staticmethod
-    def _verify_and_get_cache_config(config: CacheConfig) -> CacheConfig:
-        if config.enable_prefix_caching:
-            logger.warning(
-                "Prefix caching is not supported on CPU, disable it.")
-            config.enable_prefix_caching = False
-        return config
 
     def execute_model(self,
                       seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -137,3 +115,23 @@ class CPUExecutor(ExecutorBase):
         # CPUExecutor will always be healthy as long as
         # it's running.
         return
+
+
+def _verify_and_get_model_config(config: ModelConfig) -> ModelConfig:
+    if config.dtype == torch.float16:
+        logger.warning(
+            "float16 is not supported on CPU, casting to bfloat16.")
+        config.dtype = torch.bfloat16
+    if not config.enforce_eager:
+        logger.warning(
+            "CUDA graph is not supported on CPU, fallback to the eager "
+            "mode.")
+        config.enforce_eager = True
+    return config
+
+def _verify_and_get_cache_config(config: CacheConfig) -> CacheConfig:
+    if config.enable_prefix_caching:
+        logger.warning(
+            "Prefix caching is not supported on CPU, disable it.")
+        config.enable_prefix_caching = False
+    return config
