@@ -1,6 +1,7 @@
 import asyncio
 import enum
 import gc
+import importlib
 import os
 import socket
 import subprocess
@@ -124,6 +125,11 @@ def is_neuron() -> bool:
     except ImportError:
         transformers_neuronx = None
     return transformers_neuronx is not None
+
+
+@lru_cache(maxsize=None)
+def is_tpu() -> bool:
+    return importlib.util.find_spec("libtpu") is not None
 
 
 @lru_cache(maxsize=None)
