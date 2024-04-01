@@ -65,10 +65,10 @@ class TPUExecutor(ExecutorBase):
         """
         # Get the maximum number of blocks that can be allocated on TPU.
         num_tpu_blocks = self.driver_worker.profile_num_available_blocks(
-                block_size=self.cache_config.block_size,
-                gpu_memory_utilization=self.cache_config.gpu_memory_utilization,
-                cache_dtype=self.cache_config.cache_dtype,
-            )
+            block_size=self.cache_config.block_size,
+            gpu_memory_utilization=self.cache_config.gpu_memory_utilization,
+            cache_dtype=self.cache_config.cache_dtype,
+        )
         logger.info(f"# TPU blocks: {num_tpu_blocks}")
 
         check_block_size_valid(num_tpu_blocks, self.cache_config.block_size,
