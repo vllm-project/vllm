@@ -35,7 +35,10 @@ class RayGPUExecutor(ExecutorBase):
 
         assert self.parallel_config.worker_use_ray
         placement_group = self.parallel_config.placement_group
-        self.model_running = False
+
+        # This is non-None when the execute model loop is running
+        # in the parallel workers
+        self.parallel_worker_tasks = None
 
         # Disable Ray usage stats collection.
         ray_usage = os.environ.get("RAY_USAGE_STATS_ENABLED", "0")
@@ -224,12 +227,13 @@ class RayGPUExecutor(ExecutorBase):
                       blocks_to_swap_in: Dict[int, int],
                       blocks_to_swap_out: Dict[int, int],
                       blocks_to_copy: Dict[int, List[int]]) -> SamplerOutput:
-        if not self.model_running:
+        if self.parallel_worker_tasks is None:
             # Start model execution loop running in the parallel workers
-            _ = self._run_workers("execute_model_parallel",
-                                  async_remote_only=True,
-                                  use_ray_compiled_dag=USE_RAY_COMPILED_DAG)
-            self.model_running = True
+            parallel_worker_tasks = self._run_workers(
+                "execute_model_parallel",
+                async_remote_only=True,
+                use_ray_compiled_dag=USE_RAY_COMPILED_DAG)
+            self.parallel_worker_tasks = asyncio.gather(*parallel_worker_tasks)
 
         # Only the driver worker returns the sampling results.
         return self.driver_worker.execute_model(
@@ -239,9 +243,15 @@ class RayGPUExecutor(ExecutorBase):
             blocks_to_copy=blocks_to_copy)
 
     def halt_model(self) -> None:
-        if self.model_running:
-            self.driver_worker.execute_model()
-            self.model_running = False
+        if self.parallel_worker_tasks is None:
+            return
+
+        self.driver_worker.execute_model()
+        parallel_worker_tasks = self.parallel_worker_tasks
+        self.parallel_worker_tasks = None
+        # Ensure that workers exit model loop cleanly
+        # (this will raise otherwise)
+        ray.get(parallel_worker_tasks)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
@@ -360,10 +370,10 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
     ) -> SamplerOutput:
-        if not self.model_running:
+        if self.parallel_worker_tasks is None:
             # Start model execution loop running in the parallel workers
-            _ = asyncio.create_task(self._execute_model_parallel())
-            self.model_running = True
+            self.parallel_worker_tasks = asyncio.create_task(
+                self._execute_model_parallel())
 
         # Only the driver worker returns the sampling results.
         return await make_async(self.driver_worker.execute_model)(
@@ -380,6 +390,12 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
         return await asyncio.gather(*coros)
 
     async def halt_model_async(self) -> None:
-        if self.model_running:
-            await make_async(self.driver_worker.execute_model)()
-            self.model_running = False
+        if self.parallel_worker_tasks is None:
+            return
+
+        await make_async(self.driver_worker.execute_model)()
+        parallel_worker_tasks = self.parallel_worker_tasks
+        self.parallel_worker_tasks = None
+        # Ensure that workers exit model loop cleanly
+        # (this will raise otherwise)
+        await parallel_worker_tasks

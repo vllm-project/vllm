@@ -213,8 +213,8 @@ class Worker(WorkerBase):
     ) -> Optional[SamplerOutput]:
         assert self.is_driver_worker
         if seq_group_metadata_list is None:
-            data = {}
             num_seq_groups = 0
+            data = {}
         else:
             num_seq_groups = len(seq_group_metadata_list)
             assert blocks_to_swap_in is not None
