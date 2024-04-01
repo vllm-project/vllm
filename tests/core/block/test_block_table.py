@@ -549,7 +549,7 @@ def test_num_blocks_touched_by_append_slots(block_size: int, sequence_len: int,
         block_table.get_num_blocks_touched_by_append_slots(
             token_ids=token_ids_to_append,
             num_lookahead_slots=num_lookahead_slots))
-    
+
     # Measure how many blocks are touched by measuring num_free_blocks before
     # and after the append.
     #
