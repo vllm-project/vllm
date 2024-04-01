@@ -11,6 +11,7 @@ from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from prometheus_client import make_asgi_app
 from prometheus_fastapi_instrumentator import Instrumentator
 
 import vllm
@@ -45,8 +46,12 @@ async def lifespan(app: fastapi.FastAPI):
 
 
 app = fastapi.FastAPI(lifespan=lifespan)
-# Instrument the app with HTTP metrics and expose it on /metrics
-Instrumentator().instrument(app).expose(app, endpoint="/metrics")
+# Instrument the app with HTTP metrics
+Instrumentator().instrument(app)
+
+# Add prometheus ASGI middleware to route /metrics requests
+metrics_app = make_asgi_app()
+app.mount("/metrics", metrics_app)
 
 
 def parse_args():
