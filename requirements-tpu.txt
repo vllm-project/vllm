@@ -4,6 +4,7 @@ sentencepiece  # Required for LLaMA tokenizer.
 numpy
 torch ~= 2.2.0
 torch_xla[tpu] ~= 2.2.0
+jax[tpu]  # Required for Pallas kernels.
 requests
 py-cpuinfo
 transformers >= 4.39.1  # Required for StarCoder2 & Llava.
