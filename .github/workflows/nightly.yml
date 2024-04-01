@@ -3,7 +3,7 @@ run-name: ${{ github.actor }} triggered nightly on ${{ github.ref }}
 on:
     schedule:
       # * is a special character in YAML so you have to quote this string
-      - cron: '0 0 * * *'
+      - cron: '0 1 * * *'
 
     workflow_dispatch:
       inputs:
@@ -20,7 +20,7 @@ jobs:
     NIGHTLY-MULTI:
         uses: ./.github/workflows/build-test.yml
         with:
-            label: aws-avx2-192G-4-a10g-96G
+            build_label: aws-avx2-192G-4-a10g-96G
             timeout: 240
             gitref: ${{ github.ref }}
             Gi_per_thread: 4
@@ -32,7 +32,7 @@ jobs:
     NIGHTLY-SOLO:
         uses: ./.github/workflows/build-test.yml
         with:
-            label: aws-avx2-32G-a10g-24G
+            build_label: aws-avx2-32G-a10g-24G
             timeout: 300
             gitref: ${{ github.ref }}
             Gi_per_thread: 12
@@ -40,21 +40,6 @@ jobs:
             python: 3.11.4
             test_skip_list:
         secrets: inherit
-
-    # multi-gpu
-    # AWS-AVX2-192G-4-A10G-96G-Benchmark:
-    #     uses: ./.github/workflows/nm-benchmark.yml
-    #     with:
-    #         label: aws-avx2-192G-4-a10g-96G
-    #         benchmark_config_list_file:  ./.github/data/nm_benchmark_nightly_configs_list.txt
-    #         timeout: 480
-    #         gitref: '${{ github.ref }}'
-    #         Gi_per_thread: 4
-    #         nvcc_threads: 8
-    #         python: "3.10.12"
-    #         # Always push if it is a scheduled job
-    #         push_benchmark_results_to_gh_pages: "${{ github.event_name == 'schedule' || inputs.push_benchmark_results_to_gh_pages }}"
-    #     secrets: inherit
 
     # single gpu
     AWS-AVX2-32G-A10G-24G-Benchmark:

@@ -1,4 +1,4 @@
-name: build-test
+name: test
 on:
   # makes workflow reusable
   workflow_call:
@@ -72,3 +72,89 @@ jobs:
                 fetch-depth: 0
                 ref: ${{ inputs.gitref }}
                 submodules: recursive
+
+            - name: setenv
+              id: setenv
+              uses: ./.github/actions/nm-set-env/
+              with:
+                hf_token: ${{ secrets.NM_HF_TOKEN }}
+                Gi_per_thread: 1
+
+            - name: set python
+              id: set_python
+              uses: ./.github/actions/nm-set-python/
+              with:
+                python: ${{ inputs.python }}
+                venv: TEST
+
+            - name: hf cache
+              id: hf_cache
+              uses: ./.github/actions/nm-hf-cache/
+              with:
+                fs_cache: ${{ secrets.HF_FS_CACHE }}
+
+            - name: create testmo run
+              id: create_testmo_run
+              uses: ./.github/actions/nm-testmo-run-create/
+              if: success() || failure()
+              with:
+                testmo_url: https://neuralmagic.testmo.net
+                testmo_token: ${{ secrets.TESTMO_TEST_TOKEN }}
+                source: 'build-test'
+
+            - name: download whl
+              id: download
+              uses: actions/download-artifact@v4
+              with:
+                name: ${{ inputs.whl }}
+                path: ${{ inputs.whl }}
+
+            - name: install and test whl
+              id: test
+              uses: ./.github/actions/nm-install-test-whl/
+              with:
+                pypi: ${{ secrets.NM_PRIVATE_PYPI_LOCATION }}
+                python: ${{ inputs.python }}
+                venv: TEST
+                test_skip_list: ${{ inputs.test_skip_list }}
+                test_directory: tests
+                test_results: test-results
+
+            - name: upload code coverage html
+              uses: actions/upload-artifact@v4
+              if: success() || failure()
+              with:
+                name: cc-vllm-html
+                path: cc-vllm-html
+                retention-days: 15
+
+            - name: report test results
+              id: report_test
+              uses: ./.github/actions/nm-testmo-run-submit-thread/
+              if: success() || failure()
+              with:
+                testmo_url: https://neuralmagic.testmo.net
+                testmo_token: ${{ secrets.TESTMO_TEST_TOKEN }}
+                testmo_run_id: ${{ steps.create_testmo_run.outputs.id }}
+                results: test-results
+                step_status: ${{ steps.test.outputs.status }}
+
+            - name: summary
+              uses: ./.github/actions/nm-summary-test/
+              if: success() || failure()
+              with:
+                test_label: ${{ inputs.test_label }}
+                gitref: ${{ inputs.gitref }}
+                testmo_run_url: https://neuralmagic.testmo.net/automation/runs/view/${{ steps.create_testmo_run.outputs.id }}
+                python: ${{ steps.set_python.outputs.version }}
+                whl: ${{ steps.test.outputs.whl }}
+                magic_wand: ${{ steps.test.outputs.magic_wand }}
+                test_status: ${{ steps.test.outputs.status }}
+
+            - name: complete testmo run
+              uses: ./.github/actions/nm-testmo-run-complete/
+              if: success() || failure()
+              with:
+                testmo_url: https://neuralmagic.testmo.net
+                testmo_token: ${{ secrets.TESTMO_TEST_TOKEN }}
+                testmo_run_id: ${{ steps.create_testmo_run.outputs.id }}

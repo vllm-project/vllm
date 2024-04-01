@@ -1,4 +1,4 @@
-name: build-test
+name: build
 on:
   # makes workflow reusable
   workflow_call:
@@ -17,6 +17,10 @@ on:
         required: true
       Gi_per_thread:
         description: 'requested GiB to reserve per thread'
+        type: string
+        required: true
+      nvcc_threads:
+        description: 'requested number of threads for nvcc'
         type: string
         required: true
       python:
@@ -43,6 +47,10 @@ on:
         description: 'requested GiB to reserve per thread'
         type: string
         required: true
+      nvcc_threads:
+        description: 'requested number of threads for nvcc'
+        type: string
+        required: true
       python:
         description: "python version, e.g. 3.10.12"
         type: string
@@ -54,6 +62,8 @@ jobs:
 
         runs-on: ${{ inputs.build_label }}
         timeout-minutes: ${{ fromJson(inputs.timeout) }}
+        outputs:
+            whl: ${{ steps.build.outputs.whl }}
 
         steps:
 
@@ -64,3 +74,96 @@ jobs:
                 fetch-depth: 0
                 ref: ${{ inputs.gitref }}
                 submodules: recursive
+
+            - name: setenv
+              id: setenv
+              uses: ./.github/actions/nm-set-env/
+              with:
+                hf_token: ${{ secrets.NM_HF_TOKEN }}
+                Gi_per_thread: ${{ inputs.Gi_per_thread }}
+                nvcc_threads: ${{ inputs.nvcc_threads }}
+
+            - name: set python
+              id: set_python
+              uses: ./.github/actions/nm-set-python/
+              with:
+                python: ${{ inputs.python }}
+                venv: TEST
+
+            - name: hf cache
+              id: hf_cache
+              uses: ./.github/actions/nm-hf-cache/
+              with:
+                fs_cache: ${{ secrets.HF_FS_CACHE }}
+
+            - name: create testmo run
+              id: create_testmo_run
+              uses: ./.github/actions/nm-testmo-run-create/
+              if: success() || failure()
+              with:
+                testmo_url: https://neuralmagic.testmo.net
+                testmo_token: ${{ secrets.TESTMO_TEST_TOKEN }}
+                source: 'build-test'
+
+            - name: python lint
+              id: lint
+              uses: ./.github/actions/nm-lint-python/
+
+            - name: build
+              id: build
+              uses: ./.github/actions/nm-build-vllm/
+              with:
+                python: ${{ inputs.python }}
+                venv: TEST
+                pypi: ${{ secrets.NM_PRIVATE_PYPI_LOCATION }}
+
+            - name: upload whl
+              uses: actions/upload-artifact@v4
+              if: success() || failure()
+              with:
+                name: ${{ steps.build.outputs.whl }}
+                path: dist/${{ steps.build.outputs.whl }}
+                retention-days: 15
+
+            - name: upload tar.gz
+              uses: actions/upload-artifact@v4
+              if: success() || failure()
+              with:
+                name: ${{ inputs.python }}-${{ steps.build.outputs.tarfile }}
+                path: dist/${{ steps.build.outputs.tarfile }}
+                retention-days: 5
+
+            - name: summary
+              uses: ./.github/actions/nm-summary-build/
+              if: success() || failure()
+              with:
+                label: ${{ inputs.build_label }}
+                gitref: ${{ inputs.gitref }}
+                testmo_run_url: https://neuralmagic.testmo.net/automation/runs/view/${{ steps.create_testmo_run.outputs.id }}
+                python: ${{ steps.set_python.outputs.version }}
+                lint_status: ${{ steps.lint.outputs.status }}
+                build_status: ${{ steps.build.outputs.build_status }}
+                whl_status: ${{ steps.build.outputs.whl_status }}
+
+            - name: run status
+              id: run_status
+              if: success() || failure()
+              env:
+                LINT_STATUS: ${{ steps.lint.outputs.status }}
+                BUILD_STATUS: ${{ steps.build.outputs.build_status }}
+                WHL_STATUS: ${{ steps.build.outputs.whl_status }}
+              run: |
+                echo "lint status: ${LINT_STATUS}"
+                echo "build status: ${BUILD_STATUS}"
+                echo "build status: ${WHL_STATUS}"
+                if [ -z "${LINT_STATUS}" ] || [ "${LINT_STATUS}" -ne "0" ]; then exit 1; fi
+                if [ -z "${BUILD_STATUS}" ] || [ "${BUILD_STATUS}" -ne "0" ]; then exit 1; fi
+                if [ -z "${WHL_STATUS}" ] || [ "${WHL_STATUS}" -ne "0" ]; then exit 1; fi
+
+            - name: complete testmo run
+              uses: ./.github/actions/nm-testmo-run-complete/
+              if: success() || failure()
+              with:
+                testmo_url: https://neuralmagic.testmo.net
+                testmo_token: ${{ secrets.TESTMO_TEST_TOKEN }}
+                testmo_run_id: ${{ steps.create_testmo_run.outputs.id }}

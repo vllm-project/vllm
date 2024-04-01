@@ -1,7 +1,7 @@
 name: summary
 description: 'creates a neuralmagic GHA run summary'
 inputs:
-  label:
+  test_label:
     description: 'GHA runner label'
     required: true
   gitref:
@@ -13,11 +13,11 @@ inputs:
   python:
     description: 'python version info'
     required: true
-  lint_status:
-    description: 'status from python lint step'
+  whl:
+    description: 'whl file tested'
     required: true
-  build_status:
-    description: 'status from build step'
+  magic_wand:
+    description: 'magic_wand version'
     required: true
   test_status:
     description: 'status from test step'
@@ -26,23 +26,20 @@ runs:
   using: composite
   steps:
   - run: |
-      LINT_STATUS=${{ inputs.lint_status }}
-      LINT_EMOJI=$(./.github/scripts/step-status ${LINT_STATUS})
-      BUILD_STATUS=${{ inputs.build_status }}
-      BUILD_EMOJI=$(./.github/scripts/step-status ${BUILD_STATUS})
+      TESTMO_URL=${{ inputs.testmo_run_url }}
       TEST_STATUS=${{ inputs.test_status }}
       TEST_EMOJI=$(./.github/scripts/step-status ${TEST_STATUS})
-      echo "testmo URL: ${{ inputs.testmo_run_url }}" >> $GITHUB_STEP_SUMMARY
+      echo "testmo URL: ${TESTMO_URL}" >> $GITHUB_STEP_SUMMARY
       echo ""
       echo "| Parameter | |" >> $GITHUB_STEP_SUMMARY
       echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-      echo "| label: | \`${{ inputs.label }}\` |" >> $GITHUB_STEP_SUMMARY
+      echo "| label: | \`${{ inputs.test_label }}\` |" >> $GITHUB_STEP_SUMMARY
       echo "| git sha: | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
       echo "| github actor: | '${{ github.actor }}' |" >> $GITHUB_STEP_SUMMARY
       echo "| gitref: | '${{ inputs.gitref }}' |" >> $GITHUB_STEP_SUMMARY
       echo "| branch name: | '${{ github.ref_name }}' |" >> $GITHUB_STEP_SUMMARY
       echo "| python: | ${{ inputs.python }} |" >> $GITHUB_STEP_SUMMARY
-      echo "| lint: | ${LINT_EMOJI} |" >> $GITHUB_STEP_SUMMARY
-      echo "| build: | ${BUILD_EMOJI} |" >> $GITHUB_STEP_SUMMARY
+      echo "| whl: | ${{ inputs.whl }} |" >> $GITHUB_STEP_SUMMARY
+      echo "| magic_wand: | ${{ inputs.magic_wand }} |" >> $GITHUB_STEP_SUMMARY
       echo "| test: | ${TEST_EMOJI} |" >> $GITHUB_STEP_SUMMARY
     shell: bash
