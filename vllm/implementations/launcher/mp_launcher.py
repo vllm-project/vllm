@@ -31,3 +31,8 @@ class MPLauncher(Launcher):
             tasks.append(p)
         for task in tasks:
             task.join()
+        msg = ""
+        for i, task in enumerate(tasks):
+            if task.exitcode != 0:
+                msg += f"Task {i} exited with code {task.exitcode}"
+        assert msg != "", msg
