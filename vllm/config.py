@@ -338,11 +338,13 @@ class CacheConfig:
         forced_num_gpu_blocks: Optional[int] = None,
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
+        cpu_kvcache_space: int = 0,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
         self.swap_space_bytes = swap_space * _GB
         self.forced_num_gpu_blocks = forced_num_gpu_blocks
+        self.cpu_kvcache_space_bytes = cpu_kvcache_space * _GB
         self.cache_dtype = cache_dtype
         self.sliding_window = sliding_window
         self.enable_prefix_caching = enable_prefix_caching

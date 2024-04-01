@@ -221,13 +221,7 @@ def _make_alibi_bias(
         bias = bias[None, :] - bias[:, None]
 
         num_heads = alibi_slopes.shape[0]
-        bias = torch.empty(
-            num_heads,
-            prompt_len,
-            prompt_len,
-            device=alibi_slopes.device,
-            dtype=dtype,
-        )[:, :, :prompt_len].copy_(bias)
+        bias = bias[None, :].expand(num_heads, prompt_len, prompt_len)
         bias.mul_(alibi_slopes[:, None, None])
         inf_mask = torch.empty(
             (1, prompt_len, prompt_len),

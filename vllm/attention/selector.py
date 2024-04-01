@@ -34,7 +34,6 @@ def _can_use_flash_attn(dtype: torch.dtype) -> bool:
         logger.info("Cannot use FlashAttention backend for AMD GPUs.")
         return False
     if is_cpu():
-        logger.info("Cannot use FlashAttention backend for CPU.")
         return False
     if torch.cuda.get_device_capability()[0] < 8:
         # Volta and Turing NVIDIA GPUs.

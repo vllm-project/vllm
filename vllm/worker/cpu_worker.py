@@ -4,6 +4,7 @@ from typing import Dict, List, Optional
 import torch
 import torch.distributed
 
+from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.logger import init_logger
@@ -14,7 +15,7 @@ from vllm.model_executor.parallel_utils.communication_op import (
 from vllm.model_executor.parallel_utils.parallel_state import (
     ensure_model_parallel_initialized)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
-from vllm.worker.cache_engine import CacheEngine
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.worker.model_runner import ModelRunner
 
 logger = init_logger(__name__)
@@ -48,6 +49,87 @@ class CPUModelRunner(ModelRunner):
                                lora_config=self.lora_config,
                                parallel_config=self.parallel_config,
                                scheduler_config=self.scheduler_config)
+
+
+class CPUCacheEngine:
+    """Manages the KV cache for CPU backend.
+
+    This class is responsible for initializing and managing CPU KV
+    caches. It also provides methods for performing KV cache operations, such
+    as copying.
+    """
+
+    def __init__(self, cache_config: CacheConfig, model_config: ModelConfig,
+                 parallel_config: ParallelConfig,
+                 device_config: DeviceConfig) -> None:
+        assert device_config.device_type == "cpu"
+        self.cache_config = cache_config
+        self.model_config = model_config
+        self.parallel_config = parallel_config
+
+        self.head_size = model_config.get_head_size()
+        self.num_layers = model_config.get_num_layers(parallel_config)
+        self.num_heads = model_config.get_num_kv_heads(parallel_config)
+
+        self.block_size = cache_config.block_size
+        # Note: In CacheConfig, num_gpu_blocks actual is num_cpu_blocks
+        # for CPU backend, because we want to reuse KV cache management
+        # in the scheduler.
+        self.num_cpu_blocks = cache_config.num_gpu_blocks
+
+        if cache_config.cache_dtype == "auto":
+            self.dtype = model_config.dtype
+        else:
+            self.dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+
+        # Get attention backend.
+        self.attn_backend = get_attn_backend(model_config.dtype)
+
+        # Initialize the cache.
+        self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks)
+
+    def _allocate_kv_cache(
+        self,
+        num_blocks: int,
+    ) -> List[torch.Tensor]:
+        """Allocates KV cache on CPU."""
+        kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+            num_blocks, self.block_size, self.num_heads, self.head_size)
+        kv_cache: List[torch.Tensor] = []
+        for _ in range(self.num_layers):
+            kv_cache.append(
+                torch.empty(kv_cache_shape, dtype=self.dtype, device="cpu"))
+        return kv_cache
+
+    def swap_in(self, src_to_dst: Dict[int, int]) -> None:
+        raise NotImplementedError("Swap is not supported in CPUCacheEngine.")
+
+    def swap_out(self, src_to_dst: Dict[int, int]) -> None:
+        raise NotImplementedError("Swap is not supported in CPUCacheEngine.")
+
+    def copy(self, src_to_dsts: Dict[int, List[int]]) -> None:
+        self.attn_backend.copy_blocks(self.cpu_cache, src_to_dsts)
+
+    @staticmethod
+    def get_cache_block_size(
+        block_size: int,
+        cache_dtype: str,
+        model_config: ModelConfig,
+        parallel_config: ParallelConfig,
+    ) -> int:
+        head_size = model_config.get_head_size()
+        num_heads = model_config.get_num_kv_heads(parallel_config)
+        num_layers = model_config.get_num_layers(parallel_config)
+
+        key_cache_block = block_size * num_heads * head_size
+        value_cache_block = key_cache_block
+        total = num_layers * (key_cache_block + value_cache_block)
+        if cache_dtype == "auto":
+            dtype = model_config.dtype
+        else:
+            dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
+        dtype_size = torch.tensor([], dtype=dtype).element_size()
+        return dtype_size * total
 
 
 class Worker:
@@ -96,7 +178,6 @@ class Worker:
         self.cache_config = None
         self.cache_engine = None
         self.cpu_cache = None
-        self.gpu_cache = None
 
     def init_device(self) -> None:
         self.init_distributed_environment()
@@ -109,38 +190,36 @@ class Worker:
     def get_cpu_cache_block_num(
         self,
         block_size: int,
-        cpu_swap_space: int,
+        cache_space: int,
         cache_dtype: str,
     ) -> int:
         """
         Args:
             block_size: The size of the cache block.
-            cpu_swap_space: The size of the CPU swap space in bytes.
+            cache_space: The size of the CPU KV cache space in bytes.
         """
         # For CPU device, the block number will be calculated based on the
-        # swap_space.
-        cache_block_size = CacheEngine.get_cache_block_size(
+        # cpu_kvcache_space.
+        cache_block_size = CPUCacheEngine.get_cache_block_size(
             block_size, cache_dtype, self.model_config, self.parallel_config)
-        num_cpu_blocks = int(cpu_swap_space // cache_block_size)
+        num_cpu_blocks = int(cache_space // cache_block_size)
         num_cpu_blocks = max(num_cpu_blocks, 0)
 
         return num_cpu_blocks
 
     def init_cache_engine(self, cache_config: CacheConfig) -> None:
         self.cache_config = cache_config
-        self.cache_engine = CacheEngine(self.cache_config, self.model_config,
-                                        self.parallel_config,
-                                        self.device_config)
-        self.gpu_cache = self.cache_engine.gpu_cache
+        self.cache_engine = CPUCacheEngine(self.cache_config,
+                                           self.model_config,
+                                           self.parallel_config,
+                                           self.device_config)
         self.cpu_cache = self.cache_engine.cpu_cache
         self.model_runner.block_size = self.cache_engine.block_size
 
-        assert self.gpu_cache is not None
         assert self.cpu_cache is not None
 
-        # To reuse the cache management procedure, use cpu cache as 'gpu cache'.
         # Populate the cache to warmup the memory
-        for layer_cache in self.gpu_cache:
+        for layer_cache in self.cpu_cache:
             layer_cache.fill_(0)
 
     def cache_copy(
@@ -183,14 +262,11 @@ class Worker:
             return {}
 
         output = self.model_runner.execute_model(seq_group_metadata_list,
-                                                 self.gpu_cache)
+                                                 self.cpu_cache)
         return output
 
     def init_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
-
-        def all_reduce_warmup():
-            torch.distributed.all_reduce(torch.zeros(1).cpu())
 
         parallel_config = self.parallel_config
         rank = self.rank
@@ -217,7 +293,7 @@ class Worker:
             )
 
         # A small all_reduce for warmup.
-        all_reduce_warmup()
+        torch.distributed.all_reduce(torch.zeros(1).cpu())
 
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,

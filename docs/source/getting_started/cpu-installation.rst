@@ -64,16 +64,18 @@ Build from source
     $ VLLM_TARGET_DEVICE=cpu python setup.py install
 
 .. note::
-    - BF16 is the default data type in the current CPU backend, and is compatible will all CPUs with AVX512 ISA support. AVX512_BF16 is an extension ISA provides native BF16 data type conversion and vector product instructions. The CPU backend build script will check the host CPU flags to determine whether to enable AVX512_BF16. 
+    - BF16 is the default data type in the current CPU backend (that means the backend will cast FP16 to BF16), and is compatible will all CPUs with AVX512 ISA support. 
+
+    - AVX512_BF16 is an extension ISA provides native BF16 data type conversion and vector product instructions, will brings some performance improvement compared with pure AVX512. The CPU backend build script will check the host CPU flags to determine whether to enable AVX512_BF16. 
     
-    - If you want to enable AVX512_BF16 for the cross-compilation, please set environment variable VLLM_CPU_AVX512BF16=1 before the building.    
+    - If you want to force enable AVX512_BF16 for the cross-compilation, please set environment variable VLLM_CPU_AVX512BF16=1 before the building.    
 
 .. _cpu_backend_performance_tips:
 
 Performance tips
 -----------------
 
-- vLLM CPU backend uses ``swap_space`` parameter to specify the KV Cache size (e.g, ``--swap-space=40`` means 40 GB space for KV cache), larger setting will allow vLLM running more requests in parallel. This parameter should be set based on the hardware configuration and memory management pattern of users.
+- vLLM CPU backend uses ``cpu_kvcache_space`` parameter to specify the KV Cache size (e.g, ``--cpu-kv-cache-size=40`` means 40 GB space for KV cache), larger setting will allow vLLM running more requests in parallel. This parameter should be set based on the hardware configuration and memory management pattern of users.
 
 - vLLM CPU backend uses OpenMP for thread-parallel computation. If you want the best performance on CPU, it will be very critical to isolate CPU cores for OpenMP threads with other thread pools (like web-service event-loop), to avoid CPU oversubscription. 
 
