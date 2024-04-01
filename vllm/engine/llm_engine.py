@@ -736,20 +736,22 @@ class LLMEngine:
             else:
                 num_generation_tokens = scheduler_outputs.num_batched_tokens
                 num_generation_tokens_lst = [
-                    seq.get_output_len()
-                    for seq_group in scheduler_outputs.scheduled_seq_groups
-                    for seq in seq_group.get_finished_seqs()
+                    seq.get_output_len() for scheduled_seq_group in
+                    scheduler_outputs.scheduled_seq_groups for seq in
+                    scheduled_seq_group.seq_group.get_finished_seqs()
                 ]
 
             # Sampling Params
             if prompt_run:
                 request_n = [
-                    seq_group.sampling_params.n
-                    for seq_group in scheduler_outputs.scheduled_seq_groups
+                    scheduled_seq_group.seq_group.sampling_params.n
+                    for scheduled_seq_group in
+                    scheduler_outputs.scheduled_seq_groups
                 ]
                 request_best_of = [
-                    seq_group.sampling_params.best_of
-                    for seq_group in scheduler_outputs.scheduled_seq_groups
+                    scheduled_seq_group.seq_group.sampling_params.best_of
+                    for scheduled_seq_group in
+                    scheduler_outputs.scheduled_seq_groups
                 ]
 
             # Latency Timings
@@ -768,12 +770,12 @@ class LLMEngine:
             time_per_output_tokens = [] if prompt_run else time_last_iters
 
             # Finished Requests
-            for seq_group in scheduler_outputs.scheduled_seq_groups:
-                if not seq_group.is_finished():
+            for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
+                if not scheduled_seq_group.seq_group.is_finished():
                     continue
                 finished_reason_counter += CollectionsCounter([
-                    SequenceStatus.get_finished_reason(seq.status)
-                    for seq in seq_group.get_finished_seqs()
+                    SequenceStatus.get_finished_reason(seq.status) for seq in
+                    scheduled_seq_group.seq_group.get_finished_seqs()
                 ])
 
         return Stats(
