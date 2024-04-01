@@ -25,13 +25,13 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         The block manager has the notion of a "lookahead slot". These are slots
         in the KV cache that are allocated for a sequence. Unlike the other
         allocated slots, the content of these slots is undefined -- the worker
-        may use the memory allocations in any ways.
+        may use the memory allocations in any way.
 
         In practice, a worker could use these lookahead slots to run multiple
         forward passes for a single scheduler invocation. Each successive
         forward pass would write KV activations to the corresponding lookahead
         slot. This allows low inter-token latency use-cases, where the overhead
-        of continuous batching is amortized over >1 generated tokens.
+        of continuous batching scheduling is amortized over >1 generated tokens.
 
         Speculative decoding uses lookahead slots to store KV activations of
         proposal tokens.
