@@ -334,7 +334,8 @@ async def async_request_openai_chat_completions(
                             timestamp = time.perf_counter()
                             data = json.loads(chunk)
 
-                            if "content" in data["choices"][0]["delta"]:
+                            delta = data["choices"][0]["delta"]
+                            if delta.get("content", None):
                                 # First token
                                 if ttft == 0:
                                     ttft = time.perf_counter() - st
@@ -345,8 +346,7 @@ async def async_request_openai_chat_completions(
                                     output.itl.append(timestamp -
                                                       most_recent_timestamp)
 
-                                generated_text += data["choices"][0]["delta"][
-                                    "content"]
+                                generated_text += delta["content"]
 
                             most_recent_timestamp = timestamp
 
