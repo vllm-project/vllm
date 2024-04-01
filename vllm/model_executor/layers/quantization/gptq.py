@@ -1,5 +1,6 @@
 import enum
 from enum import Enum
+from fractions import Fraction
 from typing import Any, Dict, List, Optional
 from fractions import Fraction
 

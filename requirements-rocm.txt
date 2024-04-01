@@ -2,8 +2,10 @@ cmake>=3.21
 ninja  # For faster builds.
 typing-extensions>=4.8.0
 starlette
+requests
+py-cpuinfo
 psutil
-ray >= 2.9
+ray == 2.9.3
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
 tokenizers>=0.15.0

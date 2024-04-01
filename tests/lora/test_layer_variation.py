@@ -1,8 +1,9 @@
+import tempfile
+from random import sample
 from typing import List, Optional
+
 import peft
 import pytest
-from random import sample
-import tempfile
 from transformers import AutoModelForCausalLM
 
 import vllm

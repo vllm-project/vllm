@@ -3,20 +3,22 @@
 # This file has been modified by Neural Magic
 
 import io
+import logging
 import os
 import re
 import subprocess
 import sys
+from shutil import which
 from typing import List
 
-from packaging.version import parse, Version
-from setuptools import setup, find_packages, Extension
-from setuptools.command.build_ext import build_ext
-from shutil import which
 import torch
+from packaging.version import Version, parse
+from setuptools import Extension, find_packages, setup
+from setuptools.command.build_ext import build_ext
 from torch.utils.cpp_extension import CUDA_HOME
 
 ROOT_DIR = os.path.dirname(__file__)
+logger = logging.getLogger(__name__)
 
 # vLLM only supports Linux platform
 assert sys.platform.startswith(
@@ -58,19 +60,34 @@ class cmake_build_ext(build_ext):
     # Determine number of compilation jobs and optionally nvcc compile threads.
     #
     def compute_num_jobs(self):
-        try:
-            # os.sched_getaffinity() isn't universally available, so fall back
-            # to os.cpu_count() if we get an error here.
-            num_jobs = len(os.sched_getaffinity(0))
-        except AttributeError:
-            num_jobs = os.cpu_count()
+        # `num_jobs` is either the value of the MAX_JOBS environment variable
+        # (if defined) or the number of CPUs available.
+        num_jobs = os.environ.get("MAX_JOBS", None)
+        if num_jobs is not None:
+            num_jobs = int(num_jobs)
+            logger.info(f"Using MAX_JOBS={num_jobs} as the number of jobs.")
+        else:
+            try:
+                # os.sched_getaffinity() isn't universally available, so fall
+                #  back to os.cpu_count() if we get an error here.
+                num_jobs = len(os.sched_getaffinity(0))
+            except AttributeError:
+                num_jobs = os.cpu_count()
 
         nvcc_threads = None
-        if _is_cuda():
-            nvcc_cuda_version = get_nvcc_cuda_version()
-            if nvcc_cuda_version >= Version("11.2"):
-                nvcc_threads = int(os.getenv("NVCC_THREADS", 8))
-                num_jobs = max(1, round(num_jobs / (nvcc_threads / 4)))
+        if _is_cuda() and get_nvcc_cuda_version() >= Version("11.2"):
+            # `nvcc_threads` is either the value of the NVCC_THREADS
+            # environment variable (if defined) or 1.
+            # when it is set, we reduce `num_jobs` to avoid
+            # overloading the system.
+            nvcc_threads = os.getenv("NVCC_THREADS", None)
+            if nvcc_threads is not None:
+                nvcc_threads = int(nvcc_threads)
+                logger.info(f"Using NVCC_THREADS={nvcc_threads} as the number"
+                            " of nvcc threads.")
+            else:
+                nvcc_threads = 1
+            num_jobs = max(1, num_jobs // nvcc_threads)
 
         return num_jobs, nvcc_threads
 
@@ -303,12 +320,6 @@ def get_requirements() -> List[str]:
     if _is_cuda():
         with open(get_path("requirements.txt")) as f:
             requirements = f.read().strip().split("\n")
-        if get_nvcc_cuda_version() <= Version("11.8"):
-            # replace cupy-cuda12x with cupy-cuda11x for cuda 11.x
-            for i in range(len(requirements)):
-                if requirements[i].startswith("cupy-cuda12x"):
-                    requirements[i] = "cupy-cuda11x"
-                    break
     elif _is_hip():
         with open(get_path("requirements-rocm.txt")) as f:
             requirements = f.read().strip().split("\n")

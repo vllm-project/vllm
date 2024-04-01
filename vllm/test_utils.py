@@ -10,6 +10,7 @@ def init_test_distributed_environment(
     tensor_parallel_size: int,
     rank: int,
     distributed_init_port: str,
+    local_rank: int = -1,
 ) -> None:
     parallel_config = ParallelConfig(pipeline_parallel_size,
                                      tensor_parallel_size,
@@ -18,8 +19,8 @@ def init_test_distributed_environment(
     init_distributed_environment(
         parallel_config,
         rank,
-        cupy_port=None,
-        distributed_init_method=distributed_init_method)
+        distributed_init_method=distributed_init_method,
+        local_rank=local_rank)
 
 
 def multi_process_tensor_parallel(

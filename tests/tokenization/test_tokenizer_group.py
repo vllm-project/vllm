@@ -1,9 +1,10 @@
-import os
-import pytest
 import asyncio
+import os
 from unittest.mock import patch
 
+import pytest
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
+
 from vllm.transformers_utils.tokenizer_group import get_tokenizer_group
 from vllm.transformers_utils.tokenizer_group.ray_tokenizer_group import (
     RayTokenizerGroupPool)
