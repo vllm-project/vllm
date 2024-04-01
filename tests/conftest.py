@@ -479,15 +479,20 @@ class VllmRunnerNm(VllmRunner):
     def __init__(
         self,
         model_name: str,
+        model_revision: Optional[str] = None,
+        quantization: Optional[str] = None,
         sparsity: Optional[str] = None,
         tokenizer_name: Optional[str] = None,
         dtype: str = "half",
         disable_log_stats: bool = True,
         tensor_parallel_size: int = 1,
         max_model_len: Optional[int] = None,
+        enforce_eager: bool = False,
     ) -> None:
         self.model = LLM(
             model=model_name,
+            revision=model_revision,
+            quantization=quantization,
             sparsity=sparsity,
             tokenizer=tokenizer_name,
             trust_remote_code=True,
@@ -496,6 +501,7 @@ class VllmRunnerNm(VllmRunner):
             disable_log_stats=disable_log_stats,
             tensor_parallel_size=tensor_parallel_size,
             max_model_len=max_model_len,
+            enforce_eager=enforce_eager,
         )
 
     def generate_w_logprobs(

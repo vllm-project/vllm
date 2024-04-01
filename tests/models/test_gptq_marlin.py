@@ -1,5 +1,4 @@
-# UPSTREAM SYNC: Use the current downstream version.
-"""Compare the outputs of a GPTQ model to a Marlin model.
+"""Compares the outputs of gptq vs gptq_marlin 
 
 Note: GPTQ and Marlin do not have bitwise correctness.
 As a result, in this test, we just confirm that the top selected tokens of the
@@ -13,16 +12,13 @@ Note: This test currently fails running with --forked with the following:
     RuntimeError: Cannot re-initialize CUDA in forked subprocess.
     To use CUDA with multiprocessing, you must use the 'spawn' start method
 
-Run `pytest tests/models/test_marlin.py`.
+Run `pytest tests/models/test_gptq_marlin.py`.
 """
-
-import gc
-from dataclasses import dataclass
 
 import pytest
 import torch
+import gc
 from compare_utils import check_logprobs_close
-
 from vllm.model_executor.layers.quantization import (
     _QUANTIZATION_CONFIG_REGISTRY)
 
@@ -30,60 +26,64 @@ MAX_MODEL_LEN = 1024
 
 capability = torch.cuda.get_device_capability()
 capability = capability[0] * 10 + capability[1]
-marlin_not_supported = (
-    capability < _QUANTIZATION_CONFIG_REGISTRY["marlin"].get_min_capability())
+gptq_marlin_not_supported = (
+    capability <
+    _QUANTIZATION_CONFIG_REGISTRY["gptq_marlin"].get_min_capability())
 
+models = [
+    # act_order==False, group_size=channelwise
+    ("robertgshaw2/zephyr-7b-beta-channelwise-gptq", "main"),
+    # act_order==False, group_size=128
+    ("TheBloke/Llama-2-7B-GPTQ", "main"),
 
-@dataclass
-class ModelPair:
-    model_marlin: str
-    model_gptq: str
-
-
-model_pairs = [
-    ModelPair(model_marlin="nm-testing/zephyr-beta-7b-marlin-g128",
-              model_gptq="nm-testing/zephyr-beta-7b-gptq-g128"),
-    ModelPair(model_marlin="robertgshaw2/zephyr-7b-beta-channelwise-marlin",
-              model_gptq="robertgshaw2/zephyr-7b-beta-channelwise-gptq"),
-    ModelPair(model_marlin="robertgshaw2/TinyLlama-1.1B-Chat-v1.0-g128-marlin",
-              model_gptq="robertgshaw2/TinyLlama-1.1B-Chat-v1.0-g128-gptq")
+    # act_order==True, group_size=128
+    ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "main"),
+    # act_order==True, group_size=64
+    ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "gptq-4bit-64g-actorder_True"),
+    # act_order==True, group_size=32
+    ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "gptq-4bit-32g-actorder_True"),
 ]
 
 
 @pytest.mark.flaky(reruns=2)
-@pytest.mark.skipif(marlin_not_supported,
-                    reason="Marlin is not supported on this GPU type.")
-@pytest.mark.parametrize("model_pair", model_pairs)
+@pytest.mark.skipif(gptq_marlin_not_supported,
+                    reason="gptq_marlin is not supported on this GPU type.")
+@pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(
     vllm_runner_nm,
     example_prompts,
-    model_pair: ModelPair,
+    model,
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    marlin_model = vllm_runner_nm(model_pair.model_marlin,
-                                  dtype=dtype,
-                                  max_model_len=MAX_MODEL_LEN)
-    marlin_outputs = marlin_model.generate_greedy_logprobs(
+    gptq_marlin_model = vllm_runner_nm(model_name=model[0],
+                                       model_revision=model[1],
+                                       dtype=dtype,
+                                       quantization="gptq_marlin",
+                                       max_model_len=MAX_MODEL_LEN,
+                                       enforce_eager=False)
+    gptq_marlin_outputs = gptq_marlin_model.generate_greedy_logprobs(
         example_prompts, max_tokens, num_logprobs)
 
-    del marlin_model
+    del gptq_marlin_model
     gc.collect()
     torch.cuda.empty_cache()
 
-    gptq_model = vllm_runner_nm(model_pair.model_gptq,
+    gptq_model = vllm_runner_nm(model_name=model[0],
+                                model_revision=model[1],
                                 dtype=dtype,
                                 quantization="gptq",
-                                max_model_len=MAX_MODEL_LEN)
+                                max_model_len=MAX_MODEL_LEN,
+                                enforce_eager=False)
     gptq_outputs = gptq_model.generate_greedy_logprobs(example_prompts,
                                                        max_tokens,
                                                        num_logprobs)
 
-    del gptq_model
+    del gptq_model.model
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -91,7 +91,7 @@ def test_models(
     # use logprobs or else this will consistently run out of memory
     check_logprobs_close(
         outputs_0_lst=gptq_outputs,
-        outputs_1_lst=marlin_outputs,
+        outputs_1_lst=gptq_marlin_outputs,
         name_0="gptq",
-        name_1="marlin",
+        name_1="gptq_marlin",
     )

@@ -270,7 +270,9 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             # Newly generated tensors need to replace existing tensors that are
             # already registered as parameters by vLLM (and won't be freed)
             def replace_tensor(name, new_t):
-                weights[name] = weights[name].reshape(new_t.shape)
+                # It is important to use resize_() here since it ensures
+                # the same buffer is reused
+                weights[name].resize_(new_t.shape)
                 weights[name].copy_(new_t)
                 del new_t
 
