@@ -1,5 +1,8 @@
 """Inference-only Gemma model compatible with HF weights.
 
+Adapted from
+https://github.com/google/gemma_pytorch/blob/main/gemma/model_xla.py
+
 NOTE(woosuk): This is a temporary workaround to run the Gemma model using
 PyTorch XLA. This should be merged into the main Gemma model implementation
 once the custom ops are refactored and the model becomes torch.compile-able.
