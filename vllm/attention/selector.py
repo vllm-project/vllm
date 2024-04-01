@@ -12,7 +12,12 @@ logger = init_logger(__name__)
 
 @lru_cache(maxsize=None)
 def get_attn_backend(dtype: torch.dtype) -> Type[AttentionBackend]:
-    if _can_use_flash_attn(dtype):
+    if True:
+        logger.info("Using PallasAttention backend.")
+        from vllm.attention.backends.pallas import (  # noqa: F401
+            PallasAttentionBackend)
+        return PallasAttentionBackend
+    elif _can_use_flash_attn(dtype):
         logger.info("Using FlashAttention backend.")
         from vllm.attention.backends.flash_attn import (  # noqa: F401
             FlashAttentionBackend)
