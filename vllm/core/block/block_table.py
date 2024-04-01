@@ -279,8 +279,8 @@ class BlockTable:
 
     def _chunk_token_blocks_for_append(
             self, token_ids: List[int]) -> List[List[int]]:
-        """Split the token ids into blocks so they can be appended to the
-        allocated blocks. The first such "token block" may have less token ids
+        """Split the token ids into block-sized chunks so they can be easily
+        appended to blocks. The first such "token block" may have less token ids
         than the block size, since the last allocated block may be partially
         full.
         """

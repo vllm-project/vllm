@@ -559,7 +559,7 @@ def test_num_blocks_touched_by_append_slots(block_size: int, sequence_len: int,
     num_consumed_blocks = (num_free_blocks_before_append -
                            allocator.get_num_free_blocks(Device.GPU))
 
-    # TODO(cade) ensure equality here.
+    # TODO(cade) ensure equality when num_lookahead_slots > 0.
     # The reason we have < is because lookahead blocks are not copied eagerly;
     # they are copied on first write. This will cause issues for beam search +
     # speculative decoding. This is acceptable for now as it is a large effort
@@ -568,7 +568,7 @@ def test_num_blocks_touched_by_append_slots(block_size: int, sequence_len: int,
     # trigger the CoW.
     #
     # Until then, we can accept that the consumed tokens are <= the expected
-    # tokens.
+    # tokens when appending with lookahead.
     if num_lookahead_slots > 0:
         assert num_consumed_blocks <= expected_num_touched_blocks
     else:
