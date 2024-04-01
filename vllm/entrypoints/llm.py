@@ -9,7 +9,7 @@ from vllm.engine.llm_engine import LLMEngine
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.utils import Counter
-
+import pdb
 
 class LLM:
     """An LLM for generating texts from given prompts and sampling parameters.
@@ -106,6 +106,7 @@ class LLM:
             disable_custom_all_reduce=disable_custom_all_reduce,
             **kwargs,
         )
+        #pdb.set_trace()
         self.llm_engine = LLMEngine.from_engine_args(engine_args)
         self.request_counter = Counter()
 
@@ -194,9 +195,11 @@ class LLM:
             pbar = tqdm(total=num_requests,
                         desc="Processed prompts",
                         dynamic_ncols=True)
+
         # Run the engine.
         outputs: List[RequestOutput] = []
         while self.llm_engine.has_unfinished_requests():
+            #pdb.set_trace()
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
                 if output.finished:

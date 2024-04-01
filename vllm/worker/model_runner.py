@@ -580,7 +580,9 @@ class ModelRunner:
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
-
+        #import pdb
+        #pdb.set_trace()
+        
         # Execute the model.
         if input_metadata.use_cuda_graph:
             graph_batch_size = input_tokens.shape[0]
@@ -629,6 +631,7 @@ class ModelRunner:
                 dummy_lora_requests[idx % len(dummy_lora_requests)]
                 for idx in range(max_num_seqs)
             ]
+        
 
         # Profile memory usage with max_num_sequences sequences and the total
         # number of tokens equal to max_num_batched_tokens.
@@ -685,6 +688,8 @@ class ModelRunner:
     def capture_model(self, kv_caches: List[KVCache]) -> None:
         # NOTE(woosuk): This is a hack to ensure that the NCCL backend is never
         # deleted before the CUDA graphs.
+        #import pdb
+        #pdb.set_trace()
         self.cupy_nccl_backend = cupy_utils.get_nccl_backend()
 
         assert not self.model_config.enforce_eager

@@ -131,7 +131,10 @@ class LLMEngine:
                 "Ray is required if parallel_config.world_size > 1.")
             from vllm.executor.gpu_executor import GPUExecutor
             executor_class = GPUExecutor
-
+        
+        #import pdb
+        #pdb.set_trace()
+        
         # Create the LLM engine.
         engine = cls(*engine_configs,
                      executor_class=executor_class,

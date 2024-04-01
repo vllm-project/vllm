@@ -85,6 +85,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     "reshape_and_cache",
     &reshape_and_cache,
     "Reshape the key and value tensors and cache them");
+
+  cache_ops.def(
+    "load_and_reshape",
+    &reshape_and_cache,
+    "Load the key and value tensors and reshape them");
+
   cache_ops.def(
     "convert_fp8_e5m2",
     &convert_fp8_e5m2,

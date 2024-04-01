@@ -26,6 +26,8 @@ class PagedAttentionImpl:
         value_cache: torch.Tensor,
         input_metadata: InputMetadata,
     ) -> None:
+        #import pdb
+        #pdb.set_trace()
         cache_ops.reshape_and_cache(
             key,
             value,
@@ -33,6 +35,25 @@ class PagedAttentionImpl:
             value_cache,
             input_metadata.slot_mapping.flatten(),
             input_metadata.kv_cache_dtype,
+        )
+    
+    @staticmethod
+    def load_and_reshape(
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        cache_fuse_metadata: dict,
+    ) -> None:
+        #import pdb
+        #pdb.set_trace()
+        cache_ops.load_and_reshape(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            cache_fuse_metadata["original_slot_mapping"].flatten(),
+            cache_fuse_metadata["kv_cache_dtype"],
         )
 
     @staticmethod

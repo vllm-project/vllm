@@ -161,6 +161,9 @@ class Worker:
 
     def warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
+            print("\033[96m Jiayi: Start cpature_model in Warming Up Model \033[00m")
+            #import pdb
+            #pdb.set_trace()
             self.model_runner.capture_model(self.gpu_cache)
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.

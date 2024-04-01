@@ -41,6 +41,10 @@ class GPUExecutor(ExecutorBase):
         # Instantiate the worker and load the model to GPU.
         self._init_worker()
 
+        #jiayi:
+        #import pdb
+        #pdb.set_trace() 
+        
         # Profile the memory usage and initialize the cache.
         self._init_cache()
 
@@ -109,6 +113,7 @@ class GPUExecutor(ExecutorBase):
         self.driver_worker.init_cache_engine(cache_config=self.cache_config)
         # Warm up the model. This includes capturing the model into CUDA graph
         # if enforce_eager is False.
+        print("\033[96m Jiayi: Warming Up Model \033[00m")
         self.driver_worker.warm_up_model()
 
     def execute_model(self,
