@@ -533,6 +533,8 @@ class SchedulerConfig:
         delay_factor: Apply a delay (of delay factor multiplied by previous
             prompt latency) before scheduling next prompt.
         use_v2_block_manager: Whether to use the BlockSpaceManagerV2 or not.
+        enable_chunked_prefill: If True, prefill requests can be chunked based
+            on the remaining max_num_batched_tokens.
     """
 
     def __init__(
@@ -542,6 +544,7 @@ class SchedulerConfig:
         max_model_len: int,
         use_v2_block_manager: bool = False,
         delay_factor: float = 0.0,
+        enable_chunked_prefill: bool = False,
     ) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
@@ -553,6 +556,7 @@ class SchedulerConfig:
         self.max_model_len = max_model_len
         self.delay_factor = delay_factor
         self.use_v2_block_manager = use_v2_block_manager
+        self.chunked_prefill_enabled = enable_chunked_prefill
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -761,15 +765,20 @@ def _get_and_verify_max_len(
         "max_seq_len",
         # ChatGLM2
         "seq_length",
+        # Command-R
+        "model_max_length",
         # Others
         "max_sequence_length",
         "max_seq_length",
         "seq_len",
     ]
+    max_len_key = None
     for key in possible_keys:
-        max_len_key = getattr(hf_config, key, None)
-        if max_len_key is not None:
-            derived_max_model_len = min(derived_max_model_len, max_len_key)
+        max_len = getattr(hf_config, key, None)
+        if max_len is not None:
+            max_len_key = key if max_len < derived_max_model_len \
+                else max_len_key
+            derived_max_model_len = min(derived_max_model_len, max_len)
     if derived_max_model_len == float("inf"):
         if max_model_len is not None:
             # If max_model_len is specified, we use it.
@@ -795,10 +804,18 @@ def _get_and_verify_max_len(
     if max_model_len is None:
         max_model_len = derived_max_model_len
     elif max_model_len > derived_max_model_len:
-        raise ValueError(
-            f"User-specified max_model_len ({max_model_len}) is greater than "
-            f"the derived max_model_len ({max_len_key}={derived_max_model_len}"
-            " in model's config.json). This may lead to incorrect model "
-            "outputs or CUDA errors. Make sure the value is correct and "
-            "within the model context size.")
+        # Some models might have a separate key for specifying model_max_length
+        # that will be bigger than derived_max_model_len. We compare user input
+        # with model_max_length and allow this override when it's smaller.
+        model_max_length = getattr(hf_config, "model_max_length", None)
+        if model_max_length is not None and max_model_len <= model_max_length:
+            pass
+        else:
+            raise ValueError(
+                f"User-specified max_model_len ({max_model_len}) is greater "
+                "than the derived max_model_len "
+                f"({max_len_key}={derived_max_model_len} or model_max_length="
+                f"{model_max_length} in model's config.json). This may lead "
+                "to incorrect model outputs or CUDA errors. Make sure the "
+                "value is correct and within the model context size.")
     return int(max_model_len)

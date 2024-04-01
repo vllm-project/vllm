@@ -1,5 +1,6 @@
 import os
 from functools import lru_cache
+from typing import Type
 
 import torch
 
@@ -11,7 +12,7 @@ logger = init_logger(__name__)
 
 
 @lru_cache(maxsize=None)
-def get_attn_backend(dtype: torch.dtype) -> AttentionBackend:
+def get_attn_backend(dtype: torch.dtype) -> Type[AttentionBackend]:
     if _which_attn_to_use(dtype) == "FlashAttention":
         logger.info("Using FlashAttention backend.")
         from vllm.attention.backends.flash_attn import (  # noqa: F401
@@ -64,6 +65,9 @@ def _which_attn_to_use(dtype: torch.dtype) -> str:
         try:
             import flash_attn  # noqa: F401
         except ImportError:
+            logger.info(
+                "Cannot use FlashAttention because the package is not found. "
+                "Please install it for better performance.")
             return "XFormers"
 
     return "TritonFlashAttention" if use_triton_flash_attn else "FlashAttention"
