@@ -53,7 +53,7 @@ class PagedAttentionImpl:
             key_cache,
             value_cache,
             cache_fuse_metadata["original_slot_mapping"].flatten(),
-            cache_fuse_metadata["kv_cache_dtype"],
+            cache_fuse_metadata["kv_cache_string_dtype"],
         )
 
     @staticmethod

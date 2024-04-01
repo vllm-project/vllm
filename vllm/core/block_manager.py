@@ -91,8 +91,32 @@ class BlockAllocator:
         print("\033[31mHERE: filling KV cache\033[0m")
         slot_mapping = torch.arange(block_size) + block.block_number * block_size
         slot_mapping = slot_mapping.to("cuda")
+        import pdb
+        pdb.set_trace()
         cache_ops.reshape_and_cache(src_kv_pair[0], src_kv_pair[1], dst_buffer[0], dst_buffer[1],
                                     slot_mapping, "auto")
+        
+    @staticmethod
+    def load_kv_block( 
+            src_kv_pair: KVCache, 
+            dst_buffer: KVCache,
+            block: PhysicalTokenBlock
+        ):
+
+        block_size = block.block_size
+        k, v = src_kv_pair
+        assert(k.shape[0] == block_size)
+        assert(v.shape[0] == block_size)
+
+        '''
+        slot_mapping: a list of num_token elements. slot_mapping[i] means the slot index (flattened index) of the token
+        '''
+        print("\033[31mHERE: loading KV cache\033[0m")
+        slot_mapping = torch.arange(block_size) + block.block_number * block_size
+        slot_mapping = slot_mapping.to("cuda")
+        import pdb
+        pdb.set_trace()
+        cache_ops.load_and_reshape(src_kv_pair[0], src_kv_pair[1], dst_buffer[0], dst_buffer[1], slot_mapping, "auto")
 
 
     def allocate(self,

@@ -88,7 +88,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   cache_ops.def(
     "load_and_reshape",
-    &reshape_and_cache,
+    &load_and_reshape,
     "Load the key and value tensors and reshape them");
 
   cache_ops.def(

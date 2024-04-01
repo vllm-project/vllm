@@ -151,16 +151,13 @@ class LlamaAttention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        status: int,
-        cache_fuse_metadata: dict,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata, 
-                                status, cache_fuse_metadata)
+        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -209,10 +206,15 @@ class LlamaDecoderLayer(nn.Module):
         kv_cache: KVCache,
         input_metadata: InputMetadata,
         residual: Optional[torch.Tensor],
-        status: int,
-        cache_fuse_metadata: dict,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
+        '''
+        if hidden_states.shape[1] > 500:
+            torch.cuda.synchronize()
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+        '''
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
@@ -224,14 +226,31 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
-            status=status,
-            cache_fuse_metadata=cache_fuse_metadata,
         )
-
+        
+        '''
+        if hidden_states.shape[1] > 500:
+            end.record()
+            torch.cuda.synchronize()
+            temp_time = start.elapsed_time(end)
+            print(f"attn_time: {temp_time}")
+        if hidden_states.shape[1] > 500:
+            torch.cuda.synchronize()
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+        '''
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
+        '''
+        if hidden_states.shape[1] > 500:
+            end.record()
+            torch.cuda.synchronize()
+            temp_time = start.elapsed_time(end)
+            print(f"mlp_time: {temp_time}")
+        '''
         return hidden_states, residual
 
 
@@ -260,23 +279,6 @@ class LlamaModel(nn.Module):
             for _ in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        
-        # FIXME(Jiayi): needs to be dynamic
-        # FIXME(Jiayi): currently only support `batch_size=1`
-        # batching for prefill (e.g., (prompt_with_reuse, prompt_with_no_reuse)) will
-        # dillute our improvement sometimes 
-        self.cache_fuse_metadata = {"check_layers":[1], 
-                                    "recomp_ratios":[0.15],
-                                    "recomp_ratio":0.15,
-                                    "load_indices":[],
-                                    "recomp_indices":[],
-                                    "original_slot_mapping":None,
-                                    "our_slot_mapping":None,
-                                    "kv_cache_dtype": None,
-                                    "attn_bias": None,
-                                    "imp_token_indices": None,
-                                    }
-                                    #"batch_indices":[0]}
 
     def forward(
         self,
@@ -294,40 +296,37 @@ class LlamaModel(nn.Module):
             print(f"\033[32mHere, the KV cache shape {kv_caches[0][0].shape}\033[0m")
         else:
             print("\033[31mThis time we don't have any KV caches\033[0m")
+        
+        #if input_ids.shape[1] > 1000:
+        #    import pdb
+        #    pdb.set_trace()
+        if input_ids.shape[1] > 500:
+            torch.cuda.synchronize()
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+        
         residual = None
-        
-        if input_metadata.is_prompt:
-            temp_status = 0 # full recomp
-        else:
-            temp_status = -1 # decode
-        
-        check_layer_idx = 0
         for i in range(len(self.layers)):
-            if i in self.cache_fuse_metadata["check_layers"]:
-                temp_status = 1 # check this layer
-                self.cache_fuse_metadata["check_layer"] = self.cache_fuse_metadata["check_layers"][check_layer_idx]
-            elif i > self.cache_fuse_metadata["check_layers"][0]:
-                temp_status = 2 # after check
-                
             layer = self.layers[i]
             hidden_states, residual = layer(
-                positions, #FIXME(Jiayi): positions need to be changed
+                positions,
                 hidden_states,
                 kv_caches[i],
                 input_metadata,
                 residual,
-                status = temp_status,
-                cache_fuse_metadata = self.cache_fuse_metadata,
             )
-            
-            if temp_status==1:
-                positions = positions[:,self.cache_fuse_metadata["imp_token_indices"]]
         hidden_states, _ = self.norm(hidden_states, residual)
         
-        
-        if input_ids.shape[0] == 6:
-            import pdb
-            pdb.set_trace()
+        if input_ids.shape[1] > 500:
+            end.record()
+            torch.cuda.synchronize()
+
+            temp_time = start.elapsed_time(end)
+            print(temp_time)
+        #if input_ids.shape[0] == 6:
+        #    import pdb
+        #    pdb.set_trace()
         
         return hidden_states
 

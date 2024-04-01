@@ -17,14 +17,27 @@ block = llm.llm_engine.scheduler.block_manager.gpu_allocator.allocate(0, 1)
 num_heads, head_size, block_size = cache_engine.get_value_block_shape()
 key_tensor = torch.full((block_size, num_heads, head_size), 1).half().cuda()
 v_tensor = torch.full((block_size, num_heads, head_size), 2).half().cuda()
-pdb.set_trace()
+
 # put K and V into the block
 BlockAllocator.fill_kv_block(
         (key_tensor, v_tensor),
         gpu_cache[layer_id],
         block)
-
 # check if the block is filled with K and V
 assert torch.isclose(gpu_cache[layer_id][0][block.block_number].mean(), torch.tensor(1.).half())
 assert torch.isclose(gpu_cache[layer_id][1][block.block_number].mean(), torch.tensor(2.).half())
+
+
+key_tensor_new = torch.empty_like(key_tensor)
+v_tensor_new = torch.empty_like(v_tensor)
+pdb.set_trace()
+BlockAllocator.load_kv_block(
+        (key_tensor_new, v_tensor_new),
+        gpu_cache[layer_id],
+        block)
+pdb.set_trace()
+
+#assert torch.isclose(gpu_cache[layer_id][0][block.block_number].mean(), torch.tensor(1.).half())
+#assert torch.isclose(gpu_cache[layer_id][1][block.block_number].mean(), torch.tensor(2.).half())
+print("finish")
 
