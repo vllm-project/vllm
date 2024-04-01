@@ -155,9 +155,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             num_unseen_tokens = len(
                 block_table.get_unseen_token_ids(seq.get_token_ids()))
             num_touched_blocks += (
-                block_table.get_num_blocks_touched_by_new_tokens(
-                    # NOTE: we treat lookahead slots as new tokens for the
-                    # worst-case estimation.
+                block_table.get_num_blocks_touched_by_append_slots(
+                    # NOTE: We will append slots for the unseen tokens as well
+                    # as for the lookahead slots.
                     num_unseen_tokens + num_lookahead_slots))
 
         num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(

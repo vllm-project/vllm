@@ -263,15 +263,16 @@ class BlockTable:
         """
         return self._num_full_slots
 
-    def get_num_blocks_touched_by_new_tokens(self, num_new_tokens: int) -> int:
+    def get_num_blocks_touched_by_append_slots(
+            self, num_slots_to_append: int) -> int:
         """Determine how many blocks will be "touched" by appending the
-        specified number of new tokens.
+        specified number of slots.
 
         This is required for the scheduler to determine whether a sequence can
         continue generation, or if it must be preempted.
         """
         first_chunk_size = self._block_size - (self._num_full_slots %
                                                self._block_size)
-        remainder = max(num_new_tokens - first_chunk_size, 0)
+        remainder = max(num_slots_to_append - first_chunk_size, 0)
         return cdiv(first_chunk_size, self._block_size) + cdiv(
             remainder, self._block_size)
