@@ -113,8 +113,8 @@ class LLMEngine:
         self.log_stats = log_stats
 
         if not self.model_config.disable_tokenizer:
-            self.detokenizer = Detokenizer(self.tokenizer)
             self._init_tokenizer()
+            self.detokenizer = Detokenizer(self.tokenizer)
         else:
             self.detokenizer = None
             self.tokenizer = None
