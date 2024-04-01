@@ -6,7 +6,6 @@ Run `pytest tests/quantization/test_autogptq_marlin_configs.py --forked`.
 from dataclasses import dataclass
 
 import pytest
-import torch
 
 from vllm.config import ModelConfig
 
@@ -29,11 +28,9 @@ MODELS_QUANT_TYPE = [
 
 
 @pytest.mark.parametrize("model_quant_type", MODELS_QUANT_TYPE)
-def test_auto_gptq(
-    model_quant_type: str,
-) -> None:
+def test_auto_gptq(model_quant_type: str, ) -> None:
     model_path, quant_type = model_quant_type
-    
+
     model_config_no_quant_arg = ModelConfig(
         model_path,
         model_path,
@@ -44,7 +41,7 @@ def test_auto_gptq(
         seed=0,
         dtype="float16",
         revision=None,
-        quantization=None   # case 1
+        quantization=None  # case 1
     )
 
     model_config_quant_arg = ModelConfig(
@@ -57,18 +54,15 @@ def test_auto_gptq(
         seed=0,
         dtype="float16",
         revision=None,
-        quantization="gptq" # case 2
+        quantization="gptq"  # case 2
     )
-    
+
     assert model_config_no_quant_arg.quantization == quant_type, (
         f"Expected quant_type == {quant_type} for {model_path}, "
         f"but found {model_config_no_quant_arg.quantization} "
-         "for no --quantization None case"
-    )
+        "for no --quantization None case")
 
     assert model_config_quant_arg.quantization == quant_type, (
         f"Expected quant_type == {quant_type} for {model_path}, "
-        f"but found {model_config.quantization} "
-         "for --quantization gptq case"
-    )
-    
+        f"but found {model_config_quant_arg.quantization} "
+        "for --quantization gptq case")
