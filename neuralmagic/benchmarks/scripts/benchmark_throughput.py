@@ -17,10 +17,11 @@ from transformers import AutoTokenizer
 from .common import (generate_synthetic_requests, num_available_gpus,
                      print_request_outputs, warmup_vllm_engine)
 from .datasets_registry import DatasetArgs, get_dataset
-from .logging.benchmark_result import BenchmarkResult
 # yapf: disable
+from .logging.benchmark_result import BenchmarkResult
 from .logging.benchmark_result import (
     BenchmarkThroughputResultMetricTemplates as ResultMetricTemplates)
+
 # yapf: enable
 
 
