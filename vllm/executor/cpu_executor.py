@@ -1,3 +1,4 @@
+import os
 from typing import Dict, List, Optional
 
 import torch
@@ -69,7 +70,7 @@ class CPUExecutor(ExecutorBase):
         logger.info(f"# CPU blocks: {num_cpu_blocks}")
         if num_cpu_blocks <= 0:
             raise ValueError("No available memory for the cache blocks. "
-                             "Try increasing `cpu_kvcache_space` when "
+                             "Try increasing `VLLM_CPU_KVCACHE_SPACE` when "
                              "initializing the engine.")
 
         max_seq_len = self.cache_config.block_size * num_cpu_blocks
@@ -78,7 +79,7 @@ class CPUExecutor(ExecutorBase):
                 f"The model's max seq len ({self.model_config.max_model_len}) "
                 "is larger than the maximum number of tokens that can be "
                 f"stored in KV cache ({max_seq_len}). Try increasing "
-                "`cpu_kvcache_space` or decreasing `max_model_len` when "
+                "`VLLM_CPU_KVCACHE_SPACE` or decreasing `max_model_len` when "
                 "initializing the engine.")
 
         # Note: To reuse the cache management procedure,
@@ -119,8 +120,7 @@ class CPUExecutor(ExecutorBase):
 
 def _verify_and_get_model_config(config: ModelConfig) -> ModelConfig:
     if config.dtype == torch.float16:
-        logger.warning(
-            "float16 is not supported on CPU, casting to bfloat16.")
+        logger.warning("float16 is not supported on CPU, casting to bfloat16.")
         config.dtype = torch.bfloat16
     if not config.enforce_eager:
         logger.warning(
@@ -129,9 +129,26 @@ def _verify_and_get_model_config(config: ModelConfig) -> ModelConfig:
         config.enforce_eager = True
     return config
 
+
 def _verify_and_get_cache_config(config: CacheConfig) -> CacheConfig:
+    _GB = 1 << 30
     if config.enable_prefix_caching:
-        logger.warning(
-            "Prefix caching is not supported on CPU, disable it.")
+        logger.warning("Prefix caching is not supported on CPU, disable it.")
         config.enable_prefix_caching = False
+
+    kv_cache_space_str = os.getenv("VLLM_CPU_KVCACHE_SPACE", "0")
+    kv_cache_space = int(kv_cache_space_str)
+
+    if kv_cache_space >= 0:
+        if kv_cache_space == 0:
+            config.cpu_kvcache_space_bytes = 4 * _GB  # type: ignore
+            logger.warning("Environment variable VLLM_CPU_KVCACHE_SPACE (GB) "
+                           "for CPU backend is not set, using 4 by default.")
+        else:
+            config.cpu_kvcache_space_bytes = kv_cache_space * _GB  # type: ignore
+    else:
+        raise RuntimeError(
+            "Invalid environment variable VLLM_CPU_KVCACHE_SPACE"
+            f" {kv_cache_space}, expect a positive integer value.")
+
     return config

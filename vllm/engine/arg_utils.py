@@ -63,7 +63,6 @@ class EngineArgs:
     image_feature_size: Optional[int] = None
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: bool = False
-    cpu_kvcache_space: int = 4
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -364,10 +363,6 @@ class EngineArgs:
             default=False,
             help='If True, the prefill requests can be chunked based on the '
             'max_num_batched_tokens')
-        parser.add_argument('--cpu-kvcache-space',
-                            type=int,
-                            default=EngineArgs.cpu_kvcache_space,
-                            help='KV cache space (GiB) of CPU backend.')
         return parser
 
     @classmethod
@@ -396,8 +391,7 @@ class EngineArgs:
                                    self.swap_space, self.kv_cache_dtype,
                                    self.forced_num_gpu_blocks,
                                    model_config.get_sliding_window(),
-                                   self.enable_prefix_caching,
-                                   self.cpu_kvcache_space)
+                                   self.enable_prefix_caching)
         parallel_config = ParallelConfig(
             self.pipeline_parallel_size, self.tensor_parallel_size,
             self.worker_use_ray, self.max_parallel_loading_workers,
