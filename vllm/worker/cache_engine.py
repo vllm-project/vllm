@@ -25,6 +25,7 @@ class CacheEngine:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
     ) -> None:
+        self.cache_config = cache_config
         self.model_config = model_config
         self.parallel_config = parallel_config
 
