@@ -7,12 +7,12 @@ import pytest
 import torch
 from transformers import GenerationConfig, GenerationMixin
 
+from vllm.config import DeviceConfig
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.utils import Counter
 from vllm.worker.model_runner import ModelRunner
-from vllm.config import DeviceConfig
 
 
 class MockLogitsSampler(Sampler):

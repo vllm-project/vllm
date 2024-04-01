@@ -16,10 +16,10 @@ from tqdm.auto import tqdm
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import (QuantizationConfig,
-                                                     get_quantization_config)
 # UPSTREAM SYNC: needed for sparsity
 from vllm.model_executor.layers.parameters import LazyCompressedParameter
+from vllm.model_executor.layers.quantization import (QuantizationConfig,
+                                                     get_quantization_config)
 
 logger = init_logger(__name__)
 

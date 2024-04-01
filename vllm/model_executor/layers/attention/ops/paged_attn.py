@@ -2,8 +2,7 @@ from typing import List, Optional
 
 import torch
 
-from vllm._C import cache_ops
-from vllm._C import ops
+from vllm._C import cache_ops, ops
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention.ops.prefix_prefill import (
     context_attention_fwd)

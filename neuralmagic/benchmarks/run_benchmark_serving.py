@@ -1,17 +1,17 @@
 import argparse
-import subprocess
-import requests
-import time
-import json
 import itertools
-
-from typing import NamedTuple, Optional
+import json
+import subprocess
+import time
 from pathlib import Path
+from typing import NamedTuple, Optional
 
-from .common import (download_model, max_model_length_from_model_id,
-                     script_args_to_cla, benchmark_configs)
-from .scripts.common import warmup_server, num_available_gpus
+import requests
+
 from ..tools.call_cmd import call_cmd
+from .common import (benchmark_configs, download_model,
+                     max_model_length_from_model_id, script_args_to_cla)
+from .scripts.common import num_available_gpus, warmup_server
 
 BENCH_SERVER_HOST = "localhost"
 BENCH_SERVER_PORT = 9000

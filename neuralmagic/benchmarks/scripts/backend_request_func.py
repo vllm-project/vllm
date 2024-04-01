@@ -7,8 +7,8 @@ NOTE: This script is a version of benchmarks/backend_request_func.py from
 
 import json
 import os
-import time
 import re
+import time
 from dataclasses import dataclass
 from typing import Optional
 

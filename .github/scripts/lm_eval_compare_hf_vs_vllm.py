@@ -2,11 +2,10 @@ import argparse
 import os
 from typing import Dict, List, Tuple
 
-import numpy as np
-import scipy.stats
-
 import lm_eval
 import lm_eval.models.utils
+import numpy as np
+import scipy.stats
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 

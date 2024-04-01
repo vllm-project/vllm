@@ -10,6 +10,7 @@ from vllm.transformers_utils.tokenizer_group.ray_tokenizer_group import (
     RayTokenizerGroupPool)
 from vllm.transformers_utils.tokenizer_group.tokenizer_group import (
     TokenizerGroup)
+
 from ..conftest import get_tokenizer_pool_config
 
 

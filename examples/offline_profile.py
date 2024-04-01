@@ -1,11 +1,12 @@
 import argparse
-import torch
-import sys
-import json
 import inspect
-
-from dataclasses import dataclass, asdict
+import json
+import sys
+from dataclasses import asdict, dataclass
 from typing import Optional
+
+import torch
+
 from vllm import LLM, SamplingParams
 from vllm.profiler import nm_profile
 

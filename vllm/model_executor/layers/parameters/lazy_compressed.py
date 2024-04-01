@@ -1,9 +1,9 @@
+import importlib.util
+from typing import Type
+
 import numpy
 import torch
 from torch.utils._pytree import tree_map
-import importlib.util
-
-from typing import Type
 
 from vllm.logger import init_logger
 

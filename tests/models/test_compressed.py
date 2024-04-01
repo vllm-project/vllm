@@ -7,6 +7,7 @@ Run `pytest tests/models/test_compressed.py`.
 """
 
 import gc
+
 import pytest
 from compare_utils import check_logprobs_close
 

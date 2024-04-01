@@ -10,6 +10,7 @@ from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
     import torch
+
     from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 

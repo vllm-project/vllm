@@ -8,9 +8,9 @@
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import time
-import sys
 
 
 def parse_process_stats(str):

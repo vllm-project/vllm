@@ -3,15 +3,16 @@ Defines a BenchmarkResult class that all the benchmarks use to save results.
 """
 
 import json
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Optional
 
 from vllm import __version__ as __vllm_version__
-from typing import Optional
-from types import SimpleNamespace
-from pathlib import Path
+
 from ..common import get_benchmarking_context
-from datetime import datetime
-from dataclasses import dataclass, field
-from enum import Enum
 
 # NOTE - PLEASE READ:
 # Any modifications that adds/removes the keys in the JSON that BenchmarkResult

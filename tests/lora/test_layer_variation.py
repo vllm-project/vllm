@@ -8,6 +8,7 @@ from transformers import AutoModelForCausalLM
 
 import vllm
 from vllm.lora.request import LoRARequest
+
 from .conftest import cleanup
 
 MODEL_PATH = "Felladrin/Llama-68M-Chat-v1"

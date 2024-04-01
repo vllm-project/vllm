@@ -1,6 +1,5 @@
 import dataclasses
-
-from typing import Callable, Dict, Type, List, Union
+from typing import Callable, Dict, List, Type, Union
 
 from torch._C._profiler import _EventType, _ProfilerEvent, _TensorMetadata
 

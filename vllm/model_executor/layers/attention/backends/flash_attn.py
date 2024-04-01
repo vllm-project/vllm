@@ -1,8 +1,8 @@
 """Attention layer with Flash and PagedAttention."""
 from typing import List, Optional
 
-from flash_attn import flash_attn_varlen_func
 import torch
+from flash_attn import flash_attn_varlen_func
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention.ops.paged_attn import (

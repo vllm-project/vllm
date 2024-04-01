@@ -5,10 +5,10 @@ Reference : https://github.com/benchmark-action/github-action-benchmark
 """
 import argparse
 import json
-from pathlib import Path
-from functools import reduce
 from dataclasses import dataclass
-from typing import List, Iterable, NamedTuple
+from functools import reduce
+from pathlib import Path
+from typing import Iterable, List, NamedTuple
 
 from .benchmark_result import (BenchmarkMetricType, BenchmarkResult,
                                MetricTemplate)

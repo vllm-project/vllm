@@ -1,6 +1,6 @@
 import argparse
-
 from pathlib import Path
+
 from .common import benchmark_configs
 from .run_benchmark_serving import run_benchmark_serving_script
 from .run_benchmark_throughput import run_benchmark_throughput_script

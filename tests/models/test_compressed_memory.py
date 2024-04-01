@@ -9,6 +9,7 @@ Run `pytest tests/models/test_sparse_memory.py --forked`.
 """
 
 import gc
+
 import pytest
 import torch
 

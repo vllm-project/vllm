@@ -1,10 +1,12 @@
 import json
 import random
 from dataclasses import dataclass
-from transformers import PreTrainedTokenizerBase
-from datasets import load_dataset
-from typing import List, Tuple, Optional
 from pathlib import Path
+from typing import List, Optional, Tuple
+
+from datasets import load_dataset
+from transformers import PreTrainedTokenizerBase
+
 from ...tools.call_cmd import call_cmd
 
 

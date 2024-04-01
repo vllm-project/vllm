@@ -395,12 +395,23 @@ class EngineArgs:
                Optional[VisionLanguageConfig]]:
         device_config = DeviceConfig(self.device)
         model_config = ModelConfig(
-            self.model, self.tokenizer, self.tokenizer_mode,
-            self.trust_remote_code, self.download_dir, self.load_format,
-            self.dtype, self.seed, self.revision, self.code_revision,
-            self.tokenizer_revision, self.max_model_len, self.quantization,
+            self.model,
+            self.tokenizer,
+            self.tokenizer_mode,
+            self.trust_remote_code,
+            self.download_dir,
+            self.load_format,
+            self.dtype,
+            self.seed,
+            self.revision,
+            self.code_revision,
+            self.tokenizer_revision,
+            self.max_model_len,
+            self.quantization,
             # UPSTREAM SYNC: keep sparsity argument
-            self.sparsity,self.enforce_eager, self.max_context_len_to_capture,
+            self.sparsity,
+            self.enforce_eager,
+            self.max_context_len_to_capture,
             self.max_logprobs)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,

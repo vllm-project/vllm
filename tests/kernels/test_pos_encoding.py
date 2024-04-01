@@ -4,6 +4,7 @@ from typing import List, Optional
 import pytest
 import torch
 from allclose_default import get_default_atol, get_default_rtol
+
 from vllm.model_executor.layers.rotary_embedding import get_rope
 
 IS_NEOX_STYLE = [True, False]

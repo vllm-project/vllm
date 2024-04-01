@@ -1,15 +1,14 @@
 import itertools
 import json
-
 from argparse import Namespace
 from pathlib import Path
-from typing import NamedTuple, Iterable
+from typing import Iterable, NamedTuple
 
-from vllm.model_executor.weight_utils import prepare_hf_model_weights
-from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.transformers_utils.config import get_config
 # TODO (varun) : find a workaround so we avoid using private methods
 from vllm.config import _get_and_verify_max_len
+from vllm.model_executor.weight_utils import prepare_hf_model_weights
+from vllm.transformers_utils.config import get_config
+from vllm.transformers_utils.tokenizer import get_tokenizer
 
 
 def download_model(model: str) -> None:
