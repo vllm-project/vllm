@@ -678,6 +678,7 @@ class LLMEngine:
         num_prompt_tokens_lst = []
         num_generation_tokens_lst = []
         request_n = []
+        request_best_of = []
         time_to_first_tokens = []
         time_per_output_tokens = []
         time_e2e_requests = []
@@ -707,6 +708,10 @@ class LLMEngine:
             if prompt_run:
                 request_n = [
                     seq_group.sampling_params.n
+                    for seq_group in scheduler_outputs.scheduled_seq_groups
+                ]
+                request_best_of = [
+                    seq_group.sampling_params.best_of
                     for seq_group in scheduler_outputs.scheduled_seq_groups
                 ]
 
@@ -746,6 +751,7 @@ class LLMEngine:
             num_prompt_tokens_lst=num_prompt_tokens_lst,
             num_generation_tokens_lst=num_generation_tokens_lst,
             request_n=request_n,
+            request_best_of=request_best_of,
             time_to_first_tokens=time_to_first_tokens,
             time_per_output_tokens=time_per_output_tokens,
             time_e2e_requests=time_e2e_requests,

@@ -97,6 +97,12 @@ class Metrics:
             labelnames=labelnames,
             buckets=[1, 2, 5, 10, 20],
         )
+        self.histogram_request_best_of = Histogram(
+            name="vllm:request_params_best_of",
+            documentation="Histogram of the best_of request parameter.",
+            labelnames=labelnames,
+            buckets=[1, 2, 5, 10, 20],
+        )
 
         # Legacy metrics
         self.gauge_avg_prompt_throughput = Gauge(
@@ -165,6 +171,7 @@ class Stats:
     num_prompt_tokens_lst: List[int]
     num_generation_tokens_lst: List[int]
     request_n: List[int]
+    request_best_of: List[int]
     time_to_first_tokens: List[float]
     time_per_output_tokens: List[float]
     time_e2e_requests: List[float]
@@ -237,6 +244,9 @@ class StatLogger:
         # Observe sampling params in histograms.
         for n in stats.request_n:
             self.metrics.histogram_request_n.labels(**self.labels).observe(n)
+        for best_of in stats.request_best_of:
+            self.metrics.histogram_request_best_of.labels(
+                **self.labels).observe(best_of)
 
         # Observe request level latencies in histograms.
         for ttft in stats.time_to_first_tokens:
