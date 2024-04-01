@@ -39,9 +39,9 @@ from .common import generate_synthetic_requests, print_serving_request_io
 from .datasets_registry import DatasetArgs, get_dataset
 from .logging.benchmark_result import BenchmarkResult
 from .logging.benchmark_result import (
-    BenchmarkServingResultMetadataKeys as ResultMetadataKeys)
+    BenchmarkServingResultMetadataKeys as ResultMetadataKeys) # yapf: disable
 from .logging.benchmark_result import (
-    BenchmarkServingResultMetricTemplates as ResultMetricTemplates)
+    BenchmarkServingResultMetricTemplates as ResultMetricTemplates) # yapf: disable
 
 
 @dataclass

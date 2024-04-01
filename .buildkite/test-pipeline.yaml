@@ -17,9 +17,6 @@ steps:
 - label: Core Test
   command: pytest -v -s core
 
-- label: Core Test
-  command: pytest -v -s core
-
 - label: Distributed Comm Ops Test
   command: pytest -v -s test_comm_ops.py
   working_dir: "/vllm-workspace/tests/distributed"

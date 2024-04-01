@@ -19,7 +19,7 @@ from .common import (generate_synthetic_requests, num_available_gpus,
 from .datasets_registry import DatasetArgs, get_dataset
 from .logging.benchmark_result import BenchmarkResult
 from .logging.benchmark_result import (
-    BenchmarkThroughputResultMetricTemplates as ResultMetricTemplates)
+    BenchmarkThroughputResultMetricTemplates as ResultMetricTemplates) # yapf: disable
 
 
 def get_tensor_parallel_size(args: argparse.Namespace) -> int:
