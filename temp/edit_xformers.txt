@@ -1,0 +1,87 @@
+INFO 04-01 00:58:15 llm_engine.py:67] Initializing an LLM engine (v0.3.3) with config: model='lmsys/vicuna-7b-v1.5', tokenizer='lmsys/vicuna-7b-v1.5', tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.float16, max_seq_len=4096, download_dir=None, load_format=auto, tensor_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=True, kv_cache_dtype=auto, device_config=cuda, seed=0)
+INFO 04-01 00:58:17 attention.py:67] flash_attn is not found. Using xformers backend.
+INFO 04-01 00:58:18 weight_utils.py:167] Using model weights format ['*.bin']
+INFO 04-01 00:58:28 model_runner.py:96] Loading model weights took 12.5523 GB
+	execute_model: tensor([[0, 0, 0,  ..., 0, 0, 0],
+        [0, 0, 0,  ..., 0, 0, 0],
+        [0, 0, 0,  ..., 0, 0, 0],
+        ...,
+        [0, 0, 0,  ..., 0, 0, 0],
+        [0, 0, 0,  ..., 0, 0, 0],
+        [0, 0, 0,  ..., 0, 0, 0]], device='cuda:0'), tensor([[ 0,  1,  2,  ..., 13, 14, 15],
+        [ 0,  1,  2,  ..., 13, 14, 15],
+        [ 0,  1,  2,  ..., 13, 14, 15],
+        ...,
+        [ 0,  1,  2,  ..., 13, 14, 15],
+        [ 0,  1,  2,  ..., 13, 14, 15],
+        [ 0,  1,  2,  ..., 13, 14, 15]], device='cuda:0')
+INFO 04-01 00:58:28 gpu_executor.py:99] # GPU blocks: 7428, # CPU blocks: 512
+max model len 4096
+	execute_model: tensor([[    1,  2266,   338,  ...,   363,   592, 29973]], device='cuda:0'), tensor([[   0,    1,    2,  ..., 4065, 4066, 4067]], device='cuda:0')
+		FREE BLOCKS 7173
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4068]], device='cuda:0')
+		FREE BLOCKS 7173
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4069]], device='cuda:0')
+		FREE BLOCKS 7173
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4070]], device='cuda:0')
+		FREE BLOCKS 7173
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4071]], device='cuda:0')
+		FREE BLOCKS 7173
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4072]], device='cuda:0')
+		FREE BLOCKS 7173
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4073]], device='cuda:0')
+		FREE BLOCKS 7173
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4074]], device='cuda:0')
+		FREE BLOCKS 7173
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4075]], device='cuda:0')
+		FREE BLOCKS 7173
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4076]], device='cuda:0')
+		FREE BLOCKS 7173
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4077]], device='cuda:0')
+		FREE BLOCKS 7173
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4078]], device='cuda:0')
+		FREE BLOCKS 7173
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4079]], device='cuda:0')
+		FREE BLOCKS 7173
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4080]], device='cuda:0')
+		FREE BLOCKS 7172
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4081]], device='cuda:0')
+		FREE BLOCKS 7172
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4082]], device='cuda:0')
+		FREE BLOCKS 7172
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4083]], device='cuda:0')
+		FREE BLOCKS 7172
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4084]], device='cuda:0')
+		FREE BLOCKS 7172
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4085]], device='cuda:0')
+		FREE BLOCKS 7172
+	execute_model: tensor([[13]], device='cuda:0'), tensor([[4086]], device='cuda:0')
+		FREE BLOCKS 7172
+	execute_model: tensor([[4013]], device='cuda:0'), tensor([[4087]], device='cuda:0')
+		FREE BLOCKS 7172
+	execute_model: tensor([[338]], device='cuda:0'), tensor([[4088]], device='cuda:0')
+		FREE BLOCKS 7172
+	execute_model: tensor([[2086]], device='cuda:0'), tensor([[4089]], device='cuda:0')
+		FREE BLOCKS 7172
+
+OUTPUT: (23 tokens)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+This is too

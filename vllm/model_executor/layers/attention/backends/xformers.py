@@ -171,13 +171,6 @@ class XFormersBackend:
                     self.alibi_slopes,
                 )
         else:
-            # add attention sinks
-            use_attn_sinks = True
-            if use_attn_sinks:
-                if key_cache is not None and value_cache is not None:
-                    PagedAttentionImpl.reshape_and_cache(key_original, value, key_cache,
-                                                        value_cache, input_metadata)
-
             # Decoding run.
             output = PagedAttentionImpl.forward_decode(
                 query,
@@ -188,6 +181,14 @@ class XFormersBackend:
                 self.scale,
                 self.alibi_slopes,
             )
+            
+            # attention sinks: revert key in cache to pre-rotated state
+            use_attn_sinks = True
+            if use_attn_sinks:
+                if key_cache is not None and value_cache is not None:
+                    key_original = key_original.view(-1, self.num_kv_heads, self.head_size)
+                    PagedAttentionImpl.reshape_and_cache(key_original, value, key_cache,
+                                                        value_cache, input_metadata)
 
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
