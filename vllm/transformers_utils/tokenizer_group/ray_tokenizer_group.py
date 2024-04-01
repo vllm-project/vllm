@@ -2,16 +2,16 @@ import asyncio
 import os
 from typing import List, Optional
 
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from transformers import PreTrainedTokenizer
 
 from vllm.config import TokenizerPoolConfig
-from vllm.lora.request import LoRARequest
 from vllm.engine.ray_utils import ray
+from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
     BaseTokenizerGroup)
 from vllm.transformers_utils.tokenizer_group.tokenizer_group import (
     TokenizerGroup)
-from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 
 class RayTokenizerGroupPool(BaseTokenizerGroup):
