@@ -1,10 +1,9 @@
 import pytest
-import random
 
 from vllm.core.block_manager_v2 import BlockSpaceManagerV2
 from vllm.core.interfaces import AllocStatus
-from vllm.sequence import SequenceStatus, Logprob
-from vllm.utils import cdiv, chunk_list
+from vllm.sequence import Logprob, SequenceStatus
+from vllm.utils import chunk_list
 
 from ..utils import create_seq_group
 
@@ -52,12 +51,15 @@ def test_can_allocate_seq_group(block_size: int, num_seqs_per_group: int,
         else:
             assert can_allocate_result == AllocStatus.LATER
 
+
 @pytest.mark.parametrize("block_size", [1, 8])
 @pytest.mark.parametrize("prompt_len", [1, 7, 8])
 @pytest.mark.parametrize("num_slots_to_append", [1, 8, 129])
 @pytest.mark.parametrize("num_lookahead_slots", [0, 10])
-def test_append_slots(block_size, prompt_len, num_slots_to_append, num_lookahead_slots):
-    """Verify append_slots consumes the correct number of blocks from the block table.
+def test_append_slots(block_size, prompt_len, num_slots_to_append,
+                      num_lookahead_slots):
+    """Verify append_slots consumes the correct number of blocks from the block
+    table.
     """
 
     num_gpu_blocks = 1024
@@ -73,7 +75,7 @@ def test_append_slots(block_size, prompt_len, num_slots_to_append, num_lookahead
         seq_prompt_len=prompt_len,
         seq_output_lens=[0],
     )
-    
+
     # Allocate seq
     assert block_manager.can_allocate(seq_group)
     block_manager.allocate(seq_group)
@@ -89,8 +91,13 @@ def test_append_slots(block_size, prompt_len, num_slots_to_append, num_lookahead
     # Append slots for new tokens and lookahead slots.
     free_blocks_before_append = block_manager.get_num_free_gpu_blocks()
     block_manager.append_slots(seq, num_lookahead_slots)
-    num_consumed_blocks = free_blocks_before_append - block_manager.get_num_free_gpu_blocks()
+    num_consumed_blocks = (free_blocks_before_append -
+                           block_manager.get_num_free_gpu_blocks())
 
     # Expect consumed blocks to be new blocks required to support the new slots.
-    expected_consumed_blocks = len(chunk_list(list(range(prompt_len + num_slots_to_append + num_lookahead_slots)), block_size)) - len(chunk_list(list(range(prompt_len)), block_size))
+    expected_consumed_blocks = len(
+        chunk_list(
+            list(
+                range(prompt_len + num_slots_to_append + num_lookahead_slots)),
+            block_size)) - len(chunk_list(list(range(prompt_len)), block_size))
     assert num_consumed_blocks == expected_consumed_blocks
