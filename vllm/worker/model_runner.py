@@ -889,10 +889,6 @@ class ModelRunner:
     def vocab_size(self) -> int:
         return self.model_config.get_vocab_size()
 
-    @property
-    def vocab_size(self) -> int:
-        return self.model_config.get_vocab_size()
-
 
 class CUDAGraphRunner(nn.Module):
 

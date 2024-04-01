@@ -1,11 +1,5 @@
 # coding=utf-8
 # Adapted from
-<<<<<<<< HEAD:vllm/model_executor/models/orion.py
-# https://huggingface.co/OrionStarAI/Orion-14B-Base/blob/main/modeling_orion.py
-# Copyright (c) OrionStar Inc.
-# LICENSE: https://huggingface.co/OrionStarAI/Orion-14B-Base/blob/main/LICENSE
-"""Inference-only Orion-14B model compatible with HuggingFace weights."""
-========
 # https://huggingface.co/xverse/XVERSE-7B/blob/main/modeling_xverse.py
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 #
@@ -26,7 +20,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Xverse model compatible with HuggingFace weights."""
->>>>>>>> upstream-sync-2024-04-01:vllm/model_executor/models/xverse.py
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -36,42 +29,25 @@ from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import LoRAConfig
 from vllm.model_executor.layers.activation import SiluAndMul
-<<<<<<<< HEAD:vllm/model_executor/models/orion.py
-from vllm.model_executor.layers.attention import Attention
-========
 from vllm.model_executor.layers.layernorm import RMSNorm
->>>>>>>> upstream-sync-2024-04-01:vllm/model_executor/models/xverse.py
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-<<<<<<<< HEAD:vllm/model_executor/models/orion.py
-    VocabParallelEmbedding, ParallelLMHead)
-========
     ParallelLMHead, VocabParallelEmbedding)
->>>>>>>> upstream-sync-2024-04-01:vllm/model_executor/models/xverse.py
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_world_size)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
-<<<<<<<< HEAD:vllm/model_executor/models/orion.py
-
-KVCache = Tuple[torch.Tensor, torch.Tensor]
-
-
-class OrionMLP(nn.Module):
-========
 
 
 class XverseMLP(nn.Module):
->>>>>>>> upstream-sync-2024-04-01:vllm/model_executor/models/xverse.py
 
     def __init__(
         self,
@@ -101,11 +77,7 @@ class XverseMLP(nn.Module):
         return x
 
 
-<<<<<<<< HEAD:vllm/model_executor/models/orion.py
-class OrionAttention(nn.Module):
-========
 class XverseAttention(nn.Module):
->>>>>>>> upstream-sync-2024-04-01:vllm/model_executor/models/xverse.py
 
     def __init__(
         self,
@@ -116,11 +88,8 @@ class XverseAttention(nn.Module):
         rope_scaling: Optional[Dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
         linear_method: Optional[LinearMethodBase] = None,
-<<<<<<<< HEAD:vllm/model_executor/models/orion.py
-========
         bias: bool = False,
         sliding_window: Optional[int] = None,
->>>>>>>> upstream-sync-2024-04-01:vllm/model_executor/models/xverse.py
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -164,12 +133,8 @@ class XverseAttention(nn.Module):
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
-<<<<<<<< HEAD:vllm/model_executor/models/orion.py
-                              num_kv_heads=self.num_kv_heads)
-========
                               num_kv_heads=self.num_kv_heads,
                               sliding_window=sliding_window)
->>>>>>>> upstream-sync-2024-04-01:vllm/model_executor/models/xverse.py
 
     def forward(
         self,
@@ -186,11 +151,7 @@ class XverseAttention(nn.Module):
         return output
 
 
-<<<<<<<< HEAD:vllm/model_executor/models/orion.py
-class OrionDecoderLayer(nn.Module):
-========
 class XverseDecoderLayer(nn.Module):
->>>>>>>> upstream-sync-2024-04-01:vllm/model_executor/models/xverse.py
 
     def __init__(
         self,
@@ -203,42 +164,29 @@ class XverseDecoderLayer(nn.Module):
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
-<<<<<<<< HEAD:vllm/model_executor/models/orion.py
-        self.self_attn = OrionAttention(
-            hidden_size=self.hidden_size,
-            num_heads=config.num_attention_heads,
-            num_kv_heads=config.num_key_value_heads,
-========
         sliding_window = getattr(config, "sliding_window", None)
         self.self_attn = XverseAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=getattr(config, "num_key_value_heads",
                                  config.num_attention_heads),
->>>>>>>> upstream-sync-2024-04-01:vllm/model_executor/models/xverse.py
             rope_theta=rope_theta,
             rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
             linear_method=linear_method,
-<<<<<<<< HEAD:vllm/model_executor/models/orion.py
-        )
-        self.mlp = OrionMLP(
-========
             bias=getattr(config, "bias", False),
             sliding_window=sliding_window,
         )
         self.mlp = XverseMLP(
->>>>>>>> upstream-sync-2024-04-01:vllm/model_executor/models/xverse.py
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
             linear_method=linear_method,
         )
-
-        self.input_layernorm = nn.LayerNorm(config.hidden_size,
-                                            eps=config.rms_norm_eps)
-        self.post_attention_layernorm = nn.LayerNorm(config.hidden_size,
-                                                     eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size,
+                                       eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size,
+                                                eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -249,8 +197,12 @@ class XverseDecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm(
+                hidden_states, residual)
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -258,51 +210,38 @@ class XverseDecoderLayer(nn.Module):
             attn_metadata=attn_metadata,
         )
 
-        hidden_states = residual + hidden_states
-
         # Fully Connected
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states, residual = self.post_attention_layernorm(
+            hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-        return hidden_states, None
+        return hidden_states, residual
 
 
-<<<<<<<< HEAD:vllm/model_executor/models/orion.py
-class OrionModel(nn.Module):
-========
 class XverseModel(nn.Module):
->>>>>>>> upstream-sync-2024-04-01:vllm/model_executor/models/xverse.py
 
     def __init__(
         self,
         config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
+        lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
         self.config = config
         self.padding_idx = config.pad_token_id
-<<<<<<<< HEAD:vllm/model_executor/models/orion.py
-        self.vocab_size = config.vocab_size
-========
         lora_vocab = (lora_config.lora_extra_vocab_size *
                       (lora_config.max_loras or 1)) if lora_config else 0
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
->>>>>>>> upstream-sync-2024-04-01:vllm/model_executor/models/xverse.py
         self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
+            self.vocab_size,
             config.hidden_size,
+            org_num_embeddings=config.vocab_size,
         )
         self.layers = nn.ModuleList([
-<<<<<<<< HEAD:vllm/model_executor/models/orion.py
-            OrionDecoderLayer(config, linear_method)
-========
             XverseDecoderLayer(config, linear_method)
->>>>>>>> upstream-sync-2024-04-01:vllm/model_executor/models/xverse.py
             for _ in range(config.num_hidden_layers)
         ])
-        self.norm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -322,13 +261,10 @@ class XverseModel(nn.Module):
                 attn_metadata,
                 residual,
             )
-        hidden_states = self.norm(hidden_states)
+        hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
 
-<<<<<<<< HEAD:vllm/model_executor/models/orion.py
-class OrionForCausalLM(nn.Module):
-========
 class XverseForCausalLM(nn.Module):
     packed_modules_mapping = {
         "qkv_proj": [
@@ -356,25 +292,17 @@ class XverseForCausalLM(nn.Module):
         "lm_head": "output_embeddings",
     }
     embedding_padding_modules = ["lm_head"]
->>>>>>>> upstream-sync-2024-04-01:vllm/model_executor/models/xverse.py
 
     def __init__(
         self,
         config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
-<<<<<<<< HEAD:vllm/model_executor/models/orion.py
-========
         lora_config=None,
->>>>>>>> upstream-sync-2024-04-01:vllm/model_executor/models/xverse.py
     ) -> None:
         super().__init__()
         self.config = config
         self.linear_method = linear_method
-<<<<<<<< HEAD:vllm/model_executor/models/orion.py
-        self.model = OrionModel(config, linear_method)
-========
         self.model = XverseModel(config, linear_method)
->>>>>>>> upstream-sync-2024-04-01:vllm/model_executor/models/xverse.py
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
@@ -422,11 +350,6 @@ class XverseForCausalLM(nn.Module):
             if ("rotary_emb.inv_freq" in name
                     or "rotary_emb.cos_cached" in name
                     or "rotary_emb.sin_cached" in name):
-                continue
-            if ("rotary_emb.cos_cached" in name
-                    or "rotary_emb.sin_cached" in name):
-                # Models trained using ColossalAI may include these tensors in
-                # the checkpoint. Skip them.
                 continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:

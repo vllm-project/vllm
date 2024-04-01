@@ -4,7 +4,6 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, Optional, Union
 
-import json
 import torch
 from packaging.version import Version
 from transformers import PretrainedConfig

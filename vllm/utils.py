@@ -17,7 +17,6 @@ import torch
 from packaging.version import Version, parse
 
 from vllm.logger import init_logger
-import warnings
 
 T = TypeVar("T")
 logger = init_logger(__name__)

@@ -896,10 +896,6 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
                           model_config: Optional[PretrainedConfig]) -> bool:
         return type(source_layer) is RowParallelLinear
 
-<<<<<<< HEAD
-=======
-
->>>>>>> upstream-sync-2024-04-01
 class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
 
     def __init__(

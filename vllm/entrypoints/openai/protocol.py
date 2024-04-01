@@ -9,8 +9,6 @@ from pydantic import BaseModel, Field, model_validator
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
 
-import torch
-
 
 class ErrorResponse(BaseModel):
     object: str = "error"

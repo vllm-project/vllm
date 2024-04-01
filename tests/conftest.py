@@ -15,7 +15,6 @@ from vllm.model_executor.parallel_utils.parallel_state import (
     destroy_model_parallel)
 from vllm.sequence import MultiModalData
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.config import TokenizerPoolConfig
 
 _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]

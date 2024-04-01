@@ -29,42 +29,6 @@ def test_prepare_prompt(batch_size):
         assert seq_group_metadata.token_chunk_size == seq_data.get_len()
         seq_group_metadata_list.append(seq_group_metadata)
 
-    input_tokens, input_positions, input_metadata, _, _, _ = (
-        model_runner._prepare_decode(seq_group_metadata_list))
-
-    # Verify input metadata is correct for prompts.
-    device = model_runner.device
-    assert input_metadata.is_prompt is False
-    assert input_metadata.prompt_lens is None
-    assert input_metadata.num_prompt_tokens == 0
-    assert input_metadata.num_generation_tokens == (get_aligned_size(
-        len(seq_group_metadata_list), _BATCH_SIZE_ALIGNMENT))
-    assert input_metadata.max_seq_len is None
-    assert input_metadata.subquery_start_loc is None
-    assert input_metadata.seq_start_loc is None
-    assert input_metadata.max_context_len == max(prompt_lens)
-    assert torch.allclose(
-        input_metadata.context_lens[:len(prompt_lens)],
-        torch.tensor(prompt_lens, dtype=torch.int, device=device))
-
-    # block table's first index corresponds to each batch, meaning in
-    # decoding it is each token.
-    assert input_metadata.block_tables.shape[0] == len(input_tokens)
-    # Block table's second dim correspondsd to each token's block number.
-    # It is padded up to
-    assert input_metadata.block_tables.shape[1] == (
-        model_runner.get_max_block_per_batch())
-    # Cuda graph should not be used for prerill.
-    assert input_metadata.use_cuda_graph is True
-    assert input_metadata.kv_cache_dtype == "auto"
-
-    assert input_tokens.shape == (get_aligned_size(
-        len(seq_group_metadata_list), _BATCH_SIZE_ALIGNMENT), )
-    assert input_positions.shape == (get_aligned_size(
-        len(seq_group_metadata_list), _BATCH_SIZE_ALIGNMENT), )
-    torch.testing.assert_close(input_tokens, input_positions)
-
-    # Verify Sampling
     expected_selected_token_indices = []
     selected_token_start_idx = 0
     for prompt_len in prompt_lens:
