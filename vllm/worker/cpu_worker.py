@@ -23,26 +23,6 @@ logger = init_logger(__name__)
 
 class CPUModelRunner(ModelRunner):
 
-    def __init__(
-        self,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        lora_config: Optional[LoRAConfig],
-        kv_cache_dtype: Optional[str] = "auto",
-        is_driver_worker: bool = False,
-    ):
-        super().__init__(
-            model_config=model_config,
-            parallel_config=parallel_config,
-            scheduler_config=scheduler_config,
-            device_config=device_config,
-            lora_config=lora_config,
-            kv_cache_dtype=kv_cache_dtype,
-            is_driver_worker=is_driver_worker,
-        )
-
     def load_model(self) -> None:
         self.model = get_model(self.model_config,
                                self.device_config,
