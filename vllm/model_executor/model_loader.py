@@ -1,6 +1,6 @@
 """Utilities for selecting and loading models."""
 import contextlib
-from typing import Type
+from typing import Tuple, Type
 
 import torch
 import torch.nn as nn
@@ -25,7 +25,8 @@ def _set_default_torch_dtype(dtype: torch.dtype):
     torch.set_default_dtype(old_dtype)
 
 
-def _get_model_architecture(model_config: ModelConfig) -> Type[nn.Module]:
+def _get_model_architecture(
+        model_config: ModelConfig) -> Tuple[Type[nn.Module], str]:
     architectures = getattr(model_config.hf_config, "architectures", [])
     # Special handling for quantized Mixtral.
     # FIXME(woosuk): This is a temporary hack.
@@ -36,17 +37,21 @@ def _get_model_architecture(model_config: ModelConfig) -> Type[nn.Module]:
     for arch in architectures:
         model_cls = ModelRegistry.load_model_cls(arch)
         if model_cls is not None:
-            return model_cls
+            return (model_cls, arch)
     raise ValueError(
         f"Model architectures {architectures} are not supported for now. "
         f"Supported architectures: {ModelRegistry.get_supported_archs()}")
+
+
+def get_architecture_class_name(model_config: ModelConfig) -> str:
+    return _get_model_architecture(model_config)[1]
 
 
 def get_model(model_config: ModelConfig, device_config: DeviceConfig,
               **kwargs) -> nn.Module:
     lora_config = kwargs.get("lora_config", None)
     vision_language_config = kwargs.get("vision_language_config", None)
-    model_class = _get_model_architecture(model_config)
+    model_class = _get_model_architecture(model_config)[0]
 
     # Get the (maybe quantized) linear method.
     linear_method = None

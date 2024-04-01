@@ -28,6 +28,7 @@ class EngineArgs:
     max_parallel_loading_workers: Optional[int] = None
     block_size: int = 16
     enable_prefix_caching: bool = False
+    use_v2_block_manager: bool = False
     swap_space: int = 4  # GiB
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
@@ -52,12 +53,16 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
     ray_workers_use_nsight: bool = False
+
+    forced_num_gpu_blocks: Optional[int] = None
+
     # Related to Vision-language models such as llava
     image_input_type: Optional[str] = None
     image_token_id: Optional[int] = None
     image_input_shape: Optional[str] = None
     image_feature_size: Optional[int] = None
     scheduler_delay_factor: float = 0.0
+    enable_chunked_prefill: bool = False
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -194,6 +199,9 @@ class EngineArgs:
         parser.add_argument('--enable-prefix-caching',
                             action='store_true',
                             help='Enables automatic prefix caching')
+        parser.add_argument('--use-v2-block-manager',
+                            action='store_true',
+                            help='Use BlockSpaceMangerV2')
 
         parser.add_argument('--seed',
                             type=int,
@@ -210,6 +218,12 @@ class EngineArgs:
             help='the fraction of GPU memory to be used for '
             'the model executor, which can range from 0 to 1.'
             'If unspecified, will use the default value of 0.9.')
+        parser.add_argument(
+            '--forced-num-gpu-blocks',
+            type=int,
+            default=None,
+            help='If specified, ignore GPU profiling result and use this number'
+            'of GPU blocks. Used for testing preemption.')
         parser.add_argument('--max-num-batched-tokens',
                             type=int,
                             default=EngineArgs.max_num_batched_tokens,
@@ -343,6 +357,12 @@ class EngineArgs:
             default=EngineArgs.scheduler_delay_factor,
             help='Apply a delay (of delay factor multiplied by previous'
             'prompt latency) before scheduling next prompt.')
+        parser.add_argument(
+            '--enable-chunked-prefill',
+            type=bool,
+            default=False,
+            help='If True, the prefill requests can be chunked based on the '
+            'max_num_batched_tokens')
         return parser
 
     @classmethod
@@ -369,6 +389,7 @@ class EngineArgs:
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
+                                   self.forced_num_gpu_blocks,
                                    model_config.get_sliding_window(),
                                    self.enable_prefix_caching)
         parallel_config = ParallelConfig(
@@ -380,10 +401,14 @@ class EngineArgs:
                 self.tokenizer_pool_type,
                 self.tokenizer_pool_extra_config,
             ), self.ray_workers_use_nsight)
-        scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
-                                           self.max_num_seqs,
-                                           model_config.max_model_len,
-                                           self.scheduler_delay_factor)
+        scheduler_config = SchedulerConfig(
+            self.max_num_batched_tokens,
+            self.max_num_seqs,
+            model_config.max_model_len,
+            self.use_v2_block_manager,
+            delay_factor=self.scheduler_delay_factor,
+            enable_chunked_prefill=self.enable_chunked_prefill,
+        )
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,
