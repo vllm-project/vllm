@@ -5,6 +5,7 @@
 usage() {
     echo "Usage: ${0} <options>"
     echo
+    echo "  -s    - src directory, i.e. location of package *.py files."
     echo "  -t    - test directory, i.e. location of *.py test files. (default 'tests/')"
     echo "  -r    - desired results base directory. xml results will mirror provided tests directory structure. (default 'test-results/')"
     echo "  -f    - file with test skip list, e.g. ' neuralmagic/tests/skip-for-remote-push.txt'. (default is to run all found tests)"
@@ -15,15 +16,19 @@ usage() {
     exit 1
 }
 
+SRC_DIR=
 TEST_DIR=tests
 RESULTS_DIR=test-results
 SKIP_LIST=
 
-while getopts "ht:r:f:" OPT; do
+while getopts "hs:t:r:f:" OPT; do
     case "${OPT}" in
 	h)
 	    usage
 	    ;;
+    s)
+        SRC_DIR="${OPTARG}"
+        ;;
 	t)
 	    TEST_DIR="${OPTARG}"
 	    ;;
@@ -37,6 +42,11 @@ while getopts "ht:r:f:" OPT; do
 done
 
 # check if variables are valid
+if [ -z "${SRC_DIR}" ]; then
+    echo "please set desired source directory"
+    usage
+fi
+
 if [ -z "${RESULTS_DIR}" ]; then
     echo "please set desired results base directory"
     usage
@@ -70,6 +80,7 @@ if [ -f "${SKIP_LIST}" ]; then
     done < "${SKIP_LIST}"
 fi
 
+echo "..."
 for EXCLUDE in "${TESTS_TO_EXCLUDE[@]}"; do
     for JJ in "${!TESTS_FOUND[@]}"; do
         if [[ ${TESTS_FOUND[$JJ]} = ${EXCLUDE} ]]; then
@@ -79,29 +90,32 @@ for EXCLUDE in "${TESTS_TO_EXCLUDE[@]}"; do
     done
 done
 
+echo "..."
+echo "planning to run:"
+for TEST in "${TESTS_FOUND[@]}"
+do
+    echo "${TEST}"
+done
+echo "..."
+
 # run selected tests
 SUCCESS=0
+CC_PYTEST_FLAGS="--cov=${SRC_DIR} --cov=${TEST_DIR} --cov-report=html:cc-vllm-html --cov-append"
 for TEST in "${TESTS_FOUND[@]}"
 do
     LOCAL_SUCCESS=0
     RESULT_XML=$(echo ${TEST} | sed -e "s/${TEST_DIR}/${RESULTS_DIR}/" | sed -e "s/.py/.xml/")
 
-    echo "planning to generate ... .coverage-$(basename ${TEST})"
-
     # this is a bit messy and brittle, but certain tests
     # need to be run with specific options
     if [[ "${TEST}" == *"kernels/test_pos_encoding"* ]]; then
-        CUDA_VISIBLE_DEVICES=0,1 coverage run --data-file=.coverage-$(basename ${TEST}) -m pytest --forked --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
-    elif [[ "${TEST}" == *"kernels"* ]]; then
-        CUDA_VISIBLE_DEVICES=0,1 coverage run --data-file=.coverage-$(basename ${TEST}) -m pytest --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
-    elif [[ "${TEST}" == *"samplers"* ]]; then
-        CUDA_VISIBLE_DEVICES=0,1 coverage run --data-file=.coverage-$(basename ${TEST}) -m pytest --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
-    elif [[ "${TEST}" == *"distributed"* ]]; then
-        coverage run --data-file=.coverage-$(basename ${TEST}) -m pytest --forked --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
-    elif [[ "${TEST}" == *"models_logprobs"* ]]; then
-        coverage run --data-file=.coverage-$(basename ${TEST}) -m pytest --forked --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
+        CUDA_VISIBLE_DEVICES=0,1 pytest ${CC_PYTEST_FLAGS} --forked --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
+    elif [[ "${TEST}" == *"kernels"* || "${TEST}" == *"samplers"* ]]; then
+        CUDA_VISIBLE_DEVICES=0,1 pytest ${CC_PYTEST_FLAGS} --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
+    elif [[ "${TEST}" == *"distributed"* || "${TEST}" == *"models_logprobs"* || "${TEST}" == *"basic_correctness"* ]]; then
+        pytest ${CC_PYTEST_FLAGS} --forked --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
     else
-        coverage run --data-file=.coverage-$(basename ${TEST}) -m pytest --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
+        pytest ${CC_PYTEST_FLAGS} --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
     fi
 
     SUCCESS=$((SUCCESS + LOCAL_SUCCESS))

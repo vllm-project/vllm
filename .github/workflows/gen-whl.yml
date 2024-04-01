@@ -14,10 +14,10 @@ jobs:
     strategy:
       matrix:
             python: [3.8.17, 3.9.17, 3.10.12, 3.11.4]
-    uses: ./.github/workflows/build-whl.yml
+    uses: ./.github/workflows/build.yml
     with:
         build_label: aws-avx2-192G-4-a10g-96G
-        timeout: 30
+        timeout: 60
         gitref: ${{ inputs.gitref }}
         Gi_per_thread: 4
         nvcc_threads: 8

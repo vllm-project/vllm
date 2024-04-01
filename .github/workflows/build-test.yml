@@ -3,7 +3,7 @@ on:
   # makes workflow reusable
   workflow_call:
     inputs:
-      label:
+      build_label:
         description: "requested runner label (specifies instance)"
         type: string
         required: true
@@ -35,7 +35,7 @@ on:
   # makes workflow manually callable
   workflow_dispatch:
     inputs:
-      label:
+      build_label:
         description: "requested runner label (specifies instance)"
         type: string
         required: true
@@ -66,136 +66,29 @@ on:
 
 jobs:
 
-    BUILD-TEST:
+    BUILD:
+        uses: ./.github/workflows/build.yml
+        with:
+            build_label: aws-avx512-192G-4-T4-64G
+            timeout: ${{ inputs.timeout }}
+            gitref: ${{ inputs.gitref }}
+            Gi_per_thread: ${{ inputs.Gi_per_thread }}
+            nvcc_threads: ${{ inputs.nvcc_threads }}
+            python: ${{ inputs.python }}
+        secrets: inherit
 
-        runs-on: ${{ inputs.label }}
-        timeout-minutes: ${{ fromJson(inputs.timeout) }}
-
-        steps:
-
-            - name: checkout
-              id: checkout
-              uses: actions/checkout@v4
-              with:
-                fetch-depth: 0
-                ref: ${{ inputs.gitref }}
-                submodules: recursive
-
-            - name: setenv
-              id: setenv
-              uses: ./.github/actions/nm-set-env/
-              with:
-                hf_token: ${{ secrets.NM_HF_TOKEN }}
-                Gi_per_thread: ${{ inputs.Gi_per_thread }}
-                nvcc_threads: ${{ inputs.nvcc_threads }}
-
-            - name: set python
-              id: set_python
-              uses: ./.github/actions/nm-set-python/
-              with:
-                python: ${{ inputs.python }}
-                venv: TEST
-
-            - name: hf cache
-              id: hf_cache
-              uses: ./.github/actions/nm-hf-cache/
-              with:
-                fs_cache: ${{ secrets.HF_FS_CACHE }}
-
-            # TODO: testmo source is currently hardcoded.
-            - name: create testmo run
-              id: create_testmo_run
-              uses: ./.github/actions/nm-testmo-run-create/
-              if: success() || failure()
-              with:
-                testmo_url: https://neuralmagic.testmo.net
-                testmo_token: ${{ secrets.TESTMO_TEST_TOKEN }}
-                source: 'build-test'
-
-            - name: python lint
-              id: lint
-              uses: ./.github/actions/nm-lint-python/
-
-            - name: build
-              id: build
-              uses: ./.github/actions/nm-build-vllm/
-              with:
-                python: ${{ inputs.python }}
-                venv: TEST
-                pypi: ${{ secrets.NM_PRIVATE_PYPI_LOCATION }}
-
-            - name: test
-              id: test
-              uses: ./.github/actions/nm-test-vllm/
-              with:
-                test_skip_list: ${{ inputs.test_skip_list }}
-                test_directory: tests
-                test_results: test-results
-                python: ${{ inputs.python }}
-                venv: TEST
-                pypi: ${{ secrets.NM_PRIVATE_PYPI_LOCATION }}
-
-            - name: generate code coverage
-              uses: ./.github/actions/nm-code-coverage/
-              if: success() || failure()
-              with:
-                python: ${{ inputs.python }}
-                venv: TEST
-                reports_directory: cc-nm-vllm-html
-
-            - name: upload code coverage html
-              uses: actions/upload-artifact@v4
-              if: success() || failure()
-              with:
-                name: ${{ github.run_id }}-${{ inputs.label }}-cc-nm-vllm-html
-                path: cc-nm-vllm-html
-                retention-days: 15
-
-            - name: report test results
-              id: report_test
-              uses: ./.github/actions/nm-testmo-run-submit-thread/
-              if: success() || failure()
-              with:
-                testmo_url: https://neuralmagic.testmo.net
-                testmo_token: ${{ secrets.TESTMO_TEST_TOKEN }}
-                testmo_run_id: ${{ steps.create_testmo_run.outputs.id }}
-                results: test-results
-                step_status: ${{ steps.test.outputs.status }}
-
-            - name: summary
-              uses: ./.github/actions/nm-run-summary/
-              if: success() || failure()
-              with:
-                label: ${{ inputs.label }}
-                gitref: ${{ inputs.gitref }}
-                testmo_run_url: https://neuralmagic.testmo.net/automation/runs/view/${{ steps.create_testmo_run.outputs.id }}
-                python: ${{ steps.set_python.outputs.version }}
-                lint_status: ${{ steps.lint.outputs.status }}
-                build_status: ${{ steps.build.outputs.status }}
-                test_status: ${{ steps.test.outputs.status }}
-
-            - name: run status
-              id: run_status
-              if: success() || failure()
-              env:
-                CHECKOUT: ${{ steps.checkout.outcome }}
-                LINT_STATUS: ${{ steps.lint.outputs.status }}
-                BUILD_STATUS: ${{ steps.build.outputs.status }}
-                TEST_STATUS: ${{ steps.test.outputs.status }}
-              run: |
-                  echo "checkout status: ${CHECKOUT}"
-                  echo "lint status: ${LINT_STATUS}"
-                  echo "build status: ${BUILD_STATUS}"
-                  echo "test status: ${TEST_STATUS}"
-                  if [[ "${CHECKOUT}" != *"success"* ]]; then exit 1; fi
-                  if [ -z "${LINT_STATUS}" ] || [ "${LINT_STATUS}" -ne "0" ]; then exit 1; fi
-                  if [ -z "${BUILD_STATUS}" ] || [ "${BUILD_STATUS}" -ne "0" ]; then exit 1; fi
-                  if [ -z "${TEST_STATUS}" ] || [ "${TEST_STATUS}" -ne "0" ]; then exit 1; fi
-
-            - name: complete testmo run
-              uses: ./.github/actions/nm-testmo-run-complete/
-              if: success() || failure()
-              with:
-                testmo_url: https://neuralmagic.testmo.net
-                testmo_token: ${{ secrets.TESTMO_TEST_TOKEN }}
-                testmo_run_id: ${{ steps.create_testmo_run.outputs.id }}
+    TEST:
+        needs: [BUILD]
+        if: success()
+        strategy:
+            matrix:
+                test_label: [aws-avx2-192G-4-a10g-96G]
+        uses: ./.github/workflows/test.yml
+        with:
+            test_label: ${{ matrix.test_label }}
+            timeout: ${{ inputs.timeout }}
+            gitref: ${{ inputs.gitref }}
+            python: ${{ inputs.python }}
+            whl: ${{ needs.BUILD.outputs.whl }}
+            test_skip_list: ${{ inputs.test_skip_list }}
+        secrets: inherit

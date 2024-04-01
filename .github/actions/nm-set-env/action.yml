@@ -9,7 +9,6 @@ inputs:
     required: true
   nvcc_threads:
     description: "number of threads nvcc build threads"
-    type: string
     required: true
 runs:
   using: composite

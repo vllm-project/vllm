@@ -11,9 +11,18 @@ inputs:
     description: 'ip address for pypi server'
     required: true
 outputs:
-  status:
-    description: "final build status from 'pip install -e'"
-    value: ${{ steps.build.outputs.status }}
+  build_status:
+    description: "final status from 'pip install -e'"
+    value: ${{ steps.build.outputs.build_status }}
+  whl_status:
+    description: "final status from 'pip3 wheel --no-deps -w dist'"
+    value: ${{ steps.build.outputs.whl_status }}
+  whl:
+    description: 'basename for generated whl'
+    value: ${{ steps.build.outputs.whl }}
+  tarfile:
+    description: 'basename for generated tar.gz'
+    value: ${{ steps.build.outputs.tarfile }}
 runs:
   using: composite
   steps:
@@ -22,10 +31,34 @@ runs:
       COMMIT=${{ github.sha }}
       VENV="${{ inputs.venv }}-${COMMIT:0:7}"
       source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
+      # TODO: adjust when we need a proper release. use nightly now.
       pip3 install --index-url http://${{ inputs.pypi }}:8080/ --trusted-host ${{ inputs.pypi }} nm-magic-wand-nightly
       pip3 install -r requirements.txt
+      # build
       SUCCESS=0
       pip3 install -e . || SUCCESS=$?
-      echo "status=${SUCCESS}" >> "$GITHUB_OUTPUT"
+      echo "build_status=${SUCCESS}" >> "$GITHUB_OUTPUT"
+      if [ ${SUCCESS} -ne 0 ]; then
+        exit 1
+      fi
+      # whl
+      SUCCESS=0
+      pip3 wheel --no-deps -w dist . || SUCCESS=$?
+      echo "whl_status=${SUCCESS}" >> "$GITHUB_OUTPUT"
+      BASE=$(./.github/scripts/convert-version ${{ inputs.python }})
+      ls -alh dist
+      WHL_FILEPATH=$(find dist -iname "*${BASE}*.whl")
+      WHL=$(basename ${WHL_FILEPATH})
+      echo "whl=${WHL}" >> "$GITHUB_OUTPUT"
+      if [ ${SUCCESS} -ne 0 ]; then
+        exit 1
+      fi
+      # sdist
+      python3 setup.py sdist || SUCCESS=$?
+      ls -alh dist
+      TAR_FILEPATH=$(find dist -type f -iname "*.tar.gz")
+      echo "${TAR_FILEPATH}"
+      TARFILE=$(basename ${TAR_FILEPATH})
+      echo "tarfile=${TARFILE}" >> "$GITHUB_OUTPUT"
       exit ${SUCCESS}
     shell: bash

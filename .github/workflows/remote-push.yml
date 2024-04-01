@@ -11,16 +11,14 @@ concurrency:
 
 jobs:
 
-    # TODO: expand python matrix later, once CI system has matured.
-
     # multi-gpu
-    AWS-AVX2-192G-4-A10G-96G:
+    BUILD-TEST:
         strategy:
             matrix:
                 python: [3.10.12]
         uses: ./.github/workflows/build-test.yml
         with:
-            label: aws-avx2-192G-4-a10g-96G
+            build_label: aws-avx512-192G-4-T4-64G
             timeout: 240
             gitref: '${{ github.ref }}'
             Gi_per_thread: 4
@@ -35,7 +33,7 @@ jobs:
         with:
             label: aws-avx2-32G-a10g-24G
             benchmark_config_list_file:  ./.github/data/nm_benchmark_remote_push_configs_list.txt
-            timeout: 60
+            timeout: 180
             gitref: '${{ github.ref }}'
             Gi_per_thread: 12
             nvcc_threads: 1
