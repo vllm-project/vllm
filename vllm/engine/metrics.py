@@ -13,6 +13,8 @@ logger = init_logger(__name__)
 
 disable_created_metrics()
 
+LABEL_NAME_FINISHED_REASON = "finished_reason"
+
 # The begin-* and end* here are used by the documentation generator
 # to extract the metrics definitions.
 
@@ -57,7 +59,7 @@ class Metrics:
         self.counter_request_success = Counter(
             name="vllm:request_success",
             documentation="Count of successfully processed requests.",
-            labelnames=labelnames)
+            labelnames=labelnames + [LABEL_NAME_FINISHED_REASON])
         self.histogram_request_prompt_tokens = Histogram(
             name="vllm:request_prompt_tokens",
             documentation="Number of prefill tokens processed.",
@@ -227,11 +229,11 @@ class StatLogger:
 
         # Add to request counters.
         for finished_reason, count in stats.finished_reason_counter.items():
-            self.metrics.counter_request_success.labels({
-                **self.labels,
-                "finished_reason":
-                finished_reason,
-            }).inc(count)
+            self.metrics.counter_request_success.labels(
+                **{
+                    **self.labels,
+                    LABEL_NAME_FINISHED_REASON: finished_reason,
+                }).inc(count)
 
         # Observe number of tokens in histograms.
         for val in stats.num_prompt_tokens_lst:
