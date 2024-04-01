@@ -178,6 +178,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
                                   "unseen tokens")
 
         block_table.append_token_ids(unseen_token_ids)
+        block_table.ensure_num_empty_slots(num_lookahead_slots)
 
         # Return any new copy-on-writes.
         new_cows = self.block_allocator.clear_copy_on_writes()
