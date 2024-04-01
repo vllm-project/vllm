@@ -39,7 +39,6 @@
 			"script_name": "benchmark_serving",
 			"script_args": {
 				"nr-qps-pair_": [
-                                        "150,0.5",
                                         "300,1",
                                         "750,2.5",
                                         "1500,5"
@@ -63,7 +62,6 @@
 			"script_args": {
 				"nr-qps-pair_": [
                                         "150,0.5",
-                                        "300,1",
                                         "750,2.5",
                                         "1500,5"
 				],
