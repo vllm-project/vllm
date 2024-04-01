@@ -444,3 +444,8 @@ def maybe_expand_dim(tensor: torch.Tensor,
     if tensor.ndim < target_dims:
         tensor = tensor.view(-1, *([size] * (target_dims - tensor.ndim)))
     return tensor
+
+
+def get_dtype_size(dtype: torch.dtype) -> int:
+    """Get the size of the data type in bytes."""
+    return torch.tensor([], dtype=dtype).element_size()
