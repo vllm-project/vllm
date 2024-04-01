@@ -152,13 +152,12 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             block_table = self.block_tables[seq.seq_id]
 
-            num_unseen_tokens = len(
-                block_table.get_unseen_token_ids(seq.get_token_ids()))
             num_touched_blocks += (
                 block_table.get_num_blocks_touched_by_append_slots(
-                    # NOTE: We will append slots for the unseen tokens as well
-                    # as for the lookahead slots.
-                    num_unseen_tokens + num_lookahead_slots))
+                    token_ids=block_table.get_unseen_token_ids(
+                        seq.get_token_ids()),
+                    num_lookahead_slots=num_lookahead_slots,
+                ))
 
         num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(
             Device.GPU)
@@ -176,9 +175,8 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             seq.get_token_ids())
         assert unseen_token_ids, ("append slots called on sequence without "
                                   "unseen tokens")
-
-        block_table.append_token_ids(unseen_token_ids)
-        block_table.ensure_num_empty_slots(num_lookahead_slots)
+        
+        block_table.append_token_ids(unseen_token_ids, num_lookahead_slots)
 
         # Return any new copy-on-writes.
         new_cows = self.block_allocator.clear_copy_on_writes()

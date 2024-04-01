@@ -503,9 +503,11 @@ def test_cow_lookahead_simple(block_size: int, sequence_len: int,
 @pytest.mark.parametrize("block_size", [1, 8])
 @pytest.mark.parametrize("sequence_len", [1, 16, 129])
 @pytest.mark.parametrize("num_new_tokens", [1, 16, 129])
+@pytest.mark.parametrize("num_lookahead_slots", [1, 7, 8])
 @pytest.mark.parametrize("allocator_type", ["naive", "prefix_caching"])
 def test_num_blocks_touched_by_append_slots(block_size: int, sequence_len: int,
                                             num_new_tokens: int,
+                                            num_lookahead_slots: int,
                                             allocator_type: str):
     """Verify correct calculation of get_num_blocks_touched_by_append_slots.
 
@@ -534,13 +536,18 @@ def test_num_blocks_touched_by_append_slots(block_size: int, sequence_len: int,
     )
 
     block_table.allocate(token_ids=token_ids, device=Device.GPU)
+
+    # Add lookahead before fork.
+    block_table.ensure_num_empty_slots(num_empty_slots=num_lookahead_slots)
+
     _ = block_table.fork()
 
     expected_num_touched_blocks = (
-        block_table.get_num_blocks_touched_by_append_slots(num_new_tokens))
+        block_table.get_num_blocks_touched_by_append_slots(
+            token_ids=token_ids_to_append, num_lookahead_slots=num_lookahead_slots))
 
     num_free_blocks_before_append = allocator.get_num_free_blocks(Device.GPU)
-    block_table.append_token_ids(token_ids_to_append)
+    block_table.append_token_ids(token_ids_to_append, num_lookahead_slots)
     num_consumed_blocks = (num_free_blocks_before_append -
                            allocator.get_num_free_blocks(Device.GPU))
 

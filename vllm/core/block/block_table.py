@@ -85,7 +85,7 @@ class BlockTable:
                                                            device=device)
         self._num_full_slots = len(token_ids)
 
-    def append_token_ids(self, token_ids: List[int]) -> None:
+    def append_token_ids(self, token_ids: List[int], num_lookahead_slots: int) -> None:
         """Appends a sequence of token IDs to the existing blocks in the
         BlockTable.
 
@@ -103,7 +103,7 @@ class BlockTable:
         """
         assert self._is_allocated
 
-        self.ensure_num_empty_slots(num_empty_slots=len(token_ids))
+        self.ensure_num_empty_slots(num_empty_slots=len(token_ids) + num_lookahead_slots)
 
         blocks = self._blocks[self._num_full_slots // self._block_size:]
         first_chunk_size = self._block_size - (self._num_full_slots %
@@ -264,13 +264,14 @@ class BlockTable:
         return self._num_full_slots
 
     def get_num_blocks_touched_by_append_slots(
-            self, num_slots_to_append: int) -> int:
-        """Determine how many blocks will be "touched" by appending the
-        specified number of slots.
+            self, token_ids: List[int], num_lookahead_slots: int) -> int:
+        """Determine how many blocks will be "touched" by appending the token
+        ids.
 
         This is required for the scheduler to determine whether a sequence can
         continue generation, or if it must be preempted.
         """
+        num_slots_to_append = len(token_ids)
         first_chunk_size = self._block_size - (self._num_full_slots %
                                                self._block_size)
         remainder = max(num_slots_to_append - first_chunk_size, 0)
