@@ -68,6 +68,7 @@ class SchedulerOutputs:
     blocks_to_copy: Dict[int, List[int]]
     # Sequence groups that are going to be ignored.
     ignored_seq_groups: List[SequenceGroup]
+    # The number of slots for lookahead decoding.
     num_lookahead_slots: int
 
     def __post_init__(self):
@@ -175,6 +176,7 @@ class Scheduler:
         # LoRAs. This should be improved in the future.
         self.lora_config = lora_config
 
+        # TODO(sang): Fix it after chunked prefill is enabled.
         self.prompt_limit = min(self.scheduler_config.max_model_len,
                                 self.scheduler_config.max_num_batched_tokens)
 
@@ -589,12 +591,11 @@ class Scheduler:
         if len(prefills.seq_groups) == 0:
             remaining_running, decodes = self._schedule_decodes(
                 self.running, budget, curr_loras, self.policy)
-
-        # If any sequence group is preempted, do not swap in any sequence group.
-        # because it means there's no slot for new running requests.
-        if len(decodes.preempted) + len(decodes.swapped_out) == 0:
-            remaining_swapped, swapped_in = self._schedule_swapped(
-                self.swapped, budget, curr_loras, self.policy)
+            # If any sequence group is preempted, do not swap in any sequence
+            # group. because it means there's no slot for new running requests.
+            if len(decodes.preempted) + len(decodes.swapped_out) == 0:
+                remaining_swapped, swapped_in = self._schedule_swapped(
+                    self.swapped, budget, curr_loras, self.policy)
 
         assert (budget.num_batched_tokens <=
                 self.scheduler_config.max_num_batched_tokens)
