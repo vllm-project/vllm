@@ -230,7 +230,8 @@ __device__ void paged_attention_kernel(
           k_vecs[j] = fp8_e5m2_unscaled::vec_conversion<K_vec, Quant_vec>(k_vec_quant);
 #elif defined(ENABLE_FP8_E4M3)
           Quant_vec k_vec_quant = *reinterpret_cast<const Quant_vec*>(k_ptr + offset1 * BLOCK_SIZE * x + offset2);
-          // Vector conversion from Quant_vec to K_vec. Scaled conversion: FP8 => higher precision
+          // Vector conversion from Quant_vec to K_vec. Use scaled_vec_conversion to convert FP8_E4M3 quantized k
+          // cache vec to k vec in higher precision (FP16, BFloat16, etc.)
           k_vecs[j] = fp8_e4m3::scaled_vec_conversion<K_vec, Quant_vec>(k_vec_quant, kv_scale);
 #else
           assert(false);
@@ -354,7 +355,8 @@ __device__ void paged_attention_kernel(
           v_vec = fp8_e5m2_unscaled::vec_conversion<V_vec, V_quant_vec>(v_quant_vec);
 #elif defined(ENABLE_FP8_E4M3)
           V_quant_vec v_quant_vec = *reinterpret_cast<const V_quant_vec*>(v_ptr + offset);
-          // Vector conversion from V_quant_vec to V_vec. Scaled conversion: FP8 => higher precision
+          // Vector conversion from V_quant_vec to V_vec. Use scaled_vec_conversion to convert
+          // FP8_E4M3 quantized v cache vec to v vec in higher precision (FP16, BFloat16, etc.)
           v_vec = fp8_e4m3::scaled_vec_conversion<V_vec, V_quant_vec>(v_quant_vec, kv_scale);
 #else
           assert(false);

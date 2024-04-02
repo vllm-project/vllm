@@ -261,8 +261,8 @@ class XFormersImpl(AttentionImpl):
                     query, key, value, attn_metadata)
             else:
                 # prefix-enabled attention
-                # TODO(Hai) this triton kernel has regression issue with
-                # FP8 KVCache to handle mixed types
+                # TODO(Hai) this triton kernel has regression issue (would break) to deal with
+                # different data types between KV and FP8 KV cache (to be addressed separately)
                 output = PagedAttention.forward_prefix(
                     query,
                     key,
