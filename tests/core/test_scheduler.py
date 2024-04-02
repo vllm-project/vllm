@@ -212,12 +212,12 @@ def test_scheduler_delay_factor():
 
 
 def initialize_scheduler(*,
-                         max_num_seq=1000,
+                         max_num_seqs=1000,
                          max_token_budget=1000,
                          max_model_len=1000,
                          lora_config=None):
     block_size = 4
-    scheduler_config = SchedulerConfig(max_token_budget, max_num_seq,
+    scheduler_config = SchedulerConfig(max_token_budget, max_num_seqs,
                                        max_model_len)
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 8

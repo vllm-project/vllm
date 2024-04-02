@@ -305,7 +305,6 @@ class Scheduler:
                 seq_groups.append(
                     ScheduledSequenceGroup(seq_group=seq_group,
                                            token_chunk_size=1))
-                logger.debug(f"scheduled r -> r {seq_group.request_id}")
                 num_batched_tokens += new_token_size
 
         return SchedulerDecodeOutputs(seq_groups=seq_groups,
@@ -363,7 +362,6 @@ class Scheduler:
             self.swapped.popleft()
             self._swap_in(seq_group, blocks_to_swap_in)
             self._append_slot(seq_group, blocks_to_copy)
-            logger.debug(f"scheduled s -> r {seq_group.request_id}")
             num_curr_seqs += num_new_seqs
             seq_groups.append(
                 ScheduledSequenceGroup(seq_group, token_chunk_size=1))
