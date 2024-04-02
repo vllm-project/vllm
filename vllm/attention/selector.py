@@ -5,7 +5,7 @@ import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
-from vllm.utils import is_hip
+from vllm.utils import is_cpu, is_hip
 
 logger = init_logger(__name__)
 
@@ -22,6 +22,10 @@ def get_attn_backend(dtype: torch.dtype) -> Type[AttentionBackend]:
         from vllm.attention.backends.rocm_flash_attn import (  # noqa: F401
             ROCmFlashAttentionBackend)
         return ROCmFlashAttentionBackend
+    elif _which_attn_to_use(dtype) == "CPUFlashAttention":
+        logger.info("Using Torch SDPA backend.")
+        from vllm.attention.backends.torch_sdpa import TorchSDPABackend
+        return TorchSDPABackend
     else:
         logger.info("Using XFormers backend.")
         from vllm.attention.backends.xformers import (  # noqa: F401
@@ -33,8 +37,11 @@ def _which_attn_to_use(dtype: torch.dtype) -> str:
     """Returns which flash attention backend to use.
 
     Returns:
-        str: XFormers, FlashAttention, or ROCmFlashAttention
+        str: XFormers, FlashAttention,
+             CPUFlashAttention, or ROCmFlashAttention
     """
+    if is_cpu():
+        return "CPUFlashAttention"
 
     if not is_hip() and torch.cuda.get_device_capability()[0] < 8:
         # Volta and Turing NVIDIA GPUs.

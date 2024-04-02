@@ -1,23 +1,8 @@
-import contextlib
-import gc
-
 import pytest
-import ray
-import torch
 
+from tests.conftest import cleanup
 from vllm import LLM
-from vllm.model_executor.parallel_utils.parallel_state import (
-    destroy_model_parallel)
 from vllm.model_executor.utils import set_random_seed
-
-
-def cleanup():
-    destroy_model_parallel()
-    with contextlib.suppress(AssertionError):
-        torch.distributed.destroy_process_group()
-    gc.collect()
-    torch.cuda.empty_cache()
-    ray.shutdown()
 
 
 @pytest.fixture
