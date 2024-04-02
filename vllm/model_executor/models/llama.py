@@ -415,7 +415,6 @@ class LlamaForCausalLM(nn.Module):
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
 
-    # Should not be called unless the KV cache dtype is FP8 on ROCm (AMD GPU)
     # If this function is called, it should always initialize KV cache scale
     # factors (or else raise an exception). Thus, handled exceptions should
     # make sure to leave KV cache scale factors in a known good (dummy) state
@@ -437,5 +436,5 @@ class LlamaForCausalLM(nn.Module):
             if hasattr(layer_self_attn, "kv_scale"):
                 layer_self_attn.kv_scale = scaling_factor
             else:
-                raise RuntimeError("PagedAttention has no KV cache scaling "
+                raise RuntimeError("Self attention has no KV cache scaling "
                                    "factor attribute!")

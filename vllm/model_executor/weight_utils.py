@@ -5,13 +5,12 @@ import hashlib
 import json
 import os
 from collections import defaultdict
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import Any, Iterable, Iterator, List, Optional, Tuple
 
 import filelock
 import numpy as np
 import torch
 from huggingface_hub import HfFileSystem, snapshot_download
-from pydantic import BaseModel, ConfigDict, computed_field, model_validator
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
 
@@ -19,6 +18,7 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
+from vllm.model_executor.layers.quantization.schema import QuantParamSchema
 
 logger = init_logger(__name__)
 
@@ -285,96 +285,20 @@ def kv_cache_scales_loader(
     KV cache scaling factors. The serialization should represent a dictionary
     whose keys are the TP ranks and values are another dictionary mapping layers
     to their KV cache scaling factors.
-    Keep this function in sync with the output of
-    3rdparty/quantization/extract_scales.pyc
+    Keep this function in sync with the output of examples/fp8/extract_scales.py
     """
-
-    # TODO: Once a quantization params format is finalized, pull these Pydantic
-    # schemas out into a separate file that deals solely with quantization
-    # params and their related schemas so that they can be generalized and
-    # shared across various use cases.
-    class KVCacheQuantSchema(BaseModel):
-        dtype: str
-        # Each key is a TP rank. Each value is a dictionary mapping a TP rank's
-        # layer indices to their per-tensor KV cache scaling factor.
-        # TODO: Consider pulling this and its validation methods out into its
-        # own schema class (tricky as its members are variable)
-        scaling_factor: Dict[str, Dict[int, float]]
-
-        @computed_field
-        @property
-        def rank_keyword(self) -> str:
-            # Each TP rank key should be prefixed by a common rank_keyword.
-            # Thus, recovering the alphabetical components of any key should
-            # return it.
-            rank_keyword = "".join(
-                char for char in next(iter(self.scaling_factor.keys()))
-                if char.isalpha())
-            return rank_keyword
-
-        @model_validator(mode="after")
-        def check_is_fp8(self) -> "KVCacheQuantSchema":
-            assert self.dtype == "float8_e4m3fn", (
-                "Loaded scaling factors intended for KV cache dtype = "
-                f"{self.dtype} rather than float8_e4m3fn!")
-            return self
-
-        @model_validator(mode="after")
-        def check_tp_ranks(self) -> "KVCacheQuantSchema":
-            assert len(self.scaling_factor) == tp_size, (
-                f"Loaded dictionary has TP size {len(self.scaling_factor)} "
-                f"but LLM engine is currently running with TP size {tp_size}.")
-            for tp_rank, layer_maps in self.scaling_factor.items():
-                assert tp_rank.startswith(self.rank_keyword), (
-                    f"TP `{tp_rank}` does not start with `{self.rank_keyword}`"
-                )
-                assert len(layer_maps) == num_hidden_layers, (
-                    f"KV cache scales map for TP `{tp_rank}` is malformed. "
-                    f"Expected {num_hidden_layers} layers, got "
-                    f"{len(layer_maps)}.")
-            for i in range(tp_size):
-                assert f"{self.rank_keyword}{i}" in self.scaling_factor, (
-                    f"KV cache scales map for TP rank {i} not found.")
-            return self
-
-        @model_validator(mode="after")
-        def check_current_rank(self) -> "KVCacheQuantSchema":
-            layer_scales_map = self.scaling_factor[
-                f"{self.rank_keyword}{tp_rank}"]
-            for i in range(num_hidden_layers):
-                assert i in layer_scales_map, (
-                    f"Could not find KV cache scales for layer {i} in "
-                    f"TP rank {tp_rank}.")
-            return self
-
-    class QuantParamSchema(BaseModel):
-        # TODO: Generalize and extend with more fields
-        # (e.g. weights/activations params) once functionality is enabled
-        model_config = ConfigDict(protected_namespaces=())
-        model_type: Optional[str]
-        kv_cache: KVCacheQuantSchema
-
-        @model_validator(mode="after")
-        def check_model_type(self) -> "QuantParamSchema":
-            if model_type is not None:
-                assert model_type == self.model_type, (
-                    f"Model type is {model_type} but loaded "
-                    f"scaling factors belonging to different "
-                    f"model type {self.model_type}!")
-            return self
-
     try:
         with open(filename) as f:
-            # Loading and processing the entire dictionary at once allows us
-            # to do sanity checks all at once and avoid a situation where we
-            # have to abort after having partially loaded scaling factors
-            # Since the number of layers is small and (for now) we use scalar
-            # scaling factors (so the size they use is also small), this is
-            # not a concern at present.
+            context = {
+                "model_type": model_type,
+                "num_hidden_layers": num_hidden_layers,
+                "tp_rank": tp_rank,
+                "tp_size": tp_size,
+            }
             schema_dct = json.load(f)
-            schema = QuantParamSchema.model_validate(schema_dct)
-            layer_scales_map = schema.kv_cache.scaling_factor[
-                f"{schema.kv_cache.rank_keyword}{tp_rank}"]
+            schema = QuantParamSchema.model_validate(schema_dct,
+                                                     context=context)
+            layer_scales_map = schema.kv_cache.scaling_factor[tp_rank]
             return layer_scales_map.items()
 
     except FileNotFoundError:
@@ -389,7 +313,7 @@ def kv_cache_scales_loader(
     logger.warning("Defaulting to KV cache scaling factors = 1.0 "
                    f"for all layers in TP rank {tp_rank} "
                    "as an error occurred during loading.")
-    return ()
+    return []
 
 
 def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:

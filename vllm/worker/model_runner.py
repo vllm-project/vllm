@@ -23,7 +23,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (MultiModalData, SamplerOutput, SequenceData,
                            SequenceGroupMetadata)
-from vllm.utils import (CudaMemoryProfiler, async_tensor_h2d,
+from vllm.utils import (CudaMemoryProfiler, async_tensor_h2d, is_hip,
                         is_pin_memory_available, make_tensor_with_pad,
                         maybe_expand_dim)
 
@@ -120,7 +120,8 @@ class ModelRunner:
                 self.model.embedding_padding_modules)
             self.model = self.lora_manager.create_lora_manager(self.model)
 
-        if self.kv_cache_dtype == "fp8":
+        if self.kv_cache_dtype == "fp8" and is_hip():
+            # Currently scaled KV cache is only enabled on ROCm
             if self.model_config.quantization_param_path is not None:
                 if callable(getattr(self.model, "load_kv_cache_scales", None)):
                     self.model.load_kv_cache_scales(

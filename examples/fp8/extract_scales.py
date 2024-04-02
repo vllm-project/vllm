@@ -8,6 +8,8 @@ import numpy as np
 import torch
 from safetensors.torch import safe_open
 
+from vllm.model_executor.layers.quantization.schema import QuantParamSchema
+
 
 # Adapted from vllm/model_executor/weight_utils.py
 # The main differences are that we add the NPZ format and simplify
@@ -80,7 +82,7 @@ def _hf_tensorfile_iterator(filename: str, load_format: str,
                 yield name, param
     elif use_safetensors:
         with safe_open(filename, framework="pt") as f:
-            for name in f:
+            for name in f.keys():  # NOQA: SIM118
                 param = f.get_tensor(name)
                 yield name, param
     else:
@@ -287,22 +289,21 @@ def main(args):
     # Postprocess: formatting to the current schema. Consider pulling it
     # out into a dedicated function should it ever become more complicated.
     rank_scales_map = {
-        rank_keyword + str(rank): {k: scale[k]
-                                   for k in sorted(scale.keys())}
+        rank: {k: scale[k]
+               for k in sorted(scale.keys())}
         for rank, scale in rank_scales_map.items()
     }
-
-    # Consider generalizing and formalizing this into its own class
-    # (and other necessary subclasses) in the future
-    schema = { "model_type": recovered_metadata["model_type"],
-               "kv_cache": {
-                   "dtype": "float8_e4m3fn" if len(rank_scales_map) > 0 \
-                            else recovered_metadata["model_dtype"],
-                   "scaling_factor": rank_scales_map
-               },
-               # TODO: Expand this with activation and weights scaling
-               # factors when they are used in the future
-             }
+    # TODO: Expand this with activation and weights scaling factors when
+    # they are used in the future
+    schema = QuantParamSchema(
+        model_type=recovered_metadata["model_type"],
+        kv_cache={
+            "dtype": ("float8_e4m3fn" if len(rank_scales_map) > 0 else
+                      recovered_metadata["model_dtype"]),
+            "scaling_factor":
+            rank_scales_map
+        },
+    )
 
     if args.output_dir is None:
         output_file = os.path.join(args.quantized_model, args.output_name)
@@ -312,7 +313,7 @@ def main(args):
         output_file = os.path.join(args.output_dir, args.output_name)
 
     with open(output_file, 'w') as f:
-        json.dump(schema, f, indent=4)
+        f.write(schema.model_dump_json(indent=4))
         print(f"Completed! KV cache scaling factors saved to {output_file}")
 
 

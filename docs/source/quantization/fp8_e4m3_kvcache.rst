@@ -34,12 +34,12 @@ Here is an example of how to enable this feature:
         # https://github.com/vllm-project/vllm/blob/main/examples/fp8/README.md to generate kv_cache_scales.json of your own.
 
         from vllm import LLM, SamplingParams
-        sampling_params = SamplingParams(temperature=1.2, top_p=0.9)
+        sampling_params = SamplingParams(temperature=1.3, top_p=0.8)
         # llm=LLM(model="meta-llama/Llama-2-7b-chat-hf", # if local:
         llm = LLM(model="/data/models/llama-2-7b-chat-hf",
                   kv_cache_dtype="fp8",
                   quantization_param_path="./tests/fp8_kv/llama2-7b-fp8-kv/kv_cache_scales.json")
-        prompt = "Barcelona is the capital of"
+        prompt = "London is the capital of"
         out = llm.generate(prompt, sampling_params)[0].outputs[0]
         print(out)
 
