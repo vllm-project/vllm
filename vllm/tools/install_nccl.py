@@ -43,7 +43,7 @@ if __name__ == "__main__":
 
     from argparse import ArgumentParser
 
-    args = ArgumentParser(help="Install NCCL package for VLLM")
+    args = ArgumentParser(description="Install NCCL package for VLLM")
     args.add_argument("--cuda",
                       type=str,
                       required=True,
