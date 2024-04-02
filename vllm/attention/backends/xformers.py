@@ -411,7 +411,7 @@ def _check_use_naive_attention() -> bool:
     if not is_hip():
         return False
     # For ROCm, check whether flash attention is installed or not.
-    has_flash_attn = importlib.util.find_spec("flash_attn") is not None
+    has_flash_attn = importlib.util.find_spec("flash_attn") is None
     if not has_flash_attn:
         logger.warning("flash_attn is not installed. Using naive attention. "
                        "This will take significantly more GPU memory.")
