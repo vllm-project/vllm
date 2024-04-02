@@ -10,7 +10,8 @@ from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config, get_hf_text_config
-from vllm.utils import get_cpu_memory, get_nvcc_cuda_version, is_hip, is_neuron
+from vllm.utils import (get_cpu_memory, get_nvcc_cuda_version, is_cpu, is_hip,
+                        is_neuron)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -171,26 +172,28 @@ class ModelConfig:
             self.quantization = self.quantization.lower()
 
         # Parse quantization method from the HF model config, if available.
-        hf_quant_config = getattr(self.hf_config, "quantization_config", None)
-        if hf_quant_config is not None:
-            hf_quant_method = str(hf_quant_config["quant_method"]).lower()
+        quant_cfg = getattr(self.hf_config, "quantization_config", None)
+        if quant_cfg is not None:
+            quant_method = quant_cfg.get("quant_method", "").lower()
+            # compat: autogptq >=0.8.0 use checkpoint_format: str
+            # compat: autogptq <=0.7.1 is_marlin_format: bool
+            is_format_marlin = (quant_cfg.get("checkpoint_format") == "marlin"
+                                or quant_cfg.get("is_marlin_format", False))
 
-            # If the GPTQ model is serialized in marlin format, use marlin.
-            if (hf_quant_method == "gptq"
-                    and "is_marlin_format" in hf_quant_config
-                    and hf_quant_config["is_marlin_format"]):
+            # Use marlin if the GPTQ model is serialized in marlin format.
+            if quant_method == "gptq" and is_format_marlin:
                 logger.info("The model is serialized in Marlin format. "
                             "Using Marlin kernel.")
-                hf_quant_method = "marlin"
+                quant_method = "marlin"
                 if self.quantization == "gptq":
-                    self.quantization = hf_quant_method
+                    self.quantization = quant_method
 
             if self.quantization is None:
-                self.quantization = hf_quant_method
-            elif self.quantization != hf_quant_method:
+                self.quantization = quant_method
+            elif self.quantization != quant_method:
                 raise ValueError(
                     "Quantization method specified in the model config "
-                    f"({hf_quant_method}) does not match the quantization "
+                    f"({quant_method}) does not match the quantization "
                     f"method specified in the `quantization` argument "
                     f"({self.quantization}).")
 
@@ -596,6 +599,8 @@ class DeviceConfig:
             # Automated device type detection
             if is_neuron():
                 self.device_type = "neuron"
+            elif is_cpu():
+                self.device_type = "cpu"
             else:
                 # We don't call torch.cuda.is_available() here to
                 # avoid initializing CUDA before workers are forked
