@@ -78,7 +78,7 @@ class ExecutorBase(ABC):
 
     async def halt_model(self) -> None:
         """Releases parallel workers from model loop."""
-        pass
+        return
 
     @abstractmethod
     def add_lora(self, lora_request: LoRARequest) -> bool:
@@ -114,7 +114,7 @@ class ExecutorAsyncBase(ExecutorBase):
 
     async def halt_model_async(self) -> None:
         """Releases parallel workers from model loop."""
-        pass
+        return
 
     async def check_health_async(self) -> None:
         """Checks if the executor is healthy. If not, it should raise an
