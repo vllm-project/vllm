@@ -1,0 +1,15 @@
+cmake>=3.21
+ninja  # For faster builds.
+psutil
+ray >= 2.9
+sentencepiece  # Required for LLaMA tokenizer.
+numpy
+transformers >= 4.38.0  # Required for Gemma.
+fastapi
+uvicorn[standard]
+pydantic >= 2.0  # Required for OpenAI server.
+prometheus_client >= 0.18.0
+torch == 2.1.2+cpu 
+triton >= 2.1.0
+filelock == 3.13.3
+py-cpuinfo

@@ -10,7 +10,8 @@ from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config, get_hf_text_config
-from vllm.utils import get_cpu_memory, get_nvcc_cuda_version, is_hip, is_neuron
+from vllm.utils import (get_cpu_memory, get_nvcc_cuda_version, is_cpu, is_hip,
+                        is_neuron)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -598,6 +599,8 @@ class DeviceConfig:
             # Automated device type detection
             if is_neuron():
                 self.device_type = "neuron"
+            elif is_cpu():
+                self.device_type = "cpu"
             else:
                 # We don't call torch.cuda.is_available() here to
                 # avoid initializing CUDA before workers are forked

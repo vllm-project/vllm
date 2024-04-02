@@ -8,6 +8,9 @@ steps:
       queue: amd
     command: bash .buildkite/run-amd-test.sh
 
+  - label: "CPU Test"
+    command: bash .buildkite/run-cpu-test.sh
+
   - label: ":docker: build image"
     commands:
       - "docker build --build-arg max_jobs=16 --tag {{ docker_image }} --target test --progress plain ."
