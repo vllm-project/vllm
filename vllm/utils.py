@@ -119,8 +119,8 @@ def is_hip() -> bool:
 
 @lru_cache(maxsize=None)
 def is_cpu() -> bool:
-    from importlib.metadata import version
-    is_cpu_flag = "cpu" in version("vllm")
+    import vllm
+    is_cpu_flag = "cpu" in vllm.__version__
     return is_cpu_flag
 
 
