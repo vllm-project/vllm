@@ -746,7 +746,7 @@ class SpeculativeConfig:
         self._verify_args()
 
     def _verify_args(self) -> None:
-        if self.num_speculative_tokens < 0:
+        if self.num_speculative_tokens <= 0:
             raise ValueError("Expected num_speculative_tokens to be greater "
                              f"than zero ({self.num_speculative_tokens}).")
 
