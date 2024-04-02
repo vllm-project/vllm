@@ -76,7 +76,6 @@ class ExecutorBase(ABC):
         """Executes one model step on the given sequences."""
         raise NotImplementedError
 
-    @abstractmethod
     async def halt_model(self) -> None:
         """Releases parallel workers from model loop."""
         pass
