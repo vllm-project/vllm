@@ -61,7 +61,7 @@ jobs:
         uses: ./.github/workflows/nm-lm-eval-accuracy.yml
         with:
             label: aws-avx2-32G-a10g-24G
-            timeout: 60
+            timeout: 240
             gitref: '${{ github.ref }}'
             Gi_per_thread: 12
             nvcc_threads: 1
