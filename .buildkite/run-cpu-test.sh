@@ -10,5 +10,5 @@ remove_docker_container() { docker rm -f cpu-test || true; }
 trap remove_docker_container EXIT
 remove_docker_container
 
-# Run the image
-docker run --rm --network host --name cpu-check cpu-test python3 examples/offline_inference.py
+# Run the image and launch offline inference
+docker run --network host --env VLLM_CPU_KVCACHE_SPACE=1 --name cpu-check cpu-test python3 examples/offline_inference.py
