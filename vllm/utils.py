@@ -205,9 +205,13 @@ def get_ip() -> str:
 
 
 def get_distributed_init_method(ip: str, port: int) -> str:
-    # Brackets are not permitted in ipv4 addresses,
-    # see https://github.com/python/cpython/issues/103848
-    return f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}"
+    if (os.environ.get("MASTER_ADDR") is not None) and \
+        (os.environ.get("MASTER_PORT") is not None) and \
+            (os.environ.get("WORLD_SIZE") is not None) and \
+                (os.environ.get("RANK") is not None):
+                return "env://"
+    else:
+        return f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}"
 
 
 def get_open_port() -> int:
