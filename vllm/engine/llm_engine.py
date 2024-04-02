@@ -83,6 +83,7 @@ class LLMEngine:
             f"model={model_config.model!r}, "
             f"speculative_config={speculative_config!r}, "
             f"tokenizer={model_config.tokenizer!r}, "
+            f"disable_tokenizer={model_config.disable_tokenizer}, "
             f"tokenizer_mode={model_config.tokenizer_mode}, "
             f"revision={model_config.revision}, "
             f"tokenizer_revision={model_config.tokenizer_revision}, "
