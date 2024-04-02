@@ -2,7 +2,7 @@
 from abc import ABC, abstractmethod
 from itertools import count, takewhile
 from os.path import commonprefix
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set
 
 from vllm.block import BlockTable, PhysicalTokenBlock
 from vllm.core.evictor import EvictionPolicy, Evictor, make_evictor
@@ -292,7 +292,12 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             self.block_tables[seq.seq_id] = block_table.copy()
 
-    def can_append_slot(self, seq_group: SequenceGroup) -> bool:
+    def can_append_slots(self,
+                         seq_group: SequenceGroup,
+                         num_lookahead_slots: int = 0) -> bool:
+        assert (num_lookahead_slots == 0
+                ), "lookahead allocation not supported in BlockSpaceManagerV1"
+
         # Simple heuristic: If there is at least one free block
         # for each sequence, we can append.
         num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
@@ -364,10 +369,11 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             assert new_block.ref_count == 1
         return new_block
 
-    def append_slot(
+    def append_slots(
         self,
         seq: Sequence,
-    ) -> Optional[Tuple[int, int]]:
+        num_lookahead_slots: int = 0,
+    ) -> Dict[int, List[int]]:
         """Allocate a physical slot for a new token."""
         logical_blocks = seq.logical_token_blocks
         block_table = self.block_tables[seq.seq_id]
@@ -386,7 +392,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 # Allocate a new physical block.
                 new_block = self._allocate_last_physical_block(seq)
                 block_table.append(new_block)
-                return None
+                return {}
 
         # We want to append the token to the last physical block.
         last_block = block_table[-1]
@@ -399,7 +405,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 maybe_new_block = self._maybe_promote_last_block(
                     seq, last_block)
                 block_table[-1] = maybe_new_block
-            return None
+            return {}
         else:
             # The last block is shared with other sequences.
             # Copy on Write: Allocate a new block and copy the tokens.
@@ -407,7 +413,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
             block_table[-1] = new_block
             self.gpu_allocator.free(last_block)
-            return last_block.block_number, new_block.block_number
+            return {last_block.block_number: [new_block.block_number]}
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         # NOTE: fork does not allocate a new physical block.
@@ -433,7 +439,11 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             blocks.update(self.block_tables[seq.seq_id])
         return list(blocks)
 
-    def can_swap_in(self, seq_group: SequenceGroup) -> bool:
+    def can_swap_in(self,
+                    seq_group: SequenceGroup,
+                    num_lookahead_slots: int = 0) -> bool:
+        assert (num_lookahead_slots == 0
+                ), "BlockSpaceManagerV1 does not support lookahead allocation"
         blocks = self._get_physical_blocks(seq_group)
         num_swapped_seqs = seq_group.num_seqs(status=SequenceStatus.SWAPPED)
         num_free_blocks = self.gpu_allocator.get_num_free_blocks()
@@ -443,7 +453,12 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         num_required_blocks = len(blocks) + num_swapped_seqs
         return num_free_blocks - num_required_blocks >= self.watermark_blocks
 
-    def swap_in(self, seq_group: SequenceGroup) -> Dict[int, int]:
+    def swap_in(self,
+                seq_group: SequenceGroup,
+                num_lookahead_slots: int = 0) -> Dict[int, int]:
+        assert (num_lookahead_slots == 0
+                ), "BlockSpaceManagerV1 does not support lookahead allocation"
+
         # CPU block -> GPU block.
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):

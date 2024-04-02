@@ -21,7 +21,6 @@
 
 import ctypes
 import datetime
-import logging
 import os
 
 # ===================== import region =====================
@@ -29,7 +28,9 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ReduceOp
 
-logger = logging.getLogger(__name__)
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 so_file = os.environ.get("VLLM_NCCL_SO_PATH", "")
 
@@ -41,7 +42,7 @@ else:
     if torch.version.cuda is not None:
         so_file = "libnccl.so.2"
     elif torch.version.hip is not None:
-        so_file = "librccl.so.2"
+        so_file = "librccl.so.1"
     else:
         raise ValueError("NCCL only supports CUDA and ROCm backends.")
     logger.debug(f"Loading nccl from library {so_file}")
@@ -202,11 +203,11 @@ class NCCLCommunicator:
         init_method=None,
         timeout=datetime.timedelta(seconds=10),
         world_size: int = -1,
-        local_rank: int = -1,
         rank: int = -1,
         store=None,
         group_name: str = "",
         pg_options=None,
+        local_rank: int = -1,
     ):
         if not dist.is_initialized():
             backend = backend or "nccl"
@@ -220,6 +221,11 @@ class NCCLCommunicator:
                                     store=store,
                                     group_name=group_name,
                                     pg_options=pg_options)
+        self.rank = dist.get_rank()
+        self.world_size = dist.get_world_size()
+        if local_rank == -1:
+            local_rank = self.rank
+        self.local_rank = local_rank
         torch.cuda.set_device(local_rank)
         if rank == 0:
             self.unique_id = ncclGetUniqueId()

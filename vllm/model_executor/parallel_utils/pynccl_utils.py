@@ -1,11 +1,12 @@
 import contextlib
-import logging
 from typing import Optional
 
 import torch
 from torch.distributed import ReduceOp
 
-logger = logging.getLogger(__name__)
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 try:
     from vllm.model_executor.parallel_utils.pynccl import (NCCLCommunicator,
@@ -35,8 +36,10 @@ def set_pynccl_stream(stream: torch.cuda.Stream):
         pass
 
 
-def init_process_group(world_size: int, local_rank: int, rank: int,
-                       init_method: str) -> None:
+def init_process_group(world_size: int,
+                       rank: int,
+                       init_method: str,
+                       local_rank: int = -1) -> None:
     assert not is_initialized()
     global comm
     logger.info(f"vLLM is using nccl=={ncclGetVersion()}")
