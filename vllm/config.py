@@ -1,7 +1,7 @@
 import enum
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, ClassVar, Optional, Union
 
 import torch
@@ -1011,7 +1011,6 @@ class EngineConfig:
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.
         """
-
         self.model_config.verify_with_parallel_config(self.parallel_config)
         self.cache_config.verify_with_parallel_config(self.parallel_config)
 
@@ -1020,7 +1019,7 @@ class EngineConfig:
             self.lora_config.verify_with_scheduler_config(
                 self.scheduler_config)
 
-    def as_dict(self):
+    def to_dict(self):
         """Return the configs as a dictionary, for use in **kwargs.
         """
-        return asdict(self)
+        return dict((field.name, getattr(self, field.name)) for field in fields(self))

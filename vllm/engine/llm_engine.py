@@ -206,7 +206,7 @@ class LLMEngine:
 
         # Create the LLM engine.
         engine = cls(
-            **engine_config.as_dict(),
+            **engine_config.to_dict(),
             executor_class=executor_class,
             log_stats=not engine_args.disable_log_stats,
             usage_context=usage_context,
