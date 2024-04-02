@@ -28,14 +28,17 @@ assert torch.isclose(gpu_cache[layer_id][0][block.block_number].mean(), torch.te
 assert torch.isclose(gpu_cache[layer_id][1][block.block_number].mean(), torch.tensor(2.).half())
 
 
-key_tensor_new = torch.empty_like(key_tensor)
-v_tensor_new = torch.empty_like(v_tensor)
+key_tensor_new = torch.ones_like(key_tensor)
+v_tensor_new = torch.ones_like(v_tensor)
 pdb.set_trace()
 BlockAllocator.load_kv_block(
         (key_tensor_new, v_tensor_new),
         gpu_cache[layer_id],
         block)
 pdb.set_trace()
+
+assert torch.isclose(key_tensor_new.mean(), torch.tensor(1.).half())
+assert torch.isclose(v_tensor_new.mean(), torch.tensor(2.).half())
 
 #assert torch.isclose(gpu_cache[layer_id][0][block.block_number].mean(), torch.tensor(1.).half())
 #assert torch.isclose(gpu_cache[layer_id][1][block.block_number].mean(), torch.tensor(2.).half())

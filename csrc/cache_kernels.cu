@@ -258,9 +258,9 @@ __global__ void load_and_reshape_kernel(
                                   + block_offset;
     cache_t tgt_key = key_cache[tgt_key_idx];
     cache_t tgt_value = value_cache[tgt_value_idx];
-    printf("%.3f", tgt_key);
-    printf("%.3f", key_cache[tgt_key_idx]);
-    printf("---------------------------");
+
+    //TORCH_CHECK(false, "tgt key: ", tgt_key);
+    //TORCH_CHECK(false, "tgt key idx: ", tgt_key_idx);
     if constexpr (is_fp8_e5m2_kv_cache) {
 #ifdef ENABLE_FP8_E5M2
       key[src_key_idx] = fp8_e5m2_unscaled::vec_conversion<scalar_t, uint8_t>(tgt_key);
@@ -292,7 +292,7 @@ __global__ void load_and_reshape_kernel(
     x);
 
 #define CALL_LOAD_AND_RESHAPE(KV_T, CACHE_T, IS_FP8_E5M2_KV_CACHE)                                \
-  vllm::reshape_and_cache_kernel<KV_T, CACHE_T, IS_FP8_E5M2_KV_CACHE><<<grid, block, 0, stream>>>( \
+  vllm::load_and_reshape_kernel<KV_T, CACHE_T, IS_FP8_E5M2_KV_CACHE><<<grid, block, 0, stream>>>( \
     reinterpret_cast<KV_T*>(key.data_ptr()),                                                       \
     reinterpret_cast<KV_T*>(value.data_ptr()),                                                     \
     reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),                                              \
@@ -346,6 +346,9 @@ void reshape_and_cache(
   } else {
     TORCH_CHECK(false, "Unsupported data type of kv cache: ", kv_cache_dtype);
   }
+  //cudaDeviceSynchronize();
+  //cudaPrintfDisplay(stdout, true);
+  //cudaPrintfEnd();
 }
 
 void load_and_reshape(
@@ -372,19 +375,19 @@ void load_and_reshape(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   if (kv_cache_dtype == "auto") {
     if (key.dtype() == at::ScalarType::Float) {
-      CALL_RESHAPE_AND_CACHE(float, float, false);
+      CALL_LOAD_AND_RESHAPE(float, float, false);
     } else if (key.dtype() == at::ScalarType::Half) {
-      CALL_RESHAPE_AND_CACHE(uint16_t, uint16_t, false);
+      CALL_LOAD_AND_RESHAPE(uint16_t, uint16_t, false);
     } else if (key.dtype() == at::ScalarType::BFloat16) {
-      CALL_RESHAPE_AND_CACHE(__nv_bfloat16, __nv_bfloat16, false);
+      CALL_LOAD_AND_RESHAPE(__nv_bfloat16, __nv_bfloat16, false);
     }
   } else if (kv_cache_dtype == "fp8_e5m2") {
     if (key.dtype() == at::ScalarType::Float) {
-      CALL_RESHAPE_AND_CACHE(float, uint8_t, true);
+      CALL_LOAD_AND_RESHAPE(float, uint8_t, true);
     } else if (key.dtype() == at::ScalarType::Half) {
-      CALL_RESHAPE_AND_CACHE(uint16_t, uint8_t, true);
+      CALL_LOAD_AND_RESHAPE(uint16_t, uint8_t, true);
     } else if (key.dtype() == at::ScalarType::BFloat16) {
-      CALL_RESHAPE_AND_CACHE(__nv_bfloat16, uint8_t, true);
+      CALL_LOAD_AND_RESHAPE(__nv_bfloat16, uint8_t, true);
     }
   } else {
     TORCH_CHECK(false, "Unsupported data type of kv cache: ", kv_cache_dtype);

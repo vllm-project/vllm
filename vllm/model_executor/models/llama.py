@@ -214,6 +214,13 @@ class LlamaDecoderLayer(nn.Module):
         cache_fuse_metadata: dict,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
+        
+        if hidden_states.shape[1]>4000 or cache_fuse_metadata["org_seq_len"]>4000:
+            torch.cuda.synchronize()
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+        
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
@@ -228,11 +235,29 @@ class LlamaDecoderLayer(nn.Module):
             status=status,
             cache_fuse_metadata=cache_fuse_metadata,
         )
-
+        
+        if status==1:
+            residual = residual[:, cache_fuse_metadata["imp_token_indices"]]
+        if hidden_states.shape[1]>4000 or cache_fuse_metadata["org_seq_len"]>4000:
+            end.record()
+            torch.cuda.synchronize()
+            temp_time = start.elapsed_time(end)
+            print(f"Attention time:{temp_time}")
+            
+        if hidden_states.shape[1]>4000 or cache_fuse_metadata["org_seq_len"]>4000:
+            torch.cuda.synchronize()
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
+        if hidden_states.shape[1]>4000 or cache_fuse_metadata["org_seq_len"]>4000:
+            end.record()
+            torch.cuda.synchronize()
+            temp_time = start.elapsed_time(end)
+            print(f"MLP time:{temp_time}")
         return hidden_states, residual
 
 
@@ -278,7 +303,8 @@ class LlamaModel(nn.Module):
                                     "kv_cache_dtype": None,
                                     "attn_bias": None,
                                     "imp_token_indices": None,
-                                    "org_seq_len": None}
+                                    "org_seq_len": None,
+                                    "pre_mask":None}
                                     #"batch_indices":[0]}
 
     def forward(
@@ -298,6 +324,15 @@ class LlamaModel(nn.Module):
         else:
             print("\033[31mThis time we don't have any KV caches\033[0m")
         residual = None
+        
+        flag=None
+        
+        if input_ids.shape[1]>4000:
+            flag=True
+            torch.cuda.synchronize()
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
         
         #import pdb
         #pdb.set_trace()
@@ -336,17 +371,17 @@ class LlamaModel(nn.Module):
                 cache_fuse_metadata = self.cache_fuse_metadata,
             )
             
-            if self.cache_fuse_metadata["org_seq_len"]>4000:
-                import pdb
-                pdb.set_trace()
             if temp_status==1:
                 positions = positions[:,self.cache_fuse_metadata["imp_token_indices"]]
         hidden_states, _ = self.norm(hidden_states, residual)
         
-        
-        #if input_ids.shape[0] == 6:
-        #    import pdb
-        #    pdb.set_trace()
+        if flag:
+            end.record()
+            torch.cuda.synchronize()
+            temp_time = start.elapsed_time(end)
+            print(temp_time)
+            import pdb
+            pdb.set_trace()
         
         return hidden_states
 

@@ -63,11 +63,13 @@ class Attention(nn.Module):
 
 @lru_cache(maxsize=1)
 def _use_flash_attn() -> bool:
-    try:
-        import flash_attn  # noqa: F401
-    except ImportError:
-        logger.info("flash_attn is not found. Using xformers backend.")
-        return False
+    #FIXME(Jiayi): use flash attn
+    #try:
+    #    import flash_attn  # noqa: F401
+    #except ImportError:
+    #    logger.info("flash_attn is not found. Using xformers backend.")
+    #    return False
+    return False
 
     if is_hip():
         # AMD GPUs.
