@@ -58,6 +58,7 @@ class SchedulerOutputs:
     blocks_to_copy: Dict[int, List[int]]
     # Sequence groups that are going to be ignored.
     ignored_seq_groups: List[SequenceGroup]
+    num_lookahead_slots: int
 
     def __post_init__(self):
         # Swap in and swap out should never happen at the same time.
@@ -95,6 +96,7 @@ class SchedulerDecodeOutputs:
     blocks_to_copy: Dict[int, List[int]]
     # # The number of batched tokens.
     num_batched_tokens: int
+    num_lookahead_slots: int
 
     @classmethod
     def create_empty(cls) -> "SchedulerDecodeOutputs":
@@ -118,6 +120,7 @@ class SchedulerSwappedOutputs:
     blocks_to_copy: Dict[int, List[int]]
     # # The number of batched tokens.
     num_batched_tokens: int
+    num_lookahead_slots: int
 
     @classmethod
     def create_empty(cls) -> "SchedulerSwappedOutputs":
@@ -138,6 +141,7 @@ class SchedulerPrefillOutputs:
     ignored_seq_groups: List[SequenceGroup]
     # The number of batched tokens.
     num_batched_tokens: int
+    num_lookahead_slots: int
 
     @classmethod
     def create_empty(cls) -> "SchedulerPrefillOutputs":
@@ -287,7 +291,7 @@ class Scheduler:
                 break
 
             self.running.popleft()
-            while not self.block_manager.can_append_slot(seq_group):
+            while not self._can_append_slots(seq_group):
                 if self.running:
                     # Preempt the lowest-priority sequence groups.
                     victim_seq_group = self.running.pop()
@@ -311,7 +315,8 @@ class Scheduler:
                                       num_preempted_seqs=len(preempted),
                                       blocks_to_swap_out=blocks_to_swap_out,
                                       blocks_to_copy=blocks_to_copy,
-                                      num_batched_tokens=num_batched_tokens)
+                                      num_batched_tokens=num_batched_tokens,
+                                      num_lookahead_slots=self._get_num_lookahead_slots(is_prefill=False))
 
     def _schedule_swapped(self) -> SchedulerSwappedOutputs:
         """Schedule sequence groups in a swapped stage.
@@ -375,7 +380,8 @@ class Scheduler:
         return SchedulerSwappedOutputs(seq_groups=seq_groups,
                                        blocks_to_swap_in=blocks_to_swap_in,
                                        blocks_to_copy=blocks_to_copy,
-                                       num_batched_tokens=num_batched_tokens)
+                                       num_batched_tokens=num_batched_tokens,
+                                       num_lookahead_slots=self._get_num_lookahead_slots(is_prefill=False))
 
     def _schedule_prefills(self, token_budget: int) -> SchedulerPrefillOutputs:
         """Schedule sequence groups in prefill stages.
@@ -480,7 +486,9 @@ class Scheduler:
 
         return SchedulerPrefillOutputs(seq_groups=seq_groups,
                                        ignored_seq_groups=ignored_seq_groups,
-                                       num_batched_tokens=num_batched_tokens)
+                                       num_batched_tokens=num_batched_tokens,
+                                    num_lookahead_slots=self._get_num_lookahead_slots(
+                                        is_prefill=True))
 
     def _schedule(self) -> SchedulerOutputs:
         """Batch requests that are queued..
@@ -519,6 +527,9 @@ class Scheduler:
         num_batched_tokens = (prefills.num_batched_tokens +
                               decodes.num_batched_tokens +
                               swapped_in.num_batched_tokens)
+        num_lookahead_slots = (prefills.num_lookahead_slots +
+                                decodes.num_lookahead_slots +
+                                swapped_in.num_lookahead_slots)
 
         scheduler_outputs = SchedulerOutputs(
             scheduled_seq_groups=prefills.seq_groups + decodes.seq_groups +
@@ -530,12 +541,34 @@ class Scheduler:
             blocks_to_copy=merge_dicts(decodes.blocks_to_copy,
                                        swapped_in.blocks_to_copy),
             ignored_seq_groups=prefills.ignored_seq_groups,
+            num_lookahead_slots=num_lookahead_slots,
         )
 
         self.running.extend([s.seq_group for s in prefills.seq_groups])
         self.running.extend([s.seq_group for s in decodes.seq_groups])
         self.running.extend([s.seq_group for s in swapped_in.seq_groups])
         return scheduler_outputs
+
+    def _can_append_slots(self, seq_group: SequenceGroup) -> bool:
+        """Determine whether or not we have enough space in the KV cache to
+        continue generation of the sequence group.
+        """
+        # Appending slots only occurs in decoding.
+        is_prefill = False
+
+        return self.block_manager.can_append_slots(
+            seq_group=seq_group,
+            num_lookahead_slots=self._get_num_lookahead_slots(is_prefill),
+        )
+
+    def _can_swap_in(self, seq_group: SequenceGroup) -> bool:
+        # Swapping in is considered decode.
+        is_prefill = False
+
+        return self.block_manager.can_swap_in(
+            seq_group=seq_group,
+            num_lookahead_slots=self._get_num_lookahead_slots(is_prefill),
+        )
 
     def schedule(self) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs]:
         # Schedule sequence groups.
@@ -615,19 +648,30 @@ class Scheduler:
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             seq.status = SequenceStatus.RUNNING
 
-    def _append_slot(
+    def _append_slots(
         self,
         seq_group: SequenceGroup,
         blocks_to_copy: Dict[int, List[int]],
     ) -> None:
+        """Appends new slots to the sequences in the given sequence group.
+
+        Args:
+            seq_group (SequenceGroup): The sequence group containing the
+                sequences to append slots to.
+            blocks_to_copy (Dict[int, List[int]]): A dictionary mapping source
+                block indices to lists of destination block indices. This
+                dictionary is updated with the new source and destination block
+                indices for the appended slots.
+        """
+        num_lookahead_slots = self._get_num_lookahead_slots(is_prefill=False)
+
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-            ret = self.block_manager.append_slot(seq)
-            if ret is not None:
-                src_block, dst_block = ret
-                if src_block in blocks_to_copy:
-                    blocks_to_copy[src_block].append(dst_block)
-                else:
-                    blocks_to_copy[src_block] = [dst_block]
+            cows = self.block_manager.append_slots(seq, num_lookahead_slots)
+
+            for src, dests in cows.items():
+                if src not in blocks_to_copy:
+                    blocks_to_copy[src] = []
+                blocks_to_copy[src].extend(dests)
 
     def _preempt(
         self,
@@ -721,3 +765,16 @@ class Scheduler:
         else:
             passed_delay = True
         return passed_delay
+
+    def _get_num_lookahead_slots(self, is_prefill: bool) -> int:
+        """The number of slots to allocate per sequence per step, beyond known
+        token ids. Speculative decoding uses these slots to store KV activations
+        of tokens which may or may not be accepted.
+
+        Speculative decoding does not yet support prefill, so we do not perform
+        lookahead allocation for prefill.
+        """
+        if is_prefill:
+            return 0
+
+        return self.scheduler_config.num_lookahead_slots
