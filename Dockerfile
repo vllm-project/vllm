@@ -15,25 +15,26 @@ RUN ldconfig /usr/local/cuda-12.1/compat/
 
 WORKDIR /workspace
 
-# install build and runtime dependencies
-COPY requirements.txt requirements.txt
+# install build dependencies
+COPY requirements-build.txt requirements-build.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt
+    pip install -r requirements-build.txt
 
 # install development dependencies
 COPY requirements-dev.txt requirements-dev.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements-dev.txt
+
+# install runtime dependencies
+COPY requirements.txt requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt
+
 #################### BASE BUILD IMAGE ####################
 
 
 #################### EXTENSION BUILD IMAGE ####################
 FROM dev AS build
-
-# install build dependencies
-COPY requirements-build.txt requirements-build.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements-build.txt
 
 # install compiler cache to speed up compilation leveraging local or remote caching
 RUN apt-get update -y && apt-get install -y ccache
