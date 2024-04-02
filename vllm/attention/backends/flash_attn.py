@@ -209,8 +209,9 @@ class FlashAttentionImpl(AttentionImpl):
                 )
             else:
                 # prefix-enabled attention
-                # TODO(Hai) this triton kernel has regression issue (would break) to deal with
-                # different data types between KV and FP8 KV cache (to be addressed separately)
+                # TODO(Hai) this triton kernel has regression issue (broke) to
+                # deal with different data types between KV and FP8 KV cache,
+                # to be addressed separately.
                 output = PagedAttention.forward_prefix(
                     query,
                     key,
