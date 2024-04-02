@@ -44,7 +44,8 @@ else:
     if torch.version.cuda is not None:
         # check if we have vllm-managed nccl
         if os.path.exists(os.path.join(sys.prefix, "vllm_nccl")):
-            so_file = glob.glob(os.path.join(sys.prefix, "vllm_nccl") + "/**/*.so")[0]
+            so_file = glob.glob(
+                os.path.join(sys.prefix, "vllm_nccl") + "/**/*.so")[0]
         else:
             so_file = "libnccl.so.2"
     elif torch.version.hip is not None:

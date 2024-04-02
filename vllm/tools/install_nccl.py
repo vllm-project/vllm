@@ -1,11 +1,14 @@
 # usage: python -m vllm.tools.install_nccl --cuda 11 --nccl 2.18.3
 # after installation, files are available in `{sys.prefix}/vllm_nccl` directory
 
-import platform
 import os
+import platform
 from dataclasses import dataclass
+
 from vllm.logger import init_logger
+
 logger = init_logger(__name__)
+
 
 @dataclass
 class DistInfo:
@@ -18,6 +21,7 @@ class DistInfo:
         url_temp = "https://developer.download.nvidia.com/compute/redist/nccl/v{}/{}".format(
             self.public_version, self.filename_linux)
         return url_temp.replace("x86_64", architecture)
+
 
 # taken from https://developer.download.nvidia.com/compute/redist/nccl/
 available_dist_info = [
@@ -37,19 +41,28 @@ available_dist_info = [
 
 if __name__ == "__main__":
 
-    import argparse
-
     from argparse import ArgumentParser
 
     args = ArgumentParser(help="Install NCCL package for VLLM")
-    args.add_argument("--cuda", type=str, required=True, default="12", help="Major CUDA version", choices=["11", "12"])
-    args.add_argument("--nccl", type=str, required=True, default="2.18", help="Major NCCL version", choices=["2.20", "2.18", "2.17", "2.16"])
+    args.add_argument("--cuda",
+                      type=str,
+                      required=True,
+                      default="12",
+                      help="Major CUDA version",
+                      choices=["11", "12"])
+    args.add_argument("--nccl",
+                      type=str,
+                      required=True,
+                      default="2.18",
+                      help="Major NCCL version",
+                      choices=["2.20", "2.18", "2.17", "2.16"])
 
     args = args.parse_args()
 
     architecture = platform.machine()
     if architecture not in ["x86_64", "aarch64", "ppc64le"]:
-        print(f"Unsupported architecture: {architecture}, using x86_64 instead.")
+        print(
+            f"Unsupported architecture: {architecture}, using x86_64 instead.")
         architecture = "x86_64"
 
     nccl_major_version, cuda_major_version = args.nccl, args.cuda
@@ -57,11 +70,17 @@ if __name__ == "__main__":
     url = None
 
     for each in available_dist_info:
-        if each.cuda_version.split(".")[0] == cuda_major_version and each.full_version.startswith(nccl_major_version):
+        if each.cuda_version.split(
+                ".")[0] == cuda_major_version and each.full_version.startswith(
+                    nccl_major_version):
             url = each.get_url(architecture)
             break
 
-    assert url is not None, f"Could not find a suitable nccl package for cuda {cuda_major_version} and nccl {nccl_major_version}"
+    assert url is not None, \
+        (
+            "Could not find a suitable nccl package for cuda"
+        f" {cuda_major_version} and nccl {nccl_major_version}"
+        )
 
     print(f"Downloading nccl package from {url}")
     import sys
@@ -74,10 +93,10 @@ if __name__ == "__main__":
 
     # download from url
     if not os.path.exists(dir_path):
-        import requests
         import os
         import shutil
-        import subprocess
+
+        import requests
 
         # download with progress bar
         response = requests.get(url, stream=True)
@@ -85,7 +104,7 @@ if __name__ == "__main__":
         with open(file_path, "wb") as f:
             shutil.copyfileobj(response.raw, f)
 
-        # extract the file to a temporary location, using python's built-in tarfile module
+        # extract the file
         import tarfile
         with tarfile.open(file_path) as f:
             f.extractall(dir_path)
