@@ -1,6 +1,8 @@
-from typing import Optional
+from typing import Dict, List, Optional
 
 import torch
+
+from vllm.model_executor.mamba_metadata import MambaCache, RequestInfo
 
 
 class InputMetadata:
@@ -27,6 +29,7 @@ class InputMetadata:
         block_tables: Optional[torch.Tensor],
         use_cuda_graph: bool,
         kv_cache_dtype: str,
+        requests_info: Optional[List[RequestInfo]] = None
     ) -> None:
         self.is_prompt = is_prompt
         self.prompt_lens = prompt_lens
@@ -42,7 +45,8 @@ class InputMetadata:
         # Set during the execution of the first attention op.
         # FIXME(woosuk): This is a hack.
         self.attn_bias = None
-        self.mamba_metadata = None
+        self.mamba_cache_batch: List[MambaCache] = []
+        self.requests_info = requests_info
 
     def __repr__(self) -> str:
         return ("InputMetadata("

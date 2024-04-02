@@ -31,8 +31,7 @@ _MODELS = {
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
     "JAISLMHeadModel": ("jais", "JAISLMHeadModel"),
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
-    "LlavaForConditionalGeneration":
-    ("llava", "LlavaForConditionalGeneration"),
+    "LlavaForConditionalGeneration": ("llava", "LlavaForConditionalGeneration"),
     # For decapoda-research/llama-*
     "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
     "MistralForCausalLM": ("llama", "LlamaForCausalLM"),
@@ -54,7 +53,7 @@ _MODELS = {
     "StableLmForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
     "XverseForCausalLM": ("xverse", "XverseForCausalLM"),
-    "Jurassic3ForCausalLM": ("jurassic3", "Jurassic3ForCausalLM")
+    "JambaForCausalLM": ("jamba", "JambaForCausalLM")
 }
 
 # Architecture -> type.
@@ -67,17 +66,13 @@ _ROCM_UNSUPPORTED_MODELS = []
 # Models partially supported by ROCm.
 # Architecture -> Reason.
 _ROCM_PARTIALLY_SUPPORTED_MODELS = {
-    "Qwen2ForCausalLM":
-    "Sliding window attention is not yet supported in ROCm's flash attention",
-    "MistralForCausalLM":
-    "Sliding window attention is not yet supported in ROCm's flash attention",
-    "MixtralForCausalLM":
-    "Sliding window attention is not yet supported in ROCm's flash attention",
+    "Qwen2ForCausalLM": "Sliding window attention is not yet supported in ROCm's flash attention",
+    "MistralForCausalLM": "Sliding window attention is not yet supported in ROCm's flash attention",
+    "MixtralForCausalLM": "Sliding window attention is not yet supported in ROCm's flash attention",
 }
 
 
 class ModelRegistry:
-
     @staticmethod
     def load_model_cls(model_arch: str) -> Optional[Type[nn.Module]]:
         if model_arch in _OOT_MODELS:
@@ -88,15 +83,16 @@ class ModelRegistry:
             if model_arch in _ROCM_UNSUPPORTED_MODELS:
                 raise ValueError(
                     f"Model architecture {model_arch} is not supported by "
-                    "ROCm for now.")
+                    "ROCm for now."
+                )
             if model_arch in _ROCM_PARTIALLY_SUPPORTED_MODELS:
                 logger.warning(
                     f"Model architecture {model_arch} is partially supported "
-                    "by ROCm: " + _ROCM_PARTIALLY_SUPPORTED_MODELS[model_arch])
+                    "by ROCm: " + _ROCM_PARTIALLY_SUPPORTED_MODELS[model_arch]
+                )
 
         module_name, model_cls_name = _MODELS[model_arch]
-        module = importlib.import_module(
-            f"vllm.model_executor.models.{module_name}")
+        module = importlib.import_module(f"vllm.model_executor.models.{module_name}")
         return getattr(module, model_cls_name, None)
 
     @staticmethod

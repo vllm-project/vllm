@@ -21,6 +21,7 @@ from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
+from vllm.model_executor.mamba_metadata import RequestInfo
 from vllm.model_executor.model_loader import get_model
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (MultiModalData, SamplerOutput, SequenceData,
@@ -151,6 +152,7 @@ class ModelRunner:
         self.kv_cache_dtype = kv_cache_dtype
         self.vision_language_config = vision_language_config
         self.mamba_cache = defaultdict(lambda: {})
+        self.request_id2mamba_cache: Dict[str, MambaCache] = {}
 
         self.attn_backend = get_attn_backend(
             self.model_config.dtype if model_config is not None else None)
@@ -403,6 +405,14 @@ class ModelRunner:
             context_lens=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=False,
+            kv_cache_dtype=self.kv_cache_dtype,
+            requests_info=[
+                RequestInfo(
+                    request_id=req.request_id,
+                    n=req.sampling_params.n
+                )
+                for req in seq_group_metadata_list
+            ]
         )
 
         return PreparePromptMetadata(
@@ -533,6 +543,14 @@ class ModelRunner:
             context_lens=context_lens,
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
+            kv_cache_dtype=self.kv_cache_dtype,
+            requests_info=[
+                RequestInfo(
+                    request_id=req.request_id,
+                    n=req.sampling_params.n
+                )
+                for req in seq_group_metadata_list]
+
         )
         return PrepareDecodeMetadata(
             input_tokens=input_tokens,
@@ -740,6 +758,13 @@ class ModelRunner:
                 "slot_mapping": slot_mapping,
                 "num_prefills": num_prefills,
                 "batch_type": batch_type,
+                "requests_info": [
+                    RequestInfo(
+                        request_id=req.request_id,
+                        n=req.sampling_params.n
+                    )
+                    for req in seq_group_metadata_list
+                ]
             }
             if prefill_attn_metadata is not None:
                 metadata_dict.update(prefill_attn_metadata.asdict_zerocopy())
@@ -778,6 +803,24 @@ class ModelRunner:
             else:
                 decode_attn_metadata = self.attn_backend.make_metadata(
                     **metadata_dict)
+            attn_metadata = self.attn_backend.make_metadata(**metadata_dict)
+            input_tokens = metadata_dict["input_tokens"]
+            input_positions = metadata_dict["input_positions"]
+            lora_mapping = metadata_dict["lora_mapping"]
+            lora_requests = metadata_dict["lora_requests"]
+            input_metadata = InputMetadata(
+                is_prompt=metadata_dict["is_prompt"],
+                slot_mapping=metadata_dict["slot_mapping"],
+                prompt_lens=metadata_dict["prompt_lens"],
+                max_seq_len=metadata_dict["max_seq_len"],
+                start_loc=metadata_dict["start_loc"],
+                max_context_len=metadata_dict["max_context_len"],
+                context_lens=metadata_dict["context_lens"],
+                block_tables=metadata_dict["block_tables"],
+                use_cuda_graph=metadata_dict["use_cuda_graph"],
+                kv_cache_dtype=metadata_dict["kv_cache_dtype"],
+                requests_info=metadata_dict["requests_info"]
+            )
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
                 seq_data=None,
@@ -847,8 +890,8 @@ class ModelRunner:
         if not sampling_metadata.perform_sampling:
             return None
 
-        mamba_metadata = self._get_mamba_caches_by_seq_group(seq_group_metadata_list)
-        input_metadata.mamba_metadata = mamba_metadata # list of caches
+        batch_mamba_cache = self._prepare_mamba_cache(input_metadata)
+        input_metadata.mamba_cache_batch = batch_mamba_cache # list of caches
 
         hidden_states = model_executable(
             input_ids=input_tokens,
@@ -857,10 +900,8 @@ class ModelRunner:
             input_metadata=input_metadata
         )
 
-        if self.is_driver_worker:
-            for idx, seq_group_metadata in enumerate(seq_group_metadata_list):
-                request_id = seq_group_metadata.request_id
-                self.mamba_cache[request_id] = input_metadata.mamba_metadata[idx]["cache"]
+        for request_mamba_cache in input_metadata.mamba_cache_batch:
+            self.request_id2mamba_cache[request_mamba_cache.request_info.request_id] = request_mamba_cache
 
         # Sample the next token.
         output = self.model.sample(
@@ -869,16 +910,14 @@ class ModelRunner:
         )
         return output
 
-    def _get_mamba_caches_by_seq_group(
+    def _prepare_mamba_cache(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]]
-    ):
-        if seq_group_metadata_list is None:
-            return []
-        return [{
-            "cache":self.mamba_cache[seq.request_id],
-            "n":seq.sampling_params.n,
-        } for seq in seq_group_metadata_list]
+        input_metadata: InputMetadata
+    ) -> List[MambaCache]:
+        return [self.request_id2mamba_cache.get(
+            request_info.request_id,
+            MambaCache(request_info)
+        ) for request_info in input_metadata.requests_info]
 
     @torch.inference_mode()
     def profile_run(self) -> None:
@@ -945,7 +984,7 @@ class ModelRunner:
         kv_caches = [None] * num_layers
         self.execute_model(seqs, kv_caches)
         torch.cuda.synchronize()
-        self.mamba_cache = defaultdict(lambda: {})
+        self.request_id2mamba_cache = {}
         return
 
     def remove_all_loras(self) -> bool:

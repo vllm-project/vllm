@@ -7,7 +7,7 @@ from vllm.transformers_utils.configs.falcon import RWConfig
 from vllm.transformers_utils.configs.jais import JAISConfig
 from vllm.transformers_utils.configs.mpt import MPTConfig
 
-from vllm.transformers_utils.configs.jurassic3 import Jurassic3Config
+from vllm.transformers_utils.configs.jamba import JambaConfig
 
 __all__ = [
     "ChatGLMConfig",
@@ -15,5 +15,5 @@ __all__ = [
     "MPTConfig",
     "RWConfig",
     "JAISConfig",
-    "Jurassic3Config",
+    "JambaConfig"
 ]

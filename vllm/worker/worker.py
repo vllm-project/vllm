@@ -21,7 +21,11 @@ from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
 from vllm.worker.worker_base import WorkerBase
+from vllm.lora.request import LoRARequest
+from vllm.utils import is_hip
+from vllm.logger import init_logger
 
+logger = init_logger(__name__)
 
 class Worker(WorkerBase):
     """A worker class that executes (a partition of) the model on a GPU.
@@ -206,8 +210,9 @@ class Worker(WorkerBase):
 
     def release_mamba_cache(self, finished_seq_groups_req_ids: List[str]):
         for req_id in finished_seq_groups_req_ids:
-            if req_id in self.model_runner.mamba_cache:
-                del self.model_runner.mamba_cache[req_id]
+            if req_id in self.model_runner.request_id2mamba_cache:
+                del self.model_runner.request_id2mamba_cache[req_id]
+                logger.info(f"deleted { req_id } from mamba_cache")
 
 
     @torch.inference_mode()

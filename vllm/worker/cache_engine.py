@@ -89,7 +89,8 @@ class CacheEngine:
         head_size = model_config.get_head_size()
         num_heads = model_config.get_num_kv_heads(parallel_config)
         num_layers = model_config.get_num_layers(parallel_config)
-        is_mamba = model_config.hf_config.model_type == "jurassic3"
+        is_mamba = model_config.hf_config.model_type == "jamba"
+
         if is_mamba:
             attention_period = model_config.hf_config.attn_layer_period
             num_layers = num_layers // attention_period
