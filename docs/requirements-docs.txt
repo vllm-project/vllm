@@ -9,4 +9,4 @@ pydantic
 -f https://download.pytorch.org/whl/cpu
 torch
 transformers
-cpuinfo
+py-cpuinfo
