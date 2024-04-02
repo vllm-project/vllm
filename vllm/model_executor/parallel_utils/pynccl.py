@@ -45,14 +45,14 @@ else:
         # check if we have vllm-managed nccl
         if os.path.exists(os.path.join(sys.prefix, "vllm_nccl")):
             so_file = glob.glob(
-                os.path.join(sys.prefix, "vllm_nccl") + "/**/*.so")[0]
+                os.path.join(sys.prefix, "vllm_nccl") + "/**/libnccl.so.*")[0]
         else:
             so_file = "libnccl.so.2"
     elif torch.version.hip is not None:
         so_file = "librccl.so.1"
     else:
         raise ValueError("NCCL only supports CUDA and ROCm backends.")
-    logger.debug(f"Loading nccl from library {so_file}")
+    logger.info(f"Loading nccl from library {so_file}")
 
 try:
     nccl = ctypes.CDLL(so_file)
