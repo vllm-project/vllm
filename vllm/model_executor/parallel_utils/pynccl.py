@@ -22,8 +22,8 @@
 import ctypes
 import datetime
 import os
-import sys
 import site
+import sys
 
 # ===================== import region =====================
 import torch
