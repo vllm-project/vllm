@@ -97,7 +97,7 @@ RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,ta
 # ignore build dependencies installation because we are using pre-complied extensions
 RUN rm pyproject.toml
 RUN --mount=type=cache,target=/root/.cache/pip VLLM_USE_PRECOMPILED=1 pip install . --verbose
-RUN python3 -m vllm.tools.install_nccl --cuda 12 --nccl 2.18.3
+RUN python3 -m vllm.tools.install_nccl --cuda 12 --nccl 2.18
 #################### TEST IMAGE ####################
 
 
@@ -132,7 +132,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 COPY --from=build /workspace/vllm/*.so /workspace/vllm/
 COPY vllm vllm
-RUN python3 -m vllm.tools.install_nccl --cuda 12 --nccl 2.18.3
+RUN python3 -m vllm.tools.install_nccl --cuda 12 --nccl 2.18
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 
