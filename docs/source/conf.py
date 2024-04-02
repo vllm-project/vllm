@@ -75,6 +75,7 @@ html_theme_options = {
 
 # Mock out external dependencies here.
 autodoc_mock_imports = [
+    "cpuinfo",
     "torch",
     "transformers",
     "psutil",
