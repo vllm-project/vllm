@@ -347,7 +347,7 @@ class AsyncLLMEngine:
         engine = cls(
             engine_config.parallel_config.worker_use_ray,
             engine_args.engine_use_ray,
-            **engine_config.as_dict(),
+            **engine_config.to_dict(),
             executor_class=executor_class,
             log_requests=not engine_args.disable_log_requests,
             log_stats=not engine_args.disable_log_stats,
