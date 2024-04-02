@@ -22,6 +22,8 @@
 import ctypes
 import datetime
 import os
+import sys
+import site
 
 # ===================== import region =====================
 import torch
@@ -40,7 +42,13 @@ if so_file:
         f"Loading nccl from environment variable VLLM_NCCL_SO_PATH={so_file}")
 else:
     if torch.version.cuda is not None:
-        so_file = "libnccl.so.2"
+        # check if we have vllm-managed nccl
+        if os.path.exists(os.path.join(sys.prefix, "vllm_nccl")):
+            so_file = os.path.join(sys.prefix, "vllm_nccl", "libnccl.so.2")
+        elif os.path.exists(os.path.join(site.USER_BASE, "vllm_nccl")):
+            so_file = os.path.join(site.USER_BASE, "vllm_nccl", "libnccl.so.2")
+        else:
+            so_file = "libnccl.so.2"
     elif torch.version.hip is not None:
         so_file = "librccl.so.1"
     else:
