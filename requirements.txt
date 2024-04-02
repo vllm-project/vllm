@@ -17,4 +17,5 @@ pynvml == 11.5.0
 triton >= 2.1.0
 outlines == 0.0.34
 tiktoken == 0.6.0 # Required for DBRX tokenizer
+requests # Required for downloading nccl library
 git+https://github.com/vllm-project/vllm-nccl.git # manage NCCL version to be separate from PyTorch
