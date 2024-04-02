@@ -95,10 +95,9 @@ class EngineArgs:
             type=str,
             default=EngineArgs.tokenizer,
             help='name or path of the huggingface tokenizer to use')
-        parser.add_argument(
-            '--disable_tokenizer',
-            action='store_true',
-            help='Disable tokenization and detokenization')
+        parser.add_argument('--disable_tokenizer',
+                            action='store_true',
+                            help='Disable tokenization and detokenization')
         parser.add_argument(
             '--revision',
             type=str,
