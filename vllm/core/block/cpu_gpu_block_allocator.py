@@ -1,5 +1,7 @@
 from __future__ import annotations
+
 from typing import Dict, List, Optional
+
 from vllm.core.block.interfaces import (Block, BlockAllocator,
                                         DeviceAwareBlockAllocator)
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
@@ -189,7 +191,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         # CoW only supported on GPU
         device = Device.GPU
         return self._allocators[device].clear_copy_on_writes()
-    
+
     def increase_ref_count(self, device: Device, block_id: int) -> None:
         return self._allocators[device].refcounter().incr(block_id)
 
