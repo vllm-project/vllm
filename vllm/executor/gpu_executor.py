@@ -86,6 +86,7 @@ class GPUExecutor(ExecutorBase):
             num_swapped_kv_blocks=num_cpu_blocks,
         )
 
+
     def allocate_kv_cache(self, num_active_kv_blocks: int, num_swapped_kv_blocks) -> None:
         if self.cache_config.forced_num_gpu_blocks is not None:
             forced_num_active_kv_blocks = self.cache_config.forced_num_gpu_blocks
@@ -109,46 +110,6 @@ class GPUExecutor(ExecutorBase):
         # if enforce_eager is False.
         self.driver_worker.warm_up_model()
 
-    #def _init_cache(self) -> None:
-    #    """Profiles the memory usage and initializes the KV cache.
-
-    #    The engine first profiles the existing memory usage.
-    #    Then, it allocates the remaining memory for KV blocks.
-
-    #    .. tip::
-    #        You may limit the usage of GPU memory
-    #        by adjusting the `gpu_memory_utilization` parameter.
-    #    """
-    #    # Get the maximum number of blocks that can be allocated on GPU and CPU.
-    #    num_gpu_blocks, num_cpu_blocks = (
-    #        self.driver_worker.profile_num_available_blocks(
-    #            block_size=self.cache_config.block_size,
-    #            gpu_memory_utilization=self.cache_config.
-    #            gpu_memory_utilization,
-    #            cpu_swap_space=self.cache_config.swap_space_bytes,
-    #            cache_dtype=self.cache_config.cache_dtype,
-    #        ))
-
-    #    if self.cache_config.forced_num_gpu_blocks is not None:
-    #        forced_num_gpu_blocks = self.cache_config.forced_num_gpu_blocks
-    #        logger.info(f"Replacing profiled {num_gpu_blocks=} with "
-    #                    f"{forced_num_gpu_blocks=}")
-    #        num_gpu_blocks = forced_num_gpu_blocks
-
-    #    logger.info(f"# GPU blocks: {num_gpu_blocks}, "
-    #                f"# CPU blocks: {num_cpu_blocks}")
-
-    #    check_block_size_valid(num_gpu_blocks, self.cache_config.block_size,
-    #                           self.model_config.max_model_len)
-
-    #    self.cache_config.num_gpu_blocks = num_gpu_blocks
-    #    self.cache_config.num_cpu_blocks = num_cpu_blocks
-
-    #    # Initialize the cache.
-    #    self.driver_worker.init_cache_engine(cache_config=self.cache_config)
-    #    # Warm up the model. This includes capturing the model into CUDA graph
-    #    # if enforce_eager is False.
-    #    self.driver_worker.warm_up_model()
 
     def execute_model(self,
                       seq_group_metadata_list: List[SequenceGroupMetadata],
