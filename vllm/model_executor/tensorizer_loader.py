@@ -55,6 +55,7 @@ class TensorizerArgs:
                           str, bytes, os.PathLike, int]
     verify_hash: bool = False
     encryption_keyfile: Optional[str] = None
+    num_readers: Optional[int] = None
     s3_access_key_id: Optional[str] = None
     s3_secret_access_key: Optional[str] = None
     s3_endpoint: Optional[str] = None
@@ -100,6 +101,7 @@ class TensorizerArgs:
         self.deserializer_params = {
             "verify_hash": self.verify_hash,
             "encryption": self.encryption_keyfile,
+            "num_readers": self.num_readers
         }
         if self.encryption_keyfile:
             with stream_io.open_stream(
@@ -138,6 +140,12 @@ class TensorizerArgs:
             default=None,
             help="The file path to a binary file containing a binary key to "
             "use for decryption. Can be a file path or S3 network URI.")
+        group.add_argument(
+            "--num-readers",
+            default=1,
+            type=int,
+            help="Controls how many threads are allowed to read concurrently "
+                 "from the source file.")
         group.add_argument(
             "--s3-access-key-id",
             default=None,
