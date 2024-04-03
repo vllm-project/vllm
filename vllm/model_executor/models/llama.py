@@ -215,11 +215,11 @@ class LlamaDecoderLayer(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         
-        if hidden_states.shape[1]>4000 or cache_fuse_metadata["org_seq_len"]>4000:
-            torch.cuda.synchronize()
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()
+        #if hidden_states.shape[1]>4000 or cache_fuse_metadata["org_seq_len"]>4000:
+        #    torch.cuda.synchronize()
+        #    start = torch.cuda.Event(enable_timing=True)
+        #    end = torch.cuda.Event(enable_timing=True)
+        #    start.record()
         
         if residual is None:
             residual = hidden_states
@@ -238,26 +238,26 @@ class LlamaDecoderLayer(nn.Module):
         
         if status==1:
             residual = residual[:, cache_fuse_metadata["imp_token_indices"]]
-        if hidden_states.shape[1]>4000 or cache_fuse_metadata["org_seq_len"]>4000:
-            end.record()
-            torch.cuda.synchronize()
-            temp_time = start.elapsed_time(end)
-            print(f"Attention time:{temp_time}")
+        #if hidden_states.shape[1]>4000 or cache_fuse_metadata["org_seq_len"]>4000:
+        #    end.record()
+        #    torch.cuda.synchronize()
+        #    temp_time = start.elapsed_time(end)
+        #    print(f"Attention time:{temp_time}")
             
-        if hidden_states.shape[1]>4000 or cache_fuse_metadata["org_seq_len"]>4000:
-            torch.cuda.synchronize()
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()
+        #if hidden_states.shape[1]>4000 or cache_fuse_metadata["org_seq_len"]>4000:
+        #    torch.cuda.synchronize()
+        #    start = torch.cuda.Event(enable_timing=True)
+        #    end = torch.cuda.Event(enable_timing=True)
+        #    start.record()
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
-        if hidden_states.shape[1]>4000 or cache_fuse_metadata["org_seq_len"]>4000:
-            end.record()
-            torch.cuda.synchronize()
-            temp_time = start.elapsed_time(end)
-            print(f"MLP time:{temp_time}")
+        #if hidden_states.shape[1]>4000 or cache_fuse_metadata["org_seq_len"]>4000:
+        #    end.record()
+        #    torch.cuda.synchronize()
+        #    temp_time = start.elapsed_time(end)
+        #    print(f"MLP time:{temp_time}")
         return hidden_states, residual
 
 
@@ -449,6 +449,7 @@ class LlamaForCausalLM(nn.Module):
                                    input_metadata)
         return hidden_states
 
+    #HACK(Jiayi): sampler hacked
     def sample(
         self,
         hidden_states: torch.Tensor,

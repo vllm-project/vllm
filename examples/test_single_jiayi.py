@@ -46,15 +46,20 @@ def _pre_make_partial_bias(device,
     #attn_mask_padded = LowerTriangularMaskWithTensorBias(attn_mask_padded)
     return attn_mask_padded
 
+x = torch.rand((2000)).cuda()
+xx = torch.topk(x, k=300).indices
+x = torch.rand((1000)).cuda()
+xx = torch.topk(x, k=400).indices
+
 device = llm.llm_engine.model_executor.driver_worker.model_runner.device
 pre_mask = _pre_make_partial_bias(device=device)
 
 #FIXME(Jiayi): Please align `recomp_ratio` and `recomp_ratios` automatically
 llm.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata = {
     "check_layers":[1],
-    "check": True,
-    "recomp_ratios":[1.0],
-    "recomp_ratio":1.0,
+    "check": False,
+    "recomp_ratios":[0.15],
+    "recomp_ratio":0.15,
     "load_indices":[],
     "recomp_indices":[],
     "original_slot_mapping":None,
@@ -73,6 +78,10 @@ start = torch.cuda.Event(enable_timing=True)
 end = torch.cuda.Event(enable_timing=True)
 start.record()
 
+outputs = llm.generate(prompts, sampling_params)
+outputs = llm.generate(prompts, sampling_params)
+outputs = llm.generate(prompts, sampling_params)
+outputs = llm.generate(prompts, sampling_params)
 outputs = llm.generate(prompts, sampling_params)
 
 end.record()

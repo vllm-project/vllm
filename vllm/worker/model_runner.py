@@ -595,8 +595,13 @@ class ModelRunner:
             kv_caches=kv_caches,
             input_metadata=input_metadata,
         )
-
+        import pdb
+        pdb.set_trace()
         # Sample the next token.
+        #HACK(Jiayi): This aligns sampling indices
+        if self.model.model.cache_fuse_metadata["check"]:
+            sampling_metadata.selected_token_indices[0]=len(self.model.model.cache_fuse_metadata["imp_token_indices"])-1
+            sampling_metadata.prompt_lens[0] = len(self.model.model.cache_fuse_metadata["imp_token_indices"])
         output = self.model.sample(
             hidden_states=hidden_states,
             sampling_metadata=sampling_metadata,
