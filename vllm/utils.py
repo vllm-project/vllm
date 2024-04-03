@@ -216,7 +216,7 @@ def get_distributed_init_method(ip: str, port: int) -> str:
         (os.environ.get("MASTER_PORT") is not None) and \
             (os.environ.get("WORLD_SIZE") is not None) and \
                 (os.environ.get("RANK") is not None):
-                return "env://"
+        return "env://"
     else:
         return f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}"
 
