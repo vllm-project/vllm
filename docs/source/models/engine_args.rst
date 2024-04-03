@@ -120,7 +120,7 @@ Below, you can find an explanation of every engine argument for vLLM:
     Method used to quantize the weights.
 
 Async Engine Arguments
--------------------------
+----------------------
 Below are the asynchronous engine related arguments:
 
 .. option:: --engine-use-ray
@@ -129,8 +129,8 @@ Below are the asynchronous engine related arguments:
 
 .. option:: --disable-log-requests
 
-    Disable logging requests
-
+    Disable logging requests.
+    
 .. option:: --max-log-len
 
     Max number of prompt characters or prompt ID numbers being printed in log. Defaults to unlimited.
