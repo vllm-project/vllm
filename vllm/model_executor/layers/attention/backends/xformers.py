@@ -81,6 +81,8 @@ class XFormersBackend:
         # Do checking here
         if status in [1]:
             # Get cached KV
+            # In this step, Jiayi is assuming that we have the loaded key and value tensors in value_old and key_old.
+            # He uses empty_like to put in random numbers right now to substitute. 
             value_old = torch.empty_like(value)
             key_old = torch.empty_like(key)
             #FIXME(Jiayi): Optimize this kernel to only load value_old or even lesser stuff
