@@ -64,6 +64,28 @@ class BlockTable:
                 sequence of token IDs.
         """
         return cdiv(len(token_ids), block_size)
+    
+    def append_by_blocks(self,
+                 token_ids: List[int],
+                 device: Device = Device.GPU) -> Block:
+        """Allocates memory blocks for storing the given sequence of token IDs.
+
+        This method allocates the required number of blocks to store the given
+        sequence of token IDs.
+
+        Args:
+            token_ids (List[int]): The sequence of token IDs to be stored.
+            device (Device, optional): The device on which the blocks should be
+                allocated. Defaults to Device.GPU.
+        """
+        block = self._allocate_blocks_for_token_ids(prev_block=None,
+                                                        token_ids=token_ids,
+                                                        device=device)
+        self._blocks.append(block)
+        self._num_full_slots += len(token_ids)
+        return block
+        
+
 
     def allocate(self,
                  token_ids: List[int],
@@ -78,8 +100,8 @@ class BlockTable:
             device (Device, optional): The device on which the blocks should be
                 allocated. Defaults to Device.GPU.
         """
-        assert not self._is_allocated
         assert token_ids
+        assert not self._is_allocated
         self._blocks = self._allocate_blocks_for_token_ids(prev_block=None,
                                                            token_ids=token_ids,
                                                            device=device)
@@ -248,7 +270,11 @@ class BlockTable:
     @property
     def _is_allocated(self) -> bool:
         return self._blocks is not None
-
+    
+    @property
+    def _num_touched_blocks(self) -> int:
+        return len(self._blocks)
+    
     @property
     def _num_empty_slots(self) -> int:
         assert self._is_allocated

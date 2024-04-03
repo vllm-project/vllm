@@ -1,3 +1,4 @@
+from __future__ import annotations
 from typing import Dict, Iterable, List, Optional, Set
 
 from vllm.core.block.common import (CopyOnWriteTracker, RefCounter,
