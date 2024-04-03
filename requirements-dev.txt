@@ -14,7 +14,7 @@ types-setuptools
 
 # testing
 pytest
-git+https://github.com/coreweave/tensorizer@v2.8.1-no-init-cuda ## This can be removed for tensorizer > 2.8.1
+tensorizer==2.9.0a0
 pytest-forked
 pytest-asyncio
 pytest-rerunfailures
