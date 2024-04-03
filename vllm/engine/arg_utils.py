@@ -1,10 +1,11 @@
 import argparse
 import dataclasses
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
-from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, TokenizerPoolConfig,
+from vllm.config import (CacheConfig, DeviceConfig, EngineConfig, LoRAConfig,
+                         ModelConfig, ParallelConfig, SchedulerConfig,
+                         SpeculativeConfig, TokenizerPoolConfig,
                          VisionLanguageConfig)
 from vllm.utils import str_to_int_tuple
 
@@ -61,8 +62,13 @@ class EngineArgs:
     image_token_id: Optional[int] = None
     image_input_shape: Optional[str] = None
     image_feature_size: Optional[int] = None
+
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: bool = False
+
+    # Speculative decoding configuration.
+    speculative_model: Optional[str] = None
+    num_speculative_tokens: Optional[int] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -371,6 +377,20 @@ class EngineArgs:
             default=False,
             help='If True, the prefill requests can be chunked based on the '
             'max_num_batched_tokens')
+
+        parser.add_argument(
+            '--speculative-model',
+            type=str,
+            default=None,
+            help=
+            'The name of the draft model to be used in speculative decoding.')
+
+        parser.add_argument(
+            '--num-speculative-tokens',
+            type=int,
+            default=None,
+            help='The number of speculative tokens to sample from '
+            'the draft model in speculative decoding')
         return parser
 
     @classmethod
@@ -381,11 +401,7 @@ class EngineArgs:
         engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
         return engine_args
 
-    def create_engine_configs(
-        self,
-    ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig,
-               DeviceConfig, Optional[LoRAConfig],
-               Optional[VisionLanguageConfig]]:
+    def create_engine_config(self, ) -> EngineConfig:
         device_config = DeviceConfig(self.device)
         model_config = ModelConfig(
             self.model, self.tokenizer, self.tokenizer_mode,
@@ -409,12 +425,23 @@ class EngineArgs:
                 self.tokenizer_pool_type,
                 self.tokenizer_pool_extra_config,
             ), self.ray_workers_use_nsight)
+
+        speculative_config = SpeculativeConfig.maybe_create_spec_config(
+            target_model_config=model_config,
+            target_parallel_config=parallel_config,
+            target_dtype=self.dtype,
+            speculative_model=self.speculative_model,
+            num_speculative_tokens=self.num_speculative_tokens,
+        )
+
         scheduler_config = SchedulerConfig(
             self.max_num_batched_tokens,
             self.max_num_seqs,
             model_config.max_model_len,
             self.use_v2_block_manager,
-            num_lookahead_slots=self.num_lookahead_slots,
+            num_lookahead_slots=(self.num_lookahead_slots
+                                 if speculative_config is None else
+                                 speculative_config.num_lookahead_slots),
             delay_factor=self.scheduler_delay_factor,
             enable_chunked_prefill=self.enable_chunked_prefill,
         )
@@ -442,8 +469,14 @@ class EngineArgs:
         else:
             vision_language_config = None
 
-        return (model_config, cache_config, parallel_config, scheduler_config,
-                device_config, lora_config, vision_language_config)
+        return EngineConfig(model_config=model_config,
+                            cache_config=cache_config,
+                            parallel_config=parallel_config,
+                            scheduler_config=scheduler_config,
+                            device_config=device_config,
+                            lora_config=lora_config,
+                            vision_language_config=vision_language_config,
+                            speculative_config=speculative_config)
 
 
 @dataclass
