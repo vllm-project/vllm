@@ -2,9 +2,8 @@ import asyncio
 import json
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import Dict, List, Tuple, Optional, Union
-from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from typing import Dict, List, Optional, Tuple, Union
+
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest, ErrorResponse,
