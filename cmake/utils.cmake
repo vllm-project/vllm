@@ -100,6 +100,11 @@ function (get_torch_gpu_compiler_flags OUT_GPU_FLAGS GPU_LANG)
 
     if (CUDA_VERSION VERSION_GREATER_EQUAL 11.8)
       list(APPEND GPU_FLAGS "-DENABLE_FP8_E5M2")
+      list(REMOVE_ITEM GPU_FLAGS
+        "-D__CUDA_NO_HALF_OPERATORS__"
+        "-D__CUDA_NO_HALF_CONVERSIONS__"
+        "-D__CUDA_NO_BFLOAT16_CONVERSIONS__"
+        "-D__CUDA_NO_HALF2_OPERATORS__")
     endif()
 
   elseif(${GPU_LANG} STREQUAL "HIP")
@@ -240,9 +245,12 @@ macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
       endif()
 
       if (_SM)
-        set(_VIRT "")
+        # -real suffix let CMake to only generate elf code for the kernels.
+        # we want this, otherwise the added ptx (default) will increase binary size.
+        set(_VIRT "-real")
         set(_CODE_ARCH ${_SM})
       else()
+        # -virtual suffix let CMake to generate ptx code for the kernels.
         set(_VIRT "-virtual")
         set(_CODE_ARCH ${_CODE})
       endif()
@@ -281,7 +289,7 @@ endmacro()
 #                              not provided.
 # COMPILE_FLAGS <flags>      - Extra compiler flags passed to NVCC/hip.
 # INCLUDE_DIRECTORIES <dirs> - Extra include directories.
-# LINK_LIBRARIES <libraries> - Extra link libraries.
+# LIBRARIES <libraries>      - Extra link libraries.
 # WITH_SOABI                 - Generate library with python SOABI suffix name.
 #
 # Note: optimization level/debug info is set via cmake build type.
@@ -327,8 +335,17 @@ function (define_gpu_extension_target GPU_MOD_NAME)
   target_include_directories(${GPU_MOD_NAME} PRIVATE csrc
     ${GPU_INCLUDE_DIRECTORIES})
 
-  target_link_libraries(${GPU_MOD_NAME} PRIVATE ${TORCH_LIBRARIES}
+  target_link_libraries(${GPU_MOD_NAME} PRIVATE torch ${torch_python_LIBRARY}
     ${GPU_LIBRARIES})
+
+  # Don't use `TORCH_LIBRARIES` for CUDA since it pulls in a bunch of
+  # dependencies that are not necessary and may not be installed.
+  if (GPU_LANGUAGE STREQUAL "CUDA")
+    target_link_libraries(${GPU_MOD_NAME} PRIVATE ${CUDA_CUDA_LIB}
+      ${CUDA_LIBRARIES})
+  else()
+    target_link_libraries(${GPU_MOD_NAME} PRIVATE ${TORCH_LIBRARIES})
+  endif()
 
   install(TARGETS ${GPU_MOD_NAME} LIBRARY DESTINATION ${GPU_DESTINATION})
 endfunction()

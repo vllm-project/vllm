@@ -53,8 +53,8 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
     ray_workers_use_nsight: bool = False
-
     forced_num_gpu_blocks: Optional[int] = None
+    num_lookahead_slots: int = 0
 
     # Related to Vision-language models such as llava
     image_input_type: Optional[str] = None
@@ -62,6 +62,7 @@ class EngineArgs:
     image_input_shape: Optional[str] = None
     image_feature_size: Optional[int] = None
     scheduler_delay_factor: float = 0.0
+    enable_chunked_prefill: bool = False
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -201,6 +202,14 @@ class EngineArgs:
         parser.add_argument('--use-v2-block-manager',
                             action='store_true',
                             help='Use BlockSpaceMangerV2')
+        parser.add_argument(
+            '--num-lookahead-slots',
+            type=int,
+            default=EngineArgs.num_lookahead_slots,
+            help='Experimental scheduling config necessary for '
+            'speculative decoding. This will be replaced by '
+            'speculative config in the future; it is present '
+            'to enable correctness tests until then.')
 
         parser.add_argument('--seed',
                             type=int,
@@ -323,7 +332,7 @@ class EngineArgs:
         parser.add_argument("--device",
                             type=str,
                             default=EngineArgs.device,
-                            choices=["auto", "cuda", "neuron"],
+                            choices=["auto", "cuda", "neuron", "cpu"],
                             help='Device type for vLLM execution.')
         # Related to Vision-language models such as llava
         parser.add_argument(
@@ -356,6 +365,12 @@ class EngineArgs:
             default=EngineArgs.scheduler_delay_factor,
             help='Apply a delay (of delay factor multiplied by previous'
             'prompt latency) before scheduling next prompt.')
+        parser.add_argument(
+            '--enable-chunked-prefill',
+            type=bool,
+            default=False,
+            help='If True, the prefill requests can be chunked based on the '
+            'max_num_batched_tokens')
         return parser
 
     @classmethod
@@ -394,11 +409,15 @@ class EngineArgs:
                 self.tokenizer_pool_type,
                 self.tokenizer_pool_extra_config,
             ), self.ray_workers_use_nsight)
-        scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
-                                           self.max_num_seqs,
-                                           model_config.max_model_len,
-                                           self.use_v2_block_manager,
-                                           self.scheduler_delay_factor)
+        scheduler_config = SchedulerConfig(
+            self.max_num_batched_tokens,
+            self.max_num_seqs,
+            model_config.max_model_len,
+            self.use_v2_block_manager,
+            num_lookahead_slots=self.num_lookahead_slots,
+            delay_factor=self.scheduler_delay_factor,
+            enable_chunked_prefill=self.enable_chunked_prefill,
+        )
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,

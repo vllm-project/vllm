@@ -98,7 +98,8 @@ class Worker:
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
         init_distributed_environment(self.parallel_config, self.rank,
-                                     self.distributed_init_method)
+                                     self.distributed_init_method,
+                                     self.local_rank)
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
@@ -251,6 +252,7 @@ def init_distributed_environment(
     parallel_config: ParallelConfig,
     rank: int,
     distributed_init_method: Optional[str] = None,
+    local_rank: int = -1,
 ) -> None:
     """Initialize the distributed environment."""
     if torch.distributed.is_initialized():
@@ -282,9 +284,9 @@ def init_distributed_environment(
     elif parallel_config.world_size > 1:
         # NOTE(woosuk): We don't initialize pynccl process group when world size
         # is 1.
-        # TODO(woosuk): Support multi-node connection.
         pynccl_utils.init_process_group(
             world_size=parallel_config.world_size,
+            local_rank=local_rank,
             rank=rank,
             init_method=distributed_init_method,
         )
