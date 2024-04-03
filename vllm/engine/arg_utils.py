@@ -396,9 +396,9 @@ class EngineArgs:
                Optional[VisionLanguageConfig]]:
         device_config = DeviceConfig(self.device)
         model_config = ModelConfig(
-            self.model, self.model_class, self.tokenizer, self.tokenizer_mode,
+            self.model, self.tokenizer, self.tokenizer_mode,
             self.trust_remote_code, self.download_dir, self.load_format,
-            self.dtype, self.seed, self.revision, self.code_revision,
+            self.dtype, self.seed, self.model_class, self.revision, self.code_revision,
             self.tokenizer_revision, self.max_model_len, self.quantization,
             self.enforce_eager, self.max_context_len_to_capture,
             self.max_logprobs)
