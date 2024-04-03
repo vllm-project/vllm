@@ -546,7 +546,9 @@ class AsyncEngineArgs(EngineArgs):
         parser.add_argument('--max-log-len',
                             type=int,
                             default=None,
-                            help='max number of prompt characters or prompt '
-                            'ID numbers being printed in log. '
+                            help='maximum character length to log for either '
+                            'the input prompt or list of prompt token ids '
+                            'for each request. Only applies if '
+                            '--disable-log-requests is not set.'
                             'Default: unlimited.')
         return parser
