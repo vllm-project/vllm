@@ -698,8 +698,8 @@ class AsyncLLMEngine:
             await self.engine.check_health_async()
         logger.debug(f"Health check took {time.perf_counter()-t}s")
 
-    def _shorten_for_logging(self, prompt,
-                             prompt_token_ids) -> Tuple[str, str]:
+    def _shorten_for_logging(self, prompt: str,
+                             prompt_token_ids: List[int]) -> Tuple[str, str]:
         """Truncates the input prompt text and token ids for logging.
         The string representations of both are truncated to a maximum length
         of self.max_log_len, and then ellipses (...) are added to indicate
