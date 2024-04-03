@@ -13,7 +13,7 @@ from vllm.utils import str_to_int_tuple
 class EngineArgs:
     """Arguments for vLLM engine."""
     model: str
-    model_class: Optional[str]
+    model_class: Optional[str] = None
     tokenizer: Optional[str] = None
     tokenizer_mode: str = 'auto'
     trust_remote_code: bool = False
