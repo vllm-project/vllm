@@ -13,6 +13,10 @@ build-backend = "setuptools.build_meta"
 [tool.ruff]
 # Allow lines to be as long as 80.
 line-length = 80
+exclude = [
+    # External file, leaving license intact
+    "examples/fp8/quantizer/quantize.py"
+]
 
 [tool.ruff.lint]
 select = [
