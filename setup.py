@@ -5,7 +5,7 @@ import re
 import subprocess
 import sys
 from shutil import which
-from typing import List, Dict
+from typing import Dict, List
 
 import torch
 from packaging.version import Version, parse
