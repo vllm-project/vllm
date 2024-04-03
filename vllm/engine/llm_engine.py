@@ -5,7 +5,8 @@ from transformers import PreTrainedTokenizer
 
 import vllm
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
+                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
+                         VisionLanguageConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics import StatLogger, Stats
@@ -21,6 +22,8 @@ from vllm.sequence import (MultiModalData, SamplerOutput, Sequence,
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
+from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
+                                  usage_message)
 from vllm.utils import Counter
 
 logger = init_logger(__name__)
@@ -50,9 +53,15 @@ class LLMEngine:
         parallel_config: The configuration related to distributed execution.
         scheduler_config: The configuration related to the request scheduler.
         device_config: The configuration related to the device.
+        lora_config (Optional): The configuration related to serving multi-LoRA.
+        vision_language_config (Optional): The configuration related to vision
+            language models.
+        speculative_config (Optional): The configuration related to speculative
+            decoding.
         executor_class: The model executor class for managing distributed
             execution.
         log_stats: Whether to log statistics.
+        usage_context: Specified entry point, used for usage info collection
     """
 
     def __init__(
@@ -63,13 +72,16 @@ class LLMEngine:
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
-        vision_language_config: Optional["VisionLanguageConfig"],
+        vision_language_config: Optional[VisionLanguageConfig],
+        speculative_config: Optional[SpeculativeConfig],
         executor_class: Type[ExecutorBase],
         log_stats: bool,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
     ) -> None:
         logger.info(
             f"Initializing an LLM engine (v{vllm.__version__}) with config: "
             f"model={model_config.model!r}, "
+            f"speculative_config={speculative_config!r}, "
             f"tokenizer={model_config.tokenizer!r}, "
             f"tokenizer_mode={model_config.tokenizer_mode}, "
             f"revision={model_config.revision}, "
@@ -96,17 +108,58 @@ class LLMEngine:
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
+        self.speculative_config = speculative_config
         self.log_stats = log_stats
-        self._verify_args()
 
         self._init_tokenizer()
         self.detokenizer = Detokenizer(self.tokenizer)
         self.seq_counter = Counter()
 
-        self.model_executor = executor_class(model_config, cache_config,
-                                             parallel_config, scheduler_config,
-                                             device_config, lora_config,
-                                             vision_language_config)
+        self.model_executor = executor_class(
+            model_config=model_config,
+            cache_config=cache_config,
+            parallel_config=parallel_config,
+            scheduler_config=scheduler_config,
+            device_config=device_config,
+            lora_config=lora_config,
+            vision_language_config=vision_language_config,
+            speculative_config=speculative_config,
+        )
+
+        # If usage stat is enabled, collect relevant info.
+        if is_usage_stats_enabled():
+            from vllm.model_executor.model_loader import (
+                get_architecture_class_name)
+            usage_message.report_usage(
+                get_architecture_class_name(model_config),
+                usage_context,
+                extra_kvs={
+                    # Common configuration
+                    "dtype":
+                    str(model_config.dtype),
+                    "tensor_parallel_size":
+                    parallel_config.tensor_parallel_size,
+                    "block_size":
+                    cache_config.block_size,
+                    "gpu_memory_utilization":
+                    cache_config.gpu_memory_utilization,
+
+                    # Quantization
+                    "quantization":
+                    model_config.quantization,
+                    "kv_cache_dtype":
+                    cache_config.cache_dtype,
+
+                    # Feature flags
+                    "enable_lora":
+                    bool(lora_config),
+                    "enable_prefix_caching":
+                    cache_config.enable_prefix_caching,
+                    "enforce_eager":
+                    model_config.enforce_eager,
+                    "disable_custom_all_reduce":
+                    parallel_config.disable_custom_all_reduce,
+                })
 
         # Ping the tokenizer to ensure liveness if it runs in a
         # different process.
@@ -125,31 +178,39 @@ class LLMEngine:
             self.stat_logger.info("cache_config", self.cache_config)
 
     @classmethod
-    def from_engine_args(cls, engine_args: EngineArgs) -> "LLMEngine":
+    def from_engine_args(
+        cls,
+        engine_args: EngineArgs,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+    ) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.
-        engine_configs = engine_args.create_engine_configs()
-        parallel_config = engine_configs[2]
-        device_config = engine_configs[4]
+        engine_config = engine_args.create_engine_config()
 
         # Initialize the cluster and specify the executor class.
-        if device_config.device_type == "neuron":
+        if engine_config.device_config.device_type == "neuron":
             from vllm.executor.neuron_executor import NeuronExecutor
             executor_class = NeuronExecutor
-        elif parallel_config.worker_use_ray:
-            initialize_ray_cluster(parallel_config)
+        elif engine_config.device_config.device_type == "cpu":
+            from vllm.executor.cpu_executor import CPUExecutor
+            executor_class = CPUExecutor
+        elif engine_config.parallel_config.worker_use_ray:
+            initialize_ray_cluster(engine_config.parallel_config)
             from vllm.executor.ray_gpu_executor import RayGPUExecutor
             executor_class = RayGPUExecutor
         else:
-            assert parallel_config.world_size == 1, (
+            assert engine_config.parallel_config.world_size == 1, (
                 "Ray is required if parallel_config.world_size > 1.")
             from vllm.executor.gpu_executor import GPUExecutor
             executor_class = GPUExecutor
 
         # Create the LLM engine.
-        engine = cls(*engine_configs,
-                     executor_class=executor_class,
-                     log_stats=not engine_args.disable_log_stats)
+        engine = cls(
+            **engine_config.to_dict(),
+            executor_class=executor_class,
+            log_stats=not engine_args.disable_log_stats,
+            usage_context=usage_context,
+        )
         return engine
 
     def __reduce__(self):
@@ -176,14 +237,6 @@ class LLMEngine:
         init_kwargs.update(tokenizer_init_kwargs)
         self.tokenizer: BaseTokenizerGroup = get_tokenizer_group(
             self.parallel_config.tokenizer_pool_config, **init_kwargs)
-
-        if len(self.get_tokenizer()) != self.model_config.get_vocab_size():
-            logger.warning(
-                f"The tokenizer's vocabulary size {len(self.get_tokenizer())}"
-                f" does not match the model's vocabulary size "
-                f"{self.model_config.get_vocab_size()}. This might "
-                f"cause an error in decoding. Please change config.json "
-                "to match the tokenizer's vocabulary size.")
 
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
@@ -553,13 +606,10 @@ class LLMEngine:
         # Update the scheduled sequence groups with the model outputs.
         scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
 
-        # If prefix caching is enabled, mark all blocks in the sequence groups
-        # as completed so that future requests don't attempt to recompute them
-        if self.cache_config.enable_prefix_caching:
-            for seq_group in scheduled_seq_groups:
-                self.scheduler.mark_blocks_as_computed(seq_group)
-
-        for seq_group, outputs in zip(scheduled_seq_groups, output):
+        for scheduled_seq_group, outputs in zip(scheduled_seq_groups, output):
+            seq_group = scheduled_seq_group.seq_group
+            token_chunk_size = scheduled_seq_group.token_chunk_size
+            seq_group.update_num_computed_tokens(token_chunk_size)
             self._process_sequence_group_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.
@@ -567,7 +617,8 @@ class LLMEngine:
 
         # Create the outputs.
         request_outputs: List[RequestOutput] = []
-        for seq_group in scheduled_seq_groups:
+        for scheduled_seq_group in scheduled_seq_groups:
+            seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
@@ -682,17 +733,20 @@ class LLMEngine:
             # Number of Tokens.
             if prompt_run:
                 num_prompt_tokens = sum(
-                    len(seq_group.prompt_token_ids)
-                    for seq_group in scheduler_outputs.scheduled_seq_groups)
+                    len(scheduled_seq_group.seq_group.prompt_token_ids)
+                    for scheduled_seq_group in
+                    scheduler_outputs.scheduled_seq_groups)
                 num_generation_tokens = sum(
-                    seq_group.num_seqs()
-                    for seq_group in scheduler_outputs.scheduled_seq_groups)
+                    scheduled_seq_group.seq_group.num_seqs()
+                    for scheduled_seq_group in
+                    scheduler_outputs.scheduled_seq_groups)
             else:
                 num_generation_tokens = scheduler_outputs.num_batched_tokens
 
             # Latency Timings.
             time_last_iters = []
-            for seq_group in scheduler_outputs.scheduled_seq_groups:
+            for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
+                seq_group = scheduled_seq_group.seq_group
                 # Time since last token.
                 # (n.b. updates seq_group.metrics.last_token_time)
                 time_last_iters.append(seq_group.get_last_latency(now))

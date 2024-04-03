@@ -63,6 +63,7 @@ Documentation
    getting_started/installation
    getting_started/amd-installation
    getting_started/neuron-installation
+   getting_started/cpu-installation
    getting_started/quickstart
 
 .. toctree::
@@ -73,6 +74,7 @@ Documentation
    serving/deploying_with_docker
    serving/distributed_serving
    serving/metrics
+   serving/usage_stats
    serving/integrations
 
 .. toctree::
