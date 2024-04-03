@@ -8,6 +8,7 @@ from collections import defaultdict
 from typing import Any, Iterator, List, Optional, Tuple
 
 import filelock
+import huggingface_hub.constants
 import numpy as np
 import torch
 from huggingface_hub import HfFileSystem, snapshot_download
@@ -27,6 +28,13 @@ logger = init_logger(__name__)
 # system reboots, so users will not complain about annoying lock files
 temp_dir = os.environ.get('TMPDIR') or os.environ.get(
     'TEMP') or os.environ.get('TMP') or "/tmp/"
+
+try:
+    # enable hf hub transfer if available
+    import hf_transfer  # type: ignore # noqa
+    huggingface_hub.constants.HF_HUB_ENABLE_HF_TRANSFER = True
+except ImportError:
+    pass
 
 
 class Disabledtqdm(tqdm):
