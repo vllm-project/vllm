@@ -30,6 +30,8 @@ pip install -e .  # This may take several minutes.
 ```bash
 pip install -r requirements-dev.txt
 
+# linting and formatting
+bash format.sh
 # Static type checking
 mypy
 # Unit tests

@@ -73,6 +73,7 @@ class PagedAttention:
         value_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
+        kv_scale: float,
     ) -> None:
         cache_ops.reshape_and_cache(
             key,
@@ -81,6 +82,7 @@ class PagedAttention:
             value_cache,
             slot_mapping.flatten(),
             kv_cache_dtype,
+            kv_scale,
         )
 
     @staticmethod
@@ -95,6 +97,7 @@ class PagedAttention:
         num_kv_heads: int,
         scale: float,
         alibi_slopes: Optional[torch.Tensor],
+        kv_scale,
     ) -> torch.Tensor:
         output = torch.empty_like(query)
 
@@ -126,6 +129,7 @@ class PagedAttention:
                 max_context_len,
                 alibi_slopes,
                 kv_cache_dtype,
+                kv_scale,
             )
         else:
             # Run PagedAttention V2.
@@ -157,6 +161,7 @@ class PagedAttention:
                 max_context_len,
                 alibi_slopes,
                 kv_cache_dtype,
+                kv_scale,
             )
         return output
 

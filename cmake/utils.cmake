@@ -117,6 +117,7 @@ function (get_torch_gpu_compiler_flags OUT_GPU_FLAGS GPU_LANG)
 
     list(APPEND GPU_FLAGS
       "-DUSE_ROCM"
+      "-DENABLE_FP8_E4M3"
       "-U__HIP_NO_HALF_CONVERSIONS__"
       "-U__HIP_NO_HALF_OPERATORS__"
       "-fno-gpu-rdc")
