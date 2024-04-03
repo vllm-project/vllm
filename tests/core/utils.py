@@ -1,14 +1,19 @@
 import time
-from typing import Tuple
+from typing import Optional, Tuple
 
 from vllm import SamplingParams
+from vllm.lora.request import LoRARequest
 from vllm.sequence import Logprob, Sequence, SequenceGroup
 
 
 def create_dummy_prompt(
-        request_id: str,
-        prompt_length: int,
-        block_size: int = None) -> Tuple[Sequence, SequenceGroup]:
+    request_id: str,
+    prompt_length: int,
+    block_size: Optional[int] = None,
+    lora_request: Optional[LoRARequest] = None,
+    use_beam_search: bool = False,
+    best_of: int = 1,
+) -> Tuple[Sequence, SequenceGroup]:
     if not block_size:
         block_size = prompt_length
 
@@ -17,8 +22,10 @@ def create_dummy_prompt(
     prompt_tokens = list(range(prompt_length))
     prompt_str = " ".join([str(t) for t in prompt_tokens])
     prompt = Sequence(int(request_id), prompt_str, prompt_tokens, block_size)
-    seq_group = SequenceGroup(request_id, [prompt], SamplingParams(),
-                              time.time(), None)
+    seq_group = SequenceGroup(
+        request_id, [prompt],
+        SamplingParams(use_beam_search=use_beam_search, best_of=best_of),
+        time.time(), lora_request)
 
     return prompt, seq_group
 
