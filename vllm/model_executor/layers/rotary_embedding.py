@@ -247,11 +247,12 @@ def _yarn_find_correction_dim(num_rotations: int,
 
 
 # Find dim range bounds based on rotations
-def _yarn_find_correction_range(low_rot: int,
-                                high_rot: int,
-                                dim: int,
-                                base: float = 10000,
-                                max_position_embeddings: int = 2048) -> Tuple[int,int]:
+def _yarn_find_correction_range(
+        low_rot: int,
+        high_rot: int,
+        dim: int,
+        base: float = 10000,
+        max_position_embeddings: int = 2048) -> Tuple[int, int]:
     low = math.floor(
         _yarn_find_correction_dim(low_rot, dim, base, max_position_embeddings))
     high = math.ceil(
