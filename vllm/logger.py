@@ -4,7 +4,6 @@
 import logging
 import os
 import sys
-from typing import Optional
 
 VLLM_CONFIGURE_LOGGING = int(os.getenv("VLLM_CONFIGURE_LOGGING", "1"))
 

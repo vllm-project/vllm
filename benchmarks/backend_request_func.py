@@ -130,7 +130,9 @@ async def async_request_trt_llm(
                         if not chunk_bytes:
                             continue
 
-                        chunk = remove_prefix(chunk_bytes.decode("utf-8"), "data:")
+                        chunk = remove_prefix(
+                            chunk_bytes.decode("utf-8"), "data:"
+                        )
 
                         data = json.loads(chunk)
                         timestamp = time.perf_counter()
