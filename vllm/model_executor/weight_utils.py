@@ -29,12 +29,18 @@ logger = init_logger(__name__)
 temp_dir = os.environ.get('TMPDIR') or os.environ.get(
     'TEMP') or os.environ.get('TMP') or "/tmp/"
 
-try:
-    # enable hf hub transfer if available
-    import hf_transfer  # type: ignore # noqa
-    huggingface_hub.constants.HF_HUB_ENABLE_HF_TRANSFER = True
-except ImportError:
-    pass
+
+def enable_hf_transfer():
+    """enforces activation of hf_transfer if installed."""
+    try:
+        # enable hf hub transfer if available
+        import hf_transfer  # type: ignore # noqa
+        huggingface_hub.constants.HF_HUB_ENABLE_HF_TRANSFER = True
+    except ImportError:
+        pass
+
+
+enable_hf_transfer()
 
 
 class Disabledtqdm(tqdm):
