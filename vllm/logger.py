@@ -27,7 +27,7 @@ class NewLineFormatter(logging.Formatter):
 
 
 _root_logger = logging.getLogger("vllm")
-_default_handler: Optional[logging.Handler] = None
+_default_handler: logging.Handler = None
 
 
 def _setup_logger():

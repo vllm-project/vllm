@@ -27,8 +27,8 @@ class RequestFuncInput:
 class RequestFuncOutput:
     generated_text: str = ""
     success: bool = False
-    latency: float = 0
-    ttft: float = 0  # Time to first token
+    latency: float = 0.0
+    ttft: float = 0.0  # Time to first token
     itl: List[float] = field(
         default_factory=list)  # List of inter-token latencies
     prompt_len: int = 0
