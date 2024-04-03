@@ -4,6 +4,7 @@
 import logging
 import os
 import sys
+from typing import Optional
 
 VLLM_CONFIGURE_LOGGING = int(os.getenv("VLLM_CONFIGURE_LOGGING", "1"))
 
@@ -26,7 +27,7 @@ class NewLineFormatter(logging.Formatter):
 
 
 _root_logger = logging.getLogger("vllm")
-_default_handler = None
+_default_handler: Optional[logging.Handler] = None
 
 
 def _setup_logger():

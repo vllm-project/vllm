@@ -58,7 +58,7 @@ async def async_request_tgi(
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
 
-        ttft = 0
+        ttft = 0.0
         st = time.perf_counter()
         most_recent_timestamp = st
         try:
@@ -74,7 +74,7 @@ async def async_request_tgi(
                         data = json.loads(chunk)
                         timestamp = time.perf_counter()
                         # First token
-                        if ttft == 0:
+                        if ttft == 0.0:
                             ttft = time.perf_counter() - st
                             output.ttft = ttft
 
@@ -125,12 +125,12 @@ async def async_request_trt_llm(
         try:
             async with session.post(url=api_url, json=payload) as response:
                 if response.status == 200:
-                    async for chunk in response.content:
-                        chunk = chunk.strip()
-                        if not chunk:
+                    async for chunk_bytes in response.content:
+                        chunk_bytes = chunk_bytes.strip()
+                        if not chunk_bytes:
                             continue
 
-                        chunk = remove_prefix(chunk.decode("utf-8"), "data:")
+                        chunk = remove_prefix(chunk_bytes.decode("utf-8"), "data:")
 
                         data = json.loads(chunk)
                         timestamp = time.perf_counter()
