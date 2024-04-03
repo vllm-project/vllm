@@ -35,7 +35,14 @@ def _get_model_architecture(
         architectures = ["QuantMixtralForCausalLM"]
 
     for arch in architectures:
-        model_cls = ModelRegistry.load_model_cls(arch)
+        if model_config.model_class:
+
+            module_name, model_cls_name = model_config.model_class.split(":")
+            module = importlib.import_module(
+                f"vllm.model_executor.models.{module_name}")
+            model_cls = getattr(module, model_cls_name, None)
+        else:
+            model_cls = ModelRegistry.load_model_cls(arch)
         if model_cls is not None:
             return (model_cls, arch)
     raise ValueError(

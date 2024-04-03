@@ -26,6 +26,9 @@ class ModelConfig:
 
     Args:
         model: Name or path of the huggingface model to use.
+        model_class: Custom model class implementation to use instead of
+            the default implementation. The value should be an import path,
+            specified like: 'my.module:MyModelClass'
         tokenizer: Name or path of the huggingface tokenizer to use.
         tokenizer_mode: Tokenizer mode. "auto" will use the fast tokenizer if
             available, and "slow" will always use the slow tokenizer.
@@ -71,6 +74,7 @@ class ModelConfig:
     def __init__(
         self,
         model: str,
+        model_class: str,
         tokenizer: str,
         tokenizer_mode: str,
         trust_remote_code: bool,
@@ -88,6 +92,7 @@ class ModelConfig:
         max_logprobs: int = 5,
     ) -> None:
         self.model = model
+        self.model_class = model_class
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
         self.trust_remote_code = trust_remote_code

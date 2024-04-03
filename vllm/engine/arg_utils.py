@@ -13,6 +13,7 @@ from vllm.utils import str_to_int_tuple
 class EngineArgs:
     """Arguments for vLLM engine."""
     model: str
+    model_class: Optional[str]
     tokenizer: Optional[str] = None
     tokenizer_mode: str = 'auto'
     trust_remote_code: bool = False
@@ -82,6 +83,13 @@ class EngineArgs:
             type=str,
             default='facebook/opt-125m',
             help='name or path of the huggingface model to use')
+        parser.add_argument(
+            '--model-class',
+            type=str,
+            default=None,
+            help='custom model class implementation to use instead of '
+            'the default implementation, specified like '
+            'my.module:MyModelClass')
         parser.add_argument(
             '--tokenizer',
             type=str,
@@ -388,7 +396,7 @@ class EngineArgs:
                Optional[VisionLanguageConfig]]:
         device_config = DeviceConfig(self.device)
         model_config = ModelConfig(
-            self.model, self.tokenizer, self.tokenizer_mode,
+            self.model, self.model_class, self.tokenizer, self.tokenizer_mode,
             self.trust_remote_code, self.download_dir, self.load_format,
             self.dtype, self.seed, self.revision, self.code_revision,
             self.tokenizer_revision, self.max_model_len, self.quantization,
