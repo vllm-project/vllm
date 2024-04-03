@@ -28,6 +28,45 @@ class ExecutorBase(ABC):
     ) -> None:
         raise NotImplementedError
 
+
+    #@abstractmethod
+    #def init_workers(self) -> None:
+    #    """Initialize workers, such as loading the model or preparing on-device
+    #    tensors.
+    #    """
+    #    raise NotImplementedError
+
+
+    #@abstractmethod
+    #def profile_num_available_blocks(self, block_size: int,
+    #                                 gpu_memory_utilization: float,
+    #                                 cpu_swap_space: float,
+    #                                 cache_dtype: str) -> tuple[int, int]:
+    #    """Profile the model on-device to determine the maximum number of KV
+    #    blocks that can be allocated.
+
+    #    Returns a tuple[num_device_blocks, num_cpu_blocks], where
+    #        num_device_blocks refers to the number of blocks in the "active" KV
+    #        cache (e.g. where blocks are appended to), and num_cpu_blocks refers
+    #        to the number of blocks in the "passive" KV cache (e.g. where blocks
+    #        are swapped to).
+
+    #    Examples:
+    #        - The GPUExecutor will return [num_gpu_blocks, num_cpu_blocks].
+    #        - A future CPUExecutor can return [num_cpu_blocks, 0] or
+    #            [num_cpu_blocks, num_swap_cpu_blocks].
+    #    """
+    #    raise NotImplementedError
+
+
+    #@abstractmethod
+    #def init_cache(self, cache_config: CacheConfig) -> None:
+    #    """Given a fully-specified cache config, initialize the KV cache. This
+    #    is separate from init_workers as profiling may be required to determine
+    #    the maxmimum allowed KV cache size.
+    #    """
+    #    raise NotImplementedError
+
     @abstractmethod
     def execute_model(self,
                       seq_group_metadata_list: List[SequenceGroupMetadata],
