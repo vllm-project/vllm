@@ -30,6 +30,11 @@ pip install -e .  # This may take several minutes.
 ```bash
 pip install -r requirements-dev.txt
 
+# linting and formatting
+ruff .
+isort .
+yapf --in-place --recursive .
+codespell --toml pyproject.toml
 # Static type checking
 mypy
 # Unit tests
