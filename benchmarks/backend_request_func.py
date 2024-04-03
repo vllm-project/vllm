@@ -69,7 +69,8 @@ async def async_request_tgi(
                         if not chunk_bytes:
                             continue
 
-                        chunk = remove_prefix(chunk_bytes.decode("utf-8"), "data:")
+                        chunk = remove_prefix(chunk_bytes.decode("utf-8"),
+                                              "data:")
 
                         data = json.loads(chunk)
                         timestamp = time.perf_counter()
@@ -247,7 +248,8 @@ async def async_request_openai_completions(
                         if not chunk_bytes:
                             continue
 
-                        chunk = remove_prefix(chunk_bytes.decode("utf-8"), "data: ")
+                        chunk = remove_prefix(chunk_bytes.decode("utf-8"),
+                                              "data: ")
                         if chunk == "[DONE]":
                             latency = time.perf_counter() - st
                         else:
@@ -328,7 +330,8 @@ async def async_request_openai_chat_completions(
                         if not chunk_bytes:
                             continue
 
-                        chunk = remove_prefix(chunk_bytes.decode("utf-8"), "data: ")
+                        chunk = remove_prefix(chunk_bytes.decode("utf-8"),
+                                              "data: ")
                         if chunk == "[DONE]":
                             latency = time.perf_counter() - st
                         else:
