@@ -73,6 +73,9 @@ class TensorizerArgs:
           binary key to use for decryption. `None` (the default) means 
           no decryption. See the example script in 
           examples/tensorize_vllm_model.py. 
+      num_readers: Controls how many threads are allowed to read concurrently
+          from the source file. Default is 1. This greatly increases
+          performance.
       s3_access_key_id: The access key for the S3 bucket. Can also be set via
           the S3_ACCESS_KEY_ID environment variable.
       s3_secret_access_key: The secret access key for the S3 bucket. Can also
