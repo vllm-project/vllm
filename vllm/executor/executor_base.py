@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional
+from dataclasses import dataclass
 
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
@@ -115,3 +116,8 @@ class ExecutorAsyncBase(ExecutorBase):
         """Checks if the executor is healthy. If not, it should raise an
         exception."""
         raise NotImplementedError
+
+@dataclass(frozen=True)
+class KvCacheProfileResult:
+    num_active_kv_blocks: int
+    num_swapped_kv_blocks: int

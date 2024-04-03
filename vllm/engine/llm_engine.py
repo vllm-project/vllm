@@ -127,6 +127,13 @@ class LLMEngine:
             speculative_config=speculative_config,
         )
 
+        # TODO cleanup location
+        profile_result = self.model_executor.profile_num_available_blocks()
+        self.model_executor.allocate_kv_cache(
+            num_active_kv_blocks=profile_result.num_active_kv_blocks,
+            num_swapped_kv_blocks=profile_result.num_swapped_kv_blocks,
+        )
+
         # If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
             from vllm.model_executor.model_loader import (
@@ -212,6 +219,7 @@ class LLMEngine:
             log_stats=not engine_args.disable_log_stats,
             usage_context=usage_context,
         )
+
         return engine
 
     def __reduce__(self):
