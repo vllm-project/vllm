@@ -13,7 +13,6 @@ from vllm.engine.ray_utils import initialize_ray_cluster
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.model_loader import get_architecture_class_name
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (MultiModalData, SamplerOutput, Sequence,
@@ -117,6 +116,8 @@ class LLMEngine:
 
         # If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
+            from vllm.model_executor.model_loader import (
+                get_architecture_class_name)
             usage_message.report_usage(
                 get_architecture_class_name(model_config),
                 usage_context,
@@ -180,6 +181,9 @@ class LLMEngine:
         if device_config.device_type == "neuron":
             from vllm.executor.neuron_executor import NeuronExecutor
             executor_class = NeuronExecutor
+        elif device_config.device_type == "cpu":
+            from vllm.executor.cpu_executor import CPUExecutor
+            executor_class = CPUExecutor
         elif parallel_config.worker_use_ray:
             initialize_ray_cluster(parallel_config)
             from vllm.executor.ray_gpu_executor import RayGPUExecutor
