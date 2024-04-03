@@ -1,7 +1,8 @@
 from typing import Dict, List, Optional
 
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
+                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
+                         VisionLanguageConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -21,6 +22,7 @@ class NeuronExecutor(ExecutorBase):
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
         vision_language_config: Optional[VisionLanguageConfig],
+        speculative_config: Optional[SpeculativeConfig],
     ) -> None:
         self.model_config = model_config
         self.cache_config = cache_config
@@ -28,6 +30,8 @@ class NeuronExecutor(ExecutorBase):
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
+        assert (not speculative_config
+                ), "Speculative decoding not yet supported for Neuron backend."
 
         # Set the number of GPU blocks to be the same as the maximum number of
         # sequences that can be processed in a single batch. This is equivalent

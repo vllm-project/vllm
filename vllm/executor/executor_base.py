@@ -2,7 +2,8 @@ from abc import ABC, abstractmethod
 from typing import Dict, List, Optional
 
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
+                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
+                         VisionLanguageConfig)
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 
@@ -25,6 +26,7 @@ class ExecutorBase(ABC):
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
         vision_language_config: Optional[VisionLanguageConfig],
+        speculative_config: Optional[SpeculativeConfig],
     ) -> None:
         raise NotImplementedError
 

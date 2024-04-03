@@ -1,7 +1,7 @@
 import enum
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, ClassVar, Optional, Union
 
 import torch
@@ -617,6 +617,159 @@ class DeviceConfig:
             self.device = torch.device(self.device_type)
 
 
+class SpeculativeConfig:
+    """Configuration for speculative decoding.
+
+    The configuration is currently specialized to draft-model speculative
+    decoding with top-1 proposals.
+    """
+
+    @staticmethod
+    def maybe_create_spec_config(
+        target_model_config: ModelConfig,
+        target_parallel_config: ParallelConfig,
+        target_dtype: str,
+        speculative_model: Optional[str],
+        num_speculative_tokens: Optional[int],
+    ) -> Optional["SpeculativeConfig"]:
+        """Create a SpeculativeConfig if possible, else return None.
+
+        This function attempts to create a SpeculativeConfig object based on the
+        provided parameters. If the necessary conditions are met, it returns an
+        instance of SpeculativeConfig. Otherwise, it returns None.
+
+        Args:
+            target_model_config (ModelConfig): The configuration of the target
+                model.
+            target_parallel_config (ParallelConfig): The parallel configuration
+                for the target model.
+            target_dtype (str): The data type used for the target model.
+            speculative_model (Optional[str]): The name of the speculative
+                model, if provided.
+            num_speculative_tokens (Optional[int]): The number of speculative
+                tokens, if provided.
+
+        Returns:
+            Optional["SpeculativeConfig"]: An instance of SpeculativeConfig if
+                the necessary conditions are met, else None.
+        """
+
+        if (speculative_model is None and num_speculative_tokens is None):
+            return None
+
+        if speculative_model is not None and num_speculative_tokens is None:
+            raise ValueError(
+                "Expected both speculative_model and "
+                "num_speculative_tokens to be provided, but found "
+                f"{speculative_model=} and {num_speculative_tokens=}.")
+
+        # TODO: The user should be able to specify revision/quantization/max
+        # model len for the draft model. It is not currently supported.
+        draft_revision = None
+        draft_code_revision = None
+        draft_quantization = None
+        draft_max_model_len = None
+
+        draft_model_config = ModelConfig(
+            model=speculative_model,
+            tokenizer=target_model_config.tokenizer,
+            tokenizer_mode=target_model_config.tokenizer_mode,
+            trust_remote_code=target_model_config.trust_remote_code,
+            download_dir=target_model_config.download_dir,
+            load_format=target_model_config.load_format,
+            dtype=target_model_config.dtype,
+            seed=target_model_config.seed,
+            revision=draft_revision,
+            code_revision=draft_code_revision,
+            tokenizer_revision=target_model_config.tokenizer_revision,
+            max_model_len=draft_max_model_len,
+            quantization=draft_quantization,
+            enforce_eager=target_model_config.enforce_eager,
+            max_context_len_to_capture=target_model_config.
+            max_context_len_to_capture,
+            max_logprobs=target_model_config.max_logprobs,
+        )
+
+        draft_parallel_config = (
+            SpeculativeConfig.create_draft_parallel_config(
+                target_parallel_config))
+
+        return SpeculativeConfig(
+            draft_model_config,
+            draft_parallel_config,
+            num_speculative_tokens,
+        )
+
+    @staticmethod
+    def create_draft_parallel_config(
+            target_parallel_config: ParallelConfig) -> ParallelConfig:
+        """Create a parallel config for use by the draft worker.
+
+        This is mostly a copy of the target parallel config. In the future the
+        draft worker can have a different parallel strategy, e.g. TP=1.
+        """
+        draft_parallel_config = ParallelConfig(
+            pipeline_parallel_size=target_parallel_config.
+            pipeline_parallel_size,
+            tensor_parallel_size=target_parallel_config.tensor_parallel_size,
+            worker_use_ray=target_parallel_config.worker_use_ray,
+            max_parallel_loading_workers=target_parallel_config.
+            max_parallel_loading_workers,
+            disable_custom_all_reduce=target_parallel_config.
+            disable_custom_all_reduce,
+            tokenizer_pool_config=target_parallel_config.tokenizer_pool_config,
+            ray_workers_use_nsight=target_parallel_config.
+            ray_workers_use_nsight,
+            placement_group=target_parallel_config.placement_group,
+        )
+
+        return draft_parallel_config
+
+    def __init__(
+        self,
+        draft_model_config: ModelConfig,
+        draft_parallel_config: ParallelConfig,
+        num_speculative_tokens: int,
+    ):
+        """Create a SpeculativeConfig object.
+
+        Args:
+            draft_model_config: ModelConfig for the draft model.
+            draft_parallel_config: ParallelConfig for the draft model.
+            num_speculative_tokens: The number of tokens to sample from the
+                draft model before scoring with the target model.
+        """
+        self.draft_model_config = draft_model_config
+        self.draft_parallel_config = draft_parallel_config
+        self.num_speculative_tokens = num_speculative_tokens
+
+        self._verify_args()
+
+    def _verify_args(self) -> None:
+        if self.num_speculative_tokens <= 0:
+            raise ValueError("Expected num_speculative_tokens to be greater "
+                             f"than zero ({self.num_speculative_tokens}).")
+
+        if self.draft_model_config:
+            self.draft_model_config.verify_with_parallel_config(
+                self.draft_parallel_config)
+
+    @property
+    def num_lookahead_slots(self) -> int:
+        """The number of additional slots the scheduler should allocate per
+        step, in addition to the slots allocated for each known token.
+
+        This is equal to the number of speculative tokens, as each speculative
+        token must be scored.
+        """
+        return self.num_speculative_tokens
+
+    def __repr__(self) -> str:
+        draft_model = self.draft_model_config.model
+        num_spec_tokens = self.num_speculative_tokens
+        return f"SpeculativeConfig({draft_model=}, {num_spec_tokens=})"
+
+
 @dataclass
 class LoRAConfig:
     max_lora_rank: int
@@ -838,3 +991,36 @@ def _get_and_verify_max_len(
                 "to incorrect model outputs or CUDA errors. Make sure the "
                 "value is correct and within the model context size.")
     return int(max_model_len)
+
+
+@dataclass(frozen=True)
+class EngineConfig:
+    """Dataclass which contains all engine-related configuration. This
+    simplifies passing around the distinct configurations in the codebase.
+    """
+
+    model_config: ModelConfig
+    cache_config: CacheConfig
+    parallel_config: ParallelConfig
+    scheduler_config: SchedulerConfig
+    device_config: DeviceConfig
+    lora_config: Optional[LoRAConfig]
+    vision_language_config: Optional[VisionLanguageConfig]
+    speculative_config: Optional[SpeculativeConfig]
+
+    def __post_init__(self):
+        """Verify configs are valid & consistent with each other.
+        """
+        self.model_config.verify_with_parallel_config(self.parallel_config)
+        self.cache_config.verify_with_parallel_config(self.parallel_config)
+
+        if self.lora_config:
+            self.lora_config.verify_with_model_config(self.model_config)
+            self.lora_config.verify_with_scheduler_config(
+                self.scheduler_config)
+
+    def to_dict(self):
+        """Return the configs as a dictionary, for use in **kwargs.
+        """
+        return dict(
+            (field.name, getattr(self, field.name)) for field in fields(self))

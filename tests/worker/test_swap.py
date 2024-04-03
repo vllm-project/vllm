@@ -10,19 +10,18 @@ def test_swap() -> None:
     engine_args = EngineArgs(model="facebook/opt-125m",
                              dtype="half",
                              load_format="dummy")
-    (model_config, cache_config, parallel_config, scheduler_config,
-     device_config, _, _) = engine_args.create_engine_configs()
-    cache_config.num_gpu_blocks = 100
-    cache_config.num_cpu_blocks = 100
+    engine_config = engine_args.create_engine_config()
+    engine_config.cache_config.num_gpu_blocks = 100
+    engine_config.cache_config.num_cpu_blocks = 100
 
     # Create the worker.
     distributed_init_method = get_distributed_init_method(
         get_ip(), get_open_port())
     worker = Worker(
-        model_config=model_config,
-        parallel_config=parallel_config,
-        scheduler_config=scheduler_config,
-        device_config=device_config,
+        model_config=engine_config.model_config,
+        parallel_config=engine_config.parallel_config,
+        scheduler_config=engine_config.scheduler_config,
+        device_config=engine_config.device_config,
         local_rank=0,
         rank=0,
         distributed_init_method=distributed_init_method,
@@ -32,7 +31,7 @@ def test_swap() -> None:
     # Initialize the worker.
     worker.init_device()
     worker.load_model()
-    worker.init_cache_engine(cache_config)
+    worker.init_cache_engine(engine_config.cache_config)
     worker.warm_up_model()
 
     # Randomly initialize the cache.

@@ -107,18 +107,16 @@ def create_worker(cls: type,
         block_size=block_size,
         enforce_eager=enforce_eager,
     )
-
-    (model_config, cache_config, parallel_config, scheduler_config,
-     device_config, _, _) = engine_args.create_engine_configs()
+    engine_config = engine_args.create_engine_config()
 
     distributed_init_method = get_distributed_init_method(
         get_ip(), get_open_port())
 
     worker = cls(
-        model_config=model_config,
-        parallel_config=parallel_config,
-        scheduler_config=scheduler_config,
-        device_config=device_config,
+        model_config=engine_config.model_config,
+        parallel_config=engine_config.parallel_config,
+        scheduler_config=engine_config.scheduler_config,
+        device_config=engine_config.device_config,
         local_rank=0,
         rank=0,
         distributed_init_method=distributed_init_method,
@@ -128,9 +126,9 @@ def create_worker(cls: type,
     worker.init_device()
     worker.load_model()
 
-    cache_config.num_gpu_blocks = num_gpu_blocks
-    cache_config.num_cpu_blocks = 0
-    worker.init_cache_engine(cache_config)
+    engine_config.cache_config.num_gpu_blocks = num_gpu_blocks
+    engine_config.cache_config.num_cpu_blocks = 0
+    worker.init_cache_engine(engine_config.cache_config)
     worker.warm_up_model()
 
     return worker
