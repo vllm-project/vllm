@@ -1,7 +1,7 @@
 import argparse
 import dataclasses
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
 from vllm.config import (CacheConfig, DeviceConfig, EngineConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
