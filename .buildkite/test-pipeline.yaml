@@ -12,42 +12,63 @@ steps:
   command: pytest -v -s async_engine
 
 - label: Basic Correctness Test
-  command: pytest -v -s --forked basic_correctness
+  command: pytest -v -s basic_correctness
 
 - label: Core Test
   command: pytest -v -s core
 
 - label: Distributed Comm Ops Test
-  command: pytest -v -s --forked test_comm_ops.py
+  command: pytest -v -s test_comm_ops.py
   working_dir: "/vllm-workspace/tests/distributed"
   num_gpus: 2 # only support 1 or 2 for now.
 
-- label: Distributed Correctness Test
-  command: pytest -v -s --forked test_basic_distributed_correctness.py
+- label: Distributed Tests
   working_dir: "/vllm-workspace/tests/distributed"
   num_gpus: 2 # only support 1 or 2 for now.
+  commands:
+  - pytest -v -s test_pynccl.py
+  - TEST_DIST_MODEL=facebook/opt-125m pytest -v -s test_basic_distributed_correctness.py
+  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf pytest -v -s test_basic_distributed_correctness.py
 
 - label: Engine Test
-  command: pytest -v -s engine test_sequence.py
+  command: pytest -v -s engine tokenization test_sequence.py test_config.py
 
 - label: Entrypoints Test
   command: pytest -v -s entrypoints
 
-- label: Kernels Test
-  command: pytest -v -s kernels
-  soft_fail: true
+- label: Examples Test
+  working_dir: "/vllm-workspace/examples"
+  commands:
+    # install aws cli for llava_example.py
+    - pip install awscli
+    - python3 offline_inference.py
+    - python3 offline_inference_with_prefix.py
+    - python3 llm_engine_example.py
+    - python3 llava_example.py
+
+- label: Kernels Test %N
+  command: pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 4
 
 - label: Models Test
   commands:
-    - pytest -v -s models --forked
-  soft_fail: true
+    - bash ../.buildkite/download-images.sh
+    - pytest -v -s models --ignore=models/test_llava.py --ignore=models/test_mistral.py
+
+- label: Llava Test
+  commands:
+    - bash ../.buildkite/download-images.sh
+    - pytest -v -s models/test_llava.py
 
 - label: Prefix Caching Test
   commands:
     - pytest -v -s prefix_caching
 
 - label: Samplers Test
-  command: pytest -v -s samplers --forked
+  command: pytest -v -s samplers
+
+- label: LogitsProcessor Test
+  command: pytest -v -s test_logits_processor.py
 
 - label: Worker Test
   command: pytest -v -s worker
@@ -55,8 +76,9 @@ steps:
 - label: Speculative decoding tests
   command: pytest -v -s spec_decode
 
-- label: LoRA Test
-  command: pytest -v -s lora --forked
+- label: LoRA Test %N
+  command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 4
 
 - label: Metrics Test
   command: pytest -v -s metrics

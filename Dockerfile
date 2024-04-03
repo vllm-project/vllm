@@ -35,9 +35,14 @@ COPY requirements-build.txt requirements-build.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements-build.txt
 
+# install compiler cache to speed up compilation leveraging local or remote caching
+RUN apt-get update -y && apt-get install -y ccache
+
 # copy input files
 COPY csrc csrc
 COPY setup.py setup.py
+COPY cmake cmake
+COPY CMakeLists.txt CMakeLists.txt
 COPY requirements.txt requirements.txt
 COPY pyproject.toml pyproject.toml
 COPY vllm/__init__.py vllm/__init__.py
@@ -54,7 +59,9 @@ ENV NVCC_THREADS=$nvcc_threads
 # make sure punica kernels are built (for LoRA)
 ENV VLLM_INSTALL_PUNICA_KERNELS=1
 
-RUN python3 setup.py build_ext --inplace
+ENV CCACHE_DIR=/root/.cache/ccache
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    python3 setup.py build_ext --inplace
 #################### EXTENSION Build IMAGE ####################
 
 #################### FLASH_ATTENTION Build IMAGE ####################
@@ -95,7 +102,7 @@ RUN --mount=type=cache,target=/root/.cache/pip VLLM_USE_PRECOMPILED=1 pip instal
 
 #################### RUNTIME BASE IMAGE ####################
 # We used base cuda image because pytorch installs its own cuda libraries.
-# However cupy depends on cuda libraries so we had to switch to the runtime image
+# However pynccl depends on cuda libraries so we had to switch to the runtime image
 # In the future it would be nice to get a container with pytorch and cuda without duplicating cuda
 FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04 AS vllm-base
 
@@ -120,10 +127,12 @@ RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,ta
 FROM vllm-base AS vllm-openai
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install accelerate hf_transfer
+    pip install accelerate hf_transfer modelscope
 
 COPY --from=build /workspace/vllm/*.so /workspace/vllm/
 COPY vllm vllm
+
+ENV VLLM_USAGE_SOURCE production-docker-image
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 #################### OPENAI API SERVER ####################

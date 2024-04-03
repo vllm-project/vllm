@@ -1,12 +1,10 @@
 import random
+from typing import Tuple
 
 import pytest
 import torch
 
-from typing import Tuple
-
 from vllm._C import cache_ops
-from vllm.utils import is_hip
 
 COPYING_DIRECTION = [('cuda', 'cpu'), ('cuda', 'cuda'), ('cpu', 'cuda')]
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -15,10 +13,11 @@ NUM_LAYERS = [1]  # Arbitrary values for testing
 NUM_HEADS = [8]  # Arbitrary values for testing
 HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 BLOCK_SIZES = [8, 16, 32]
-# reduce the size for ROCm test to avoid HIP OOM
-NUM_BLOCKS = [1024, 36000] if not is_hip else [
-    1024, 10000
-]  # Arbitrary values for testing
+
+# Arbitrary values for testing
+# don't make it too large. e.g. [1024, 36000] will OOM
+NUM_BLOCKS = [1024, 10000]
+
 NUM_MAPPINGS = [256]  # Arbitrary values for testing
 SEEDS = [0]
 CUDA_DEVICES = [

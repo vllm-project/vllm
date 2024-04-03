@@ -1,10 +1,13 @@
+cmake>=3.21
 ninja  # For faster builds.
 psutil
 ray >= 2.9
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
 torch == 2.1.2
-transformers >= 4.38.0  # Required for Gemma.
+requests
+py-cpuinfo
+transformers >= 4.39.1  # Required for StarCoder2 & Llava.
 xformers == 0.0.23.post1  # Required for CUDA 12.1.
 fastapi
 uvicorn[standard]
@@ -13,4 +16,4 @@ prometheus_client >= 0.18.0
 pynvml == 11.5.0
 triton >= 2.1.0
 outlines == 0.0.34
-cupy-cuda12x == 12.1.0  # Required for CUDA graphs. CUDA 11.8 users should install cupy-cuda11x instead.
+tiktoken == 0.6.0 # Required for DBRX tokenizer

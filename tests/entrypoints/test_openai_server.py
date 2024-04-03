@@ -1,21 +1,20 @@
+# imports for guided decoding tests
+import json
 import os
+import re
 import subprocess
+import sys
 import time
 
-import sys
+import jsonschema
+import openai  # use the official client for correctness check
 import pytest
-import requests
 # using Ray for overall ease of process management, parallel requests,
 # and debugging.
 import ray
-import openai  # use the official client for correctness check
+import requests
 # downloading lora to test lora requests
 from huggingface_hub import snapshot_download
-
-# imports for guided decoding tests
-import json
-import jsonschema
-import re
 
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -201,6 +200,27 @@ async def test_single_completion(server, client: openai.AsyncOpenAI,
 
 
 @pytest.mark.parametrize(
+    # first test base model, then test loras
+    "model_name",
+    [MODEL_NAME, "zephyr-lora", "zephyr-lora2"],
+)
+async def test_zero_logprobs(server, client: openai.AsyncOpenAI,
+                             model_name: str):
+    # test using token IDs
+    completion = await client.completions.create(
+        model=MODEL_NAME,
+        prompt=[0, 0, 0, 0, 0],
+        max_tokens=5,
+        temperature=0.0,
+        logprobs=0,
+    )
+    choice = completion.choices[0]
+    assert choice.logprobs is not None
+    assert choice.logprobs.token_logprobs is not None
+    assert choice.logprobs.top_logprobs is None
+
+
+@pytest.mark.parametrize(
     # just test 1 lora hereafter
     "model_name",
     [MODEL_NAME, "zephyr-lora"],
@@ -323,9 +343,15 @@ async def test_completion_streaming(server, client: openai.AsyncOpenAI,
                                              temperature=0.0,
                                              stream=True)
     chunks = []
+    finish_reason_count = 0
     async for chunk in stream:
         chunks.append(chunk.choices[0].text)
+        if chunk.choices[0].finish_reason is not None:
+            finish_reason_count += 1
+    # finish reason should only return in last block
+    assert finish_reason_count == 1
     assert chunk.choices[0].finish_reason == "length"
+    assert chunk.choices[0].text
     assert chunk.usage == single_usage
     assert "".join(chunks) == single_output
 
@@ -364,13 +390,19 @@ async def test_chat_streaming(server, client: openai.AsyncOpenAI,
         stream=True,
     )
     chunks = []
+    finish_reason_count = 0
     async for chunk in stream:
         delta = chunk.choices[0].delta
         if delta.role:
             assert delta.role == "assistant"
         if delta.content:
             chunks.append(delta.content)
+        if chunk.choices[0].finish_reason is not None:
+            finish_reason_count += 1
+    # finish reason should only return in last block
+    assert finish_reason_count == 1
     assert chunk.choices[0].finish_reason == stop_reason
+    assert delta.content
     assert "".join(chunks) == output
 
 
@@ -658,6 +690,56 @@ async def test_guided_decoding_type_error(server, client: openai.AsyncOpenAI):
             model=MODEL_NAME,
             prompt="Give an example string that fits this regex",
             extra_body=dict(guided_regex=TEST_REGEX, guided_json=TEST_SCHEMA))
+
+
+async def test_response_format_json_object(server, client: openai.AsyncOpenAI):
+    resp = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{
+            "role":
+            "user",
+            "content": ('what is 1+1? please respond with a JSON object, '
+                        'the format is {"result": 2}')
+        }],
+        response_format={"type": "json_object"})
+
+    content = resp.choices[0].message.content
+    loaded = json.loads(content)
+    assert loaded == {"result": 2}, loaded
+
+
+async def test_guided_grammar(server, client: openai.AsyncOpenAI):
+    simple_sql_grammar = """
+start: select_statement
+
+select_statement: "SELECT" column "from" table "where" condition
+
+column: "col_1" | "col_2"
+table: "table_1" | "table_2"
+condition: column "=" number
+
+number: "1" | "2"
+"""
+
+    completion = await client.completions.create(
+        model=MODEL_NAME,
+        prompt=("Generate a sql state that select col_1 from "
+                "table_1 where it is equals to 1"),
+        temperature=1.0,
+        max_tokens=500,
+        extra_body=dict(guided_grammar=simple_sql_grammar))
+
+    content = completion.choices[0].text
+
+    # use Lark to parse the output, and make sure it's a valid parse tree
+    from lark import Lark
+    parser = Lark(simple_sql_grammar)
+    parser.parse(content)
+
+    # remove spaces for comparison b/c we removed them in the grammar
+    ground_truth = "SELECT col_1 from table_1 where col_1 = 1".replace(" ", "")
+
+    assert content.strip() == ground_truth
 
 
 if __name__ == "__main__":

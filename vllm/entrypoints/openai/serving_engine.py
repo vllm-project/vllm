@@ -6,13 +6,14 @@ from typing import Dict, List, Tuple, Optional, Union
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.openai.protocol import (CompletionRequest,
-                                              ChatCompletionRequest,
-                                              ErrorResponse, LogProbs,
-                                              ModelCard, ModelList,
+from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              CompletionRequest, ErrorResponse,
+                                              LogProbs, ModelCard, ModelList,
                                               ModelPermission)
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import Logprob
+from vllm.transformers_utils.tokenizer import get_tokenizer
 
 logger = init_logger(__name__)
 

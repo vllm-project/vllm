@@ -1,19 +1,21 @@
-import time
 import codecs
+import time
+from typing import AsyncGenerator, AsyncIterator, List, Optional, Union
+
 from fastapi import Request
-from typing import AsyncGenerator, AsyncIterator, Optional, List, Union
-from vllm.logger import init_logger
-from vllm.utils import random_uuid
+
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse,
     UsageInfo)
-from vllm.outputs import RequestOutput
-from vllm.entrypoints.openai.serving_engine import OpenAIServing, LoRA
+from vllm.entrypoints.openai.serving_engine import LoRA, OpenAIServing
+from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
+from vllm.outputs import RequestOutput
+from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -103,7 +105,7 @@ class OpenAIServingChat(OpenAIServing):
     ) -> Union[ErrorResponse, AsyncGenerator[str, None]]:
 
         model_name = request.model
-        created_time = int(time.monotonic())
+        created_time = int(time.time())
         chunk_object_type = "chat.completion.chunk"
         first_iteration = True
 
@@ -218,7 +220,8 @@ class OpenAIServingChat(OpenAIServing):
                             index=i,
                             delta=DeltaMessage(content=delta_text),
                             logprobs=logprobs,
-                            finish_reason=output.finish_reason)
+                            finish_reason=output.finish_reason,
+                            stop_reason=output.stop_reason)
                         chunk = ChatCompletionStreamResponse(
                             id=request_id,
                             object=chunk_object_type,
@@ -244,7 +247,7 @@ class OpenAIServingChat(OpenAIServing):
             request_id: str) -> Union[ErrorResponse, ChatCompletionResponse]:
 
         model_name = request.model
-        created_time = int(time.monotonic())
+        created_time = int(time.time())
         final_res: RequestOutput = None
 
         async for res in result_generator:
@@ -276,6 +279,7 @@ class OpenAIServingChat(OpenAIServing):
                 message=ChatMessage(role=role, content=output.text),
                 logprobs=logprobs,
                 finish_reason=output.finish_reason,
+                stop_reason=output.stop_reason,
             )
             choices.append(choice_data)
 
