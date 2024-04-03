@@ -372,7 +372,6 @@ def is_pin_memory_available() -> bool:
         print_warning_once("Pin memory is not supported on Neuron.")
         return False
     elif is_cpu():
-        print_warning_once("Pin memory is not supported on CPU.")
         return False
     return True
 
