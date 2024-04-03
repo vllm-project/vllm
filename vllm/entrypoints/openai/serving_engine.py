@@ -98,13 +98,13 @@ class OpenAIServing:
             logprobs.top_logprobs = []
 
         for i, token_id in enumerate(token_ids):
-            if top_logprobs is None or top_logprobs[i] is None:
+            step_top_logprobs = top_logprobs[i]
+            if step_top_logprobs is None:
                 token = self.tokenizer.decode(token_id)
                 logprobs.tokens.append(token)
                 logprobs.token_logprobs.append(None)
                 logprobs.top_logprobs.append(None)
             else:
-                step_top_logprobs = top_logprobs[i]
                 token_logprob = step_top_logprobs[token_id].logprob
                 token = step_top_logprobs[token_id].decoded_token
                 logprobs.tokens.append(token)
