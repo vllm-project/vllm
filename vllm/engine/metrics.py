@@ -118,8 +118,12 @@ class Stats:
     time_per_output_tokens: List[float]
     time_e2e_requests: List[float]
 
+
 class SupportsMetricsInfo(Protocol):
-    def metrics_info(self) -> Dict[str, str]: ...
+
+    def metrics_info(self) -> Dict[str, str]:
+        ...
+
 
 class StatLogger:
     """StatLogger is used LLMEngine to log to Promethus and Stdout."""

@@ -4,7 +4,7 @@ from transformers import AutoConfig, PretrainedConfig
 
 from vllm.transformers_utils.configs import *
 
-_CONFIG_REGISTRY: Dict[str,PretrainedConfig] = {
+_CONFIG_REGISTRY: Dict[str, PretrainedConfig] = {
     "chatglm": ChatGLMConfig,
     "dbrx": DbrxConfig,
     "mpt": MPTConfig,
