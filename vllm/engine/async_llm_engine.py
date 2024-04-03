@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import time
 from functools import partial
 from typing import (AsyncIterator, Callable, Dict, Iterable, List, Optional,
@@ -310,6 +311,7 @@ class AsyncLLMEngine:
         self.engine_use_ray = engine_use_ray
         self.log_requests = log_requests
         self.max_log_len = max_log_len
+        self.list_truncation_regex = re.compile(r',(\s*\d*)$')
         self.engine = self._init_engine(*args, **kwargs)
 
         self.background_loop = None
@@ -497,14 +499,8 @@ class AsyncLLMEngine:
         multi_modal_data: Optional[MultiModalData] = None,
     ) -> AsyncStream:
         if self.log_requests:
-            shortened_prompt = prompt
-            shortened_token_ids = prompt_token_ids
-            if self.max_log_len is not None:
-                if shortened_prompt is not None:
-                    shortened_prompt = shortened_prompt[:self.max_log_len]
-                if shortened_token_ids is not None:
-                    shortened_token_ids = shortened_token_ids[:self.
-                                                              max_log_len]
+            shortened_prompt, shortened_token_ids = self._shorten_for_logging(
+                prompt, prompt_token_ids)
             logger.info(f"Received request {request_id}: "
                         f"prompt: {shortened_prompt!r}, "
                         f"sampling_params: {sampling_params}, "
@@ -701,3 +697,22 @@ class AsyncLLMEngine:
         else:
             await self.engine.check_health_async()
         logger.debug(f"Health check took {time.perf_counter()-t}s")
+
+    def _shorten_for_logging(self, prompt,
+                             prompt_token_ids) -> Tuple[str, str]:
+        """Truncates the input prompt text and token ids for logging.
+        The string representations of both are truncated to a maximum length
+        of self.max_log_len, and then ellipses (...) are added to indicate
+        that the values were truncated.
+        """
+        if self.max_log_len is not None:
+            if prompt is not None and len(prompt) > self.max_log_len:
+                prompt = f"{prompt:.{self.max_log_len}}..."
+            if prompt_token_ids is not None:
+                # This regex removes the last value in the list after the
+                # string representation is truncated, to avoid logging an
+                # incorrect token id.
+                prompt_token_ids = re.sub(
+                    self.list_truncation_regex, ', ...]',
+                    f"{prompt_token_ids!s:.{self.max_log_len}}")
+        return prompt, prompt_token_ids
