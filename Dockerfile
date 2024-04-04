@@ -16,9 +16,12 @@ RUN ldconfig /usr/local/cuda-12.1/compat/
 WORKDIR /workspace
 
 # install build and runtime dependencies
-COPY requirements.txt requirements.txt
+COPY requirements-common.txt requirements-common.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt
+    pip install -r requirements-common.txt
+COPY requirements-cuda.txt requirements-cuda.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements-cuda.txt
 
 # install development dependencies
 COPY requirements-dev.txt requirements-dev.txt
@@ -43,7 +46,8 @@ COPY csrc csrc
 COPY setup.py setup.py
 COPY cmake cmake
 COPY CMakeLists.txt CMakeLists.txt
-COPY requirements.txt requirements.txt
+COPY requirements-common.txt requirements-common.txt
+COPY requirements-cuda.txt requirements-cuda.txt
 COPY pyproject.toml pyproject.toml
 COPY vllm/__init__.py vllm/__init__.py
 
@@ -111,9 +115,12 @@ RUN apt-get update -y \
     && apt-get install -y python3-pip
 
 WORKDIR /workspace
-COPY requirements.txt requirements.txt
+COPY requirements-common.txt requirements-common.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt
+    pip install -r requirements-common.txt
+COPY requirements-cuda.txt requirements-cuda.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements-cuda.txt
 
 # Install flash attention (from pre-built wheel)
 RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,target=/usr/src/flash-attention-v2 \

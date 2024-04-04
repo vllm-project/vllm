@@ -13,6 +13,7 @@ COPY ./ /workspace/vllm
 
 WORKDIR /workspace/vllm
 
+RUN pip install -v -r requirements-common.txt --extra-index-url https://download.pytorch.org/whl/cpu
 RUN pip install -v -r requirements-cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
 RUN VLLM_TARGET_DEVICE=cpu python3 setup.py install

@@ -87,6 +87,7 @@ At the time of this documentation update, PyTorch on ROCm 6.0 wheel is not yet a
     .. code-block:: console
 
         $ cd vllm
+        $ pip install -U -r requirements-common.txt
         $ pip install -U -r requirements-rocm.txt
         $ python setup.py install # This may take 5-10 minutes. Currently, `pip install .`` does not work for ROCm installation
 
@@ -163,6 +164,7 @@ Alternatively, if you plan to install vLLM-ROCm on a local machine or start from
     .. code-block:: console
 
         $ cd vllm
+        $ pip install -U -r requirements-common.txt
         $ pip install -U -r requirements-rocm.txt
         $ python setup.py install # This may take 5-10 minutes.
 

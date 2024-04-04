@@ -329,7 +329,7 @@ def get_requirements() -> List[str]:
         common = f.read().strip().split("\n")
 
     if _is_cuda():
-        with open(get_path("requirements.txt")) as f:
+        with open(get_path("requirements-cuda.txt")) as f:
             requirements = f.read().strip().split("\n")
     elif _is_hip():
         with open(get_path("requirements-rocm.txt")) as f:
