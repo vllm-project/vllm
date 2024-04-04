@@ -72,8 +72,8 @@ def vllm_init(args):
         kv_cache_dtype=args.kv_cache_dtype,
         #scales_path=args.kv_cache_scales_path
         #   if args.kv_cache_scales_path!='' else None,
-        quantization_param_path=args.kv_cache_scales_path 
-            if args.kv_cache_scales_path!='' else None,
+        quantization_param_path=args.kv_cache_scales_path
+        if args.kv_cache_scales_path != '' else None,
         enforce_eager=args.enforce_eager)
 
     sampling_params = SamplingParams(n=1,
