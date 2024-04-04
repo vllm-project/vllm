@@ -85,20 +85,30 @@ def _apply_logits_processors(
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
     logits_row_idx = 0
-    found_logits_processors = False
-    for seq_ids, sampling_params in sampling_metadata.seq_groups:
+    for i, seq_group in enumerate(sampling_metadata.seq_groups):
+        seq_ids, sampling_params = seq_group
+
+        if (i < sampling_metadata.num_prompts
+                and sampling_params.prompt_logprobs is not None):
+            num_rows_per_seq = sampling_metadata.prompt_lens[i]
+            assert len(seq_ids) == 1
+        else:
+            num_rows_per_seq = 1
+
         logits_processors = sampling_params.logits_processors
-        if logits_processors:
-            found_logits_processors = True
-            for seq_id in seq_ids:
+        if not logits_processors:
+            logits_row_idx += num_rows_per_seq * len(seq_ids)
+            continue
+
+        for seq_id in seq_ids:
+            token_ids = sampling_metadata.seq_data[seq_id].output_token_ids
+            for _ in range(num_rows_per_seq):
                 logits_row = logits[logits_row_idx]
-                token_ids = sampling_metadata.seq_data[seq_id].output_token_ids
                 for logits_processor in logits_processors:
                     logits_row = logits_processor(token_ids, logits_row)
                 logits[logits_row_idx] = logits_row
                 logits_row_idx += 1
-        else:
-            logits_row_idx += len(seq_ids)
-    if found_logits_processors:
-        assert logits_row_idx == logits.shape[0]
+
+    # ensures that we processed all rows in logits
+    assert logits_row_idx == logits.shape[0]
     return logits
