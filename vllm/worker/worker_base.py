@@ -59,3 +59,13 @@ class WorkerBase(ABC):
     @abstractmethod
     def list_loras(self) -> List[int]:
         raise NotImplementedError
+
+class LoraNotSupportedWorkerBase(WorkerBase);
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        raise ValueError(f"{type(self)} does not support LoRA")
+
+    def remove_lora(self, lora_id: int) -> bool:
+        raise ValueError(f"{type(self)} does not support LoRA")
+
+    def list_loras(self) -> List[int]:
+        raise ValueError(f"{type(self)} does not support LoRA")
