@@ -6,9 +6,9 @@ import time
 from typing import List, Optional, Tuple
 
 import torch
+from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           PreTrainedTokenizerBase)
-from tqdm import tqdm
 
 
 def sample_requests(
@@ -72,20 +72,28 @@ def run_vllm(
     max_model_len: Optional[int],
     enforce_eager: bool,
     kv_cache_dtype: str,
+    quantization_param_path: Optional[str],
+    device: str,
+    enable_prefix_caching: bool,
+    gpu_memory_utilization: float = 0.9,
+    download_dir: Optional[str] = None,
 ) -> float:
     from vllm import LLM, SamplingParams
-    llm = LLM(
-        model=model,
-        tokenizer=tokenizer,
-        quantization=quantization,
-        tensor_parallel_size=tensor_parallel_size,
-        seed=seed,
-        trust_remote_code=trust_remote_code,
-        dtype=dtype,
-        max_model_len=max_model_len,
-        enforce_eager=enforce_eager,
-        kv_cache_dtype=kv_cache_dtype,
-    )
+    llm = LLM(model=model,
+              tokenizer=tokenizer,
+              quantization=quantization,
+              tensor_parallel_size=tensor_parallel_size,
+              seed=seed,
+              trust_remote_code=trust_remote_code,
+              dtype=dtype,
+              max_model_len=max_model_len,
+              gpu_memory_utilization=gpu_memory_utilization,
+              enforce_eager=enforce_eager,
+              kv_cache_dtype=kv_cache_dtype,
+              quantization_param_path=quantization_param_path,
+              device=device,
+              enable_prefix_caching=enable_prefix_caching,
+              download_dir=download_dir)
 
     # Add the requests to the engine.
     for prompt, _, output_len in requests:
@@ -177,13 +185,15 @@ def run_mii(
     tensor_parallel_size: int,
     output_len: int,
 ) -> float:
-    from mii import pipeline
-    llm = pipeline(model, tensor_parallel=tensor_parallel_size)
+    from mii import client, serve
+    llm = serve(model, tensor_parallel=tensor_parallel_size)
     prompts = [prompt for prompt, _, _ in requests]
 
     start = time.perf_counter()
-    llm(prompts, max_new_tokens=output_len)
+    llm.generate(prompts, max_new_tokens=output_len)
     end = time.perf_counter()
+    client = client(model)
+    client.terminate_server()
     return end - start
 
 
@@ -209,7 +219,10 @@ def main(args: argparse.Namespace):
                                 args.seed, args.n, args.use_beam_search,
                                 args.trust_remote_code, args.dtype,
                                 args.max_model_len, args.enforce_eager,
-                                args.kv_cache_dtype)
+                                args.kv_cache_dtype,
+                                args.quantization_param_path, args.device,
+                                args.enable_prefix_caching,
+                                args.gpu_memory_utilization, args.download_dir)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -284,16 +297,50 @@ if __name__ == "__main__":
         'The "auto" option will use FP16 precision '
         'for FP32 and FP16 models, and BF16 precision '
         'for BF16 models.')
+    parser.add_argument('--gpu-memory-utilization',
+                        type=float,
+                        default=0.9,
+                        help='the fraction of GPU memory to be used for '
+                        'the model executor, which can range from 0 to 1.'
+                        'If unspecified, will use the default value of 0.9.')
     parser.add_argument("--enforce-eager",
                         action="store_true",
                         help="enforce eager execution")
     parser.add_argument(
         "--kv-cache-dtype",
         type=str,
-        choices=["auto", "fp8_e5m2"],
+        choices=["auto", "fp8"],
         default="auto",
         help=
-        'Data type for kv cache storage. If "auto", will use model data type.')
+        'Data type for kv cache storage. If "auto", will use model data type. '
+        'FP8_E5M2 (without scaling) is only supported on cuda version greater '
+        'than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead supported for '
+        'common inference criteria.')
+    parser.add_argument(
+        '--quantization-param-path',
+        type=str,
+        default=None,
+        help='Path to the JSON file containing the KV cache scaling factors. '
+        'This should generally be supplied, when KV cache dtype is FP8. '
+        'Otherwise, KV cache scaling factors default to 1.0, which may cause '
+        'accuracy issues. FP8_E5M2 (without scaling) is only supported on '
+        'cuda version greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 is '
+        'instead supported for common inference criteria.')
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda",
+        choices=["cuda"],
+        help='device type for vLLM execution, supporting CUDA only currently.')
+    parser.add_argument(
+        "--enable-prefix-caching",
+        action='store_true',
+        help="enable automatic prefix caching for vLLM backend.")
+    parser.add_argument('--download-dir',
+                        type=str,
+                        default=None,
+                        help='directory to download and load the weights, '
+                        'default to the default cache dir of huggingface')
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model

@@ -1,24 +1,49 @@
 """Utilities for downloading and initializing model weights."""
-import filelock
-import glob
 import fnmatch
+import glob
+import hashlib
 import json
 import os
 from collections import defaultdict
-from typing import Any, Iterator, List, Optional, Tuple
+from typing import Any, Iterable, Iterator, List, Optional, Tuple
 
-from huggingface_hub import snapshot_download, HfFileSystem
+import filelock
+import huggingface_hub.constants
 import numpy as np
-from safetensors.torch import load_file, save_file, safe_open
 import torch
-from transformers import PretrainedConfig
+from huggingface_hub import HfFileSystem, snapshot_download
+from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
 
+from vllm.config import ModelConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import (get_quantization_config,
-                                                     QuantizationConfig)
+from vllm.model_executor.layers.quantization import (QuantizationConfig,
+                                                     get_quantization_config)
+from vllm.model_executor.layers.quantization.schema import QuantParamSchema
 
 logger = init_logger(__name__)
+
+# use system-level temp directory for file locks, so that multiple users
+# can share the same lock without error.
+# lock files in the temp directory will be automatically deleted when the
+# system reboots, so users will not complain about annoying lock files
+temp_dir = os.environ.get('TMPDIR') or os.environ.get(
+    'TEMP') or os.environ.get('TMP') or "/tmp/"
+
+
+def enable_hf_transfer():
+    """automatically activates hf_transfer
+    """
+    if "HF_HUB_ENABLE_HF_TRANSFER" not in os.environ:
+        try:
+            # enable hf hub transfer if available
+            import hf_transfer  # type: ignore # noqa
+            huggingface_hub.constants.HF_HUB_ENABLE_HF_TRANSFER = True
+        except ImportError:
+            pass
+
+
+enable_hf_transfer()
 
 
 class Disabledtqdm(tqdm):
@@ -28,9 +53,15 @@ class Disabledtqdm(tqdm):
 
 
 def get_lock(model_name_or_path: str, cache_dir: Optional[str] = None):
-    lock_dir = cache_dir if cache_dir is not None else "/tmp"
-    lock_file_name = model_name_or_path.replace("/", "-") + ".lock"
-    lock = filelock.FileLock(os.path.join(lock_dir, lock_file_name))
+    lock_dir = cache_dir or temp_dir
+    os.makedirs(os.path.dirname(lock_dir), exist_ok=True)
+    model_name = model_name_or_path.replace("/", "-")
+    hash_name = hashlib.sha256(model_name.encode()).hexdigest()
+    # add hash to avoid conflict with old users' lock files
+    lock_file_name = hash_name + model_name + ".lock"
+    # mode 0o666 is required for the filelock to be shared across users
+    lock = filelock.FileLock(os.path.join(lock_dir, lock_file_name),
+                             mode=0o666)
     return lock
 
 
@@ -83,25 +114,22 @@ def convert_bin_to_safetensor_file(
 
 
 # TODO(woosuk): Move this to other place.
-def get_quant_config(
-    quantization: str,
-    model_name_or_path: str,
-    hf_config: PretrainedConfig,
-    cache_dir: Optional[str] = None,
-) -> QuantizationConfig:
-    quant_cls = get_quantization_config(quantization)
+def get_quant_config(model_config: ModelConfig) -> QuantizationConfig:
+    quant_cls = get_quantization_config(model_config.quantization)
     # Read the quantization config from the HF model config, if available.
-    hf_quant_config = getattr(hf_config, "quantization_config", None)
+    hf_quant_config = getattr(model_config.hf_config, "quantization_config",
+                              None)
     if hf_quant_config is not None:
         return quant_cls.from_config(hf_quant_config)
-
+    model_name_or_path = model_config.model
     is_local = os.path.isdir(model_name_or_path)
     if not is_local:
         # Download the config files.
-        with get_lock(model_name_or_path, cache_dir):
+        with get_lock(model_name_or_path, model_config.download_dir):
             hf_folder = snapshot_download(model_name_or_path,
+                                          revision=model_config.revision,
                                           allow_patterns="*.json",
-                                          cache_dir=cache_dir,
+                                          cache_dir=model_config.download_dir,
                                           tqdm_class=Disabledtqdm)
     else:
         hf_folder = model_name_or_path
@@ -112,10 +140,12 @@ def get_quant_config(
             f.endswith(x) for x in quant_cls.get_config_filenames())
     ]
     if len(quant_config_files) == 0:
-        raise ValueError(f"Cannot find the config file for {quantization}")
+        raise ValueError(
+            f"Cannot find the config file for {model_config.quantization}")
     if len(quant_config_files) > 1:
-        raise ValueError(f"Found multiple config files for {quantization}: "
-                         f"{quant_config_files}")
+        raise ValueError(
+            f"Found multiple config files for {model_config.quantization}: "
+            f"{quant_config_files}")
 
     quant_config_file = quant_config_files[0]
     with open(quant_config_file, "r") as f:
@@ -260,6 +290,46 @@ def hf_model_weights_iterator(
                 yield name, param
             del state
             torch.cuda.empty_cache()
+
+
+def kv_cache_scales_loader(
+        filename: str, tp_rank: int, tp_size: int, num_hidden_layers: int,
+        model_type: Optional[str]) -> Iterable[Tuple[int, float]]:
+    """
+    A simple utility to read in KV cache scaling factors that have been
+    previously serialized to disk. Used by the model to populate the appropriate
+    KV cache scaling factors. The serialization should represent a dictionary
+    whose keys are the TP ranks and values are another dictionary mapping layers
+    to their KV cache scaling factors.
+    Keep this function in sync with the output of examples/fp8/extract_scales.py
+    """
+    try:
+        with open(filename) as f:
+            context = {
+                "model_type": model_type,
+                "num_hidden_layers": num_hidden_layers,
+                "tp_rank": tp_rank,
+                "tp_size": tp_size,
+            }
+            schema_dct = json.load(f)
+            schema = QuantParamSchema.model_validate(schema_dct,
+                                                     context=context)
+            layer_scales_map = schema.kv_cache.scaling_factor[tp_rank]
+            return layer_scales_map.items()
+
+    except FileNotFoundError:
+        logger.error(f"File or directory '{filename}' not found.")
+    except json.JSONDecodeError:
+        logger.error(f"Error decoding JSON in file '{filename}'.")
+    except Exception as e:
+        logger.error(f"An error occurred while reading '{filename}': {e}")
+    # This section is reached if and only if any of the excepts are hit
+    # Return an empty iterable (list) => no KV cache scales are loaded
+    # which ultimately defaults to 1.0 scales
+    logger.warning("Defaulting to KV cache scaling factors = 1.0 "
+                   f"for all layers in TP rank {tp_rank} "
+                   "as an error occurred during loading.")
+    return []
 
 
 def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:

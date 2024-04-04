@@ -6,7 +6,8 @@ from torch.nn.parameter import Parameter
 from vllm._C import ops
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 
 
 class AWQConfig(QuantizationConfig):
@@ -50,7 +51,8 @@ class AWQConfig(QuantizationConfig):
     def get_config_filenames() -> List[str]:
         return [
             "quant_config.json",  # E.g., casperhansen/vicuna-7b-v1.5-awq
-            "quantize_config.json",  # E.g., abhinavkulkarni/mosaicml-mpt-7b-instruct-w4-g128-awq
+            # E.g., abhinavkulkarni/mosaicml-mpt-7b-instruct-w4-g128-awq
+            "quantize_config.json",
         ]
 
     @classmethod
@@ -96,7 +98,6 @@ class AWQLinearMethod(LinearMethodBase):
             torch.empty(
                 input_size_per_partition,
                 output_size_per_partition // self.quant_config.pack_factor,
-                device="cuda",
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -112,7 +113,6 @@ class AWQLinearMethod(LinearMethodBase):
             torch.empty(
                 input_size_per_partition // self.quant_config.group_size,
                 output_size_per_partition // self.quant_config.pack_factor,
-                device="cuda",
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -128,7 +128,6 @@ class AWQLinearMethod(LinearMethodBase):
             torch.empty(
                 input_size_per_partition // self.quant_config.group_size,
                 output_size_per_partition,
-                device="cuda",
                 dtype=params_dtype,
             ),
             requires_grad=False,
@@ -148,8 +147,8 @@ class AWQLinearMethod(LinearMethodBase):
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         qweight = weights["qweight"]
-        qzeros = weights["qzeros"]
         scales = weights["scales"]
+        qzeros = weights["qzeros"]
         pack_factor = self.quant_config.pack_factor
         out_shape = (x.shape[:-1] + (qweight.shape[-1] * pack_factor, ))
         reshaped_x = x.reshape(-1, x.shape[-1])

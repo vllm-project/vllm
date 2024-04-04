@@ -16,16 +16,20 @@ def main(args: argparse.Namespace):
 
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
-    llm = LLM(
-        model=args.model,
-        tokenizer=args.tokenizer,
-        quantization=args.quantization,
-        tensor_parallel_size=args.tensor_parallel_size,
-        trust_remote_code=args.trust_remote_code,
-        dtype=args.dtype,
-        enforce_eager=args.enforce_eager,
-        kv_cache_dtype=args.kv_cache_dtype,
-    )
+    llm = LLM(model=args.model,
+              tokenizer=args.tokenizer,
+              quantization=args.quantization,
+              tensor_parallel_size=args.tensor_parallel_size,
+              trust_remote_code=args.trust_remote_code,
+              dtype=args.dtype,
+              enforce_eager=args.enforce_eager,
+              kv_cache_dtype=args.kv_cache_dtype,
+              quantization_param_path=args.quantization_param_path,
+              device=args.device,
+              ray_workers_use_nsight=args.ray_workers_use_nsight,
+              enable_chunked_prefill=args.enable_chunked_prefill,
+              download_dir=args.download_dir,
+              block_size=args.block_size)
 
     sampling_params = SamplingParams(
         n=args.n,
@@ -36,7 +40,10 @@ def main(args: argparse.Namespace):
         max_tokens=args.output_len,
     )
     print(sampling_params)
-    dummy_prompt_token_ids = [[0] * args.input_len] * args.batch_size
+    dummy_prompt_token_ids = np.random.randint(10000,
+                                               size=(args.batch_size,
+                                                     args.input_len))
+    dummy_prompt_token_ids = dummy_prompt_token_ids.tolist()
 
     def run_to_completion(profile_dir: Optional[str] = None):
         if profile_dir:
@@ -70,7 +77,7 @@ def main(args: argparse.Namespace):
                 "."
             ) / "vllm_benchmark_result" / f"latency_result_{time.time()}"
         print(f"Profiling (results will be saved to '{profile_dir}')...")
-        run_to_completion(profile_dir=args.profile_result_dir)
+        run_to_completion(profile_dir=profile_dir)
         return
 
     # Benchmark.
@@ -121,10 +128,23 @@ if __name__ == '__main__':
     parser.add_argument(
         "--kv-cache-dtype",
         type=str,
-        choices=['auto', 'fp8_e5m2'],
+        choices=['auto', 'fp8'],
         default='auto',
         help=
-        'Data type for kv cache storage. If "auto", will use model data type.')
+        'Data type for kv cache storage. If "auto", will use model data type. '
+        'FP8_E5M2 (without scaling) is only supported on cuda version greater '
+        'than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead supported for '
+        'common inference criteria.')
+    parser.add_argument(
+        '--quantization-param-path',
+        type=str,
+        default=None,
+        help='Path to the JSON file containing the KV cache scaling factors. '
+        'This should generally be supplied, when KV cache dtype is FP8. '
+        'Otherwise, KV cache scaling factors default to 1.0, which may cause '
+        'accuracy issues. FP8_E5M2 (without scaling) is only supported on '
+        'cuda version greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 is '
+        'instead supported for common inference criteria.')
     parser.add_argument(
         '--profile',
         action='store_true',
@@ -135,5 +155,31 @@ if __name__ == '__main__':
         default=None,
         help=('path to save the pytorch profiler output. Can be visualized '
               'with ui.perfetto.dev or Tensorboard.'))
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda",
+        choices=["cuda"],
+        help='device type for vLLM execution, supporting CUDA only currently.')
+    parser.add_argument('--block-size',
+                        type=int,
+                        default=16,
+                        help='block size of key/value cache')
+    parser.add_argument(
+        '--enable-chunked-prefill',
+        type=bool,
+        default=False,
+        help='If True, the prefill requests can be chunked based on the '
+        'max_num_batched_tokens')
+    parser.add_argument(
+        "--ray-workers-use-nsight",
+        action='store_true',
+        help="If specified, use nsight to profile ray workers",
+    )
+    parser.add_argument('--download-dir',
+                        type=str,
+                        default=None,
+                        help='directory to download and load the weights, '
+                        'default to the default cache dir of huggingface')
     args = parser.parse_args()
     main(args)

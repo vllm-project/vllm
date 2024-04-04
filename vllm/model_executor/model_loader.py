@@ -1,14 +1,19 @@
 """Utilities for selecting and loading models."""
 import contextlib
-from typing import Optional, Type
+from typing import Tuple, Type
 
 import torch
 import torch.nn as nn
 
-from vllm.config import ModelConfig, LoRAConfig
+from vllm.config import DeviceConfig, ModelConfig
 from vllm.model_executor.models import ModelRegistry
+from vllm.model_executor.models.llava import LlavaForConditionalGeneration
 from vllm.model_executor.weight_utils import (get_quant_config,
                                               initialize_dummy_weights)
+
+_VISION_MODEL_CLASSES = [
+    LlavaForConditionalGeneration,
+]
 
 
 @contextlib.contextmanager
@@ -20,7 +25,8 @@ def _set_default_torch_dtype(dtype: torch.dtype):
     torch.set_default_dtype(old_dtype)
 
 
-def _get_model_architecture(model_config: ModelConfig) -> Type[nn.Module]:
+def _get_model_architecture(
+        model_config: ModelConfig) -> Tuple[Type[nn.Module], str]:
     architectures = getattr(model_config.hf_config, "architectures", [])
     # Special handling for quantized Mixtral.
     # FIXME(woosuk): This is a temporary hack.
@@ -31,23 +37,26 @@ def _get_model_architecture(model_config: ModelConfig) -> Type[nn.Module]:
     for arch in architectures:
         model_cls = ModelRegistry.load_model_cls(arch)
         if model_cls is not None:
-            return model_cls
+            return (model_cls, arch)
     raise ValueError(
         f"Model architectures {architectures} are not supported for now. "
         f"Supported architectures: {ModelRegistry.get_supported_archs()}")
 
 
-def get_model(model_config: ModelConfig,
-              lora_config: Optional[LoRAConfig] = None) -> nn.Module:
-    model_class = _get_model_architecture(model_config)
+def get_architecture_class_name(model_config: ModelConfig) -> str:
+    return _get_model_architecture(model_config)[1]
+
+
+def get_model(model_config: ModelConfig, device_config: DeviceConfig,
+              **kwargs) -> nn.Module:
+    lora_config = kwargs.get("lora_config", None)
+    vision_language_config = kwargs.get("vision_language_config", None)
+    model_class = _get_model_architecture(model_config)[0]
 
     # Get the (maybe quantized) linear method.
     linear_method = None
     if model_config.quantization is not None:
-        quant_config = get_quant_config(model_config.quantization,
-                                        model_config.model,
-                                        model_config.hf_config,
-                                        model_config.download_dir)
+        quant_config = get_quant_config(model_config)
         capability = torch.cuda.get_device_capability()
         capability = capability[0] * 10 + capability[1]
         if capability < quant_config.get_min_capability():
@@ -67,8 +76,8 @@ def get_model(model_config: ModelConfig,
     with _set_default_torch_dtype(model_config.dtype):
         # Create a model instance.
         # The weights will be initialized as empty tensors.
-        with torch.device("cuda"):
-            if getattr(model_class, "supports_lora", False):
+        with torch.device(device_config.device):
+            if hasattr(model_class, "supported_lora_modules"):
                 model = model_class(model_config.hf_config, linear_method,
                                     lora_config)
             elif lora_config:
@@ -78,7 +87,11 @@ def get_model(model_config: ModelConfig,
                     "be added in the future. If this is important to you, "
                     "please open an issue on github.")
             else:
-                model = model_class(model_config.hf_config, linear_method)
+                if model_class not in _VISION_MODEL_CLASSES:
+                    model = model_class(model_config.hf_config, linear_method)
+                else:
+                    model = model_class(model_config.hf_config,
+                                        vision_language_config, linear_method)
         if model_config.load_format == "dummy":
             # NOTE(woosuk): For accurate performance evaluation, we assign
             # random values to the weights.
