@@ -35,7 +35,7 @@ def enable_hf_transfer():
     """
     if "HF_HUB_ENABLE_HF_TRANSFER" not in os.environ:
         try:
-            # enable hf hub transfer if available
+            # enable hf hub transfer  if available
             import hf_transfer  # type: ignore # noqa
             huggingface_hub.constants.HF_HUB_ENABLE_HF_TRANSFER = True
         except ImportError:
