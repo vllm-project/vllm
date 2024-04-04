@@ -1,4 +1,14 @@
 from dataclasses import dataclass
+from typing import Optional
+import hashlib
+
+
+def positive_hash_sha256(input_string):
+    """
+    function to generate positive hash from input string, which is used to identify the model variant for lora
+    sha-256 is used to keep it consistent between python versions and the sheets addon
+    """
+    return int(hashlib.sha256(input_string.encode('utf-8')).hexdigest(), 16) % (2 ** 63)
 
 
 @dataclass
@@ -16,10 +26,13 @@ class LoRARequest:
     """
 
     lora_name: str
-    lora_int_id: int
     lora_local_path: str
+    lora_int_id: Optional[int] = 0
 
     def __post_init__(self):
+        # if no int_id was given, use the name hash as id
+        if not self.lora_int_id:
+            self.lora_int_id = positive_hash_sha256(self.lora_name)
         if self.lora_int_id < 1:
             raise ValueError(
                 f"lora_int_id must be > 0, got {self.lora_int_id}")
