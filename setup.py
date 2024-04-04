@@ -337,6 +337,7 @@ def get_requirements() -> List[str]:
                                     f"vllm-nccl-cu{cuda_major}"))
                 else:
                     modified_requirements.append(req)
+            requirements = modified_requirements
     elif _is_hip():
         with open(get_path("requirements-rocm.txt")) as f:
             requirements = f.read().strip().split("\n")
