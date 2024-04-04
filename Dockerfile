@@ -126,6 +126,7 @@ FROM vllm-base AS test
 # files and directories related to tests (CI)
 COPY tests tests
 COPY benchmarks benchmarks
+COPY examples examples
 
 # install development dependencies (for testing)
 COPY requirements-dev.txt requirements-dev.txt
