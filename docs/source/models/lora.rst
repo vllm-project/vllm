@@ -102,3 +102,18 @@ The following is an example request
             "max_tokens": 7,
             "temperature": 0
         }' | jq
+
+
+Alternatively, the request can specify a LoRA adapter to load dynamically from the server's local disk storage:
+
+.. code-block:: bash
+
+    curl http://localhost:8000/v1/completions \
+        -H "Content-Type: application/json" \
+        -d '{
+            "model": "sql-lora",
+            "prompt": "San Francisco is a",
+            "max_tokens": 7,
+            "temperature": 0,
+            "lora_request": {"lora_name":"sql-lora","lora_local_path":"/data/adapters/sql-lora"}
+        }' | jq
