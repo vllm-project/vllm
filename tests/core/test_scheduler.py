@@ -99,6 +99,35 @@ def test_scheduler_schedule_simple():
     assert len(seq_group_meta) == num_seq_group
 
 
+def test_scheduler_prefill_prioritized():
+    """Verify running batched tokens are not applied to prefill requests."""
+    block_size = 4
+    max_model_len = 1
+    max_batched_num_tokens = 1
+    scheduler_config = SchedulerConfig(max_batched_num_tokens, 1, max_model_len)
+    cache_config = CacheConfig(block_size, 1.0, 1, "auto")
+    cache_config.num_cpu_blocks = 2
+    cache_config.num_gpu_blocks = 2
+    scheduler = Scheduler(scheduler_config, cache_config, None)
+
+    # Add seq groups to scheduler.
+    _, seq_group_a = create_dummy_prompt("1", 1)
+    scheduler.add_seq_group(seq_group_a)
+
+    # Schedule seq groups prompts.
+    seq_group_meta, out = scheduler.schedule()
+    assert get_sequence_groups(out) == [seq_group_a]
+
+    # Add a new prefill request B.
+    _, seq_group_b = create_dummy_prompt("2", 1)
+    scheduler.add_seq_group(seq_group_b)
+    
+    # Verify prefill requests are prioritized. Since max_batched_num_tokens
+    # is 1, new prefill request has to be scheduled first.
+    __name__, out = scheduler.schedule()
+    assert get_sequence_groups(out) == [seq_group_b]
+
+
 def test_scheduler_schedule_preempt_abort():
     block_size = 4
     max_model_len = 16
@@ -285,6 +314,12 @@ def create_token_budget(token_budget: int = 10000,
         token_budget=token_budget,
         max_num_seqs=max_num_seqs,
     )
+
+
+def add_token_budget(budget: SchedulingBudget, num_batched_tokens: int = 0, num_curr_seqs: int = 0):
+    mock_seq_group = create_dummy_prompt('10', prompt_length=60)[1]
+    budget.add_num_batched_tokens(mock_seq_group, num_batched_tokens)
+    budget.add_num_seqs(mock_seq_group, num_curr_seqs)
     
 
 def test_prefill_schedule_max_prompt_len():
@@ -338,6 +373,7 @@ def test_prefill_schedule_token_budget():
     scheduler = initialize_scheduler()
     waiting = deque()
     budget = create_token_budget(token_budget=60)
+    add_token_budget(budget, 30, 0)
     _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
     # Cannot schedule a prompt that doesn't fit the budget.
     waiting.append(seq_group)
@@ -349,7 +385,7 @@ def test_prefill_schedule_token_budget():
     assert budget.num_curr_seqs == 0
     assert len(remaining_waiting) == 1
     budget = create_token_budget(token_budget=90)
-    budget.subtract_budget(create_dummy_prompt('10', prompt_length=60)[1], 30, 1)
+    add_token_budget(budget, 30, 0)
     remaining_waiting, output = scheduler._schedule_prefills(
         waiting, budget, None)
     assert len(output.seq_groups) == 1
@@ -379,7 +415,7 @@ def test_prefill_schedule_max_seqs():
     # Verify curr_num_seqs respected.
     waiting = deque()
     budget = create_token_budget(max_num_seqs=2)
-    budget.subtract_budget(create_dummy_prompt('10', prompt_length=60)[1], 0, 2)
+    add_token_budget(budget, 0, 2)
     _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
     waiting.append(seq_group)
     remaining_waiting, output = scheduler._schedule_prefills(
@@ -498,7 +534,7 @@ def test_decode_schedule_preempted():
     # 1 cannot be scheduled, and the lowest priority (request 2)
     # should be preempted. 1 will also be preempted.
     budget = create_token_budget()
-    budget.subtract_budget(create_dummy_prompt('10', prompt_length=60)[1], 3, 3)
+    add_token_budget(budget, 3, 3) 
     remainig_running, output = scheduler._schedule_running(
         running, budget, curr_loras, policy)
     assert len(remainig_running) == 0
@@ -540,7 +576,7 @@ def test_decode_swap_beam_search():
     scheduler.block_manager.swap_out.return_value = expected_swap_mapping
 
     budget = create_token_budget()
-    budget.subtract_budget(create_dummy_prompt('10', prompt_length=60)[1], 0, 3)
+    add_token_budget(budget, 3, 3)
     remainig_running, output = scheduler._schedule_running(
         running, budget, curr_loras, policy)
     assert len(remainig_running) == 0
@@ -636,7 +672,7 @@ def test_schedule_swapped_max_token_budget():
 
     # Verify num_batched_tokens are respected.
     budget = create_token_budget(token_budget=1)
-    budget.subtract_budget(create_dummy_prompt('10', prompt_length=60)[1], 1, 0)
+    add_token_budget(budget, 1, 0)
     remaining_swapped, output = scheduler._schedule_swapped(
         remaining_swapped, budget, curr_loras, policy)
     assert len(remaining_swapped) == 1
@@ -667,7 +703,7 @@ def test_schedule_swapped_max_seqs():
 
     # Verify num_curr_seqs are respected.
     budget = create_token_budget(max_num_seqs=2)
-    budget.subtract_budget(create_dummy_prompt('10', prompt_length=60)[1], 0, 2)
+    add_token_budget(budget, 0, 2)
     remaining_swapped, output = scheduler._schedule_swapped(
         remaining_swapped, budget, curr_loras, policy)
     assert len(remaining_swapped) == 1
