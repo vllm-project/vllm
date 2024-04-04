@@ -24,14 +24,6 @@ class LoRA:
     local_path: str
 
 
-def positive_hash_sha256(input_string):
-    """
-    function to generate positive hash from input string, which is used to identify the model variant for lora
-    sha-256 is used to keep it consistent between python versions and the sheets addon
-    """
-    return int(hashlib.sha256(input_string.encode('utf-8')).hexdigest(), 16) % (2 ** 63)
-
-
 class OpenAIServing:
 
     def __init__(self,
