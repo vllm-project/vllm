@@ -320,6 +320,22 @@ class Sequence:
         new_seq.seq_id = new_seq_id
         return new_seq
 
+    def get_new_num_tokens(self) -> int:
+        """Get the number of new tokens to be computed.
+
+        Args:
+            remainig_token_budget: The remaining token budgets.
+        Returns:
+            The new number of tokens to be computed. I.e., 1 for decode, prompt
+            size for prefill. If there's not enough remainig_token_budget, it
+            can return the chunked number of new tokens.
+        """
+        num_uncomputed_tokens = self.data.get_num_uncomputed_tokens()
+        if num_uncomputed_tokens == 0:
+            # decoding request.
+            return 1
+        return num_uncomputed_tokens
+
     def __repr__(self) -> str:
         return (f"Sequence(seq_id={self.seq_id}, "
                 f"status={self.status.name}, "
@@ -462,13 +478,6 @@ class SequenceGroup:
         """Update number of tokens computed so far."""
         for seq in self.seqs_dict.values():
             seq.data.update_num_computed_tokens(num_new_computed_tokens)
-
-    def get_num_uncomputed_tokens(self) -> int:
-        # All sequences in the group should have the same prompt, so the
-        # number of unfinished prefill tokens are the same across all
-        # sequences.
-        return list(
-            self.seqs_dict.values())[0].data.get_num_uncomputed_tokens()
 
     def num_seqs(self, status: Optional[SequenceStatus] = None) -> int:
         return len(self.get_seqs(status))

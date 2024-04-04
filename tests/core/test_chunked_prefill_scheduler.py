@@ -1,0 +1,86 @@
+from typing import List
+
+import pytest  # noqa
+
+from vllm.config import CacheConfig, SchedulerConfig
+from vllm.core.scheduler import Scheduler
+from vllm.sequence import SequenceGroup
+
+from .utils import create_dummy_prompt
+
+
+def get_sequence_groups(scheduler_output):
+    return [s.seq_group for s in scheduler_output.scheduled_seq_groups]
+
+
+def test_scheduler_add_seq_group():
+    block_size = 4
+    scheduler_config = SchedulerConfig(100, 64, 1)
+    cache_config = CacheConfig(block_size, 1.0, 1, cache_dtype="auto")
+    cache_config.num_cpu_blocks = 4
+    cache_config.num_gpu_blocks = 4
+    scheduler = Scheduler(scheduler_config, cache_config, None)
+
+    # Add seq group to scheduler.
+    num_seq_group = 4
+    for i in range(num_seq_group):
+        _, seq_group = create_dummy_prompt(str(i), block_size)
+        scheduler.add_seq_group(seq_group)
+        assert scheduler.get_num_unfinished_seq_groups() == i + 1
+
+
+def test_scheduler_abort_seq_group():
+    block_size = 4
+    scheduler_config = SchedulerConfig(100, 64, 1)
+    cache_config = CacheConfig(block_size, 1.0, 1, "auto")
+    cache_config.num_cpu_blocks = 4
+    cache_config.num_gpu_blocks = 4
+    scheduler = Scheduler(scheduler_config, cache_config, None)
+
+    # Add multiple seq groups to scheduler.
+    num_seq_group = 4
+    request_ids = set()
+    for i in range(num_seq_group):
+        _, seq_group = create_dummy_prompt(str(i), block_size)
+        scheduler.add_seq_group(seq_group)
+        request_ids.add(str(i))
+
+    # Abort all added seq groups.
+    assert scheduler.get_num_unfinished_seq_groups() == num_seq_group
+    scheduler.abort_seq_group(request_ids)
+    assert scheduler.get_num_unfinished_seq_groups() == 0
+
+
+def test_scheduler_schedule_simple():
+    block_size = 4
+    num_seq_group = 4
+    max_model_len = 16
+    scheduler_config = SchedulerConfig(64, num_seq_group, max_model_len)
+    cache_config = CacheConfig(block_size, 1.0, 1, "auto")
+    cache_config.num_cpu_blocks = 8
+    cache_config.num_gpu_blocks = 8
+    scheduler = Scheduler(scheduler_config, cache_config, None)
+    running: List[SequenceGroup] = []
+
+    # Add seq groups to scheduler.
+    for i in range(num_seq_group):
+        _, seq_group = create_dummy_prompt(str(i), prompt_length=block_size)
+        scheduler.add_seq_group(seq_group)
+        running.append(seq_group)
+
+    # Schedule seq groups prompts.
+    num_tokens = block_size * num_seq_group
+    seq_group_meta, out = scheduler.schedule()
+    assert set(get_sequence_groups(out)) == set(running)
+    assert out.num_batched_tokens == num_tokens
+    assert (not out.blocks_to_copy and not out.blocks_to_swap_in
+            and not out.blocks_to_swap_out)
+    assert len(seq_group_meta) == num_seq_group
+
+    # Schedule seq groups generation.
+    seq_group_meta, out = scheduler.schedule()
+    assert set(get_sequence_groups(out)) == set(running)
+    assert out.num_batched_tokens == num_seq_group
+    assert (not out.blocks_to_copy and not out.blocks_to_swap_in
+            and not out.blocks_to_swap_out)
+    assert len(seq_group_meta) == num_seq_group

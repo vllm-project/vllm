@@ -10,13 +10,20 @@ from vllm.core.interfaces import AllocStatus
 from vllm.core.policy import PolicyFactory
 from vllm.core.scheduler import Scheduler, SchedulingBudget
 from vllm.lora.request import LoRARequest
-from vllm.sequence import Logprob, SequenceGroup
+from vllm.sequence import Logprob, SequenceGroup, Logprob
 
 from .utils import create_dummy_prompt
 
 
 def get_sequence_groups(scheduler_output):
     return [s.seq_group for s in scheduler_output.scheduled_seq_groups]
+
+
+def append_new_token(out, token_id: int):
+    seq_groups = get_sequence_groups(out)
+    for seq_group in seq_groups:
+        for seq in seq_group.get_seqs():
+            seq.append_token_id(token_id, {token_id: Logprob(token_id)})
 
 
 def test_scheduler_add_seq_group():
@@ -165,10 +172,12 @@ def test_scheduler_max_seqs():
     # Schedule seq groups prompts.
     _, out = scheduler.schedule()
     assert set(get_sequence_groups(out)) == set([all_seq_groups[0]])
+    append_new_token(out, 1)
 
     # Schedule seq groups generation.
     _, out = scheduler.schedule()
     assert set(get_sequence_groups(out)) == set([all_seq_groups[0]])
+    append_new_token(out, 1)
 
     # Append 2 more seq group
     scheduler.add_seq_group(all_seq_groups[1])
@@ -195,6 +204,7 @@ def test_scheduler_delay_factor():
     seq_group_meta, out = scheduler.schedule()
     assert out.num_prefill_groups > 0
     assert seq_group_meta[0].request_id == '0'
+    append_new_token(out, 1)
 
     # wait for a second before scheduling next prompt
     time.sleep(1)
@@ -205,12 +215,14 @@ def test_scheduler_delay_factor():
     seq_group_meta, out = scheduler.schedule()
     assert out.num_prefill_groups == 0
     assert seq_group_meta[0].request_id == '0'
+    append_new_token(out, 1)
 
     # wait for more than 0.5 second and try again
     time.sleep(0.6)
     seq_group_meta, out = scheduler.schedule()
     assert out.num_prefill_groups > 0
     assert seq_group_meta[0].request_id == '1'
+    append_new_token(out, 1)
 
 
 def test_swapped_out_prioritized():
@@ -222,6 +234,7 @@ def test_swapped_out_prioritized():
     _, out = scheduler.schedule()
     # prefill scheduled now.
     assert len(out.scheduled_seq_groups) == 3
+    append_new_token(out, 1)
 
     # The last request should be swapped out.
     scheduler.block_manager.can_append_slots = MagicMock()
@@ -237,11 +250,13 @@ def test_swapped_out_prioritized():
     assert out.num_batched_tokens == 2
     assert out.blocks_to_swap_out != {}
     assert out.blocks_to_swap_in == {}
+    append_new_token(out, 1)
 
     # Add 1 more task. Swap should be prioritized over prefill.
     _, seq_group = create_dummy_prompt(str(i), prompt_length=60, best_of=2)
     scheduler.add_seq_group(seq_group)
     _, out = scheduler.schedule()
+    append_new_token(out, 1)
     assert len(out.scheduled_seq_groups) == 3
     # 3 decodes. It is swapped in.
     assert out.num_batched_tokens == 3
@@ -472,7 +487,7 @@ def test_decode_schedule_preempted():
     curr_loras = None
     for i in range(3):
         _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
-        scheduler._allocate_and_set_running(seq_group)
+        scheduler._allocate_and_set_running(seq_group, 60)
         running.append(seq_group)
     scheduler.block_manager.can_append_slots = MagicMock()
 
@@ -485,7 +500,7 @@ def test_decode_schedule_preempted():
     # 1 cannot be scheduled, and the lowest priority (request 2)
     # should be preempted. 1 will also be preempted.
     budget = create_token_budget(num_batched_tokens=3, num_curr_seqs=3)
-    remainig_running, output = scheduler._schedule_decodes(
+    remainig_running, output = scheduler._schedule_running(
         running, budget, curr_loras, policy)
     assert len(remainig_running) == 0
     assert len(output.seq_groups) == 1
@@ -510,7 +525,7 @@ def test_decode_swap_beam_search():
     curr_loras = None
     for i in range(3):
         _, seq_group = create_dummy_prompt(str(i), prompt_length=60, best_of=2)
-        scheduler._allocate_and_set_running(seq_group)
+        scheduler._allocate_and_set_running(seq_group, 60)
         running.append(seq_group)
 
     # The last request should be swapped out.
@@ -526,7 +541,7 @@ def test_decode_swap_beam_search():
     scheduler.block_manager.swap_out.return_value = expected_swap_mapping
 
     budget = create_token_budget(num_batched_tokens=3, num_curr_seqs=3)
-    remainig_running, output = scheduler._schedule_decodes(
+    remainig_running, output = scheduler._schedule_running(
         running, budget, curr_loras, policy)
     assert len(remainig_running) == 0
     assert len(output.seq_groups) == 2
@@ -553,7 +568,7 @@ def test_schedule_decode_blocks_to_copy_update():
     running = deque()
     policy = PolicyFactory.get_policy(policy_name="fcfs")
     curr_loras = None
-    scheduler._allocate_and_set_running(seq_group)
+    scheduler._allocate_and_set_running(seq_group, 60)
     running.append(seq_group)
 
     # The last request should be swapped out.
@@ -561,7 +576,7 @@ def test_schedule_decode_blocks_to_copy_update():
     scheduler.block_manager.append_slots.return_value = {2: [3]}
 
     budget = create_token_budget()
-    remaining_running, output = scheduler._schedule_decodes(
+    remaining_running, output = scheduler._schedule_running(
         running, budget, curr_loras, policy)
     assert len(remaining_running) == 0
     assert len(output.seq_groups) == 1
@@ -581,7 +596,7 @@ def test_schedule_swapped_simple():
     curr_loras = None
     blocks_to_swap_out = {}
     _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
-    scheduler._allocate_and_set_running(seq_group)
+    scheduler._allocate_and_set_running(seq_group, 60)
     scheduler._swap_out(seq_group, blocks_to_swap_out)
     swapped.append(seq_group)
 
@@ -607,7 +622,7 @@ def test_schedule_swapped_max_token_budget():
     blocks_to_swap_out = {}
     for _ in range(2):
         _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
-        scheduler._allocate_and_set_running(seq_group)
+        scheduler._allocate_and_set_running(seq_group, 60)
         scheduler._swap_out(seq_group, blocks_to_swap_out)
         swapped.append(seq_group)
 
@@ -637,7 +652,7 @@ def test_schedule_swapped_max_seqs():
     blocks_to_swap_out = {}
     for _ in range(2):
         _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
-        scheduler._allocate_and_set_running(seq_group)
+        scheduler._allocate_and_set_running(seq_group, 60)
         scheduler._swap_out(seq_group, blocks_to_swap_out)
         swapped.append(seq_group)
 
@@ -673,7 +688,7 @@ def test_schedule_swapped_max_loras():
                                                lora_name=str(i),
                                                lora_int_id=i + 1,
                                                lora_local_path="abc"))
-        scheduler._allocate_and_set_running(seq_group)
+        scheduler._allocate_and_set_running(seq_group, 60)
         scheduler._swap_out(seq_group, blocks_to_swap_out)
         swapped.append(seq_group)
 
@@ -695,7 +710,7 @@ def test_schedule_swapped_cannot_swap_in():
     blocks_to_swap_out = {}
     for _ in range(2):
         _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
-        scheduler._allocate_and_set_running(seq_group)
+        scheduler._allocate_and_set_running(seq_group, 60)
         scheduler._swap_out(seq_group, blocks_to_swap_out)
         swapped.append(seq_group)
 
@@ -718,7 +733,7 @@ def test_schedule_swapped_blocks_to_copy():
     policy = PolicyFactory.get_policy(policy_name="fcfs")
     curr_loras = None
     _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
-    scheduler._allocate_and_set_running(seq_group)
+    scheduler._allocate_and_set_running(seq_group, 60)
     blocks_to_swap_out = {}
     scheduler._swap_out(seq_group, blocks_to_swap_out)
     swapped.append(seq_group)

@@ -38,8 +38,13 @@ class SchedulingBudget:
     max_num_seqs: int
 
     def can_schedule(self, *, num_new_tokens: int, num_new_seqs: int):
+        assert num_new_tokens != 0
+        assert num_new_seqs != 0
         return (self.num_batched_tokens + num_new_tokens <= self.token_budget
                 and self.num_curr_seqs + num_new_seqs <= self.max_num_seqs)
+
+    def remaining_token_budget(self):
+        return self.token_budget - self.num_batched_tokens
 
 
 @dataclass
@@ -96,7 +101,7 @@ class SchedulerOutputs:
 
 @dataclass
 class SchedulerDecodeOutputs:
-    """Outputs of the decoding phase of the scheduler."""
+    """SANG-TODO"""
     # Selected sequence groups for decoding.
     seq_groups: List[SequenceGroup]
     # The preempted sequences.
@@ -123,7 +128,7 @@ class SchedulerDecodeOutputs:
 
 @dataclass
 class SchedulerSwappedInOutputs:
-    """Outputs of the decoding phase of the scheduler."""
+    """SANG-TODO"""
     # Selected sequence groups for decoding.
     seq_groups: List[SequenceGroup]
     # The blocks to swap in.
@@ -145,7 +150,7 @@ class SchedulerSwappedInOutputs:
 
 @dataclass
 class SchedulerPrefillOutputs:
-    """Outputs of the prefill phase of the scheduler."""
+    """SANG-TODO"""
     # Selected sequence groups for prefill.
     seq_groups: List[SequenceGroup]
     # Ignored sequence groups.
@@ -176,12 +181,13 @@ class Scheduler:
         # LoRAs. This should be improved in the future.
         self.lora_config = lora_config
 
-        # TODO(sang): Fix it after chunked prefill is enabled.
-        self.prompt_limit = min(self.scheduler_config.max_model_len,
-                                self.scheduler_config.max_num_batched_tokens)
-
-        # Instantiate the scheduling policy.
-        self.policy = PolicyFactory.get_policy(policy_name="fcfs")
+        # SANG-TODO Add a test case.
+        if self.scheduler_config.chunked_prefill_enabled:
+            self.prompt_limit = self.scheduler_config.max_model_len
+        else:
+            self.prompt_limit = min(
+                self.scheduler_config.max_model_len,
+                self.scheduler_config.max_num_batched_tokens)
 
         BlockSpaceManagerImpl = BlockSpaceManager.get_block_space_manager_class(
             version="v2" if self.scheduler_config.
@@ -268,14 +274,17 @@ class Scheduler:
     def get_num_unfinished_seq_groups(self) -> int:
         return len(self.waiting) + len(self.running) + len(self.swapped)
 
-    def _schedule_decodes(
+    def _schedule_running(
         self,
         running_queue: deque,
         budget: SchedulingBudget,
         curr_loras: Optional[Set[int]],
         policy: Policy,
+        enable_chunking: bool = False,
     ) -> Tuple[deque, SchedulerDecodeOutputs]:
-        """Schedule sequence groups in a decoding stage.
+        """Schedule sequence groups that are running.
+
+        Running queue should include decode and chunked prefill requests.
 
         NOTE(sang): All the RUNNING num_batched_tokens, num_curr_seqs,
         and curr_loras should be already included in `budget` and `curr_loras`.
@@ -292,7 +301,11 @@ class Scheduler:
             curr_loras: Currently batched lora request ids. The argument is
                 in-place updated when any decodes are preempted.
             policy: The sorting policy to sort running_queue.
-        
+            enable_chunking: If True, seq group can be chunked and only a
+                chunked number of tokens are scheduled  if
+                `budget.num_batched_tokens` has not enough capacity to schedule
+                all tokens.
+    
         Returns:
             A tuple of remaining running queue (should be always 0) after
             scheduling and SchedulerDecodeOutputs.
@@ -313,11 +326,18 @@ class Scheduler:
         running_queue = policy.sort_by_priority(now, running_queue)
 
         while running_queue:
-            # NOTE: running
             seq_group = running_queue[0]
-            num_running_tokens = (
-                seq_group.num_seqs(status=SequenceStatus.RUNNING) *
-                self.num_decoding_tokens_per_seq)
+            num_running_tokens = 0
+            seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
+            for seq in seqs:
+                num_running_tokens += seq.get_new_num_tokens()
+            # Chunk if a running request cannot fit in.
+            # If number of seq > 1, it means it is doing beam search in a
+            # decode phase. Do not chunk in that case.
+            if enable_chunking and len(seqs) == 1:
+                num_running_tokens = min(num_running_tokens,
+                                         budget.remaining_token_budget())
+            assert num_running_tokens != 0
             num_running_seqs = seq_group.get_max_num_running_seqs()
 
             running_queue.popleft()
@@ -350,9 +370,13 @@ class Scheduler:
             else:
                 logger.debug(f"append slot for {seq_group}")
                 self._append_slots(seq_group, blocks_to_copy)
+                # NOTE(sang): It assumes the model execution never fails.
+                # This is the general assumption in vllm.
+                seq_group.update_num_computed_tokens(num_running_tokens)
                 seq_groups.append(
-                    ScheduledSequenceGroup(seq_group=seq_group,
-                                           token_chunk_size=1))
+                    ScheduledSequenceGroup(
+                        seq_group=seq_group,
+                        token_chunk_size=num_running_tokens))
         # Make sure all queues are updated.
         assert len(running_queue) == 0
 
@@ -371,6 +395,7 @@ class Scheduler:
         budget: SchedulingBudget,
         curr_loras: Optional[Set[int]],
         policy: Policy,
+        enable_chunking: bool = False,
     ) -> Tuple[deque, SchedulerSwappedInOutputs]:
         """Schedule sequence groups that are swapped out.
 
@@ -386,7 +411,11 @@ class Scheduler:
             curr_loras: Currently batched lora request ids. The argument is
                 in-place updated when any requests are swapped in.
             policy: The sorting policy to sort swapped_queue.
-        
+            enable_chunking: If True, seq group can be chunked and only a
+                chunked number of tokens are scheduled  if
+                `budget.num_batched_tokens` has not enough capacity to schedule
+                all tokens.
+
         Returns:
             A tuple of remaining swapped_queue after scheduling and
             SchedulerSwappedInOutputs.
@@ -420,12 +449,20 @@ class Scheduler:
             # The total number of sequences in the RUNNING state should not
             # exceed the maximum number of sequences.
             num_new_seqs = seq_group.get_max_num_running_seqs()
-            num_new_tokens = (
-                seq_group.num_seqs(status=SequenceStatus.SWAPPED) *
-                self.num_decoding_tokens_per_seq)
+            num_new_tokens = 0
+            seqs = seq_group.get_seqs(status=SequenceStatus.SWAPPED)
+            for seq in seqs:
+                num_new_tokens += seq.get_new_num_tokens()
+            # Chunk if a running request cannot fit in.
+            # If number of seq > 1, it means it is doing beam search in a
+            # decode phase. Do not chunk in that case.
+            if enable_chunking and len(seqs) == 1:
+                num_running_tokens = min(num_running_tokens,
+                                         budget.remaining_token_budget())
 
-            if not budget.can_schedule(num_new_tokens=num_new_tokens,
-                                       num_new_seqs=num_new_seqs):
+            if (not budget.can_schedule(num_new_tokens=num_new_tokens,
+                                        num_new_seqs=num_new_seqs)
+                    or num_new_tokens == 0):
                 break
 
             if lora_int_id > 0 and curr_loras is not None:
@@ -433,8 +470,12 @@ class Scheduler:
             swapped_queue.popleft()
             self._swap_in(seq_group, blocks_to_swap_in)
             self._append_slots(seq_group, blocks_to_copy)
+            # NOTE(sang): It assumes the model execution never fails.
+            # This is the general assumption in vllm.
+            seq_group.update_num_computed_tokens(num_new_tokens)
             seq_groups.append(
-                ScheduledSequenceGroup(seq_group, token_chunk_size=1))
+                ScheduledSequenceGroup(seq_group,
+                                       token_chunk_size=num_new_tokens))
             budget.num_batched_tokens += num_new_tokens
             budget.num_curr_seqs += num_new_seqs
 
@@ -452,6 +493,7 @@ class Scheduler:
         waiting_queue: deque,
         budget: SchedulingBudget,
         curr_loras: Optional[Set[int]],
+        enable_chunking: bool = False,
     ) -> Tuple[deque, SchedulerPrefillOutputs]:
         """Schedule sequence groups that are in prefill stage.
 
@@ -470,6 +512,10 @@ class Scheduler:
                 when any requests are scheduled.
             curr_loras: Currently batched lora request ids. The argument is
                 in-place updated when any requests are scheduled.
+            enable_chunking: If True, seq group can be chunked and only a
+                chunked number of tokens are scheduled  if
+                `budget.num_batched_tokens` has not enough capacity to schedule
+                all tokens.
 
         Returns:
             A tuple of remaining waiting_queue after scheduling and
@@ -490,10 +536,17 @@ class Scheduler:
                 "Waiting sequence group should have only one prompt "
                 "sequence.")
 
-            num_prompt_tokens = waiting_seqs[0].get_len()
-            if num_prompt_tokens > self.prompt_limit:
+            num_new_tokens = waiting_seqs[0].get_new_num_tokens()
+            # Chunk if a running request cannot fit in.
+            # If number of seq > 1, it means it is doing beam search in a
+            # decode phase. Do not chunk in that case.
+            if enable_chunking:
+                num_new_tokens = min(num_new_tokens,
+                                     budget.remaining_token_budget())
+
+            if num_new_tokens > self.prompt_limit:
                 logger.warning(
-                    f"Input prompt ({num_prompt_tokens} tokens) is too long"
+                    f"Input prompt ({num_new_tokens} tokens) is too long"
                     f" and exceeds limit of {self.prompt_limit}")
                 for seq in waiting_seqs:
                     seq.status = SequenceStatus.FINISHED_IGNORED
@@ -507,7 +560,7 @@ class Scheduler:
                 break
             elif can_allocate == AllocStatus.NEVER:
                 logger.warning(
-                    f"Input prompt ({num_prompt_tokens} tokens) is too long"
+                    f"Input prompt ({num_new_tokens} tokens) is too long"
                     f" and exceeds the capacity of block_manager")
                 for seq in waiting_seqs:
                     seq.status = SequenceStatus.FINISHED_IGNORED
@@ -528,19 +581,20 @@ class Scheduler:
                     continue
 
             num_new_seqs = seq_group.get_max_num_running_seqs()
-            if not budget.can_schedule(num_new_tokens=num_prompt_tokens,
-                                       num_new_seqs=num_new_seqs):
+            if (not budget.can_schedule(num_new_tokens=num_new_tokens,
+                                        num_new_seqs=num_new_seqs)
+                    or num_new_tokens == 0):
                 break
 
             # Can schedule this request.
             if curr_loras is not None and lora_int_id > 0:
                 curr_loras.add(lora_int_id)
             waiting_queue.popleft()
-            self._allocate_and_set_running(seq_group)
+            self._allocate_and_set_running(seq_group, num_new_tokens)
             seq_groups.append(
                 ScheduledSequenceGroup(seq_group=seq_group,
-                                       token_chunk_size=num_prompt_tokens))
-            budget.num_batched_tokens += num_prompt_tokens
+                                       token_chunk_size=num_new_tokens))
+            budget.num_batched_tokens += num_new_tokens
             budget.num_curr_seqs += num_new_seqs
 
         # Queue requests that couldn't be scheduled.
@@ -553,49 +607,49 @@ class Scheduler:
             ignored_seq_groups=ignored_seq_groups,
             num_lookahead_slots=self._get_num_lookahead_slots(is_prefill=True))
 
-    def _schedule(self) -> SchedulerOutputs:
-        """Batch requests that are queued..
+    def _schedule_default(self) -> SchedulerOutputs:
+        """Schedule queued requests.
         
         The current policy is designed to opimimize the throughput. First,
         it batches as many prefill requests as possible. And it schedules
         decodes. If there's a pressure on GPU memory, decode requests can
         be swapped or preempted.
         """
-        # Include running requests to the budget.
-        budget = SchedulingBudget(
-            num_batched_tokens=sum(
-                seq_group.num_seqs(status=SequenceStatus.RUNNING)
-                for seq_group in self.running),
-            num_curr_seqs=sum(seq_group.get_max_num_running_seqs()
-                              for seq_group in self.running),
-            token_budget=self.scheduler_config.max_num_batched_tokens,
-            max_num_seqs=self.scheduler_config.max_num_seqs,
+        budget, curr_loras = _compute_scheduling_budget(
+            self.running,
+            self.scheduler_config.chunked_prefill_enabled,
+            self.scheduler_config.max_num_batched_tokens,
+            self.scheduler_config.max_num_seqs,
         )
-        curr_loras = set(
-            seq_group.lora_int_id
-            for seq_group in self.running) if self.lora_enabled else None
-
         remaining_waiting, prefills = (self.waiting,
                                        SchedulerPrefillOutputs.create_empty())
-        remaining_running, decodes = (self.running,
-                                      SchedulerDecodeOutputs.create_empty())
+        remaining_running, running_scheduled = (
+            self.running, SchedulerDecodeOutputs.create_empty())
         remaining_swapped, swapped_in = (
             self.swapped, SchedulerSwappedInOutputs.create_empty())
 
         # If any requests are swapped, prioritized swapped requests.
         if not self.swapped:
             remaining_waiting, prefills = self._schedule_prefills(
-                self.waiting, budget, curr_loras)
+                self.waiting, budget, curr_loras, enable_chunking=False)
 
+        fcfs_policy = PolicyFactory.get_policy(policy_name="fcfs")
         # Don't schedule decodes if prefills are scheduled.
+        # NOTE: If `_schedule_prefills`` doesn't enable chunking, running only
+        # contains decode requests.
         if len(prefills.seq_groups) == 0:
-            remaining_running, decodes = self._schedule_decodes(
-                self.running, budget, curr_loras, self.policy)
+            remaining_running, running_scheduled = self._schedule_running(
+                self.running,
+                budget,
+                curr_loras,
+                fcfs_policy,
+                enable_chunking=False)
             # If any sequence group is preempted, do not swap in any sequence
             # group. because it means there's no slot for new running requests.
-            if len(decodes.preempted) + len(decodes.swapped_out) == 0:
+            if len(running_scheduled.preempted) + len(
+                    running_scheduled.swapped_out) == 0:
                 remaining_swapped, swapped_in = self._schedule_swapped(
-                    self.swapped, budget, curr_loras, self.policy)
+                    self.swapped, budget, curr_loras, fcfs_policy)
 
         assert (budget.num_batched_tokens <=
                 self.scheduler_config.max_num_batched_tokens)
@@ -603,30 +657,116 @@ class Scheduler:
 
         # Update waiting requests.
         self.waiting = remaining_waiting
-        self.waiting.extendleft(decodes.preempted)
+        self.waiting.extendleft(running_scheduled.preempted)
         # Update new running requests.
         self.running = remaining_running
         self.running.extend([s.seq_group for s in prefills.seq_groups])
-        self.running.extend([s.seq_group for s in decodes.seq_groups])
+        self.running.extend(
+            [s.seq_group for s in running_scheduled.seq_groups])
         self.running.extend([s.seq_group for s in swapped_in.seq_groups])
         # Update swapped requests.
         self.swapped = remaining_swapped
-        self.swapped.extend(decodes.swapped_out)
+        self.swapped.extend(running_scheduled.swapped_out)
 
         return SchedulerOutputs(
-            scheduled_seq_groups=prefills.seq_groups + decodes.seq_groups +
-            swapped_in.seq_groups,
+            scheduled_seq_groups=prefills.seq_groups +
+            running_scheduled.seq_groups + swapped_in.seq_groups,
             num_prefill_groups=len(prefills.seq_groups),
             num_batched_tokens=budget.num_batched_tokens,
             blocks_to_swap_in=swapped_in.blocks_to_swap_in,
-            blocks_to_swap_out=decodes.blocks_to_swap_out,
-            blocks_to_copy=merge_dicts(decodes.blocks_to_copy,
+            blocks_to_swap_out=running_scheduled.blocks_to_swap_out,
+            blocks_to_copy=merge_dicts(running_scheduled.blocks_to_copy,
                                        swapped_in.blocks_to_copy),
             ignored_seq_groups=prefills.ignored_seq_groups,
             num_lookahead_slots=(prefills.num_lookahead_slots +
-                                 decodes.num_lookahead_slots +
+                                 running_scheduled.num_lookahead_slots +
                                  swapped_in.num_lookahead_slots),
         )
+
+    def _schedule_chunked_prefill(self):
+        """Schedule queued requests.
+        
+        Chunked prefill allows to chunk prefill requests, batch them together
+        with decode requests. This policy 1. schedule as many decoding requests
+        as possible. 2. schedule chunked prefill requests that are not
+        finished. 3. schedule swapped request. 4. schedule new prefill
+        requests.
+
+        The policy can sustain the high GPU utilization because it can put
+        prefill and decodes requests to the same batch, while it improves
+        inter token latency because decodes requests don't need to blocked
+        by prefill requests.
+        """
+        budget, curr_loras = _compute_scheduling_budget(
+            self.running,
+            self.scheduler_config.chunked_prefill_enabled,
+            self.scheduler_config.max_num_batched_tokens,
+            self.scheduler_config.max_num_seqs,
+        )
+        remaining_waiting, prefills = (self.waiting,
+                                       SchedulerPrefillOutputs.create_empty())
+        remaining_running, running_scheduled = (
+            self.running, SchedulerDecodeOutputs.create_empty())
+        remaining_swapped, swapped_in = (
+            self.swapped, SchedulerSwappedInOutputs.create_empty())
+
+        maximal_decoding_policy = PolicyFactory.get_policy(
+            policy_name="maximal_decoding")
+        remaining_running, running_scheduled = self._schedule_running(
+            self.running,
+            budget,
+            curr_loras,
+            maximal_decoding_policy,
+            enable_chunking=True)
+
+        fcfs_policy = PolicyFactory.get_policy(policy_name="fcfs")
+        # If preemption happens, it means we don't have space for swap-in.
+        if len(running_scheduled.preempted) + len(
+                running_scheduled.swapped_out) == 0:
+            remaining_swapped, swapped_in = self._schedule_swapped(
+                self.swapped, budget, curr_loras, fcfs_policy)
+
+        remaining_waiting, prefills = self._schedule_prefills(
+            self.waiting, budget, curr_loras, enable_chunking=True)
+
+        assert (budget.num_batched_tokens <=
+                self.scheduler_config.max_num_batched_tokens)
+        assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
+
+        # Update waiting requests.
+        self.waiting = remaining_waiting
+        self.waiting.extendleft(running_scheduled.preempted)
+        # Update new running requests.
+        self.running = remaining_running
+        self.running.extend([s.seq_group for s in prefills.seq_groups])
+        self.running.extend(
+            [s.seq_group for s in running_scheduled.seq_groups])
+        self.running.extend([s.seq_group for s in swapped_in.seq_groups])
+        # Update swapped requests.
+        self.swapped = remaining_swapped
+        self.swapped.extend(running_scheduled.swapped_out)
+
+        return SchedulerOutputs(
+            scheduled_seq_groups=prefills.seq_groups +
+            running_scheduled.seq_groups + swapped_in.seq_groups,
+            num_prefill_groups=len(prefills.seq_groups),
+            num_batched_tokens=budget.num_batched_tokens,
+            blocks_to_swap_in=swapped_in.blocks_to_swap_in,
+            blocks_to_swap_out=running_scheduled.blocks_to_swap_out,
+            blocks_to_copy=merge_dicts(running_scheduled.blocks_to_copy,
+                                       swapped_in.blocks_to_copy),
+            ignored_seq_groups=prefills.ignored_seq_groups,
+            num_lookahead_slots=(prefills.num_lookahead_slots +
+                                 running_scheduled.num_lookahead_slots +
+                                 swapped_in.num_lookahead_slots),
+        )
+
+    def _schedule(self) -> SchedulerOutputs:
+        """Schedule queued requests."""
+        if self.scheduler_config.chunked_prefill_enabled:
+            return self._schedule_chunked_prefill()
+        else:
+            return self._schedule_default()
 
     def _can_append_slots(self, seq_group: SequenceGroup) -> bool:
         """Determine whether or not we have enough space in the KV cache to
@@ -722,10 +862,12 @@ class Scheduler:
         self.running = deque(seq_group for seq_group in self.running
                              if not seq_group.is_finished())
 
-    def _allocate_and_set_running(self, seq_group: SequenceGroup) -> None:
+    def _allocate_and_set_running(self, seq_group: SequenceGroup,
+                                  num_new_tokens: int) -> None:
         self.block_manager.allocate(seq_group)
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             seq.status = SequenceStatus.RUNNING
+        seq_group.update_num_computed_tokens(num_new_tokens)
 
     def _append_slots(
         self,
@@ -854,3 +996,48 @@ class Scheduler:
             return 0
 
         return self.scheduler_config.num_lookahead_slots
+
+
+def _compute_scheduling_budget(
+    running_queue: deque,
+    chunked_prefill_enabled: bool,
+    max_num_batched_tokens: int,
+    max_num_seqs: int,
+) -> Tuple[SchedulingBudget, Set[int]]:
+    """Compute the scheduling budget and currently scheduled loras based
+        on a given running_queue.
+
+    Args:
+        running_queue: A queue of SequenceGroup that contain running
+            sequence groups.
+
+    Returns:
+        SchedulingBudget: The remaining scheduling budget after subtracting
+            budgets used from a running queue.
+        curr_loras: Currently running lora ids.
+    """
+    num_batched_tokens = 0
+    curr_loras = set()
+    num_curr_seqs = 0
+
+    for seq_group in running_queue:
+        for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+            new_tokens = seq.get_new_num_tokens()
+            if not chunked_prefill_enabled:
+                # Only decode requests exist if chunked prefill is disabled.
+                assert new_tokens == 1
+            num_batched_tokens += seq.get_new_num_tokens()
+
+        num_curr_seqs += seq_group.get_max_num_running_seqs()
+        curr_loras.add(seq_group.lora_int_id)
+
+    assert num_batched_tokens <= max_num_batched_tokens
+    assert num_curr_seqs <= max_num_seqs
+
+    budget = SchedulingBudget(
+        num_batched_tokens=num_batched_tokens,
+        num_curr_seqs=num_curr_seqs,
+        token_budget=max_num_batched_tokens,
+        max_num_seqs=max_num_seqs,
+    )
+    return budget, curr_loras
