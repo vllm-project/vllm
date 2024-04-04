@@ -48,7 +48,9 @@ runs:
       BASE=$(./.github/scripts/convert-version ${{ inputs.python }})
       ls -alh dist
       WHL_FILEPATH=$(find dist -iname "*${BASE}*.whl")
-      WHL=$(basename ${WHL_FILEPATH})
+      RENAME=$(echo ${WHL_FILEPATH} | sed -e 's/linux_x86_64/manylinux_2_17_x86_64/')
+      mv ${WHL_FILEPATH} ${RENAME}
+      WHL=$(basename ${RENAME})
       echo "whl=${WHL}" >> "$GITHUB_OUTPUT"
       if [ ${SUCCESS} -ne 0 ]; then
         exit 1
