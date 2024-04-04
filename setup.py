@@ -344,8 +344,7 @@ def get_requirements() -> List[str]:
         for req in requirements:
             if "vllm-nccl-cu12" in req:
                 modified_requirements.append(
-                    req.replace("vllm-nccl-cu12",
-                                f"vllm-nccl-cu{cuda_major}"))
+                    req.replace("vllm-nccl-cu12", f"vllm-nccl-cu{cuda_major}"))
             else:
                 modified_requirements.append(req)
         requirements = modified_requirements
