@@ -17,6 +17,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.worker.model_runner import ModelRunner
+from vllm.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
 
@@ -112,7 +113,7 @@ class CPUCacheEngine:
         return dtype_size * total
 
 
-class CPUWorker:
+class CPUWorker(WorkerBase):
     """A worker class that executes (a partition of) the model on a CPU socket.
 
     Each worker is associated with a single CPU socket. The worker is 
@@ -166,6 +167,46 @@ class CPUWorker:
 
     def load_model(self):
         self.model_runner.load_model()
+
+    def profile_num_available_blocks(self) -> tuple[int, int]:
+        num_cpu_blocks = self.get_cpu_cache_block_num(
+            block_size=self.cache_config.block_size,
+            cache_space=self.cache_config.cpu_kvcache_space_bytes,
+            cache_dtype=self.cache_config.cache_dtype,
+        )
+
+        # Note: To reuse the cache management procedure,
+        # use cpu cache as 'gpu cache'.
+        num_gpu_blocks = num_cpu_blocks
+        num_cpu_blocks = 0
+        return num_gpu_blocks, num_cpu_blocks
+
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
+        # Note: To reuse the cache management procedure,
+        # use cpu cache as 'gpu cache'.
+        assert num_cpu_blocks == 0
+        num_cpu_blocks = num_gpu_blocks
+        num_gpu_blocks = 0
+        self.cache_config.num_gpu_blocks = num_cpu_blocks
+        self.cache_config.num_cpu_blocks = 0
+
+        logger.info(f"# CPU blocks: {num_cpu_blocks}")
+        if num_cpu_blocks <= 0:
+            raise ValueError("No available memory for the cache blocks. "
+                             "Try increasing `VLLM_CPU_KVCACHE_SPACE` when "
+                             "initializing the engine.")
+
+        max_seq_len = self.cache_config.block_size * num_cpu_blocks
+        if self.model_config.max_model_len > max_seq_len:
+            raise ValueError(
+                f"The model's max seq len ({self.model_config.max_model_len}) "
+                "is larger than the maximum number of tokens that can be "
+                f"stored in KV cache ({max_seq_len}). Try increasing "
+                "`VLLM_CPU_KVCACHE_SPACE` or decreasing `max_model_len` when "
+                "initializing the engine.")
+
+        # Initialize the cache.
+        self.init_cache_engine(cache_config=self.cache_config)
 
     def get_cpu_cache_block_num(
         self,
