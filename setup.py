@@ -328,6 +328,16 @@ def get_requirements() -> List[str]:
     if _is_cuda():
         with open(get_path("requirements.txt")) as f:
             requirements = f.read().strip().split("\n")
+            cuda_major = torch.version.cuda.split(".")[0]
+            modified_requirements = []
+            for req in requirements:
+                if "vllm-nccl-cu12" in req:
+                    modified_requirements.append(
+                        req.replace("vllm-nccl-cu12",
+                                    f"vllm-nccl-cu{cuda_major}"))
+                else:
+                    modified_requirements.append(req)
+            requirements = modified_requirements
     elif _is_hip():
         with open(get_path("requirements-rocm.txt")) as f:
             requirements = f.read().strip().split("\n")
