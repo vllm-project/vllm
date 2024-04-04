@@ -1,4 +1,4 @@
-cmake>=3.21
+cmake >= 3.21
 ninja  # For faster builds.
 psutil
 sentencepiece  # Required for LLaMA tokenizer.
