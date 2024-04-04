@@ -1,9 +1,9 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          VisionLanguageConfig)
-from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase, KvCacheProfileResult
+from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.executor.utils import check_block_size_valid
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -71,41 +71,26 @@ class GPUExecutor(ExecutorBase):
         self.driver_worker.init_device()
         self.driver_worker.load_model()
 
-    def profile_num_available_blocks(self) -> KvCacheProfileResult:
-        # TODO clean up datastructure
-        num_gpu_blocks, num_cpu_blocks = (
-            self.driver_worker.profile_num_available_blocks(
-                #self.cache_config,
-            ))
-            #self.driver_worker.profile_num_available_blocks(
-            #    block_size=self.cache_config.block_size,
-            #    gpu_memory_utilization=self.cache_config.
-            #    gpu_memory_utilization,
-            #    cpu_swap_space=self.cache_config.swap_space_bytes,
-            #    cache_dtype=self.cache_config.cache_dtype,
-            #))
 
-        return KvCacheProfileResult(
-            num_active_kv_blocks=num_gpu_blocks,
-            num_swapped_kv_blocks=num_cpu_blocks,
-        )
+    def profile_num_available_blocks(self) -> Tuple[int, int]:
+        return self.driver_worker.profile_num_available_blocks()
 
 
-    def initialize_cache(self, num_active_kv_blocks: int, num_swapped_kv_blocks) -> None:
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks) -> None:
         if self.cache_config.forced_num_gpu_blocks is not None:
-            forced_num_active_kv_blocks = self.cache_config.forced_num_gpu_blocks
-            logger.info(f"Replacing profiled {num_active_kv_blocks=} with "
-                        f"{forced_num_active_kv_blocks=}")
-            num_active_kv_blocks = forced_num_active_kv_blocks
+            forced_num_gpu_blocks = self.cache_config.forced_num_gpu_blocks
+            logger.info(f"Replacing profiled {num_gpu_blocks=} with "
+                        f"{forced_num_gpu_blocks=}")
+            num_gpu_blocks = forced_num_gpu_blocks
 
-        logger.info(f"# GPU blocks: {num_active_kv_blocks}, "
-                    f"# CPU blocks: {num_swapped_kv_blocks}")
+        logger.info(f"# GPU blocks: {num_gpu_blocks}, "
+                    f"# CPU blocks: {num_cpu_blocks}")
 
-        check_block_size_valid(num_active_kv_blocks, self.cache_config.block_size,
+        check_block_size_valid(num_gpu_blocks, self.cache_config.block_size,
                                self.model_config.max_model_len)
 
-        self.cache_config.num_gpu_blocks = num_active_kv_blocks
-        self.cache_config.num_cpu_blocks = num_swapped_kv_blocks
+        self.cache_config.num_gpu_blocks = num_gpu_blocks
+        self.cache_config.num_cpu_blocks = num_cpu_blocks
 
         # Initialize the cache.
         self.driver_worker.init_cache_engine(cache_config=self.cache_config)

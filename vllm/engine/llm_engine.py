@@ -128,10 +128,9 @@ class LLMEngine:
         )
 
         # TODO cleanup location
-        profile_result = self.model_executor.profile_num_available_blocks()
+        num_gpu_blocks, num_cpu_blocks = self.model_executor.profile_num_available_blocks()
         self.model_executor.initialize_cache(
-            num_active_kv_blocks=profile_result.num_active_kv_blocks,
-            num_swapped_kv_blocks=profile_result.num_swapped_kv_blocks,
+            num_gpu_blocks, num_cpu_blocks,
         )
 
         # If usage stat is enabled, collect relevant info.

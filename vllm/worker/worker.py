@@ -111,15 +111,12 @@ class Worker:
     @torch.inference_mode()
     def profile_num_available_blocks(
         self,
-        #block_size: int,
-        #gpu_memory_utilization: float,
-        #cpu_swap_space: int,
-        #cache_dtype: str,
     ) -> Tuple[int, int]:
         """Profiles the peak memory usage of the model and returns the maximum
         number of GPU and CPU cache blocks that can be allocated.
 
         Args:
+            # TODO
             block_size: The size of the cache block.
             gpu_memory_utilization: The fraction of the total GPU memory to use.
             cpu_swap_space: The size of the CPU swap space in bytes.
@@ -161,6 +158,7 @@ class Worker:
             self.model_runner.remove_all_loras()
         gc.collect()
         torch.cuda.empty_cache()
+
         return num_gpu_blocks, num_cpu_blocks
 
     def init_cache_engine(self, cache_config: CacheConfig) -> None:

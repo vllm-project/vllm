@@ -116,8 +116,3 @@ class ExecutorAsyncBase(ExecutorBase):
         """Checks if the executor is healthy. If not, it should raise an
         exception."""
         raise NotImplementedError
-
-@dataclass(frozen=True)
-class KvCacheProfileResult:
-    num_active_kv_blocks: int
-    num_swapped_kv_blocks: int
