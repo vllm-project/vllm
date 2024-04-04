@@ -92,9 +92,6 @@ class NaiveBlockAllocator(BlockAllocator):
     def free(self, block: Block) -> None:
         self._free_block_id(block.block_id)
 
-        # Mark the block as having no allocation.
-        block.block_id = None
-
     def fork(self, last_block: Block) -> List[Block]:
         """Creates a new sequence of blocks that shares the same underlying
         memory as the original sequence.

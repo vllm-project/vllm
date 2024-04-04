@@ -5,7 +5,7 @@ from vllm.core.interfaces import AllocStatus
 from vllm.sequence import Logprob, SequenceStatus
 from vllm.utils import chunk_list
 
-from ..utils import create_seq_group
+from ..utils import create_dummy_prompt, create_seq_group
 
 
 @pytest.mark.parametrize("block_size", [16])
@@ -101,3 +101,49 @@ def test_append_slots(block_size, prompt_len, num_slots_to_append,
                 range(prompt_len + num_slots_to_append + num_lookahead_slots)),
             block_size)) - len(chunk_list(list(range(prompt_len)), block_size))
     assert num_consumed_blocks == expected_consumed_blocks
+
+
+@pytest.mark.parametrize("block_size", [8])
+@pytest.mark.parametrize("num_cpu_blocks", [4])
+@pytest.mark.parametrize("num_gpu_blocks", [4])
+@pytest.mark.parametrize("num_lookahead_slots", [2])
+def test_swap(block_size, num_cpu_blocks, num_gpu_blocks, num_lookahead_slots):
+    block_manager = BlockSpaceManagerV2(block_size,
+                                        num_cpu_blocks,
+                                        num_gpu_blocks,
+                                        watermark=0)
+    prompt, seq_group = create_dummy_prompt("1", prompt_length=block_size - 1)
+    prompt.status = SequenceStatus.WAITING
+    block_manager.allocate(seq_group)
+    # Emulate a forward pass by appending a single token.
+    # The block manager then knows how many unprocessed
+    # tokens will be written in the next forward pass.
+    token_id = 0
+    prompt.status = SequenceStatus.RUNNING
+    prompt.append_token_id(token_id, {token_id: Logprob(0.0)})
+
+    # Swap seq group from GPU -> CPU.
+    gpu_blocks = block_manager.get_block_table(prompt)
+    assert block_manager.can_swap_out(seq_group)
+    before_cpu_blocks = block_manager.get_num_free_cpu_blocks()
+    before_gpu_blocks = block_manager.get_num_free_gpu_blocks()
+    mapping = block_manager.swap_out(seq_group)
+    assert list(mapping.keys()) == gpu_blocks
+    after_cpu_blocks = block_manager.get_num_free_cpu_blocks()
+    after_gpu_blocks = block_manager.get_num_free_gpu_blocks()
+    assert before_cpu_blocks == after_cpu_blocks + len(gpu_blocks)
+    assert before_gpu_blocks + len(gpu_blocks) == after_gpu_blocks
+    prompt.status = SequenceStatus.SWAPPED
+
+    # Swap seq group from CPU -> GPU.
+    cpu_blocks = block_manager.get_block_table(prompt)
+    assert block_manager.can_swap_in(seq_group, num_lookahead_slots)
+    before_cpu_blocks = block_manager.get_num_free_cpu_blocks()
+    before_gpu_blocks = block_manager.get_num_free_gpu_blocks()
+    mapping = block_manager.swap_in(seq_group, num_lookahead_slots)
+    adjusted_cpu_blocks = [block - num_gpu_blocks for block in cpu_blocks]
+    assert list(mapping.keys()) == adjusted_cpu_blocks
+    after_cpu_blocks = block_manager.get_num_free_cpu_blocks()
+    after_gpu_blocks = block_manager.get_num_free_gpu_blocks()
+    assert before_cpu_blocks + len(cpu_blocks) == after_cpu_blocks
+    assert before_gpu_blocks == after_gpu_blocks + len(cpu_blocks)

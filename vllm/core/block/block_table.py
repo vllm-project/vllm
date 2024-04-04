@@ -65,23 +65,34 @@ class BlockTable:
         """
         return cdiv(len(token_ids), block_size)
 
-    def append_by_blocks(self,
-                         token_ids: List[int],
-                         device: Device = Device.GPU) -> Block:
-        """Allocates memory blocks for storing the given sequence of token IDs.
+    def get_blocks(self) -> Optional[List[Block]]:
+        return self._blocks
 
-        This method allocates the required number of blocks to store the given
-        sequence of token IDs.
+    def append_by_block(self,
+                        token_ids: List[int],
+                        device: Device = Device.GPU) -> Block:
+        """Allocates memory block for storing the given sequence 
+        of token IDs and append it back to the block list.
+
+        This method allocates a block to store the given
+        sequence of token IDs append it back to the block list.
 
         Args:
             token_ids (List[int]): The sequence of token IDs to be stored.
             device (Device, optional): The device on which the blocks should be
                 allocated. Defaults to Device.GPU.
         """
-        block = self._allocate_blocks_for_token_ids(prev_block=None,
-                                                    token_ids=token_ids,
-                                                    device=device)
-        self._blocks.append(block)
+        blocks = self._allocate_blocks_for_token_ids(prev_block=None,
+                                                     token_ids=token_ids,
+                                                     device=device)
+        # Note: whenever we call append_by_block because of swapping, the tokens
+        # must fit in a block
+        assert len(blocks) <= 1
+        block = blocks[0]
+        if not self._is_allocated:
+            self._blocks = blocks
+        else:
+            self._blocks.append(block)
         self._num_full_slots += len(token_ids)
         return block
 
@@ -98,8 +109,8 @@ class BlockTable:
             device (Device, optional): The device on which the blocks should be
                 allocated. Defaults to Device.GPU.
         """
-        assert token_ids
         assert not self._is_allocated
+        assert token_ids
         self._blocks = self._allocate_blocks_for_token_ids(prev_block=None,
                                                            token_ids=token_ids,
                                                            device=device)

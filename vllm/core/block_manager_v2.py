@@ -253,14 +253,14 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             )
             block_table = self.block_tables[seq.seq_id]
 
-            for cpu_block in block_table:
+            for cpu_block in block_table.get_blocks():
                 if cpu_block in mapping:
                     gpu_block = mapping[cpu_block]
                     self.block_allocator.increase_ref_count(
                         Device.GPU, gpu_block.block_id())
                 else:
-                    gpu_block = new_block_table.append_by_blocks(
-                        token_ids=cpu_block.token_ids(), device=Device.GPU)
+                    gpu_block = new_block_table.append_by_block(
+                        token_ids=cpu_block.token_ids, device=Device.GPU)
                     mapping[cpu_block] = gpu_block
                 self.block_allocator.free(cpu_block)
             self.block_tables[seq.seq_id] = new_block_table
@@ -270,8 +270,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         # we need to shift the block id of cpu block back to its relative
         # position within CPU cache.
         block_number_mapping = {
-            cpu_block.block_id() - self.num_total_gpu_blocks:
-            gpu_block.block_id()
+            cpu_block.block_id - self.num_total_gpu_blocks: gpu_block.block_id
             for cpu_block, gpu_block in mapping.items()
         }
         return block_number_mapping
@@ -280,7 +279,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         num_touched_blocks = 0
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             num_touched_blocks += self.block_tables[
-                seq.seq_id]._num_touched_blocks()
+                seq.seq_id]._num_touched_blocks
         return num_touched_blocks <= self.block_allocator.get_num_free_blocks(
             Device.CPU)
 
@@ -293,22 +292,21 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             )
             block_table = self.block_tables[seq.seq_id]
 
-            for gpu_block in block_table:
+            for gpu_block in block_table.get_blocks():
                 if gpu_block in mapping:
                     cpu_block = mapping[gpu_block]
                     self.block_allocator.increase_ref_count(
                         Device.CPU, cpu_block.block_id())
                 else:
-                    cpu_block = new_block_table.append_by_blocks(
-                        token_ids=gpu_block.token_ids(), device=Device.CPU)
+                    cpu_block = new_block_table.append_by_block(
+                        token_ids=gpu_block.token_ids, device=Device.CPU)
                     mapping[gpu_block] = cpu_block
-                self.block_allocator.free(cpu_block)
+                self.block_allocator.free(gpu_block)
             self.block_tables[seq.seq_id] = new_block_table
 
         block_number_mapping = {
-            cpu_block.block_number - self.num_total_gpu_blocks:
-            gpu_block.block_number
-            for cpu_block, gpu_block in mapping.items()
+            gpu_block.block_id: cpu_block.block_id - self.num_total_gpu_blocks
+            for gpu_block, cpu_block in mapping.items()
         }
         return block_number_mapping
 
