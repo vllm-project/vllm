@@ -17,8 +17,6 @@ WORKDIR /workspace
 
 # install build and runtime dependencies
 COPY requirements-common.txt requirements-common.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements-common.txt
 COPY requirements-cuda.txt requirements-cuda.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements-cuda.txt
@@ -116,8 +114,6 @@ RUN apt-get update -y \
 
 WORKDIR /workspace
 COPY requirements-common.txt requirements-common.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements-common.txt
 COPY requirements-cuda.txt requirements-cuda.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements-cuda.txt

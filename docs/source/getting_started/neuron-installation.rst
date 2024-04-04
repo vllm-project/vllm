@@ -130,7 +130,6 @@ Once neuronx-cc and transformers-neuronx packages are installed, we will be able
 
     $ git clone https://github.com/vllm-project/vllm.git
     $ cd vllm
-    $ pip install -U -r requirements-common.txt
     $ pip install -U -r requirements-neuron.txt
     $ pip install .
 

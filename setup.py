@@ -325,26 +325,28 @@ def read_readme() -> str:
 
 def get_requirements() -> List[str]:
     """Get Python package dependencies from requirements.txt."""
-    with open(get_path("requirements-common.txt")) as f:
-        common = f.read().strip().split("\n")
+
+    def _read_requirements(filename: str) -> List[str]:
+        with open(get_path(filename)) as f:
+            requirements = f.read().strip().split("\n")
+        for line in requirements:
+            if line.startswith("-r "):
+                requirements.remove(line)
+                requirements += _read_requirements(line.split()[1])
+        return requirements
 
     if _is_cuda():
-        with open(get_path("requirements-cuda.txt")) as f:
-            requirements = f.read().strip().split("\n")
+        requirements = _read_requirements("requirements-cuda.txt")
     elif _is_hip():
-        with open(get_path("requirements-rocm.txt")) as f:
-            requirements = f.read().strip().split("\n")
+        requirements = _read_requirements("requirements-rocm.txt")
     elif _is_neuron():
-        with open(get_path("requirements-neuron.txt")) as f:
-            requirements = f.read().strip().split("\n")
+        requirements = _read_requirements("requirements-neuron.txt")
     elif _is_cpu():
-        with open(get_path("requirements-cpu.txt")) as f:
-            requirements = f.read().strip().split("\n")
+        requirements = _read_requirements("requirements-cpu.txt")
     else:
         raise ValueError(
-            "Unsupported platform, please use CUDA, ROCM or Neuron.")
-
-    return common + requirements
+            "Unsupported platform, please use CUDA, ROCm, Neuron, or CPU.")
+    return requirements
 
 
 ext_modules = []

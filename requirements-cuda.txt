@@ -1,3 +1,7 @@
+# Common dependencies
+-r requirements-common.txt
+
+# Dependencies for NVIDIA GPUs
 ray >= 2.9
 torch == 2.1.2
 xformers == 0.0.23.post1  # Required for CUDA 12.1.

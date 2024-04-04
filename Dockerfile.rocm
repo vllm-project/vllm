@@ -82,7 +82,6 @@ RUN python3 -m pip install xformers==0.0.23 --no-deps
 
 RUN cd /app \
     && cd vllm \
-    && pip install -U -r requirements-common.txt \
     && pip install -U -r requirements-rocm.txt \
     && if [ "$BUILD_FA" = "1" ]; then \
        bash patch_xformers.rocm.sh; fi \
