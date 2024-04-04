@@ -4,11 +4,11 @@ psutil
 ray >= 2.9
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
-torch == 2.1.2
+torch == 2.2.1
 requests
 py-cpuinfo
 transformers >= 4.39.1  # Required for StarCoder2 & Llava.
-xformers == 0.0.23.post1  # Required for CUDA 12.1.
+xformers == 0.0.25  # Requires PyTorch 2.2.1.
 fastapi
 uvicorn[standard]
 pydantic >= 2.0  # Required for OpenAI server.
@@ -17,3 +17,4 @@ pynvml == 11.5.0
 triton >= 2.1.0
 outlines == 0.0.34
 tiktoken == 0.6.0 # Required for DBRX tokenizer
+vllm-nccl-cu12>=2.18<2.19 # for downloading nccl library
