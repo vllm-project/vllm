@@ -25,7 +25,7 @@ class NeuronExecutor(ExecutorBase):
         speculative_config: Optional[SpeculativeConfig],
     ) -> None:
         self.model_config = model_config
-        self.cache_config = cache_config
+        #self.cache_config = cache_config
         assert lora_config is None, "LoRA is not supported for Neuron backend."
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
@@ -56,6 +56,8 @@ class NeuronExecutor(ExecutorBase):
 
     # TODO change name
     def profile_num_available_blocks(self) -> tuple[int, int]:
+        return self.driver_worker.profile_num_available_blocks()
+
         # Set the number of GPU blocks to be the same as the maximum number of
         # sequences that can be processed in a single batch. This is equivalent
         # to schedule without PagedAttention.
@@ -67,10 +69,11 @@ class NeuronExecutor(ExecutorBase):
         return num_gpu_blocks, num_cpu_blocks
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
-        assert num_cpu_blocks == 0
-        assert num_gpu_blocks == self.scheduler_config.max_num_seqs
-        self.cache_config.num_gpu_blocks = num_gpu_blocks
-        self.cache_config.num_cpu_blocks = num_cpu_blocks
+        self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+        #assert num_cpu_blocks == 0
+        #assert num_gpu_blocks == self.scheduler_config.max_num_seqs
+        #self.cache_config.num_gpu_blocks = num_gpu_blocks
+        #self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     def execute_model(self,
                       seq_group_metadata_list: List[SequenceGroupMetadata],
