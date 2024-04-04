@@ -328,8 +328,9 @@ def add_token_budget(budget: SchedulingBudget,
                      num_batched_tokens: int = 0,
                      num_curr_seqs: int = 0):
     mock_seq_group = create_dummy_prompt('10', prompt_length=60)[1]
-    budget.add_num_batched_tokens(mock_seq_group, num_batched_tokens)
-    budget.add_num_seqs(mock_seq_group, num_curr_seqs)
+    budget.add_num_batched_tokens(mock_seq_group.request_id,
+                                  num_batched_tokens)
+    budget.add_num_seqs(mock_seq_group.request_id, num_curr_seqs)
 
 
 def test_prefill_schedule_max_prompt_len():
@@ -575,9 +576,10 @@ def test_decode_swap_beam_search():
         scheduler._allocate_and_set_running(seq_group, 60)
         running.append(seq_group)
         append_new_token_seq_group(seq_group, 1)
-        budget.add_num_seqs(seq_group, seq_group.get_max_num_running_seqs())
+        budget.add_num_seqs(seq_group.request_id,
+                            seq_group.get_max_num_running_seqs())
         budget.add_num_batched_tokens(
-            seq_group, seq_group.num_seqs(SequenceStatus.RUNNING))
+            seq_group.request_id, seq_group.num_seqs(SequenceStatus.RUNNING))
 
     # The last request should be swapped out.
     scheduler.block_manager.can_append_slots = MagicMock()
@@ -830,32 +832,32 @@ def test_scheduling_budget():
 
     # Verify add/subtract num batched tokens.
     _, seq_group = create_dummy_prompt("1", 3)
-    budget.add_num_batched_tokens(seq_group, 2)
+    budget.add_num_batched_tokens(seq_group.request_id, 2)
     assert budget.remaining_token_budget() == 2
     assert budget.num_batched_tokens == 2
     assert budget.can_schedule(num_new_tokens=2, num_new_seqs=1)
     assert not budget.can_schedule(num_new_tokens=3, num_new_seqs=1)
     # Verify adding another seq group is no-op.
-    budget.add_num_batched_tokens(seq_group, 2)
+    budget.add_num_batched_tokens(seq_group.request_id, 2)
     assert budget.remaining_token_budget() == 2
     assert budget.num_batched_tokens == 2
-    budget.subtract_num_batched_tokens(seq_group, 2)
+    budget.subtract_num_batched_tokens(seq_group.request_id, 2)
     assert budget.remaining_token_budget() == 4
     assert budget.num_batched_tokens == 0
-    budget.subtract_num_batched_tokens(seq_group, 2)
+    budget.subtract_num_batched_tokens(seq_group.request_id, 2)
     assert budget.remaining_token_budget() == 4
     assert budget.num_batched_tokens == 0
 
     # Verify add/subtract max seqs.
     _, seq_group = create_dummy_prompt("1", 3)
-    budget.add_num_seqs(seq_group, 2)
+    budget.add_num_seqs(seq_group.request_id, 2)
     assert budget.can_schedule(num_new_tokens=1, num_new_seqs=2)
     assert not budget.can_schedule(num_new_tokens=1, num_new_seqs=3)
     assert budget.num_curr_seqs == 2
     # Verify adding another seq group is no-op.
-    budget.add_num_seqs(seq_group, 2)
+    budget.add_num_seqs(seq_group.request_id, 2)
     assert budget.num_curr_seqs == 2
-    budget.subtract_num_seqs(seq_group, 2)
+    budget.subtract_num_seqs(seq_group.request_id, 2)
     assert budget.num_curr_seqs == 0
-    budget.subtract_num_seqs(seq_group, 2)
+    budget.subtract_num_seqs(seq_group.request_id, 2)
     assert budget.num_curr_seqs == 0

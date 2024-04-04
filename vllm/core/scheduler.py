@@ -48,32 +48,27 @@ class SchedulingBudget:
     def remaining_token_budget(self):
         return self.token_budget - self.num_batched_tokens
 
-    def add_num_batched_tokens(self, seq_group: SequenceGroup,
-                               num_batched_tokens: int):
-        req_id = seq_group.request_id
+    def add_num_batched_tokens(self, req_id: str, num_batched_tokens: int):
         if req_id in self._requeset_ids_num_batched_tokens:
             return
 
         self._requeset_ids_num_batched_tokens.add(req_id)
         self._num_batched_tokens += num_batched_tokens
 
-    def subtract_num_batched_tokens(self, seq_group: SequenceGroup,
+    def subtract_num_batched_tokens(self, req_id: str,
                                     num_batched_tokens: int):
-        req_id = seq_group.request_id
         if req_id in self._requeset_ids_num_batched_tokens:
             self._requeset_ids_num_batched_tokens.remove(req_id)
             self._num_batched_tokens -= num_batched_tokens
 
-    def add_num_seqs(self, seq_group: SequenceGroup, num_curr_seqs: int):
-        req_id = seq_group.request_id
+    def add_num_seqs(self, req_id: str, num_curr_seqs: int):
         if req_id in self._requeset_ids_num_curr_seqs:
             return
 
         self._requeset_ids_num_curr_seqs.add(req_id)
         self._num_curr_seqs += num_curr_seqs
 
-    def subtract_num_seqs(self, seq_group: SequenceGroup, num_curr_seqs: int):
-        req_id = seq_group.request_id
+    def subtract_num_seqs(self, req_id: str, num_curr_seqs: int):
         if req_id in self._requeset_ids_num_curr_seqs:
             self._requeset_ids_num_curr_seqs.remove(req_id)
             self._num_curr_seqs -= num_curr_seqs
@@ -376,9 +371,10 @@ class Scheduler:
 
             running_queue.popleft()
             while not self._can_append_slots(seq_group):
-                budget.subtract_num_batched_tokens(seq_group,
+                budget.subtract_num_batched_tokens(seq_group.request_id,
                                                    num_running_tokens)
-                budget.subtract_num_seqs(seq_group, num_running_seqs)
+                budget.subtract_num_seqs(seq_group.request_id,
+                                         num_running_seqs)
                 if curr_loras is not None and seq_group.lora_int_id > 0:
                     curr_loras.pop(seq_group.lora_int_id)
 
@@ -419,8 +415,9 @@ class Scheduler:
                         ScheduledSequenceGroup(
                             seq_group=seq_group,
                             token_chunk_size=num_running_tokens))
-                budget.add_num_batched_tokens(seq_group, num_running_tokens)
-                budget.add_num_seqs(seq_group, num_running_seqs)
+                budget.add_num_batched_tokens(seq_group.request_id,
+                                              num_running_tokens)
+                budget.add_num_seqs(seq_group.request_id, num_running_seqs)
                 if curr_loras is not None and seq_group.lora_int_id > 0:
                     curr_loras.add(seq_group.lora_int_id)
 
@@ -525,8 +522,8 @@ class Scheduler:
                 decode_seq_groups.append(
                     ScheduledSequenceGroup(seq_group,
                                            token_chunk_size=num_new_tokens))
-            budget.add_num_batched_tokens(seq_group, num_new_tokens)
-            budget.add_num_seqs(seq_group, num_new_seqs)
+            budget.add_num_batched_tokens(seq_group.request_id, num_new_tokens)
+            budget.add_num_seqs(seq_group.request_id, num_new_seqs)
 
         swapped_queue.extendleft(leftover_swapped)
 
@@ -639,8 +636,8 @@ class Scheduler:
             seq_groups.append(
                 ScheduledSequenceGroup(seq_group=seq_group,
                                        token_chunk_size=num_new_tokens))
-            budget.add_num_batched_tokens(seq_group, num_new_tokens)
-            budget.add_num_seqs(seq_group, num_new_seqs)
+            budget.add_num_batched_tokens(seq_group.request_id, num_new_tokens)
+            budget.add_num_seqs(seq_group.request_id, num_new_seqs)
 
         # Queue requests that couldn't be scheduled.
         waiting_queue.extendleft(leftover_waiting_sequences)
@@ -668,7 +665,7 @@ class Scheduler:
         # Make sure we include num running seqs before scheduling prefill,
         # so that we don't schedule beyond max_num_seqs for prefill.
         for seq_group in self.running:
-            budget.add_num_seqs(seq_group,
+            budget.add_num_seqs(seq_group.request_id,
                                 seq_group.get_max_num_running_seqs())
         curr_loras = set(
             seq_group.lora_int_id
