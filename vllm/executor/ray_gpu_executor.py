@@ -10,7 +10,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
                          VisionLanguageConfig)
 from vllm.engine.ray_utils import RayWorkerVllm, ray
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
-from vllm.executor.utils import check_block_size_valid
+from vllm.executor.utils import check_block_size_valid, raise_if_cache_size_invalid
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
@@ -66,7 +66,7 @@ class RayGPUExecutor(ExecutorBase):
         self._init_workers_ray(placement_group)
 
         # Profile the memory usage and initialize the cache.
-        self._init_cache()
+        #self._init_cache()
 
         self.forward_dag = None
         if USE_RAY_COMPILED_DAG:
@@ -255,6 +255,38 @@ class RayGPUExecutor(ExecutorBase):
         # Warm up the model. This includes capturing the model into CUDA graph
         # if enforce_eager is False.
         self._run_workers("warm_up_model")
+
+    def profile_num_available_blocks(self) -> tuple[int, int]:
+        # Get the maximum number of blocks that can be allocated on GPU and CPU.
+        num_blocks = self._run_workers(
+            "profile_num_available_blocks",
+            block_size=self.cache_config.block_size,
+            gpu_memory_utilization=self.cache_config.gpu_memory_utilization,
+            cpu_swap_space=self.cache_config.swap_space_bytes,
+            cache_dtype=self.cache_config.cache_dtype,
+        )
+
+        # Since we use a shared centralized controller, we take the minimum
+        # number of blocks across all workers to make sure all the memory
+        # operators can be applied to all workers.
+        num_gpu_blocks = min(b[0] for b in num_blocks)
+        num_cpu_blocks = min(b[1] for b in num_blocks)
+
+
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
+        raise_if_cache_size_invalid(num_gpu_blocks, self.cache_config.block_size,
+                               self.model_config.max_model_len)
+
+        self.cache_config.num_gpu_blocks = num_gpu_blocks
+        self.cache_config.num_cpu_blocks = num_cpu_blocks
+
+        # Initialize the cache.
+        self._run_workers("init_cache_engine", cache_config=self.cache_config)
+
+        # Warm up the model. This includes capturing the model into CUDA graph
+        # if enforce_eager is False.
+        self._run_workers("warm_up_model")
+
 
     def execute_model(self,
                       seq_group_metadata_list: List[SequenceGroupMetadata],
