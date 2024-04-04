@@ -155,6 +155,8 @@ class OpenAIServing:
             return
         if request.model in [lora.lora_name for lora in self.lora_requests]:
             return
+        elif request.lora_request and os.path.exists(request.lora_request.lora_local_path):
+            return
         return self.create_error_response(
             message=f"The model `{request.model}` does not exist.",
             err_type="NotFoundError",
