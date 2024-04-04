@@ -1,4 +1,3 @@
-# Copyright © [2023,] 2023, Oracle and/or its affiliates.
 """Logging configuration for vLLM."""
 import inspect
 import json
