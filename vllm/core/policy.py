@@ -55,10 +55,7 @@ class MaximalDecoding(Policy):
 
 class PolicyFactory:
 
-    _POLICY_REGISTRY = {
-        'fcfs': FCFS,
-        'maximal_decoding': MaximalDecoding
-    }
+    _POLICY_REGISTRY = {'fcfs': FCFS, 'maximal_decoding': MaximalDecoding}
 
     @classmethod
     def get_policy(cls, policy_name: str, **kwargs) -> Policy:
