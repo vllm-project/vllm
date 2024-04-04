@@ -33,10 +33,7 @@ temp_dir = os.environ.get('TMPDIR') or os.environ.get(
 def enable_hf_transfer():
     """automatically activates hf_transfer
     """
-    if "HF_HUB_ENABLE_HF_TRANSFER" in os.environ:
-        #  no additional logic, use default behaviour.
-        return
-    else:
+    if "HF_HUB_ENABLE_HF_TRANSFER" not in os.environ:
         try:
             # enable hf hub transfer if available
             import hf_transfer  # type: ignore # noqa
