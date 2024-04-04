@@ -51,6 +51,7 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
             enable_lora=enable_lora,
             max_num_seqs=max_num_seqs,
             max_input_length=max_input_length,
+            **tokenizer_config,
         )
 
         ray_tokenizer_group_cls = ray.remote(
