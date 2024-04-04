@@ -147,8 +147,7 @@ class Worker(WorkerBase):
             "Error in memory profiling. This happens when the GPU memory was "
             "not properly cleaned up before initializing the vLLM instance.")
 
-        cache_block_size = self.get_cache_block_size_bytes(
-            block_size, cache_dtype)
+        cache_block_size = self.get_cache_block_size_bytes()
         num_gpu_blocks = int(
             (total_gpu_memory * gpu_memory_utilization - peak_memory) //
             cache_block_size)
@@ -250,13 +249,10 @@ class Worker(WorkerBase):
     def vocab_size(self) -> int:
         return self.model_runner.vocab_size
 
-    def get_cache_block_size_bytes(self, block_size: int,
-                                   cache_dtype: str) -> int:
+    def get_cache_block_size_bytes(self) -> int:
         """Get the size of the KV cache block size in bytes.
         """
-        return CacheEngine.get_cache_block_size(block_size, cache_dtype,
-                                                self.model_config,
-                                                self.parallel_config)
+        return self.cache_config.get_cache_block_size(self.model_config, self.parallel_config)
 
 
 def init_distributed_environment(

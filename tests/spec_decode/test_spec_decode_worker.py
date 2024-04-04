@@ -512,7 +512,7 @@ def test_init_device():
 
 
 @torch.inference_mode()
-def test_init_cache_engine():
+def test_initialize_cache():
     """Verify SpecDecodeWorker invokes init_cache_engine on proposer/scorer
     workers.
     """
@@ -526,11 +526,12 @@ def test_init_cache_engine():
                               metrics_collector)
 
     cache_config = MagicMock()
+    
+    kwargs = {"num_gpu_blocks":1024, "num_cpu_blocks": 1023}
+    worker.initialize_cache(**kwargs)
 
-    worker.init_cache_engine(cache_config)
-
-    draft_worker.init_cache_engine.assert_called_once_with(cache_config)
-    target_worker.init_cache_engine.assert_called_once_with(cache_config)
+    draft_worker.initialize_cache.assert_called_once_with(**kwargs)
+    target_worker.initialize_cache.assert_called_once_with(**kwargs)
 
 
 @pytest.mark.parametrize('available_gpu_blocks', [1, 1024])
@@ -561,17 +562,10 @@ def test_profile_num_available_blocks(available_gpu_blocks: int,
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
                               metrics_collector)
 
-    # These values do not directly impact the adjusted block size calculation,
-    # so they can be fixed.
-    gpu_memory_utilization = 0.9
-    cpu_swap_space = 100
-    block_size = 16
 
-    num_gpu_blocks, num_cpu_blocks = worker.profile_num_available_blocks(
-        block_size, gpu_memory_utilization, cpu_swap_space, cache_dtype="auto")
+    num_gpu_blocks, num_cpu_blocks = worker.profile_num_available_blocks()
 
-    target_worker.profile_num_available_blocks.assert_called_once_with(
-        block_size, gpu_memory_utilization, cpu_swap_space, "auto")
+    target_worker.profile_num_available_blocks.assert_called_once()
     assert num_cpu_blocks == available_cpu_blocks
 
     assert num_gpu_blocks == split_num_cache_blocks_evenly(
