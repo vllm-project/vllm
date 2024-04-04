@@ -118,7 +118,7 @@ class LLMEngine:
 
         self.model_executor = executor_class(
             model_config=model_config,
-            cache_config=cache_config,
+            cache_config=cache_config.shallow_copy(),
             parallel_config=parallel_config,
             scheduler_config=scheduler_config,
             device_config=device_config,
@@ -137,6 +137,8 @@ class LLMEngine:
             num_gpu_blocks = forced_num_gpu_blocks
 
         raise_if_cache_size_invalid(num_gpu_blocks, self.cache_config.block_size, self.model_config.max_model_len)
+        self.cache_config.num_gpu_blocks = num_gpu_blocks
+        self.cache_config.num_cpu_blocks = num_cpu_blocks
 
         logger.info(
             f"# GPU blocks: {num_gpu_blocks}, "

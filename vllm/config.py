@@ -367,6 +367,21 @@ class CacheConfig:
         # metrics info
         return {key: str(value) for key, value in self.__dict__.items()}
 
+    def shallow_copy(self):
+        cache_config = CacheConfig(
+            block_size=self.block_size,
+            gpu_memory_utilization=self.gpu_memory_utilization,
+            swap_space=self.swap_space_bytes // _GB,
+            cache_dtype=self.cache_dtype,
+            forced_num_gpu_blocks=self.forced_num_gpu_blocks,
+            sliding_window=self.sliding_window,
+            enable_prefix_caching=self.enable_prefix_caching
+        )
+
+        cache_config.num_gpu_blocks = self.num_gpu_blocks
+        cache_config.num_cpu_blocks = self.num_cpu_blocks
+        return cache_config
+
     def _verify_args(self) -> None:
         if self.gpu_memory_utilization > 1.0:
             raise ValueError(

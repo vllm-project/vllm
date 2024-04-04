@@ -56,7 +56,7 @@ class GPUExecutor(ExecutorBase):
             parallel_config=self.parallel_config,
             scheduler_config=self.scheduler_config,
             device_config=self.device_config,
-            cache_config=self.cache_config,
+            cache_config=self.cache_config.shallow_copy(),
             local_rank=0,
             rank=0,
             distributed_init_method=distributed_init_method,
