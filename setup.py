@@ -329,11 +329,13 @@ def get_requirements() -> List[str]:
     def _read_requirements(filename: str) -> List[str]:
         with open(get_path(filename)) as f:
             requirements = f.read().strip().split("\n")
+        resolved_requirements = []
         for line in requirements:
             if line.startswith("-r "):
-                requirements.remove(line)
-                requirements += _read_requirements(line.split()[1])
-        return requirements
+                resolved_requirements += _read_requirements(line.split()[1])
+            else:
+                resolved_requirements.append(line)
+        return resolved_requirements
 
     if _is_cuda():
         requirements = _read_requirements("requirements-cuda.txt")
