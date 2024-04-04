@@ -68,37 +68,10 @@ class BlockTable:
     def get_blocks(self) -> Optional[List[Block]]:
         return self._blocks
 
-    def append_by_block(self,
-                        token_ids: List[int],
-                        device: Device = Device.GPU) -> Block:
-        """Allocates memory block for storing the given sequence 
-        of token IDs and append it back to the block list.
-
-        This method allocates a block to store the given
-        sequence of token IDs append it back to the block list.
-
-        Args:
-            token_ids (List[int]): The sequence of token IDs to be stored.
-            device (Device, optional): The device on which the blocks should be
-                allocated. Defaults to Device.GPU.
-        """
-        blocks = self._allocate_blocks_for_token_ids(prev_block=None,
-                                                     token_ids=token_ids,
-                                                     device=device)
-        # Note: whenever we call append_by_block because of swapping, the tokens
-        # must fit in a block
-        assert len(blocks) <= 1
-        block = blocks[0]
-        if not self._is_allocated:
-            self._blocks = blocks
-        else:
-            self._blocks.append(block)
-        self._num_full_slots += len(token_ids)
-        return block
-
     def allocate(self,
                  token_ids: List[int],
-                 device: Device = Device.GPU) -> None:
+                 device: Device = Device.GPU,
+                 by_block: bool = False) -> Optional[Block]:
         """Allocates memory blocks for storing the given sequence of token IDs.
 
         This method allocates the required number of blocks to store the given
@@ -108,13 +81,23 @@ class BlockTable:
             token_ids (List[int]): The sequence of token IDs to be stored.
             device (Device, optional): The device on which the blocks should be
                 allocated. Defaults to Device.GPU.
+            by_block (bool, optional): whether we are allocate block by block.
+            Set to True when doing cache swapping. Defaults to False. 
         """
-        assert not self._is_allocated
+        assert not self._is_allocated or by_block
         assert token_ids
-        self._blocks = self._allocate_blocks_for_token_ids(prev_block=None,
-                                                           token_ids=token_ids,
-                                                           device=device)
-        self._num_full_slots = len(token_ids)
+        blocks = self._allocate_blocks_for_token_ids(prev_block=None,
+                                                     token_ids=token_ids,
+                                                     device=device)
+        self._num_full_slots += len(token_ids)
+        if not (by_block and self._is_allocated):
+            self._blocks = blocks
+        else:
+            # Note: whenever we call allocate with by_block set to True,
+            # because of swapping, the tokens must fit in a block
+            assert len(blocks) == 1
+            self._blocks.append(blocks[0])
+        return blocks[0]
 
     def append_token_ids(self,
                          token_ids: List[int],
