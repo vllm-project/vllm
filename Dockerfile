@@ -47,11 +47,13 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 RUN apt-get update -y && apt-get install -y ccache
 
 # files and directories related to build wheels
-ADD cmake /workspace/cmake
-ADD csrc /workspace/csrc
-ADD vllm /workspace/vllm
-ADD setup.py /workspace/setup.py
-ADD CMakeLists.txt /workspace/CMakeLists.txt
+COPY csrc csrc
+COPY setup.py setup.py
+COPY cmake cmake
+COPY CMakeLists.txt CMakeLists.txt
+COPY requirements.txt requirements.txt
+COPY pyproject.toml pyproject.toml
+COPY vllm vllm
 
 # max jobs used by Ninja to build extensions
 ARG max_jobs=2
