@@ -5,7 +5,8 @@ from transformers import PreTrainedTokenizer
 
 import vllm
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
+                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
+                         VisionLanguageConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics import StatLogger, Stats
@@ -13,7 +14,6 @@ from vllm.engine.ray_utils import initialize_ray_cluster
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.model_loader import get_architecture_class_name
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (MultiModalData, SamplerOutput, Sequence,
@@ -53,6 +53,11 @@ class LLMEngine:
         parallel_config: The configuration related to distributed execution.
         scheduler_config: The configuration related to the request scheduler.
         device_config: The configuration related to the device.
+        lora_config (Optional): The configuration related to serving multi-LoRA.
+        vision_language_config (Optional): The configuration related to vision
+            language models.
+        speculative_config (Optional): The configuration related to speculative
+            decoding.
         executor_class: The model executor class for managing distributed
             execution.
         log_stats: Whether to log statistics.
@@ -67,7 +72,8 @@ class LLMEngine:
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
-        vision_language_config: Optional["VisionLanguageConfig"],
+        vision_language_config: Optional[VisionLanguageConfig],
+        speculative_config: Optional[SpeculativeConfig],
         executor_class: Type[ExecutorBase],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
@@ -75,6 +81,7 @@ class LLMEngine:
         logger.info(
             f"Initializing an LLM engine (v{vllm.__version__}) with config: "
             f"model={model_config.model!r}, "
+            f"speculative_config={speculative_config!r}, "
             f"tokenizer={model_config.tokenizer!r}, "
             f"tokenizer_mode={model_config.tokenizer_mode}, "
             f"revision={model_config.revision}, "
@@ -90,6 +97,7 @@ class LLMEngine:
             f"quantization={model_config.quantization}, "
             f"enforce_eager={model_config.enforce_eager}, "
             f"kv_cache_dtype={cache_config.cache_dtype}, "
+            f"quantization_param_path={model_config.quantization_param_path}, "
             f"device_config={device_config.device}, "
             f"seed={model_config.seed})")
         # TODO(woosuk): Print more configs in debug mode.
@@ -101,20 +109,28 @@ class LLMEngine:
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
+        self.speculative_config = speculative_config
         self.log_stats = log_stats
-        self._verify_args()
 
         self._init_tokenizer()
         self.detokenizer = Detokenizer(self.tokenizer)
         self.seq_counter = Counter()
 
-        self.model_executor = executor_class(model_config, cache_config,
-                                             parallel_config, scheduler_config,
-                                             device_config, lora_config,
-                                             vision_language_config)
+        self.model_executor = executor_class(
+            model_config=model_config,
+            cache_config=cache_config,
+            parallel_config=parallel_config,
+            scheduler_config=scheduler_config,
+            device_config=device_config,
+            lora_config=lora_config,
+            vision_language_config=vision_language_config,
+            speculative_config=speculative_config,
+        )
 
         # If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
+            from vllm.model_executor.model_loader import (
+                get_architecture_class_name)
             usage_message.report_usage(
                 get_architecture_class_name(model_config),
                 usage_context,
@@ -170,27 +186,28 @@ class LLMEngine:
     ) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.
-        engine_configs = engine_args.create_engine_configs()
-        parallel_config = engine_configs[2]
-        device_config = engine_configs[4]
+        engine_config = engine_args.create_engine_config()
 
         # Initialize the cluster and specify the executor class.
-        if device_config.device_type == "neuron":
+        if engine_config.device_config.device_type == "neuron":
             from vllm.executor.neuron_executor import NeuronExecutor
             executor_class = NeuronExecutor
-        elif parallel_config.worker_use_ray:
-            initialize_ray_cluster(parallel_config)
+        elif engine_config.device_config.device_type == "cpu":
+            from vllm.executor.cpu_executor import CPUExecutor
+            executor_class = CPUExecutor
+        elif engine_config.parallel_config.worker_use_ray:
+            initialize_ray_cluster(engine_config.parallel_config)
             from vllm.executor.ray_gpu_executor import RayGPUExecutor
             executor_class = RayGPUExecutor
         else:
-            assert parallel_config.world_size == 1, (
+            assert engine_config.parallel_config.world_size == 1, (
                 "Ray is required if parallel_config.world_size > 1.")
             from vllm.executor.gpu_executor import GPUExecutor
             executor_class = GPUExecutor
 
         # Create the LLM engine.
         engine = cls(
-            *engine_configs,
+            **engine_config.to_dict(),
             executor_class=executor_class,
             log_stats=not engine_args.disable_log_stats,
             usage_context=usage_context,
@@ -415,7 +432,7 @@ class LLMEngine:
 
         # Process prompt logprobs
         prompt_logprobs = outputs.prompt_logprobs
-        if prompt_logprobs is not None:
+        if prompt_logprobs is not None and seq_group.sampling_params.detokenize:
             self.detokenizer.decode_prompt_logprobs_inplace(
                 seq_group, prompt_logprobs)
             seq_group.prompt_logprobs = prompt_logprobs
@@ -461,8 +478,9 @@ class LLMEngine:
             child_seqs.append((parent, parent))
 
         for seq, _ in child_seqs:
-            self.detokenizer.decode_sequence_inplace(seq,
-                                                     seq_group.sampling_params)
+            if seq_group.sampling_params.detokenize:
+                self.detokenizer.decode_sequence_inplace(
+                    seq, seq_group.sampling_params)
             self._check_stop(seq, seq_group.sampling_params)
 
         # Non-beam search case
@@ -712,7 +730,7 @@ class LLMEngine:
         time_per_output_tokens = []
         time_e2e_requests = []
         if scheduler_outputs is not None:
-            prompt_run = scheduler_outputs.prompt_run
+            prompt_run = scheduler_outputs.num_prefill_groups > 0
 
             # Number of Tokens.
             if prompt_run:
@@ -774,12 +792,13 @@ class LLMEngine:
         if seq.get_output_len() < sampling_params.min_tokens:
             return
 
-        for stop_str in sampling_params.stop:
-            if seq.output_text.endswith(stop_str):
-                self._finalize_sequence(seq, sampling_params, stop_str)
-                seq.status = SequenceStatus.FINISHED_STOPPED
-                seq.stop_reason = stop_str
-                return
+        if sampling_params.detokenize:
+            for stop_str in sampling_params.stop:
+                if seq.output_text.endswith(stop_str):
+                    self._finalize_sequence(seq, sampling_params, stop_str)
+                    seq.status = SequenceStatus.FINISHED_STOPPED
+                    seq.stop_reason = stop_str
+                    return
         last_token_id = seq.get_last_token_id()
         if last_token_id in sampling_params.stop_token_ids:
             stop_str = self.get_tokenizer_for_seq(seq).convert_ids_to_tokens(

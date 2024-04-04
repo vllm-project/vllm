@@ -2,7 +2,10 @@ cmake_minimum_required(VERSION 3.21)
 
 project(vllm_extensions LANGUAGES CXX)
 
+option(VLLM_TARGET_DEVICE "Target device backend for vLLM" "cuda")
+
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
+message(STATUS "Target device: ${VLLM_TARGET_DEVICE}")
 
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/utils.cmake)
 
@@ -16,7 +19,7 @@ set(PYTHON_SUPPORTED_VERSIONS "3.8" "3.9" "3.10" "3.11")
 set(CUDA_SUPPORTED_ARCHS "7.0;7.5;8.0;8.6;8.9;9.0")
 
 # Supported AMD GPU architectures.
-set(HIP_SUPPORTED_ARCHS "gfx908;gfx90a;gfx942;gfx1100")
+set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx1100")
 
 #
 # Supported/expected torch versions for CUDA/ROCm.
@@ -75,6 +78,19 @@ find_package(Torch REQUIRED)
 #
 find_library(torch_python_LIBRARY torch_python PATHS
   "${TORCH_INSTALL_PREFIX}/lib")
+
+#
+# Forward the non-CUDA device extensions to external CMake scripts.
+#
+if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND
+    NOT VLLM_TARGET_DEVICE STREQUAL "rocm")
+    if (VLLM_TARGET_DEVICE STREQUAL "cpu")
+        include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
+    else()
+        message(FATAL_ERROR "Unsupported vLLM target device: ${VLLM_TARGET_DEVICE}")
+    endif()
+    return()
+endif()
 
 #
 # Set up GPU language and check the torch version and warn if it isn't

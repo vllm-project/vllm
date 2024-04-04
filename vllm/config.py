@@ -1,7 +1,7 @@
 import enum
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, ClassVar, Optional, Union
 
 import torch
@@ -10,7 +10,8 @@ from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config, get_hf_text_config
-from vllm.utils import get_cpu_memory, get_nvcc_cuda_version, is_hip, is_neuron
+from vllm.utils import (get_cpu_memory, get_nvcc_cuda_version, is_cpu, is_hip,
+                        is_neuron)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -59,6 +60,11 @@ class ModelConfig:
             output). If None, will be derived from the model.
         quantization: Quantization method that was used to quantize the model
             weights. If None, we assume the model weights are not quantized.
+        quantization_param_path: Path to JSON file containing scaling factors.
+            Used to load KV cache scaling factors into the model when KV cache
+            type is FP8_E4M3 on ROCm (AMD GPU). In the future these will also 
+            be used to load activation and weight scaling factors when the 
+            model dtype is FP8_E4M3 on ROCm.
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
@@ -82,6 +88,7 @@ class ModelConfig:
         tokenizer_revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
+        quantization_param_path: Optional[str] = None,
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
         max_logprobs: int = 5,
@@ -97,6 +104,7 @@ class ModelConfig:
         self.code_revision = code_revision
         self.tokenizer_revision = tokenizer_revision
         self.quantization = quantization
+        self.quantization_param_path = quantization_param_path
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
         self.max_logprobs = max_logprobs
@@ -171,26 +179,28 @@ class ModelConfig:
             self.quantization = self.quantization.lower()
 
         # Parse quantization method from the HF model config, if available.
-        hf_quant_config = getattr(self.hf_config, "quantization_config", None)
-        if hf_quant_config is not None:
-            hf_quant_method = str(hf_quant_config["quant_method"]).lower()
+        quant_cfg = getattr(self.hf_config, "quantization_config", None)
+        if quant_cfg is not None:
+            quant_method = quant_cfg.get("quant_method", "").lower()
+            # compat: autogptq >=0.8.0 use checkpoint_format: str
+            # compat: autogptq <=0.7.1 is_marlin_format: bool
+            is_format_marlin = (quant_cfg.get("checkpoint_format") == "marlin"
+                                or quant_cfg.get("is_marlin_format", False))
 
-            # If the GPTQ model is serialized in marlin format, use marlin.
-            if (hf_quant_method == "gptq"
-                    and "is_marlin_format" in hf_quant_config
-                    and hf_quant_config["is_marlin_format"]):
+            # Use marlin if the GPTQ model is serialized in marlin format.
+            if quant_method == "gptq" and is_format_marlin:
                 logger.info("The model is serialized in Marlin format. "
                             "Using Marlin kernel.")
-                hf_quant_method = "marlin"
+                quant_method = "marlin"
                 if self.quantization == "gptq":
-                    self.quantization = hf_quant_method
+                    self.quantization = quant_method
 
             if self.quantization is None:
-                self.quantization = hf_quant_method
-            elif self.quantization != hf_quant_method:
+                self.quantization = quant_method
+            elif self.quantization != quant_method:
                 raise ValueError(
                     "Quantization method specified in the model config "
-                    f"({hf_quant_method}) does not match the quantization "
+                    f"({quant_method}) does not match the quantization "
                     f"method specified in the `quantization` argument "
                     f"({self.quantization}).")
 
@@ -366,21 +376,20 @@ class CacheConfig:
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":
             pass
-        elif self.cache_dtype == "fp8_e5m2":
-            if is_hip():
-                raise NotImplementedError(
-                    "FP8_E5M2 KV Cache on AMD GPU has not been supported yet.")
-            nvcc_cuda_version = get_nvcc_cuda_version()
-            if nvcc_cuda_version and nvcc_cuda_version < Version("11.8"):
-                raise ValueError(
-                    "FP8 is not supported when cuda version is lower than 11.8."
-                )
+        elif self.cache_dtype == "fp8":
+            if not is_hip():
+                nvcc_cuda_version = get_nvcc_cuda_version()
+                if nvcc_cuda_version < Version("11.8"):
+                    raise ValueError(
+                        "FP8 is not supported when cuda version is"
+                        "lower than 11.8.")
             logger.info(
-                "Using fp8_e5m2 data type to store kv cache. It reduces "
-                "the GPU memory footprint and boosts the performance. "
-                "But it may cause slight accuracy drop. "
-                "Currently we only support fp8 without scaling factors and "
-                "make e5m2 as a default format.")
+                "Using fp8 data type to store kv cache. It reduces the GPU "
+                "memory footprint and boosts the performance. "
+                "But it may cause slight accuracy drop without scaling "
+                "factors. FP8_E5M2 (without scaling) is only supported on "
+                "cuda version greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 "
+                "is instead supported for common inference criteria.")
         else:
             raise ValueError(f"Unknown kv cache dtype: {self.cache_dtype}")
 
@@ -530,9 +539,13 @@ class SchedulerConfig:
             iteration.
         max_model_len: Maximum length of a sequence (including prompt
             and generated text).
+        use_v2_block_manager: Whether to use the BlockSpaceManagerV2 or not.
+        num_lookahead_slots: The number of slots to allocate per sequence per
+            step, beyond the known token ids. This is used in speculative
+            decoding to store KV activations of tokens which may or may not be
+            accepted.
         delay_factor: Apply a delay (of delay factor multiplied by previous
             prompt latency) before scheduling next prompt.
-        use_v2_block_manager: Whether to use the BlockSpaceManagerV2 or not.
         enable_chunked_prefill: If True, prefill requests can be chunked based
             on the remaining max_num_batched_tokens.
     """
@@ -543,6 +556,7 @@ class SchedulerConfig:
         max_num_seqs: int,
         max_model_len: int,
         use_v2_block_manager: bool = False,
+        num_lookahead_slots: int = 0,
         delay_factor: float = 0.0,
         enable_chunked_prefill: bool = False,
     ) -> None:
@@ -554,9 +568,11 @@ class SchedulerConfig:
             self.max_num_batched_tokens = max(max_model_len, 2048)
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
-        self.delay_factor = delay_factor
         self.use_v2_block_manager = use_v2_block_manager
+        self.num_lookahead_slots = num_lookahead_slots
+        self.delay_factor = delay_factor
         self.chunked_prefill_enabled = enable_chunked_prefill
+
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -568,11 +584,18 @@ class SchedulerConfig:
                 "max_num_batched_tokens and makes vLLM reject longer "
                 "sequences. Please increase max_num_batched_tokens or "
                 "decrease max_model_len.")
+
         if self.max_num_batched_tokens < self.max_num_seqs:
             raise ValueError(
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) must "
                 "be greater than or equal to max_num_seqs "
                 f"({self.max_num_seqs}).")
+
+        if self.num_lookahead_slots < 0:
+            raise ValueError(
+                "num_lookahead_slots "
+                f"({self.num_lookahead_slots}) must be greater than or "
+                "equal to 0.")
 
 
 class DeviceConfig:
@@ -582,6 +605,8 @@ class DeviceConfig:
             # Automated device type detection
             if is_neuron():
                 self.device_type = "neuron"
+            elif is_cpu():
+                self.device_type = "cpu"
             else:
                 # We don't call torch.cuda.is_available() here to
                 # avoid initializing CUDA before workers are forked
@@ -596,6 +621,159 @@ class DeviceConfig:
         else:
             # Set device with device type
             self.device = torch.device(self.device_type)
+
+
+class SpeculativeConfig:
+    """Configuration for speculative decoding.
+
+    The configuration is currently specialized to draft-model speculative
+    decoding with top-1 proposals.
+    """
+
+    @staticmethod
+    def maybe_create_spec_config(
+        target_model_config: ModelConfig,
+        target_parallel_config: ParallelConfig,
+        target_dtype: str,
+        speculative_model: Optional[str],
+        num_speculative_tokens: Optional[int],
+    ) -> Optional["SpeculativeConfig"]:
+        """Create a SpeculativeConfig if possible, else return None.
+
+        This function attempts to create a SpeculativeConfig object based on the
+        provided parameters. If the necessary conditions are met, it returns an
+        instance of SpeculativeConfig. Otherwise, it returns None.
+
+        Args:
+            target_model_config (ModelConfig): The configuration of the target
+                model.
+            target_parallel_config (ParallelConfig): The parallel configuration
+                for the target model.
+            target_dtype (str): The data type used for the target model.
+            speculative_model (Optional[str]): The name of the speculative
+                model, if provided.
+            num_speculative_tokens (Optional[int]): The number of speculative
+                tokens, if provided.
+
+        Returns:
+            Optional["SpeculativeConfig"]: An instance of SpeculativeConfig if
+                the necessary conditions are met, else None.
+        """
+
+        if (speculative_model is None and num_speculative_tokens is None):
+            return None
+
+        if speculative_model is not None and num_speculative_tokens is None:
+            raise ValueError(
+                "Expected both speculative_model and "
+                "num_speculative_tokens to be provided, but found "
+                f"{speculative_model=} and {num_speculative_tokens=}.")
+
+        # TODO: The user should be able to specify revision/quantization/max
+        # model len for the draft model. It is not currently supported.
+        draft_revision = None
+        draft_code_revision = None
+        draft_quantization = None
+        draft_max_model_len = None
+
+        draft_model_config = ModelConfig(
+            model=speculative_model,
+            tokenizer=target_model_config.tokenizer,
+            tokenizer_mode=target_model_config.tokenizer_mode,
+            trust_remote_code=target_model_config.trust_remote_code,
+            download_dir=target_model_config.download_dir,
+            load_format=target_model_config.load_format,
+            dtype=target_model_config.dtype,
+            seed=target_model_config.seed,
+            revision=draft_revision,
+            code_revision=draft_code_revision,
+            tokenizer_revision=target_model_config.tokenizer_revision,
+            max_model_len=draft_max_model_len,
+            quantization=draft_quantization,
+            enforce_eager=target_model_config.enforce_eager,
+            max_context_len_to_capture=target_model_config.
+            max_context_len_to_capture,
+            max_logprobs=target_model_config.max_logprobs,
+        )
+
+        draft_parallel_config = (
+            SpeculativeConfig.create_draft_parallel_config(
+                target_parallel_config))
+
+        return SpeculativeConfig(
+            draft_model_config,
+            draft_parallel_config,
+            num_speculative_tokens,
+        )
+
+    @staticmethod
+    def create_draft_parallel_config(
+            target_parallel_config: ParallelConfig) -> ParallelConfig:
+        """Create a parallel config for use by the draft worker.
+
+        This is mostly a copy of the target parallel config. In the future the
+        draft worker can have a different parallel strategy, e.g. TP=1.
+        """
+        draft_parallel_config = ParallelConfig(
+            pipeline_parallel_size=target_parallel_config.
+            pipeline_parallel_size,
+            tensor_parallel_size=target_parallel_config.tensor_parallel_size,
+            worker_use_ray=target_parallel_config.worker_use_ray,
+            max_parallel_loading_workers=target_parallel_config.
+            max_parallel_loading_workers,
+            disable_custom_all_reduce=target_parallel_config.
+            disable_custom_all_reduce,
+            tokenizer_pool_config=target_parallel_config.tokenizer_pool_config,
+            ray_workers_use_nsight=target_parallel_config.
+            ray_workers_use_nsight,
+            placement_group=target_parallel_config.placement_group,
+        )
+
+        return draft_parallel_config
+
+    def __init__(
+        self,
+        draft_model_config: ModelConfig,
+        draft_parallel_config: ParallelConfig,
+        num_speculative_tokens: int,
+    ):
+        """Create a SpeculativeConfig object.
+
+        Args:
+            draft_model_config: ModelConfig for the draft model.
+            draft_parallel_config: ParallelConfig for the draft model.
+            num_speculative_tokens: The number of tokens to sample from the
+                draft model before scoring with the target model.
+        """
+        self.draft_model_config = draft_model_config
+        self.draft_parallel_config = draft_parallel_config
+        self.num_speculative_tokens = num_speculative_tokens
+
+        self._verify_args()
+
+    def _verify_args(self) -> None:
+        if self.num_speculative_tokens <= 0:
+            raise ValueError("Expected num_speculative_tokens to be greater "
+                             f"than zero ({self.num_speculative_tokens}).")
+
+        if self.draft_model_config:
+            self.draft_model_config.verify_with_parallel_config(
+                self.draft_parallel_config)
+
+    @property
+    def num_lookahead_slots(self) -> int:
+        """The number of additional slots the scheduler should allocate per
+        step, in addition to the slots allocated for each known token.
+
+        This is equal to the number of speculative tokens, as each speculative
+        token must be scored.
+        """
+        return self.num_speculative_tokens
+
+    def __repr__(self) -> str:
+        draft_model = self.draft_model_config.model
+        num_spec_tokens = self.num_speculative_tokens
+        return f"SpeculativeConfig({draft_model=}, {num_spec_tokens=})"
 
 
 @dataclass
@@ -819,3 +997,36 @@ def _get_and_verify_max_len(
                 "to incorrect model outputs or CUDA errors. Make sure the "
                 "value is correct and within the model context size.")
     return int(max_model_len)
+
+
+@dataclass(frozen=True)
+class EngineConfig:
+    """Dataclass which contains all engine-related configuration. This
+    simplifies passing around the distinct configurations in the codebase.
+    """
+
+    model_config: ModelConfig
+    cache_config: CacheConfig
+    parallel_config: ParallelConfig
+    scheduler_config: SchedulerConfig
+    device_config: DeviceConfig
+    lora_config: Optional[LoRAConfig]
+    vision_language_config: Optional[VisionLanguageConfig]
+    speculative_config: Optional[SpeculativeConfig]
+
+    def __post_init__(self):
+        """Verify configs are valid & consistent with each other.
+        """
+        self.model_config.verify_with_parallel_config(self.parallel_config)
+        self.cache_config.verify_with_parallel_config(self.parallel_config)
+
+        if self.lora_config:
+            self.lora_config.verify_with_model_config(self.model_config)
+            self.lora_config.verify_with_scheduler_config(
+                self.scheduler_config)
+
+    def to_dict(self):
+        """Return the configs as a dictionary, for use in **kwargs.
+        """
+        return dict(
+            (field.name, getattr(self, field.name)) for field in fields(self))
