@@ -110,7 +110,9 @@ def sample_sonnet_requests(
     prefix_len: int,
     tokenizer: PreTrainedTokenizerBase,
 ) -> List[Tuple[str, str, int, int]]:
-    assert input_len > prefix_len, "input_len must be greater than prefix_len."
+    assert (
+        input_len > prefix_len
+    ), "'args.sonnet-input-len' must be greater than 'args.prefix-input-len'."
 
     # Load the dataset.
     with open(dataset_path) as f:
