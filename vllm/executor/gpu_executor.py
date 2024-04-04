@@ -55,16 +55,17 @@ class GPUExecutor(ExecutorBase):
         distributed_init_method = get_distributed_init_method(
             get_ip(), get_open_port())
         self.driver_worker = Worker(
-            self.model_config,
-            self.parallel_config,
-            self.scheduler_config,
-            self.device_config,
+            model_config=self.model_config,
+            parallel_config=self.parallel_config,
+            scheduler_config=self.scheduler_config,
+            device_config=self.device_config,
+            cache_config=self.cache_config,
             local_rank=0,
             rank=0,
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
             vision_language_config=self.vision_language_config,
-            kv_cache_dtype=self.cache_config.cache_dtype,
+            #kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )
         self.driver_worker.init_device()
@@ -74,12 +75,15 @@ class GPUExecutor(ExecutorBase):
         # TODO clean up datastructure
         num_gpu_blocks, num_cpu_blocks = (
             self.driver_worker.profile_num_available_blocks(
-                block_size=self.cache_config.block_size,
-                gpu_memory_utilization=self.cache_config.
-                gpu_memory_utilization,
-                cpu_swap_space=self.cache_config.swap_space_bytes,
-                cache_dtype=self.cache_config.cache_dtype,
+                #self.cache_config,
             ))
+            #self.driver_worker.profile_num_available_blocks(
+            #    block_size=self.cache_config.block_size,
+            #    gpu_memory_utilization=self.cache_config.
+            #    gpu_memory_utilization,
+            #    cpu_swap_space=self.cache_config.swap_space_bytes,
+            #    cache_dtype=self.cache_config.cache_dtype,
+            #))
 
         return KvCacheProfileResult(
             num_active_kv_blocks=num_gpu_blocks,
@@ -87,7 +91,7 @@ class GPUExecutor(ExecutorBase):
         )
 
 
-    def allocate_kv_cache(self, num_active_kv_blocks: int, num_swapped_kv_blocks) -> None:
+    def initialize_cache(self, num_active_kv_blocks: int, num_swapped_kv_blocks) -> None:
         if self.cache_config.forced_num_gpu_blocks is not None:
             forced_num_active_kv_blocks = self.cache_config.forced_num_gpu_blocks
             logger.info(f"Replacing profiled {num_active_kv_blocks=} with "

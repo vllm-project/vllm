@@ -35,18 +35,20 @@ class Worker:
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
+        cache_config: CacheConfig,
         local_rank: int,
         rank: int,
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
         vision_language_config: Optional[VisionLanguageConfig] = None,
-        kv_cache_dtype: Optional[str] = "auto",
+        #kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
+        self.cache_config = cache_config
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
@@ -66,12 +68,12 @@ class Worker:
             scheduler_config,
             device_config,
             lora_config=self.lora_config,
-            kv_cache_dtype=kv_cache_dtype,
+            kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
             vision_language_config=vision_language_config)
         # Uninitialized cache engine. Will be initialized by
         # self.init_cache_engine().
-        self.cache_config = None
+        #self.cache_config = None
         self.cache_engine = None
         self.gpu_cache = None
 
@@ -109,10 +111,10 @@ class Worker:
     @torch.inference_mode()
     def profile_num_available_blocks(
         self,
-        block_size: int,
-        gpu_memory_utilization: float,
-        cpu_swap_space: int,
-        cache_dtype: str,
+        #block_size: int,
+        #gpu_memory_utilization: float,
+        #cpu_swap_space: int,
+        #cache_dtype: str,
     ) -> Tuple[int, int]:
         """Profiles the peak memory usage of the model and returns the maximum
         number of GPU and CPU cache blocks that can be allocated.
@@ -122,6 +124,12 @@ class Worker:
             gpu_memory_utilization: The fraction of the total GPU memory to use.
             cpu_swap_space: The size of the CPU swap space in bytes.
         """
+
+        block_size = self.cache_config.block_size
+        gpu_memory_utilization = self.cache_config.gpu_memory_utilization
+        cpu_swap_space = self.cache_config.swap_space_bytes
+        cache_dtype = self.cache_config.cache_dtype
+        
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
         torch.cuda.empty_cache()
