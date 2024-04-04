@@ -11,7 +11,6 @@ from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention.ops.paged_attn import (
     PagedAttentionImpl)
 from vllm.utils import is_hip
-from vllm.core.block_manager import BlockSpaceManager
 
 
 class XFormersBackend:
@@ -53,7 +52,6 @@ class XFormersBackend:
         value_cache: Optional[torch.Tensor],
         input_metadata: InputMetadata,
         key_original: Optional[torch.Tensor],
-        block_manager: Optional[BlockSpaceManager]
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
@@ -185,7 +183,7 @@ class XFormersBackend:
             )
             
             # attention sinks: revert key in cache to pre-rotated state
-            use_attn_sinks = True
+            use_attn_sinks = False
             if use_attn_sinks:
                 if key_cache is not None and value_cache is not None:
                     # need to first evict the rotated key cached above (line 83)

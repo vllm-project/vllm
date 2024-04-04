@@ -8,7 +8,6 @@ import torch.nn as nn
 from vllm.logger import init_logger
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.utils import is_hip
-from vllm.core.block_manager import BlockSpaceManager
 
 logger = init_logger(__name__)
 
@@ -55,10 +54,9 @@ class Attention(nn.Module):
         value_cache: Optional[torch.Tensor],
         input_metadata: InputMetadata,
         key_original: Optional[torch.Tensor],
-        block_manager: Optional[BlockSpaceManager]
     ) -> torch.Tensor:
         return self.backend.forward(query, key, value, key_cache, value_cache,
-                                    input_metadata, key_original, block_manager)
+                                    input_metadata, key_original)
 
 
 @lru_cache(maxsize=1)

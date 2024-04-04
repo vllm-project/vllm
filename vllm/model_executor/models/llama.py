@@ -46,7 +46,6 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
-from vllm.core.block_manager import BlockSpaceManager
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -152,7 +151,6 @@ class LlamaAttention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
-        block_manager: Optional[BlockSpaceManager]
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -170,7 +168,7 @@ class LlamaAttention(nn.Module):
             q, k = self.rotary_emb(positions, q, k)
         
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata, k_original, block_manager)
+        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata, k_original)
         output, _ = self.o_proj(attn_output)
         return output
 
