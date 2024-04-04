@@ -60,6 +60,7 @@ class WorkerBase(ABC):
     def list_loras(self) -> List[int]:
         raise NotImplementedError
 
+
 class LoraNotSupportedWorkerBase(WorkerBase):
     def add_lora(self, lora_request: LoRARequest) -> bool:
         raise ValueError(f"{type(self)} does not support LoRA")
