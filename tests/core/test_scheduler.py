@@ -10,7 +10,7 @@ from vllm.core.interfaces import AllocStatus
 from vllm.core.policy import PolicyFactory
 from vllm.core.scheduler import Scheduler, SchedulingBudget
 from vllm.lora.request import LoRARequest
-from vllm.sequence import Logprob, SequenceGroup, Logprob
+from vllm.sequence import Logprob, SequenceGroup
 
 from .utils import create_dummy_prompt
 
@@ -279,17 +279,13 @@ def initialize_scheduler(*,
     return scheduler
 
 
-def create_token_budget(num_batched_tokens: int = 0,
-                        num_curr_seqs: int = 0,
-                        token_budget: int = 10000,
+def create_token_budget(token_budget: int = 10000,
                         max_num_seqs: int = 10000) -> SchedulingBudget:
     return SchedulingBudget(
-        num_batched_tokens=num_batched_tokens,
-        num_curr_seqs=num_curr_seqs,
         token_budget=token_budget,
         max_num_seqs=max_num_seqs,
     )
-
+    
 
 def test_prefill_schedule_max_prompt_len():
     """
@@ -341,7 +337,7 @@ def test_prefill_schedule_token_budget():
     # Test when current_batched_tokens respected.
     scheduler = initialize_scheduler()
     waiting = deque()
-    budget = create_token_budget(num_batched_tokens=30, token_budget=60)
+    budget = create_token_budget(token_budget=60)
     _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
     # Cannot schedule a prompt that doesn't fit the budget.
     waiting.append(seq_group)
@@ -352,7 +348,8 @@ def test_prefill_schedule_token_budget():
     assert budget.num_batched_tokens == 30
     assert budget.num_curr_seqs == 0
     assert len(remaining_waiting) == 1
-    budget = create_token_budget(num_batched_tokens=30, token_budget=90)
+    budget = create_token_budget(token_budget=90)
+    budget.subtract_budget(create_dummy_prompt('10', prompt_length=60)[1], 30, 1)
     remaining_waiting, output = scheduler._schedule_prefills(
         waiting, budget, None)
     assert len(output.seq_groups) == 1
@@ -381,7 +378,8 @@ def test_prefill_schedule_max_seqs():
 
     # Verify curr_num_seqs respected.
     waiting = deque()
-    budget = create_token_budget(num_curr_seqs=2, max_num_seqs=2)
+    budget = create_token_budget(max_num_seqs=2)
+    budget.subtract_budget(create_dummy_prompt('10', prompt_length=60)[1], 0, 2)
     _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
     waiting.append(seq_group)
     remaining_waiting, output = scheduler._schedule_prefills(
@@ -499,7 +497,8 @@ def test_decode_schedule_preempted():
 
     # 1 cannot be scheduled, and the lowest priority (request 2)
     # should be preempted. 1 will also be preempted.
-    budget = create_token_budget(num_batched_tokens=3, num_curr_seqs=3)
+    budget = create_token_budget()
+    budget.subtract_budget(create_dummy_prompt('10', prompt_length=60)[1], 3, 3)
     remainig_running, output = scheduler._schedule_running(
         running, budget, curr_loras, policy)
     assert len(remainig_running) == 0
@@ -540,7 +539,8 @@ def test_decode_swap_beam_search():
     expected_swap_mapping = {"5": "7"}
     scheduler.block_manager.swap_out.return_value = expected_swap_mapping
 
-    budget = create_token_budget(num_batched_tokens=3, num_curr_seqs=3)
+    budget = create_token_budget()
+    budget.subtract_budget(create_dummy_prompt('10', prompt_length=60)[1], 0, 3)
     remainig_running, output = scheduler._schedule_running(
         running, budget, curr_loras, policy)
     assert len(remainig_running) == 0
@@ -635,7 +635,8 @@ def test_schedule_swapped_max_token_budget():
     assert len(output.seq_groups) == 1
 
     # Verify num_batched_tokens are respected.
-    budget = create_token_budget(num_batched_tokens=1, token_budget=1)
+    budget = create_token_budget(token_budget=1)
+    budget.subtract_budget(create_dummy_prompt('10', prompt_length=60)[1], 1, 0)
     remaining_swapped, output = scheduler._schedule_swapped(
         remaining_swapped, budget, curr_loras, policy)
     assert len(remaining_swapped) == 1
@@ -665,7 +666,8 @@ def test_schedule_swapped_max_seqs():
     assert len(output.seq_groups) == 1
 
     # Verify num_curr_seqs are respected.
-    budget = create_token_budget(num_curr_seqs=2, max_num_seqs=2)
+    budget = create_token_budget(max_num_seqs=2)
+    budget.subtract_budget(create_dummy_prompt('10', prompt_length=60)[1], 0, 2)
     remaining_swapped, output = scheduler._schedule_swapped(
         remaining_swapped, budget, curr_loras, policy)
     assert len(remaining_swapped) == 1
@@ -748,3 +750,51 @@ def test_schedule_swapped_blocks_to_copy():
     assert len(remaining_swapped) == 0
     assert len(output.seq_groups) == 1
     assert output.blocks_to_copy == {2: [3]}
+
+
+def test_scheduling_budget():
+    pass
+# SANG-TODO
+# @dataclass
+# class SchedulingBudget:
+#     """The available slots for scheduling."""
+#     token_budget: int
+#     max_num_seqs: int
+#     _requeset_ids: Set[int] = field(default_factory=set)
+#     _num_batched_tokens: int = 0
+#     _num_curr_seqs: int = 0
+
+#     def can_schedule(self, *, num_new_tokens: int, num_new_seqs: int):
+#         assert num_new_tokens != 0
+#         assert num_new_seqs != 0
+#         return (self.num_batched_tokens + num_new_tokens <= self.token_budget
+#                 and self.num_curr_seqs + num_new_seqs <= self.max_num_seqs)
+
+#     def remaining_token_budget(self):
+#         return self.token_budget - self.num_batched_tokens
+    
+#     def subtract_budget(self, seq_group: SequenceGroup, num_batched_tokens: int, num_curr_seqs: int):
+#         req_id = seq_group.request_id
+#         if req_id in self._requeset_ids:
+#             return
+    
+#         self._requeset_ids.add(req_id)
+#         self._num_batched_tokens += num_batched_tokens
+#         self._num_curr_seqs += num_curr_seqs
+
+#     def add_budget(self, seq_group: SequenceGroup, num_batched_tokens: int, num_curr_seqs: int):
+#         req_id = seq_group.request_id
+#         if req_id in self._requeset_ids:
+#             return
+    
+#         self._requeset_ids.add(req_id)
+#         self._num_batched_tokens -= num_batched_tokens
+#         self._num_curr_seqs -= num_curr_seqs
+
+#     @property
+#     def num_batched_tokens(self):
+#         return self._num_batched_tokens
+
+#     @property
+#     def num_curr_seqs(self):
+#         return self._num_curr_seqs

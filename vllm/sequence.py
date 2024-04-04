@@ -479,6 +479,12 @@ class SequenceGroup:
         for seq in self.seqs_dict.values():
             seq.data.update_num_computed_tokens(num_new_computed_tokens)
 
+    def get_num_uncomputed_tokens(self):
+        num_uncomputed_tokens = 0
+        for seq in self.get_seqs(status=SequenceStatus.RUNNING):
+            num_uncomputed_tokens += seq.data.get_num_uncomputed_tokens()
+        return num_uncomputed_tokens
+
     def num_seqs(self, status: Optional[SequenceStatus] = None) -> int:
         return len(self.get_seqs(status))
 
