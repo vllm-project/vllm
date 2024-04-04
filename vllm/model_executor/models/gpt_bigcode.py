@@ -240,7 +240,8 @@ class GPTBigCodeForCausalLM(nn.Module):
         "c_fc",  
         "c_proj",
         "wte",
-        "lm_head"
+        "lm_head",
+        "c_attn",
     ]
 
     embedding_modules = {
