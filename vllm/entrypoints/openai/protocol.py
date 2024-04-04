@@ -86,11 +86,7 @@ class ChatCompletionRequest(BaseModel):
     def to_lora_params(self) -> Union[LoRARequest, None]:
         if not self.lora_request:
             return None
-        return LoRARequest(
-            lora_name=self.lora_request["lora_name"],
-            lora_int_id=self.lora_request["lora_int_id"],
-            lora_local_path=self.lora_request["lora_local_path"],
-        )
+        return LoRARequest(**self.lora_request)
 
     def to_sampling_params(self) -> SamplingParams:
         return SamplingParams(
@@ -149,11 +145,7 @@ class CompletionRequest(BaseModel):
     def to_lora_params(self) -> Union[LoRARequest, None]:
         if not self.lora_request:
             return None
-        return LoRARequest(
-            lora_name=self.lora_request["lora_name"],
-            lora_int_id=self.lora_request["lora_int_id"],
-            lora_local_path=self.lora_request["lora_local_path"],
-        )
+        return LoRARequest(**self.lora_request)
 
     def to_sampling_params(self):
         echo_without_generation = self.echo and self.max_tokens == 0
