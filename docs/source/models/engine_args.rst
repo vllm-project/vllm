@@ -9,6 +9,15 @@ Below, you can find an explanation of every engine argument for vLLM:
 
     Name or path of the huggingface model to use.
 
+.. option:: --served-model-name <server_model_name>
+
+    The model name used in the API. If not specified, the model name will be the same as the huggingface name.
+
+.. api-key:: --api-key <api_key>
+
+    If provided, the server will require this key to be presented in the header.
+    Example: 'Authorization: Bearer api_key'
+
 .. option:: --tokenizer <tokenizer_name_or_path>
 
     Name or path of the huggingface tokenizer to use.
@@ -24,7 +33,7 @@ Below, you can find an explanation of every engine argument for vLLM:
 .. option:: --tokenizer-mode {auto,slow}
 
     The tokenizer mode.
-    
+
     * "auto" will use the fast tokenizer if available.
     * "slow" will always use the slow tokenizer.
 
@@ -95,7 +104,7 @@ Below, you can find an explanation of every engine argument for vLLM:
 
 .. option:: --gpu-memory-utilization <fraction>
 
-    The fraction of GPU memory to be used for the model executor, which can range from 0 to 1. 
+    The fraction of GPU memory to be used for the model executor, which can range from 0 to 1.
     For example, a value of 0.5 would imply 50% GPU memory utilization.
     If unspecified, will use the default value of 0.9.
 
