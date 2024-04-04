@@ -29,14 +29,16 @@ def sample_requests(
     dataset = [(data["conversations"][0]["value"],
                 data["conversations"][1]["value"]) for data in dataset]
 
-    # Filter out too long sequences.
-    filtered_dataset: List[Tuple[str, int, int]] = []
-
+    # Shuffle the dataset.
     random.shuffle(dataset)
 
+    # Filter out sequences that are too long or too short
+    filtered_dataset: List[Tuple[str, int, int]] = []
     for i in range(len(dataset)):
         if len(filtered_dataset) == num_requests:
             break
+
+        # Tokenize the prompts and completions.
         prompt = dataset[i][0]
         prompt_token_ids = tokenizer(prompt).input_ids
         completion = dataset[i][1]
