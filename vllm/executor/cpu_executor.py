@@ -115,13 +115,13 @@ class CPUExecutor(ExecutorBase):
         return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
-        raise NotImplementedError("LoRA is not implemented for cpu backend.")
+        return self.driver_worker.add_lora(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
-        raise NotImplementedError("LoRA is not implemented for cpu backend.")
+        return self.driver_worker.remove_lora(lora_id)
 
     def list_loras(self) -> List[int]:
-        raise NotImplementedError("LoRA is not implemented for cpu backend.")
+        return self.driver_worker.list_loras()
 
     def check_health(self) -> None:
         # CPUExecutor will always be healthy as long as
