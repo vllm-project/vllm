@@ -129,9 +129,20 @@ class LLMEngine:
 
         # TODO cleanup location
         num_gpu_blocks, num_cpu_blocks = self.model_executor.profile_num_available_blocks()
-        self.model_executor.initialize_cache(
-            num_gpu_blocks, num_cpu_blocks,
-        )
+        
+        if self.cache_config.forced_num_gpu_blocks is not None:
+            forced_num_gpu_blocks = self.cache_config.forced_num_gpu_blocks
+            logger.info(f"Replacing profiled {num_gpu_blocks=} with "
+                f"{forced_num_gpu_blocks=}")
+            num_gpu_blocks = forced_num_gpu_blocks
+
+        raise_if_cache_size_invalid(num_gpu_blocks, self.cache_config.block_size, self.model_config.max_model_len)
+
+        logger.info(
+            f"# GPU blocks: {num_gpu_blocks}, "
+            f"# CPU blocks: {num_cpu_blocks}")
+
+        self.model_executor.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
         # If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
@@ -841,3 +852,18 @@ class LLMEngine:
 
     def check_health(self) -> None:
         self.model_executor.check_health()
+
+
+def raise_if_cache_size_invalid(num_gpu_blocks, block_size, max_model_len) -> None:
+    if num_gpu_blocks <= 0:
+        raise ValueError("No available memory for the cache blocks. "
+                         "Try increasing `gpu_memory_utilization` when "
+                         "initializing the engine.")
+    max_seq_len = block_size * num_gpu_blocks
+    if max_model_len > max_seq_len:
+        raise ValueError(
+            f"The model's max seq len ({max_model_len}) "
+            "is larger than the maximum number of tokens that can be "
+            f"stored in KV cache ({max_seq_len}). Try increasing "
+            "`gpu_memory_utilization` or decreasing `max_model_len` when "
+            "initializing the engine.")

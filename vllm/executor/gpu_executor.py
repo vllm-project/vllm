@@ -41,9 +41,6 @@ class GPUExecutor(ExecutorBase):
         # Instantiate the worker and load the model to GPU.
         self._init_worker()
 
-        # Profile the memory usage and initialize the cache.
-        #self._init_cache()
-
     def _init_worker(self):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
@@ -77,18 +74,6 @@ class GPUExecutor(ExecutorBase):
 
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks) -> None:
-        if self.cache_config.forced_num_gpu_blocks is not None:
-            forced_num_gpu_blocks = self.cache_config.forced_num_gpu_blocks
-            logger.info(f"Replacing profiled {num_gpu_blocks=} with "
-                        f"{forced_num_gpu_blocks=}")
-            num_gpu_blocks = forced_num_gpu_blocks
-
-        logger.info(f"# GPU blocks: {num_gpu_blocks}, "
-                    f"# CPU blocks: {num_cpu_blocks}")
-
-        check_block_size_valid(num_gpu_blocks, self.cache_config.block_size,
-                               self.model_config.max_model_len)
-
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
