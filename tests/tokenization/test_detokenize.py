@@ -1,12 +1,12 @@
+from typing import Dict, List
+
 import pytest
-
 from transformers import AutoTokenizer
-from typing import List, Dict
 
-from vllm.sequence import Sequence, Logprob, SamplingParams, SequenceGroup
+from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
+from vllm.transformers_utils.detokenizer import (Detokenizer,
+                                                 detokenize_incrementally)
 from vllm.transformers_utils.tokenizer_group import get_tokenizer_group
-from vllm.transformers_utils.tokenizer import detokenize_incrementally
-from vllm.transformers_utils.detokenizer import Detokenizer
 
 TRUTH = [
     "Hello here, this is a simple test",
@@ -82,6 +82,13 @@ def test_decode_streaming(tokenizer_id, truth, with_prompt,
         starting_index=starting_index)
 
     assert decoded_text == generated
+
+    decoded_text = _run_incremental_decode(
+        tokenizer, [len(tokenizer)],
+        skip_special_tokens=skip_special_tokens,
+        starting_index=starting_index)
+
+    assert decoded_text == ''
 
 
 @pytest.fixture

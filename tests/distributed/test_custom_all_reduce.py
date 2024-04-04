@@ -1,6 +1,6 @@
+import os
 import random
 
-import os
 import pytest
 import ray
 import torch

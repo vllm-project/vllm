@@ -1,20 +1,20 @@
-from typing import List, Tuple, Optional, Dict
 from functools import cached_property
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
-from vllm.spec_decode.metrics import AsyncMetricsCollector
+from vllm.config import CacheConfig
+from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.sequence import (SamplerOutput, SequenceGroupMetadata,
                            SequenceGroupOutput, SequenceOutput)
-from vllm.worker.worker import Worker
-from vllm.spec_decode.multi_step_worker import MultiStepWorker
-from vllm.model_executor.layers.rejection_sampler import RejectionSampler
-from vllm.config import CacheConfig
-from vllm.spec_decode.util import (nvtx_range, get_all_seq_ids,
-                                   split_batch_by_proposal_len)
-from vllm.spec_decode.interfaces import SpeculativeProposals, SpeculativeScores
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
-from vllm.spec_decode.interfaces import SpeculativeScorer
+from vllm.spec_decode.interfaces import (SpeculativeProposals,
+                                         SpeculativeScorer, SpeculativeScores)
+from vllm.spec_decode.metrics import AsyncMetricsCollector
+from vllm.spec_decode.multi_step_worker import MultiStepWorker
+from vllm.spec_decode.util import (get_all_seq_ids, nvtx_range,
+                                   split_batch_by_proposal_len)
+from vllm.worker.worker import Worker
 
 
 class SpecDecodeWorker:

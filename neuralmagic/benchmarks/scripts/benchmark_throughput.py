@@ -11,13 +11,18 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
+
 from transformers import AutoTokenizer
-from .common import (generate_synthetic_requests, warmup_vllm_engine,
-                     num_available_gpus, print_request_outputs)
-from .datasets_registry import get_dataset, DatasetArgs
-from .logging.benchmark_result import (BenchmarkResult,
-                                       BenchmarkThroughputResultMetricTemplates
-                                       as ResultMetricTemplates)
+
+from .common import (generate_synthetic_requests, num_available_gpus,
+                     print_request_outputs, warmup_vllm_engine)
+from .datasets_registry import DatasetArgs, get_dataset
+# yapf: disable
+from .logging.benchmark_result import BenchmarkResult
+from .logging.benchmark_result import (
+    BenchmarkThroughputResultMetricTemplates as ResultMetricTemplates)
+
+# yapf: enable
 
 
 def get_tensor_parallel_size(args: argparse.Namespace) -> int:

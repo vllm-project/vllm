@@ -3,9 +3,9 @@ import json
 from pathlib import Path
 from typing import NamedTuple, Optional
 
-from .common import (script_args_to_cla, benchmark_configs,
-                     max_model_length_from_model_id)
 from ..tools.call_cmd import call_cmd
+from .common import (benchmark_configs, max_model_length_from_model_id,
+                     script_args_to_cla)
 
 
 def run_benchmark_throughput_script(config: NamedTuple,

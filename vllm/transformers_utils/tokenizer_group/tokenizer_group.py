@@ -4,11 +4,11 @@ from transformers import PreTrainedTokenizer
 
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.tokenizer import (get_lora_tokenizer,
-                                               get_lora_tokenizer_async)
+                                               get_lora_tokenizer_async,
+                                               get_tokenizer)
 from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
     BaseTokenizerGroup)
 from vllm.utils import LRUCache
-from vllm.transformers_utils.tokenizer import get_tokenizer
 
 
 class TokenizerGroup(BaseTokenizerGroup):

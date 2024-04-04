@@ -2,15 +2,16 @@ from typing import Any, Dict, Optional, Type
 
 import torch
 import torch.nn.functional as F
-
-from vllm.model_executor.layers.linear import LinearMethodBase, set_weight_attrs
-from vllm.model_executor.layers.sparsity.base_config import SparsityConfig
-from vllm.model_executor.layers.parameters import LazyCompressedParameter
-from magic_wand.semi_structured import (pad_tensor_to_multiple,
-                                        extract_valid_rows)
 from magic_wand import (CompressedStorageFormat, SparseBEGemmStorageFormat,
                         SparseSemiStructuredStorageFormat)
 from magic_wand.ops import be_ds_gemm
+from magic_wand.semi_structured import (extract_valid_rows,
+                                        pad_tensor_to_multiple)
+
+from vllm.model_executor.layers.linear import (LinearMethodBase,
+                                               set_weight_attrs)
+from vllm.model_executor.layers.parameters import LazyCompressedParameter
+from vllm.model_executor.layers.sparsity.base_config import SparsityConfig
 
 
 class SparseW16A16LinearMethod(LinearMethodBase):

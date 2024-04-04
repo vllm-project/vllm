@@ -1,16 +1,17 @@
-import pandas as pd
 import copy
-
 from collections import defaultdict
-from dataclasses import dataclass, field, asdict
-from vllm.profiler.utils import (indent_string, TablePrinter, event_has_module,
-                                 event_is_torch_op, event_module_repr,
-                                 event_torch_op_stack_trace)
-from typing import Dict, List, Union, Optional, Tuple, Callable, TypeAlias
-from torch.profiler import profile, ProfilerActivity
+from dataclasses import asdict, dataclass, field
+from typing import Callable, Dict, List, Optional, Tuple, TypeAlias, Union
+
+import pandas as pd
+from torch._C._autograd import DeviceType, _KinetoEvent, _ProfilerResult
+from torch._C._profiler import _EventType, _ExperimentalConfig, _ProfilerEvent
 from torch.autograd.profiler import FunctionEvent
-from torch._C._autograd import _ProfilerResult, _KinetoEvent, DeviceType
-from torch._C._profiler import _EventType, _ProfilerEvent, _ExperimentalConfig
+from torch.profiler import ProfilerActivity, profile
+
+from vllm.profiler.utils import (TablePrinter, event_has_module,
+                                 event_is_torch_op, event_module_repr,
+                                 event_torch_op_stack_trace, indent_string)
 
 
 @dataclass

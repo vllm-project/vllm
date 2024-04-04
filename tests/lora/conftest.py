@@ -2,7 +2,7 @@ import contextlib
 import gc
 import tempfile
 from collections import OrderedDict
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import ray
@@ -12,13 +12,13 @@ from huggingface_hub import snapshot_download
 
 import vllm
 from vllm.config import LoRAConfig
-from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.parallel_utils.parallel_state import (
     destroy_model_parallel, initialize_model_parallel)
 
@@ -132,6 +132,16 @@ def mixtral_lora_files():
 @pytest.fixture(scope="session")
 def gemma_lora_files():
     return snapshot_download(repo_id="wskwon/gemma-7b-test-lora")
+
+
+@pytest.fixture(scope="session")
+def chatglm3_lora_files():
+    return snapshot_download(repo_id="jeeejeee/chatglm3-text2sql-spider")
+
+
+@pytest.fixture(scope="session")
+def baichuan_lora_files():
+    return snapshot_download(repo_id="jeeejeee/baichuan7b-text2sql-spider")
 
 
 @pytest.fixture

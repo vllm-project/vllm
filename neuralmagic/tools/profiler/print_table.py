@@ -1,9 +1,9 @@
 import argparse
 import json
-
-from vllm.profiler.nm_profile import SummaryStatsEntry, ModelStatsEntry
-from vllm.profiler.utils import indent_string, TablePrinter
 from typing import Dict
+
+from vllm.profiler.nm_profile import ModelStatsEntry, SummaryStatsEntry
+from vllm.profiler.utils import TablePrinter, indent_string
 
 
 def flatten_entries(entry_cls, profile_dict: Dict):

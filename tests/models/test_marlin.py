@@ -16,11 +16,13 @@ Note: This test currently fails running with --forked with the following:
 Run `pytest tests/models/test_marlin.py`.
 """
 
+import gc
+from dataclasses import dataclass
+
 import pytest
 import torch
-import gc
 from compare_utils import check_logprobs_close
-from dataclasses import dataclass
+
 from vllm.model_executor.layers.quantization import (
     _QUANTIZATION_CONFIG_REGISTRY)
 

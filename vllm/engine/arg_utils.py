@@ -5,9 +5,10 @@ import dataclasses
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, LoRAConfig,
-                         TokenizerPoolConfig)
+from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig, TokenizerPoolConfig,
+                         VisionLanguageConfig)
+from vllm.utils import str_to_int_tuple
 
 
 @dataclass
@@ -29,6 +30,7 @@ class EngineArgs:
     max_parallel_loading_workers: Optional[int] = None
     block_size: int = 16
     enable_prefix_caching: bool = False
+    use_v2_block_manager: bool = False
     swap_space: int = 4  # GiB
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
@@ -55,7 +57,16 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
     ray_workers_use_nsight: bool = False
+    forced_num_gpu_blocks: Optional[int] = None
+    num_lookahead_slots: int = 0
+
+    # Related to Vision-language models such as llava
+    image_input_type: Optional[str] = None
+    image_token_id: Optional[int] = None
+    image_input_shape: Optional[str] = None
+    image_feature_size: Optional[int] = None
     scheduler_delay_factor: float = 0.0
+    enable_chunked_prefill: bool = False
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -192,6 +203,17 @@ class EngineArgs:
         parser.add_argument('--enable-prefix-caching',
                             action='store_true',
                             help='Enables automatic prefix caching')
+        parser.add_argument('--use-v2-block-manager',
+                            action='store_true',
+                            help='Use BlockSpaceMangerV2')
+        parser.add_argument(
+            '--num-lookahead-slots',
+            type=int,
+            default=EngineArgs.num_lookahead_slots,
+            help='Experimental scheduling config necessary for '
+            'speculative decoding. This will be replaced by '
+            'speculative config in the future; it is present '
+            'to enable correctness tests until then.')
 
         parser.add_argument('--seed',
                             type=int,
@@ -208,6 +230,12 @@ class EngineArgs:
             help='the fraction of GPU memory to be used for '
             'the model executor, which can range from 0 to 1.'
             'If unspecified, will use the default value of 0.9.')
+        parser.add_argument(
+            '--forced-num-gpu-blocks',
+            type=int,
+            default=None,
+            help='If specified, ignore GPU profiling result and use this number'
+            'of GPU blocks. Used for testing preemption.')
         parser.add_argument('--max-num-batched-tokens',
                             type=int,
                             default=EngineArgs.max_num_batched_tokens,
@@ -319,14 +347,45 @@ class EngineArgs:
         parser.add_argument("--device",
                             type=str,
                             default=EngineArgs.device,
-                            choices=["auto", "cuda", "neuron"],
+                            choices=["auto", "cuda", "neuron", "cpu"],
                             help='Device type for vLLM execution.')
+        # Related to Vision-language models such as llava
+        parser.add_argument(
+            '--image-input-type',
+            type=str,
+            default=None,
+            choices=[
+                t.name.lower() for t in VisionLanguageConfig.ImageInputType
+            ],
+            help=('The image input type passed into vLLM. '
+                  'Should be one of "pixel_values" or "image_features".'))
+        parser.add_argument('--image-token-id',
+                            type=int,
+                            default=None,
+                            help=('Input id for image token.'))
+        parser.add_argument(
+            '--image-input-shape',
+            type=str,
+            default=None,
+            help=('The biggest image input shape (worst for memory footprint) '
+                  'given an input type. Only used for vLLM\'s profile_run.'))
+        parser.add_argument(
+            '--image-feature-size',
+            type=int,
+            default=None,
+            help=('The image feature size along the context dimension.'))
         parser.add_argument(
             '--scheduler-delay-factor',
             type=float,
             default=EngineArgs.scheduler_delay_factor,
             help='Apply a delay (of delay factor multiplied by previous'
             'prompt latency) before scheduling next prompt.')
+        parser.add_argument(
+            '--enable-chunked-prefill',
+            type=bool,
+            default=False,
+            help='If True, the prefill requests can be chunked based on the '
+            'max_num_batched_tokens')
         return parser
 
     @classmethod
@@ -340,7 +399,8 @@ class EngineArgs:
     def create_engine_configs(
         self,
     ) -> Tuple[ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig,
-               DeviceConfig, Optional[LoRAConfig]]:
+               DeviceConfig, Optional[LoRAConfig],
+               Optional[VisionLanguageConfig]]:
         device_config = DeviceConfig(self.device)
         model_config = ModelConfig(
             self.model,
@@ -364,7 +424,9 @@ class EngineArgs:
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
-                                   model_config.get_sliding_window())
+                                   self.forced_num_gpu_blocks,
+                                   model_config.get_sliding_window(),
+                                   self.enable_prefix_caching)
         parallel_config = ParallelConfig(
             self.pipeline_parallel_size, self.tensor_parallel_size,
             self.worker_use_ray, self.max_parallel_loading_workers,
@@ -374,10 +436,15 @@ class EngineArgs:
                 self.tokenizer_pool_type,
                 self.tokenizer_pool_extra_config,
             ), self.ray_workers_use_nsight)
-        scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
-                                           self.max_num_seqs,
-                                           model_config.max_model_len,
-                                           self.scheduler_delay_factor)
+        scheduler_config = SchedulerConfig(
+            self.max_num_batched_tokens,
+            self.max_num_seqs,
+            model_config.max_model_len,
+            self.use_v2_block_manager,
+            num_lookahead_slots=self.num_lookahead_slots,
+            delay_factor=self.scheduler_delay_factor,
+            enable_chunked_prefill=self.enable_chunked_prefill,
+        )
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,
@@ -385,8 +452,25 @@ class EngineArgs:
             lora_dtype=self.lora_dtype,
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
+
+        if self.image_input_type:
+            if (not self.image_token_id or not self.image_input_shape
+                    or not self.image_feature_size):
+                raise ValueError(
+                    'Specify `image_token_id`, `image_input_shape` and '
+                    '`image_feature_size` together with `image_input_type`.')
+            vision_language_config = VisionLanguageConfig(
+                image_input_type=VisionLanguageConfig.
+                get_image_input_enum_type(self.image_input_type),
+                image_token_id=self.image_token_id,
+                image_input_shape=str_to_int_tuple(self.image_input_shape),
+                image_feature_size=self.image_feature_size,
+            )
+        else:
+            vision_language_config = None
+
         return (model_config, cache_config, parallel_config, scheduler_config,
-                device_config, lora_config)
+                device_config, lora_config, vision_language_config)
 
 
 @dataclass

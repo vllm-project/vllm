@@ -1,6 +1,6 @@
+import argparse
 import random
 import time
-import argparse
 
 from vllm import LLM, SamplingParams
 

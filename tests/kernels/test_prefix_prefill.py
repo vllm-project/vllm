@@ -1,12 +1,12 @@
 import random
-import pytest
 import time
 
+import pytest
 import torch
-from vllm.model_executor.layers.attention.ops.prefix_prefill import (
-    context_attention_fwd)
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalFromBottomRightMask
+
+from vllm.attention.ops.prefix_prefill import context_attention_fwd
 
 NUM_HEADS = [64]
 NUM_QUERIES_PER_KV = [1, 8, 64]
@@ -40,8 +40,8 @@ def test_contexted_kv_attention(
         torch.cuda.manual_seed(0)
     torch.set_default_device(device)
 
-    # Need this, otherwise when we capture the graph the process for GPU 1 would
-    # run on both GPU0 and GPU1 and things would hang
+    # Need this, otherwise when we capture the graph the process
+    # for GPU 1 would run on both GPU0 and GPU1 and things would hang
     #
     # see also similar issue: https://github.com/Dao-AILab/flash-attention/issues/523
     torch.cuda.set_device(device)

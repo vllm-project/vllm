@@ -1,20 +1,23 @@
 """
 Common functions used in all benchmarking scripts
 """
+import asyncio
 import json
 import random
-import asyncio
-from typing import List, Tuple
 from pathlib import Path
+from typing import List, Tuple
+
 from transformers import PreTrainedTokenizerBase
 
-from vllm import (LLM, SamplingParams, __version__ as __vllm_version__)
+from vllm import LLM, SamplingParams
+from vllm import __version__ as __vllm_version__
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from .datasets_registry import SHAREGPT_PATH, SHAREGPT_DOWNLOAD_STR
-from .backend_request_func import (RequestFuncInput, RequestFuncOutput,
-                                   AsyncRequestVLLM)
+
 from ...tools.call_cmd import call_cmd
+from .backend_request_func import (AsyncRequestVLLM, RequestFuncInput,
+                                   RequestFuncOutput)
+from .datasets_registry import SHAREGPT_DOWNLOAD_STR, SHAREGPT_PATH
 
 
 def num_available_gpus() -> int:
@@ -27,6 +30,7 @@ def get_benchmarking_context() -> dict:
     Return the current python, pytorch and CUDA version as a dict
     """
     import sys
+
     import torch
 
     cuda_devices = [

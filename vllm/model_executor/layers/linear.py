@@ -5,16 +5,16 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.communication_op import (
-    tensor_model_parallel_all_reduce, tensor_model_parallel_all_gather)
-from vllm.model_executor.parallel_utils.utils import (
-    divide, split_tensor_along_last_dim)
-from vllm.model_executor.utils import set_weight_attrs
 from vllm.logger import init_logger
 # UPSTREAM SYNC: keep LazyCompressedParameter
 from vllm.model_executor.layers.parameters import LazyCompressedParameter
+from vllm.model_executor.parallel_utils.communication_op import (
+    tensor_model_parallel_all_gather, tensor_model_parallel_all_reduce)
+from vllm.model_executor.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
+from vllm.model_executor.parallel_utils.utils import (
+    divide, split_tensor_along_last_dim)
+from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
 

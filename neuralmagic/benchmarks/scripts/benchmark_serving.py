@@ -22,29 +22,29 @@ import argparse
 import asyncio
 import random
 import time
-from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime
-from typing import AsyncGenerator, List, Tuple, NamedTuple
+from pathlib import Path
+from typing import AsyncGenerator, List, NamedTuple, Tuple
 
 import numpy as np
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
-from vllm.transformers_utils.tokenizer import get_tokenizer
-from .common import generate_synthetic_requests, print_serving_request_io
-from .datasets_registry import get_dataset, DatasetArgs
-from .logging.benchmark_result import (BenchmarkResult,
-                                       BenchmarkServingResultMetadataKeys as
-                                       ResultMetadataKeys,
-                                       BenchmarkServingResultMetricTemplates as
-                                       ResultMetricTemplates)
 
 from neuralmagic.benchmarks.scripts.backend_request_func import (
-    ASYNC_REQUEST_FUNCS,
-    AsyncRequestVLLM,
-    RequestFuncInput,
-    RequestFuncOutput,
-)
+    ASYNC_REQUEST_FUNCS, AsyncRequestVLLM, RequestFuncInput, RequestFuncOutput)
+from vllm.transformers_utils.tokenizer import get_tokenizer
+
+from .common import generate_synthetic_requests, print_serving_request_io
+from .datasets_registry import DatasetArgs, get_dataset
+# yapf: disable
+from .logging.benchmark_result import BenchmarkResult
+from .logging.benchmark_result import (
+    BenchmarkServingResultMetadataKeys as ResultMetadataKeys)
+from .logging.benchmark_result import (
+    BenchmarkServingResultMetricTemplates as ResultMetricTemplates)
+
+# yapf: enable
 
 
 @dataclass

@@ -19,7 +19,7 @@ jobs:
         uses: ./.github/workflows/build-test.yml
         with:
             build_label: aws-avx512-192G-4-T4-64G
-            timeout: 240
+            timeout: 360
             gitref: '${{ github.ref }}'
             Gi_per_thread: 4
             nvcc_threads: 8

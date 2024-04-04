@@ -1,7 +1,8 @@
 import argparse
 import json
-import pandas as pd
+
 import matplotlib.pyplot as plt
+import pandas as pd
 
 
 def trim_string_back(string: str, width: int):

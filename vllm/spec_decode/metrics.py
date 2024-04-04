@@ -1,10 +1,11 @@
-import torch
-from dataclasses import dataclass
-from vllm.model_executor.layers.rejection_sampler import RejectionSampler
-from typing import Optional
-from vllm.utils import is_pin_memory_available
 import time
-from typing import Callable
+from dataclasses import dataclass
+from typing import Callable, Optional
+
+import torch
+
+from vllm.model_executor.layers.rejection_sampler import RejectionSampler
+from vllm.utils import is_pin_memory_available
 
 
 @dataclass
