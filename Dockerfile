@@ -25,6 +25,13 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY requirements-dev.txt requirements-dev.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements-dev.txt
+
+# cuda arch list used by torch
+# can be useful for both `dev` and `test`
+# explicitly set the list to avoid issues with torch 2.2
+# see https://github.com/pytorch/pytorch/pull/123243
+ARG torch_cuda_arch_list='7.0 7.5 8.0 8.6 8.9 9.0+PTX'
+ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 #################### BASE BUILD IMAGE ####################
 
 
@@ -49,9 +56,6 @@ COPY requirements-cuda.txt requirements-cuda.txt
 COPY pyproject.toml pyproject.toml
 COPY vllm/__init__.py vllm/__init__.py
 
-# cuda arch list used by torch
-ARG torch_cuda_arch_list='7.0 7.5 8.0 8.6 8.9 9.0+PTX'
-ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 # max jobs used by Ninja to build extensions
 ARG max_jobs=2
 ENV MAX_JOBS=${max_jobs}
