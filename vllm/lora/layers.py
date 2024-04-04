@@ -1,7 +1,8 @@
 # pylint: disable=unused-argument
+import inspect
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Set, Tuple, Type
 
 import torch
 import torch.nn as nn
@@ -10,18 +11,16 @@ from transformers import PretrainedConfig
 
 from vllm.config import LoRAConfig
 from vllm.lora.punica import add_lora, add_lora_slice, bgmv
-from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.parallel_utils.communication_op import (
-    tensor_model_parallel_all_gather,
-    tensor_model_parallel_all_reduce,
-    tensor_model_parallel_gather,
-)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               RowParallelLinear,
+                                               MergedColumnParallelLinear,
                                                QKVParallelLinear,
-                                               MergedColumnParallelLinear)
+                                               RowParallelLinear)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding, ParallelLMHead)
+    ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.parallel_utils.communication_op import (
+    tensor_model_parallel_all_gather, tensor_model_parallel_all_reduce,
+    tensor_model_parallel_gather)
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.utils import (
@@ -116,8 +115,11 @@ class LoRAMapping:
 
 class BaseLayerWithLoRA(nn.Module):
 
-    def create_lora_weights(self, max_loras: int, lora_config: LoRAConfig,
-                            model_config: PretrainedConfig) -> None:
+    def create_lora_weights(
+            self,
+            max_loras: int,
+            lora_config: LoRAConfig,
+            model_config: Optional[PretrainedConfig] = None) -> None:
         """Initializes lora matrices."""
         ...
 
@@ -145,6 +147,13 @@ class BaseLayerWithLoRA(nn.Module):
     ):
         """Sets the mapping indices."""
         ...
+
+    @classmethod
+    def can_replace_layer(cls, source_layer: nn.Module,
+                          lora_config: LoRAConfig, packed_modules_list: List,
+                          model_config: Optional[PretrainedConfig]) -> bool:
+        """Returns True if the layer can be replaced by this LoRA layer."""
+        raise NotImplementedError
 
 
 class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
@@ -280,6 +289,12 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
              self.indices[:self.indices_len[0]], 0, 1.0)
         return full_output.view_as(full_output_org)
 
+    @classmethod
+    def can_replace_layer(cls, source_layer: nn.Module,
+                          lora_config: LoRAConfig, packed_modules_list: List,
+                          model_config: Optional[PretrainedConfig]) -> bool:
+        return type(source_layer) is VocabParallelEmbedding
+
 
 class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
 
@@ -391,6 +406,14 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
     def linear_weights(self):
         return self.base_layer.linear_weights
 
+    @classmethod
+    def can_replace_layer(cls, source_layer: nn.Module,
+                          lora_config: LoRAConfig, packed_modules_list: List,
+                          model_config: Optional[PretrainedConfig]) -> bool:
+        return type(source_layer) is ColumnParallelLinear or (
+            type(source_layer) is MergedColumnParallelLinear
+            and len(packed_modules_list) == 1)
+
 
 class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     """ColumnParallelLinear layer that is composed of 2 sublayers (slices)
@@ -493,66 +516,15 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         )
         return output
 
+    @classmethod
+    def can_replace_layer(cls, source_layer: nn.Module,
+                          lora_config: LoRAConfig, packed_modules_list: List,
+                          model_config: Optional[PretrainedConfig]) -> bool:
+        return type(source_layer) is MergedColumnParallelLinear and len(
+            packed_modules_list) == 2
+
 
 class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
-    """
-    ColumnParallelLinear layer that is specifically designed for  
-    qkv_proj. Certain models, such as chtglm3 and baichuan-7b,  
-    only contains a single LoRA within their qkv_proj layer. 
-
-    During inference with Tensor Parallel, the weights of lora_b 
-    must be accurately partitioned according to the respective ranks.
-    
-    Q slice may have different shape than K and V slices (which both have
-    the same shape).
-    """
-
-    def __init__(self, base_layer: QKVParallelLinear) -> None:
-        super().__init__(base_layer)
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.q_proj_total_size = (self.base_layer.total_num_heads *
-                                  self.base_layer.head_size)
-        self.q_proj_shard_size = (self.base_layer.num_heads *
-                                  self.base_layer.head_size)
-        self.kv_proj_shard_size = (self.base_layer.num_kv_heads *
-                                   self.base_layer.head_size)
-        self.kv_proj_total_size = (self.base_layer.total_num_kv_heads *
-                                   self.base_layer.head_size)
-
-    def set_lora(
-        self,
-        index: int,
-        lora_a: torch.Tensor,
-        lora_b: torch.Tensor,
-        embeddings_tensor: Optional[torch.Tensor],
-    ):
-        self.reset_lora(index)
-        if self.tp_size > 1:
-            tp_rank = get_tensor_model_parallel_rank()
-            self.q_shard_id = tp_rank
-            self.kv_shard_id = tp_rank // self.base_layer.num_kv_head_replicas
-            lora_b_q = lora_b[:, self.q_proj_shard_size *
-                              self.q_shard_id:self.q_proj_shard_size *
-                              (self.q_shard_id + 1)]
-            k_offset = self.q_proj_total_size
-            lora_b_k = lora_b[:, k_offset + self.kv_proj_shard_size *
-                              self.kv_shard_id:k_offset +
-                              self.kv_proj_shard_size * (self.kv_shard_id + 1)]
-            v_offset = k_offset + self.kv_proj_total_size
-            lora_b_v = lora_b[:, v_offset + self.kv_proj_shard_size *
-                              self.kv_shard_id:v_offset +
-                              self.kv_proj_shard_size * (self.kv_shard_id + 1)]
-            lora_b = torch.cat([lora_b_q, lora_b_k, lora_b_v], dim=1)
-
-        self.lora_a_stacked[index,
-                            0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
-                                lora_a.T, non_blocking=True)
-        self.lora_b_stacked[index,
-                            0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
-                                lora_b.T, non_blocking=True)
-
-
-class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
     """ColumnParallelLinear layer that is composed of 3 sublayers (slices)
     packed together in qkv proj fashion
     (q_proj + k_proj + v_proj -> qkv_proj).
@@ -720,6 +692,13 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
         )
         return output
 
+    @classmethod
+    def can_replace_layer(cls, source_layer: nn.Module,
+                          lora_config: LoRAConfig, packed_modules_list: List,
+                          model_config: Optional[PretrainedConfig]) -> bool:
+        return type(source_layer) is QKVParallelLinear and len(
+            packed_modules_list) == 3
+
 
 class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
 
@@ -846,12 +825,18 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
     def weight(self):
         return self.base_layer.weight
 
+    @classmethod
+    def can_replace_layer(cls, source_layer: nn.Module,
+                          lora_config: LoRAConfig, packed_modules_list: List,
+                          model_config: Optional[PretrainedConfig]) -> bool:
+        return type(source_layer) is RowParallelLinear
 
-class SamplerWithLoRA(BaseLayerWithLoRA):
+
+class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
 
     def __init__(
         self,
-        base_layer: Sampler,
+        base_layer: LogitsProcessor,
         hidden_size: int,
         dtype: torch.dtype,
         device: torch.device,
@@ -863,12 +848,16 @@ class SamplerWithLoRA(BaseLayerWithLoRA):
         self.device = device
 
     @property
-    def logits_as_hidden_states(self):
-        return self.base_layer.logits_as_hidden_states
+    def logits_as_input(self):
+        return self.base_layer.logits_as_input
 
     @property
     def vocab_size(self):
         return self.base_layer.vocab_size
+
+    @property
+    def scale(self):
+        return self.base_layer.scale
 
     @property
     def org_vocab_size(self):
@@ -962,7 +951,7 @@ class SamplerWithLoRA(BaseLayerWithLoRA):
         hidden_states: torch.Tensor,
         embedding: torch.Tensor,
         embedding_bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Optional[torch.Tensor]:
         # Get the logits for the next tokens.
         logits = torch.matmul(hidden_states, embedding.t())
         if embedding_bias is not None:
@@ -1016,42 +1005,30 @@ def from_layer(
         layer: nn.Module,
         max_loras: int,
         lora_config: LoRAConfig,
-        packed_modules_list: List,
         model_config: Optional[PretrainedConfig] = None) -> BaseLayerWithLoRA:
     supported_layer_types = {
-        VocabParallelEmbedding:
-        VocabParallelEmbeddingWithLoRA,
-        ColumnParallelLinear:
-        ColumnParallelLinearWithLoRA,
-        QKVParallelLinear:
-        (MergedQKVParallelLinearWithLora, QKVParallelLinearWithLora),
-        MergedColumnParallelLinear:
-        (MergedColumnParallelLinearWithLoRA, ColumnParallelLinearWithLoRA),
-        RowParallelLinear:
-        RowParallelLinearWithLoRA
+        VocabParallelEmbedding: VocabParallelEmbeddingWithLoRA,
+        ColumnParallelLinear: ColumnParallelLinearWithLoRA,
+        QKVParallelLinear: QKVParallelLinearWithLora,
+        MergedColumnParallelLinear: MergedColumnParallelLinearWithLoRA,
+        RowParallelLinear: RowParallelLinearWithLoRA,
     }
     for src_layer_type, lora_layer_type in supported_layer_types.items():
         if type(layer) is src_layer_type:  # pylint: disable=unidiomatic-typecheck
-            if isinstance(lora_layer_type, tuple):
-                if len(packed_modules_list) > 1:
-                    ret = lora_layer_type[0](layer)
-                else:
-                    ret = lora_layer_type[1](layer)
-            else:
-                ret = lora_layer_type(layer)
+            ret = lora_layer_type(layer)
             ret.create_lora_weights(max_loras, lora_config, model_config)
             return ret
     return layer
 
 
-def from_layer_sampler(
-    layer: Sampler,
+def from_layer_logits_processor(
+    layer: LogitsProcessor,
     lm_head: ParallelLMHead,
     max_loras: int,
     lora_config: LoRAConfig,
     model_config: Optional[PretrainedConfig] = None,
-) -> SamplerWithLoRA:
-    ret = SamplerWithLoRA(layer, lm_head.embedding_dim, lm_head.weight.dtype,
-                          lm_head.weight.device)
+) -> LogitsProcessorWithLoRA:
+    ret = LogitsProcessorWithLoRA(layer, lm_head.embedding_dim,
+                                  lm_head.weight.dtype, lm_head.weight.device)
     ret.create_lora_weights(max_loras, lora_config, model_config)
     return ret

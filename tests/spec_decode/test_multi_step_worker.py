@@ -1,18 +1,19 @@
-import torch
 import random
-import pytest
 from unittest.mock import MagicMock
 
-from vllm.spec_decode.multi_step_worker import (MultiStepWorker,
-                                                DraftModelTop1Proposer)
-from vllm.worker.worker import Worker
+import pytest
+import torch
+
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SamplerOutput
+from vllm.spec_decode.multi_step_worker import (DraftModelTop1Proposer,
+                                                MultiStepWorker)
+from vllm.worker.worker import Worker
 
-from .utils import (create_execute_model_data, create_worker,
-                    create_seq_group_metadata_from_prompts, zero_kv_cache,
-                    patch_execute_model_with_seeds,
-                    assert_logprobs_dict_allclose, create_batch)
+from .utils import (assert_logprobs_dict_allclose, create_batch,
+                    create_execute_model_data,
+                    create_seq_group_metadata_from_prompts, create_worker,
+                    patch_execute_model_with_seeds, zero_kv_cache)
 
 
 @pytest.mark.parametrize('num_steps', list(range(1, 17)))
@@ -92,8 +93,8 @@ def test_same_output_for_single_step():
         num_gpu_blocks,
         seed,
     )
-    multi_step_worker.model_runner = worker.model_runner
-    multi_step_worker.cache_engine = worker.cache_engine
+    # multi_step_worker.model_runner = worker.model_runner
+    # multi_step_worker.cache_engine = worker.cache_engine
 
     num_steps = 1
 

@@ -1,6 +1,6 @@
 """Verify that seeded random sampling is deterministic.
 
-Run `pytest tests/samplers/test_seeded_generate.py --forked`.
+Run `pytest tests/samplers/test_seeded_generate.py`.
 """
 import copy
 import random
@@ -8,8 +8,8 @@ from itertools import combinations
 
 import pytest
 
-from vllm.model_executor.utils import set_random_seed
 from vllm import SamplingParams
+from vllm.model_executor.utils import set_random_seed
 
 MODEL = "facebook/opt-125m"
 RANDOM_SEEDS = list(range(5))
