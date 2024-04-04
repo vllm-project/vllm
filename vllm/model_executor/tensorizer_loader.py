@@ -148,7 +148,7 @@ class TensorizerArgs:
             default=1,
             type=int,
             help="Controls how many threads are allowed to read concurrently "
-                 "from the source file.")
+            "from the source file.")
         group.add_argument(
             "--s3-access-key-id",
             default=None,
