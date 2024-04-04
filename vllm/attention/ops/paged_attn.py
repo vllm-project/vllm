@@ -75,6 +75,7 @@ class PagedAttention:
         kv_cache_dtype: str,
         kv_scale: Optional[float] = None,
     ) -> None:
+        optional_args = [x for x in (kv_scale, ) if x is not None]
         cache_ops.reshape_and_cache(
             key,
             value,
@@ -82,7 +83,7 @@ class PagedAttention:
             value_cache,
             slot_mapping.flatten(),
             kv_cache_dtype,
-            kv_scale,
+            *optional_args,
         )
 
     @staticmethod
