@@ -42,10 +42,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
-from vllm.model_executor.utils import set_weight_attrs
 
 
 class LayerNorm(nn.Module):
@@ -77,6 +77,7 @@ class LayerNorm(nn.Module):
                                                  shard_size)
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
+
 
 # Copied from transformers.models.llama.modeling_llama.LlamaMLP Llama->Cohere
 class CohereMLP(nn.Module):
@@ -172,8 +173,12 @@ class CohereAttention(nn.Module):
             num_kv_heads=self.num_kv_heads,
         )
         if self.use_qk_norm:
-            self.q_norm = LayerNorm(param_shape=(self.num_heads, self.head_dim), eps=config.layer_norm_eps)
-            self.k_norm = LayerNorm(param_shape=(self.num_kv_heads, self.head_dim), eps=config.layer_norm_eps)
+            self.q_norm = LayerNorm(param_shape=(self.num_heads,
+                                                 self.head_dim),
+                                    eps=config.layer_norm_eps)
+            self.k_norm = LayerNorm(param_shape=(self.num_kv_heads,
+                                                 self.head_dim),
+                                    eps=config.layer_norm_eps)
 
     def _apply_qk_norm(self, q, k):
         q = q.view(*q.shape[:-1], -1, self.head_dim)
@@ -255,7 +260,8 @@ class CohereModel(nn.Module):
             CohereDecoderLayer(config, linear_method=linear_method)
             for _ in range(config.num_hidden_layers)
         ])
-        self.norm = LayerNorm(param_shape=(config.hidden_size), eps=config.layer_norm_eps)
+        self.norm = LayerNorm(param_shape=(config.hidden_size),
+                              eps=config.layer_norm_eps)
 
     def forward(
         self,
