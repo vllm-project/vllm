@@ -3,6 +3,8 @@ import json
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Dict, List, Optional, Union
+import os
+import hashlib
 
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -21,6 +23,14 @@ logger = init_logger(__name__)
 class LoRA:
     name: str
     local_path: str
+
+
+def positive_hash_sha256(input_string):
+    """
+    function to generate positive hash from input string, which is used to identify the model variant for lora
+    sha-256 is used to keep it consistent between python versions and the sheets addon
+    """
+    return int(hashlib.sha256(input_string.encode('utf-8')).hexdigest(), 16) % (2 ** 63)
 
 
 class OpenAIServing:
@@ -154,11 +164,24 @@ class OpenAIServing:
     def _maybe_get_lora(self, request) -> Optional[LoRARequest]:
         if request.model == self.served_model:
             return
+
+        # if this lora adapter was already encountered, use it. otherwise, load a new adapter from disk
         for lora in self.lora_requests:
             if request.model == lora.lora_name:
                 return lora
+
+        if request.lora_request and os.path.exists(request.lora_request.lora_local_path):
+            lora_int_id = positive_hash_sha256(request.model)
+            new_lora = LoRARequest(
+                lora_name=request.model,
+                lora_int_id=lora_int_id,
+                lora_local_path=request.lora_request.lora_local_path,
+            )
+            self.lora_requests.append(new_lora)
+            return new_lora
+
         # if _check_model has been called earlier, this will be unreachable
-        raise ValueError("The model `{request.model}` does not exist.")
+        raise ValueError(f"The model `{request.model}` does not exist.")
 
     def _validate_prompt_and_tokenize(
             self,
