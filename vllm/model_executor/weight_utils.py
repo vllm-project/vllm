@@ -6,7 +6,7 @@ import json
 import os
 import threading
 from collections import defaultdict
-from typing import Any, Iterable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import filelock
 import huggingface_hub.constants
