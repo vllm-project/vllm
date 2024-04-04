@@ -2,8 +2,9 @@ from vllm import LLM, SamplingParams
 import pdb
 import os
 import torch
+from vllm.metis.kv_loader import kv_manager
 
-os.environ['CUDA_VISIBLE_DEVICES']= '1'
+os.environ['CUDA_VISIBLE_DEVICES']= '0'
 # Sample prompts.
 long_prompt = ["You are an expert school principal in JCL library"] * 400
 prompts = [' '.join(long_prompt)]
@@ -57,7 +58,7 @@ pre_mask = _pre_make_partial_bias(device=device)
 #FIXME(Jiayi): Please align `recomp_ratio` and `recomp_ratios` automatically
 llm.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata = {
     "check_layers":[1],
-    "check": False,
+    "check": True,
     "recomp_ratios":[0.15],
     "recomp_ratio":0.15,
     "load_indices":[],
@@ -71,23 +72,39 @@ llm.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_
     "org_seq_len": -1,
     "pre_mask":pre_mask}
 
+#FIXME Add the metadata dynamically
+our_loader = kv_manager("/local/hanchen/", [])
+llm.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_load_metadata = {
+   "loader" :  our_loader,
+   "hash": "kv_temp"
+}
+
+
 #pdb.set_trace()
 
 torch.cuda.synchronize()
 start = torch.cuda.Event(enable_timing=True)
 end = torch.cuda.Event(enable_timing=True)
+
+outputs = llm.generate(prompts, sampling_params)
+
+llm.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_load_metadata = {
+   "loader" :  our_loader,
+   "hash": "kv_temp3"
+}
+
 start.record()
 
 outputs = llm.generate(prompts, sampling_params)
 outputs = llm.generate(prompts, sampling_params)
 outputs = llm.generate(prompts, sampling_params)
 outputs = llm.generate(prompts, sampling_params)
-outputs = llm.generate(prompts, sampling_params)
-
 end.record()
-torch.cuda.synchronize()
 temp_time = start.elapsed_time(end)
-print(temp_time)
+pdb.set_trace()
+print("time spent is: ", temp_time)
+torch.cuda.synchronize()
+
 
 pdb.set_trace()
 

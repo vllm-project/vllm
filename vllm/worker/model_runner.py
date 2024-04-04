@@ -595,8 +595,8 @@ class ModelRunner:
             kv_caches=kv_caches,
             input_metadata=input_metadata,
         )
-        import pdb
-        pdb.set_trace()
+        # import pdb
+        # pdb.set_trace()
         # Sample the next token.
         #HACK(Jiayi): This aligns sampling indices
         if self.model.model.cache_fuse_metadata["check"]:

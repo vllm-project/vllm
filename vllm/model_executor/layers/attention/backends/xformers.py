@@ -54,6 +54,7 @@ class XFormersBackend:
         input_metadata: InputMetadata,
         status: int,
         cache_fuse_metadata: dict,
+        cache_load_metadata: dict,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
@@ -69,8 +70,7 @@ class XFormersBackend:
         Returns:
             shape = [batch_size, seq_len, num_heads * head_size]
         """
-        batch_size, seq_len, hidden_size = query.shape
-        
+        batch_size, seq_len, hidden_size = query.shape        
         
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)
@@ -83,8 +83,26 @@ class XFormersBackend:
             # Get cached KV
             # In this step, Jiayi is assuming that we have the loaded key and value tensors in value_old and key_old.
             # He uses empty_like to put in random numbers right now to substitute. 
-            value_old = torch.empty_like(value)
-            key_old = torch.empty_like(key)
+            # import pdb
+            # pdb.set_trace()
+            
+            # value_old = torch.empty_like(value)
+            # key_old = torch.empty_like(key)
+            # print("We are saving kv for shape: ", value_old.shape)
+            # torch.save(value_old, f"/local/hanchen/kv_temp/{str(cache_load_metadata['layer'])}_0")
+            # torch.save(key_old, f"/local/hanchen/kv_temp/{str(cache_load_metadata['layer'])}_1")
+
+            #FIXME Hanchen need to add cuda device. also change to directly load into GPU memory
+
+            key_old = cache_load_metadata['loader'].fetch_kv_layer(cache_load_metadata['hash'],
+                                                                    cache_load_metadata['layer'], True, 'cuda:0')
+            value_old =  cache_load_metadata['loader'].fetch_kv_layer(cache_load_metadata['hash'],
+                                                                    cache_load_metadata['layer'], False, 'cuda:0')
+            # if (value_old is None or key_old is None):
+            #     exit("KV failure")
+
+            # pdb.set_trace()
+
             #FIXME(Jiayi): Optimize this kernel to only load value_old or even lesser stuff
             PagedAttentionImpl.load_and_reshape(key_old, value_old, key_cache,
                                                  value_cache, cache_fuse_metadata)
@@ -178,12 +196,22 @@ class XFormersBackend:
         '''
         # FIXME(Jiayi): can we do kernel fusion here?
         if status in [2]: #load memory if `after_check`
-            key = torch.empty(cache_fuse_metadata["key_shape"], 
-                              dtype=key.dtype, 
-                              device=key.device)
-            value = torch.empty(cache_fuse_metadata["value_shape"],
-                                dtype=value.dtype, 
-                                device=value.device)
+            # key = torch.empty(cache_fuse_metadata["key_shape"], 
+            #                   dtype=key.dtype, 
+            #                   device=key.device)
+            # torch.save(key, f"/local/hanchen/kv_temp/{str(cache_load_metadata['layer'])}_1")
+            # value = torch.empty(cache_fuse_metadata["value_shape"],
+            #                     dtype=value.dtype, 
+            #                     device=value.device)
+            # torch.save(value, f"/local/hanchen/kv_temp/{str(cache_load_metadata['layer'])}_0")
+            
+            key = cache_load_metadata['loader'].fetch_kv_layer(cache_load_metadata['hash'],
+                                                                cache_load_metadata['layer'], True, 'cuda:0')
+            value =  cache_load_metadata['loader'].fetch_kv_layer(cache_load_metadata['hash'],
+                                                                    cache_load_metadata['layer'], False, 'cuda:0')
+            # assert(value_old.shape == key.shape)
+            if (value is None or key is None):
+                exit("KV failure")
             #import pdb
             #pdb.set_trace()
             PagedAttentionImpl.load_and_reshape(key, value, key_cache,

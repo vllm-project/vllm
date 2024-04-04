@@ -154,6 +154,7 @@ class LlamaAttention(nn.Module):
         input_metadata: InputMetadata,
         status: int,
         cache_fuse_metadata: dict,
+        cache_load_metadata: dict
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         
@@ -161,7 +162,7 @@ class LlamaAttention(nn.Module):
         q, k = self.rotary_emb(positions, q, k)
         k_cache, v_cache = kv_cache
         attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata, 
-                                status, cache_fuse_metadata)
+                                status, cache_fuse_metadata, cache_load_metadata)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -212,6 +213,7 @@ class LlamaDecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         status: int,
         cache_fuse_metadata: dict,
+        cache_load_metadata: dict
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         
@@ -234,6 +236,7 @@ class LlamaDecoderLayer(nn.Module):
             input_metadata=input_metadata,
             status=status,
             cache_fuse_metadata=cache_fuse_metadata,
+            cache_load_metadata = cache_load_metadata
         )
         
         if status==1:
@@ -306,6 +309,8 @@ class LlamaModel(nn.Module):
                                     "org_seq_len": None,
                                     "pre_mask":None}
                                     #"batch_indices":[0]}
+        self.cache_load_metadata = { "loader" :  None,
+                                    "hash": "kv_temp"}
 
     def forward(
         self,
@@ -361,6 +366,7 @@ class LlamaModel(nn.Module):
             #    pdb.set_trace()
             
             layer = self.layers[i]
+            self.cache_load_metadata['layer'] = i
             hidden_states, residual = layer(
                 positions, #FIXME(Jiayi): positions need to be changed
                 hidden_states,
@@ -369,6 +375,7 @@ class LlamaModel(nn.Module):
                 residual,
                 status = temp_status,
                 cache_fuse_metadata = self.cache_fuse_metadata,
+                cache_load_metadata = self.cache_load_metadata
             )
             
             if temp_status==1:
@@ -380,8 +387,8 @@ class LlamaModel(nn.Module):
             torch.cuda.synchronize()
             temp_time = start.elapsed_time(end)
             print(temp_time)
-            import pdb
-            pdb.set_trace()
+            # import pdb
+            # pdb.set_trace()
         
         return hidden_states
 
