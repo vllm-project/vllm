@@ -322,6 +322,10 @@ class CohereForCausalLM(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                # lm_head is not used in vllm as it is tied with embed_token.
+                # To prevent errors, skip loading lm_head.weight.
+                if "lm_head.weight" in name:
+                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
