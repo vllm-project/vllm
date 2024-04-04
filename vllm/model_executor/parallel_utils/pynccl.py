@@ -35,18 +35,19 @@ logger = init_logger(__name__)
 
 so_file = os.environ.get("VLLM_NCCL_SO_PATH", "")
 
+# check if we have vllm-managed nccl
+cuda_major = torch.version.cuda.split(".")[0]
+path = os.path.expanduser(f"~/.config/vllm/nccl/cu{cuda_major}/libnccl.so.*")
+files = glob.glob(path)
+vllm_nccl_path = files[0] if files else None
+
 # manually load the nccl library
 if so_file:
     logger.info(
         f"Loading nccl from environment variable VLLM_NCCL_SO_PATH={so_file}")
 else:
     if torch.version.cuda is not None:
-        cuda_major = torch.version.cuda.split(".")[0]
-        # check if we have vllm-managed nccl
-        path = os.path.expanduser(
-            f"~/.config/vllm/nccl/cu{cuda_major}/libnccl.so.*")
-        files = glob.glob(path)
-        so_file = files[0] if files else "libnccl.so.2"
+        so_file = vllm_nccl_path or "libnccl.so.2"
     elif torch.version.hip is not None:
         so_file = "librccl.so.1"
     else:
