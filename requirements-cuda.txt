@@ -1,0 +1,5 @@
+ray >= 2.9
+torch == 2.1.2
+xformers == 0.0.23.post1  # Required for CUDA 12.1.
+pynvml == 11.5.0
+triton >= 2.1.0

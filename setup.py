@@ -325,6 +325,9 @@ def read_readme() -> str:
 
 def get_requirements() -> List[str]:
     """Get Python package dependencies from requirements.txt."""
+    with open(get_path("requirements-common.txt")) as f:
+        common = f.read().strip().split("\n")
+
     if _is_cuda():
         with open(get_path("requirements.txt")) as f:
             requirements = f.read().strip().split("\n")
@@ -341,7 +344,7 @@ def get_requirements() -> List[str]:
         raise ValueError(
             "Unsupported platform, please use CUDA, ROCM or Neuron.")
 
-    return requirements
+    return common + requirements
 
 
 ext_modules = []
