@@ -85,7 +85,7 @@ class GPUExecutor(ExecutorBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
         # Initialize the cache.
-        self.driver_worker.init_cache_engine(cache_config=self.cache_config)
+        self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
         # Warm up the model. This includes capturing the model into CUDA graph
         # if enforce_eager is False.

@@ -19,9 +19,10 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
+from vllm.worker.worker_base import WorkerBase
 
 
-class Worker:
+class Worker(WorkerBase):
     """A worker class that executes (a partition of) the model on a GPU.
 
     Each worker is associated with a single GPU. The worker is responsible for
@@ -161,12 +162,16 @@ class Worker:
 
         return num_gpu_blocks, num_cpu_blocks
 
-    def init_cache_engine(self, cache_config: CacheConfig) -> None:
-        self.cache_config = cache_config
+
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
+        self.cache_config.num_gpu_blocks = num_gpu_blocks
+        self.cache_config.num_cpu_blocks = num_cpu_blocks
+        #self.cache_config = cache_config
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
                                         self.parallel_config)
         self.gpu_cache = self.cache_engine.gpu_cache
         self.model_runner.set_block_size(self.cache_engine.block_size)
+
 
     def warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:

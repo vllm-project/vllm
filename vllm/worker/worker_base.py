@@ -35,7 +35,7 @@ class WorkerBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def init_cache(self, cache_config: CacheConfig) -> None:
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         """Given a fully-specified cache config, initialize the KV cache. This
         is separate from init_workers as profiling may be required to determine
         the maxmimum allowed KV cache size.
@@ -61,10 +61,4 @@ class WorkerBase(ABC):
 
     @abstractmethod
     def list_loras(self) -> List[int]:
-        raise NotImplementedError
-
-    @abstractmethod
-    def check_health(self) -> None:
-        """Checks if the executor is healthy. If not, it should raise an
-        exception."""
         raise NotImplementedError
