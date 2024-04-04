@@ -121,7 +121,7 @@ Below, you can find an explanation of every engine argument for vLLM:
 
 Async Engine Arguments
 ----------------------
-Below are the asynchronous engine related arguments:
+Below are the additional arguments related to the asynchronous engine:
 
 .. option:: --engine-use-ray
 
