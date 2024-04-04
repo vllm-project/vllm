@@ -137,6 +137,7 @@ class LLMEngine:
             num_gpu_blocks = forced_num_gpu_blocks
 
         raise_if_cache_size_invalid(num_gpu_blocks, self.cache_config.block_size, self.model_config.max_model_len)
+
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
