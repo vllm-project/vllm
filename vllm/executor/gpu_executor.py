@@ -4,7 +4,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          VisionLanguageConfig)
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
-from vllm.executor.utils import check_block_size_valid
+from vllm.executor.utils import check_block_size_valid, raise_if_cache_size_invalid
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
@@ -56,7 +56,7 @@ class GPUExecutor(ExecutorBase):
             parallel_config=self.parallel_config,
             scheduler_config=self.scheduler_config,
             device_config=self.device_config,
-            cache_config=self.cache_config.shallow_copy(),
+            cache_config=self.cache_config,
             local_rank=0,
             rank=0,
             distributed_init_method=distributed_init_method,
@@ -74,6 +74,13 @@ class GPUExecutor(ExecutorBase):
 
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks) -> None:
+        logger.info(
+            f"# GPU blocks: {num_gpu_blocks}, "
+            f"# CPU blocks: {num_cpu_blocks}"
+        )
+
+        raise_if_cache_size_invalid(num_gpu_blocks, self.cache_config.block_size, self.model_config.max_model_len)
+
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 

@@ -367,7 +367,7 @@ class CacheConfig:
         # metrics info
         return {key: str(value) for key, value in self.__dict__.items()}
 
-    def shallow_copy(self):
+    def shallow_copy2(self):
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,

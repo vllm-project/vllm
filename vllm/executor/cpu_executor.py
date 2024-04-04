@@ -35,7 +35,7 @@ class CPUExecutor(ExecutorBase):
 
         # Instantiate the worker and load the model to CPU.
         self._init_worker()
-        self._init_cache()
+        #self._init_cache()
 
     def _init_worker(self):
         from vllm.worker.cpu_worker import CPUWorker
@@ -60,12 +60,28 @@ class CPUExecutor(ExecutorBase):
         self.driver_worker.init_device()
         self.driver_worker.load_model()
 
-    def _init_cache(self) -> None:
+    def profile_num_available_blocks(self) -> tuple[int, int]:
         num_cpu_blocks = self.driver_worker.get_cpu_cache_block_num(
             block_size=self.cache_config.block_size,
             cache_space=self.cache_config.cpu_kvcache_space_bytes,
             cache_dtype=self.cache_config.cache_dtype,
         )
+
+        # Note: To reuse the cache management procedure,
+        # use cpu cache as 'gpu cache'.
+        num_gpu_blocks = num_cpu_blocks
+        num_cpu_blocks = 0
+        return num_gpu_blocks, num_cpu_blocks
+
+
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
+        # Note: To reuse the cache management procedure,
+        # use cpu cache as 'gpu cache'.
+        assert num_cpu_blocks == 0
+        num_cpu_blocks = num_gpu_blocks
+        num_gpu_blocks = 0
+        self.cache_config.num_gpu_blocks = num_cpu_blocks
+        self.cache_config.num_cpu_blocks = 0
 
         logger.info(f"# CPU blocks: {num_cpu_blocks}")
         if num_cpu_blocks <= 0:
@@ -81,11 +97,6 @@ class CPUExecutor(ExecutorBase):
                 f"stored in KV cache ({max_seq_len}). Try increasing "
                 "`VLLM_CPU_KVCACHE_SPACE` or decreasing `max_model_len` when "
                 "initializing the engine.")
-
-        # Note: To reuse the cache management procedure,
-        # use cpu cache as 'gpu cache'.
-        self.cache_config.num_gpu_blocks = num_cpu_blocks  # type: ignore
-        self.cache_config.num_cpu_blocks = 0  # type: ignore
 
         # Initialize the cache.
         self.driver_worker.init_cache_engine(cache_config=self.cache_config)

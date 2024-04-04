@@ -36,8 +36,8 @@ class NeuronExecutor(ExecutorBase):
         # Set the number of GPU blocks to be the same as the maximum number of
         # sequences that can be processed in a single batch. This is equivalent
         # to schedule without PagedAttention.
-        self.cache_config.num_gpu_blocks = self.scheduler_config.max_num_seqs
-        self.cache_config.num_cpu_blocks = 0
+        #self.cache_config.num_gpu_blocks = self.scheduler_config.max_num_seqs
+        #self.cache_config.num_cpu_blocks = 0
 
         # Instantiate the worker and load the model to the device.
         self._init_worker()
@@ -53,6 +53,24 @@ class NeuronExecutor(ExecutorBase):
         )
         self.driver_worker.init_device()
         self.driver_worker.load_model()
+
+    # TODO change name
+    def profile_num_available_blocks(self) -> tuple[int, int]:
+        # Set the number of GPU blocks to be the same as the maximum number of
+        # sequences that can be processed in a single batch. This is equivalent
+        # to schedule without PagedAttention.
+        num_gpu_blocks = self.scheduler_config.max_num_seqs
+
+        # Swap not yet supported with Neuron backend.
+        num_cpu_blocks = 0
+
+        return num_gpu_blocks, num_cpu_blocks
+
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
+        assert num_cpu_blocks == 0
+        assert num_gpu_blocks == self.scheduler_config.max_num_seqs
+        self.cache_config.num_gpu_blocks = num_gpu_blocks
+        self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     def execute_model(self,
                       seq_group_metadata_list: List[SequenceGroupMetadata],
