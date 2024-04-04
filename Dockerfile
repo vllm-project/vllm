@@ -20,6 +20,11 @@ COPY requirements.txt requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.txt
 
+# the `vllm_nccl` package must be installed from source distribution
+# pip is too smart to store a wheel in the cache, and other CI jobs
+# will directly use the wheel from the cache, which is not what we want.
+# we need to remove it manually
+RUN pip cache remove vllm_nccl*
 # install development dependencies
 COPY requirements-dev.txt requirements-dev.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
