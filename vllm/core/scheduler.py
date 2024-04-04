@@ -369,6 +369,8 @@ class Scheduler:
             seq_group = running_queue[0]
             num_running_tokens = self._get_num_new_tokens(
                 seq_group, SequenceStatus.RUNNING, enable_chunking, budget)
+            # We can have up to 1 running prefill at any given time in running
+            # queue, which means we can guarantee chunk size is at least 1.
             assert num_running_tokens != 0
             num_running_seqs = seq_group.get_max_num_running_seqs()
 
@@ -686,8 +688,8 @@ class Scheduler:
 
         fcfs_policy = PolicyFactory.get_policy(policy_name="fcfs")
         # Don't schedule decodes if prefills are scheduled.
-        # NOTE: If `_schedule_prefills`` doesn't enable chunking, running only
-        # contains decode requests.
+        # NOTE: If `_schedule_prefills` doesn't enable chunking, self.running
+        # only contains decode requests, not chunked prefills.
         if len(prefills.seq_groups) == 0:
             remaining_running, running_scheduled = self._schedule_running(
                 self.running,
