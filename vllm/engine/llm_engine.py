@@ -488,8 +488,8 @@ class LLMEngine:
 
         for seq, _ in child_seqs:
             if seq_group.sampling_params.detokenize and self.detokenizer:
-                self.detokenizer.decode_sequence_inplace(seq,
-                                                         seq_group.sampling_params)
+                self.detokenizer.decode_sequence_inplace(
+                    seq, seq_group.sampling_params)
             self._check_stop(seq, seq_group.sampling_params)
 
         # Non-beam search case
