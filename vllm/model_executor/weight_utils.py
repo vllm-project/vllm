@@ -31,13 +31,18 @@ temp_dir = os.environ.get('TMPDIR') or os.environ.get(
 
 
 def enable_hf_transfer():
-    """enforces activation of hf_transfer if installed."""
-    try:
-        # enable hf hub transfer if available
-        import hf_transfer  # type: ignore # noqa
-        huggingface_hub.constants.HF_HUB_ENABLE_HF_TRANSFER = True
-    except ImportError:
-        pass
+    """automatically activates hf_transfer
+    """
+    if "HF_HUB_ENABLE_HF_TRANSFER" in os.environ:
+        #  no additional logic, use default behaviour.
+        return
+    else:
+        try:
+            # enable hf hub transfer if available
+            import hf_transfer  # type: ignore # noqa
+            huggingface_hub.constants.HF_HUB_ENABLE_HF_TRANSFER = True
+        except ImportError:
+            pass
 
 
 enable_hf_transfer()
