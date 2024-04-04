@@ -36,26 +36,9 @@ class FCFS(Policy):
         return now - seq_group.metrics.arrival_time
 
 
-class MaximalDecoding(Policy):
-    """Policy to prioritize decoding requests as much as possible when a
-        queue contains both prefill and decode requests.
-    
-    It prioritizes 1. seq_group with small number of tokens to compute
-    (i.e., decode). 2. FCFS.
-    """
-
-    def get_priority(
-        self,
-        now: float,
-        seq_group: SequenceGroup,
-    ) -> float:
-        return (-seq_group.get_num_uncomputed_tokens(),
-                now - seq_group.metrics.arrival_time)
-
-
 class PolicyFactory:
 
-    _POLICY_REGISTRY = {'fcfs': FCFS, 'maximal_decoding': MaximalDecoding}
+    _POLICY_REGISTRY = {'fcfs': FCFS}
 
     @classmethod
     def get_policy(cls, policy_name: str, **kwargs) -> Policy:

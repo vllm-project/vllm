@@ -769,18 +769,16 @@ class Scheduler:
         remaining_swapped, swapped_in = (
             self.swapped, SchedulerSwappedInOutputs.create_empty())
 
-        # Schedule running requests sorted by decoding -> chunked prefill.
-        maximal_decoding_policy = PolicyFactory.get_policy(
-            policy_name="maximal_decoding")
+        # Decoding should be always scheduled first by fcfs.
+        fcfs_policy = PolicyFactory.get_policy(policy_name="fcfs")
         remaining_running, running_scheduled = self._schedule_running(
             self.running,
             budget,
             curr_loras,
-            maximal_decoding_policy,
+            fcfs_policy,
             enable_chunking=True)
 
         # Schedule swapped out requests.
-        fcfs_policy = PolicyFactory.get_policy(policy_name="fcfs")
         # If preemption happens, it means we don't have space for swap-in.
         if len(running_scheduled.preempted) + len(
                 running_scheduled.swapped_out) == 0:
@@ -1083,7 +1081,7 @@ class Scheduler:
         num_new_tokens = 0
         seqs = seq_group.get_seqs(status=status)
         for seq in seqs:
-            num_new_tokens += seq.get_new_num_tokens()
+            num_new_tokens += seq.get_num_new_tokens()
         # Chunk if a running request cannot fit in.
         # If number of seq > 1, it means it is doing beam search in a
         # decode phase. Do not chunk in that case.

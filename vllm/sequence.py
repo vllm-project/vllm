@@ -336,7 +336,7 @@ class Sequence:
         new_seq.seq_id = new_seq_id
         return new_seq
 
-    def get_new_num_tokens(self) -> int:
+    def get_num_new_tokens(self) -> int:
         """Get the number of new tokens to be computed.
 
         Args:
@@ -347,8 +347,8 @@ class Sequence:
             can return the chunked number of new tokens.
         """
         num_uncomputed_tokens = self.data.get_num_uncomputed_tokens()
-        if num_uncomputed_tokens == 0:
-            # decoding request.
+        if self.data.stage == SequenceStage.DECODE:
+            assert num_uncomputed_tokens == 1
             return 1
         return num_uncomputed_tokens
 
@@ -498,7 +498,7 @@ class SequenceGroup:
         for seq in self.seqs_dict.values():
             seq.data.update_num_computed_tokens(num_new_computed_tokens)
 
-    def get_num_uncomputed_tokens(self):
+    def get_num_uncomputed_tokens(self) -> int:
         num_uncomputed_tokens = 0
         for seq in self.get_seqs():
             num_uncomputed_tokens += seq.data.get_num_uncomputed_tokens()
