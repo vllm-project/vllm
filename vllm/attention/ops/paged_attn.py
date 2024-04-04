@@ -97,7 +97,7 @@ class PagedAttention:
         num_kv_heads: int,
         scale: float,
         alibi_slopes: Optional[torch.Tensor],
-        kv_scale,
+        kv_scale: float,
     ) -> torch.Tensor:
         output = torch.empty_like(query)
 
