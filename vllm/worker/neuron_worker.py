@@ -9,10 +9,10 @@ from vllm.config import (DeviceConfig, ModelConfig, ParallelConfig,
 from vllm.model_executor import set_random_seed
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.neuron_model_runner import NeuronModelRunner
-from vllm.worker.worker_base import WorkerBase
+from vllm.worker.worker_base import LoraNotSupportedWorkerBase
 
 
-class NeuronWorker(WorkerBase):
+class NeuronWorker(LoraNotSupportedWorkerBase):
     """A worker class that executes the model on a group of neuron cores.
     """
 

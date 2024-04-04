@@ -17,7 +17,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.worker.model_runner import ModelRunner
-from vllm.worker.worker_base import WorkerBase
+from vllm.worker.worker_base import LoraNotSupportedWorkerBase
 
 logger = init_logger(__name__)
 
