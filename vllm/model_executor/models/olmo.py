@@ -365,6 +365,7 @@ class OLMoForCausalLM(nn.Module):
             # mlp
             if ".ff_proj" in name:
                 name = name.replace(".ff_proj", ".mlp.ff_proj")
+                # Reverse the weight for the MergeColumnParallelLinear
                 loaded_weight = torch.concat(loaded_weight.chunk(2)[::-1])
             if ".ff_out" in name and "transformer.ff_out" not in name:
                 name = name.replace(".ff_out", ".mlp.ff_out")
