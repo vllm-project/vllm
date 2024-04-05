@@ -35,7 +35,6 @@ class CPUExecutor(ExecutorBase):
 
         # Instantiate the worker and load the model to CPU.
         self._init_worker()
-        #self._init_cache()
 
     def _init_worker(self):
         from vllm.worker.cpu_worker import CPUWorker

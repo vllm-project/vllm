@@ -155,7 +155,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
                                            kv_cache_dtype=kv_cache_dtype,
                                            is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
-        # self.init_cache_engine().
+        # initialize_cache.
         self.cache_config = None
         self.cache_engine = None
         self.cpu_cache = None
@@ -206,7 +206,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
                 "initializing the engine.")
 
         # Initialize the cache.
-        self.init_cache_engine(cache_config=self.cache_config)
+        self._init_cache_engine(cache_config=self.cache_config)
 
     def get_cpu_cache_block_num(
         self,
@@ -228,7 +228,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
 
         return num_cpu_blocks
 
-    def init_cache_engine(self, cache_config: CacheConfig) -> None:
+    def _init_cache_engine(self, cache_config: CacheConfig) -> None:
         self.cache_config = cache_config
         self.cache_engine = CPUCacheEngine(self.cache_config,
                                            self.model_config,
