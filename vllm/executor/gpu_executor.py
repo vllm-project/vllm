@@ -4,7 +4,6 @@ from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          VisionLanguageConfig)
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
-from vllm.executor.utils import check_block_size_valid, raise_if_cache_size_invalid
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata

@@ -228,7 +228,6 @@ class LLMEngine:
             log_stats=not engine_args.disable_log_stats,
             usage_context=usage_context,
         )
-
         return engine
 
     def __reduce__(self):
