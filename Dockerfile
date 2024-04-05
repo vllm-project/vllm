@@ -123,17 +123,17 @@ RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,ta
 # image to run unit testing suite
 FROM vllm-base AS test
 
+# install development dependencies (for testing)
+COPY requirements-dev.txt requirements-dev.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements-dev.txt
+
 # files and directories related to tests (CI)
 COPY tests tests
 COPY benchmarks benchmarks
 COPY examples examples
 COPY docs docs
 COPY .buildkite .buildkite
-
-# install development dependencies (for testing)
-COPY requirements-dev.txt requirements-dev.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements-dev.txt
 
 #################### TEST IMAGE ####################
 
