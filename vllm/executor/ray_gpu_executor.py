@@ -160,14 +160,14 @@ class RayGPUExecutor(ExecutorBase):
             local_rank = node_workers[node_id].index(rank)
             worker.init_worker.remote(
                 lambda rank=rank, local_rank=local_rank: Worker(
-                    model_config,
-                    parallel_config,
-                    scheduler_config,
-                    device_config,
-                    cache_config,
-                    local_rank,
-                    rank,
-                    distributed_init_method,
+                    model_config=model_config,
+                    parallel_config=parallel_config,
+                    scheduler_config=scheduler_config,
+                    device_config=device_config,
+                    cache_config=cache_config,
+                    local_rank=local_rank,
+                    rank=rank,
+                    distributed_init_method=distributed_init_method,
                     lora_config=lora_config,
                 ))
 
@@ -175,14 +175,14 @@ class RayGPUExecutor(ExecutorBase):
         driver_rank = 0
         driver_local_rank = node_workers[driver_node_id].index(driver_rank)
         self.driver_worker = Worker(
-            self.model_config,
-            self.parallel_config,
-            self.scheduler_config,
-            self.device_config,
-            self.cache_config,
-            driver_local_rank,
-            driver_rank,
-            distributed_init_method,
+            model_config=self.model_config,
+            parallel_config=self.parallel_config,
+            scheduler_config=self.scheduler_config,
+            device_config=self.device_config,
+            cache_config=self.cache_config,
+            local_rank=driver_local_rank,
+            rank=driver_rank,
+            distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
             vision_language_config=self.vision_language_config,
             is_driver_worker=True,
@@ -196,6 +196,15 @@ class RayGPUExecutor(ExecutorBase):
         )
 
     def determine_num_available_blocks(self) -> tuple[int, int]:
+        """Determine the number of available KV blocks.
+
+        This invokes `determine_num_available_blocks` on each worker and takes
+        the min of the results, guaranteeing that the selected cache sizes are
+        compatible with all workers.
+
+        Returns:
+            - tuple[num_gpu_blocks, num_cpu_blocks]
+        """
         # Get the maximum number of blocks that can be allocated on GPU and CPU.
         num_blocks = self._run_workers("determine_num_available_blocks", )
 
@@ -209,6 +218,8 @@ class RayGPUExecutor(ExecutorBase):
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
+        """Initialize the KV cache in all workers.
+        """
 
         # NOTE: We log here to avoid multiple logs when number of workers is
         # greater than one. We could log in the engine, but not all executors

@@ -61,10 +61,18 @@ class CPUExecutor(ExecutorBase):
         self.driver_worker.load_model()
 
     def determine_num_available_blocks(self) -> tuple[int, int]:
+        """Determine the number of available KV blocks by invoking the
+        underlying worker.
+        """
         return self.driver_worker.determine_num_available_blocks()
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
+        """Initialize the KV cache by invoking the underlying worker.
+        """
+        # NOTE: We log here to avoid multiple logs when number of workers is
+        # greater than one. We could log in the engine, but not all executors
+        # have GPUs.
         logger.info(f"# CPU blocks: {num_cpu_blocks}")
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 

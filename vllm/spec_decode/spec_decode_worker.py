@@ -118,7 +118,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
         """Initialize the cache engine of the scorer and proposer workers.
-        TODO
         """
         self.scorer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
                                             num_cpu_blocks=num_cpu_blocks)
@@ -349,6 +348,13 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         return self.scorer_worker.device
 
     def get_cache_block_size_bytes(self):
+        """Return the size of a cache block in bytes.
+        
+        This function is only used to compose workers within a SpecDecodeWorker.
+        We leave composing a SpecDecodeWorker within a SpecDecodeWorker
+        undefined for now, although it could be implemented in the future.
+        See https://arxiv.org/abs/2308.04623.
+        """
         raise NotImplementedError
 
 

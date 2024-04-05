@@ -32,28 +32,24 @@ class ExecutorBase(ABC):
 
     @abstractmethod
     def determine_num_available_blocks(self) -> tuple[int, int]:
-        """Profile the model on-device to determine the maximum number of KV
-        blocks that can be allocated.
+        """Determine the number of available blocks for the GPU KV cache and
+        swappable CPU KV cache.
 
-        Returns a tuple[num_device_blocks, num_cpu_blocks], where
-            num_device_blocks refers to the number of blocks in the "active" KV
-            cache (e.g. where blocks are appended to), and num_cpu_blocks refers
-            to the number of blocks in the "passive" KV cache (e.g. where blocks
-            are swapped to).
+        Normally, this should simply delegate to the underlying Worker. Some
+        ExecutorBase may require modification of the result, e.g. to ensure the
+        selected cache sizes are compatible with all workers.
 
-        Examples:
-            - The GPUExecutor will return [num_gpu_blocks, num_cpu_blocks].
-            - A future CPUExecutor can return [num_cpu_blocks, 0] or
-                [num_cpu_blocks, num_swap_cpu_blocks].
+        Returns a tuple[num_gpu_blocks, num_cpu_blocks], where num_gpu_blocks
+        are blocks that are "active" on the device and can be appended to.
+        num_cpu_blocks refers to "swapped" blocks in CPU memory and cannot be
+        appended to.
         """
         raise NotImplementedError
 
     @abstractmethod
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
-        """Given a fully-specified cache config, initialize the KV cache. This
-        is separate from init_workers as profiling may be required to determine
-        the maximum allowed KV cache size.
+        """Initialize the KV cache with the given size in blocks.
         """
         raise NotImplementedError
 

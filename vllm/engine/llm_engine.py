@@ -181,6 +181,11 @@ class LLMEngine:
             self.stat_logger.info("cache_config", self.cache_config)
 
     def _initialize_kv_caches(self) -> None:
+        """Initialize the KV cache in the worker(s).
+
+        The workers will determine the number of blocks in both the GPU cache
+        and the swap CPU cache.
+        """
         num_gpu_blocks, num_cpu_blocks = (
             self.model_executor.determine_num_available_blocks())
 

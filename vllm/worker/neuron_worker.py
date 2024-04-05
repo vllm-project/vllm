@@ -41,6 +41,12 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
         self.model_runner.load_model()
 
     def determine_num_available_blocks(self) -> tuple[int, int]:
+        """Determine the number of available KV blocks.
+
+        Swapping is not yet supported, so always return num_cpu_blocks=0.
+
+        We configure num_gpu_blocks to be equal to max_num_seqs.
+        """
         # Set the number of GPU blocks to be the same as the maximum number of
         # sequences that can be processed in a single batch. This is equivalent
         # to schedule without PagedAttention.
@@ -53,8 +59,13 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
+        """Initialize the KV cache.
+        """
+
+        # Different values are not tested.
         assert num_cpu_blocks == 0
         assert num_gpu_blocks == self.scheduler_config.max_num_seqs
+
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
@@ -73,4 +84,8 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
         return output
 
     def get_cache_block_size_bytes(self) -> int:
+        """Determine the size in bytes of a cache block.
+
+        This is required for speculative decoding; it is not yet implemented.
+        """
         raise NotImplementedError

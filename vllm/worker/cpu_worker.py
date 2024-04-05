@@ -170,6 +170,16 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         self.model_runner.load_model()
 
     def determine_num_available_blocks(self) -> tuple[int, int]:
+        """Determine the number of blocks available for the KV cache.
+
+        This determines how many KV blocks can fit into the configured CPU
+        KV cache space.
+
+        Note that since vLLM assumes a block resides on GPU if it can be
+        modified, we return num_gpu_blocks=num_cpu_blocks and num_cpu_blocks=0.
+        This allows us to reuse the scheduler of vLLM without generalizing it
+        to different devices.
+        """
         # For CPU device, the block number will be calculated based on the
         # cpu_kvcache_space.
         cache_block_size = self.get_cache_block_size_bytes()
@@ -185,11 +195,20 @@ class CPUWorker(LoraNotSupportedWorkerBase):
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
+        """Initialize the KV cache. Currently, swappable CPU memory is not
+        supported.
+
+        Since this worker does not support GPUs, we use the num_gpu_blocks to
+        determine how many non-swappable CPU blocks to allocate.
+        """
+        assert (num_cpu_blocks == 0
+                ), f"{type(self)} does not support swappable cache"
+
         # Note: To reuse the cache management procedure,
         # use cpu cache as 'gpu cache'.
-        assert num_cpu_blocks == 0
         num_cpu_blocks = num_gpu_blocks
-        num_gpu_blocks = 0
+        del num_gpu_blocks
+
         self.cache_config.num_gpu_blocks = num_cpu_blocks
         self.cache_config.num_cpu_blocks = 0
 
@@ -302,6 +321,8 @@ class CPUWorker(LoraNotSupportedWorkerBase):
             parallel_config.pipeline_parallel_size)
 
     def get_cache_block_size_bytes(self) -> int:
+        """Return the size in bytes of a single KV cache block.
+        """
         return CPUCacheEngine.get_cache_block_size(
             self.cache_config.block_size, self.cache_config.cache_dtype,
             self.model_config, self.parallel_config)

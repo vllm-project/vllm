@@ -6,6 +6,9 @@ from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 
 
 class WorkerBase(ABC):
+    """Worker interface that allows vLLM to cleanly separate implementations for
+    different hardware.
+    """
 
     @abstractmethod
     def init_device(self) -> None:
@@ -16,28 +19,23 @@ class WorkerBase(ABC):
 
     @abstractmethod
     def determine_num_available_blocks(self) -> tuple[int, int]:
-        """Profile the model on-device to determine the maximum number of KV
-        blocks that can be allocated.
+        """Determine the number of available blocks for the GPU KV cache and
+        swappable CPU KV cache.
 
-        Returns a tuple[num_device_blocks, num_cpu_blocks], where
-            num_device_blocks refers to the number of blocks in the "active" KV
-            cache (e.g. where blocks are appended to), and num_cpu_blocks refers
-            to the number of blocks in the "passive" KV cache (e.g. where blocks
-            are swapped to).
+        The implementation may run profiling or other heuristics to determine
+        the size of caches.
 
-        Examples:
-            - The GPUExecutor will return [num_gpu_blocks, num_cpu_blocks].
-            - A future CPUExecutor can return [num_cpu_blocks, 0] or
-                [num_cpu_blocks, num_swap_cpu_blocks].
+        Returns a tuple[num_gpu_blocks, num_cpu_blocks], where num_gpu_blocks
+        are blocks that are "active" on the device and can be appended to.
+        num_cpu_blocks refers to "swapped" blocks in CPU memory and cannot be
+        appended to.
         """
         raise NotImplementedError
 
     @abstractmethod
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
-        """Given a fully-specified cache config, initialize the KV cache. This
-        is separate from init_workers as profiling may be required to determine
-        the maximum allowed KV cache size.
+        """Initialize the KV cache with the given size in blocks.
         """
         raise NotImplementedError
 
@@ -52,6 +50,9 @@ class WorkerBase(ABC):
 
     @abstractmethod
     def get_cache_block_size_bytes() -> int:
+        """Return the size of a single cache block, in bytes. Used in
+        speculative decoding.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -68,6 +69,9 @@ class WorkerBase(ABC):
 
 
 class LoraNotSupportedWorkerBase(WorkerBase):
+    """Partial implementation of WorkerBase that raises exceptions when LoRA
+    methods are invoked.
+    """
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         raise ValueError(f"{type(self)} does not support LoRA")

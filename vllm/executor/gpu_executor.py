@@ -67,9 +67,14 @@ class GPUExecutor(ExecutorBase):
         self.driver_worker.load_model()
 
     def determine_num_available_blocks(self) -> tuple[int, int]:
+        """Determine the number of available KV blocks by invoking the
+        underlying worker.
+        """
         return self.driver_worker.determine_num_available_blocks()
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks) -> None:
+        """Initialize the KV cache by invoking the underlying worker.
+        """
         # NOTE: This is logged in the executor because there can be >1 worker
         # with other executors. We could log in the engine level, but work
         # remains to abstract away the device for non-GPU configurations.

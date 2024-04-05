@@ -48,10 +48,15 @@ class NeuronExecutor(ExecutorBase):
         self.driver_worker.load_model()
 
     def determine_num_available_blocks(self) -> tuple[int, int]:
+        """Determine the number of available KV blocks by invoking the
+        underlying worker.
+        """
         return self.driver_worker.determine_num_available_blocks()
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
+        """Initialize the KV cache by invoking the underlying worker.
+        """
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     def execute_model(self,
