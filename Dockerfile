@@ -127,6 +127,8 @@ FROM vllm-base AS test
 COPY tests tests
 COPY benchmarks benchmarks
 COPY examples examples
+COPY docs docs
+COPY .buildkite .buildkite
 
 # install development dependencies (for testing)
 COPY requirements-dev.txt requirements-dev.txt
