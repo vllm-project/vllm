@@ -5,9 +5,11 @@ import torch
 from transformers import AutoTokenizer
 
 from vllm.entrypoints.openai.protocol import CompletionRequest
+from vllm.model_executor.guided_decoding import (
+    get_guided_decoding_logits_processor)
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
     JSONLogitsProcessor, RegexLogitsProcessor)
-from vllm.model_executor.guided_decoding import get_guided_decoding_logits_processor
+
 TEST_SCHEMA = {
     "type": "object",
     "properties": {
@@ -80,9 +82,13 @@ def test_guided_logits_processors():
 async def test_lm_format_enforcer_guided_logits_processor():
     tokenizer = AutoTokenizer.from_pretrained('HuggingFaceH4/zephyr-7b-beta')
     for backend in ['outlines', 'lm-format-enforcer']:
-        token_ids = tokenizer.encode(f"Give an example IPv4 address with this regex: {TEST_REGEX}")
-        regex_request = CompletionRequest(model='test', prompt=token_ids, guided_regex=TEST_REGEX)
-        regex_lp = await get_guided_decoding_logits_processor(backend, regex_request, tokenizer)
+        token_ids = tokenizer.encode(
+            f"Give an example IPv4 address with this regex: {TEST_REGEX}")
+        regex_request = CompletionRequest(model='test',
+                                          prompt=token_ids,
+                                          guided_regex=TEST_REGEX)
+        regex_lp = await get_guided_decoding_logits_processor(
+            backend, regex_request, tokenizer)
         assert regex_lp is not None
         tensor = torch.rand(32000)
         original_tensor = torch.clone(tensor)
@@ -90,13 +96,16 @@ async def test_lm_format_enforcer_guided_logits_processor():
         assert tensor.shape == original_tensor.shape
         assert not torch.allclose(tensor, original_tensor)
 
-        token_ids = tokenizer.encode(f"Give an employee profile that fits this schema: {TEST_SCHEMA}")
-        json_request = CompletionRequest(model='test', prompt=token_ids, guided_json=TEST_SCHEMA)
-        json_lp = await get_guided_decoding_logits_processor(backend, json_request, tokenizer)
+        token_ids = tokenizer.encode(
+            f"Give an employee profile that fits this schema: {TEST_SCHEMA}")
+        json_request = CompletionRequest(model='test',
+                                         prompt=token_ids,
+                                         guided_json=TEST_SCHEMA)
+        json_lp = await get_guided_decoding_logits_processor(
+            backend, json_request, tokenizer)
         assert json_lp is not None
         tensor = torch.rand(32000)
         original_tensor = torch.clone(tensor)
         json_lp(token_ids, tensor)
         assert tensor.shape == original_tensor.shape
         assert not torch.allclose(tensor, original_tensor)
-
