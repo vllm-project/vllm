@@ -3,10 +3,10 @@ import dataclasses
 from dataclasses import dataclass
 from typing import Optional
 
-from vllm.config import (CacheConfig, DeviceConfig, EngineConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig,
-                         SpeculativeConfig, TokenizerPoolConfig,
-                         VisionLanguageConfig)
+from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
+                         EngineConfig, LoRAConfig, ModelConfig, ParallelConfig,
+                         SchedulerConfig, SpeculativeConfig,
+                         TokenizerPoolConfig, VisionLanguageConfig)
 from vllm.utils import str_to_int_tuple
 
 
@@ -430,8 +430,7 @@ class EngineArgs:
             self.dtype, self.seed, self.revision, self.code_revision,
             self.tokenizer_revision, self.max_model_len, self.quantization,
             self.quantization_param_path, self.enforce_eager,
-            self.max_context_len_to_capture, self.max_logprobs,
-            self.guided_decoding_backend)
+            self.max_context_len_to_capture, self.max_logprobs)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
@@ -491,6 +490,9 @@ class EngineArgs:
         else:
             vision_language_config = None
 
+        decoding_config = DecodingConfig(
+            guided_decoding_backend=self.guided_decoding_backend)
+
         return EngineConfig(model_config=model_config,
                             cache_config=cache_config,
                             parallel_config=parallel_config,
@@ -498,7 +500,8 @@ class EngineArgs:
                             device_config=device_config,
                             lora_config=lora_config,
                             vision_language_config=vision_language_config,
-                            speculative_config=speculative_config)
+                            speculative_config=speculative_config,
+                            decoding_config=decoding_config)
 
 
 @dataclass
