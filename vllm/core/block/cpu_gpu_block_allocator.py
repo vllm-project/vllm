@@ -7,7 +7,6 @@ from vllm.core.block.interfaces import (Block, BlockAllocator,
                                         DeviceAwareBlockAllocator)
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
 from vllm.core.block.prefix_caching_block import PrefixCachingBlockAllocator
-from vllm.sequence import Sequence
 from vllm.utils import Device
 
 
@@ -92,23 +91,22 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         return CpuGpuBlockAllocator(
             cpu_block_allocator=cpu_allocator,
             gpu_block_allocator=gpu_allocator,
-            block_size=block_size,
         )
 
     def __init__(self, cpu_block_allocator: BlockAllocator,
-                 gpu_block_allocator: BlockAllocator, block_size: int):
+                 gpu_block_allocator: BlockAllocator):
         assert not (
             cpu_block_allocator.all_block_ids
             & gpu_block_allocator.all_block_ids
         ), "cpu and gpu block allocators can't have intersection of block ids"
 
-        self._block_size = block_size
         self._allocators = {
             Device.CPU: cpu_block_allocator,
             Device.GPU: gpu_block_allocator,
         }
 
         self._block_ids_to_allocator = {}
+        self._swap_mapping = {}
         for _, allocator in self._allocators.items():
             for block_id in allocator.all_block_ids:
                 self._block_ids_to_allocator[block_id] = allocator
@@ -161,15 +159,15 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         """
         return self._allocators[device].mock_mutable(prev_block, token_ids)
 
-    def reference(self, block: Block) -> None:
+    def reference(self, block_id: int) -> None:
         """Notify the device aware allocator there is new sequence reference
         the given block.
 
         Args:
             block (Block): The block to be referenced.
         """
-        allocator = self._block_ids_to_allocator[block.block_id]
-        return allocator.reference(block)
+        allocator = self._block_ids_to_allocator[block_id]
+        return allocator.reference(block_id)
 
     def free(self, block: Block) -> None:
         """Frees the memory occupied by the given block.
@@ -233,46 +231,63 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
     def all_block_ids(self) -> frozenset[int]:
         return frozenset(self._block_ids_to_allocator.keys())
 
-    def get_seq_swap_out_block_mapping(
-            self, seq: Sequence, block_table: BlockTable,
-            mapping: Dict[Block, Block]) -> BlockTable:
-        # The swap out logic for a sequence, the mapping dict will be updated
-        # and the new block table for swapped out sequence is returned.
-        new_block_table = BlockTable(
-            block_size=self._block_size,
-            block_allocator=self,
-        )
-        for gpu_block in block_table.get_blocks():
-            if gpu_block in mapping:
-                cpu_block = mapping[gpu_block]
-                self.reference(cpu_block)
-            else:
-                cpu_block = new_block_table.allocate(
-                    token_ids=gpu_block.token_ids,
-                    device=Device.CPU,
-                    by_block=True)
-                mapping[gpu_block] = cpu_block
-            self.free(gpu_block)
-        return new_block_table
+    def update_seq_swap_out_block_mapping(self, block: Block,
+                                          block_table: BlockTable,
+                                          destination_device: Device) -> None:
+        if block.block_id in self._swap_mapping:
+            dest_block_id = self._swap_mapping[block.block_id]
+            self.reference(dest_block_id)
+        else:
+            dest_block = block_table.allocate(token_ids=block.token_ids,
+                                              device=destination_device,
+                                              by_block=True)
+            self._swap_mapping[block.block_id] = dest_block.block_id
 
-    def get_seq_swap_in_block_mapping(
-            self, seq: Sequence, block_table: BlockTable,
-            mapping: Dict[Block, Block]) -> BlockTable:
-        # The swap in logic for a sequence, the mapping dict will be updated
-        # and the new block table for swapped in sequence is returned.
-        new_block_table = BlockTable(
-            block_size=self._block_size,
-            block_allocator=self,
-        )
-        for cpu_block in block_table.get_blocks():
-            if cpu_block in mapping:
-                gpu_block = mapping[cpu_block]
-                self.reference(gpu_block)
-            else:
-                gpu_block = new_block_table.allocate(
-                    token_ids=cpu_block.token_ids,
-                    device=Device.GPU,
-                    by_block=True)
-                mapping[cpu_block] = gpu_block
-            self.free(cpu_block)
-        return new_block_table
+    def get_and_reset_swaps(self) -> dict:
+        mapping = self._swap_mapping.copy()
+        self._swap_mapping.clear()
+        return mapping
+
+    # def get_seq_swap_out_block_mapping(
+    #         self, seq: Sequence, block_table: BlockTable,
+    #         mapping: Dict[Block, Block]) -> BlockTable:
+    #     # The swap out logic for a sequence, the mapping dict will be updated
+    #     # and the new block table for swapped out sequence is returned.
+    #     new_block_table = BlockTable(
+    #         block_size=self._block_size,
+    #         block_allocator=self,
+    #     )
+    #     for src_block in block_table.get_blocks():
+    #         if src_block in mapping:
+    #             cpu_block = mapping[src_block]
+    #             self.reference(cpu_block)
+    #         else:
+    #             cpu_block = new_block_table.allocate(
+    #                 token_ids=src_block.token_ids,
+    #                 device=Device.CPU,
+    #                 by_block=True)
+    #             mapping[src_block] = cpu_block
+    #         self.free(src_block)
+    #     return new_block_table
+
+    # def get_seq_swap_in_block_mapping(
+    #         self, seq: Sequence, block_table: BlockTable,
+    #         mapping: Dict[Block, Block]) -> BlockTable:
+    #     # The swap in logic for a sequence, the mapping dict will be updated
+    #     # and the new block table for swapped in sequence is returned.
+    #     new_block_table = BlockTable(
+    #         block_size=self._block_size,
+    #         block_allocator=self,
+    #     )
+    #     for cpu_block in block_table.get_blocks():
+    #         if cpu_block in mapping:
+    #             gpu_block = mapping[cpu_block]
+    #             self.reference(gpu_block)
+    #         else:
+    #             gpu_block = new_block_table.allocate(
+    #                 token_ids=cpu_block.token_ids,
+    #                 device=Device.GPU,
+    #                 by_block=True)
+    #             mapping[cpu_block] = gpu_block
+    #         self.free(cpu_block)
+    #     return new_block_table

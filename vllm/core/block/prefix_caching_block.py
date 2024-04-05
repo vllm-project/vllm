@@ -217,8 +217,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             assert block.content_hash in self._cached_blocks
             self._unused_cached_blocks[block.content_hash] = block_id
 
-    def reference(self, block: Block) -> None:
-        self._refcounter.incr(block.block_id)
+    def reference(self, block_id: int) -> None:
+        self._refcounter.incr(block_id)
 
     def fork(self, last_block: Block) -> List[Block]:
         """Creates a new sequence of blocks that shares the same underlying

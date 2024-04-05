@@ -176,7 +176,6 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
             num_lookahead_slots=num_lookahead_slots,
         )
-
         # Return any new copy-on-writes.
         new_cows = self.block_allocator.clear_copy_on_writes()
         return new_cows
@@ -263,21 +262,20 @@ class BlockSpaceManagerV2(BlockSpaceManager):
 
     def swap_in(self, seq_group: SequenceGroup,
                 num_lookahead_slots: int) -> Dict[int, int]:
-        mapping: Dict[Block, Block] = {}
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
             block_table = self.block_tables[seq.seq_id]
-            self.block_tables[
-                seq.
-                seq_id] = self.block_allocator.get_seq_swap_in_block_mapping(
-                    seq, block_table, mapping)
+            new_block_table = block_table.swap(destination_device=Device.GPU)
+            self.block_tables[seq.seq_id] = new_block_table
+            self.append_slots(seq=seq, num_lookahead_slots=num_lookahead_slots)
 
         # NOTE: since the memory operation in physical blocks need the
         # relative position of CPU block to its starting address, here
         # we need to shift the block id of cpu block back to its relative
         # position within CPU cache.
+        mapping = self.block_allocator.get_and_reset_swaps()
         block_number_mapping = {
-            cpu_block.block_id - self.num_total_gpu_blocks: gpu_block.block_id
-            for cpu_block, gpu_block in mapping.items()
+            cpu_block_id - self.num_total_gpu_blocks: gpu_block_id
+            for cpu_block_id, gpu_block_id in mapping.items()
         }
         return block_number_mapping
 
@@ -310,14 +308,13 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         mapping: Dict[Block, Block] = {}
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             block_table = self.block_tables[seq.seq_id]
-            self.block_tables[
-                seq.
-                seq_id] = self.block_allocator.get_seq_swap_out_block_mapping(
-                    seq, block_table, mapping)
+            new_block_table = block_table.swap(destination_device=Device.CPU)
+            self.block_tables[seq.seq_id] = new_block_table
 
+        mapping = self.block_allocator.get_and_reset_swaps()
         block_number_mapping = {
-            gpu_block.block_id: cpu_block.block_id - self.num_total_gpu_blocks
-            for gpu_block, cpu_block in mapping.items()
+            gpu_block_id: cpu_block_id - self.num_total_gpu_blocks
+            for gpu_block_id, cpu_block_id in mapping.items()
         }
         return block_number_mapping
 

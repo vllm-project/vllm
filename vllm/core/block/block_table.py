@@ -193,6 +193,17 @@ class BlockTable:
             self._allocator.free(block)
         self._blocks = None
 
+    def swap(self, destination_device: Device) -> "BlockTable":
+        new_block_table = BlockTable(
+            block_size=self._block_size,
+            block_allocator=self._allocator,
+        )
+        for src_block in self.get_blocks():
+            self._allocator.update_seq_swap_out_block_mapping(
+                src_block, new_block_table, destination_device)
+            self._allocator.free(src_block)
+        return new_block_table
+
     @property
     def physical_block_ids(self) -> List[int]:
         """Returns a list of physical block indices for the blocks in the
