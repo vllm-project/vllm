@@ -238,7 +238,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
                 block_table = self.block_tables[seq.seq_id]
                 num_touched_blocks += (
-                    block_table.get_num_cache_blocks_touched_by_swapping_in(
+                    block_table.get_num_cache_blocks_touched_by_swapping(
                         token_ids=seq.get_token_ids(),
                         num_lookahead_slots=num_lookahead_slots,
                         device=Device.GPU))
@@ -251,7 +251,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             block_set = set()
             for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
                 block_table = self.block_tables[seq.seq_id]
-                block_table.get_num_naive_blocks_touched_by_swapping_in(
+                block_table.get_num_naive_blocks_touched_by_swapping(
                     token_ids=seq.get_token_ids(),
                     num_lookahead_slots=num_lookahead_slots,
                     total_touched_blocks=num_touched_blocks,
@@ -283,9 +283,26 @@ class BlockSpaceManagerV2(BlockSpaceManager):
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
         num_touched_blocks = 0
-        for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-            block_table = self.block_tables[seq.seq_id]
-            num_touched_blocks += block_table._num_touched_blocks
+
+        if self.enable_caching:
+            for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
+                block_table = self.block_tables[seq.seq_id]
+                num_touched_blocks += (
+                    block_table.get_num_cache_blocks_touched_by_swapping(
+                        token_ids=seq.get_token_ids(),
+                        num_lookahead_slots=0,
+                        device=Device.CPU))
+        else:
+            block_set = set()
+            for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
+                block_table = self.block_tables[seq.seq_id]
+                block_table.get_num_naive_blocks_touched_by_swapping(
+                    token_ids=seq.get_token_ids(),
+                    num_lookahead_slots=0,
+                    total_touched_blocks=num_touched_blocks,
+                    block_set=block_set)
+            num_touched_blocks += len(block_set)
+
         return num_touched_blocks <= self.block_allocator.get_num_free_blocks(
             Device.CPU)
 

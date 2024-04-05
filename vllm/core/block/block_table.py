@@ -308,14 +308,14 @@ class BlockTable:
             token_ids[first_chunk_size:], self._block_size)
         return token_blocks
 
-    def get_num_cache_blocks_touched_by_swapping_in(self, token_ids: List[int],
-                                                    num_lookahead_slots: int,
-                                                    device: Device) -> int:
-        """Determine how many blocks will be "touched" by swapping in the 
+    def get_num_cache_blocks_touched_by_swapping(self, token_ids: List[int],
+                                                 num_lookahead_slots: int,
+                                                 device: Device) -> int:
+        """Determine how many blocks will be "touched" by swapping in/out the 
         token ids.
 
         This is required for the scheduler to determine whether a sequence can
-        be swapped in.
+        be swapped in/out.
         """
         all_token_ids = token_ids + [-1] * num_lookahead_slots
         token_blocks = self._chunk_token_blocks_for_append(all_token_ids)
@@ -329,10 +329,10 @@ class BlockTable:
             prev_block = block
         return num_blocks_touched
 
-    def get_num_naive_blocks_touched_by_swapping_in(self, token_ids: List[int],
-                                                    num_lookahead_slots: int,
-                                                    total_touched_blocks: int,
-                                                    block_set: set) -> None:
+    def get_num_naive_blocks_touched_by_swapping(self, token_ids: List[int],
+                                                 num_lookahead_slots: int,
+                                                 total_touched_blocks: int,
+                                                 block_set: set) -> None:
         num_blocks_touched = self.get_num_blocks_touched_by_append_slots(
             token_ids, num_lookahead_slots)
         blocks = self.get_blocks()
