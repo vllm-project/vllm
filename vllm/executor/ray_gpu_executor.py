@@ -172,7 +172,7 @@ class RayGPUExecutor(ExecutorBase):
                     rank,
                     distributed_init_method,
                     lora_config=lora_config,
-                    kv_cache_dtype=kv_cache_dtype,
+                    #kv_cache_dtype=kv_cache_dtype,
                 ))
 
         # Initialize the driver worker with the Worker class.
@@ -188,7 +188,7 @@ class RayGPUExecutor(ExecutorBase):
             distributed_init_method,
             lora_config=self.lora_config,
             vision_language_config=self.vision_language_config,
-            kv_cache_dtype=kv_cache_dtype,
+            #kv_cache_dtype=kv_cache_dtype,
             is_driver_worker=True,
         )
 
