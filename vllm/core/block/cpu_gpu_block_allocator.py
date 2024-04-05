@@ -146,6 +146,21 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         return self._allocators[device].allocate_immutable(
             prev_block, token_ids)
 
+    def mock_mutable(self, prev_block: Optional[Block], token_ids: List[int],
+                     device: Device) -> Block:
+        """Mock a new mutable block, linked to the previous block, to help with
+        content hash calculation.
+
+        Args:
+            prev_block (Optional[Block]): The previous block in the sequence. If
+                None, then the block to be allocated is the first block in the
+                sequence.
+
+        Returns:
+            Block: The newly allocated mutable block.
+        """
+        return self._allocators[device].mock_mutable(prev_block, token_ids)
+
     def reference(self, block: Block) -> None:
         """Notify the device aware allocator there is new sequence reference
         the given block.

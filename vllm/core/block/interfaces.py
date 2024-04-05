@@ -58,6 +58,11 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
+    def mock_mutable(self, prev_block: Optional[Block],
+                     token_ids: List[int]) -> Block:
+        pass
+
+    @abstractmethod
     def free(self, block: Block) -> None:
         pass
 
@@ -100,6 +105,11 @@ class DeviceAwareBlockAllocator(BlockAllocator):
     @abstractmethod
     def allocate_immutable(self, prev_block: Optional[Block],
                            token_ids: List[int], device: Device) -> Block:
+        pass
+
+    @abstractmethod
+    def mock_mutable(self, prev_block: Optional[Block], token_ids: List[int],
+                     device: Device) -> Block:
         pass
 
     @abstractmethod

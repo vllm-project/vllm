@@ -233,13 +233,31 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         touched and sum them up to see whether there is enough memory to swap in
         """
         num_touched_blocks = 0
-        for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
-            block_table = self.block_tables[seq.seq_id]
-            num_touched_blocks += (
-                block_table.get_num_blocks_touched_by_append_slots(
+
+        if self.enable_caching:
+            for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
+                block_table = self.block_tables[seq.seq_id]
+                num_touched_blocks += (
+                    block_table.get_num_cache_blocks_touched_by_swapping_in(
+                        token_ids=seq.get_token_ids(),
+                        num_lookahead_slots=num_lookahead_slots,
+                        device=Device.GPU))
+        else:
+            # NOTE: for naive block, we go though all the sequence to collect
+            # a set of immutable block id, and accumulate number of isolated
+            # blocks (mutable ones and single block caused by lookahead). We
+            # sum them up at the end to get the final num_touched_blocks
+            # num_touched_blocks swap in op.
+            block_set = set()
+            for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
+                block_table = self.block_tables[seq.seq_id]
+                block_table.get_num_naive_blocks_touched_by_swapping_in(
                     token_ids=seq.get_token_ids(),
                     num_lookahead_slots=num_lookahead_slots,
-                ))
+                    total_touched_blocks=num_touched_blocks,
+                    block_set=block_set)
+            num_touched_blocks += len(block_set)
+
         num_free_blocks = self.block_allocator.get_num_free_blocks(Device.GPU)
         return num_free_blocks - num_touched_blocks >= self.watermark_blocks
 
