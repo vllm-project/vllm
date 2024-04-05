@@ -510,7 +510,7 @@ def test_init_device():
     metrics_collector.init_gpu_tensors.assert_called_once()
     rejection_sampler.init_gpu_tensors.assert_called_once()
 
-
+@torch.inference_mode()
 def test_initialize_cache():
     """Verify SpecDecodeWorker invokes initialize_cache on proposer/scorer
     workers.
