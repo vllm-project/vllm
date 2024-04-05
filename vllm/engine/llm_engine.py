@@ -97,6 +97,7 @@ class LLMEngine:
             f"quantization={model_config.quantization}, "
             f"enforce_eager={model_config.enforce_eager}, "
             f"kv_cache_dtype={cache_config.cache_dtype}, "
+            f"quantization_param_path={model_config.quantization_param_path}, "
             f"device_config={device_config.device}, "
             f"seed={model_config.seed})")
         # TODO(woosuk): Print more configs in debug mode.
@@ -431,7 +432,7 @@ class LLMEngine:
 
         # Process prompt logprobs
         prompt_logprobs = outputs.prompt_logprobs
-        if prompt_logprobs is not None:
+        if prompt_logprobs is not None and seq_group.sampling_params.detokenize:
             self.detokenizer.decode_prompt_logprobs_inplace(
                 seq_group, prompt_logprobs)
             seq_group.prompt_logprobs = prompt_logprobs
@@ -477,8 +478,9 @@ class LLMEngine:
             child_seqs.append((parent, parent))
 
         for seq, _ in child_seqs:
-            self.detokenizer.decode_sequence_inplace(seq,
-                                                     seq_group.sampling_params)
+            if seq_group.sampling_params.detokenize:
+                self.detokenizer.decode_sequence_inplace(
+                    seq, seq_group.sampling_params)
             self._check_stop(seq, seq_group.sampling_params)
 
         # Non-beam search case
@@ -728,7 +730,7 @@ class LLMEngine:
         time_per_output_tokens = []
         time_e2e_requests = []
         if scheduler_outputs is not None:
-            prompt_run = scheduler_outputs.prompt_run
+            prompt_run = scheduler_outputs.num_prefill_groups > 0
 
             # Number of Tokens.
             if prompt_run:
@@ -790,12 +792,13 @@ class LLMEngine:
         if seq.get_output_len() < sampling_params.min_tokens:
             return
 
-        for stop_str in sampling_params.stop:
-            if seq.output_text.endswith(stop_str):
-                self._finalize_sequence(seq, sampling_params, stop_str)
-                seq.status = SequenceStatus.FINISHED_STOPPED
-                seq.stop_reason = stop_str
-                return
+        if sampling_params.detokenize:
+            for stop_str in sampling_params.stop:
+                if seq.output_text.endswith(stop_str):
+                    self._finalize_sequence(seq, sampling_params, stop_str)
+                    seq.status = SequenceStatus.FINISHED_STOPPED
+                    seq.stop_reason = stop_str
+                    return
         last_token_id = seq.get_last_token_id()
         if last_token_id in sampling_params.stop_token_ids:
             stop_str = self.get_tokenizer_for_seq(seq).convert_ids_to_tokens(

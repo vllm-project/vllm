@@ -89,6 +89,7 @@ class SamplingParams:
             log probability of the sampled token, so there  may be up to
             `logprobs+1` elements in the response.
         prompt_logprobs: Number of log probabilities to return per prompt token.
+        detokenize: Whether to detokenize the output. Defaults to True.
         skip_special_tokens: Whether to skip special tokens in the output.
         spaces_between_special_tokens: Whether to add spaces between special
             tokens in the output.  Defaults to True.
@@ -122,6 +123,7 @@ class SamplingParams:
         min_tokens: int = 0,
         logprobs: Optional[int] = None,
         prompt_logprobs: Optional[int] = None,
+        detokenize: bool = True,
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
         logits_processors: Optional[List[LogitsProcessor]] = None,
@@ -155,6 +157,10 @@ class SamplingParams:
         self.min_tokens = min_tokens
         self.logprobs = logprobs
         self.prompt_logprobs = prompt_logprobs
+        # NOTE: This parameter is only exposed at the engine level for now.
+        # It is not exposed in the OpenAI API server, as the OpenAI API does
+        # not support returning only a list of token IDs.
+        self.detokenize = detokenize
         self.skip_special_tokens = skip_special_tokens
         self.spaces_between_special_tokens = spaces_between_special_tokens
         self.logits_processors = logits_processors
@@ -220,6 +226,10 @@ class SamplingParams:
                 and self.truncate_prompt_tokens < 1):
             raise ValueError(f"truncate_prompt_tokens must be >= 1, "
                              f"got {self.truncate_prompt_tokens}")
+        if self.stop and not self.detokenize:
+            raise ValueError(
+                "stop strings are only supported when detokenize is True. "
+                "Set detokenize=True to use stop.")
 
     def _verify_beam_search(self) -> None:
         if self.best_of == 1:
