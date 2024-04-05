@@ -494,7 +494,8 @@ class SequenceGroup:
     def update_num_computed_tokens(self, num_new_computed_tokens: int):
         """Update number of tokens computed so far."""
         for seq in self.seqs_dict.values():
-            seq.data.update_num_computed_tokens(num_new_computed_tokens)
+            if not seq.is_finished():
+                seq.data.update_num_computed_tokens(num_new_computed_tokens)
 
     def get_num_uncomputed_tokens(self) -> int:
         num_uncomputed_tokens = 0
