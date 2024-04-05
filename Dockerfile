@@ -124,22 +124,18 @@ RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,ta
 # note that this uses vllm installed by `pip`
 FROM vllm-base AS test
 
+ADD . /vllm-workspace/
+
 # install development dependencies (for testing)
-COPY requirements-dev.txt requirements-dev.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements-dev.txt
-
-# files and directories related to tests (CI)
-COPY tests tests
-COPY benchmarks benchmarks
-COPY examples examples
-COPY .buildkite .buildkite
 
 # doc requires source code
 # we hide them inside `test_docs/` , so that this source code
 # will not be imported by other tests
-COPY docs test_docs/docs
-COPY vllm test_docs/vllm
+RUN mkdir test_docs
+RUN mv docs test_docs/
+RUN mv vllm test_docs/
 
 #################### TEST IMAGE ####################
 
