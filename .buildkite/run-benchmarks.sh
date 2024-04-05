@@ -16,7 +16,7 @@ python3 benchmarks/benchmark_throughput.py --input-len 256 --output-len 256 2>&1
 bench_throughput_exit_code=$?
 
 # run python-based benchmark minimal measure perplexity
-python3 benchmarks/measure_ppl2_MC.py --model=meta-llama/Llama-2-7b-hf --data=tests/prompts/wiki.test.raw --context-size=1024 --sample-size=512 --patch-size=1 2>&1 | tee benchmark_measure_pplv2.txt
+python3 examples/measure_ppl2_MC.py --model=meta-llama/Llama-2-7b-hf --data=tests/prompts/wiki.test.raw --context-size=1024 --sample-size=512 --patch-size=1 2>&1 | tee benchmark_measure_pplv2.txt
 
 # run server-based benchmarks and upload the result to buildkite
 python3 -m vllm.entrypoints.openai.api_server --model meta-llama/Llama-2-7b-chat-hf &
