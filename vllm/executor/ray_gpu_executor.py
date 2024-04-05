@@ -273,22 +273,10 @@ class RayGPUExecutor(ExecutorBase):
 
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
+        self.cache_config.num_gpu_blocks = num_gpu_blocks
+        self.cache_config.num_cpu_blocks = num_cpu_blocks
+
         self._run_workers("initialize_cache", num_gpu_blocks=num_gpu_blocks, num_cpu_blocks=num_cpu_blocks)
-
-        #return
-
-        #raise_if_cache_size_invalid(num_gpu_blocks, self.cache_config.block_size,
-        #                       self.model_config.max_model_len)
-
-        #self.cache_config.num_gpu_blocks = num_gpu_blocks
-        #self.cache_config.num_cpu_blocks = num_cpu_blocks
-
-        ## Initialize the cache.
-        #self._run_workers("initialize_cache", num_gpu_blocks=num_gpu_blocks, num_cpu_blocks=num_cpu_blocks)
-
-        ## Warm up the model. This includes capturing the model into CUDA graph
-        ## if enforce_eager is False.
-        #self._run_workers("warm_up_model")
 
 
     def execute_model(self,

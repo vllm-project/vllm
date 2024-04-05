@@ -74,26 +74,15 @@ class GPUExecutor(ExecutorBase):
 
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks) -> None:
+        # NOTE: This is logged in the executor because there can be >1 worker
+        # with other executors. We could log in the engine level, but work
+        # remains to abstract away the device for non-GPU configurations.
         logger.info(
             f"# GPU blocks: {num_gpu_blocks}, "
             f"# CPU blocks: {num_cpu_blocks}"
         )
 
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
-        #return
-
-
-        #raise_if_cache_size_invalid(num_gpu_blocks, self.cache_config.block_size, self.model_config.max_model_len)
-
-        #self.cache_config.num_gpu_blocks = num_gpu_blocks
-        #self.cache_config.num_cpu_blocks = num_cpu_blocks
-
-        ## Initialize the cache.
-        #self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
-
-        ## Warm up the model. This includes capturing the model into CUDA graph
-        ## if enforce_eager is False.
-        #self.driver_worker.warm_up_model()
 
 
     def execute_model(self,

@@ -19,7 +19,9 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
-from vllm.worker.worker_base import WorkerBase
+from vllm.worker.worker_base import WorkerBase, raise_if_cache_size_invalid
+
+# TODO move raise_if_cache_size_invalid
 
 
 class Worker(WorkerBase):

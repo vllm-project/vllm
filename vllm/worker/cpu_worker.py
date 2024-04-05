@@ -128,6 +128,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
+        cache_config: CacheConfig,
         local_rank: int,
         rank: int,
         distributed_init_method: str,
@@ -139,6 +140,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
+        self.cache_config = cache_config
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
@@ -156,7 +158,6 @@ class CPUWorker(LoraNotSupportedWorkerBase):
                                            is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
-        self.cache_config = None
         self.cache_engine = None
         self.cpu_cache = None
 
