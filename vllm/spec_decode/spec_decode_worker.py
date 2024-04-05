@@ -348,6 +348,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     def device(self):
         return self.scorer_worker.device
 
+    def get_cache_block_size_bytes(self):
+        raise NotImplementedError
+
 
 def split_num_cache_blocks_evenly(scorer_cache_block_size_bytes: int,
                                   proposer_cache_block_size_bytes: int,

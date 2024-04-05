@@ -11,8 +11,8 @@ def test_swap() -> None:
                              dtype="half",
                              load_format="dummy")
     engine_config = engine_args.create_engine_config()
-    engine_config.cache_config.num_gpu_blocks = 100
-    engine_config.cache_config.num_cpu_blocks = 100
+    engine_config.cache_config.num_gpu_blocks = 1000
+    engine_config.cache_config.num_cpu_blocks = 1000
 
     # Create the worker.
     distributed_init_method = get_distributed_init_method(

@@ -150,6 +150,7 @@ class RayGPUExecutor(ExecutorBase):
         scheduler_config = copy.deepcopy(self.scheduler_config)
         device_config = copy.deepcopy(self.device_config)
         lora_config = copy.deepcopy(self.lora_config)
+        cache_config = copy.deepcopy(self.cache_config)
 
         # Initialize the actual workers with the Worker class.
         for rank, (worker, (node_id, _)) in enumerate(
@@ -163,6 +164,7 @@ class RayGPUExecutor(ExecutorBase):
                     parallel_config,
                     scheduler_config,
                     device_config,
+                    cache_config,
                     local_rank,
                     rank,
                     distributed_init_method,
@@ -177,6 +179,7 @@ class RayGPUExecutor(ExecutorBase):
             self.parallel_config,
             self.scheduler_config,
             self.device_config,
+            self.cache_config,
             driver_local_rank,
             driver_rank,
             distributed_init_method,
