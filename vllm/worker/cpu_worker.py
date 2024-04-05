@@ -172,8 +172,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
     def determine_num_available_blocks(self) -> tuple[int, int]:
         # For CPU device, the block number will be calculated based on the
         # cpu_kvcache_space.
-        cache_block_size = CPUCacheEngine.get_cache_block_size(
-            self.cache_config.block_size, self.cache_config.cache_dtype, self.model_config, self.parallel_config)
+        cache_block_size = self.get_cache_block_size_bytes()
         num_cpu_blocks = int(self.cache_config.cpu_kvcache_space_bytes // cache_block_size)
         num_cpu_blocks = max(num_cpu_blocks, 0)
 
@@ -299,3 +298,8 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,
             parallel_config.pipeline_parallel_size)
+
+    def get_cache_block_size_bytes(self) -> int:
+        return CPUCacheEngine.get_cache_block_size(
+            self.cache_config.block_size, self.cache_config.cache_dtype, self.model_config, self.parallel_config)
+

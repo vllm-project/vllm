@@ -70,3 +70,6 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
 
         output = self.model_runner.execute_model(seq_group_metadata_list)
         return output
+
+    def get_cache_block_size_bytes(self) -> int:
+        raise NotImplementedError

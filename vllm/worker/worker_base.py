@@ -49,6 +49,10 @@ class WorkerBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_cache_block_size_bytes() -> int:
+        raise NotImplementedError
+
+    @abstractmethod
     def add_lora(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError
 

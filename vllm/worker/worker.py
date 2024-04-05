@@ -42,7 +42,6 @@ class Worker(WorkerBase):
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
         vision_language_config: Optional[VisionLanguageConfig] = None,
-        #kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
     ) -> None:
         self.model_config = model_config
@@ -73,8 +72,7 @@ class Worker(WorkerBase):
             is_driver_worker=is_driver_worker,
             vision_language_config=vision_language_config)
         # Uninitialized cache engine. Will be initialized by
-        # self.init_cache_engine().
-        #self.cache_config = None
+        # initialize_cache.
         self.cache_engine = None
         self.gpu_cache = None
 
@@ -115,34 +113,28 @@ class Worker(WorkerBase):
     ) -> Tuple[int, int]:
         """Profiles the peak memory usage of the model and returns the maximum
         number of GPU and CPU cache blocks that can be allocated.
-
-        Args:
-            # TODO
-            block_size: The size of the cache block.
-            gpu_memory_utilization: The fraction of the total GPU memory to use.
-            cpu_swap_space: The size of the CPU swap space in bytes.
         """
 
-    #    """Profiles the memory usage and initializes the KV cache.
+        #    """Profiles the memory usage and initializes the KV cache.
 
-    #    The engine will first conduct a profiling of the existing memory usage.
-    #    Then, it calculate the maximum possible number of GPU and CPU blocks
-    #    that can be allocated with the remaining free memory.
-    #    More details can be found in the
-    #    :meth:`~vllm.worker.worker.Worker.determine_num_available_blocks` method
-    #    from class :class:`~vllm.worker.Worker`.
+        #    The engine will first conduct a profiling of the existing memory usage.
+        #    Then, it calculate the maximum possible number of GPU and CPU blocks
+        #    that can be allocated with the remaining free memory.
+        #    More details can be found in the
+        #    :meth:`~vllm.worker.worker.Worker.determine_num_available_blocks` method
+        #    from class :class:`~vllm.worker.Worker`.
 
-    #    Afterwards, as there may be multiple workers,
-    #    we take the minimum number of blocks across all workers
-    #    to ensure this can be applied to all of them.
+        #    Afterwards, as there may be multiple workers,
+        #    we take the minimum number of blocks across all workers
+        #    to ensure this can be applied to all of them.
 
-    #    Finally, the engine will initialize the KV cache
-    #    with the calculated number of blocks.
+        #    Finally, the engine will initialize the KV cache
+        #    with the calculated number of blocks.
 
-    #    .. tip::
-    #        You may limit the usage of GPU memory
-    #        by adjusting the `gpu_memory_utilization` parameter.
-    #    """
+        #    .. tip::
+        #        You may limit the usage of GPU memory
+        #        by adjusting the `gpu_memory_utilization` parameter.
+        #    """
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
         torch.cuda.empty_cache()
@@ -173,7 +165,6 @@ class Worker(WorkerBase):
             self.model_runner.remove_all_loras()
         gc.collect()
         torch.cuda.empty_cache()
-
         return num_gpu_blocks, num_cpu_blocks
 
 
