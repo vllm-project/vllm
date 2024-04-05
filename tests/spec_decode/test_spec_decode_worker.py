@@ -487,7 +487,6 @@ def test_empty_input_batch(k: int, batch_size: int):
         **execute_model_data.to_dict())
 
 
-@pytest.mark.skip_global_cleanup
 def test_init_device():
     """Verify SpecDecodeWorker invokes proposer/scorer worker init_device, as
     well as other GPU initialization.
