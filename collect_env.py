@@ -73,6 +73,8 @@ DEFAULT_PIP_PATTERNS = {
     "triton",
     "optree",
     "onnx",
+    # UPSTREAM SYNC: needed for sparsity
+    "nm-magic-wand",
 }
 
 
