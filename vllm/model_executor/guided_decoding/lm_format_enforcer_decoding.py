@@ -1,5 +1,3 @@
-import asyncio
-import concurrent.futures
 from functools import lru_cache
 from json import loads as json_loads
 from typing import Optional, Union
@@ -18,8 +16,6 @@ from vllm.model_executor.guided_decoding.outlines_decoding import (
     get_outlines_guided_decoding_logits_processor)
 from vllm.sampling_params import LogitsProcessor
 
-global_thread_pool = None  # used for generating logits processor tokenizer data
-
 
 async def get_lm_format_enforcer_guided_decoding_logits_processor(
         request: Union[CompletionRequest, ChatCompletionRequest],
@@ -31,7 +27,7 @@ async def get_lm_format_enforcer_guided_decoding_logits_processor(
     we make a shallow copy to reuse the same underlying FSM.
     """
 
-    tokenizer_data = await _cached_build_vllm_token_enforcer_tokenizer_data(
+    tokenizer_data = _cached_build_vllm_token_enforcer_tokenizer_data(
         tokenizer)
     character_level_parser: CharacterLevelParser
     if request.guided_json:
@@ -68,14 +64,6 @@ def _normalize_json_schema_object(schema: Union[str, dict, BaseModel]) -> dict:
 
 
 @lru_cache
-async def _cached_build_vllm_token_enforcer_tokenizer_data(
+def _cached_build_vllm_token_enforcer_tokenizer_data(
         tokenizer: PreTrainedTokenizerBase) -> TokenEnforcerTokenizerData:
-    global global_thread_pool
-    if global_thread_pool is None:
-        global_thread_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=2)
-    loop = asyncio.get_running_loop()
-    tokenizer_data = await loop.run_in_executor(
-        global_thread_pool, build_vllm_token_enforcer_tokenizer_data,
-        tokenizer)
-    return tokenizer_data
+    return build_vllm_token_enforcer_tokenizer_data(tokenizer)
