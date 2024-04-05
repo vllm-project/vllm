@@ -513,7 +513,7 @@ def test_init_device():
 
 @torch.inference_mode()
 def test_initialize_cache():
-    """Verify SpecDecodeWorker invokes init_cache_engine on proposer/scorer
+    """Verify SpecDecodeWorker invokes initialize_cache on proposer/scorer
     workers.
     """
     draft_worker = mock_worker(cls=MultiStepWorker)

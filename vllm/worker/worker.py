@@ -163,9 +163,16 @@ class Worker(WorkerBase):
 
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
+        raise_if_cache_size_invalid(num_gpu_blocks, self.cache_config.block_size, self.model_config.max_model_len)
+
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
-        #self.cache_config = cache_config
+
+        self._init_cache_engine()
+        self.warm_up_model()
+
+    def _init_cache_engine(self):
+        assert self.cache_config.num_gpu_blocks is not None
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
                                         self.parallel_config)
         self.gpu_cache = self.cache_engine.gpu_cache
