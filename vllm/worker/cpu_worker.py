@@ -170,11 +170,12 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         self.model_runner.load_model()
 
     def profile_num_available_blocks(self) -> tuple[int, int]:
-        num_cpu_blocks = self.get_cpu_cache_block_num(
-            block_size=self.cache_config.block_size,
-            cache_space=self.cache_config.cpu_kvcache_space_bytes,
-            cache_dtype=self.cache_config.cache_dtype,
-        )
+        # For CPU device, the block number will be calculated based on the
+        # cpu_kvcache_space.
+        cache_block_size = CPUCacheEngine.get_cache_block_size(
+            self.cache_config.block_size, self.cache_config.cache_dtype, self.model_config, self.parallel_config)
+        num_cpu_blocks = int(self.cache_config.cpu_kvcache_space_bytes // cache_block_size)
+        num_cpu_blocks = max(num_cpu_blocks, 0)
 
         # Note: To reuse the cache management procedure,
         # use cpu cache as 'gpu cache'.
@@ -208,26 +209,6 @@ class CPUWorker(LoraNotSupportedWorkerBase):
 
         # Initialize the cache.
         self._init_cache_engine(cache_config=self.cache_config)
-
-    def get_cpu_cache_block_num(
-        self,
-        block_size: int,
-        cache_space: int,
-        cache_dtype: str,
-    ) -> int:
-        """
-        Args:
-            block_size: The size of the cache block.
-            cache_space: The size of the CPU KV cache space in bytes.
-        """
-        # For CPU device, the block number will be calculated based on the
-        # cpu_kvcache_space.
-        cache_block_size = CPUCacheEngine.get_cache_block_size(
-            block_size, cache_dtype, self.model_config, self.parallel_config)
-        num_cpu_blocks = int(cache_space // cache_block_size)
-        num_cpu_blocks = max(num_cpu_blocks, 0)
-
-        return num_cpu_blocks
 
     def _init_cache_engine(self, cache_config: CacheConfig) -> None:
         self.cache_config = cache_config
