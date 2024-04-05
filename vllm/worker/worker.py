@@ -252,7 +252,8 @@ class Worker(WorkerBase):
     def get_cache_block_size_bytes(self) -> int:
         """Get the size of the KV cache block size in bytes.
         """
-        return self.cache_config.get_cache_block_size(self.model_config, self.parallel_config)
+        return CacheEngine.get_cache_block_size(
+            self.cache_config, self.model_config, self.parallel_config)
 
 
 def init_distributed_environment(
