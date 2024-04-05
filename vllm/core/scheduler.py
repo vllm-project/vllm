@@ -409,9 +409,6 @@ class Scheduler:
                 logger.debug(f"append slot for {seq_group}")
                 self._append_slots(seq_group, blocks_to_copy)
                 is_prefill = seq_group.is_prefill()
-                # NOTE(sang): It assumes the model execution never fails.
-                # This is the general assumption in vllm.
-                seq_group.update_num_computed_tokens(num_running_tokens)
                 if is_prefill:
                     prefill_seq_groups.append(
                         ScheduledSequenceGroup(
@@ -518,9 +515,6 @@ class Scheduler:
             self._swap_in(seq_group, blocks_to_swap_in)
             self._append_slots(seq_group, blocks_to_copy)
             is_prefill = seq_group.is_prefill()
-            # NOTE(sang): It assumes the model execution never fails.
-            # This is the general assumption in vllm.
-            seq_group.update_num_computed_tokens(num_new_tokens)
             if is_prefill:
                 prefill_seq_groups.append(
                     ScheduledSequenceGroup(seq_group,
@@ -702,6 +696,7 @@ class Scheduler:
                 curr_loras,
                 fcfs_policy,
                 enable_chunking=False)
+
             # If any sequence group is preempted, do not swap in any sequence
             # group. because it means there's no slot for new running requests.
             if len(running_scheduled.preempted) + len(
@@ -942,7 +937,6 @@ class Scheduler:
         self.block_manager.allocate(seq_group)
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             seq.status = SequenceStatus.RUNNING
-        seq_group.update_num_computed_tokens(num_new_tokens)
 
     def _append_slots(
         self,

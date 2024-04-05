@@ -26,7 +26,15 @@ def append_new_token(out, token_id: int):
             seq.append_token_id(token_id, {token_id: Logprob(token_id)})
 
 
-def append_new_token_seq_group(seq_group, token_id: int):
+def schedule_and_update_computed_tokens(scheduler):
+    metas, out = scheduler.schedule()
+    for s, meta in zip(out.scheduled_seq_groups, metas):
+        s.seq_group.update_num_computed_tokens(meta.token_chunk_size)
+    return metas, out
+
+
+def append_new_token_seq_group(token_chunk_size, seq_group, token_id: int):
+    seq_group.update_num_computed_tokens(token_chunk_size)
     for seq in seq_group.get_seqs():
         seq.append_token_id(token_id, {token_id: Logprob(token_id)})
 
@@ -88,7 +96,7 @@ def test_scheduler_schedule_simple():
 
     # Schedule seq groups prompts.
     num_tokens = block_size * num_seq_group
-    seq_group_meta, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert set(get_sequence_groups(out)) == set(running)
     assert out.num_batched_tokens == num_tokens
     assert (not out.blocks_to_copy and not out.blocks_to_swap_in
@@ -97,7 +105,7 @@ def test_scheduler_schedule_simple():
     append_new_token(out, 1)
 
     # Schedule seq groups generation.
-    seq_group_meta, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert set(get_sequence_groups(out)) == set(running)
     assert out.num_batched_tokens == num_seq_group
     assert (not out.blocks_to_copy and not out.blocks_to_swap_in
@@ -123,7 +131,7 @@ def test_scheduler_prefill_prioritized():
     scheduler.add_seq_group(seq_group_a)
 
     # Schedule seq groups prompts.
-    _, out = scheduler.schedule()
+    _, out = schedule_and_update_computed_tokens(scheduler)
     assert get_sequence_groups(out) == [seq_group_a]
 
     # Add a new prefill request B.
@@ -132,7 +140,7 @@ def test_scheduler_prefill_prioritized():
 
     # Verify prefill requests are prioritized. Since max_batched_num_tokens
     # is 1, new prefill request has to be scheduled first.
-    _, out = scheduler.schedule()
+    _, out = schedule_and_update_computed_tokens(scheduler)
     assert get_sequence_groups(out) == [seq_group_b]
 
 
@@ -152,7 +160,7 @@ def test_scheduler_schedule_preempt_abort():
     scheduler.add_seq_group(seq_group_b)
 
     # Schedule seq groups prompts.
-    seq_group_meta, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert get_sequence_groups(out) == [seq_group_a, seq_group_b]
     assert out.num_batched_tokens == block_size * 2  # seq_a and seq_b
     assert (not out.blocks_to_copy and not out.blocks_to_swap_in
@@ -162,12 +170,10 @@ def test_scheduler_schedule_preempt_abort():
 
     # Append "generated" tokens, allowing the sequence to mark prompt tokens as
     # processed.
-    token_id = 0
-    seq_a.append_token_id(token_id, {token_id: Logprob(0.0)})
-    seq_b.append_token_id(token_id, {token_id: Logprob(0.0)})
+    append_new_token(out, 1)
 
     # Schedule seq groups generation and preempt seq group b.
-    seq_group_meta, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert get_sequence_groups(out) == [seq_group_a]
     assert out.num_batched_tokens == 1
     assert (not out.blocks_to_copy and not out.blocks_to_swap_in
@@ -177,7 +183,7 @@ def test_scheduler_schedule_preempt_abort():
 
     # Abort seq group a. Re-schedule seq group b prompt with recomputation.
     scheduler.abort_seq_group("1")
-    seq_group_meta, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert get_sequence_groups(out) == [seq_group_b]
     assert out.num_batched_tokens == 5  # 4 prompt + 1 generation.
     assert (not out.blocks_to_copy and not out.blocks_to_swap_in
@@ -207,12 +213,12 @@ def test_scheduler_max_seqs():
     scheduler.add_seq_group(all_seq_groups[0])
 
     # Schedule seq groups prompts.
-    _, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert set(get_sequence_groups(out)) == set([all_seq_groups[0]])
     append_new_token(out, 1)
 
     # Schedule seq groups generation.
-    _, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert set(get_sequence_groups(out)) == set([all_seq_groups[0]])
     append_new_token(out, 1)
 
@@ -223,7 +229,7 @@ def test_scheduler_max_seqs():
     # Schedule seq groups prompts.
     # Only 1 seq group should be scheduled since max_seq_group is 2
     # and one is prompting.
-    _, out = scheduler.schedule()
+    _, out = schedule_and_update_computed_tokens(scheduler)
     assert set(get_sequence_groups(out)) == set([all_seq_groups[1]])
 
 
@@ -236,27 +242,29 @@ def test_scheduler_delay_factor():
     scheduler = Scheduler(scheduler_config, cache_config, None)
 
     # schedule first prompt
-    _, seq_group = create_dummy_prompt("0", prompt_length=block_size)
+    seq_group_meta, seq_group = create_dummy_prompt("0",
+                                                    prompt_length=block_size)
     scheduler.add_seq_group(seq_group)
-    seq_group_meta, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert out.num_prefill_groups > 0
     assert seq_group_meta[0].request_id == '0'
     append_new_token(out, 1)
 
     # wait for a second before scheduling next prompt
     time.sleep(1)
-    _, seq_group = create_dummy_prompt("1", prompt_length=block_size)
+    seq_group_meta, seq_group = create_dummy_prompt("1",
+                                                    prompt_length=block_size)
     scheduler.add_seq_group(seq_group)
 
     # second prompt should *not* be scheduled
-    seq_group_meta, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert out.num_prefill_groups == 0
     assert seq_group_meta[0].request_id == '0'
     append_new_token(out, 1)
 
     # wait for more than 0.5 second and try again
     time.sleep(0.6)
-    seq_group_meta, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert out.num_prefill_groups > 0
     assert seq_group_meta[0].request_id == '1'
     append_new_token(out, 1)
@@ -268,7 +276,7 @@ def test_swapped_out_prioritized():
     for i in range(3):
         _, seq_group = create_dummy_prompt(str(i), prompt_length=60, best_of=2)
         scheduler.add_seq_group(seq_group)
-    _, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     # prefill scheduled now.
     assert len(out.scheduled_seq_groups) == 3
     append_new_token(out, 1)
@@ -282,7 +290,7 @@ def test_swapped_out_prioritized():
     scheduler.block_manager.can_append_slots.side_effect = (
         cannot_append_second_group)
 
-    _, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 2
     assert out.num_batched_tokens == 2
     assert out.blocks_to_swap_out != {}
@@ -292,7 +300,7 @@ def test_swapped_out_prioritized():
     # Add 1 more task. Swap should be prioritized over prefill.
     _, seq_group = create_dummy_prompt(str(i), prompt_length=60, best_of=2)
     scheduler.add_seq_group(seq_group)
-    _, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     append_new_token(out, 1)
     assert len(out.scheduled_seq_groups) == 3
     # 3 decodes. It is swapped in.
@@ -533,7 +541,7 @@ def test_decode_schedule_preempted():
     for i in range(3):
         _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
         scheduler._allocate_and_set_running(seq_group, 60)
-        append_new_token_seq_group(seq_group, 1)
+        append_new_token_seq_group(60, seq_group, 1)
         running.append(seq_group)
     scheduler.block_manager.can_append_slots = MagicMock()
 
@@ -575,7 +583,7 @@ def test_decode_swap_beam_search():
         _, seq_group = create_dummy_prompt(str(i), prompt_length=60, best_of=2)
         scheduler._allocate_and_set_running(seq_group, 60)
         running.append(seq_group)
-        append_new_token_seq_group(seq_group, 1)
+        append_new_token_seq_group(60, seq_group, 1)
         budget.add_num_seqs(seq_group.request_id,
                             seq_group.get_max_num_running_seqs())
         budget.add_num_batched_tokens(
@@ -622,7 +630,7 @@ def test_schedule_decode_blocks_to_copy_update():
     policy = PolicyFactory.get_policy(policy_name="fcfs")
     curr_loras = None
     scheduler._allocate_and_set_running(seq_group, 60)
-    append_new_token_seq_group(seq_group, 1)
+    append_new_token_seq_group(60, seq_group, 1)
     running.append(seq_group)
 
     # The last request should be swapped out.
@@ -652,7 +660,7 @@ def test_schedule_swapped_simple():
     blocks_to_swap_out = {}
     _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
     scheduler._allocate_and_set_running(seq_group, 60)
-    append_new_token_seq_group(seq_group, 1)
+    append_new_token_seq_group(60, seq_group, 1)
     scheduler._swap_out(seq_group, blocks_to_swap_out)
     swapped.append(seq_group)
 
@@ -680,7 +688,7 @@ def test_schedule_swapped_max_token_budget():
     for _ in range(2):
         _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
         scheduler._allocate_and_set_running(seq_group, 60)
-        append_new_token_seq_group(seq_group, 1)
+        append_new_token_seq_group(60, seq_group, 1)
         scheduler._swap_out(seq_group, blocks_to_swap_out)
         swapped.append(seq_group)
 
@@ -714,7 +722,7 @@ def test_schedule_swapped_max_seqs():
     for i in range(4):
         _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
         scheduler._allocate_and_set_running(seq_group, 60)
-        append_new_token_seq_group(seq_group, 1)
+        append_new_token_seq_group(60, seq_group, 1)
         scheduler._swap_out(seq_group, blocks_to_swap_out)
         swapped.append(seq_group)
 
@@ -752,7 +760,7 @@ def test_schedule_swapped_max_loras():
                                                lora_int_id=i + 1,
                                                lora_local_path="abc"))
         scheduler._allocate_and_set_running(seq_group, 60)
-        append_new_token_seq_group(seq_group, 1)
+        append_new_token_seq_group(60, seq_group, 1)
         scheduler._swap_out(seq_group, blocks_to_swap_out)
         swapped.append(seq_group)
 
@@ -776,7 +784,7 @@ def test_schedule_swapped_cannot_swap_in():
     for _ in range(2):
         _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
         scheduler._allocate_and_set_running(seq_group, 60)
-        append_new_token_seq_group(seq_group, 1)
+        append_new_token_seq_group(60, seq_group, 1)
         scheduler._swap_out(seq_group, blocks_to_swap_out)
         swapped.append(seq_group)
 
@@ -801,7 +809,7 @@ def test_schedule_swapped_blocks_to_copy():
     curr_loras = None
     _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
     scheduler._allocate_and_set_running(seq_group, 60)
-    append_new_token_seq_group(seq_group, 1)
+    append_new_token_seq_group(60, seq_group, 1)
     blocks_to_swap_out = {}
     scheduler._swap_out(seq_group, blocks_to_swap_out)
     swapped.append(seq_group)

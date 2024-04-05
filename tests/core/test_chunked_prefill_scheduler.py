@@ -19,6 +19,13 @@ def append_new_token(seq_group, token_id: int):
         seq.append_token_id(token_id, {token_id: Logprob(token_id)})
 
 
+def schedule_and_update_computed_tokens(scheduler):
+    metas, out = scheduler.schedule()
+    for s, meta in zip(out.scheduled_seq_groups, metas):
+        s.seq_group.update_num_computed_tokens(meta.token_chunk_size)
+    return metas, out
+
+
 def test_simple():
     """Verify basic scheduling works."""
     block_size = 4
@@ -43,7 +50,7 @@ def test_simple():
 
     # Schedule seq groups prompts.
     num_tokens = block_size * num_seq_group
-    seq_group_meta, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert set(get_sequence_groups(out)) == set(running)
     assert out.num_batched_tokens == num_tokens
     assert (not out.blocks_to_copy and not out.blocks_to_swap_in
@@ -53,7 +60,7 @@ def test_simple():
         append_new_token(s, 1)
 
     # Schedule seq groups generation.
-    seq_group_meta, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert set(get_sequence_groups(out)) == set(running)
     assert out.num_batched_tokens == num_seq_group
     assert (not out.blocks_to_copy and not out.blocks_to_swap_in
@@ -84,8 +91,7 @@ def test_chunk():
         running.append(seq_group)
 
     # Verify the second request is chunked.
-    seq_group_meta, out = scheduler.schedule()
-
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert set(get_sequence_groups(out)) == set(running)
     assert seq_group_meta[0].token_chunk_size == 60
     # Verify it is chunked.
@@ -96,7 +102,7 @@ def test_chunk():
     append_new_token(running[0], 1)
 
     # One chunked prefill, and one decoding.
-    seq_group_meta, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert set(get_sequence_groups(out)) == set(running)
     # The first one is decoding.
     assert seq_group_meta[0].token_chunk_size == 1
@@ -129,7 +135,7 @@ def test_complex():
         assert seq_group.is_prefill()
 
     # Verify the second request is chunked.
-    seq_group_meta, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
 
     assert set(get_sequence_groups(out)) == set(running)
     assert seq_group_meta[0].token_chunk_size == 60
@@ -149,7 +155,7 @@ def test_complex():
         running.append(seq_group)
 
     # Decoding & chunked prefill & first chunk of 3rd request is scheduled.
-    seq_group_meta, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert len(get_sequence_groups(out)) == 3
     # The first one is decoding.
     assert seq_group_meta[0].token_chunk_size == 1
@@ -193,7 +199,7 @@ def test_maximal_decoding():
         assert seq_group.is_prefill()
 
     # The first prefill is scheduled.
-    seq_group_meta, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert len(get_sequence_groups(out)) == 1
     assert seq_group_meta[0].token_chunk_size == 2
     assert not running[0].is_prefill()
@@ -209,7 +215,7 @@ def test_maximal_decoding():
     running.append(seq_group)
     assert seq_group.is_prefill()
     # The first decoding + second chunk is scheduled.
-    seq_group_meta, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert len(get_sequence_groups(out)) == 2
     assert seq_group_meta[0].token_chunk_size == 1
     assert seq_group_meta[1].token_chunk_size == 1
@@ -221,7 +227,7 @@ def test_maximal_decoding():
     append_new_token(running[0], 1)
 
     # Decoding + running prefill is prioritized.
-    seq_group_meta, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert len(get_sequence_groups(out)) == 2
     assert seq_group_meta[0].token_chunk_size == 1
     assert seq_group_meta[1].token_chunk_size == 1
@@ -233,7 +239,7 @@ def test_maximal_decoding():
     append_new_token(running[1], 1)
 
     # Only decoding is prioritized.
-    seq_group_meta, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert len(get_sequence_groups(out)) == 2
     assert seq_group_meta[0].token_chunk_size == 1
     assert seq_group_meta[1].token_chunk_size == 1
@@ -246,7 +252,7 @@ def test_maximal_decoding():
 
     # After aborting the decoding request, the fcfs new prefill is prioritized.
     scheduler.abort_seq_group(running[0].request_id)
-    seq_group_meta, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert len(get_sequence_groups(out)) == 2
     assert seq_group_meta[0].token_chunk_size == 1
     assert seq_group_meta[1].token_chunk_size == 1
@@ -278,7 +284,7 @@ def test_prompt_limit():
     assert seq_group.is_prefill()
 
     # The prompt length > max_num_batched_tokens should be still scheduled.
-    seq_group_meta, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert len(get_sequence_groups(out)) == 1
     assert seq_group_meta[0].token_chunk_size == 32
     assert running[0].is_prefill()
@@ -305,7 +311,7 @@ def test_prompt_limit_exceed():
     scheduler.add_seq_group(seq_group)
     running.append(seq_group)
     assert seq_group.is_prefill()
-    seq_group_meta, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.ignored_seq_groups) == 1
     assert out.ignored_seq_groups[0] == seq_group
 
@@ -327,7 +333,7 @@ def test_swap():
 
     _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
     scheduler.add_seq_group(seq_group)
-    _, out = scheduler.schedule()
+    _, out = schedule_and_update_computed_tokens(scheduler)
     # The request is chunked.
     # prefill scheduled now.
     assert len(out.scheduled_seq_groups) == 1
@@ -345,7 +351,7 @@ def test_swap():
         cannot_append_second_group)
 
     # The running prefill is now swapped.
-    _, out = scheduler.schedule()
+    _, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 0
     assert out.num_batched_tokens == 0
     assert out.blocks_to_swap_out != {}
@@ -354,7 +360,7 @@ def test_swap():
     # Add 1 more task. Swap should be prioritized over new prefill.
     _, seq_group = create_dummy_prompt("2", prompt_length=60)
     scheduler.add_seq_group(seq_group)
-    _, out = scheduler.schedule()
+    _, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 1
     # 3 decodes. It is swapped in.
     assert out.num_batched_tokens == 30
@@ -378,7 +384,7 @@ def test_running_prefill_prioritized_over_swap():
 
     _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
     scheduler.add_seq_group(seq_group)
-    _, out = scheduler.schedule()
+    _, out = schedule_and_update_computed_tokens(scheduler)
     # The request is chunked.
     # prefill scheduled now.
     assert len(out.scheduled_seq_groups) == 1
@@ -396,7 +402,7 @@ def test_running_prefill_prioritized_over_swap():
         cannot_append_second_group)
 
     # The running prefill is now swapped.
-    _, out = scheduler.schedule()
+    _, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 0
     assert out.num_batched_tokens == 0
     assert out.blocks_to_swap_out != {}
@@ -408,7 +414,7 @@ def test_running_prefill_prioritized_over_swap():
 
     _, seq_group2 = create_dummy_prompt("2", prompt_length=60)
     scheduler.add_seq_group(seq_group2)
-    _, out = scheduler.schedule()
+    _, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 1
     # 3 decodes. It is swapped in.
     assert out.num_batched_tokens == 30
@@ -418,7 +424,7 @@ def test_running_prefill_prioritized_over_swap():
 
     # Now although swap is possible, running prefill is prioritized.
     scheduler.block_manager.can_swap_in.return_value = True
-    _, out = scheduler.schedule()
+    _, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 1
     # 3 decodes. It is swapped in.
     assert out.num_batched_tokens == 30
@@ -429,7 +435,7 @@ def test_running_prefill_prioritized_over_swap():
     append_new_token(seq_group2, 1)
 
     # Decoding is prioritized.
-    _, out = scheduler.schedule()
+    _, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 1
     # 3 decodes. It is swapped in.
     assert out.num_batched_tokens == 1
@@ -441,7 +447,7 @@ def test_running_prefill_prioritized_over_swap():
 
     # Since we abort the sequence group, we can finally swap.
     scheduler.abort_seq_group(seq_group2.request_id)
-    _, out = scheduler.schedule()
+    _, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 1
     assert out.num_batched_tokens == 30
     assert out.blocks_to_swap_in != {}
@@ -465,7 +471,7 @@ def test_chunked_prefill_preempt():
 
     _, seq_group = create_dummy_prompt("1", prompt_length=60)
     scheduler.add_seq_group(seq_group)
-    _, out = scheduler.schedule()
+    _, out = schedule_and_update_computed_tokens(scheduler)
     # The request is chunked.
     # prefill scheduled now.
     assert len(out.scheduled_seq_groups) == 1
@@ -483,14 +489,14 @@ def test_chunked_prefill_preempt():
         cannot_append_second_group)
 
     # The running prefill is now preempted.
-    _, out = scheduler.schedule()
+    _, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 0
     assert out.num_batched_tokens == 0
     assert out.blocks_to_swap_out == {}
     assert out.blocks_to_swap_in == {}
 
     # Make sure we can reschedule preempted request.
-    _, out = scheduler.schedule()
+    _, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 1
     assert out.num_prefill_groups == 1
     assert seq_group.is_prefill()
@@ -503,7 +509,7 @@ def test_chunked_prefill_preempt():
 
     scheduler.block_manager.can_append_slots.side_effect = (
         cannot_append_second_group)
-    _, out = scheduler.schedule()
+    _, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 1
     assert out.num_prefill_groups == 1
     assert not seq_group.is_prefill()
@@ -529,7 +535,7 @@ def test_chunked_prefill_max_seqs():
     scheduler.add_seq_group(seq_group)
     running.append(seq_group)
     # The first prefill is chunked.
-    seq_group_meta, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert seq_group_meta[0].token_chunk_size == max_num_batched_tokens
     assert len(get_sequence_groups(out)) == 1
 
@@ -540,7 +546,7 @@ def test_chunked_prefill_max_seqs():
         running.append(seq_group)
 
     # Make sure only 2 requests are scheduled.
-    seq_group_meta, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert out.num_batched_tokens == max_num_batched_tokens
     assert len(get_sequence_groups(out)) == 2
     assert not running[0].is_prefill()
@@ -548,7 +554,7 @@ def test_chunked_prefill_max_seqs():
     append_new_token(running[0], 1)
 
     # Although we have enough token budget, we can only schedule max_seqs.
-    seq_group_meta, out = scheduler.schedule()
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert seq_group_meta[0].token_chunk_size == 2
     assert seq_group_meta[1].token_chunk_size == 1
     assert out.num_batched_tokens == 3
