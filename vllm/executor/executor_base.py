@@ -33,7 +33,7 @@ class ExecutorBase(ABC):
 
 
     @abstractmethod
-    def get_max_allowed_kv_blocks(self) -> tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         """Profile the model on-device to determine the maximum number of KV
         blocks that can be allocated.
 

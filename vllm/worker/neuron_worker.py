@@ -40,8 +40,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
     def load_model(self):
         self.model_runner.load_model()
 
-    # TODO change name
-    def get_max_allowed_kv_blocks(self) -> tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         # Set the number of GPU blocks to be the same as the maximum number of
         # sequences that can be processed in a single batch. This is equivalent
         # to schedule without PagedAttention.

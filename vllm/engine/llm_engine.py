@@ -181,7 +181,7 @@ class LLMEngine:
             self.stat_logger.info("cache_config", self.cache_config)
 
     def _initialize_kv_caches(self) -> None:
-        num_gpu_blocks, num_cpu_blocks = self.model_executor.get_max_allowed_kv_blocks()
+        num_gpu_blocks, num_cpu_blocks = self.model_executor.determine_num_available_blocks()
         
         if self.cache_config.forced_num_gpu_blocks is not None:
             forced_num_gpu_blocks = self.cache_config.forced_num_gpu_blocks

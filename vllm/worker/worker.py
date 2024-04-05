@@ -113,7 +113,7 @@ class Worker(WorkerBase):
         self.model_runner.load_model()
 
     @torch.inference_mode()
-    def get_max_allowed_kv_blocks(
+    def determine_num_available_blocks(
         self,
     ) -> Tuple[int, int]:
         """Profiles the peak memory usage of the model and returns the maximum
