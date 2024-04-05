@@ -1,5 +1,6 @@
 include LICENSE
-include requirements.txt
+include requirements-common.txt
+include requirements-cuda.txt
 include CMakeLists.txt
 
 recursive-include cmake *
