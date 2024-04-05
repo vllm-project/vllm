@@ -68,8 +68,8 @@ class GPUExecutor(ExecutorBase):
         self.driver_worker.load_model()
 
 
-    def profile_num_available_blocks(self) -> Tuple[int, int]:
-        return self.driver_worker.profile_num_available_blocks()
+    def get_max_allowed_kv_blocks(self) -> Tuple[int, int]:
+        return self.driver_worker.get_max_allowed_kv_blocks()
 
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks) -> None:

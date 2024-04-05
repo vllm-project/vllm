@@ -538,7 +538,7 @@ def test_initialize_cache():
 @pytest.mark.parametrize('target_cache_block_size_bytes', [2 * 2 * 4096])
 @pytest.mark.parametrize('draft_kv_size_bytes', [0, 2 * 2 * 768, 2 * 2 * 4096])
 @torch.inference_mode()
-def test_profile_num_available_blocks(available_gpu_blocks: int,
+def test_get_max_allowed_kv_blocks(available_gpu_blocks: int,
                                       available_cpu_blocks: int,
                                       target_cache_block_size_bytes: int,
                                       draft_kv_size_bytes: int):
@@ -552,7 +552,7 @@ def test_profile_num_available_blocks(available_gpu_blocks: int,
     rejection_sampler.token_id_dtype = torch.int64
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
-    target_worker.profile_num_available_blocks.return_value = (
+    target_worker.get_max_allowed_kv_blocks.return_value = (
         available_gpu_blocks, available_cpu_blocks)
     target_worker.get_cache_block_size_bytes.return_value = (
         target_cache_block_size_bytes)
@@ -562,9 +562,9 @@ def test_profile_num_available_blocks(available_gpu_blocks: int,
                               metrics_collector)
 
 
-    num_gpu_blocks, num_cpu_blocks = worker.profile_num_available_blocks()
+    num_gpu_blocks, num_cpu_blocks = worker.get_max_allowed_kv_blocks()
 
-    target_worker.profile_num_available_blocks.assert_called_once()
+    target_worker.get_max_allowed_kv_blocks.assert_called_once()
     assert num_cpu_blocks == available_cpu_blocks
 
     assert num_gpu_blocks == split_num_cache_blocks_evenly(

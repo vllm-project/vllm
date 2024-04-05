@@ -169,7 +169,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
     def load_model(self):
         self.model_runner.load_model()
 
-    def profile_num_available_blocks(self) -> tuple[int, int]:
+    def get_max_allowed_kv_blocks(self) -> tuple[int, int]:
         # For CPU device, the block number will be calculated based on the
         # cpu_kvcache_space.
         cache_block_size = CPUCacheEngine.get_cache_block_size(

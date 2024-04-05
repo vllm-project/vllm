@@ -94,7 +94,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             device=self.device,
             vocab_size=self._vocab_size)
 
-    def profile_num_available_blocks(self) -> Tuple[int, int]:
+    def get_max_allowed_kv_blocks(self) -> Tuple[int, int]:
         """Determine the number of cache blocks to use.
 
         This is done by profiling the scorer model (which is typically the
@@ -102,7 +102,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         scorer cache is divided evenly between the proposer and scorer model KV,
         such that the number of blocks is equal in both KV caches.
         """
-        num_gpu_blocks, num_cpu_blocks = (self.scorer_worker.profile_num_available_blocks())
+        num_gpu_blocks, num_cpu_blocks = (self.scorer_worker.get_max_allowed_kv_blocks())
 
         scorer_cache_block_size_bytes = (
             self.scorer_worker.get_cache_block_size_bytes())

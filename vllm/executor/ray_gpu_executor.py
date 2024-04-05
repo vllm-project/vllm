@@ -202,7 +202,7 @@ class RayGPUExecutor(ExecutorBase):
     #    Then, it calculate the maximum possible number of GPU and CPU blocks
     #    that can be allocated with the remaining free memory.
     #    More details can be found in the
-    #    :meth:`~vllm.worker.worker.Worker.profile_num_available_blocks` method
+    #    :meth:`~vllm.worker.worker.Worker.get_max_allowed_kv_blocks` method
     #    from class :class:`~vllm.worker.Worker`.
 
     #    Afterwards, as there may be multiple workers,
@@ -217,10 +217,10 @@ class RayGPUExecutor(ExecutorBase):
     #        by adjusting the `gpu_memory_utilization` parameter.
     #    """
 
-    def profile_num_available_blocks(self) -> tuple[int, int]:
+    def get_max_allowed_kv_blocks(self) -> tuple[int, int]:
         # Get the maximum number of blocks that can be allocated on GPU and CPU.
         num_blocks = self._run_workers(
-            "profile_num_available_blocks",
+            "get_max_allowed_kv_blocks",
             block_size=self.cache_config.block_size,
             gpu_memory_utilization=self.cache_config.gpu_memory_utilization,
             cpu_swap_space=self.cache_config.swap_space_bytes,

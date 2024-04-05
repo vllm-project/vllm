@@ -14,7 +14,7 @@ class WorkerBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def profile_num_available_blocks(self) -> tuple[int, int]:
+    def get_max_allowed_kv_blocks(self) -> tuple[int, int]:
         """Profile the model on-device to determine the maximum number of KV
         blocks that can be allocated.
 
