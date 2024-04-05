@@ -487,7 +487,7 @@ def test_empty_input_batch(k: int, batch_size: int):
         **execute_model_data.to_dict())
 
 
-@torch.inference_mode()
+@pytest.mark.skip_global_cleanup
 def test_init_device():
     """Verify SpecDecodeWorker invokes proposer/scorer worker init_device, as
     well as other GPU initialization.
@@ -537,7 +537,7 @@ def test_init_cache_engine():
 @pytest.mark.parametrize('available_cpu_blocks', [500])
 @pytest.mark.parametrize('target_cache_block_size_bytes', [2 * 2 * 4096])
 @pytest.mark.parametrize('draft_kv_size_bytes', [0, 2 * 2 * 768, 2 * 2 * 4096])
-@torch.inference_mode()
+@pytest.mark.skip_global_cleanup
 def test_profile_num_available_blocks(available_gpu_blocks: int,
                                       available_cpu_blocks: int,
                                       target_cache_block_size_bytes: int,
@@ -584,7 +584,7 @@ def test_profile_num_available_blocks(available_gpu_blocks: int,
 @pytest.mark.parametrize('target_cache_block_size_bytes',
                          [2 * 2 * 4096, 2 * 2 * 8192])
 @pytest.mark.parametrize('draft_kv_size_bytes', [0, 2 * 2 * 768, 2 * 2 * 4096])
-@torch.inference_mode()
+@pytest.mark.skip_global_cleanup
 def test_split_num_cache_blocks_evenly(available_gpu_blocks: int,
                                        target_cache_block_size_bytes: int,
                                        draft_kv_size_bytes: int):
