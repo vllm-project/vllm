@@ -233,13 +233,17 @@ class RayGPUExecutor(ExecutorBase):
         num_gpu_blocks = min(b[0] for b in num_blocks)
         num_cpu_blocks = min(b[1] for b in num_blocks)
 
-    #    logger.info(f"# GPU blocks: {num_gpu_blocks}, "
-    #                f"# CPU blocks: {num_cpu_blocks}")
-
         return num_gpu_blocks, num_cpu_blocks
 
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
+
+        # NOTE: We log here to avoid multiple logs when number of workers is
+        # greater than one. We could log in the engine, but not all executors
+        # have GPUs.
+        logger.info(f"# GPU blocks: {num_gpu_blocks}, "
+                    f"# CPU blocks: {num_cpu_blocks}")
+
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
