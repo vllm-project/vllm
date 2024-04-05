@@ -127,19 +127,7 @@ class LLMEngine:
             speculative_config=speculative_config,
         )
 
-        # TODO cleanup location
-        num_gpu_blocks, num_cpu_blocks = self.model_executor.profile_num_available_blocks()
-        
-        if self.cache_config.forced_num_gpu_blocks is not None:
-            forced_num_gpu_blocks = self.cache_config.forced_num_gpu_blocks
-            logger.info(f"Replacing profiled {num_gpu_blocks=} with "
-                f"{forced_num_gpu_blocks=}")
-            num_gpu_blocks = forced_num_gpu_blocks
-
-        self.cache_config.num_gpu_blocks = num_gpu_blocks
-        self.cache_config.num_cpu_blocks = num_cpu_blocks
-
-        self.model_executor.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+        self._initialize_kv_caches()
 
         # If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
@@ -191,6 +179,20 @@ class LLMEngine:
                 local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
                 labels=dict(model_name=model_config.model))
             self.stat_logger.info("cache_config", self.cache_config)
+
+    def _initialize_kv_caches(self) -> None:
+        num_gpu_blocks, num_cpu_blocks = self.model_executor.profile_num_available_blocks()
+        
+        if self.cache_config.forced_num_gpu_blocks is not None:
+            forced_num_gpu_blocks = self.cache_config.forced_num_gpu_blocks
+            logger.info(f"Replacing profiled {num_gpu_blocks=} with "
+                f"{forced_num_gpu_blocks=}")
+            num_gpu_blocks = forced_num_gpu_blocks
+
+        self.cache_config.num_gpu_blocks = num_gpu_blocks
+        self.cache_config.num_cpu_blocks = num_cpu_blocks
+
+        self.model_executor.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     @classmethod
     def from_engine_args(
