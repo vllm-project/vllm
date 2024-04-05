@@ -4,8 +4,8 @@
 import torch
 from transformers import AutoTokenizer
 
-from vllm.model_executor.guided_logits_processors import (JSONLogitsProcessor,
-                                                          RegexLogitsProcessor)
+from vllm.model_executor.guided_decoding.outlines_logits_processors import (
+    JSONLogitsProcessor, RegexLogitsProcessor)
 
 TEST_SCHEMA = {
     "type": "object",
