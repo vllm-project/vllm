@@ -183,11 +183,11 @@ class LLMEngine:
     def _initialize_kv_caches(self) -> None:
         num_gpu_blocks, num_cpu_blocks = self.model_executor.determine_num_available_blocks()
         
-        if self.cache_config.forced_num_gpu_blocks is not None:
-            forced_num_gpu_blocks = self.cache_config.forced_num_gpu_blocks
-            logger.info(f"Replacing profiled {num_gpu_blocks=} with "
-                f"{forced_num_gpu_blocks=}")
-            num_gpu_blocks = forced_num_gpu_blocks
+        if self.cache_config.num_gpu_blocks_override is not None:
+            num_gpu_blocks_override = self.cache_config.num_gpu_blocks_override
+            logger.info(f"Overriding {num_gpu_blocks=} with "
+                f"{num_gpu_blocks_override=}")
+            num_gpu_blocks = num_gpu_blocks_override
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
