@@ -346,11 +346,9 @@ class Sequence:
             size for prefill. If there's not enough remainig_token_budget, it
             can return the chunked number of new tokens.
         """
-        num_uncomputed_tokens = self.data.get_num_uncomputed_tokens()
         if self.data.stage == SequenceStage.DECODE:
-            assert num_uncomputed_tokens == 1
             return 1
-        return num_uncomputed_tokens
+        return self.data.get_num_uncomputed_tokens()
 
     def is_prefill(self) -> bool:
         return self.data.stage == SequenceStage.PREFILL

@@ -31,7 +31,15 @@ class PreemptionMode(enum.Enum):
 
 @dataclass
 class SchedulingBudget:
-    """The available slots for scheduling."""
+    """The available slots for scheduling.
+
+    TODO(sang): Right now, the budget is request_id-aware meaning it can ignore
+    budget update from the same request_id. It is because in normal scheduling
+    path, we update RUNNING num_seqs ahead of time, meaning it could be
+    updated more than once when scheduling RUNNING requests. Since this won't
+    happen if we only have chunked prefill scheduling, we can remove this
+    feature from the API when chunked prefill is enabled by default.
+    """
     token_budget: int
     max_num_seqs: int
     _requeset_ids_num_batched_tokens: Set[int] = field(default_factory=set)
