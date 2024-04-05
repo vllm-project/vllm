@@ -511,7 +511,6 @@ def test_init_device():
     rejection_sampler.init_gpu_tensors.assert_called_once()
 
 
-@pytest.mark.skip_global_cleanup
 def test_initialize_cache():
     """Verify SpecDecodeWorker invokes initialize_cache on proposer/scorer
     workers.
