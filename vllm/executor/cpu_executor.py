@@ -64,6 +64,7 @@ class CPUExecutor(ExecutorBase):
         return self.driver_worker.profile_num_available_blocks()
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
+        logger.info(f"# CPU blocks: {num_cpu_blocks}")
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     def execute_model(self,

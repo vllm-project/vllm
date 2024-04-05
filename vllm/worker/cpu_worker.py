@@ -192,7 +192,6 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         self.cache_config.num_gpu_blocks = num_cpu_blocks
         self.cache_config.num_cpu_blocks = 0
 
-        logger.info(f"# CPU blocks: {num_cpu_blocks}")
         if num_cpu_blocks <= 0:
             raise ValueError("No available memory for the cache blocks. "
                              "Try increasing `VLLM_CPU_KVCACHE_SPACE` when "
@@ -208,10 +207,9 @@ class CPUWorker(LoraNotSupportedWorkerBase):
                 "initializing the engine.")
 
         # Initialize the cache.
-        self._init_cache_engine(cache_config=self.cache_config)
+        self._init_cache_engine()
 
-    def _init_cache_engine(self, cache_config: CacheConfig) -> None:
-        self.cache_config = cache_config
+    def _init_cache_engine(self) -> None:
         self.cache_engine = CPUCacheEngine(self.cache_config,
                                            self.model_config,
                                            self.parallel_config,
