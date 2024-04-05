@@ -39,38 +39,32 @@
 from typing import List, Optional, Tuple
 
 import torch
-import torch.nn.functional as F
+
 # this model must need this dependency
 from hf_olmo import OLMoConfig
 from torch import nn
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               LinearMethodBase,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    ColumnParallelLinear,
+    LinearMethodBase,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_world_size)
+    get_tensor_model_parallel_world_size, )
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
+from vllm.model_executor.weight_utils import (
+    default_weight_loader,
+    hf_model_weights_iterator,
+)
 from vllm.sequence import SamplerOutput
-
-
-class SwiGLU(nn.Module):
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x, gate = x.chunk(2, dim=-1)
-        return F.silu(gate) * x
-
-    @property
-    def output_multiplier(self) -> float:
-        return 0.5
 
 
 class OlmoAttention(nn.Module):
@@ -89,12 +83,11 @@ class OlmoAttention(nn.Module):
         self.config = config
         self.hidden_size = config.d_model
         assert config.d_model % config.n_heads == 0
-        tensor_model_parallel_world_size = (
-            get_tensor_model_parallel_world_size())
+        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size(
+        )
         self.total_num_heads = self.config.n_heads
         assert self.total_num_heads % tensor_model_parallel_world_size == 0
-        self.num_heads = (self.total_num_heads //
-                          tensor_model_parallel_world_size)
+        self.num_heads = self.total_num_heads // tensor_model_parallel_world_size
         self.head_dim = self.hidden_size // self.total_num_heads
 
         # Layer norms.
@@ -174,17 +167,16 @@ class OlmoMLP(nn.Module):
                                     bias=False)
 
         # Feed-forward input projection.
-        self.ff_proj = ColumnParallelLinear(
+        self.ff_proj = MergedColumnParallelLinear(
             config.d_model,
-            self.hidden_size,
+            [self.hidden_size // 2] * 2,
             bias=config.include_bias,
             linear_method=linear_method,
         )
 
         # Activation function.
-        # self.act = SiluAndMul()
-        # self.act.output_multiplier = 0.5
-        self.act = SwiGLU()
+        self.act = SiluAndMul()
+        self.act.output_multiplier = 0.5
         assert (self.act.output_multiplier * self.hidden_size) % 1 == 0
 
         # Feed-forward output projection.
@@ -374,8 +366,12 @@ class OLMoForCausalLM(nn.Module):
             if ".att" in name:
                 name = name.replace(".att", ".attn.att")
             # mlp
-            if ".ff" in name and "transformer.ff_out" not in name:
-                name = name.replace(".ff", ".mlp.ff")
+            if ".ff_proj" in name:
+                name = name.replace(".ff_proj", ".mlp.ff_proj")
+                # reverse the weight for MergedColumnParallelLinear
+                loaded_weight = torch.concat(loaded_weight.chunk(2)[::-1])
+            if ".ff_out" in name and "transformer.ff_out" not in name:
+                name = name.replace(".ff_out", ".mlp.ff_out")
             # there is no bias in olmo
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader",
