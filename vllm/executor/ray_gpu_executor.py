@@ -272,6 +272,8 @@ class RayGPUExecutor(ExecutorBase):
         num_gpu_blocks = min(b[0] for b in num_blocks)
         num_cpu_blocks = min(b[1] for b in num_blocks)
 
+        return num_gpu_blocks, num_cpu_blocks
+
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         raise_if_cache_size_invalid(num_gpu_blocks, self.cache_config.block_size,
