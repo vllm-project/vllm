@@ -118,3 +118,19 @@ Below, you can find an explanation of every engine argument for vLLM:
 .. option:: --quantization (-q) {awq,squeezellm,None}
 
     Method used to quantize the weights.
+
+Async Engine Arguments
+----------------------
+Below are the additional arguments related to the asynchronous engine:
+
+.. option:: --engine-use-ray
+
+    Use Ray to start the LLM engine in a separate process as the server process.
+
+.. option:: --disable-log-requests
+
+    Disable logging requests.
+    
+.. option:: --max-log-len
+
+    Max number of prompt characters or prompt ID numbers being printed in log. Defaults to unlimited.
