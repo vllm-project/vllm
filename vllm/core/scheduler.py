@@ -102,6 +102,7 @@ class ScheduledSequenceGroup:
 
 @dataclass
 class SchedulerOutputs:
+    """The scheduling decision made from a scheduler."""
     # Scheduled sequence groups.
     scheduled_seq_groups: Iterable[ScheduledSequenceGroup]
     # Number of prefill groups scheduled.
@@ -144,6 +145,11 @@ class SchedulerOutputs:
 
 @dataclass
 class SchedulerRunningOutputs:
+    """The requests that are scheduled from a running queue.
+
+    Could contain prefill (prefill that's chunked) or decodes. If there's not
+    enough memory, it can be preempted (for recompute) or swapped out.
+    """
     # Selected sequences that are running and in a decoding phase.
     decode_seq_groups: List[SequenceGroup]
     # Selected sequences that are running and in a prefill phase.
@@ -175,6 +181,10 @@ class SchedulerRunningOutputs:
 
 @dataclass
 class SchedulerSwappedInOutputs:
+    """The requests that are scheduled from a swap queue.
+
+    Could contain prefill (prefill that's chunked) or decodes.
+    """
     # Selected sequences that are going to be swapped in and is in a
     # decoding phase.
     decode_seq_groups: List[SequenceGroup]
@@ -201,6 +211,11 @@ class SchedulerSwappedInOutputs:
 
 @dataclass
 class SchedulerPrefillOutputs:
+    """The requests that are scheduled from a waiting queue.
+
+    Could contain a fresh prefill requests or preempted requests that need
+    to be recomputed from scratch.
+    """
     # Selected sequences for prefill.
     seq_groups: List[SequenceGroup]
     # Ignored sequence groups.
