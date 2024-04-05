@@ -372,6 +372,7 @@ class Scheduler:
             seq_group = running_queue[0]
             num_running_tokens = self._get_num_new_tokens(
                 seq_group, SequenceStatus.RUNNING, enable_chunking, budget)
+
             # We can have up to 1 running prefill at any given time in running
             # queue, which means we can guarantee chunk size is at least 1.
             assert num_running_tokens != 0
@@ -415,11 +416,9 @@ class Scheduler:
                             seq_group=seq_group,
                             token_chunk_size=num_running_tokens))
                 else:
-                    assert num_running_tokens == 1, num_running_tokens
                     decode_seq_groups.append(
-                        ScheduledSequenceGroup(
-                            seq_group=seq_group,
-                            token_chunk_size=num_running_tokens))
+                        ScheduledSequenceGroup(seq_group=seq_group,
+                                               token_chunk_size=1))
                 budget.add_num_batched_tokens(seq_group.request_id,
                                               num_running_tokens)
                 budget.add_num_seqs(seq_group.request_id, num_running_seqs)
@@ -522,8 +521,7 @@ class Scheduler:
             else:
                 assert num_new_tokens == 1
                 decode_seq_groups.append(
-                    ScheduledSequenceGroup(seq_group,
-                                           token_chunk_size=num_new_tokens))
+                    ScheduledSequenceGroup(seq_group, token_chunk_size=1))
             budget.add_num_batched_tokens(seq_group.request_id, num_new_tokens)
             budget.add_num_seqs(seq_group.request_id, num_new_seqs)
 
