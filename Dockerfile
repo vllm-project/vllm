@@ -133,6 +133,8 @@ COPY tests tests
 COPY benchmarks benchmarks
 COPY examples examples
 COPY docs docs
+# doc requires source code
+COPY vllm vllm
 COPY .buildkite .buildkite
 
 #################### TEST IMAGE ####################
