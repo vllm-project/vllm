@@ -549,8 +549,8 @@ class SequenceGroupMetadata:
         sampling_params: The sampling parameters used to generate the outputs.
         block_tables: The block tables. (Seq id -> list of physical block
             numbers)
-        token_chunk_size: The number of tokens to be processed. None if
-            chunking is not required.
+        token_chunk_size: The number of tokens to be processed (per sequence).
+            None if chunking is not required.
         state: Internal state tied to this sequence group.
         lora_request: LoRA request.
         multi_modal_data: Multi modal data.
