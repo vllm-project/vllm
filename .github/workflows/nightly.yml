@@ -57,8 +57,8 @@ jobs:
         secrets: inherit
 
     # single gpu
-    AWS-AVX2-32G-A10G-24G-Accuracy:
-        uses: ./.github/workflows/nm-lm-eval-accuracy.yml
+    Accuracy-Smoke-AWS-AVX2-32G-A10G-24G:
+        uses: ./.github/workflows/nm-lm-eval-smoke.yml
         with:
             label: aws-avx2-32G-a10g-24G
             timeout: 240

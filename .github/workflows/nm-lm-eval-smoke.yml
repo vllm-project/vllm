@@ -1,4 +1,4 @@
-name: nm-lm-eval-accuracy
+name: nm-lm-eval-smoke
 on:
   # makes workflow reusable
   workflow_call:
@@ -57,7 +57,7 @@ on:
         required: true
 
 jobs:
-  LM-EVAL-FULL:
+  LM-EVAL-SMOKE:
 
     runs-on: ${{ inputs.label }}
     timeout-minutes: ${{ fromJSON(inputs.timeout) }}
@@ -99,8 +99,8 @@ jobs:
           venv: TEST
           pypi: ${{ secrets.NM_PRIVATE_PYPI_LOCATION }}
 
-      - name: run lm-eval-accuracy
-        uses: ./.github/actions/nm-lm-eval-accuracy/
+      - name: run lm-eval-smoke
+        uses: ./.github/actions/nm-lm-eval-smoke/
         with:
           python: ${{ inputs.python }}
           venv: TEST
