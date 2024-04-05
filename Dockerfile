@@ -2,6 +2,7 @@
 # to run the OpenAI compatible server.
 
 #################### BASE BUILD IMAGE ####################
+# prepare basic build environment
 FROM nvidia/cuda:12.1.0-devel-ubuntu22.04 AS dev
 
 RUN apt-get update -y \
@@ -34,7 +35,7 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 #################### BASE BUILD IMAGE ####################
 
 
-#################### EXTENSION BUILD IMAGE ####################
+#################### WHEEL BUILD IMAGE ####################
 FROM dev AS build
 
 # install build dependencies
@@ -45,14 +46,14 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # install compiler cache to speed up compilation leveraging local or remote caching
 RUN apt-get update -y && apt-get install -y ccache
 
-# copy input files
+# files and directories related to build wheels
 COPY csrc csrc
 COPY setup.py setup.py
 COPY cmake cmake
 COPY CMakeLists.txt CMakeLists.txt
 COPY requirements.txt requirements.txt
 COPY pyproject.toml pyproject.toml
-COPY vllm/__init__.py vllm/__init__.py
+COPY vllm vllm
 
 # max jobs used by Ninja to build extensions
 ARG max_jobs=2
@@ -65,7 +66,15 @@ ENV VLLM_INSTALL_PUNICA_KERNELS=1
 
 ENV CCACHE_DIR=/root/.cache/ccache
 RUN --mount=type=cache,target=/root/.cache/ccache \
-    python3 setup.py build_ext --inplace
+    --mount=type=cache,target=/root/.cache/pip \
+    python3 setup.py bdist_wheel --dist-dir=dist
+
+# the `vllm_nccl` package must be installed from source distribution
+# pip is too smart to store a wheel in the cache, and other CI jobs
+# will directly use the wheel from the cache, which is not what we want.
+# we need to remove it manually
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip cache remove vllm_nccl*
 #################### EXTENSION Build IMAGE ####################
 
 #################### FLASH_ATTENTION Build IMAGE ####################
@@ -85,56 +94,58 @@ RUN pip --verbose wheel flash-attn==${FLASH_ATTN_VERSION} \
 
 #################### FLASH_ATTENTION Build IMAGE ####################
 
+#################### vLLM installation IMAGE ####################
+# image with vLLM installed
+FROM nvidia/cuda:12.1.0-base-ubuntu22.04 AS vllm-base
+WORKDIR /vllm-workspace
+
+RUN apt-get update -y \
+    && apt-get install -y python3-pip git vim
+
+# Workaround for https://github.com/openai/triton/issues/2507 and
+# https://github.com/pytorch/pytorch/issues/107960 -- hopefully
+# this won't be needed for future versions of this docker image
+# or future versions of triton.
+RUN ldconfig /usr/local/cuda-12.1/compat/
+
+# install vllm wheel first, so that torch etc will be installed
+RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
+    --mount=type=cache,target=/root/.cache/pip \
+    pip install dist/*.whl --verbose
+
+RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,target=/usr/src/flash-attention-v2 \
+    --mount=type=cache,target=/root/.cache/pip \
+    pip install /usr/src/flash-attention-v2/*.whl --no-cache-dir
+#################### vLLM installation IMAGE ####################
+
+
 #################### TEST IMAGE ####################
 # image to run unit testing suite
-FROM dev AS test
+# note that this uses vllm installed by `pip`
+FROM vllm-base AS test
 
-# copy pytorch extensions separately to avoid having to rebuild
-# when python code changes
-WORKDIR /vllm-workspace
-# ADD is used to preserve directory structure
 ADD . /vllm-workspace/
-COPY --from=build /workspace/vllm/*.so /vllm-workspace/vllm/
-# Install flash attention (from pre-built wheel)
-RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,target=/usr/src/flash-attention-v2 \
-    pip install /usr/src/flash-attention-v2/*.whl --no-cache-dir
-# ignore build dependencies installation because we are using pre-complied extensions
-RUN rm pyproject.toml
-RUN --mount=type=cache,target=/root/.cache/pip VLLM_USE_PRECOMPILED=1 pip install . --verbose
-#################### TEST IMAGE ####################
 
-
-#################### RUNTIME BASE IMAGE ####################
-# We used base cuda image because pytorch installs its own cuda libraries.
-# However pynccl depends on cuda libraries so we had to switch to the runtime image
-# In the future it would be nice to get a container with pytorch and cuda without duplicating cuda
-FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04 AS vllm-base
-
-# libnccl required for ray
-RUN apt-get update -y \
-    && apt-get install -y python3-pip
-
-WORKDIR /workspace
-COPY requirements.txt requirements.txt
+# install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt
+    pip install -r requirements-dev.txt
 
-# Install flash attention (from pre-built wheel)
-RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,target=/usr/src/flash-attention-v2 \
-    pip install /usr/src/flash-attention-v2/*.whl --no-cache-dir
+# doc requires source code
+# we hide them inside `test_docs/` , so that this source code
+# will not be imported by other tests
+RUN mkdir test_docs
+RUN mv docs test_docs/
+RUN mv vllm test_docs/
 
-#################### RUNTIME BASE IMAGE ####################
-
+#################### TEST IMAGE ####################
 
 #################### OPENAI API SERVER ####################
 # openai api server alternative
 FROM vllm-base AS vllm-openai
+
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install accelerate hf_transfer modelscope
-
-COPY --from=build /workspace/vllm/*.so /workspace/vllm/
-COPY vllm vllm
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 
