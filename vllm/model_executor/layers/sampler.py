@@ -106,7 +106,16 @@ def _apply_min_tokens_penalty(
     # list of indices in logits that will be set to -inf
     logits_to_penalize = []
     start_idx = 0
-    for seq_ids, sampling_params in sampling_metadata.seq_groups:
+    for i, seq_group in enumerate(sampling_metadata.seq_groups):
+        seq_ids, sampling_params = seq_group
+
+        # handle prompt_logprobs by skipping rows in logits added for the prompt
+        # tokens (prompt logprobs are not penalized)
+        if (i < sampling_metadata.num_prompts
+                and sampling_params.prompt_logprobs is not None):
+            assert len(seq_ids) == 1
+            start_idx += sampling_metadata.prompt_lens[i] - 1
+
         min_tokens = sampling_params.min_tokens
         if min_tokens > 0:
             seqs_to_penalize = []
@@ -132,6 +141,8 @@ def _apply_min_tokens_penalty(
         # eg. [ (1,2), (1,3), (5,6) ] -> ( (1,1,5), (2,3,6) )
         logits[tuple(zip(*logits_to_penalize))] = -float("inf")
 
+    # verifies that no rows in logits were missed unexpectedly
+    assert start_idx == logits.shape[0]
     return logits
 
 
