@@ -121,6 +121,7 @@ RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,ta
 
 #################### TEST IMAGE ####################
 # image to run unit testing suite
+# note that this uses vllm installed by `pip`
 FROM vllm-base AS test
 
 # install development dependencies (for testing)
@@ -132,10 +133,13 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY tests tests
 COPY benchmarks benchmarks
 COPY examples examples
-COPY docs docs
-# doc requires source code
-COPY vllm vllm
 COPY .buildkite .buildkite
+
+# doc requires source code
+# we hide them inside `test_docs/` , so that this source code
+# will not be imported by other tests
+COPY docs test_docs/docs
+COPY vllm test_docs/vllm
 
 #################### TEST IMAGE ####################
 

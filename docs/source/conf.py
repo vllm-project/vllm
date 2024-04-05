@@ -16,8 +16,6 @@ import sys
 
 from sphinx.ext import autodoc
 
-sys.path.insert(0, os.path.abspath(os.path.join('..', '..')))
-
 logger = logging.getLogger(__name__)
 
 # -- Project information -----------------------------------------------------
