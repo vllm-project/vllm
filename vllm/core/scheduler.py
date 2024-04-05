@@ -600,8 +600,9 @@ class Scheduler:
             num_new_tokens = self._get_num_new_tokens(seq_group,
                                                       SequenceStatus.WAITING,
                                                       enable_chunking, budget)
-            num_prompt_tokens = waiting_seqs[0].get_len()
-            assert num_new_tokens == num_prompt_tokens
+            if not enable_chunking:
+                num_prompt_tokens = waiting_seqs[0].get_len()
+                assert num_new_tokens == num_prompt_tokens
 
             if num_new_tokens > self.prompt_limit:
                 logger.warning(
