@@ -56,11 +56,15 @@ def cleanup():
 
 
 @pytest.fixture()
-def should_do_global_cleanup_after_test() -> bool:
+def should_do_global_cleanup_after_test(request) -> bool:
     """Allow subdirectories to skip global cleanup by overriding this fixture.
     This can provide a ~10x speedup for non-GPU unit tests since they don't need
     to initialize torch.
     """
+
+    if request.node.get_closest_marker("skip_global_cleanup"):
+        return False
+
     return True
 
 
