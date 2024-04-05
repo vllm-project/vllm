@@ -41,6 +41,7 @@ RUN if [ "$BUILD_HIPBLASLT" = "1" ] ; then \
     && git clone https://github.com/ROCm/hipBLASLt \
     && cd hipBLASLt \
     && git checkout ${HIPBLASLT_BRANCH} \
+    && export GTEST_DIR="/opt/conda/lib/cmake/GTest" \
     && ./install.sh -idc --architecture ${PYTORCH_ROCM_ARCH} \
     && cd .. && rm -rf hipBLASLt \
     && sed -i 's/, hipblaslt-dev \(.*\), hipcub-dev/, hipcub-dev/g' /var/lib/dpkg/status \
