@@ -51,7 +51,8 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
 
         return num_gpu_blocks, num_cpu_blocks
 
-    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
         assert num_cpu_blocks == 0
         assert num_gpu_blocks == self.scheduler_config.max_num_seqs
         self.cache_config.num_gpu_blocks = num_gpu_blocks

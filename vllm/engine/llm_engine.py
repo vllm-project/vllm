@@ -181,12 +181,13 @@ class LLMEngine:
             self.stat_logger.info("cache_config", self.cache_config)
 
     def _initialize_kv_caches(self) -> None:
-        num_gpu_blocks, num_cpu_blocks = self.model_executor.determine_num_available_blocks()
-        
+        num_gpu_blocks, num_cpu_blocks = (self.model_executor.determine_num_available_blocks(
+        ))
+
         if self.cache_config.num_gpu_blocks_override is not None:
             num_gpu_blocks_override = self.cache_config.num_gpu_blocks_override
             logger.info(f"Overriding {num_gpu_blocks=} with "
-                f"{num_gpu_blocks_override=}")
+                        f"{num_gpu_blocks_override=}")
             num_gpu_blocks = num_gpu_blocks_override
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks

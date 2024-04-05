@@ -102,7 +102,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         scorer cache is divided evenly between the proposer and scorer model KV,
         such that the number of blocks is equal in both KV caches.
         """
-        num_gpu_blocks, num_cpu_blocks = (self.scorer_worker.determine_num_available_blocks())
+        num_gpu_blocks, num_cpu_blocks = (
+            self.scorer_worker.determine_num_available_blocks())
 
         scorer_cache_block_size_bytes = (
             self.scorer_worker.get_cache_block_size_bytes())
@@ -114,12 +115,15 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             num_gpu_blocks)
         return new_num_gpu_blocks, num_cpu_blocks
 
-    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
         """Initialize the cache engine of the scorer and proposer workers.
         TODO
         """
-        self.scorer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks, num_cpu_blocks=num_cpu_blocks)
-        self.proposer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks, num_cpu_blocks=num_cpu_blocks)
+        self.scorer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
+                                            num_cpu_blocks=num_cpu_blocks)
+        self.proposer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
+                                              num_cpu_blocks=num_cpu_blocks)
 
     @torch.inference_mode()
     def execute_model(

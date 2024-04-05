@@ -50,7 +50,8 @@ class NeuronExecutor(ExecutorBase):
     def determine_num_available_blocks(self) -> tuple[int, int]:
         return self.driver_worker.determine_num_available_blocks()
 
-    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     def execute_model(self,
@@ -70,10 +71,10 @@ class NeuronExecutor(ExecutorBase):
         return self.driver_worker.add_lora(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
-        return self.driver_worker.remove_lora(lora_request)
+        return self.driver_worker.remove_lora(lora_id)
 
     def list_loras(self) -> List[int]:
-        return self.driver_worker.list_loras(lora_request)
+        return self.driver_worker.list_loras()
 
     def check_health(self) -> None:
         # NeuronExecutor will always be healthy as long as

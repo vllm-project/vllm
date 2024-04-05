@@ -63,7 +63,8 @@ class CPUExecutor(ExecutorBase):
     def determine_num_available_blocks(self) -> tuple[int, int]:
         return self.driver_worker.determine_num_available_blocks()
 
-    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
         logger.info(f"# CPU blocks: {num_cpu_blocks}")
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 

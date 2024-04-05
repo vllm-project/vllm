@@ -1,11 +1,12 @@
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 
 
 class WorkerBase(ABC):
+
     @abstractmethod
     def init_device(self) -> None:
         """Initialize device state, such as loading the model or other on-device
@@ -32,10 +33,11 @@ class WorkerBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
         """Given a fully-specified cache config, initialize the KV cache. This
         is separate from init_workers as profiling may be required to determine
-        the maxmimum allowed KV cache size.
+        the maximum allowed KV cache size.
         """
         raise NotImplementedError
 
@@ -66,6 +68,7 @@ class WorkerBase(ABC):
 
 
 class LoraNotSupportedWorkerBase(WorkerBase):
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         raise ValueError(f"{type(self)} does not support LoRA")
 

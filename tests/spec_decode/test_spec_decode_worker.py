@@ -510,6 +510,7 @@ def test_init_device():
     metrics_collector.init_gpu_tensors.assert_called_once()
     rejection_sampler.init_gpu_tensors.assert_called_once()
 
+
 @torch.inference_mode()
 def test_initialize_cache():
     """Verify SpecDecodeWorker invokes initialize_cache on proposer/scorer
@@ -524,9 +525,7 @@ def test_initialize_cache():
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
                               metrics_collector)
 
-    cache_config = MagicMock()
-    
-    kwargs = {"num_gpu_blocks":1024, "num_cpu_blocks": 1023}
+    kwargs = {"num_gpu_blocks": 1024, "num_cpu_blocks": 1023}
     worker.initialize_cache(**kwargs)
 
     draft_worker.initialize_cache.assert_called_once_with(**kwargs)
@@ -539,9 +538,9 @@ def test_initialize_cache():
 @pytest.mark.parametrize('draft_kv_size_bytes', [0, 2 * 2 * 768, 2 * 2 * 4096])
 @torch.inference_mode()
 def test_determine_num_available_blocks(available_gpu_blocks: int,
-                                      available_cpu_blocks: int,
-                                      target_cache_block_size_bytes: int,
-                                      draft_kv_size_bytes: int):
+                                        available_cpu_blocks: int,
+                                        target_cache_block_size_bytes: int,
+                                        draft_kv_size_bytes: int):
     """Verify SpecDecodeWorker correctly profiles num available GPU blocks.
     Specifically, it should run profiling in the scorer worker, and then evenly
     split the blocks between proposer and scorer worker.
@@ -560,7 +559,6 @@ def test_determine_num_available_blocks(available_gpu_blocks: int,
 
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
                               metrics_collector)
-
 
     num_gpu_blocks, num_cpu_blocks = worker.determine_num_available_blocks()
 

@@ -1,6 +1,5 @@
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional
-from dataclasses import dataclass
 
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
@@ -31,7 +30,6 @@ class ExecutorBase(ABC):
     ) -> None:
         raise NotImplementedError
 
-
     @abstractmethod
     def determine_num_available_blocks(self) -> tuple[int, int]:
         """Profile the model on-device to determine the maximum number of KV
@@ -50,12 +48,12 @@ class ExecutorBase(ABC):
         """
         raise NotImplementedError
 
-
     @abstractmethod
-    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
         """Given a fully-specified cache config, initialize the KV cache. This
         is separate from init_workers as profiling may be required to determine
-        the maxmimum allowed KV cache size.
+        the maximum allowed KV cache size.
         """
         raise NotImplementedError
 

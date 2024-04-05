@@ -150,7 +150,6 @@ class RayGPUExecutor(ExecutorBase):
         scheduler_config = copy.deepcopy(self.scheduler_config)
         device_config = copy.deepcopy(self.device_config)
         lora_config = copy.deepcopy(self.lora_config)
-        kv_cache_dtype = self.cache_config.cache_dtype
 
         # Initialize the actual workers with the Worker class.
         for rank, (worker, (node_id, _)) in enumerate(
@@ -195,9 +194,7 @@ class RayGPUExecutor(ExecutorBase):
 
     def determine_num_available_blocks(self) -> tuple[int, int]:
         # Get the maximum number of blocks that can be allocated on GPU and CPU.
-        num_blocks = self._run_workers(
-            "determine_num_available_blocks",
-        )
+        num_blocks = self._run_workers("determine_num_available_blocks", )
 
         # Since we use a shared centralized controller, we take the minimum
         # number of blocks across all workers to make sure all the memory
@@ -207,8 +204,8 @@ class RayGPUExecutor(ExecutorBase):
 
         return num_gpu_blocks, num_cpu_blocks
 
-
-    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
 
         # NOTE: We log here to avoid multiple logs when number of workers is
         # greater than one. We could log in the engine, but not all executors
@@ -219,8 +216,9 @@ class RayGPUExecutor(ExecutorBase):
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
-        self._run_workers("initialize_cache", num_gpu_blocks=num_gpu_blocks, num_cpu_blocks=num_cpu_blocks)
-
+        self._run_workers("initialize_cache",
+                          num_gpu_blocks=num_gpu_blocks,
+                          num_cpu_blocks=num_cpu_blocks)
 
     def execute_model(self,
                       seq_group_metadata_list: List[SequenceGroupMetadata],

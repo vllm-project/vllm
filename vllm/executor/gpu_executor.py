@@ -66,22 +66,17 @@ class GPUExecutor(ExecutorBase):
         self.driver_worker.init_device()
         self.driver_worker.load_model()
 
-
     def determine_num_available_blocks(self) -> tuple[int, int]:
         return self.driver_worker.determine_num_available_blocks()
-
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks) -> None:
         # NOTE: This is logged in the executor because there can be >1 worker
         # with other executors. We could log in the engine level, but work
         # remains to abstract away the device for non-GPU configurations.
-        logger.info(
-            f"# GPU blocks: {num_gpu_blocks}, "
-            f"# CPU blocks: {num_cpu_blocks}"
-        )
+        logger.info(f"# GPU blocks: {num_gpu_blocks}, "
+                    f"# CPU blocks: {num_cpu_blocks}")
 
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
-
 
     def execute_model(self,
                       seq_group_metadata_list: List[SequenceGroupMetadata],

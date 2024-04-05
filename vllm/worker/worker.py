@@ -108,9 +108,7 @@ class Worker(WorkerBase):
         self.model_runner.load_model()
 
     @torch.inference_mode()
-    def determine_num_available_blocks(
-        self,
-    ) -> Tuple[int, int]:
+    def determine_num_available_blocks(self, ) -> Tuple[int, int]:
         """Profiles the peak memory usage of the model and returns the maximum
         number of GPU and CPU cache blocks that can be allocated.
         """
@@ -156,9 +154,10 @@ class Worker(WorkerBase):
 
         cache_block_size = self.get_cache_block_size_bytes()
         num_gpu_blocks = int(
-            (total_gpu_memory * self.cache_config.gpu_memory_utilization - peak_memory) //
-            cache_block_size)
-        num_cpu_blocks = int(self.cache_config.swap_space_bytes // cache_block_size)
+            (total_gpu_memory * self.cache_config.gpu_memory_utilization -
+             peak_memory) // cache_block_size)
+        num_cpu_blocks = int(self.cache_config.swap_space_bytes //
+                             cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
         if self.model_runner.lora_manager:
@@ -167,9 +166,11 @@ class Worker(WorkerBase):
         torch.cuda.empty_cache()
         return num_gpu_blocks, num_cpu_blocks
 
-
-    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
-        raise_if_cache_size_invalid(num_gpu_blocks, self.cache_config.block_size, self.model_config.max_model_len)
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
+        raise_if_cache_size_invalid(num_gpu_blocks,
+                                    self.cache_config.block_size,
+                                    self.model_config.max_model_len)
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
@@ -183,7 +184,6 @@ class Worker(WorkerBase):
                                         self.parallel_config)
         self.gpu_cache = self.cache_engine.gpu_cache
         self.model_runner.set_block_size(self.cache_engine.block_size)
-
 
     def _warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
@@ -265,8 +265,9 @@ class Worker(WorkerBase):
     def get_cache_block_size_bytes(self) -> int:
         """Get the size of the KV cache block size in bytes.
         """
-        return CacheEngine.get_cache_block_size(
-            self.cache_config, self.model_config, self.parallel_config)
+        return CacheEngine.get_cache_block_size(self.cache_config,
+                                                self.model_config,
+                                                self.parallel_config)
 
 
 def init_distributed_environment(
@@ -338,7 +339,8 @@ def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
                 "`dtype` flag in CLI, for example: --dtype=half.")
 
 
-def raise_if_cache_size_invalid(num_gpu_blocks, block_size, max_model_len) -> None:
+def raise_if_cache_size_invalid(num_gpu_blocks, block_size,
+                                max_model_len) -> None:
     if num_gpu_blocks <= 0:
         raise ValueError("No available memory for the cache blocks. "
                          "Try increasing `gpu_memory_utilization` when "
