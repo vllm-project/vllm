@@ -19,7 +19,8 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
-from vllm.worker.worker_base import WorkerBase, raise_if_cache_size_invalid
+from vllm.worker.worker_base import WorkerBase
+from vllm.executor.utils import raise_if_cache_size_invalid
 
 # TODO move raise_if_cache_size_invalid
 
@@ -171,7 +172,7 @@ class Worker(WorkerBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
         self._init_cache_engine()
-        self.warm_up_model()
+        self._warm_up_model()
 
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
@@ -181,7 +182,7 @@ class Worker(WorkerBase):
         self.model_runner.set_block_size(self.cache_engine.block_size)
 
 
-    def warm_up_model(self) -> None:
+    def _warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model(self.gpu_cache)
         # Reset the seed to ensure that the random state is not affected by

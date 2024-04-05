@@ -130,7 +130,6 @@ def create_worker(cls: type,
     engine_config.cache_config.num_gpu_blocks = num_gpu_blocks
     engine_config.cache_config.num_cpu_blocks = 0
     worker.initialize_cache(num_gpu_blocks=engine_config.cache_config.num_gpu_blocks, num_cpu_blocks=engine_config.cache_config.num_cpu_blocks)
-    worker.warm_up_model()
 
     return worker
 
