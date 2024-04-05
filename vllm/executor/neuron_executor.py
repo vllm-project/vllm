@@ -25,19 +25,12 @@ class NeuronExecutor(ExecutorBase):
         speculative_config: Optional[SpeculativeConfig],
     ) -> None:
         self.model_config = model_config
-        #self.cache_config = cache_config
         assert lora_config is None, "LoRA is not supported for Neuron backend."
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         assert (not speculative_config
                 ), "Speculative decoding not yet supported for Neuron backend."
-
-        # Set the number of GPU blocks to be the same as the maximum number of
-        # sequences that can be processed in a single batch. This is equivalent
-        # to schedule without PagedAttention.
-        #self.cache_config.num_gpu_blocks = self.scheduler_config.max_num_seqs
-        #self.cache_config.num_cpu_blocks = 0
 
         # Instantiate the worker and load the model to the device.
         self._init_worker()

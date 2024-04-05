@@ -32,14 +32,6 @@ class ExecutorBase(ABC):
         raise NotImplementedError
 
 
-    #@abstractmethod
-    #def init_workers(self) -> None:
-    #    """Initialize workers, such as loading the model or preparing on-device
-    #    tensors.
-    #    """
-    #    raise NotImplementedError
-
-
     @abstractmethod
     def profile_num_available_blocks(self) -> tuple[int, int]:
         """Profile the model on-device to determine the maximum number of KV
