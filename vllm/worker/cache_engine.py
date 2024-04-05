@@ -9,6 +9,7 @@ from vllm.utils import in_wsl, is_hpu
 
 if is_hpu():
     from vllm.hpu import cache_ops
+    import habana_frameworks.torch as htorch
 else:
     from vllm._C import cache_ops
 
@@ -88,11 +89,12 @@ class CacheEngine:
                 dtype=self.dtype,
                 device="hpu",
             )
-            value_blocks = torch.empty(
+            value_blocks = torch.zeros(
                 size=(self.num_gpu_blocks, *kv_block_shape),
                 dtype=self.dtype,
                 device="hpu",
             )
+            htorch.core.mark_step()
             hpu_cache.append((key_blocks, value_blocks))
         return hpu_cache
 
