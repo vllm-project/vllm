@@ -61,45 +61,10 @@ class CPUExecutor(ExecutorBase):
         self.driver_worker.load_model()
 
     def profile_num_available_blocks(self) -> tuple[int, int]:
-        num_cpu_blocks = self.driver_worker.get_cpu_cache_block_num(
-            block_size=self.cache_config.block_size,
-            cache_space=self.cache_config.cpu_kvcache_space_bytes,
-            cache_dtype=self.cache_config.cache_dtype,
-        )
-
-        # Note: To reuse the cache management procedure,
-        # use cpu cache as 'gpu cache'.
-        num_gpu_blocks = num_cpu_blocks
-        num_cpu_blocks = 0
-        return num_gpu_blocks, num_cpu_blocks
-
+        return self.driver_worker.profile_num_available_blocks()
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
-        # Note: To reuse the cache management procedure,
-        # use cpu cache as 'gpu cache'.
-        assert num_cpu_blocks == 0
-        num_cpu_blocks = num_gpu_blocks
-        num_gpu_blocks = 0
-        self.cache_config.num_gpu_blocks = num_cpu_blocks
-        self.cache_config.num_cpu_blocks = 0
-
-        logger.info(f"# CPU blocks: {num_cpu_blocks}")
-        if num_cpu_blocks <= 0:
-            raise ValueError("No available memory for the cache blocks. "
-                             "Try increasing `VLLM_CPU_KVCACHE_SPACE` when "
-                             "initializing the engine.")
-
-        max_seq_len = self.cache_config.block_size * num_cpu_blocks
-        if self.model_config.max_model_len > max_seq_len:
-            raise ValueError(
-                f"The model's max seq len ({self.model_config.max_model_len}) "
-                "is larger than the maximum number of tokens that can be "
-                f"stored in KV cache ({max_seq_len}). Try increasing "
-                "`VLLM_CPU_KVCACHE_SPACE` or decreasing `max_model_len` when "
-                "initializing the engine.")
-
-        # Initialize the cache.
-        self.driver_worker.init_cache_engine(cache_config=self.cache_config)
+        self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     def execute_model(self,
                       seq_group_metadata_list: List[SequenceGroupMetadata],
