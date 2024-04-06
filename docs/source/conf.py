@@ -13,7 +13,7 @@
 import logging
 import os
 import sys
-import typing as t
+from typing import List
 
 from sphinx.ext import autodoc
 
