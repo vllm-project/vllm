@@ -106,6 +106,6 @@ Just add the following lines in your code:
 
 .. code-block:: python
 
-    from vllm.model_executor.models import ModelRegistry
+    from vllm import ModelRegistry
     from your_code import YourModelForCausalLM
     ModelRegistry.register_model("YourModelForCausalLM", YourModelForCausalLM)

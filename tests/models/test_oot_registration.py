@@ -1,7 +1,6 @@
 import torch
 
-from vllm import LLM, SamplingParams
-from vllm.model_executor.models import ModelRegistry
+from vllm import LLM, ModelRegistry, SamplingParams
 from vllm.model_executor.models.opt import OPTForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 
