@@ -210,8 +210,8 @@ class TorchSDPABackendImpl(AttentionImpl):
             decode_meta = attn_metadata.decode_metadata
             assert decode_meta is not None
             # Decoding run.
-            output[num_prefill_tokens:] = PagedAttention.forward_decode(
-                query,
+            out = PagedAttention.forward_decode(
+                decode_query,
                 key_cache,
                 value_cache,
                 decode_meta.block_tables,
@@ -223,6 +223,8 @@ class TorchSDPABackendImpl(AttentionImpl):
                 self.alibi_slopes,
                 kv_scale,
             )
+            assert out.shape == output[num_prefill_tokens:].shape
+            output[num_prefill_tokens:]
 
         # Reshape the output tensor.
         return output.view(-1, self.num_heads * self.head_size)

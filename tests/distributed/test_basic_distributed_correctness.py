@@ -25,7 +25,6 @@ MODELS = [
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
-@pytest.mark.parametrize("chunked_prefill_token_size", [-1])
 def test_models(
     hf_runner,
     vllm_runner,
@@ -33,23 +32,13 @@ def test_models(
     model: str,
     dtype: str,
     max_tokens: int,
-    chunked_prefill_token_size: int,
 ) -> None:
-    enable_chunked_prefill = False
-    max_num_batched_tokens = None
-    if chunked_prefill_token_size != -1:
-        enable_chunked_prefill = True
-        max_num_batched_tokens = chunked_prefill_token_size
 
     hf_model = hf_runner(model, dtype=dtype)
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
     del hf_model
 
-    vllm_model = vllm_runner(model,
-                             dtype=dtype,
-                             tensor_parallel_size=2,
-                             max_num_batched_tokens=max_num_batched_tokens,
-                             enable_chunked_prefill=enable_chunked_prefill)
+    vllm_model = vllm_runner(model, dtype=dtype, tensor_parallel_size=2)
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
 

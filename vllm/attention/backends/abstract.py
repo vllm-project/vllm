@@ -65,7 +65,7 @@ T = TypeVar("T", bound=AttentionMetadataPerStage)
 
 @dataclass
 class AttentionMetadata(Generic[T]):
-    """Attention metadata for prefill and decode."""
+    """Attention metadata for prefill and decode batched together."""
     # Total number of prefill requests.
     num_prefills: int
     # Number of prefill tokens.
