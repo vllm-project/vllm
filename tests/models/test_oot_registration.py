@@ -19,8 +19,7 @@ class MyOPTForCausalLM(OPTForCausalLM):
 
 def test_oot_registration():
     # register our dummy model
-    ModelRegistry.register_out_of_tree_model("OPTForCausalLM",
-                                             MyOPTForCausalLM)
+    ModelRegistry.register_model("OPTForCausalLM", MyOPTForCausalLM)
     prompts = ["Hello, my name is", "The text does not matter"]
     sampling_params = SamplingParams(temperature=0)
     llm = LLM(model="facebook/opt-125m")

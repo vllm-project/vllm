@@ -102,8 +102,7 @@ class ModelRegistry:
         return list(_MODELS.keys())
 
     @staticmethod
-    def register_out_of_tree_model(model_arch: str,
-                                   model_cls: Type[nn.Module]):
+    def register_model(model_arch: str, model_cls: Type[nn.Module]):
         global _OOT_MODELS
         _OOT_MODELS[model_arch] = model_cls
 

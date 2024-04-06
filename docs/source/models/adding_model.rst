@@ -108,4 +108,4 @@ Just add the following lines in your code:
 
     from vllm.model_executor.models import ModelRegistry
     from your_code import YourModelForCausalLM
-    ModelRegistry.register_out_of_tree_model("YourModelForCausalLM", YourModelForCausalLM)
+    ModelRegistry.register_model("YourModelForCausalLM", YourModelForCausalLM)
