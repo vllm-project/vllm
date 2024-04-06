@@ -1,8 +1,9 @@
 import multiprocessing
 import sys
+import time
 
 import torch
-from openai import OpenAI
+from openai import OpenAI, OpenAIError
 
 from vllm import LLM, ModelRegistry, SamplingParams
 from vllm.model_executor.models.opt import OPTForCausalLM
@@ -53,19 +54,26 @@ def test_oot_registration_for_api_server():
         base_url="http://localhost:8000/v1",
         api_key="token-abc123",
     )
-
-    completion = client.chat.completions.create(
-        model="facebook/opt-125m",
-        messages=[{
-            "role": "system",
-            "content": "You are a helpful assistant."
-        }, {
-            "role": "user",
-            "content": "Hello!"
-        }],
-        temperature=0,
-    )
-
+    while True:
+        try:
+            completion = client.chat.completions.create(
+                model="facebook/opt-125m",
+                messages=[{
+                    "role": "system",
+                    "content": "You are a helpful assistant."
+                }, {
+                    "role": "user",
+                    "content": "Hello!"
+                }],
+                temperature=0,
+            )
+            break
+        except OpenAIError as e:
+            if "Connection error" in str(e):
+                time.sleep(3)
+            else:
+                raise e
+    server.kill()
     generated_text = completion.choices[0].message.content
     # make sure only the first token is generated
     rest = generated_text.replace("<s>", "")
