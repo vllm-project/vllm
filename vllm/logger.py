@@ -60,7 +60,8 @@ def init_logger(name: str):
     if VLLM_CONFIGURE_LOGGING:
         if _default_handler is None:
             raise ValueError(
-                "_default_handler is not set up, this should not happen.")
+                "_default_handler is not set up. This should never happen!"
+                " Please open an issue on Github.")
         logger.addHandler(_default_handler)
         logger.propagate = False
     return logger
