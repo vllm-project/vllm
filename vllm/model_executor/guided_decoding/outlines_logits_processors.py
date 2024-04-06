@@ -41,7 +41,7 @@ class BaseLogitsProcessor:
 
         """
         if getattr(tokenizer, "_outlines_adapted", False):
-            tokenizer.decode = getattr(tokenizer, '_modified_decoder')
+            tokenizer.decode = tokenizer._modified_decoder
             return tokenizer
 
         tokenizer.vocabulary = tokenizer.get_vocab()
@@ -78,7 +78,7 @@ class BaseLogitsProcessor:
     
     def unadapt_tokenizer(self, tokenizer: PreTrainedTokenizerBase):
         """Revert the changes made to the tokenizer"""
-        tokenizer.decode = getattr(tokenizer, '_orig_decoder')
+        tokenizer.decode = tokenizer._orig_decoder
         return tokenizer
 
     def init_state(self):
