@@ -14,10 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import copy
-from functools import lru_cache
 import json
 import math
 from collections import defaultdict
+from functools import lru_cache
 from typing import Callable, DefaultDict, Dict, List, Optional, Union
 
 import torch
