@@ -7,7 +7,8 @@ import torch
 from torch.nn.functional import scaled_dot_product_attention
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata)
+                                              AttentionMetadata,
+                                              AttentionMetadataPerStage)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 
@@ -49,17 +50,14 @@ class TorchSDPABackend(AttentionBackend):
 
 
 @dataclass
-class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
+class TorchSDPAMetadata(AttentionMetadataPerStage, PagedAttentionMetadata):
     """Metadata for TorchSDPABackend.
     """
     # Currently, input sequences can only contain all prompts
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
-    slot_mapping: torch.Tensor
     prompt_lens: Optional[List[int]]
     prompt_lens_tensor: Optional[torch.Tensor]
-    num_prompt_tokens: int
-    num_generation_tokens: int
 
     max_subquery_len: Optional[int] = None
     max_prompt_len: Optional[int] = None
@@ -113,7 +111,7 @@ class TorchSDPABackendImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: Optional[torch.Tensor],
-        attn_metadata: TorchSDPAMetadata,
+        attn_metadata: AttentionMetadata[TorchSDPAMetadata],
         kv_scale: float,
     ) -> torch.Tensor:
         """Forward pass with torch SDPA and PagedAttention.

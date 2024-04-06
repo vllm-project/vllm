@@ -829,10 +829,10 @@ class Scheduler:
 
         return SchedulerOutputs(
             scheduled_seq_groups=(prefills.seq_groups +
-                                  running_scheduled.decode_seq_groups +
                                   running_scheduled.prefill_seq_groups +
-                                  swapped_in.decode_seq_groups +
-                                  swapped_in.prefill_seq_groups),
+                                  swapped_in.prefill_seq_groups +
+                                  running_scheduled.decode_seq_groups +
+                                  swapped_in.decode_seq_groups),
             num_prefill_groups=(len(prefills.seq_groups) +
                                 len(swapped_in.prefill_seq_groups) +
                                 len(running_scheduled.prefill_seq_groups)),

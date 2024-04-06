@@ -586,7 +586,7 @@ class SchedulerConfig:
                 "sequences. Please increase max_num_batched_tokens or "
                 "decrease max_model_len.")
 
-        if self.max_num_batched_tokens < self.max_num_seqs:
+        if self.max_num_batched_tokens < self.max_num_seqs and not self.chunked_prefill_enabled:
             raise ValueError(
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) must "
                 "be greater than or equal to max_num_seqs "

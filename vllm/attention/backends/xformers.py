@@ -10,7 +10,8 @@ from xformers.ops.fmha.attn_bias import (AttentionBias,
                                          LowerTriangularMaskWithTensorBias)
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata)
+                                              AttentionMetadata,
+                                              AttentionMetadataPerStage)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
@@ -56,7 +57,7 @@ class XFormersBackend(AttentionBackend):
 
 
 @dataclass
-class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
+class XFormersMetadata(AttentionMetadataPerStage, PagedAttentionMetadata):
     """Metadata for XFormersbackend.
 
     NOTE: Any python object stored here is not updated when it is
@@ -67,19 +68,10 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     # Currently, input sequences can only contain all prompts
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
-    # (num_tokens,). The indices of the token slots that input tokens will be
-    # stored into. E.g., if `slot_mapping` is [35, 2, 17] and the block size
-    # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
-    # in block 0, and 1st slot in block 1, respectively.
-    slot_mapping: torch.Tensor
     # (batch_size,). The prompt length per sequence. None if it is a decoding.
     prompt_lens: Optional[List[int]]
     # prompt_lens stored as a tensor.
     prompt_lens_tensor: Optional[torch.Tensor]
-    # The number of prompt tokens. Doesn't include padding.
-    num_prompt_tokens: int
-    # The number of generation tokens. Doesn't include padding.
-    num_generation_tokens: int
 
     # NOTE(sang): Definition of context_len, subquery_len, and seqlen.
     # |---------- N-1 iteration --------|
@@ -125,11 +117,11 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
 class XFormersImpl(AttentionImpl):
     """
     If the input tensors contain prompt tokens, the layout is as follows:
-    |<--------------- num_prompt_tokens --------------->|	
+    |<--------------- num_prefill_tokens --------------->|	
     |<--prompt_0-->|<--prompt_1-->|...|<--prompt_N-1--->|
 
     Otherwise, the layout is as follows:	
-    |<------------------ num_generation_tokens (M) ----------------->|	
+    |<------------------ num_decode_tokens (M) ----------------->|	
     |<--generation_0-->|..........|<--generation_M-1-->|<--padding-->|
 
     Generation tokens can contain padding when cuda-graph is used.
@@ -177,7 +169,7 @@ class XFormersImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: Optional[torch.Tensor],
-        attn_metadata: XFormersMetadata,
+        attn_metadata: AttentionMetadata[XFormersMetadata],
         kv_scale: float,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
@@ -209,9 +201,27 @@ class XFormersImpl(AttentionImpl):
                                                 attn_metadata.kv_cache_dtype,
                                                 kv_scale)
 
-        if attn_metadata.is_prompt:
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        print(f"SANG-TODO original query: {query.size()}")
+        output = torch.empty_like(query)
+        decode_query = query[num_prefill_tokens:]
+        query = query[:num_prefill_tokens]
+        key = key[:num_prefill_tokens]
+        value = value[:num_prefill_tokens]
+        print(f"SANG-TODO {num_prefill_tokens=} {num_decode_tokens=}")
+        print(f"SANG-TODO {query.size()=} {decode_query.size()=}")
+
+        assert query.shape[0] == num_prefill_tokens
+        assert decode_query.shape[0] == num_decode_tokens
+
+        if num_prefill_tokens > 0:
+            print("SANG-TODO run prefill")
+            prefill_output = output[:num_prefill_tokens]
+            prefill_meta = attn_metadata.prefill_metadata
+            assert prefill_meta is not None
             # Prompt run.
-            if kv_cache is None or attn_metadata.block_tables.numel() == 0:
+            if kv_cache is None or prefill_meta.block_tables.numel() == 0:
                 # normal attention.
                 # block tables are empty if the prompt does not have a cached
                 # prefix.
@@ -234,9 +244,8 @@ class XFormersImpl(AttentionImpl):
                                                   value.shape[-1])
 
                 if self.use_naive_attention:
-                    output = torch.empty_like(query)
                     start = 0
-                    for _, prompt_len in enumerate(attn_metadata.prompt_lens):
+                    for _, prompt_len in enumerate(prefill_meta.prompt_lens):
                         end = start + prompt_len
                         out = _naive_masked_attention(
                             query[None, start:end],
@@ -255,37 +264,40 @@ class XFormersImpl(AttentionImpl):
                     # with input tensor's size and stride (at least one
                     # dimension spans across two contiguous subspaces).
                     # Use reshape instead.
-                    return output.reshape(num_tokens, hidden_size)
+                    return prefill_output.reshape(num_tokens, hidden_size)
 
-                output = self._run_memory_efficient_xformers_forward(
-                    query, key, value, attn_metadata)
+                prefill_output = self._run_memory_efficient_xformers_forward(
+                    query, key, value, prefill_meta)
             else:
                 # prefix-enabled attention
                 # TODO(Hai) this triton kernel has regression issue (broke) to
                 # deal with different data types between KV and FP8 KV cache,
                 # to be addressed separately.
-                output = PagedAttention.forward_prefix(
+                prefill_output = PagedAttention.forward_prefix(
                     query,
                     key,
                     value,
                     key_cache,
                     value_cache,
-                    attn_metadata.block_tables,
-                    attn_metadata.subquery_start_loc,
-                    attn_metadata.prompt_lens_tensor,
-                    attn_metadata.context_lens,
-                    attn_metadata.max_subquery_len,
+                    prefill_meta.block_tables,
+                    prefill_meta.subquery_start_loc,
+                    prefill_meta.prompt_lens_tensor,
+                    prefill_meta.context_lens,
+                    prefill_meta.max_subquery_len,
                     self.alibi_slopes,
                 )
-        else:
-            # Decoding run.
-            output = PagedAttention.forward_decode(
-                query,
+
+        if num_decode_tokens > 0:
+            print("SANG-TODO run decode")
+            decode_meta = attn_metadata.decode_metadata
+            assert decode_meta is not None
+            output[num_prefill_tokens:] = PagedAttention.forward_decode(
+                decode_query,
                 key_cache,
                 value_cache,
-                attn_metadata.block_tables,
-                attn_metadata.context_lens,
-                attn_metadata.max_context_len,
+                decode_meta.block_tables,
+                decode_meta.context_lens,
+                decode_meta.max_context_len,
                 attn_metadata.kv_cache_dtype,
                 self.num_kv_heads,
                 self.scale,
@@ -307,10 +319,10 @@ class XFormersImpl(AttentionImpl):
         tokens are flattened in to `query` input.
 
         Args:
-            output: shape = [num_prompt_tokens, num_heads, head_size]
-            query: shape = [num_prompt_tokens, num_heads, head_size]
-            key: shape = [num_prompt_tokens, num_kv_heads, head_size]
-            value: shape = [num_prompt_tokens, num_kv_heads, head_size]
+            output: shape = [num_prefill_tokens, num_heads, head_size]
+            query: shape = [num_prefill_tokens, num_heads, head_size]
+            key: shape = [num_prefill_tokens, num_kv_heads, head_size]
+            value: shape = [num_prefill_tokens, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         """
         # Set attention bias if not provided. This typically happens at

@@ -36,7 +36,8 @@ def test_prepare_prompt(batch_size):
                                                prompt_len - 1)
         selected_token_start_idx += prompt_len
     (input_tokens, input_positions, attn_metadata, return_prompt_lens, _, _, _,
-     _, _) = (model_runner._prepare_prompt(seq_group_metadata_list))
+     _, _,
+     slot_mapping) = (model_runner._prepare_prompt(seq_group_metadata_list))
     assert return_prompt_lens == prompt_lens
 
     # Verify input metadata is correct for prompts.
@@ -85,21 +86,21 @@ def test_prepare_prompt(batch_size):
     assert attn_metadata.use_cuda_graph is False
     assert attn_metadata.kv_cache_dtype == "auto"
 
-    assert input_tokens.shape == (sum(prompt_lens), )
-    assert input_positions.shape == (sum(prompt_lens), )
+    assert len(input_tokens) == sum(prompt_lens)
+    assert len(input_positions) == sum(prompt_lens)
     torch.testing.assert_close(input_tokens, input_positions)
 
     sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
                                                      prompt_lens,
                                                      subquery_lens=prompt_lens)
-    assert input_tokens.shape == (sum(prompt_lens), )
-    assert input_positions.shape == (sum(prompt_lens), )
+    assert len(input_tokens) == sum(prompt_lens)
+    assert len(input_positions) == sum(prompt_lens)
     actual = sampling_metadata.selected_token_indices
     expected = torch.tensor(expected_selected_token_indices,
                             device=actual.device,
                             dtype=actual.dtype)
     torch.testing.assert_close(actual, expected)
-    torch.testing.assert_close(input_tokens, input_positions)
+    assert input_tokens == input_positions
 
     actual = sampling_metadata.selected_token_indices
     expected = torch.tensor(expected_selected_token_indices,
@@ -143,7 +144,7 @@ def test_prepare_decode_cuda_graph(batch_size):
         assert seq_group_metadata.token_chunk_size == 1
         seq_group_metadata_list.append(seq_group_metadata)
 
-    input_tokens, input_positions, attn_metadata, _, _, _ = (
+    input_tokens, input_positions, attn_metadata, _, _, _, slot_mapping = (
         model_runner._prepare_decode(seq_group_metadata_list))
 
     expected_bs = _get_graph_batch_size(len(seq_group_metadata_list))
@@ -172,9 +173,9 @@ def test_prepare_decode_cuda_graph(batch_size):
     assert attn_metadata.use_cuda_graph is True
     assert attn_metadata.kv_cache_dtype == "auto"
 
-    assert input_tokens.shape == (expected_bs, )
-    assert input_positions.shape == (expected_bs, )
-    torch.testing.assert_close(input_tokens, input_positions)
+    assert len(input_tokens) == expected_bs
+    assert len(input_positions) == expected_bs
+    assert input_tokens == input_positions
 
     # Verify Sampling
     expected_selected_token_indices = []
@@ -190,3 +191,40 @@ def test_prepare_decode_cuda_graph(batch_size):
                             device=actual.device,
                             dtype=actual.dtype)
     torch.testing.assert_close(actual, expected)
+
+
+def test_empty_seq_group():
+    """Verify prepare prompt and decode returns empty output properly when there's no seq groups."""
+    model_config = ModelConfig(
+        "facebook/opt-125m",
+        "facebook/opt-125m",
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        download_dir=None,
+        load_format="dummy",
+        seed=0,
+        dtype="float16",
+        revision=None,
+        enforce_eager=False,
+    )
+    model_runner = ModelRunner(model_config, None, None, None, None)
+    model_runner.set_block_size(16)
+    seq_group_metadata_list = []
+    input_tokens, input_positions, attn_metadata, _, _, _, slot_mapping = (
+        model_runner._prepare_decode(seq_group_metadata_list))
+    assert len(input_tokens) == 0
+    assert len(input_positions) == 0
+    assert attn_metadata is None
+    assert len(slot_mapping) == 0
+
+    (input_tokens, input_positions, attn_metadata, return_prompt_lens, _, _, _,
+     _, _,
+     slot_mapping) = (model_runner._prepare_prompt(seq_group_metadata_list))
+    assert len(input_tokens) == 0
+    assert len(input_positions) == 0
+    assert attn_metadata is None
+    assert len(slot_mapping) == 0
+    assert len(return_prompt_lens) == 0
+
+
+# SANG-TODO Test chunked prefill case.

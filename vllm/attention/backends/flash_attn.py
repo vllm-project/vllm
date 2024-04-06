@@ -11,7 +11,8 @@ import torch
 from flash_attn import flash_attn_varlen_func
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata)
+                                              AttentionMetadata,
+                                              AttentionMetadataPerStage)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 
@@ -53,7 +54,8 @@ class FlashAttentionBackend(AttentionBackend):
 
 
 @dataclass
-class FlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
+class FlashAttentionMetadata(AttentionMetadataPerStage,
+                             PagedAttentionMetadata):
     """Metadata for FlashAttentionBackend.
 
     NOTE: Any python object stored here is not updated when it is
@@ -68,10 +70,6 @@ class FlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
     prompt_lens: Optional[List[int]]
     # prompt_lens stored as a tensor.
     prompt_lens_tensor: Optional[torch.Tensor]
-    # The number of prompt tokens. Doesn't include padding.
-    num_prompt_tokens: int
-    # The number of generation tokens. Doesn't include padding.
-    num_generation_tokens: int
 
     # NOTE(sang): Definition of context_len, subquery_len, and seqlen.
     # |---------- N-1 iteration --------|
@@ -155,7 +153,7 @@ class FlashAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: FlashAttentionMetadata,
+        attn_metadata: AttentionMetadata[FlashAttentionMetadata],
         kv_scale: float,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
