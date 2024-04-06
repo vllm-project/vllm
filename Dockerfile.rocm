@@ -24,16 +24,81 @@ VOLUME [ ${APP_MOUNT} ]
 WORKDIR ${APP_MOUNT}
 
 
+ARG BUILD_ROCBLAS="1"
+ARG ROCBLAS_BRANCH="82ab4ba9"
+
+RUN if [ "$BUILD_ROCBLAS" = "1" ]; then \
+    echo "ROCBLAS_BRANCH is $ROCBLAS_BRANCH"; \
+    fi
+# Build rocBLAS
+RUN if [ "$BUILD_ROCBLAS" = "1" ] ; then \
+    mkdir -p libs \
+    && cd libs \
+    && git clone https://github.com/ROCm/rocBLAS \
+    && cd rocBLAS \
+    && git checkout ${ROCBLAS_BRANCH} \
+    && ./install.sh -i --architecture ${PYTORCH_ROCM_ARCH} \
+    && cd .. && rm -rf rocBLAS \
+    && sed -i 's/, rocblas-dev \(.*\), rocfft-dev/, rocfft-dev/g' /var/lib/dpkg/status \
+    && sed -i 's/, rocblas \(.*\), rocfft/, rocfft/g' /var/lib/dpkg/status \
+    && cd ..; \
+    fi
+
+
+ARG ROCSOLVER_BRANCH="8b27faff"
+
+RUN if [ "$BUILD_ROCBLAS" = "1" ]; then \
+    echo "ROCSOLVER_RBANCH is $ROCSOLVER_BRANCH"; \
+    fi
+RUN if [ "$BUILD_ROCBLAS" = "1" ] ; then \
+    mkdir -p libs \
+    && cd libs \
+    && git clone https://github.com/ROCm/rocSOLVER \
+    && cd rocSOLVER \
+    && git checkout ${ROCSOLVER_BRANCH} \
+    && SCCACHE_IDLE_TIMEOUT=1800 ./install.sh -i --architecture ${PYTORCH_ROCM_ARCH} \
+    && cd .. && rm -rf rocSOLVER \
+    && sed -i 's/, rocsolver-dev \(.*\), rocsparse-dev/, rocsparse-dev/g' /var/lib/dpkg/status \
+    && sed -i 's/, rocsolver \(.*\), rocsparse/, rocsparse/g' /var/lib/dpkg/status \
+    && cd ..; \
+    fi
+
+
+ARG BUILD_HIPBLAS="1"
+ARG HIPBLAS_BRANCH="b77a9fb"
+
+RUN if [ "$BUILD_HIPBLAS" = "1" ]; then \
+    echo "HIPBLAS_BRANCH is $HIPBLAS_BRANCH"; \
+    fi
+RUN if [ "$BUILD_HIPBLAS" = "1" ] ; then \
+    mkdir -p libs \
+    && cd libs \
+    && git clone https://github.com/ROCm/hipBLAS \
+    && cd hipBLAS \
+    && git checkout ${HIPBLAS_BRANCH} \
+    && ./install.sh -i \
+    && cd .. && rm -rf hipBLAS \
+    && sed -i 's/hipblas-dev \(.*\), hipblaslt-dev/hipblaslt-dev/g' /var/lib/dpkg/status \
+    && sed -i 's/hipblas \(.*\), hipblaslt/hipblaslt/g' /var/lib/dpkg/status \
+    && sed -i 's/hipblas-dev \(.*\), hipcub-dev/hipcub-dev/g' /var/lib/dpkg/status \
+    && sed -i 's/hipblas \(.*\), hipfft/hipfft/g' /var/lib/dpkg/status \
+    && cd ..; \
+    fi
+
+
 # whether to build hipBLASLt
 ARG BUILD_HIPBLASLT="1"
-ARG HIPBLASLT_BRANCH="5a97711"
+ARG HIPBLASLT_BRANCH="80a95e9f"
 
 RUN if [ "$BUILD_HIPBLASLT" = "1" ]; then \
     echo "HIPBLASLT_BRANCH is $HIPBLASLT_BRANCH"; \
     fi
 # Build HipblasLt
 RUN if [ "$BUILD_HIPBLASLT" = "1" ] ; then \
-    mkdir -p libs \
+    sed -i 's/, hipblaslt-dev \(.*\), hipcub-dev/, hipcub-dev/g' /var/lib/dpkg/status \
+    && sed -i 's/, hipblaslt \(.*\), hipfft/, hipfft/g' /var/lib/dpkg/status \
+    && apt-get purge -y hipblaslt \
+    && mkdir -p libs \
     && cd libs \
     && git clone https://github.com/ROCm/hipBLASLt \
     && cd hipBLASLt \
@@ -46,12 +111,32 @@ RUN if [ "$BUILD_HIPBLASLT" = "1" ] ; then \
     fi
 
 
+ARG BUILD_HIPSOLVER="1"
+ARG HIPSOLVER_BRANCH="3d28b8b"
+RUN if [ "$BUILD_HIPSOLVER" = "1" ]; then \
+    echo "HIPSOLVER_BRANCH is $HIPSOLVER_BRANCH"; \
+    fi
+RUN if [ "$BUILD_HIPSOLVER" = "1" ] ; then \
+    mkdir -p libs \
+    && cd libs \
+    && git clone https://github.com/ROCm/hipSOLVER \
+    && cd hipSOLVER \
+    && git checkout ${HIPSOLVER_BRANCH} \
+    && apt update && apt install -y libsuitesparse-dev \
+    && ./install.sh -i \
+    && cd .. && rm -rf hipSOLVER \
+    && sed -i 's/hipsolver-dev \(.*\), hipsparse-dev/hipsparse-dev/g' /var/lib/dpkg/status \
+    && sed -i 's/hipsolver \(.*\), hipsparse/hipsparse/g' /var/lib/dpkg/status \
+    && cd ..; \
+    fi
+
+
 RUN python3 -m pip install --upgrade pip
-RUN python3 -m pip uninstall -y sccache && rm -rf /var/lib/apt/lists/*
+RUN rm -rf /var/lib/apt/lists/*
 
 
 # whether to build RCCL
-ARG BUILD_RCCL="1"
+ARG BUILD_RCCL="0"
 ARG RCCL_BRANCH="9398253"
 
 RUN if [ "$BUILD_RCCL" = "1" ]; then \
@@ -70,6 +155,7 @@ RUN if [ "$BUILD_RCCL" = "1" ]; then \
     && dpkg -i *.deb \
     && cd ../.. \
     && rm -r rccl \
+    && sed -i 's/, rccl-dev \(.*\), rocalution/, rocalution/g' /var/lib/dpkg/status \
     && cd ..; \
     fi
 
