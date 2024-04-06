@@ -20,7 +20,7 @@ runs:
       pip3 install pytest
 
       SUCCESS=0
-      python .github/scripts/test_lm_eval_sweep.py -s -v || SUCCESS=$?
+      pytest .github/scripts/test_lm_eval_sweep.py -s -v || SUCCESS=$?
       echo "test=${SUCCESS}" >> "$GITHUB_OUTPUT"
       exit ${SUCCESS}
     shell: bash
