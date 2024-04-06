@@ -70,7 +70,7 @@ class XFormersMetadata(AttentionMetadataPerStage, PagedAttentionMetadata):
     is_prompt: bool
     # (batch_size,). The prompt length per sequence. None if it is a decoding.
     prompt_lens: Optional[List[int]]
-    # prompt_lens_tensor stored as a tensor.
+    # prompt_lens stored as a tensor.
     prompt_lens_tensor: Optional[torch.Tensor]
 
     # NOTE(sang): Definition of context_len, subquery_len, and seqlen.
@@ -117,11 +117,11 @@ class XFormersMetadata(AttentionMetadataPerStage, PagedAttentionMetadata):
 class XFormersImpl(AttentionImpl):
     """
     If the input tensors contain prompt tokens, the layout is as follows:
-    |<--------------- num_prefill_tokens --------------->|	
+    |<--------------- num_prefill_tokens -------------->|	
     |<--prompt_0-->|<--prompt_1-->|...|<--prompt_N-1--->|
 
     Otherwise, the layout is as follows:	
-    |<------------------ num_decode_tokens (M) ----------------->|	
+    |<---------------------- num_decode_tokens --------------------->|	
     |<--generation_0-->|..........|<--generation_M-1-->|<--padding-->|
 
     Generation tokens can contain padding when cuda-graph is used.
@@ -129,6 +129,15 @@ class XFormersImpl(AttentionImpl):
 
     The prompts might have different lengths, while the generation tokens
     always have length 1.
+
+    If chunked prefill is enabled, prefill tokens and decode tokens can be
+    batched together in a flattened 1D query.
+
+    |<----- num_prefill_tokens ---->|<------- num_decode_tokens ----------->|	
+    |<-prompt_0->|...|<-prompt_N-1->|<-generation_0->|...|<-generation_M-1->|
+
+    Currently, cuda graph is disabled for chunked prefill, meaning there's no
+    padding between prefill and decode tokens.
     """
 
     def __init__(
@@ -205,8 +214,11 @@ class XFormersImpl(AttentionImpl):
         num_decode_tokens = attn_metadata.num_decode_tokens
         assert key.shape[0] == num_prefill_tokens + num_decode_tokens
         assert value.shape[0] == num_prefill_tokens + num_decode_tokens
+
         output = torch.empty_like(query)
+        # Query for decode. KV is not needed because it is already cached.
         decode_query = query[num_prefill_tokens:]
+        # QKV for prefill.
         query = query[:num_prefill_tokens]
         key = key[:num_prefill_tokens]
         value = value[:num_prefill_tokens]
@@ -217,6 +229,7 @@ class XFormersImpl(AttentionImpl):
         if num_prefill_tokens > 0:
             prefill_meta = attn_metadata.prefill_metadata
             assert prefill_meta is not None
+
             # Prompt run.
             if kv_cache is None or prefill_meta.block_tables.numel() == 0:
                 # normal attention.
@@ -267,7 +280,7 @@ class XFormersImpl(AttentionImpl):
                 out = self._run_memory_efficient_xformers_forward(
                     query, key, value, prefill_meta).squeeze(0)
                 assert out.shape == output[:num_prefill_tokens].shape
-                output[:num_prefill_tokens] = out.squeeze(0)
+                output[:num_prefill_tokens] = out
             else:
                 # prefix-enabled attention
                 # TODO(Hai) this triton kernel has regression issue (broke) to

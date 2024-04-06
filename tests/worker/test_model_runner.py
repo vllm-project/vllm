@@ -39,6 +39,7 @@ def test_prepare_prompt(batch_size):
      _, _,
      slot_mapping) = (model_runner._prepare_prompt(seq_group_metadata_list))
     assert return_prompt_lens == prompt_lens
+    assert len(slot_mapping) == len(input_tokens)
 
     # Verify input metadata is correct for prompts.
     device = model_runner.device
@@ -146,6 +147,7 @@ def test_prepare_decode_cuda_graph(batch_size):
 
     input_tokens, input_positions, attn_metadata, _, _, _, slot_mapping = (
         model_runner._prepare_decode(seq_group_metadata_list))
+    assert len(slot_mapping) == len(input_tokens)
 
     expected_bs = _get_graph_batch_size(len(seq_group_metadata_list))
     # Verify input metadata is correct for prompts.

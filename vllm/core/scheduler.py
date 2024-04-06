@@ -831,12 +831,12 @@ class Scheduler:
         # Update swapped requests.
         self.swapped = remaining_swapped
         self.swapped.extend(running_scheduled.swapped_out)
-        groups = (prefills.seq_groups + running_scheduled.prefill_seq_groups +
-                  swapped_in.prefill_seq_groups +
-                  running_scheduled.decode_seq_groups +
-                  swapped_in.decode_seq_groups)
-        out = SchedulerOutputs(
-            scheduled_seq_groups=groups,
+        return SchedulerOutputs(
+            scheduled_seq_groups=(prefills.seq_groups +
+                                  running_scheduled.prefill_seq_groups +
+                                  swapped_in.prefill_seq_groups +
+                                  running_scheduled.decode_seq_groups +
+                                  swapped_in.decode_seq_groups),
             num_prefill_groups=(len(prefills.seq_groups) +
                                 len(swapped_in.prefill_seq_groups) +
                                 len(running_scheduled.prefill_seq_groups)),
@@ -850,8 +850,6 @@ class Scheduler:
                                  running_scheduled.num_lookahead_slots +
                                  swapped_in.num_lookahead_slots),
         )
-
-        return out
 
     def _schedule(self) -> SchedulerOutputs:
         """Schedule queued requests."""

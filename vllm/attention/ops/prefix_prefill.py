@@ -632,7 +632,7 @@ if triton.__version__ >= "2.1.0":
                               alibi_slopes=None):
 
         cap = torch.cuda.get_device_capability()
-        BLOCK = 64 if cap[0] >= 8 else 64
+        BLOCK = 128 if cap[0] >= 8 else 64
         # shape constraints
         Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
         assert Lq == Lk and Lk == Lv

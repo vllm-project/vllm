@@ -591,10 +591,15 @@ class ModelRunner:
                 multi_modal_input,
                 slot_mapping,
             ) = self._prepare_prompt(prefill_reqs)
-            (decode_input_tokens, decode_input_positions, decode_attn_metadata,
-             decode_lora_index_mapping, decode_lora_prompt_mapping,
-             decode_lora_requests,
-             decode_slot_mapping) = self._prepare_decode(decode_reqs)
+            (
+                decode_input_tokens,
+                decode_input_positions,
+                decode_attn_metadata,
+                decode_lora_index_mapping,
+                decode_lora_prompt_mapping,
+                decode_lora_requests,
+                decode_slot_mapping,
+            ) = self._prepare_decode(decode_reqs)
             sampling_metadata = self._prepare_sample(seq_group_metadata_list,
                                                      prompt_lens,
                                                      subquery_lens)
@@ -672,7 +677,6 @@ class ModelRunner:
                 metadata_dict = decode_attn_metadata.asdict_zerocopy()
                 broadcast_tensor_dict(metadata_dict, src=0)
         else:
-            # Prefill metadata.
             metadata_dict = broadcast_tensor_dict(src=0)
             input_tokens = metadata_dict.pop("input_tokens")
             input_positions = metadata_dict.pop("input_positions")
@@ -687,6 +691,7 @@ class ModelRunner:
             num_decode_tokens = metadata_dict.pop("num_decode_tokens")
             batch_type = metadata_dict.pop("batch_type")
 
+            # Create an attention metadata.
             prefill_attn_metadata = None
             decode_attn_metadata = None
             if batch_type == "prefill" or batch_type == "mixed":
@@ -705,7 +710,8 @@ class ModelRunner:
                 perform_sampling=False,
             )
 
-            # if it is a mixed batch, decode attn_metadata is also broadcasted.
+            # if it is a mixed batch, decode attn_metadata is broadcasted
+            # separately.
             if batch_type == "mixed":
                 metadata_dict = broadcast_tensor_dict(src=0)
                 decode_attn_metadata = self.attn_backend.make_metadata(
