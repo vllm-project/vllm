@@ -15,7 +15,7 @@ RUN echo "PYTORCH_ROCM_ARCH is $PYTORCH_ROCM_ARCH"
 # Install some basic utilities
 RUN apt-get update && apt-get install python3 python3-pip -
 RUN apt-get update && apt-get install -y \
-    sqlite3 libsqlite3-dev libfmt-dev
+    sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev
 
 ### Mount Point ###
 # When launching the container, mount the code directory to /app
