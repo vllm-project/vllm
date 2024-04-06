@@ -10,12 +10,10 @@
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 
-import os
-import sys
-from sphinx.ext import autodoc
 import logging
+import sys
 
-sys.path.insert(0, os.path.abspath(os.path.join('..', '..')))
+from sphinx.ext import autodoc
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +72,7 @@ html_theme_options = {
 
 # Mock out external dependencies here.
 autodoc_mock_imports = [
+    "cpuinfo",
     "torch",
     "transformers",
     "psutil",

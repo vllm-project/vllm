@@ -7,8 +7,8 @@ from typing import List, Optional
 import pytest
 
 from vllm.lora.request import LoRARequest
-from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.sequence import Sequence
+from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 
 # Make two prefixes with different first blocks.
 prefix_start = [("You are an expert"), ("You are a")]

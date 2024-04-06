@@ -4,6 +4,7 @@
 """A HuggingFace-style model configuration."""
 import warnings
 from typing import Any, Dict, Optional, Union
+
 from transformers import PretrainedConfig
 
 attn_config_defaults: Dict = {

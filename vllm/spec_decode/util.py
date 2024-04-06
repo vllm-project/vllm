@@ -1,8 +1,10 @@
-import torch
-from typing import List, Tuple
-from vllm.sequence import SequenceGroupMetadata, SamplerOutput
 from contextlib import contextmanager
 from itertools import chain
+from typing import List, Tuple
+
+import torch
+
+from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 
 SeqId = int
 
