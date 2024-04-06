@@ -120,12 +120,14 @@ class GPUExecutor(ExecutorBase):
                       seq_group_metadata_list: List[SequenceGroupMetadata],
                       blocks_to_swap_in: Dict[int, int],
                       blocks_to_swap_out: Dict[int, int],
-                      blocks_to_copy: Dict[int, List[int]]) -> SamplerOutput:
+                      blocks_to_copy: Dict[int, List[int]],
+                      cache_fuse_metadata=None) -> SamplerOutput:
         output = self.driver_worker.execute_model(
             seq_group_metadata_list=seq_group_metadata_list,
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
+            cache_fuse_metadata=cache_fuse_metadata,
         )
         return output
 
@@ -154,12 +156,14 @@ class GPUExecutorAsync(GPUExecutor, ExecutorAsyncBase):
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
+        cache_fuse_metadata=None
     ) -> SamplerOutput:
         output = await make_async(self.driver_worker.execute_model)(
             seq_group_metadata_list=seq_group_metadata_list,
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
-            blocks_to_copy=blocks_to_copy)
+            blocks_to_copy=blocks_to_copy,
+            cache_fuse_metadata=cache_fuse_metadata)
         return output
 
     async def check_health_async(self) -> None:

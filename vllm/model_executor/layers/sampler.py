@@ -2,6 +2,7 @@
 from typing import Dict, List, Optional, Tuple
 
 import torch
+import torch.distributed
 import torch.nn as nn
 
 from vllm.model_executor.parallel_utils.communication_op import (
@@ -59,26 +60,33 @@ class Sampler(nn.Module):
         sampling_metadata: SamplingMetadata,
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[SamplerOutput]:
+        
+        
         # Get the hidden states that we use for sampling.
         if self.logits_as_hidden_states:
             logits = hidden_states
         else:
             hidden_states = _prune_hidden_states(hidden_states,
                                                  sampling_metadata)
-
+            
             # Get the logits for the next tokens.
-            logits = self._get_logits(hidden_states, embedding, embedding_bias)
-
+            logits = hidden_states#self._get_logits(hidden_states, embedding, embedding_bias)
+        print(0)
         # Only perform sampling in the driver worker.
         # Note: `_get_logits` is still distributed across TP workers because
         # the `embedding` weight is distributed across TP workers.
         # TODO(zhuohan): Change the get_logits part to a separate stage.
         if not sampling_metadata.perform_sampling:
             return None
-
+        
+        print(hidden_states.shape)
+        print(logits.shape)
+        #import pdb
+        #pdb.set_trace()
+        #torch.distributed.barrier()
         assert logits is not None
         _, vocab_size = logits.shape
-
+        print(1)
         # Apply logits processors (if any).
         logits = _apply_logits_processors(logits, sampling_metadata)
 
@@ -86,7 +94,7 @@ class Sampler(nn.Module):
         (sampling_tensors, do_penalties, do_top_p_top_k,
          do_min_p) = SamplingTensors.from_sampling_metadata(
              sampling_metadata, vocab_size, logits.device, logits.dtype)
-
+        print(2)
         # Apply presence and frequency penalties.
         if do_penalties:
             logits = _apply_penalties(logits, sampling_tensors.prompt_tokens,
@@ -98,7 +106,7 @@ class Sampler(nn.Module):
         # Apply temperature scaling.
         # Use in-place division to avoid creating a new tensor.
         logits.div_(sampling_tensors.temperatures.unsqueeze_(dim=1))
-
+        print(3)
         if do_top_p_top_k:
             logits = _apply_top_k_top_p(logits, sampling_tensors.top_ps,
                                         sampling_tensors.top_ks)
@@ -112,13 +120,18 @@ class Sampler(nn.Module):
         # Compute the log probabilities.
         # Use log_softmax to ensure numerical stability.
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
-
+        print(4)
+        print(sampling_metadata)
         # Sample the next tokens.
         sample_results = _sample(probs, logprobs, sampling_metadata)
+        print(4.5)
         # Get the logprobs query results.
         prompt_logprobs, sample_logprobs = _get_logprobs(
             logprobs, sampling_metadata, sample_results)
-        
+        print(5)
+        #sample_results = []
+        #prompt_logprobs = []
+        #sample_logprobs = []
         return _build_sampler_output(sample_results, sampling_metadata,
                                      prompt_logprobs, sample_logprobs)
 
@@ -252,15 +265,19 @@ def _greedy_sample(
     samples = samples.tolist()
     sample_idx = 0
     results = []
+    print(4.20)
     for seq_group in selected_seq_groups:
+        print(4.21)
         seq_ids, _ = seq_group
         num_parent_seqs = len(seq_ids)
         assert num_parent_seqs == 1, (
             "Greedy sampling should have only one seq.")
+        print(4.22)
         parent_ids = list(range(num_parent_seqs))
         next_token_ids = [samples[sample_idx]]
         results.append((next_token_ids, parent_ids))
         sample_idx += num_parent_seqs
+        print(4.23)
     return results
 
 
@@ -391,11 +408,16 @@ def _sample(
     sample_results_dict: Dict[int, Tuple[List[int], List[int]]] = {}
     sample_metadata = {}
     multinomial_samples = {}
-
+    print(4.1)
+    print(sample_metadata)
+    print(sampling_metadata.categorized_sample_indices)
+    
     # Counterintiutively, having two loops here is actually faster.
     # The first loop can run without waiting on GPU<->CPU sync.
     for sampling_type in SamplingType:
+        print(categorized_sample_indices)
         sample_indices = categorized_sample_indices[sampling_type]
+        print(sample_indices)
         num_tokens = len(sample_indices)
         if num_tokens == 0:
             continue
@@ -405,8 +427,11 @@ def _sample(
         sample_metadata[sampling_type] = (seq_group_ids, seq_groups,
                                           is_prompts, sample_indices)
         if sampling_type == SamplingType.GREEDY:
+            print(logprobs.shape)
+            print(sample_indices.long())
             greedy_samples = torch.argmax(logprobs[sample_indices.long()],
                                           dim=-1)
+            print("greedy_samples:",greedy_samples)
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
             max_best_of = 1
             for seq_group, is_prompt in zip(seq_groups, is_prompts):
@@ -425,13 +450,19 @@ def _sample(
             raise ValueError(f"Unsupported sampling type: {sampling_type}")
 
     # GPU<->CPU sync happens in the loop below.
-
+    print(4.2)
     for sampling_type in SamplingType:
         if sampling_type not in sample_metadata:
             continue
+        print(sampling_type)
+        print(4.200)
         seq_group_ids, seq_groups, is_prompts, sample_indices = sample_metadata[
             sampling_type]
+        print(4.201)
         if sampling_type == SamplingType.GREEDY:
+            print(4.202)
+            print("seq_group:", seq_groups)
+            print("greedy_samples:", greedy_samples)
             sample_results = _greedy_sample(seq_groups, greedy_samples)
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
             sample_results = _random_sample(seq_groups, is_prompts,
@@ -441,11 +472,12 @@ def _sample(
                                                  sampling_metadata.seq_data,
                                                  beam_search_logprobs)
         sample_results_dict.update(zip(seq_group_ids, sample_results))
-
+    print(4.3)
     sample_results = [
         sample_results_dict[i]
         for i in range(len(sampling_metadata.seq_groups))
     ]
+    print(4.4)
     return sample_results
 
 

@@ -6,7 +6,7 @@ from vllm.metis.kv_loader import kv_manager
 
 os.environ['CUDA_VISIBLE_DEVICES']= '0'
 # Sample prompts.
-long_prompt = ["You are an expert school principal in JCL library"] * 400
+long_prompt = ["You are an expert school principal in JCL library"] * 3800
 prompts = [' '.join(long_prompt)]
 #prompts = [
 #    "Hello, my name is Jiayi Yao",
@@ -15,11 +15,10 @@ prompts = [' '.join(long_prompt)]
 sampling_params = SamplingParams(temperature=0, max_tokens=1)
 
 # Create an LLM.
-llm = LLM(model="meta-llama/Llama-2-7b-chat-hf", gpu_memory_utilization=0.8)
-#llm = LLM(model="lmsys/longchat-7b-16k")
-#llm = LLM(model="gpt2")
-# Generate texts from the prompts. The output is a list of RequestOutput objects
-# that contain the prompt, generated text, and other information.
+llm = LLM(model="meta-llama/Llama-2-7b-chat-hf", gpu_memory_utilization=0.99)
+#llm = LLM(model="TheBloke/Llama-2-70b-Chat-AWQ", 
+#          quantization="AWQ",tensor_parallel_size=2,
+#          enforce_eager=True)
 
 
 def _pre_make_partial_bias(device,

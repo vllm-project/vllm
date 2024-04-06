@@ -3,7 +3,6 @@ import importlib
 from typing import List, Optional
 
 import torch
-import torch.distributed
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
                                          LowerTriangularMaskWithTensorBias,
@@ -55,7 +54,6 @@ class XFormersBackend:
         input_metadata: InputMetadata,
         status: int,
         cache_fuse_metadata: dict,
-        cache_load_metadata: dict,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
@@ -71,7 +69,8 @@ class XFormersBackend:
         Returns:
             shape = [batch_size, seq_len, num_heads * head_size]
         """
-        batch_size, seq_len, hidden_size = query.shape        
+        batch_size, seq_len, hidden_size = query.shape
+        
         
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)
@@ -84,27 +83,8 @@ class XFormersBackend:
             # Get cached KV
             # In this step, Jiayi is assuming that we have the loaded key and value tensors in value_old and key_old.
             # He uses empty_like to put in random numbers right now to substitute. 
-            # import pdb
-            # pdb.set_trace()
-            
             value_old = torch.empty_like(value)
             key_old = torch.empty_like(key)
-            # print("We are saving kv for shape: ", value_old.shape)
-            # torch.save(value_old, f"/local/hanchen/kv_temp/{str(cache_load_metadata['layer'])}_0")
-            # torch.save(key_old, f"/local/hanchen/kv_temp/{str(cache_load_metadata['layer'])}_1")
-
-            #FIXME Hanchen need to add cuda device. also change to directly load into GPU memory
-
-            #key_old = cache_load_metadata['loader'].fetch_kv_layer(cache_load_metadata['hash'],
-            #                                                        cache_load_metadata['layer'], True, 'cuda:0')
-            #value_old =  cache_load_metadata['loader'].fetch_kv_layer(cache_load_metadata['hash'],
-            #                                                        cache_load_metadata['layer'], False, 'cuda:0')
-            
-            # if (value_old is None or key_old is None):
-            #     exit("KV failure")
-
-            # pdb.set_trace()
-
             #FIXME(Jiayi): Optimize this kernel to only load value_old or even lesser stuff
             PagedAttentionImpl.load_and_reshape(key_old, value_old, key_cache,
                                                  value_cache, cache_fuse_metadata)
@@ -114,17 +94,9 @@ class XFormersBackend:
             temp_diff = torch.sum((value[:,:,:]-value_old[:,:,:])**2,dim=[1,2])
             top_indices = torch.topk(temp_diff, k=topk_num).indices
 
-            #top_indices = top_indices#.cpu().numpy().tolist()
-            xxx = [torch.zeros_like(top_indices), torch.zeros_like(top_indices)]
-            #torch.distributed.barrier()
-            torch.distributed.all_gather(xxx, top_indices)
-            #torch.distributed.barrier()
-            #print("xxx[0]:", xxx[0])
-            #print("xxx[1]:", xxx[1])
-            top_indices = torch_intersect1d(xxx[0],xxx[1])[:topk_num]
-            top_indices = top_indices.sort().values #Jiayi: only need this if use one node
-            #print(top_indices)
-            
+            top_indices = top_indices#.cpu().numpy().tolist()
+            top_indices.sort()
+                  
             # Add last token idx if not in topk
             if seq_len-1 not in top_indices:
                 top_indices = torch.cat([top_indices,torch.tensor([seq_len-1], device=top_indices.device)])
@@ -146,19 +118,10 @@ class XFormersBackend:
             cache_fuse_metadata["imp_token_indices"] = top_indices
             
             # Construct mask (attn bias)
-            #attn_bias = _make_partial_bias(cache_fuse_metadata, query.device, self.num_heads)
-            attn_bias = _make_partial_bias_70b(cache_fuse_metadata, query.device, self.num_kv_heads, self.num_queries_per_kv)
+            attn_bias = _make_partial_bias(cache_fuse_metadata, query.device, self.num_heads)
             #attn_bias = _fetch_partial_pre_mask(cache_fuse_metadata)
             cache_fuse_metadata["attn_bias"] = attn_bias
             
-            #This is to save memory
-            input_metadata.attn_bias=None
-        #if cache_fuse_metadata["check"]:
-        #    print(len(cache_fuse_metadata["imp_token_indices"]))
-        #if torch.distributed.get_rank()==1 and status in [1]:
-        #    import pdb
-        #    pdb.set_trace()
-        #torch.distributed.barrier()
         
         '''
         if seq_len>4000 or cache_fuse_metadata["org_seq_len"]>4000:
@@ -216,21 +179,11 @@ class XFormersBackend:
         # FIXME(Jiayi): can we do kernel fusion here?
         if status in [2]: #load memory if `after_check`
             key = torch.empty(cache_fuse_metadata["key_shape"], 
-                               dtype=key.dtype, 
-                               device=key.device)
-            # torch.save(key, f"/local/hanchen/kv_temp/{str(cache_load_metadata['layer'])}_1")
+                              dtype=key.dtype, 
+                              device=key.device)
             value = torch.empty(cache_fuse_metadata["value_shape"],
                                 dtype=value.dtype, 
                                 device=value.device)
-            # torch.save(value, f"/local/hanchen/kv_temp/{str(cache_load_metadata['layer'])}_0")
-            
-            #key = cache_load_metadata['loader'].fetch_kv_layer(cache_load_metadata['hash'],
-            #                                                    cache_load_metadata['layer'], True, 'cuda:0')
-            #value =  cache_load_metadata['loader'].fetch_kv_layer(cache_load_metadata['hash'],
-            #                                                        cache_load_metadata['layer'], False, 'cuda:0')
-            # assert(value_old.shape == key.shape)
-            #if (value is None or key is None):
-            #    exit("KV failure")
             #import pdb
             #pdb.set_trace()
             PagedAttentionImpl.load_and_reshape(key, value, key_cache,
@@ -241,12 +194,12 @@ class XFormersBackend:
             torch.cuda.synchronize()
             temp_time = start.elapsed_time(end)
             print(f"Cache load time:{temp_time}")
+        '''
         if seq_len>4000 or cache_fuse_metadata["org_seq_len"]>4000:
             torch.cuda.synchronize()
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
             start.record()
-        '''
         if input_metadata.is_prompt:
             # Prompt run.
             if (key_cache is None or value_cache is None
@@ -286,8 +239,7 @@ class XFormersBackend:
                             attn_bias = attn_bias.make_local_attention(
                                 self.sliding_window)
                         #HACK(Jiayi): force
-                        #input_metadata.attn_bias = _fetch_maetrailized_mask(query.shape[0],key.shape[0], self.num_heads, attn_bias,query.device,query.dtype)
-                        input_metadata.attn_bias = _fetch_maetrailized_mask_70b(query.shape[0], self.num_kv_heads, self.num_queries_per_kv, query.device,query.dtype)
+                        input_metadata.attn_bias = _fetch_maetrailized_mask(query.shape[0],key.shape[0],self.num_heads, attn_bias,query.device,query.dtype)
                     else:
                         input_metadata.attn_bias = _make_alibi_bias(
                             self.alibi_slopes, self.num_kv_heads, batch_size,
@@ -328,17 +280,17 @@ class XFormersBackend:
                 # Assign dynamic attention mask
                 if status in [1,2]:
                     out = xops.memory_efficient_attention_forward(
-                        query,
-                        key,
-                        value,
-                        attn_bias=cache_fuse_metadata["attn_bias"],
-                        p=0.0,
-                        scale=self.scale,
-                        op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if
-                        (is_hip()) else None,
+                    query,
+                    key,
+                    value,
+                    attn_bias=cache_fuse_metadata["attn_bias"],
+                    p=0.0,
+                    scale=self.scale,
+                    op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if
+                    (is_hip()) else None,
                     )
                 else:
-                    #print(input_metadata.attn_bias.shape)
+                
                     out = xops.memory_efficient_attention_forward(
                         query,
                         key,
@@ -463,33 +415,28 @@ def _fetch_maetrailized_mask(q_len,k_len,num_head,mask,device,dtype):
     ).copy_(attn_mask)[:, :, :, :seq_len]
     #attn_mask_padded = LowerTriangularMaskWithTensorBias(attn_mask_padded)
     return attn_mask_padded
+    
+    #return mask.materialize((1, num_head,q_len,k_len)).to(device).to(dtype) #HACK(Jiayi): 1 is a hack for batch size =1
+    
+def _fetch_partial_pre_mask(cache_fuse_metadata):
+    attn_mask = cache_fuse_metadata["pre_mask"]
+    imp_indices = cache_fuse_metadata['imp_token_indices']
+    seq_len = cache_fuse_metadata['org_seq_len']
+    attn_mask = attn_mask[:,:,imp_indices,]
+    attn_mask = attn_mask[:,:,:,:seq_len]
+    return attn_mask
 
-def _fetch_maetrailized_mask_70b(q_len,num_kv_heads,num_queries_per_kv,device,dtype):
-    seq_len = q_len
-    padded_len = (seq_len + 7) // 8 * 8
-    attn_mask = torch.triu(torch.ones(seq_len,
-                                      padded_len,
+def _make_pre_mask(seq_len, dtype, device, num_heads):
+    attn_mask = attn_mask = torch.triu(torch.ones(seq_len,
+                                      seq_len,
                                       dtype=dtype,
                                       device=device),
-                           diagonal=1)
-    #FIXME(Jiayi): The first 1 (bsz) is a hack
-    attn_mask = (attn_mask * torch.finfo(dtype).min).view(1, 1, 1, seq_len, padded_len) #FIXME(Jiayi): Now only focus on bsz=1
-    attn_mask = attn_mask.expand(1,num_kv_heads, num_queries_per_kv,-1,-1)
-    
-    attn_mask_padded = torch.empty(
-        1,
-        num_kv_heads,
-        num_queries_per_kv,
-        seq_len,
-        padded_len,
-        device=device,
-        dtype=dtype,
-    ).copy_(attn_mask)[:, :, :, :, :seq_len]
-    #attn_mask_padded = LowerTriangularMaskWithTensorBias(attn_mask_padded)
-    return attn_mask_padded
+                                      diagonal=1)
+    attn_mask = (attn_mask * torch.finfo(dtype).min).view(1, 1, seq_len, seq_len) #FIXME(Jiayi): Now only focus on bsz=1
+    attn_mask = attn_mask.expand(-1,num_heads,-1,-1)
+    return attn_mask
 
-
-
+#FIXME(Jiayi):This can be optimized
 def _make_partial_bias(cache_fuse_metadata, 
                        device,
                        num_heads):
@@ -515,36 +462,6 @@ def _make_partial_bias(cache_fuse_metadata,
         device=device,
         dtype=dtype,
     ).copy_(attn_mask)[:, :, :, :seq_len]
-    #attn_mask_padded = LowerTriangularMaskWithTensorBias(attn_mask_padded)
-    return attn_mask_padded
-
-def _make_partial_bias_70b(cache_fuse_metadata, 
-                       device,
-                       num_kv_heads,
-                       num_queries_per_kv):
-    seq_len = cache_fuse_metadata['org_seq_len']
-    padded_len = (seq_len + 7) // 8 * 8
-    dtype = cache_fuse_metadata['kv_cache_dtype']
-    imp_indices = cache_fuse_metadata['imp_token_indices']
-    attn_mask = torch.triu(torch.ones(padded_len,
-                                      padded_len,
-                                      dtype=dtype,
-                                      device=device),
-                           diagonal=1)
-    #FIXME(Jiayi): The first 1 (bsz) is a hack
-    attn_mask = (attn_mask * torch.finfo(dtype).min).view(1, 1, 1, padded_len, padded_len) #FIXME(Jiayi): Now only focus on bsz=1
-    attn_mask = attn_mask[:,:,:,imp_indices]
-    attn_mask = attn_mask.expand(1,num_kv_heads,num_queries_per_kv,-1,-1)
-    
-    attn_mask_padded = torch.empty(
-        1,
-        num_kv_heads,
-        num_queries_per_kv,
-        len(imp_indices),
-        padded_len,
-        device=device,
-        dtype=dtype,
-    ).copy_(attn_mask)[:, :, :, :,:seq_len]
     #attn_mask_padded = LowerTriangularMaskWithTensorBias(attn_mask_padded)
     return attn_mask_padded
 
@@ -607,17 +524,3 @@ def _ref_masked_attention_2(
     attn_weights = torch.softmax(attn_weights, dim=-1).to(value.dtype)
     out = torch.einsum("hqk,khd->qhd", attn_weights, value)
     return out
-
-def torch_intersect1d(t1: torch.Tensor, t2: torch.Tensor):
-    # NOTE: requires t1, t2 to be unique 1D Tensor in advance.
-    # Method: based on unique's count
-    num_t1 = t1.numel()
-    _, inv, cnt = torch.unique(torch.cat([t1,t2]), return_counts=True, return_inverse=True)
-    
-    cnt_12 = cnt[inv]
-    cnt_t2 = cnt_12[num_t1:]
-
-    inds_t2_exclusive = (cnt_t2 == 1).nonzero()[..., 0]
-
-    t2_exclusive = t2[inds_t2_exclusive]
-    return torch.cat([t1,t2_exclusive])

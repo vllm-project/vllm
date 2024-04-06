@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
+import torch.distributed
 from transformers import LlamaConfig
 
 from vllm.config import LoRAConfig
@@ -296,8 +297,8 @@ class LlamaModel(nn.Module):
         # dillute our improvement sometimes 
         self.cache_fuse_metadata = {"check_layers":[1],
                                     "check": False,
-                                    "recomp_ratios":[0.15],
-                                    "recomp_ratio":0.15,
+                                    "recomp_ratios":[1.0],
+                                    "recomp_ratio":1.0,
                                     "load_indices":[],
                                     "recomp_indices":[],
                                     "original_slot_mapping":None,
@@ -309,8 +310,8 @@ class LlamaModel(nn.Module):
                                     "org_seq_len": None,
                                     "pre_mask":None}
                                     #"batch_indices":[0]}
-        self.cache_load_metadata = { "loader" :  None,
-                                    "hash": "kv_temp"}
+        #self.cache_load_metadata = { "loader" :  None,
+        #                            "hash": "kv_temp"}
 
     def forward(
         self,
@@ -318,6 +319,8 @@ class LlamaModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
+        cache_fuse_metadata=None,
+        sampling_metadata=None
     ) -> torch.Tensor:
         #Jiayi: input_ids shape: [bsz, input_len]
         print(f"\033[33mHere, the input ids shape is {input_ids.shape}\033[0m")
@@ -330,10 +333,29 @@ class LlamaModel(nn.Module):
             print("\033[31mThis time we don't have any KV caches\033[0m")
         residual = None
         
+        #FIXME(Jiayi): This is a hack to make it run
+        if cache_fuse_metadata==None:
+            cache_fuse_metadata=self.cache_fuse_metadata
+        
         flag=None
         
-        if input_ids.shape[1]>4000:
+        if input_ids.shape[1]>3800:
             flag=True
+            self.cache_fuse_metadata = {"check_layers":[1],
+                                    "check": True,
+                                    "recomp_ratios":[0.15],
+                                    "recomp_ratio":0.15,
+                                    "load_indices":[],
+                                    "recomp_indices":[],
+                                    "original_slot_mapping":None,
+                                    "our_slot_mapping_for_check":None,
+                                    "our_slot_mapping":None,
+                                    "kv_cache_dtype": None,
+                                    "attn_bias": None,
+                                    "imp_token_indices": None,
+                                    "org_seq_len": None,
+                                    "pre_mask":None}
+            input_metadata.attn_bias = None #Jiayi: delete attn_bias from last inference and 
             torch.cuda.synchronize()
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
@@ -361,12 +383,12 @@ class LlamaModel(nn.Module):
                 elif i > self.cache_fuse_metadata["check_layers"][0]:
                     temp_status = 2 # after check
             
-            #if self.cache_fuse_metadata["check"]:
+            #if cache_fuse_metadata["check"]:
             #    import pdb
             #    pdb.set_trace()
             
             layer = self.layers[i]
-            self.cache_load_metadata['layer'] = i
+            #self.cache_load_metadata['layer'] = i
             hidden_states, residual = layer(
                 positions, #FIXME(Jiayi): positions need to be changed
                 hidden_states,
@@ -375,22 +397,24 @@ class LlamaModel(nn.Module):
                 residual,
                 status = temp_status,
                 cache_fuse_metadata = self.cache_fuse_metadata,
-                cache_load_metadata = self.cache_load_metadata
+                cache_load_metadata = None,
+                #cache_load_metadata = self.cache_load_metadata
             )
-            
+
             if temp_status==1:
                 positions = positions[:,self.cache_fuse_metadata["imp_token_indices"]]
         hidden_states, _ = self.norm(hidden_states, residual)
-        
         if flag:
             end.record()
             torch.cuda.synchronize()
             temp_time = start.elapsed_time(end)
             print(temp_time)
-            # import pdb
-            # pdb.set_trace()
-        
-        return hidden_states
+            #print(cache_fuse_metadata)
+            #import pdb
+            #pdb.set_trace()
+            #sampling_metadata.selected_token_indices[0]= len(self.cache_fuse_metadata["imp_token_indices"])-1
+            #sampling_metadata.prompt_lens[0] = len(self.cache_fuse_metadata["imp_token_indices"])
+        return hidden_states, sampling_metadata
 
 
 class LlamaForCausalLM(nn.Module):
@@ -451,10 +475,14 @@ class LlamaForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
+        cache_fuse_metadata=None,
+        sampling_metadata=None
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   input_metadata)
-        return hidden_states
+        hidden_states, sampling_metadata = self.model(input_ids, positions, kv_caches,
+                                   input_metadata, 
+                                   cache_fuse_metadata, 
+                                   sampling_metadata)
+        return hidden_states, sampling_metadata
 
     #HACK(Jiayi): sampler hacked
     def sample(

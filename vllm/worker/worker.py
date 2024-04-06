@@ -202,6 +202,7 @@ class Worker:
         blocks_to_swap_in: Optional[Dict[int, int]] = None,
         blocks_to_swap_out: Optional[Dict[int, int]] = None,
         blocks_to_copy: Optional[Dict[int, List[int]]] = None,
+        cache_fuse_metadata = None
     ) -> Optional[SamplerOutput]:
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
@@ -230,7 +231,8 @@ class Worker:
             return {}
 
         output = self.model_runner.execute_model(seq_group_metadata_list,
-                                                 self.gpu_cache)
+                                                 self.gpu_cache,
+                                                 cache_fuse_metadata)
         return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:

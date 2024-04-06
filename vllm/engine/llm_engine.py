@@ -560,7 +560,7 @@ class LLMEngine:
 
         return request_outputs
 
-    def step(self) -> List[RequestOutput]:
+    def step(self, cache_fuse_metadata=None) -> List[RequestOutput]:
         """Performs one decoding iteration and returns newly generated results.
 
         .. figure:: https://i.imgur.com/sv2HssD.png
@@ -617,7 +617,8 @@ class LLMEngine:
             output = self.model_executor.execute_model(
                 seq_group_metadata_list, scheduler_outputs.blocks_to_swap_in,
                 scheduler_outputs.blocks_to_swap_out,
-                scheduler_outputs.blocks_to_copy)
+                scheduler_outputs.blocks_to_copy,
+                cache_fuse_metadata=cache_fuse_metadata)
         else:
             output = []
 
