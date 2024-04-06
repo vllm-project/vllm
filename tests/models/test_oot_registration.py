@@ -1,11 +1,13 @@
 import torch
-from torch import nn
-from vllm.model_executor.sampling_metadata import SamplingMetadata
+
+from vllm import LLM, SamplingParams
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.opt import OPTForCausalLM
-from vllm import LLM, SamplingParams
+from vllm.model_executor.sampling_metadata import SamplingMetadata
+
 
 class MyOPTForCausalLM(OPTForCausalLM):
+
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
         # this dummy model always predicts the first token
@@ -14,9 +16,11 @@ class MyOPTForCausalLM(OPTForCausalLM):
         logits[:, 0] += 1.0
         return logits
 
+
 def test_oot_registration():
     # register our dummy model
-    ModelRegistry.register_out_of_tree_model("OPTForCausalLM", MyOPTForCausalLM)
+    ModelRegistry.register_out_of_tree_model("OPTForCausalLM",
+                                             MyOPTForCausalLM)
     prompts = ["Hello, my name is", "The text does not matter"]
     sampling_params = SamplingParams(temperature=0)
     llm = LLM(model="facebook/opt-125m")
@@ -24,7 +28,6 @@ def test_oot_registration():
     outputs = llm.generate(prompts, sampling_params)
 
     for output in outputs:
-        prompt = output.prompt
         generated_text = output.outputs[0].text
         # make sure only the first token is generated
         rest = generated_text.replace(first_token, "")
