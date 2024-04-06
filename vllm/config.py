@@ -90,7 +90,7 @@ class ModelConfig:
                  quantization_param_path: Optional[str] = None,
                  enforce_eager: bool = False,
                  max_context_len_to_capture: Optional[int] = None,
-                 max_logprobs: int = 5) -> None:
+                 max_logprobs: int = 5,) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
