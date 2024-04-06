@@ -117,7 +117,6 @@ If you are running api server with `python -m vllm.entrypoints.openai.api_server
     from vllm import ModelRegistry
     from your_code import YourModelForCausalLM
     ModelRegistry.register_model("YourModelForCausalLM", YourModelForCausalLM)
-    from vllm.entrypoints.openai.api_server import main
     import runpy
     runpy.run_module('vllm.entrypoints.openai.api_server', run_name='__main__')
 
