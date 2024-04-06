@@ -68,7 +68,8 @@ def main(args: argparse.Namespace):
             return latency
 
     print("Warming up...")
-    run_to_completion(profile_dir=None)
+    for _ in tqdm(range(args.num_iters_warmup), desc="Warmup iterations"):
+        run_to_completion(profile_dir=None)
 
     if args.profile:
         profile_dir = args.profile_result_dir
@@ -106,9 +107,13 @@ if __name__ == '__main__':
                         default=1,
                         help='Number of generated sequences per prompt.')
     parser.add_argument('--use-beam-search', action='store_true')
+    parser.add_argument('--num-iters-warmup',
+                        type=int,
+                        default=10,
+                        help='Number of iterations to run for warmup.')
     parser.add_argument('--num-iters',
                         type=int,
-                        default=3,
+                        default=30,
                         help='Number of iterations to run.')
     parser.add_argument('--trust-remote-code',
                         action='store_true',
