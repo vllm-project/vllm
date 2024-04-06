@@ -26,6 +26,7 @@ from transformers import PreTrainedTokenizerBase
 
 
 class BaseLogitsProcessor:
+
     def __init__(self, tokenizer: PreTrainedTokenizerBase):
         self.tokenizer = tokenizer
 
@@ -75,7 +76,7 @@ class BaseLogitsProcessor:
         setattr(tokenizer, "_outlines_adapted", True)  # noqa: B010
 
         return tokenizer
-    
+
     def unadapt_tokenizer(self, tokenizer: PreTrainedTokenizerBase):
         """Revert the changes made to the tokenizer"""
         tokenizer.decode = tokenizer._orig_decoder
