@@ -23,9 +23,6 @@ ARG APP_MOUNT=/app
 VOLUME [ ${APP_MOUNT} ]
 WORKDIR ${APP_MOUNT}
 
-RUN python3 -m pip install --upgrade pip
-RUN python3 -m pip install --no-cache-dir fastapi ninja tokenizers pandas
-
 
 # whether to build hipBLASLt
 ARG BUILD_HIPBLASLT="1"
@@ -41,8 +38,7 @@ RUN if [ "$BUILD_HIPBLASLT" = "1" ] ; then \
     && git clone https://github.com/ROCm/hipBLASLt \
     && cd hipBLASLt \
     && git checkout ${HIPBLASLT_BRANCH} \
-    && export GTEST_DIR="/opt/conda/lib/cmake/GTest" \
-    && ./install.sh -idc --architecture ${PYTORCH_ROCM_ARCH} \
+    && ./install.sh -i --architecture ${PYTORCH_ROCM_ARCH} \
     && cd .. && rm -rf hipBLASLt \
     && sed -i 's/, hipblaslt-dev \(.*\), hipcub-dev/, hipcub-dev/g' /var/lib/dpkg/status \
     && sed -i 's/, hipblaslt \(.*\), hipfft/, hipfft/g' /var/lib/dpkg/status \
@@ -50,7 +46,9 @@ RUN if [ "$BUILD_HIPBLASLT" = "1" ] ; then \
     fi
 
 
+RUN python3 -m pip install --upgrade pip
 RUN python3 -m pip uninstall -y sccache && rm -rf /var/lib/apt/lists/*
+
 
 # whether to build RCCL
 ARG BUILD_RCCL="1"
