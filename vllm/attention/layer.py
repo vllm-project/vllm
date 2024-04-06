@@ -4,7 +4,8 @@ from typing import List, Optional
 import torch
 import torch.nn as nn
 
-from vllm.attention.backends.abstract import AttentionMetadataPerStage, AttentionMetadata
+from vllm.attention.backends.abstract import (AttentionMetadata,
+                                              AttentionMetadataPerStage)
 from vllm.attention.selector import get_attn_backend
 
 

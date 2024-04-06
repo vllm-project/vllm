@@ -6,7 +6,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.attention import AttentionMetadata, AttentionMetadataPerStage, get_attn_backend
+from vllm.attention import (AttentionMetadata, AttentionMetadataPerStage,
+                            get_attn_backend)
 from vllm.config import (DeviceConfig, LoRAConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VisionLanguageConfig)
 from vllm.logger import init_logger

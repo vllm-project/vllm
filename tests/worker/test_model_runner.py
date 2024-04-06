@@ -194,7 +194,7 @@ def test_prepare_decode_cuda_graph(batch_size):
 
 
 def test_empty_seq_group():
-    """Verify prepare prompt and decode returns empty output properly when there's no seq groups."""
+    """Verify prepare prompt and decode returns empty output."""
     model_config = ModelConfig(
         "facebook/opt-125m",
         "facebook/opt-125m",
