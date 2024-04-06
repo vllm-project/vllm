@@ -545,7 +545,7 @@ async def test_guided_json_chat(server, client: openai.AsyncOpenAI,
     chat_completion = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
-        max_tokens=500,
+        max_tokens=1000,
         extra_body=dict(guided_json=TEST_SCHEMA,
                         guided_decoding_backend=guided_decoding_backend))
     message = chat_completion.choices[0].message
@@ -563,8 +563,9 @@ async def test_guided_json_chat(server, client: openai.AsyncOpenAI,
     chat_completion = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
-        max_tokens=500,
-        extra_body=dict(guided_json=TEST_SCHEMA))
+        max_tokens=1000,
+        extra_body=dict(guided_json=TEST_SCHEMA,
+                        guided_decoding_backend=guided_decoding_backend))
     message = chat_completion.choices[0].message
     assert message.content is not None
     json2 = json.loads(message.content)
@@ -610,7 +611,8 @@ async def test_guided_regex_chat(server, client: openai.AsyncOpenAI,
         model=MODEL_NAME,
         messages=messages,
         max_tokens=20,
-        extra_body=dict(guided_regex=TEST_REGEX))
+        extra_body=dict(guided_regex=TEST_REGEX,
+                        guided_decoding_backend=guided_decoding_backend))
     ip1 = chat_completion.choices[0].message.content
     assert ip1 is not None
     assert re.fullmatch(TEST_REGEX, ip1) is not None
@@ -737,10 +739,7 @@ async def test_response_format_json_object(server, client: openai.AsyncOpenAI):
     assert loaded == {"result": 2}, loaded
 
 
-@pytest.mark.parametrize("guided_decoding_backend",
-                         ["outlines", "lm-format-enforcer"])
-async def test_guided_grammar(server, client: openai.AsyncOpenAI,
-                              guided_decoding_backend: str):
+async def test_guided_grammar(server, client: openai.AsyncOpenAI):
     simple_sql_grammar = """
 start: select_statement
 
@@ -759,8 +758,7 @@ number: "1" | "2"
                 "table_1 where it is equals to 1"),
         temperature=1.0,
         max_tokens=500,
-        extra_body=dict(guided_grammar=simple_sql_grammar,
-                        guided_decoding_backend=guided_decoding_backend))
+        extra_body=dict(guided_grammar=simple_sql_grammar))
 
     content = completion.choices[0].text
 

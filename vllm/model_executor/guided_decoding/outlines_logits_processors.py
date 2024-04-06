@@ -13,6 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import copy
+from functools import lru_cache
 import json
 import math
 from collections import defaultdict
@@ -27,9 +29,7 @@ from transformers import PreTrainedTokenizerBase
 
 class BaseLogitsProcessor:
 
-    def __init__(self, tokenizer: PreTrainedTokenizerBase):
-        self.tokenizer = tokenizer
-
+    @lru_cache
     def adapt_tokenizer(self, tokenizer: PreTrainedTokenizerBase):
         """Adapt vLLM's tokenizer to use to compile the FSM.
 
@@ -42,8 +42,9 @@ class BaseLogitsProcessor:
 
         """
         if getattr(tokenizer, "_outlines_adapted", False):
-            tokenizer.decode = tokenizer._modified_decoder
             return tokenizer
+        
+        tokenizer = copy.deepcopy(tokenizer)
 
         tokenizer.vocabulary = tokenizer.get_vocab()
         tokenizer.special_tokens = set(tokenizer.all_special_tokens)
@@ -69,17 +70,10 @@ class BaseLogitsProcessor:
 
             return new_decoder
 
-        setattr(tokenizer, "_orig_decoder", tokenizer.decode)  # noqa: B010
         tokenizer.convert_token_to_string = convert_token_to_string
         tokenizer.decode = change_decoder(tokenizer.decode)
-        setattr(tokenizer, "_modified_decoder", tokenizer.decode)  # noqa: B010
         setattr(tokenizer, "_outlines_adapted", True)  # noqa: B010
 
-        return tokenizer
-
-    def unadapt_tokenizer(self, tokenizer: PreTrainedTokenizerBase):
-        """Revert the changes made to the tokenizer"""
-        tokenizer.decode = tokenizer._orig_decoder
         return tokenizer
 
     def init_state(self):
@@ -89,7 +83,6 @@ class BaseLogitsProcessor:
     def __call__(self, input_ids: List[int],
                  scores: torch.Tensor) -> torch.Tensor:
         """Use the FSM to bias the logits before sampling the next token."""
-        self.adapt_tokenizer(self.tokenizer)
         seq_id = hash(tuple(input_ids))
 
         if len(input_ids) == 0:
@@ -107,7 +100,6 @@ class BaseLogitsProcessor:
                           device=scores.device)
         mask[allowed_tokens] = 0
         scores.add_(mask)
-        self.unadapt_tokenizer(self.tokenizer)
         return scores
 
 
@@ -124,10 +116,8 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
             The model's tokenizer
 
         """
-        super().__init__(tokenizer)
         tokenizer = self.adapt_tokenizer(tokenizer)
         fsm = RegexFSM(regex_string, tokenizer)
-        tokenizer = self.unadapt_tokenizer(tokenizer)
         self.fsm = fsm
 
 
@@ -180,8 +170,6 @@ class CFGLogitsProcessor(BaseLogitsProcessor):
             The model's tokenizer
 
         """
-        super().__init__(tokenizer)
         tokenizer = self.adapt_tokenizer(tokenizer)
         fsm = CFGFSM(cfg, tokenizer)
-        tokenizer = self.unadapt_tokenizer(tokenizer)
         self.fsm = fsm
