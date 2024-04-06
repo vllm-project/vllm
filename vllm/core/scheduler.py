@@ -140,7 +140,12 @@ class SchedulerOutputs:
 
     @property
     def lora_requests(self) -> Set[LoRARequest]:
-        return {g.seq_group.lora_request for g in self.scheduled_seq_groups}
+        result = {}
+        for g in self.scheduled_seq_groups:
+            lora_request = g.seq_group.lora_request
+            if lora_request is not None:
+                result.add(lora_request)
+        return result
 
 
 @dataclass
@@ -826,13 +831,12 @@ class Scheduler:
         # Update swapped requests.
         self.swapped = remaining_swapped
         self.swapped.extend(running_scheduled.swapped_out)
-
-        return SchedulerOutputs(
-            scheduled_seq_groups=(prefills.seq_groups +
-                                  running_scheduled.prefill_seq_groups +
-                                  swapped_in.prefill_seq_groups +
-                                  running_scheduled.decode_seq_groups +
-                                  swapped_in.decode_seq_groups),
+        groups = (prefills.seq_groups + running_scheduled.prefill_seq_groups +
+                  swapped_in.prefill_seq_groups +
+                  running_scheduled.decode_seq_groups +
+                  swapped_in.decode_seq_groups)
+        out = SchedulerOutputs(
+            scheduled_seq_groups=groups,
             num_prefill_groups=(len(prefills.seq_groups) +
                                 len(swapped_in.prefill_seq_groups) +
                                 len(running_scheduled.prefill_seq_groups)),
@@ -846,6 +850,8 @@ class Scheduler:
                                  running_scheduled.num_lookahead_slots +
                                  swapped_in.num_lookahead_slots),
         )
+
+        return out
 
     def _schedule(self) -> SchedulerOutputs:
         """Schedule queued requests."""
@@ -907,7 +913,7 @@ class Scheduler:
 
             # It assumes the scheduled_seq_groups is ordered by
             # prefill < decoding.
-            is_prompt = i < scheduler_outputs.num_prefill_groups
+            is_prompt = seq_group.is_prefill()
             seq_group_metadata = SequenceGroupMetadata(
                 request_id=seq_group.request_id,
                 is_prompt=is_prompt,

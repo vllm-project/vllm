@@ -1,27 +1,25 @@
 """Compare the outputs of HF and vLLM when using greedy sampling.
 
+It tests chunked prefill. Chunked prefill can be enabled by
+enable_chunked_prefill=True. If prefill size exceeds max_num_batched_tokens,
+prefill requests are chunked.
+
 Run `pytest tests/models/test_chunked_prefill.py`.
 """
 import pytest
 
 MODELS = [
     "facebook/opt-125m",
-    # "gpt2",
-    # "bigcode/tiny_starcoder_py",
-    # "EleutherAI/pythia-70m",
-    # "bigscience/bloom-560m",
-    # "microsoft/phi-2",
-    # "stabilityai/stablelm-3b-4e1t",
-    # "allenai/OLMo-1B",  # Broken
-    # "bigcode/starcoder2-3b",
+    "meta-llama/Llama-2-7b-hf",
 ]
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["float"])
-@pytest.mark.parametrize("max_tokens", [96])
-@pytest.mark.parametrize("chunked_prefill_token_size", [-1])
-@pytest.mark.parametrize("enforce_eager", [True])
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16])
+@pytest.mark.parametrize("enforce_eager", [False, True])
+@pytest.mark.parametrize("tensor_parallel_size", [2, 1])
 def test_models(
     hf_runner,
     vllm_runner,
@@ -31,9 +29,15 @@ def test_models(
     max_tokens: int,
     chunked_prefill_token_size: int,
     enforce_eager: bool,
+    tensor_parallel_size: int,
 ) -> None:
+    if tensor_parallel_size == 2:
+        if chunked_prefill_token_size != 16 and not enforce_eager:
+            pytest.skip(
+                f"Skip {chunked_prefill_token_size=} and {enforce_eager=} for high TP to save testing time."
+            )
     # To pass the small model tests, we need full precision.
-    assert dtype == "float"
+    # assert dtype == "float"
     enable_chunked_prefill = False
     max_num_batched_tokens = None
     if chunked_prefill_token_size != -1:
@@ -49,10 +53,12 @@ def test_models(
         dtype=dtype,
         max_num_batched_tokens=max_num_batched_tokens,
         enable_chunked_prefill=enable_chunked_prefill,
+        tensor_parallel_size=tensor_parallel_size,
         enforce_eager=enforce_eager,
     )
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
+    print(vllm_outputs[0])
 
     for i in range(len(example_prompts)):
         hf_output_ids, hf_output_str = hf_outputs[i]

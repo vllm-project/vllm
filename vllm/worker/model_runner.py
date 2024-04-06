@@ -182,7 +182,8 @@ class ModelRunner:
             computed_block_nums = seq_group_metadata.computed_block_nums
             if (self.scheduler_config is not None
                     and self.scheduler_config.chunked_prefill_enabled
-                    and computed_block_nums is not None):
+                    and not (computed_block_nums is None
+                             or computed_block_nums == [])):
                 raise RuntimeError(
                     "chunked prefill cannot be used with prefix caching "
                     "now.")
@@ -194,13 +195,8 @@ class ModelRunner:
             # it contains output tokens.
             prefill_end = min(seq_data.get_len(),
                               computed_len + token_chunk_size)
-            # TODO(sang): Rename it after chunked prefill is introduced.
             prompt_tokens = seq_data.get_token_ids()[computed_len:prefill_end]
-            prompt_len = len(prompt_tokens)
-            # Right now, the prefill_end is always same as the length of
-            # sequence. However, once chunked prefill is introduced, this
-            # assumption can be changed.
-            assert prefill_end == seq_data.get_len()
+            prompt_len = prefill_end
             prompt_lens.append(prompt_len)
 
             # NOTE: This only works for oooooooxxx style attention.
@@ -210,6 +206,15 @@ class ModelRunner:
                 computed_len = len(computed_block_nums) * self.block_size
                 prompt_tokens = prompt_tokens[computed_len:]
                 prefix_block_tables.append(computed_block_nums)
+                assert self.scheduler_config.chunked_prefill_enabled is not None
+            elif self.scheduler_config.chunked_prefill_enabled:
+                if seq_group_metadata.block_tables is not None:
+                    # Prefill has chunked before.
+                    block_table = seq_group_metadata.block_tables[seq_id]
+                    prefix_block_tables.append(block_table)
+                else:
+                    # The first prefill.
+                    prefix_block_tables.append([])
             else:
                 prefix_block_tables.append([])
                 # Right now, prefill start is always 0. However, this
@@ -561,8 +566,8 @@ class ModelRunner:
     def prepare_input_tensors(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadataPerStage,
-               SamplingMetadata, Set[int], LoRAMapping, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
+               Set[int], LoRAMapping, torch.Tensor]:
         if self.is_driver_worker:
             prefill_reqs = []
             decode_reqs = []
@@ -573,7 +578,6 @@ class ModelRunner:
                     decode_reqs.append(seq_group_meta)
 
             # Prepare input tensors.
-
             (
                 input_tokens,
                 input_positions,
@@ -599,7 +603,7 @@ class ModelRunner:
 
             num_prefills = len(prompt_lens)
             num_prefill_tokens = len(input_tokens)
-            num_decode_tokesn = len(decode_input_tokens)
+            num_decode_tokens = len(decode_input_tokens)
 
             # Coalesce tensors. Note that attn_metadata is currently not
             # coalesced for simplicity.
@@ -629,6 +633,16 @@ class ModelRunner:
                 lora_mapping = None
 
             # Broadcast the metadata.
+            # If batch contains both prefill and decode, it sends 2 broadcasts.
+            # If it only contains 1 type, it triggers a single broadcast.
+            if (prefill_attn_metadata is not None
+                    and decode_attn_metadata is not None):
+                batch_type = "mixed"
+            elif prefill_attn_metadata is not None:
+                batch_type = "prefill"
+            else:
+                batch_type = "decode"
+
             metadata_dict = {
                 "input_tokens": input_tokens,
                 "input_positions": input_positions,
@@ -638,39 +652,48 @@ class ModelRunner:
                 "lora_mapping": lora_mapping,
                 "multi_modal_input": multi_modal_input,
                 "num_prefill_tokens": num_prefill_tokens,
-                "num_decode_tokesn": num_decode_tokesn
+                "num_decode_tokens": num_decode_tokens,
+                "slot_mapping": slot_mapping,
+                "num_prefills": num_prefills,
+                "batch_type": batch_type,
             }
-            s = time.time()
-            # TODO(sang): It is dangerous if attn_metadata contains the same
-            # name key.
             if prefill_attn_metadata is not None:
                 metadata_dict.update(prefill_attn_metadata.asdict_zerocopy())
+            else:
+                metadata_dict.update(decode_attn_metadata.asdict_zerocopy())
             broadcast_tensor_dict(metadata_dict, src=0)
 
-            # NOTE(sang): Broadcast prefill/decode metadata separately for
-            # simplicity. Compared to one broadcast, its latency increases from
-            # 20us -> 35~60 us. We can potentially coalesce tensors to reduce the
-            # overhead.
-            metadata_dict = None
-            if decode_attn_metadata is not None:
+            # Broadcast decode attn metadata for mixed batch type.
+            # The additional broadcast costs 300us overhead on 4 A10 GPUs.
+            # We can potentially reduce the overhead by coelescing tensors.
+            if batch_type == "mixed":
+                assert decode_attn_metadata is not None
                 metadata_dict = decode_attn_metadata.asdict_zerocopy()
-            broadcast_tensor_dict(metadata_dict, src=0)
-            print("SANG-TODO broadcast takes ",
-                  (time.time() - s) * 1000 * 1000, "us")
+                broadcast_tensor_dict(metadata_dict, src=0)
         else:
             # Prefill metadata.
             metadata_dict = broadcast_tensor_dict(src=0)
             input_tokens = metadata_dict.pop("input_tokens")
             input_positions = metadata_dict.pop("input_positions")
+            slot_mapping = metadata_dict.pop("slot_mapping")
+            num_prefills = metadata_dict.pop("num_prefills")
             selected_token_indices = metadata_dict.pop(
                 "selected_token_indices")
             lora_mapping = metadata_dict.pop("lora_mapping")
             lora_requests = metadata_dict.pop("lora_requests")
             multi_modal_input = metadata_dict.pop("multi_modal_input")
             num_prefill_tokens = metadata_dict.pop("num_prefill_tokens")
-            num_decode_tokesn = metadata_dict.pop("num_decode_tokesn")
-            prefill_attn_metadata = self.attn_backend.make_metadata(
-                **metadata_dict)
+            num_decode_tokens = metadata_dict.pop("num_decode_tokens")
+            batch_type = metadata_dict.pop("batch_type")
+
+            prefill_attn_metadata = None
+            decode_attn_metadata = None
+            if batch_type == "prefill" or batch_type == "mixed":
+                prefill_attn_metadata = self.attn_backend.make_metadata(
+                    **metadata_dict)
+            else:
+                decode_attn_metadata = self.attn_backend.make_metadata(
+                    **metadata_dict)
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
                 seq_data=None,
@@ -680,15 +703,18 @@ class ModelRunner:
                 generators=None,
                 perform_sampling=False,
             )
-            # Decode metadata.
-            metadata_dict = broadcast_tensor_dict(src=0)
-            decode_attn_metadata = self.attn_backend.make_metadata(
-                **metadata_dict)
+
+            # if it is a mixed batch, decode attn_metadata is also broadcasted.
+            if batch_type == "mixed":
+                metadata_dict = broadcast_tensor_dict(src=0)
+                decode_attn_metadata = self.attn_backend.make_metadata(
+                    **metadata_dict)
+
         attn_metadata = AttentionMetadata(
             num_prefills=num_prefills,
             slot_mapping=slot_mapping,
             num_prefill_tokens=num_prefill_tokens,
-            num_decode_tokens=num_decode_tokesn,
+            num_decode_tokens=num_decode_tokens,
             prefill_metadata=prefill_attn_metadata,
             decode_metadata=decode_attn_metadata,
             kv_cache_dtype=self.kv_cache_dtype,
@@ -712,8 +738,9 @@ class ModelRunner:
             self.set_active_loras(lora_requests, lora_mapping)
 
         # Currently cuda graph is only supported by the decode phase.
+        prefill_meta = attn_metadata.prefill_metadata
         decode_meta = attn_metadata.decode_metadata
-        if decode_meta is not None and decode_meta.use_cuda_graph:
+        if prefill_meta is None and decode_meta.use_cuda_graph:
             graph_batch_size = input_tokens.shape[0]
             model_executable = self.graph_runners[graph_batch_size]
         else:
@@ -908,6 +935,7 @@ class ModelRunner:
                     num_prefills=0,
                     num_prefill_tokens=0,
                     num_decode_tokens=batch_size,
+                    slot_mapping=slot_mapping[:batch_size],
                     prefill_metadata=None,
                     decode_metadata=decode_metadata,
                     kv_cache_dtype=self.kv_cache_dtype,

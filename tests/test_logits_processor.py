@@ -64,7 +64,7 @@ def test_logits_processors(seed: int, device: str):
         return logits
 
     seq_group_metadata_list = []
-    prompt_lens = []
+    seq_lens = []
     for i in range(batch_size):
         seq_group_metadata_list.append(
             SequenceGroupMetadata(
@@ -75,11 +75,11 @@ def test_logits_processors(seed: int, device: str):
                                                logits_processors=[pick_ith]),
                 block_tables={0: [1]},
             ))
-        prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
+        seq_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
     sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens,
-                                                     subquery_lens=prompt_lens)
+                                                     seq_lens,
+                                                     subquery_lens=seq_lens)
     logits_processor_output = logits_processor(
         embedding=None,
         hidden_states=input_tensor,

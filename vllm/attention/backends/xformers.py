@@ -70,7 +70,7 @@ class XFormersMetadata(AttentionMetadataPerStage, PagedAttentionMetadata):
     is_prompt: bool
     # (batch_size,). The prompt length per sequence. None if it is a decoding.
     prompt_lens: Optional[List[int]]
-    # prompt_lens stored as a tensor.
+    # prompt_lens_tensor stored as a tensor.
     prompt_lens_tensor: Optional[torch.Tensor]
 
     # NOTE(sang): Definition of context_len, subquery_len, and seqlen.
@@ -203,21 +203,18 @@ class XFormersImpl(AttentionImpl):
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
-        print(f"SANG-TODO original query: {query.size()}")
+        assert key.shape[0] == num_prefill_tokens + num_decode_tokens
+        assert value.shape[0] == num_prefill_tokens + num_decode_tokens
         output = torch.empty_like(query)
         decode_query = query[num_prefill_tokens:]
         query = query[:num_prefill_tokens]
         key = key[:num_prefill_tokens]
         value = value[:num_prefill_tokens]
-        print(f"SANG-TODO {num_prefill_tokens=} {num_decode_tokens=}")
-        print(f"SANG-TODO {query.size()=} {decode_query.size()=}")
 
         assert query.shape[0] == num_prefill_tokens
         assert decode_query.shape[0] == num_decode_tokens
 
         if num_prefill_tokens > 0:
-            print("SANG-TODO run prefill")
-            prefill_output = output[:num_prefill_tokens]
             prefill_meta = attn_metadata.prefill_metadata
             assert prefill_meta is not None
             # Prompt run.
@@ -264,16 +261,19 @@ class XFormersImpl(AttentionImpl):
                     # with input tensor's size and stride (at least one
                     # dimension spans across two contiguous subspaces).
                     # Use reshape instead.
-                    return prefill_output.reshape(num_tokens, hidden_size)
+                    return output[:num_prefill_tokens].reshape(
+                        num_tokens, hidden_size)
 
-                prefill_output = self._run_memory_efficient_xformers_forward(
-                    query, key, value, prefill_meta)
+                out = self._run_memory_efficient_xformers_forward(
+                    query, key, value, prefill_meta).squeeze(0)
+                assert out.shape == output[:num_prefill_tokens].shape
+                output[:num_prefill_tokens] = out.squeeze(0)
             else:
                 # prefix-enabled attention
                 # TODO(Hai) this triton kernel has regression issue (broke) to
                 # deal with different data types between KV and FP8 KV cache,
                 # to be addressed separately.
-                prefill_output = PagedAttention.forward_prefix(
+                out = PagedAttention.forward_prefix(
                     query,
                     key,
                     value,
@@ -286,9 +286,10 @@ class XFormersImpl(AttentionImpl):
                     prefill_meta.max_subquery_len,
                     self.alibi_slopes,
                 )
+                assert output[:num_prefill_tokens].shape == out.shape
+                output[:num_prefill_tokens] = out
 
         if num_decode_tokens > 0:
-            print("SANG-TODO run decode")
             decode_meta = attn_metadata.decode_metadata
             assert decode_meta is not None
             output[num_prefill_tokens:] = PagedAttention.forward_decode(

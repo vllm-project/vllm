@@ -68,7 +68,7 @@ class FlashAttentionMetadata(AttentionMetadataPerStage,
     is_prompt: bool
     # (batch_size,). The prompt length per sequence. None if it is a decoding.
     prompt_lens: Optional[List[int]]
-    # prompt_lens stored as a tensor.
+    # prompt_lens_tensor stored as a tensor.
     prompt_lens_tensor: Optional[torch.Tensor]
 
     # NOTE(sang): Definition of context_len, subquery_len, and seqlen.

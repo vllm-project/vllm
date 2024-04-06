@@ -611,8 +611,9 @@ class LLMEngine:
             seq_group = scheduled_seq_group.seq_group
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
-            # SANG-TODO DO NOT PROCESS IF IT IS CHUNKED PREFILL.
-            self._process_sequence_group_outputs(seq_group, outputs)
+            # If uncomputed tokens > 0, it means prefill is not done.
+            if seq_group.get_num_uncomputed_tokens() == 0:
+                self._process_sequence_group_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.
         self.scheduler.free_finished_seq_groups()
