@@ -5,7 +5,7 @@ import torch
 
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.sequence import (SamplerOutput, SequenceGroupMetadata,
-                           SequenceGroupOutput, SequenceOutput)
+                           SequenceGroupOutput, SequenceOutput, Logprob)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
@@ -316,7 +316,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                                 parent_seq_id=seq_id,
                                 output_token=token_id,
                                 # TODO Add verifier logprobs.
-                                logprobs={token_id: 0.0},
+                                logprobs={token_id: Logprob(0.0)},
                             )
                         ],
                         prompt_logprobs=None,

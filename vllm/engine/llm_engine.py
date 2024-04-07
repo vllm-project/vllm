@@ -626,14 +626,38 @@ class LLMEngine:
     def _process_model_outputs(
             self, output: SamplerOutput,
             scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
-        now = time.time()
-        # Update the scheduled sequence groups with the model outputs.
+
+
+        if not isinstance(output, list):
+            all_output = [output]
+        else:
+            all_output = output
+
         scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
-        for scheduled_seq_group, outputs in zip(scheduled_seq_groups, output):
+
+        # Organize list of sampler output by sequence group.
+        output_by_sequence_group: List[List[SequenceGroupOutputs]] = [
+            [] for _ in scheduled_seq_groups
+        ]
+        for step in output:
+            for i, sequence_group_output in enumerate(step):
+                output_by_sequence_group[i].append(sequence_group_output)
+
+        now = time.time()
+
+        # Update the scheduled sequence groups with the model outputs.
+        for scheduled_seq_group, outputs in zip(scheduled_seq_groups, output_by_sequence_group):
+
             seq_group = scheduled_seq_group.seq_group
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
-            self._process_sequence_group_outputs(seq_group, outputs)
+
+            assert len(outputs) > 0
+            # TODO can spec decode go through second path?
+            if len(outputs) > 1:
+                self._process_sequence_group_outputs_multi_step(seq_group, outputs)
+            else:
+                self._process_sequence_group_outputs(seq_group, outputs[0])
 
         # Free the finished sequence groups.
         self.scheduler.free_finished_seq_groups()
@@ -653,6 +677,91 @@ class LLMEngine:
         if self.log_stats:
             self.stat_logger.log(self._get_stats(scheduler_outputs))
         return request_outputs
+
+    def _process_sequence_group_outputs_multi_step(self, seq_group, outputs):
+        seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
+
+        assert seqs
+        #if not seqs:
+        #    return []
+
+        assert len(seqs) == 1, ("Beam search not supported in speculative "
+                                "decoding.")
+        seq = seqs[0]
+
+        # Since there's only one sequence per sequence group, we can take the
+        # first sample.
+        samples = [outputs[step].samples[0] for step in range(len(outputs))]
+
+        # -1 means the output token is not valid (eg. due to spec decode
+        # rejecting tokens).
+        valid_samples = [
+            sample for sample in samples if sample.output_token != -1
+        ]
+
+        # Draft target worker pads all outputs with -1 to have same length.
+        output_token_ids = [sample.output_token for sample in valid_samples]
+        #successes = [sample.success for sample in samples]
+
+        ## Truncate to max_tokens if necessary.
+        #remaining_tokens = seq_group.sampling_params.max_tokens - (
+        #    seq.get_output_len() + len(output_token_ids))
+        #if remaining_tokens < 0:
+        #    valid_samples = valid_samples[:remaining_tokens]
+        #    output_token_ids = output_token_ids[:remaining_tokens]
+
+        ## Truncate any tokens after EOS. This is required as spec decode
+        ## generates tokens in fixed blocks, which may go beyond the EOS token.
+        #if not seq_group.sampling_params.ignore_eos:
+        #    eos_token_id = self.tokenizer.get_lora_tokenizer(
+        #        seq.lora_request).eos_token_id
+        #    # Avoiding .index calls as exception throwing in the happy path
+        #    # is expensive.
+        #    for i in range(len(output_token_ids)):
+        #        if output_token_ids[i] == eos_token_id:
+        #            output_token_ids = output_token_ids[:i + 1]
+        #            valid_samples = valid_samples[:i + 1]
+        #            break
+
+        #output_logprobs = [sample.logprobs for sample in valid_samples]
+
+        ## Use the last sample for the sequence as it will have
+        ## the speculation and num_unprocessed_tokens for all the
+        ## previous samples (they are cumulative when it comes
+        ## to those two attributes).
+        #speculation = valid_samples[-1].speculation
+        #num_unprocessed_tokens = valid_samples[-1].num_unprocessed_tokens
+
+        for output_token_id in output_token_ids:
+            from vllm.sequence import Logprob
+            seq.append_token_id(
+                token_id=output_token_id,
+                logprobs={output_token_id: Logprob(0.0)},
+            )
+            print(f'Appended token id {output_token_id=}')
+
+        #seq.append_token_ids(output_token_ids,
+        #                     output_logprobs,
+        #                    )
+        #                     #num_unprocessed_tokens=num_unprocessed_tokens)
+        ##seq.set_last_speculation(speculation)
+
+        #if not all(successes):
+        #    seq.set_status_to_failed()
+
+        #if decode:
+        #    self._decode_sequence(seq,
+        #                          seq_group.sampling_params,
+        #                          token_ids=seq.get_token_ids(),
+        #                          unseen_token_ids=output_token_ids,
+        #                          prefix_offset=seq.prefix_offset,
+        #                          read_offset=seq.read_offset)
+        #self._check_stop(seq, seq_group.sampling_params, seq.lora_request,
+        #                 output_token_ids)
+        # TODO pass output token ids
+        self._check_stop(seq, seq_group.sampling_params)
+        if seq.is_finished():
+            self.scheduler.free_seq(seq)
 
     def step(self) -> List[RequestOutput]:
         """Performs one decoding iteration and returns newly generated results.
@@ -804,9 +913,11 @@ class LLMEngine:
         if seq.get_len() > self.scheduler_config.max_model_len:
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
-
+        
+        breakpoint()
         # Check if the sequence has reached max_tokens.
-        if seq.get_output_len() == sampling_params.max_tokens:
+        if seq.get_output_len() >= sampling_params.max_tokens:
+            # TODO should cap block
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
 

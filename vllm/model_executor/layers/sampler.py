@@ -684,4 +684,10 @@ def _build_sampler_output(
                 SequenceOutput(seq_ids[parent_id], next_token_id, logprobs))
         sampler_output.append(
             SequenceGroupOutput(seq_outputs, group_prompt_logprobs))
-    return SamplerOutput(outputs=sampler_output)
+
+    return SamplerOutput(
+        outputs=sampler_output,
+        # TODO
+        sampled_token_probs=torch.empty((len(sampler_output), 50_272), device='cuda', dtype=torch.float32),
+        sampled_token_ids=torch.empty((len(sampler_output), 1), device='cuda', dtype=torch.long),
+    )

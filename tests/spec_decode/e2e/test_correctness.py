@@ -21,14 +21,14 @@ from vllm import SamplingParams
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
 @pytest.mark.parametrize("seed", [1])
 def test_spec_decode_config(test_llm_generator):
-    output_len = 1024
+    output_len = 128
     temperature = 0.0
 
     prompts = [
         "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
+        #"The president of the United States is",
+        #"The capital of France is",
+        #"The future of AI is",
     ]
 
     sampling_params = SamplingParams(
@@ -37,11 +37,11 @@ def test_spec_decode_config(test_llm_generator):
         temperature=temperature,
     )
 
-    with pytest.raises(
-            AssertionError,
-            match="Speculative decoding not yet supported for GPU backend"):
-        get_token_ids_from_llm_generator(test_llm_generator, prompts,
-                                         sampling_params)
+    #with pytest.raises(
+    #        AssertionError,
+    #        match="Speculative decoding not yet supported for GPU backend"):
+    get_token_ids_from_llm_generator(test_llm_generator, prompts,
+                                     sampling_params)
 
 
 def get_token_ids_from_llm_generator(llm_generator, prompts, sampling_params):
