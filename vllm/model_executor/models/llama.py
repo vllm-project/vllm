@@ -374,6 +374,8 @@ class LlamaModel(nn.Module):
             #pdb.set_trace()
             temp_status = 0 # full recomp
             self.cache_fuse_metadata["org_seq_len"] = input_ids.shape[1]
+            
+            #FIXME(Jiayi): fix this clone for faster time
             self.cache_fuse_metadata["our_slot_mapping"] = input_metadata.slot_mapping.clone()
         else:
             temp_status = -1 # decode
