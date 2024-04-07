@@ -7,9 +7,12 @@ from vllm import SamplingParams
     "common_llm_kwargs",
     [{
         # Use a small model for a fast test.
-        "model": "facebook/opt-125m",
-        "speculative_model": "facebook/opt-125m",
+        "model": "JackFram/llama-68m",
+        "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
+
+        # Skip real loading for fast test.
+        "load_format": "dummy",
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
