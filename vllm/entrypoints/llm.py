@@ -9,7 +9,7 @@ from vllm.engine.llm_engine import LLMEngine
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.utils import Counter
-from vllm.metis.kv_loader import kv_manager
+from vllm.metis.kv_manager import KV_manager
 import pdb
 
 class LLM:
@@ -184,6 +184,8 @@ class LLM:
         prompt_token_ids: Optional[List[int]],
         lora_request: Optional[LoRARequest] = None,
     ) -> None:
+        #call kv manager's optimizer, do async prefetchs.  
+
         request_id = str(next(self.request_counter))
         self.llm_engine.add_request(request_id,
                                     prompt,

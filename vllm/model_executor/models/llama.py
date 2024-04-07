@@ -387,8 +387,11 @@ class LlamaModel(nn.Module):
             #    import pdb
             #    pdb.set_trace()
             
+            #if i == 1 get prefetch result. plan for actual loading.
+            #Load kv into temprary tensors for Jiayi to use
+
             layer = self.layers[i]
-            #self.cache_load_metadata['layer'] = i
+            
             hidden_states, residual = layer(
                 positions, #FIXME(Jiayi): positions need to be changed
                 hidden_states,
