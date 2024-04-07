@@ -37,7 +37,8 @@ def test_correctly_calls_draft_model(k: int, batch_size: int):
     execute_model_data, _, _ = create_batch(batch_size, k)
 
     with pytest.raises(ValueError, match=exception_secret):
-        worker.execute_model(**execute_model_data.to_dict(), num_lookahead_slots=k)
+        worker.execute_model(**execute_model_data.to_dict(),
+                             num_lookahead_slots=k)
 
     call_args_list = draft_worker.get_spec_proposals.call_args_list
     assert len(call_args_list) == 1
@@ -102,7 +103,8 @@ def test_correctly_calls_target_model(k: int, batch_size: int):
     target_worker.execute_model.side_effect = ValueError(exception_secret)
 
     with pytest.raises(ValueError, match=exception_secret):
-        worker.execute_model(**execute_model_data.to_dict(), num_lookahead_slots=k)
+        worker.execute_model(**execute_model_data.to_dict(),
+                             num_lookahead_slots=k)
 
     seen_contexts = []
 
@@ -195,7 +197,8 @@ def test_correctly_calls_rejection_sampler(k: int, batch_size: int):
     rejection_sampler.side_effect = ValueError(exception_secret)
 
     with pytest.raises(ValueError, match=exception_secret):
-        worker.execute_model(**execute_model_data.to_dict(), num_lookahead_slots=k)
+        worker.execute_model(**execute_model_data.to_dict(),
+                             num_lookahead_slots=k)
 
     assert len(rejection_sampler.call_args_list) == 1
     args, _ = rejection_sampler.call_args_list[0]

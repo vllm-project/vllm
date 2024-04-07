@@ -19,15 +19,17 @@ from vllm import SamplingParams
         # Required for spec decode.
         "use_v2_block_manager": True
     }])
-@pytest.mark.parametrize("per_test_common_llm_kwargs", [
-    {
-        "speculative_model": "JackFram/llama-68m",
-        "num_speculative_tokens": 5,
-    },
-    {
-        # No spec decode.
-    },
-])
+@pytest.mark.parametrize(
+    "per_test_common_llm_kwargs",
+    [
+        {
+            "speculative_model": "JackFram/llama-68m",
+            "num_speculative_tokens": 5,
+        },
+        {
+            # No spec decode.
+        },
+    ])
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
 @pytest.mark.parametrize("batch_size", [1, 10])
 @pytest.mark.parametrize("seed", [1])
