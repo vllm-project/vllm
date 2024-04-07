@@ -71,6 +71,10 @@ class ModelConfig:
         max_context_len_to_capture: Maximum context len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
             to eager mode.
+        disable_sliding_window: Whether to disable sliding window. If True,
+            we will disable the sliding window functionality of the model.
+            If the model does not support sliding window, this argument is 
+            ignored.
     """
 
     def __init__(
@@ -92,6 +96,7 @@ class ModelConfig:
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
         max_logprobs: int = 5,
+        disable_sliding_window: bool = False,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -108,6 +113,7 @@ class ModelConfig:
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
         self.max_logprobs = max_logprobs
+        self.disable_sliding_window = disable_sliding_window
 
         if os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true":
             # download model from ModelScope hub,
@@ -128,9 +134,8 @@ class ModelConfig:
         self.hf_config = get_config(self.model, trust_remote_code, revision,
                                     code_revision)
         self.hf_text_config = get_hf_text_config(self.hf_config)
-        self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
-        self.max_model_len = _get_and_verify_max_len(self.hf_text_config,
-                                                     max_model_len)
+        self.dtype = self._get_and_verify_dtype(self.hf_text_config, dtype)
+        self.max_model_len = self._get_and_verify_max_len(self.hf_text_config, self.disable_sliding_window, max_model_len)
         self._verify_load_format()
         self._verify_tokenizer_mode()
         self._verify_quantization()
@@ -246,10 +251,7 @@ class ModelConfig:
                 "must be divisible by pipeline parallel size "
                 f"({pipeline_parallel_size}).")
 
-    def get_sliding_window(self) -> Optional[int]:
-        """Get the sliding window size, or None if disabled.
-        """
-
+    def get_hf_config_sliding_window(self) -> Optional[int]:
         # Some models, like Qwen2 and Qwen1.5, use `use_sliding_window` in
         # addition to sliding window size. We check if that field is present
         # and if it's False, return None.
@@ -257,6 +259,15 @@ class ModelConfig:
                 and not self.hf_text_config.use_sliding_window):
             return None
         return getattr(self.hf_text_config, "sliding_window", None)
+
+    def get_sliding_window(self) -> Optional[int]:
+        """Get the sliding window size, or None if disabled.
+        """
+        # If user disables sliding window, return None.
+        if self.disable_sliding_window:
+            return None
+        # Otherwise get the value from the hf config.
+        return self.get_hf_config_sliding_window()
 
     def get_vocab_size(self) -> int:
         return self.hf_text_config.vocab_size
@@ -323,6 +334,160 @@ class ModelConfig:
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
         total_num_hidden_layers = self.hf_text_config.num_hidden_layers
         return total_num_hidden_layers // parallel_config.pipeline_parallel_size
+    
+    def _get_and_verify_dtype(
+        self,
+        config: PretrainedConfig,
+        dtype: Union[str, torch.dtype],
+    ) -> torch.dtype:
+        # NOTE: getattr(config, "torch_dtype", torch.float32) is not correct
+        # because config.torch_dtype can be None.
+        config_dtype = getattr(config, "torch_dtype", None)
+        if config_dtype is None:
+            config_dtype = torch.float32
+
+        if isinstance(dtype, str):
+            dtype = dtype.lower()
+            if dtype == "auto":
+                if config_dtype == torch.float32:
+                    # Following the common practice, we use float16 for float32
+                    # models.
+                    torch_dtype = torch.float16
+                else:
+                    torch_dtype = config_dtype
+            else:
+                if dtype not in _STR_DTYPE_TO_TORCH_DTYPE:
+                    raise ValueError(f"Unknown dtype: {dtype}")
+                torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype]
+        elif isinstance(dtype, torch.dtype):
+            torch_dtype = dtype
+        else:
+            raise ValueError(f"Unknown dtype: {dtype}")
+
+        if is_hip() and torch_dtype == torch.float32:
+            rocm_supported_dtypes = [
+                k for k, v in _STR_DTYPE_TO_TORCH_DTYPE.items()
+                if (k not in _ROCM_NOT_SUPPORTED_DTYPE)
+            ]
+            raise ValueError(f"dtype '{dtype}' is not supported in ROCm. "
+                            f"Supported dtypes are {rocm_supported_dtypes}")
+
+        # Verify the dtype.
+        if torch_dtype != config_dtype:
+            if torch_dtype == torch.float32:
+                # Upcasting to float32 is allowed.
+                pass
+            elif config_dtype == torch.float32:
+                # Downcasting from float32 to float16 or bfloat16 is allowed.
+                pass
+            else:
+                # Casting between float16 and bfloat16 is allowed with a warning.
+                logger.warning(f"Casting {config_dtype} to {torch_dtype}.")
+
+        return torch_dtype
+
+
+    def _get_and_verify_max_len(
+        self,
+        hf_config: PretrainedConfig,
+        disable_sliding_window: bool,
+        max_model_len: Optional[int],
+    ) -> int:
+        """Get and verify the model's maximum length."""
+        derived_max_model_len = float("inf")
+        possible_keys = [
+            # OPT
+            "max_position_embeddings",
+            # GPT-2
+            "n_positions",
+            # MPT
+            "max_seq_len",
+            # ChatGLM2
+            "seq_length",
+            # Command-R
+            "model_max_length",
+            # Others
+            "max_sequence_length",
+            "max_seq_length",
+            "seq_len",
+        ]
+        # Choose the smallest "max_length" from the possible keys.
+        max_len_key = None
+        for key in possible_keys:
+            max_len = getattr(hf_config, key, None)
+            if max_len is not None:
+                max_len_key = key if max_len < derived_max_model_len \
+                    else max_len_key
+                derived_max_model_len = min(derived_max_model_len, max_len)
+
+        # If sliding window is manually disabled, max_length should be less 
+        # than the sliding window length in the model config.
+        sliding_window_len = self.get_hf_config_sliding_window()
+        if disable_sliding_window and sliding_window_len is not None:
+            max_len_key = "sliding_window" if sliding_window_len < derived_max_model_len \
+                else max_len_key
+            derived_max_model_len = min(derived_max_model_len, sliding_window_len)
+        
+        # If none of the keys were found in the config, use a default and 
+        # log a warning.
+        if derived_max_model_len == float("inf"):
+            if max_model_len is not None:
+                # If max_model_len is specified, we use it.
+                return max_model_len
+
+            default_max_len = 2048
+            logger.warning(
+                "The model's config.json does not contain any of the following "
+                "keys to determine the original maximum length of the model: "
+                f"{possible_keys}. Assuming the model's maximum length is "
+                f"{default_max_len}.")
+            derived_max_model_len = default_max_len
+
+        rope_scaling = getattr(hf_config, "rope_scaling", None)
+        if rope_scaling is not None:
+            if disable_sliding_window:
+                # TODO(robertgshaw): Find a model that supports rope_scaling with
+                #   sliding window to see if this case should be allowed.
+                raise NotImplementedError(
+                    "Disabling sliding window is not supported for models "
+                    "with rope_scaling. Please raise an issue so we can "
+                    "investigate."
+                )
+            assert "factor" in rope_scaling
+            scaling_factor = rope_scaling["factor"]
+            if rope_scaling["type"] == "yarn":
+                derived_max_model_len = rope_scaling[
+                    "original_max_position_embeddings"]
+            derived_max_model_len *= scaling_factor
+
+        # If the user specified a max length, make sure it is smaller than the 
+        # derived length from the HF model config.
+        if max_model_len is None:
+            max_model_len = derived_max_model_len
+        elif max_model_len > derived_max_model_len:
+            # Some models might have a separate key for specifying model_max_length
+            # that will be bigger than derived_max_model_len. We compare user input
+            # with model_max_length and allow this override when it's smaller.
+            model_max_length = getattr(hf_config, "model_max_length", None)
+            if model_max_length is not None and max_model_len <= model_max_length:
+                if disable_sliding_window:
+                    # TODO(robertgshaw): Find a model that has model_max_length 
+                    # with sliding window to see if this case should be allowed.
+                    raise NotImplementedError(
+                        "Disabling sliding window is not supported for models "
+                        "model_max_length in the config. Please raise an issue so "
+                        "we can investigate."
+                    )
+                pass
+            else:
+                raise ValueError(
+                    f"User-specified max_model_len ({max_model_len}) is greater "
+                    "than the derived max_model_len "
+                    f"({max_len_key}={derived_max_model_len} or model_max_length="
+                    f"{model_max_length} in model's config.json). This may lead "
+                    "to incorrect model outputs or CUDA errors. Make sure the "
+                    "value is correct and within the model context size.")
+        return int(max_model_len)
 
 
 class CacheConfig:
@@ -357,6 +522,7 @@ class CacheConfig:
         self.enable_prefix_caching = enable_prefix_caching
         self._verify_args()
         self._verify_cache_dtype()
+        self._verify_prefix_caching()
 
         # Will be set after profiling.
         self.num_gpu_blocks = None
@@ -392,6 +558,28 @@ class CacheConfig:
                 "is instead supported for common inference criteria.")
         else:
             raise ValueError(f"Unknown kv cache dtype: {self.cache_dtype}")
+
+    def _verify_prefix_caching(self) -> None:
+        if not self.enable_prefix_caching:
+            return
+            
+        if self.sliding_window is not None:
+            raise NotImplementedError(
+                "Prefix caching is not supported with sliding window. "
+                "Run with --disable-sliding-window to use prefix caching."
+            )
+        if self.cache_dtype == "fp8":
+            raise NotImplementedError(
+                "Prefix caching is not supported for fp8 cache_dtype. "
+                "Run with --kv-cache-dtype auto to use prefix caching."
+            )
+        compute_capability = torch.cuda.get_device_capability()
+        if compute_capability[0] < 8:
+            raise NotImplementedError(
+                "Prefix caching requires compute capability > 8.0 "
+                "but found compute capability "
+                f"{compute_capability[0]}.{compute_capability[1]}."
+            )
 
     def verify_with_parallel_config(
         self,
@@ -876,129 +1064,6 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
 }
 
 _ROCM_NOT_SUPPORTED_DTYPE = ["float", "float32"]
-
-
-def _get_and_verify_dtype(
-    config: PretrainedConfig,
-    dtype: Union[str, torch.dtype],
-) -> torch.dtype:
-    # NOTE: getattr(config, "torch_dtype", torch.float32) is not correct
-    # because config.torch_dtype can be None.
-    config_dtype = getattr(config, "torch_dtype", None)
-    if config_dtype is None:
-        config_dtype = torch.float32
-
-    if isinstance(dtype, str):
-        dtype = dtype.lower()
-        if dtype == "auto":
-            if config_dtype == torch.float32:
-                # Following the common practice, we use float16 for float32
-                # models.
-                torch_dtype = torch.float16
-            else:
-                torch_dtype = config_dtype
-        else:
-            if dtype not in _STR_DTYPE_TO_TORCH_DTYPE:
-                raise ValueError(f"Unknown dtype: {dtype}")
-            torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype]
-    elif isinstance(dtype, torch.dtype):
-        torch_dtype = dtype
-    else:
-        raise ValueError(f"Unknown dtype: {dtype}")
-
-    if is_hip() and torch_dtype == torch.float32:
-        rocm_supported_dtypes = [
-            k for k, v in _STR_DTYPE_TO_TORCH_DTYPE.items()
-            if (k not in _ROCM_NOT_SUPPORTED_DTYPE)
-        ]
-        raise ValueError(f"dtype '{dtype}' is not supported in ROCm. "
-                         f"Supported dtypes are {rocm_supported_dtypes}")
-
-    # Verify the dtype.
-    if torch_dtype != config_dtype:
-        if torch_dtype == torch.float32:
-            # Upcasting to float32 is allowed.
-            pass
-        elif config_dtype == torch.float32:
-            # Downcasting from float32 to float16 or bfloat16 is allowed.
-            pass
-        else:
-            # Casting between float16 and bfloat16 is allowed with a warning.
-            logger.warning(f"Casting {config_dtype} to {torch_dtype}.")
-
-    return torch_dtype
-
-
-def _get_and_verify_max_len(
-    hf_config: PretrainedConfig,
-    max_model_len: Optional[int],
-) -> int:
-    """Get and verify the model's maximum length."""
-    derived_max_model_len = float("inf")
-    possible_keys = [
-        # OPT
-        "max_position_embeddings",
-        # GPT-2
-        "n_positions",
-        # MPT
-        "max_seq_len",
-        # ChatGLM2
-        "seq_length",
-        # Command-R
-        "model_max_length",
-        # Others
-        "max_sequence_length",
-        "max_seq_length",
-        "seq_len",
-    ]
-    max_len_key = None
-    for key in possible_keys:
-        max_len = getattr(hf_config, key, None)
-        if max_len is not None:
-            max_len_key = key if max_len < derived_max_model_len \
-                else max_len_key
-            derived_max_model_len = min(derived_max_model_len, max_len)
-    if derived_max_model_len == float("inf"):
-        if max_model_len is not None:
-            # If max_model_len is specified, we use it.
-            return max_model_len
-
-        default_max_len = 2048
-        logger.warning(
-            "The model's config.json does not contain any of the following "
-            "keys to determine the original maximum length of the model: "
-            f"{possible_keys}. Assuming the model's maximum length is "
-            f"{default_max_len}.")
-        derived_max_model_len = default_max_len
-
-    rope_scaling = getattr(hf_config, "rope_scaling", None)
-    if rope_scaling is not None:
-        assert "factor" in rope_scaling
-        scaling_factor = rope_scaling["factor"]
-        if rope_scaling["type"] == "yarn":
-            derived_max_model_len = rope_scaling[
-                "original_max_position_embeddings"]
-        derived_max_model_len *= scaling_factor
-
-    if max_model_len is None:
-        max_model_len = derived_max_model_len
-    elif max_model_len > derived_max_model_len:
-        # Some models might have a separate key for specifying model_max_length
-        # that will be bigger than derived_max_model_len. We compare user input
-        # with model_max_length and allow this override when it's smaller.
-        model_max_length = getattr(hf_config, "model_max_length", None)
-        if model_max_length is not None and max_model_len <= model_max_length:
-            pass
-        else:
-            raise ValueError(
-                f"User-specified max_model_len ({max_model_len}) is greater "
-                "than the derived max_model_len "
-                f"({max_len_key}={derived_max_model_len} or model_max_length="
-                f"{model_max_length} in model's config.json). This may lead "
-                "to incorrect model outputs or CUDA errors. Make sure the "
-                "value is correct and within the model context size.")
-    return int(max_model_len)
-
 
 @dataclass(frozen=True)
 class EngineConfig:
