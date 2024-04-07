@@ -79,9 +79,7 @@ class Sampler(nn.Module):
         prompt_logprobs, sample_logprobs = _get_logprobs(
             logprobs, sampling_metadata, sample_results)
 
-        breakpoint()
-
-
+        # TODO gate by config
         return _build_sampler_output(sample_results, sampling_metadata,
                                      prompt_logprobs, sample_logprobs,
             sampled_token_probs=probs,
