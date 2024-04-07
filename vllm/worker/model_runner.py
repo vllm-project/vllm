@@ -804,7 +804,10 @@ class ModelRunner:
         computed. This thus triggers context_fwd_attention and generates
         the code.
         """
-        prompt_tokens = list(range(self.block_size + 1))
+        NUM_BLOCKS = 10
+        NUM_COMPUTED_BLOCKS = NUM_BLOCKS - 2
+        prompt_tokens = list(range(self.block_size * NUM_BLOCKS))
+        block_table = list(range(1, NUM_BLOCKS + 1))
 
         # Prompt forward to fill up the KV cache for block 1.
         request_0 = SequenceGroupMetadata(
@@ -812,7 +815,7 @@ class ModelRunner:
             is_prompt=True,
             seq_data={0: SequenceData(prompt_tokens)},
             sampling_params=SamplingParams(temperature=0),
-            block_tables={0: [1, 2]},
+            block_tables={0: block_table},
         )
         self.execute_model([request_0], kv_caches)
 
@@ -823,8 +826,8 @@ class ModelRunner:
             is_prompt=True,
             seq_data={0: SequenceData(prompt_tokens)},
             sampling_params=SamplingParams(temperature=0),
-            block_tables={0: [1, 2]},
-            computed_block_nums=[1],
+            block_tables={0: block_table},
+            computed_block_nums=block_table[:NUM_COMPUTED_BLOCKS],
         )
         self.execute_model([request_1], kv_caches)
 

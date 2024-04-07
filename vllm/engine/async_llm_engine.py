@@ -206,7 +206,9 @@ class _AsyncLLMEngine(LLMEngine):
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
         """
+        t0 = time.perf_counter()
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
+        t1 = time.perf_counter()
 
         if not scheduler_outputs.is_empty():
             # Execute the model.
