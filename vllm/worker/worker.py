@@ -15,7 +15,7 @@ from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
 from vllm.model_executor.parallel_utils.custom_all_reduce import init_custom_ar
 from vllm.model_executor.parallel_utils.parallel_state import (
-    ensure_model_parallel_initialized)
+    ensure_model_parallel_initialized, init_distributed_environment)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
@@ -97,9 +97,9 @@ class Worker:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
-        init_distributed_environment(self.parallel_config, self.rank,
-                                     self.distributed_init_method,
-                                     self.local_rank)
+        init_distributed_environment_in_worker(self.parallel_config, self.rank,
+                                               self.distributed_init_method,
+                                               self.local_rank)
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
@@ -248,31 +248,15 @@ class Worker:
                                                 self.parallel_config)
 
 
-def init_distributed_environment(
+def init_distributed_environment_in_worker(
     parallel_config: ParallelConfig,
     rank: int,
     distributed_init_method: Optional[str] = None,
     local_rank: int = -1,
 ) -> None:
     """Initialize the distributed environment."""
-    if torch.distributed.is_initialized():
-        torch_world_size = torch.distributed.get_world_size()
-        if torch_world_size != parallel_config.world_size:
-            raise RuntimeError(
-                "torch.distributed is already initialized but the torch world "
-                "size does not match parallel_config.world_size "
-                f"({torch_world_size} vs. {parallel_config.world_size}).")
-    elif not distributed_init_method:
-        raise ValueError(
-            "distributed_init_method must be set if torch.distributed "
-            "is not already initialized")
-    else:
-        torch.distributed.init_process_group(
-            backend="nccl",
-            world_size=parallel_config.world_size,
-            rank=rank,
-            init_method=distributed_init_method,
-        )
+    init_distributed_environment(parallel_config.world_size, rank,
+                                 distributed_init_method, local_rank)
 
     if pynccl_utils.is_initialized():
         pynccl_world_size = pynccl_utils.get_world_size()

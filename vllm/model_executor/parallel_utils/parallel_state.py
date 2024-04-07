@@ -4,6 +4,7 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 """Tensor and pipeline parallel groups."""
 import contextlib
+from typing import Optional
 
 import torch
 
@@ -17,6 +18,24 @@ _PIPELINE_MODEL_PARALLEL_GROUP = None
 # A list of global ranks for each pipeline group to ease calculation of the
 # source rank when broadcasting from the first or last pipeline stage.
 _PIPELINE_GLOBAL_RANKS = None
+
+
+def init_distributed_environment(
+    world_size: int,
+    rank: int,
+    distributed_init_method: Optional[str] = None,
+    local_rank: int = -1,
+):
+    if not torch.distributed.is_initialized():
+        assert distributed_init_method is not None, (
+            "distributed_init_method must be provided when initializing "
+            "distributed environment")
+        # it is important to use gloo backend because it is general
+        torch.distributed.init_process_group(
+            backend="gloo",
+            init_method=distributed_init_method,
+            world_size=world_size,
+            rank=rank)
 
 
 def initialize_model_parallel(
@@ -69,7 +88,7 @@ def initialize_model_parallel(
     for i in range(num_tensor_model_parallel_groups):
         ranks = range(i * tensor_model_parallel_size,
                       (i + 1) * tensor_model_parallel_size)
-        group = torch.distributed.new_group(ranks)
+        group = torch.distributed.new_group(ranks, backend="nccl")
         if rank in ranks:
             _TENSOR_MODEL_PARALLEL_GROUP = group
 
@@ -80,7 +99,7 @@ def initialize_model_parallel(
         "pipeline model parallel group is already initialized")
     for i in range(num_pipeline_model_parallel_groups):
         ranks = range(i, world_size, num_pipeline_model_parallel_groups)
-        group = torch.distributed.new_group(ranks)
+        group = torch.distributed.new_group(ranks, backend="nccl")
         if rank in ranks:
             _PIPELINE_MODEL_PARALLEL_GROUP = group
             _PIPELINE_GLOBAL_RANKS = ranks

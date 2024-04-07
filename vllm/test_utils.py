@@ -1,8 +1,7 @@
 import ray
 
-from vllm.config import ParallelConfig
+from vllm.model_executor.parallel_utils import init_distributed_environment
 from vllm.utils import get_open_port
-from vllm.worker.worker import init_distributed_environment
 
 
 def init_test_distributed_environment(
@@ -12,13 +11,10 @@ def init_test_distributed_environment(
     distributed_init_port: str,
     local_rank: int = -1,
 ) -> None:
-    parallel_config = ParallelConfig(pipeline_parallel_size,
-                                     tensor_parallel_size,
-                                     worker_use_ray=True)
     distributed_init_method = f"tcp://localhost:{distributed_init_port}"
     init_distributed_environment(
-        parallel_config,
-        rank,
+        world_size=pipeline_parallel_size * tensor_parallel_size,
+        rank=rank,
         distributed_init_method=distributed_init_method,
         local_rank=local_rank)
 
