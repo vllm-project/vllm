@@ -132,6 +132,7 @@ def _apply_min_tokens_penalty(
         # eg. [ (1,2), (1,3), (5,6) ] -> ( (1,1,5), (2,3,6) )
         logits[tuple(zip(*logits_to_penalize))] = -float("inf")
 
+>>>>>>> main
     return logits
 
 

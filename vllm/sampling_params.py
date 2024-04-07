@@ -285,13 +285,17 @@ class SamplingParams:
         arbitrary, nontrivial amount of data.
         See https://github.com/vllm-project/vllm/issues/3087
         """
+        logit_processor_refs = None 
 
-        logit_processor_refs = (None if self.logits_processors is None else {
-            id(lp): lp
-            for lp in self.logits_processors
-            if (not hasattr(lp[0] if isinstance(lp, Sequence) else lp, "fsm")
-                if lp is not None else True)
-        })
+        if self.logits_processors:
+            logit_processor_refs = {}
+            for lp in self.logits_processors:
+                if lp:
+                    lp_first = lp[0] if isinstance(lp, Sequence) else lp
+                    if hasattr(lp_first, "fsm"):
+                        continue
+                logit_processor_refs[id(lp)] = lp
+
         return copy.deepcopy(self, memo=logit_processor_refs)
 
     def __repr__(self) -> str:

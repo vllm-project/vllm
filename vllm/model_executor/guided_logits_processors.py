@@ -84,31 +84,30 @@ class BaseGuidedLogitsProcessor:
 
         if len(input_ids) == 0:
             self.init_state()
-        else:
-            if not hasattr(self, "fsm_state"):
-                if len(input_ids) == 1:
-                    # This special scenario arises during sampling strategies
-                    # such as beam search when the number of sequences to be
-                    # generated (`n`) is bigger then 1.
-                    # During the initial step of beam search, only the input
-                    #`prompt` is given, while the beams themselves are yet
-                    # to be defined.
-                    # Consequently, the logits will have a shape of
-                    # [1, vocab_size].
-                    # Due to this `self.fsm_stat` initialization will be
-                    # triggered onlys for the very first `logits_processor`,
-                    # leaving the remaining `n-1` uninitialized.
-                    self.init_state()
-                    empty_seq_id = hash(tuple([]))
-                    self.fsm.allowed_token_ids(self.fsm_state[empty_seq_id])
-                else:
-                    raise ValueError(
-                        f"Multiple ids were generated: {input_ids}, "
-                        "while fsm is still not initialized")
+        elif not hasattr(self, "fsm_state") and len(input_ids) == 1:
+            # This special scenario arises during sampling strategies
+            # such as beam search when the number of sequences to be
+            # generated (`n`) is bigger then 1.
+            # During the initial step of beam search, only the input
+            #`prompt` is given, while the beams themselves are yet
+            # to be defined.
+            # Consequently, the logits will have a shape of
+            # [1, vocab_size].
+            # Due to this `self.fsm_stat` initialization will be
+            # triggered onlys for the very first `logits_processor`,
+            # leaving the remaining `n-1` uninitialized.
+            self.init_state()
+            empty_seq_id = hash(tuple([]))
+            self.fsm.allowed_token_ids(self.fsm_state[empty_seq_id])
+    
             last_token = input_ids[-1]
             last_seq_id = hash(tuple(input_ids[:-1]))
             self.fsm_state[seq_id] = self.fsm.next_state(
                 self.fsm_state[last_seq_id], last_token)
+        else:
+            raise ValueError(
+                f"Multiple ids were generated: {input_ids}, "
+                "while fsm is still not initialized")
 
         allowed_tokens = self.fsm.allowed_token_ids(self.fsm_state[seq_id])
 
@@ -196,8 +195,8 @@ class CFGLogitsProcessor(BaseGuidedLogitsProcessor):
 
     def __deepcopy__(self, memo):
         logits_processor = self.__class__(
-            copy.deepcopy(self.fsm.cfg_string, memo),
-            copy.deepcopy(self.fsm.tokenizer, memo),
+            self.fsm.cfg_string, memo,
+            self.fsm.tokenizer, memo,
         )
         logits_processor.fsm = self.fsm.copy()
         return logits_processor
