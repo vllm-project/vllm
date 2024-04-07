@@ -1,7 +1,7 @@
 import ray
 
 from vllm.model_executor.parallel_utils.parallel_state import (
-    init_distributed_environment)
+    ensure_model_parallel_initialized, init_distributed_environment)
 from vllm.utils import get_open_port
 
 
@@ -18,6 +18,8 @@ def init_test_distributed_environment(
         rank=rank,
         distributed_init_method=distributed_init_method,
         local_rank=local_rank)
+    ensure_model_parallel_initialized(tensor_parallel_size,
+                                      pipeline_parallel_size)
 
 
 def multi_process_tensor_parallel(
