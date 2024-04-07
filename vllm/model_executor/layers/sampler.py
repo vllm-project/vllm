@@ -143,9 +143,6 @@ def _apply_logits_processors(
     logits: torch.Tensor,
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
-    # when prompt_logprobs is not None, we need to skip the prompt tokens.
-    logits_with_prompt = len(sampling_metadata.prompt_lens) > 0 and sum(
-        sampling_metadata.prompt_lens) == logits.shape[0]
     logits_row_idx = -1
     found_logits_processors = False
     for seq_ids, sampling_params in sampling_metadata.seq_groups:
@@ -153,8 +150,10 @@ def _apply_logits_processors(
         if logits_processors:
             found_logits_processors = True
             for seq_id in seq_ids:
-                # skip prompt tokens for the first iteration.
-                if logits_with_prompt:
+                # handle prompt_logprobs by skipping rows in logits added for the prompt
+                # tokens (prompt logprobs are not processed)
+                if (seq_id < sampling_metadata.num_prompts
+                        and sampling_params.prompt_logprobs is not None):
                     logits_row_idx += sampling_metadata.prompt_lens[seq_id]
                 else:
                     logits_row_idx += 1
@@ -166,6 +165,8 @@ def _apply_logits_processors(
         else:
             logits_row_idx += len(seq_ids)
     if found_logits_processors:
+        # verifies that no rows in logits were missed unexpectedly
+        # logits_row_idx should be the last row index
         assert logits_row_idx == logits.shape[0] - 1
     return logits
 
