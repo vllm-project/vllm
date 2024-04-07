@@ -106,12 +106,12 @@ class RayGPUExecutor(ExecutorBase):
                 placement_group_bundle_index=bundle_id,
             )
             worker = ray.remote(
-                num_cpus=0,
+                num_cpus=0, #Jiayi: changed from 0 to 1 here
                 num_gpus=num_gpus,
                 scheduling_strategy=scheduling_strategy,
                 **ray_remote_kwargs,
             )(RayWorkerVllm).remote(self.model_config.trust_remote_code)
-
+            print("cpu assigned by workers")
             worker_ip = ray.get(worker.get_node_ip.remote())
             if worker_ip == driver_ip and self.driver_dummy_worker is None:
                 # If the worker is on the same node as the driver, we use it
@@ -264,7 +264,8 @@ class RayGPUExecutor(ExecutorBase):
                       seq_group_metadata_list: List[SequenceGroupMetadata],
                       blocks_to_swap_in: Dict[int, int],
                       blocks_to_swap_out: Dict[int, int],
-                      blocks_to_copy: Dict[int, List[int]]) -> SamplerOutput:
+                      blocks_to_copy: Dict[int, List[int]],
+                      cache_fuse_metadata=None) -> SamplerOutput:
         all_outputs = self._run_workers(
             "execute_model",
             driver_kwargs={
@@ -272,6 +273,7 @@ class RayGPUExecutor(ExecutorBase):
                 "blocks_to_swap_in": blocks_to_swap_in,
                 "blocks_to_swap_out": blocks_to_swap_out,
                 "blocks_to_copy": blocks_to_copy,
+                "cache_fuse_metadata": cache_fuse_metadata,
             },
             use_ray_compiled_dag=USE_RAY_COMPILED_DAG)
 
@@ -311,12 +313,21 @@ class RayGPUExecutor(ExecutorBase):
         if max_concurrent_workers:
             raise NotImplementedError(
                 "max_concurrent_workers is not supported yet.")
-
+        
+        import pdb
+        pdb.set_trace()
+        
         if use_ray_compiled_dag:
             # Right now, compiled DAG can only accept a single
             # input. TODO(sang): Fix it.
             output_channels = self.forward_dag.execute(1)
         else:
+            #HACK(Jiayi): worker node does not have args or kwargs
+            if args is None:
+                args = driver_args
+            if kwargs is None:
+                kwargs = driver_kwargs
+            
             # Start the ray workers first.
             ray_worker_outputs = [
                 worker.execute_method.remote(method, *args, **kwargs)
@@ -346,7 +357,8 @@ class RayGPUExecutor(ExecutorBase):
                         chan.end_read()
             else:
                 ray_worker_outputs = ray.get(ray_worker_outputs)
-
+        import pdb
+        pdb.set_trace()
         return [driver_worker_output] + ray_worker_outputs
 
     def _compiled_ray_dag(self):
@@ -422,6 +434,7 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
+        cache_fuse_metadata=None,
     ) -> SamplerOutput:
         all_outputs = await self._run_workers_async(
             "execute_model",
@@ -430,6 +443,7 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
                 "blocks_to_swap_in": blocks_to_swap_in,
                 "blocks_to_swap_out": blocks_to_swap_out,
                 "blocks_to_copy": blocks_to_copy,
+                "cache_fuse_metadata":cache_fuse_metadata,
             },
             use_ray_compiled_dag=USE_RAY_COMPILED_DAG)
 

@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Tuple, Set, Union
 
 import numpy as np
 import torch
+import torch.distributed
 import torch.nn as nn
 
 from vllm.config import (DeviceConfig, ModelConfig, LoRAConfig, ParallelConfig,
@@ -573,6 +574,7 @@ class ModelRunner:
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+        cache_fuse_metadata=None
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, input_metadata, sampling_metadata,
          lora_requests,
@@ -589,23 +591,84 @@ class ModelRunner:
             model_executable = self.graph_runners[graph_batch_size]
         else:
             model_executable = self.model
-        hidden_states = model_executable(
+
+        hidden_states, sampling_meta_data_new = model_executable(
             input_ids=input_tokens,
             positions=input_positions,
             kv_caches=kv_caches,
             input_metadata=input_metadata,
+            cache_fuse_metadata = None,
+            sampling_metadata=sampling_metadata,
         )
+        #torch.distributed.barrier()
+        #torch.cuda.synchronize()
+        #if torch.distributed.get_rank()==0:
+        #    import pdb
+        #    pdb.set_trace()
+        '''
+        torch.distributed.barrier()
+        torch.cuda.synchronize()
+        for i in range(5):
+            hidden_states, sampling_meta_data_new = model_executable(
+                input_ids=input_tokens,
+                positions=input_positions,
+                kv_caches=kv_caches,
+                input_metadata=input_metadata,
+                cache_fuse_metadata =None,
+                sampling_metadata=sampling_metadata,
+                )
+            torch.distributed.barrier()
+            torch.cuda.synchronize()
+        '''
+            
+        
+        #if sampling_meta_data_new:
+        #    sampling_metadata = sampling_meta_data_new
         # import pdb
         # pdb.set_trace()
         # Sample the next token.
         #HACK(Jiayi): This aligns sampling indices
-        if self.model.model.cache_fuse_metadata["check"]:
-            sampling_metadata.selected_token_indices[0]=len(self.model.model.cache_fuse_metadata["imp_token_indices"])-1
-            sampling_metadata.prompt_lens[0] = len(self.model.model.cache_fuse_metadata["imp_token_indices"])
-        output = self.model.sample(
-            hidden_states=hidden_states,
-            sampling_metadata=sampling_metadata,
-        )
+        print(11111111111111)
+        #print(sampling_metadata)
+        if sampling_metadata.perform_sampling==True:
+            if input_tokens.shape[1]>3800: #and torch.distributed.get_rank()==0:#self.model.model.cache_fuse_metadata["check"]:
+                print("1.51.51.51.51.51.51.5")
+                #print(f"model_runner.py(1):{sampling_metadata}")
+                idx = list(sampling_metadata.seq_data.keys())[0]
+                sampling_metadata.selected_token_indices=torch.tensor([0]).cuda()#569#len(self.model.model.cache_fuse_metadata["imp_token_indices"])-1
+                sampling_metadata.prompt_lens[0] = 1#len(self.model.model.cache_fuse_metadata["imp_token_indices"])
+                sampling_metadata.seq_data[idx].prompt_token_ids=[sampling_metadata.seq_data[idx].prompt_token_ids[-1]]#[self.model.model.cache_fuse_metadata["imp_token_indices"]]
+                hidden_states = hidden_states[:,-1:]
+                '''
+                print(hidden_states)
+                print(type(sampling_metadata.selected_token_indices))
+                print(type(sampling_metadata.prompt_lens[0]))
+                print(type(sampling_metadata.seq_data[0].prompt_token_ids))
+                print(hidden_states.shape, hidden_states.device)
+                print(f"model_runner.py)(2):{sampling_metadata}")
+                '''
+        #else:
+        #    if input_tokens.shape[1]>3800:
+        #        sampling_metadata.seq_data[0].prompt_token_ids=[sampling_metadata.seq_data[0].prompt_token_ids[-1]]#[self.model.model.cache_fuse_metadata["imp_token_indices"]]
+        #        hidden_states = hidden_states[:,-1:]
+        print(f"Rank{torch.distributed.get_rank()}: {sampling_metadata}")
+        #torch.distributed.barrier()
+        print(2222222222)
+        #if torch.distributed.get_rank()==0:
+        #    import pdb
+        #    pdb.set_trace()
+        if sampling_metadata.perform_sampling==True:
+            output = self.model.sample(
+                hidden_states=hidden_states,
+                sampling_metadata=sampling_metadata,
+            )
+        else:
+            output=None
+        #if torch.distributed.get_rank() == 0:
+        #    import pdb
+        #    pdb.set_trace()
+        print(333333333333333333)
+        #print(output)
         return output
 
     @torch.inference_mode()

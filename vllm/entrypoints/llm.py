@@ -128,6 +128,8 @@ class LLM:
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
+        cache_fuse_metadata=None,
+        
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -173,7 +175,7 @@ class LLM:
                               sampling_params,
                               token_ids,
                               lora_request=lora_request)
-        return self._run_engine(use_tqdm)
+        return self._run_engine(use_tqdm, cache_fuse_metadata=cache_fuse_metadata)
 
     def _add_request(
         self,
@@ -189,7 +191,7 @@ class LLM:
                                     prompt_token_ids,
                                     lora_request=lora_request)
 
-    def _run_engine(self, use_tqdm: bool) -> List[RequestOutput]:
+    def _run_engine(self, use_tqdm: bool, cache_fuse_metadata=None) -> List[RequestOutput]:
         # Initialize tqdm.
         if use_tqdm:
             num_requests = self.llm_engine.get_num_unfinished_requests()
@@ -201,7 +203,7 @@ class LLM:
         outputs: List[RequestOutput] = []
         while self.llm_engine.has_unfinished_requests():
             #pdb.set_trace()
-            step_outputs = self.llm_engine.step()
+            step_outputs = self.llm_engine.step(cache_fuse_metadata=cache_fuse_metadata)
             for output in step_outputs:
                 if output.finished:
                     outputs.append(output)
@@ -334,6 +336,7 @@ class METIS:
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
+        cache_fuse_metadata=None
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -385,7 +388,7 @@ class METIS:
                               sampling_params,
                               token_ids,
                               lora_request=lora_request)
-        return self._run_engine(use_tqdm)
+        return self._run_engine(use_tqdm, cache_fuse_metadata=cache_fuse_metadata)
 
     def _add_request(
         self,

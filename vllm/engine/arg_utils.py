@@ -320,6 +320,8 @@ class EngineArgs:
                                          self.max_parallel_loading_workers,
                                          self.disable_custom_all_reduce,
                                          self.ray_workers_use_nsight)
+        import pdb
+        pdb.set_trace()
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
                                            model_config.max_model_len,

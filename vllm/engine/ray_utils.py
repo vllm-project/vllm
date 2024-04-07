@@ -123,7 +123,7 @@ def initialize_ray_cluster(
                 "The number of required GPUs exceeds the total number of "
                 "available GPUs in the cluster.")
         # Create a new placement group
-        placement_group_specs = ([{"GPU": 1}] * parallel_config.world_size)
+        placement_group_specs = ([{"CPU": 1,"GPU": 1}] * parallel_config.world_size) #Jiayi: hacked here
         current_placement_group = ray.util.placement_group(
             placement_group_specs)
         # Wait until PG is ready - this will block until all
