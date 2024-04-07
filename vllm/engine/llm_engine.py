@@ -739,7 +739,6 @@ class LLMEngine:
                 token_id=output_token_id,
                 logprobs={output_token_id: Logprob(0.0)},
             )
-            print(f'Appended token id {output_token_id=}')
 
         #seq.append_token_ids(output_token_ids,
         #                     output_logprobs,

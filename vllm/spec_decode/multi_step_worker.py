@@ -6,7 +6,8 @@ import torch
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeProposer)
-from vllm.spec_decode.util import (sampler_output_to_torch, mock_device_tensors)
+from vllm.spec_decode.util import (sampler_output_to_torch,
+                                   mock_device_tensors)
 from vllm.worker.worker import Worker
 
 
@@ -343,7 +344,7 @@ class DraftModelTop1Proposer(SpeculativeProposer):
 
         for step_output in sampler_output:
             mock_device_tensors(
-                sampler_output=step_output, 
+                sampler_output=step_output,
                 batch_size=len(proposal_lens),
                 vocab_size=self._vocab_size,
                 device=self._device,
