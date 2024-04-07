@@ -84,7 +84,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
             #return_python_output=False
-            )
+        )
 
         all_tokens, all_probs = self._contract_batch(
             original_bs=len(seq_group_metadata_list),

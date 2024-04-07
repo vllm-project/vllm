@@ -19,8 +19,9 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+
 def create_spec_decode_worker():
-    
+
     from vllm.worker.worker import Worker
     from vllm.spec_decode.spec_decode_worker import SpecDecodeWorker
     from vllm.spec_decode.multi_step_worker import MultiStepWorker
@@ -41,7 +42,7 @@ def create_spec_decode_worker():
         vision_language_config=self.vision_language_config,
         is_driver_worker=True,
     )
-    
+
     from vllm.spec_decode.multi_step_worker import MultiStepWorker
     draft_worker = MultiStepWorker(
         model_config=self.speculative_config.draft_model_config,
@@ -56,7 +57,7 @@ def create_spec_decode_worker():
         vision_language_config=self.vision_language_config,
         is_driver_worker=True,
     )
-    
+
     from vllm.spec_decode.spec_decode_worker import SpecDecodeWorker
     from vllm.model_executor.layers.rejection_sampler import RejectionSampler
     spec_decode_worker = SpecDecodeWorker(
@@ -72,6 +73,7 @@ def create_spec_decode_worker():
 
     self.driver_worker.init_device()
     #self.driver_worker.load_model()
+
 
 class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     """Worker which implements speculative decoding.
@@ -240,7 +242,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
             #return_python_output=False
-            )
+        )
 
         logger.info("run target worker no spec")
         sampler_output = self.scorer_worker.execute_model(

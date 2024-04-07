@@ -627,7 +627,6 @@ class LLMEngine:
             self, output: SamplerOutput,
             scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
 
-
         if not isinstance(output, list):
             all_output = [output]
         else:
@@ -646,7 +645,8 @@ class LLMEngine:
         now = time.time()
 
         # Update the scheduled sequence groups with the model outputs.
-        for scheduled_seq_group, outputs in zip(scheduled_seq_groups, output_by_sequence_group):
+        for scheduled_seq_group, outputs in zip(scheduled_seq_groups,
+                                                output_by_sequence_group):
 
             seq_group = scheduled_seq_group.seq_group
             seq_group.update_num_computed_tokens(
@@ -655,7 +655,8 @@ class LLMEngine:
             assert len(outputs) > 0
             # TODO can spec decode go through second path?
             if len(outputs) > 1:
-                self._process_sequence_group_outputs_multi_step(seq_group, outputs)
+                self._process_sequence_group_outputs_multi_step(
+                    seq_group, outputs)
             else:
                 self._process_sequence_group_outputs(seq_group, outputs[0])
 
@@ -825,7 +826,7 @@ class LLMEngine:
                 num_lookahead_slots=scheduler_outputs.num_lookahead_slots)
         else:
             output = []
-        
+
         return self._process_model_outputs(output, scheduler_outputs)
 
     def do_log_stats(self) -> None:
@@ -913,7 +914,7 @@ class LLMEngine:
         if seq.get_len() > self.scheduler_config.max_model_len:
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
-        
+
         # Check if the sequence has reached max_tokens.
         if seq.get_output_len() >= sampling_params.max_tokens:
             # TODO should cap block

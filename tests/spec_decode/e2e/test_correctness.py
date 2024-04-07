@@ -51,14 +51,16 @@ def test_spec_decode_e2e_logical_flow(test_llm_generator, batch_size: int):
         temperature=temperature,
     )
 
-    batch_token_ids = get_token_ids_from_llm_generator(test_llm_generator, prompts,
-                                     sampling_params)
+    batch_token_ids = get_token_ids_from_llm_generator(test_llm_generator,
+                                                       prompts,
+                                                       sampling_params)
 
     # Expect a generation for each prompt in the batch.
     assert len(batch_token_ids) == len(prompts)
 
     # TODO(cadedaniel) check for equality once block truncation is implemented.
     assert all(len(token_ids) >= output_len for token_ids in batch_token_ids)
+
 
 @pytest.mark.parametrize(
     "common_llm_kwargs",
@@ -77,13 +79,15 @@ def test_spec_decode_e2e_logical_flow(test_llm_generator, batch_size: int):
         # Required for spec decode.
         "use_v2_block_manager": True
     }])
-@pytest.mark.parametrize("per_test_common_llm_kwargs", [
-    {
-        # Expect failure as spec decode not supported by
-        # Ray backend.
-        "tensor_parallel_size": 2,
-    },
-])
+@pytest.mark.parametrize(
+    "per_test_common_llm_kwargs",
+    [
+        {
+            # Expect failure as spec decode not supported by
+            # Ray backend.
+            "tensor_parallel_size": 2,
+        },
+    ])
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
 @pytest.mark.parametrize("seed", [1])
 def test_spec_decode_xfail(test_llm_generator):
@@ -100,11 +104,11 @@ def test_spec_decode_xfail(test_llm_generator):
         temperature=temperature,
     )
 
-    with pytest.raises(
-            AssertionError,
-            match="Speculative decoding not yet supported for "):
+    with pytest.raises(AssertionError,
+                       match="Speculative decoding not yet supported for "):
         get_token_ids_from_llm_generator(test_llm_generator, prompts,
                                          sampling_params)
+
 
 def get_token_ids_from_llm_generator(llm_generator, prompts, sampling_params):
     for llm in llm_generator:
@@ -113,4 +117,3 @@ def get_token_ids_from_llm_generator(llm_generator, prompts, sampling_params):
         del llm
 
     return token_ids
-

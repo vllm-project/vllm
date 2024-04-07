@@ -207,7 +207,8 @@ class Worker(WorkerBase):
         blocks_to_copy: Optional[Dict[int, List[int]]] = None,
         num_lookahead_slots: int = 0,
     ) -> Optional[SamplerOutput]:
-        assert (num_lookahead_slots == 0), "worker does not support lookahead slots"
+        assert (num_lookahead_slots == 0
+                ), "worker does not support lookahead slots"
 
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None

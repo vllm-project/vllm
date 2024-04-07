@@ -80,11 +80,17 @@ class Sampler(nn.Module):
             logprobs, sampling_metadata, sample_results)
 
         # TODO gate by config
-        return _build_sampler_output(sample_results, sampling_metadata,
-                                     prompt_logprobs, sample_logprobs,
+        return _build_sampler_output(
+            sample_results,
+            sampling_metadata,
+            prompt_logprobs,
+            sample_logprobs,
             sampled_token_probs=probs,
-            sampled_token_ids=torch.empty((len(sampling_metadata.seq_groups), 1), device=probs.device, dtype=torch.long),
-                                     )
+            sampled_token_ids=torch.empty(
+                (len(sampling_metadata.seq_groups), 1),
+                device=probs.device,
+                dtype=torch.long),
+        )
 
 
 def _get_bin_counts_and_mask(

@@ -75,7 +75,7 @@ class GPUExecutor(ExecutorBase):
             vision_language_config=self.vision_language_config,
             is_driver_worker=True,
         )
-        
+
         from vllm.spec_decode.multi_step_worker import MultiStepWorker
         draft_worker = MultiStepWorker(
             model_config=self.speculative_config.draft_model_config,
@@ -90,7 +90,7 @@ class GPUExecutor(ExecutorBase):
             vision_language_config=self.vision_language_config,
             is_driver_worker=True,
         )
-        
+
         from vllm.spec_decode.spec_decode_worker import SpecDecodeWorker
         from vllm.model_executor.layers.rejection_sampler import RejectionSampler
         spec_decode_worker = SpecDecodeWorker(
@@ -150,13 +150,14 @@ class GPUExecutor(ExecutorBase):
 
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
-    def execute_model(self,
-                      seq_group_metadata_list: List[SequenceGroupMetadata],
-                      blocks_to_swap_in: Dict[int, int],
-                      blocks_to_swap_out: Dict[int, int],
-                      blocks_to_copy: Dict[int, List[int]],
-                      num_lookahead_slots: int,
-                      ) -> SamplerOutput:
+    def execute_model(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        blocks_to_swap_in: Dict[int, int],
+        blocks_to_swap_out: Dict[int, int],
+        blocks_to_copy: Dict[int, List[int]],
+        num_lookahead_slots: int,
+    ) -> SamplerOutput:
         output = self.driver_worker.execute_model(
             seq_group_metadata_list=seq_group_metadata_list,
             blocks_to_swap_in=blocks_to_swap_in,
