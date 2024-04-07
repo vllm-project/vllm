@@ -5,6 +5,7 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.llm_engine import LLMEngine
 from vllm.engine.ray_utils import initialize_ray_cluster
 from vllm.entrypoints.llm import LLM
+from vllm.model_executor.models import ModelRegistry
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import SamplingParams
 
@@ -12,6 +13,7 @@ __version__ = "0.4.0.post1"
 
 __all__ = [
     "LLM",
+    "ModelRegistry",
     "SamplingParams",
     "RequestOutput",
     "CompletionOutput",
