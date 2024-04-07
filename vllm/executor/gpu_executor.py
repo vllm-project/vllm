@@ -96,7 +96,7 @@ class GPUExecutor(ExecutorBase):
         spec_decode_worker = SpecDecodeWorker(
             proposer_worker=draft_worker,
             scorer_worker=target_worker,
-            rejection_sampler=RejectionSampler(),
+            rejection_sampler=RejectionSampler(strict_mode=True),
         )
 
         assert self.parallel_config.world_size == 1, (

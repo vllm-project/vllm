@@ -8,7 +8,7 @@ from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
 from vllm.spec_decode.util import (get_all_seq_ids, nvtx_range,
                                    sampler_output_to_torch,
-                                   split_batch_by_proposal_len)
+                                   split_batch_by_proposal_len, mock_device_tensors)
 from vllm.worker.worker import Worker
 
 SeqId = int
@@ -143,6 +143,14 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         This maps the scores of speculative tokens back to their original
         sequences.
         """
+
+        mock_device_tensors(
+            sampler_output=target_sampler_output,
+            batch_size=len(non_spec_indices) + num_scoring_tokens,
+            vocab_size=self._vocab_size,
+            device=self._device,
+        )
+
         (target_token_ids, target_probs, non_spec_target_token_ids,
          non_spec_target_probs) = self._split_scoring_output(
              target_sampler_output, num_scoring_tokens)

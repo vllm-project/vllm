@@ -85,11 +85,12 @@ class Sampler(nn.Module):
             sampling_metadata,
             prompt_logprobs,
             sample_logprobs,
-            sampled_token_probs=probs,
-            sampled_token_ids=torch.empty(
-                (len(sampling_metadata.seq_groups), 1),
-                device=probs.device,
-                dtype=torch.long),
+            #sampled_token_probs=probs,
+            ## TODO
+            #sampled_token_ids=torch.empty(
+            #    (len(sampling_metadata.seq_groups), 1),
+            #    device=probs.device,
+            #    dtype=torch.long),
         )
 
 
