@@ -170,7 +170,7 @@ class MiniCPMMLP(nn.Module):
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
-    
+
 
 class MiniCPMAttention(nn.Module):
 
@@ -230,11 +230,12 @@ class MiniCPMAttention(nn.Module):
             rope_scaling=rope_scaling,
         )
         # set rope as fp32 instead of bf16
-        self.rotary_emb.cos_sin_cache = self.rotary_emb._compute_cos_sin_cache()
+        self.rotary_emb.cos_sin_cache = self.rotary_emb._compute_cos_sin_cache(
+        )
         self.attn = Attention(self.num_heads,
-                             self.head_dim,
-                             self.scaling,
-                             num_kv_heads=self.num_kv_heads)
+                              self.head_dim,
+                              self.scaling,
+                              num_kv_heads=self.num_kv_heads)
 
     def forward(
         self,
@@ -286,12 +287,10 @@ class MiniCPMDecoderLayer(nn.Module):
                 linear_method=linear_method,
             )
         else:
-            self.mlp = MiniCPMMoE(
-                num_experts=config.num_experts,
-                top_k=config.num_experts_per_tok,
-                hidden_size=config.hidden_size,
-                intermediate_size=config.intermediate_size
-            )
+            self.mlp = MiniCPMMoE(num_experts=config.num_experts,
+                                  top_k=config.num_experts_per_tok,
+                                  hidden_size=config.hidden_size,
+                                  intermediate_size=config.intermediate_size)
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
@@ -319,7 +318,7 @@ class MiniCPMDecoderLayer(nn.Module):
 
         # Fully Connected
         residual = hidden_states
-        hidden_states= self.post_attention_layernorm(hidden_states)
+        hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states * \
             (self.config.scale_depth / math.sqrt(self.config.num_hidden_layers))
@@ -439,7 +438,7 @@ class MiniCPMForCausalLM(nn.Module):
                 if not lora_config else lora_config.lora_vocab_padding_size,
             )
         self.scale_width = self.config.hidden_size / self.config.dim_model_base
-        
+
         self.logits_processor = LogitsProcessor(unpadded_vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()
