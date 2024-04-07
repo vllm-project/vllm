@@ -87,6 +87,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.scorer_worker.init_device()
         self.proposer_worker.init_device()
 
+        # TODO separate from init_device?
+        self.scorer_worker.load_model()
+        self.proposer_worker.load_model()
+
         self._metrics.init_gpu_tensors(self.rank)
         self.rejection_sampler.init_gpu_tensors(self.rank)
         self.scorer = BatchExpansionTop1Scorer(

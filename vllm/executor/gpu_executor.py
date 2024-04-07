@@ -33,14 +33,81 @@ class GPUExecutor(ExecutorBase):
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.vision_language_config = vision_language_config
+        self.speculative_config = speculative_config
 
-        assert (not speculative_config
-                ), "Speculative decoding not yet supported for GPU backend"
+        #assert (not speculative_config
+        #        ), "Speculative decoding not yet supported for GPU backend"
 
         # Instantiate the worker and load the model to GPU.
         self._init_worker()
 
     def _init_worker(self):
+        if self.speculative_config is None:
+            self._init_non_spec_worker()
+        else:
+            self._init_spec_worker()
+
+    def _init_spec_worker(self):
+        from vllm.worker.worker import Worker
+        from vllm.spec_decode.spec_decode_worker import SpecDecodeWorker
+        from vllm.spec_decode.multi_step_worker import MultiStepWorker
+
+        #from vllm.worker.multi_step_worker import MultiStepWorker  # pylint: disable=import-outside-toplevel
+        #from vllm.worker.single_tp_worker import SingleTpWorker  # pylint: disable=import-outside-toplevel
+        #from vllm.worker.draft_target_worker import DraftTargetWorker  # pylint: disable=import-outside-toplevel
+
+        #scheduler_config: "SchedulerConfig" = worker_kwargs.pop(
+        #    "scheduler_config")
+
+        distributed_init_method = get_distributed_init_method(
+            get_ip(), get_open_port())
+
+        target_worker = Worker(
+            model_config=self.model_config,
+            parallel_config=self.parallel_config,
+            scheduler_config=self.scheduler_config,
+            device_config=self.device_config,
+            cache_config=self.cache_config,
+            local_rank=0,
+            rank=0,
+            distributed_init_method=distributed_init_method,
+            lora_config=self.lora_config,
+            vision_language_config=self.vision_language_config,
+            is_driver_worker=True,
+        )
+        
+        from vllm.spec_decode.multi_step_worker import MultiStepWorker
+        draft_worker = MultiStepWorker(
+            model_config=self.speculative_config.draft_model_config,
+            parallel_config=self.speculative_config.draft_parallel_config,
+            scheduler_config=self.scheduler_config,
+            device_config=self.device_config,
+            cache_config=self.cache_config,
+            local_rank=0,
+            rank=0,
+            distributed_init_method=distributed_init_method,
+            lora_config=self.lora_config,
+            vision_language_config=self.vision_language_config,
+            is_driver_worker=True,
+        )
+        
+        from vllm.spec_decode.spec_decode_worker import SpecDecodeWorker
+        from vllm.model_executor.layers.rejection_sampler import RejectionSampler
+        spec_decode_worker = SpecDecodeWorker(
+            proposer_worker=draft_worker,
+            scorer_worker=target_worker,
+            rejection_sampler=RejectionSampler(),
+        )
+
+        assert self.parallel_config.world_size == 1, (
+            "GPUExecutor only supports single GPU.")
+
+        self.driver_worker = spec_decode_worker
+
+        self.driver_worker.init_device()
+        #self.driver_worker.load_model()
+
+    def _init_non_spec_worker(self):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
         from vllm.worker.worker import Worker
