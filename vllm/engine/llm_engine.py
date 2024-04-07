@@ -25,6 +25,7 @@ from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.utils import Counter
+from vllm.engine.output_processor.interfaces import SequenceGroupOutputProcessor
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -179,6 +180,14 @@ class LLMEngine:
                 local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
                 labels=dict(model_name=model_config.model))
             self.stat_logger.info("cache_config", self.cache_config)
+
+        self.output_processor = SequenceGroupOutputProcessor.create_output_processor(
+            self.scheduler_config,
+            self.detokenizer,
+            self.scheduler,
+            self.seq_counter,
+            self.get_tokenizer_for_seq,
+        )
 
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
@@ -449,179 +458,179 @@ class LLMEngine:
                         eos_token_id=best_running_seq.eos_token_id))
         return current_worst_score >= highest_attainable_score
 
-    def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
-                                        outputs: SequenceGroupOutput) -> None:
+    #def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
+    #                                    outputs: SequenceGroupOutput) -> None:
 
-        # Process prompt logprobs
-        prompt_logprobs = outputs.prompt_logprobs
-        if prompt_logprobs is not None and seq_group.sampling_params.detokenize:
-            self.detokenizer.decode_prompt_logprobs_inplace(
-                seq_group, prompt_logprobs)
-            seq_group.prompt_logprobs = prompt_logprobs
+    #    # Process prompt logprobs
+    #    prompt_logprobs = outputs.prompt_logprobs
+    #    if prompt_logprobs is not None and seq_group.sampling_params.detokenize:
+    #        self.detokenizer.decode_prompt_logprobs_inplace(
+    #            seq_group, prompt_logprobs)
+    #        seq_group.prompt_logprobs = prompt_logprobs
 
-        # Process samples
-        samples = outputs.samples
-        parent_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
-        existing_finished_seqs = seq_group.get_finished_seqs()
-        parent_child_dict = {
-            parent_seq.seq_id: []
-            for parent_seq in parent_seqs
-        }
-        for sample in samples:
-            parent_child_dict[sample.parent_seq_id].append(sample)
-        # List of (child, parent)
-        child_seqs: List[Tuple[Sequence, Sequence]] = []
+    #    # Process samples
+    #    samples = outputs.samples
+    #    parent_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
+    #    existing_finished_seqs = seq_group.get_finished_seqs()
+    #    parent_child_dict = {
+    #        parent_seq.seq_id: []
+    #        for parent_seq in parent_seqs
+    #    }
+    #    for sample in samples:
+    #        parent_child_dict[sample.parent_seq_id].append(sample)
+    #    # List of (child, parent)
+    #    child_seqs: List[Tuple[Sequence, Sequence]] = []
 
-        # Process the child samples for each parent sequence
-        for parent in parent_seqs:
-            child_samples: List[SequenceOutput] = parent_child_dict[
-                parent.seq_id]
-            if len(child_samples) == 0:
-                # This parent sequence has no children samples. Remove
-                # the parent sequence from the sequence group since it will
-                # not be used in the future iterations.
-                parent.status = SequenceStatus.FINISHED_ABORTED
-                seq_group.remove(parent.seq_id)
-                self.scheduler.free_seq(parent)
-                continue
-            # Fork the parent sequence if there are multiple child samples.
-            for child_sample in child_samples[:-1]:
-                new_child_seq_id = next(self.seq_counter)
-                child = parent.fork(new_child_seq_id)
-                child.append_token_id(child_sample.output_token,
-                                      child_sample.logprobs)
-                child_seqs.append((child, parent))
-            # Continue the parent sequence for the last child sample.
-            # We reuse the parent sequence here to reduce redundant memory
-            # copies, especially when using non-beam search sampling methods.
-            last_child_sample = child_samples[-1]
-            parent.append_token_id(last_child_sample.output_token,
-                                   last_child_sample.logprobs)
-            child_seqs.append((parent, parent))
+    #    # Process the child samples for each parent sequence
+    #    for parent in parent_seqs:
+    #        child_samples: List[SequenceOutput] = parent_child_dict[
+    #            parent.seq_id]
+    #        if len(child_samples) == 0:
+    #            # This parent sequence has no children samples. Remove
+    #            # the parent sequence from the sequence group since it will
+    #            # not be used in the future iterations.
+    #            parent.status = SequenceStatus.FINISHED_ABORTED
+    #            seq_group.remove(parent.seq_id)
+    #            self.scheduler.free_seq(parent)
+    #            continue
+    #        # Fork the parent sequence if there are multiple child samples.
+    #        for child_sample in child_samples[:-1]:
+    #            new_child_seq_id = next(self.seq_counter)
+    #            child = parent.fork(new_child_seq_id)
+    #            child.append_token_id(child_sample.output_token,
+    #                                  child_sample.logprobs)
+    #            child_seqs.append((child, parent))
+    #        # Continue the parent sequence for the last child sample.
+    #        # We reuse the parent sequence here to reduce redundant memory
+    #        # copies, especially when using non-beam search sampling methods.
+    #        last_child_sample = child_samples[-1]
+    #        parent.append_token_id(last_child_sample.output_token,
+    #                               last_child_sample.logprobs)
+    #        child_seqs.append((parent, parent))
 
-        for seq, _ in child_seqs:
-            if seq_group.sampling_params.detokenize:
-                self.detokenizer.decode_sequence_inplace(
-                    seq, seq_group.sampling_params)
-            self._check_stop(seq, seq_group.sampling_params)
+    #    for seq, _ in child_seqs:
+    #        if seq_group.sampling_params.detokenize:
+    #            self.detokenizer.decode_sequence_inplace(
+    #                seq, seq_group.sampling_params)
+    #        self._check_stop(seq, seq_group.sampling_params)
 
-        # Non-beam search case
-        if not seq_group.sampling_params.use_beam_search:
-            # For newly created child sequences, add them to the sequence group
-            # and fork them in block manager if they are not finished.
-            for seq, parent in child_seqs:
-                if seq is not parent:
-                    seq_group.add(seq)
-                    if not seq.is_finished():
-                        self.scheduler.fork_seq(parent, seq)
+    #    # Non-beam search case
+    #    if not seq_group.sampling_params.use_beam_search:
+    #        # For newly created child sequences, add them to the sequence group
+    #        # and fork them in block manager if they are not finished.
+    #        for seq, parent in child_seqs:
+    #            if seq is not parent:
+    #                seq_group.add(seq)
+    #                if not seq.is_finished():
+    #                    self.scheduler.fork_seq(parent, seq)
 
-            # Free the finished and selected parent sequences' memory in block
-            # manager. Keep them in the sequence group as candidate output.
-            # NOTE: we need to fork the new sequences before freeing the
-            # old sequences.
-            for seq, parent in child_seqs:
-                if seq is parent and seq.is_finished():
-                    self.scheduler.free_seq(seq)
-            return
+    #        # Free the finished and selected parent sequences' memory in block
+    #        # manager. Keep them in the sequence group as candidate output.
+    #        # NOTE: we need to fork the new sequences before freeing the
+    #        # old sequences.
+    #        for seq, parent in child_seqs:
+    #            if seq is parent and seq.is_finished():
+    #                self.scheduler.free_seq(seq)
+    #        return
 
-        # Beam search case
-        # Select the child sequences to keep in the sequence group.
-        selected_child_seqs = []
-        unselected_child_seqs = []
-        beam_width = seq_group.sampling_params.best_of
-        length_penalty = seq_group.sampling_params.length_penalty
+    #    # Beam search case
+    #    # Select the child sequences to keep in the sequence group.
+    #    selected_child_seqs = []
+    #    unselected_child_seqs = []
+    #    beam_width = seq_group.sampling_params.best_of
+    #    length_penalty = seq_group.sampling_params.length_penalty
 
-        # Select the newly finished sequences with the highest scores
-        # to replace existing finished sequences.
-        # Tuple of (seq, parent, is_new)
-        existing_finished_seqs = [(seq, None, False)
-                                  for seq in existing_finished_seqs]
-        new_finished_seqs = [(seq, parent, True) for seq, parent in child_seqs
-                             if seq.is_finished()]
-        all_finished_seqs = existing_finished_seqs + new_finished_seqs
-        # Sort the finished sequences by their scores.
-        all_finished_seqs.sort(key=lambda x: x[0].get_beam_search_score(
-            length_penalty=length_penalty, eos_token_id=x[0].eos_token_id),
-                               reverse=True)
-        for seq, parent, is_new in all_finished_seqs[:beam_width]:
-            if is_new:
-                # A newly generated child sequence finishes and has a high
-                # score, so we will add it into the sequence group.
-                selected_child_seqs.append((seq, parent))
-        for seq, parent, is_new in all_finished_seqs[beam_width:]:
-            if is_new:
-                # A newly generated child sequence finishes but has a low
-                # score, so we will not add it into the sequence group.
-                # Additionally, if this sequence is a continuation of a
-                # parent sequence, we will need remove the parent sequence
-                # from the sequence group.
-                unselected_child_seqs.append((seq, parent))
-            else:
-                # An existing finished sequence has a low score, so we will
-                # remove it from the sequence group.
-                seq_group.remove(seq.seq_id)
+    #    # Select the newly finished sequences with the highest scores
+    #    # to replace existing finished sequences.
+    #    # Tuple of (seq, parent, is_new)
+    #    existing_finished_seqs = [(seq, None, False)
+    #                              for seq in existing_finished_seqs]
+    #    new_finished_seqs = [(seq, parent, True) for seq, parent in child_seqs
+    #                         if seq.is_finished()]
+    #    all_finished_seqs = existing_finished_seqs + new_finished_seqs
+    #    # Sort the finished sequences by their scores.
+    #    all_finished_seqs.sort(key=lambda x: x[0].get_beam_search_score(
+    #        length_penalty=length_penalty, eos_token_id=x[0].eos_token_id),
+    #                           reverse=True)
+    #    for seq, parent, is_new in all_finished_seqs[:beam_width]:
+    #        if is_new:
+    #            # A newly generated child sequence finishes and has a high
+    #            # score, so we will add it into the sequence group.
+    #            selected_child_seqs.append((seq, parent))
+    #    for seq, parent, is_new in all_finished_seqs[beam_width:]:
+    #        if is_new:
+    #            # A newly generated child sequence finishes but has a low
+    #            # score, so we will not add it into the sequence group.
+    #            # Additionally, if this sequence is a continuation of a
+    #            # parent sequence, we will need remove the parent sequence
+    #            # from the sequence group.
+    #            unselected_child_seqs.append((seq, parent))
+    #        else:
+    #            # An existing finished sequence has a low score, so we will
+    #            # remove it from the sequence group.
+    #            seq_group.remove(seq.seq_id)
 
-        # select the top beam_width sequences from the running
-        # sequences for the next iteration to continue the beam
-        # search.
-        running_child_seqs = [(seq, parent) for seq, parent in child_seqs
-                              if not seq.is_finished()]
-        # Sort the running sequences by their scores.
-        running_child_seqs.sort(key=lambda x: x[0].get_beam_search_score(
-            length_penalty=length_penalty, eos_token_id=x[0].eos_token_id),
-                                reverse=True)
+    #    # select the top beam_width sequences from the running
+    #    # sequences for the next iteration to continue the beam
+    #    # search.
+    #    running_child_seqs = [(seq, parent) for seq, parent in child_seqs
+    #                          if not seq.is_finished()]
+    #    # Sort the running sequences by their scores.
+    #    running_child_seqs.sort(key=lambda x: x[0].get_beam_search_score(
+    #        length_penalty=length_penalty, eos_token_id=x[0].eos_token_id),
+    #                            reverse=True)
 
-        # Check if we can stop the beam search.
-        if len(running_child_seqs) == 0:
-            # No running sequences, stop the beam search.
-            stop_beam_search = True
-        elif len(all_finished_seqs) < beam_width:
-            # Not enough finished sequences, continue the beam search.
-            stop_beam_search = False
-        else:
-            # Check the early stopping criteria
-            best_running_seq = running_child_seqs[0][0]
-            current_worst_seq = all_finished_seqs[beam_width - 1][0]
-            stop_beam_search = self._check_beam_search_early_stopping(
-                seq_group.sampling_params.early_stopping,
-                seq_group.sampling_params, best_running_seq, current_worst_seq)
+    #    # Check if we can stop the beam search.
+    #    if len(running_child_seqs) == 0:
+    #        # No running sequences, stop the beam search.
+    #        stop_beam_search = True
+    #    elif len(all_finished_seqs) < beam_width:
+    #        # Not enough finished sequences, continue the beam search.
+    #        stop_beam_search = False
+    #    else:
+    #        # Check the early stopping criteria
+    #        best_running_seq = running_child_seqs[0][0]
+    #        current_worst_seq = all_finished_seqs[beam_width - 1][0]
+    #        stop_beam_search = self._check_beam_search_early_stopping(
+    #            seq_group.sampling_params.early_stopping,
+    #            seq_group.sampling_params, best_running_seq, current_worst_seq)
 
-        if stop_beam_search:
-            # Stop the beam search and remove all the running sequences from
-            # the sequence group.
-            unselected_child_seqs.extend(running_child_seqs)
-        else:
-            # Continue the beam search and select the top beam_width sequences
-            # to continue the beam search.
-            selected_child_seqs.extend(running_child_seqs[:beam_width])
-            # The remaining running sequences will not be used in the next
-            # iteration. Again, if these sequences are continuations of
-            # parent sequences, we will need to remove the parent sequences
-            # from the sequence group.
-            unselected_child_seqs.extend(running_child_seqs[beam_width:])
+    #    if stop_beam_search:
+    #        # Stop the beam search and remove all the running sequences from
+    #        # the sequence group.
+    #        unselected_child_seqs.extend(running_child_seqs)
+    #    else:
+    #        # Continue the beam search and select the top beam_width sequences
+    #        # to continue the beam search.
+    #        selected_child_seqs.extend(running_child_seqs[:beam_width])
+    #        # The remaining running sequences will not be used in the next
+    #        # iteration. Again, if these sequences are continuations of
+    #        # parent sequences, we will need to remove the parent sequences
+    #        # from the sequence group.
+    #        unselected_child_seqs.extend(running_child_seqs[beam_width:])
 
-        # For newly created child sequences, add them to the sequence group
-        # and fork them in block manager if they are not finished.
-        for seq, parent in selected_child_seqs:
-            if seq is not parent:
-                seq_group.add(seq)
-                if not seq.is_finished():
-                    self.scheduler.fork_seq(parent, seq)
+    #    # For newly created child sequences, add them to the sequence group
+    #    # and fork them in block manager if they are not finished.
+    #    for seq, parent in selected_child_seqs:
+    #        if seq is not parent:
+    #            seq_group.add(seq)
+    #            if not seq.is_finished():
+    #                self.scheduler.fork_seq(parent, seq)
 
-        # Free the finished and selected parent sequences' memory in block
-        # manager. Keep them in the sequence group as candidate output.
-        for seq, parent in selected_child_seqs:
-            if seq is parent and seq.is_finished():
-                self.scheduler.free_seq(seq)
+    #    # Free the finished and selected parent sequences' memory in block
+    #    # manager. Keep them in the sequence group as candidate output.
+    #    for seq, parent in selected_child_seqs:
+    #        if seq is parent and seq.is_finished():
+    #            self.scheduler.free_seq(seq)
 
-        # Remove the unselected parent sequences from the sequence group and
-        # free their memory in block manager.
-        for seq, parent in unselected_child_seqs:
-            if seq is parent:
-                # Remove the parent sequence if it is not selected for next
-                # iteration
-                seq_group.remove(seq.seq_id)
-                self.scheduler.free_seq(seq)
+    #    # Remove the unselected parent sequences from the sequence group and
+    #    # free their memory in block manager.
+    #    for seq, parent in unselected_child_seqs:
+    #        if seq is parent:
+    #            # Remove the parent sequence if it is not selected for next
+    #            # iteration
+    #            seq_group.remove(seq.seq_id)
+    #            self.scheduler.free_seq(seq)
 
     def _process_model_outputs(
             self, output: SamplerOutput,
@@ -651,14 +660,16 @@ class LLMEngine:
             seq_group = scheduled_seq_group.seq_group
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
+            
+            self.output_processor.process_outputs(seq_group, outputs)
 
-            assert len(outputs) > 0
-            # TODO can spec decode go through second path?
-            if len(outputs) > 1:
-                self._process_sequence_group_outputs_multi_step(
-                    seq_group, outputs)
-            else:
-                self._process_sequence_group_outputs(seq_group, outputs[0])
+            #assert len(outputs) > 0
+            ## TODO can spec decode go through second path?
+            #if len(outputs) > 1:
+            #    self._process_sequence_group_outputs_multi_step(
+            #        seq_group, outputs)
+            #else:
+            #    self._process_sequence_group_outputs(seq_group, outputs[0])
 
         # Free the finished sequence groups.
         self.scheduler.free_finished_seq_groups()
@@ -679,89 +690,89 @@ class LLMEngine:
             self.stat_logger.log(self._get_stats(scheduler_outputs))
         return request_outputs
 
-    def _process_sequence_group_outputs_multi_step(self, seq_group, outputs):
-        seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
+    #def _process_sequence_group_outputs_multi_step(self, seq_group, outputs):
+    #    seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
 
-        assert seqs
-        #if not seqs:
-        #    return []
+    #    assert seqs
+    #    #if not seqs:
+    #    #    return []
 
-        assert len(seqs) == 1, ("Beam search not supported in speculative "
-                                "decoding.")
-        seq = seqs[0]
+    #    assert len(seqs) == 1, ("Beam search not supported in speculative "
+    #                            "decoding.")
+    #    seq = seqs[0]
 
-        # Since there's only one sequence per sequence group, we can take the
-        # first sample.
-        samples = [outputs[step].samples[0] for step in range(len(outputs))]
+    #    # Since there's only one sequence per sequence group, we can take the
+    #    # first sample.
+    #    samples = [outputs[step].samples[0] for step in range(len(outputs))]
 
-        # -1 means the output token is not valid (eg. due to spec decode
-        # rejecting tokens).
-        valid_samples = [
-            sample for sample in samples if sample.output_token != -1
-        ]
+    #    # -1 means the output token is not valid (eg. due to spec decode
+    #    # rejecting tokens).
+    #    valid_samples = [
+    #        sample for sample in samples if sample.output_token != -1
+    #    ]
 
-        # Draft target worker pads all outputs with -1 to have same length.
-        output_token_ids = [sample.output_token for sample in valid_samples]
-        #successes = [sample.success for sample in samples]
+    #    # Draft target worker pads all outputs with -1 to have same length.
+    #    output_token_ids = [sample.output_token for sample in valid_samples]
+    #    #successes = [sample.success for sample in samples]
 
-        ## Truncate to max_tokens if necessary.
-        #remaining_tokens = seq_group.sampling_params.max_tokens - (
-        #    seq.get_output_len() + len(output_token_ids))
-        #if remaining_tokens < 0:
-        #    valid_samples = valid_samples[:remaining_tokens]
-        #    output_token_ids = output_token_ids[:remaining_tokens]
+    #    ## Truncate to max_tokens if necessary.
+    #    #remaining_tokens = seq_group.sampling_params.max_tokens - (
+    #    #    seq.get_output_len() + len(output_token_ids))
+    #    #if remaining_tokens < 0:
+    #    #    valid_samples = valid_samples[:remaining_tokens]
+    #    #    output_token_ids = output_token_ids[:remaining_tokens]
 
-        ## Truncate any tokens after EOS. This is required as spec decode
-        ## generates tokens in fixed blocks, which may go beyond the EOS token.
-        #if not seq_group.sampling_params.ignore_eos:
-        #    eos_token_id = self.tokenizer.get_lora_tokenizer(
-        #        seq.lora_request).eos_token_id
-        #    # Avoiding .index calls as exception throwing in the happy path
-        #    # is expensive.
-        #    for i in range(len(output_token_ids)):
-        #        if output_token_ids[i] == eos_token_id:
-        #            output_token_ids = output_token_ids[:i + 1]
-        #            valid_samples = valid_samples[:i + 1]
-        #            break
+    #    ## Truncate any tokens after EOS. This is required as spec decode
+    #    ## generates tokens in fixed blocks, which may go beyond the EOS token.
+    #    #if not seq_group.sampling_params.ignore_eos:
+    #    #    eos_token_id = self.tokenizer.get_lora_tokenizer(
+    #    #        seq.lora_request).eos_token_id
+    #    #    # Avoiding .index calls as exception throwing in the happy path
+    #    #    # is expensive.
+    #    #    for i in range(len(output_token_ids)):
+    #    #        if output_token_ids[i] == eos_token_id:
+    #    #            output_token_ids = output_token_ids[:i + 1]
+    #    #            valid_samples = valid_samples[:i + 1]
+    #    #            break
 
-        #output_logprobs = [sample.logprobs for sample in valid_samples]
+    #    #output_logprobs = [sample.logprobs for sample in valid_samples]
 
-        ## Use the last sample for the sequence as it will have
-        ## the speculation and num_unprocessed_tokens for all the
-        ## previous samples (they are cumulative when it comes
-        ## to those two attributes).
-        #speculation = valid_samples[-1].speculation
-        #num_unprocessed_tokens = valid_samples[-1].num_unprocessed_tokens
+    #    ## Use the last sample for the sequence as it will have
+    #    ## the speculation and num_unprocessed_tokens for all the
+    #    ## previous samples (they are cumulative when it comes
+    #    ## to those two attributes).
+    #    #speculation = valid_samples[-1].speculation
+    #    #num_unprocessed_tokens = valid_samples[-1].num_unprocessed_tokens
 
-        for output_token_id in output_token_ids:
-            from vllm.sequence import Logprob
-            seq.append_token_id(
-                token_id=output_token_id,
-                logprobs={output_token_id: Logprob(0.0)},
-            )
+    #    for output_token_id in output_token_ids:
+    #        from vllm.sequence import Logprob
+    #        seq.append_token_id(
+    #            token_id=output_token_id,
+    #            logprobs={output_token_id: Logprob(0.0)},
+    #        )
 
-        #seq.append_token_ids(output_token_ids,
-        #                     output_logprobs,
-        #                    )
-        #                     #num_unprocessed_tokens=num_unprocessed_tokens)
-        ##seq.set_last_speculation(speculation)
+    #    #seq.append_token_ids(output_token_ids,
+    #    #                     output_logprobs,
+    #    #                    )
+    #    #                     #num_unprocessed_tokens=num_unprocessed_tokens)
+    #    ##seq.set_last_speculation(speculation)
 
-        #if not all(successes):
-        #    seq.set_status_to_failed()
+    #    #if not all(successes):
+    #    #    seq.set_status_to_failed()
 
-        #if decode:
-        #    self._decode_sequence(seq,
-        #                          seq_group.sampling_params,
-        #                          token_ids=seq.get_token_ids(),
-        #                          unseen_token_ids=output_token_ids,
-        #                          prefix_offset=seq.prefix_offset,
-        #                          read_offset=seq.read_offset)
-        #self._check_stop(seq, seq_group.sampling_params, seq.lora_request,
-        #                 output_token_ids)
-        # TODO pass output token ids
-        self._check_stop(seq, seq_group.sampling_params)
-        if seq.is_finished():
-            self.scheduler.free_seq(seq)
+    #    #if decode:
+    #    #    self._decode_sequence(seq,
+    #    #                          seq_group.sampling_params,
+    #    #                          token_ids=seq.get_token_ids(),
+    #    #                          unseen_token_ids=output_token_ids,
+    #    #                          prefix_offset=seq.prefix_offset,
+    #    #                          read_offset=seq.read_offset)
+    #    #self._check_stop(seq, seq_group.sampling_params, seq.lora_request,
+    #    #                 output_token_ids)
+    #    # TODO pass output token ids
+    #    self._check_stop(seq, seq_group.sampling_params)
+    #    if seq.is_finished():
+    #        self.scheduler.free_seq(seq)
 
     def step(self) -> List[RequestOutput]:
         """Performs one decoding iteration and returns newly generated results.
