@@ -790,28 +790,44 @@ class ModelRunner:
 
     @torch.inference_mode()
     def warmup_prefix_attn(self, kv_caches: List[torch.Tensor]) -> None:
+        """Prefix attention uses a triton jit.
+
+        In our profile_run() step, we profile with random data, so the case
+        with a cache hit is not executed. The triton JIT is generated on
+        the fly, so the first call to context_fwd_attention will take
+        ~3s to process. Without this warmup, this JIT will occur on the hot
+        path.
+
+        In this case, we make 2 sequences. Sequence 0 runs prompt_fwd with
+        self.block_size + 1 tokens, filling up physical block 1. Sequence
+        1 then runs the same prompt, but with metadata that block 1 is 
+        computed. This thus triggers context_fwd_attention and generates
+        the code.
+        """
         prompt_tokens = list(range(self.block_size + 1))
-        
+
+        # Prompt forward to fill up the KV cache for block 1.
         request_0 = SequenceGroupMetadata(
-            request_id=f"first_request",
+            request_id="first_request",
             is_prompt=True,
             seq_data={0: SequenceData(prompt_tokens)},
             sampling_params=SamplingParams(temperature=0),
             block_tables={0: [1, 2]},
         )
-
         self.execute_model([request_0], kv_caches)
 
+        # Prompt forward with block 1 computed. (Triggers
+        # context_fwd_attention).
         request_1 = SequenceGroupMetadata(
-            request_id=f"second_request",
+            request_id="second_request",
             is_prompt=True,
             seq_data={0: SequenceData(prompt_tokens)},
             sampling_params=SamplingParams(temperature=0),
             block_tables={0: [1, 2]},
             computed_block_nums=[1],
         )
-
         self.execute_model([request_1], kv_caches)
+
         return
 
     @torch.inference_mode()
