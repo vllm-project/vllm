@@ -25,7 +25,6 @@ import math
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
-import numpy as np
 from torch import nn
 
 from vllm.attention import Attention, AttentionMetadata
@@ -36,8 +35,8 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
-                                               RowParallelLinear,
-                                               ReplicatedLinear)
+                                               ReplicatedLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
@@ -315,13 +314,15 @@ class MiniCPMDecoderLayer(nn.Module):
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
         )
-        hidden_states = residual + hidden_states * (self.config.scale_depth / math.sqrt(self.config.num_hidden_layers))
+        hidden_states = residual + hidden_states * \
+            (self.config.scale_depth / math.sqrt(self.config.num_hidden_layers))
 
         # Fully Connected
         residual = hidden_states
         hidden_states= self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states * (self.config.scale_depth / math.sqrt(self.config.num_hidden_layers))
+        hidden_states = residual + hidden_states * \
+            (self.config.scale_depth / math.sqrt(self.config.num_hidden_layers))
 
         return hidden_states, None
 
@@ -421,7 +422,9 @@ class MiniCPMForCausalLM(nn.Module):
         self.config = config
         self.num_experts = getattr(self.config, "num_experts", 0)
         self.linear_method = linear_method
-        self.model = MiniCPMModel(config, linear_method, lora_config=lora_config)
+        self.model = MiniCPMModel(config,
+                                  linear_method,
+                                  lora_config=lora_config)
         unpadded_vocab_size = config.vocab_size
         if lora_config:
             unpadded_vocab_size += lora_config.lora_extra_vocab_size
@@ -437,7 +440,8 @@ class MiniCPMForCausalLM(nn.Module):
             )
         self.scale_width = self.config.hidden_size / self.config.dim_model_base
         
-        self.logits_processor = LogitsProcessor(unpadded_vocab_size,config.vocab_size)
+        self.logits_processor = LogitsProcessor(unpadded_vocab_size,
+                                                config.vocab_size)
         self.sampler = Sampler()
 
     def forward(
