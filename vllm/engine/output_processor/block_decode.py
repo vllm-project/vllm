@@ -131,7 +131,7 @@ class BlockDecodeOutputProcessor(SequenceGroupOutputProcessor):
         #self._check_stop(seq, seq_group.sampling_params, seq.lora_request,
         #                 output_token_ids)
         # TODO pass output token ids
-        self.stop_checker.check_stop(seq, seq_group.sampling_params)
+        self.stop_checker.maybe_stop_sequence(seq, seq_group.sampling_params)
 
         if seq.is_finished():
             self.scheduler.free_seq(seq)

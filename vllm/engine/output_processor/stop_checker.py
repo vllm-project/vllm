@@ -37,7 +37,7 @@ class StopChecker:
         self.scheduler_config = scheduler_config
         self.get_tokenizer_for_seq = get_tokenizer_for_seq
 
-    def check_stop(self, seq: Sequence,
+    def maybe_stop_sequence(self, seq: Sequence,
                     sampling_params: SamplingParams) -> None:
         """Stop the finished sequences."""
         # Check if the sequence has reached max_model_len.

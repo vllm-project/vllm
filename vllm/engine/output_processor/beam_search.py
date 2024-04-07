@@ -106,7 +106,7 @@ class BeamSearchOutputProcessor(SequenceGroupOutputProcessor):
             if seq_group.sampling_params.detokenize:
                 self.detokenizer.decode_sequence_inplace(
                     seq, seq_group.sampling_params)
-            self.stop_checker.check_stop(seq, seq_group.sampling_params)
+            self.stop_checker.maybe_stop_sequence(seq, seq_group.sampling_params)
 
         # Non-beam search case
         if not seq_group.sampling_params.use_beam_search:
