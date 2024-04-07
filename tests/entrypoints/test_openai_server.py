@@ -730,17 +730,19 @@ number: "1" | "2"
         max_tokens=500,
         extra_body=dict(guided_grammar=simple_sql_grammar))
 
-    content = completion.choices[0].text
 
     # use Lark to parse the output, and make sure it's a valid parse tree
     from lark import Lark
-    parser = Lark(simple_sql_grammar)
-    parser.parse(content)
 
     # remove spaces for comparison b/c we removed them in the grammar
     ground_truth = "SELECT col_1 from table_1 where col_1 = 1".replace(" ", "")
 
-    assert content.strip() == ground_truth
+    for _ in range(3):
+        content = completion.choices[0].text
+        parser = Lark(simple_sql_grammar)
+        parser.parse(content)
+
+        assert content.strip() == ground_truth
 
 
 if __name__ == "__main__":
