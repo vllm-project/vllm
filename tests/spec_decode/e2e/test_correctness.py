@@ -1,4 +1,5 @@
 import pytest
+from itertools import cycle
 
 from vllm import SamplingParams
 
@@ -26,17 +27,23 @@ from vllm import SamplingParams
     },
 ])
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
+@pytest.mark.parametrize("batch_size", [1, 10])
 @pytest.mark.parametrize("seed", [1])
-def test_spec_decode(test_llm_generator):
+def test_spec_decode_e2e_logical_flow(test_llm_generator, batch_size: int):
+    """Run generation with speculative decoding on a batch. Verify the number
+    of output tokens is equal to the expected number.
+    """
     output_len = 128
     temperature = 0.0
 
     prompts = [
         "Hello, my name is",
-        #"The president of the United States is",
-        #"The capital of France is",
-        #"The future of AI is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
     ]
+
+    prompts = [prompt for prompt, _ in zip(cycle(prompts), range(batch_size))]
 
     sampling_params = SamplingParams(
         max_tokens=output_len,
@@ -44,11 +51,14 @@ def test_spec_decode(test_llm_generator):
         temperature=temperature,
     )
 
-    #with pytest.raises(
-    #        AssertionError,
-    #        match="Speculative decoding not yet supported for GPU backend"):
-    get_token_ids_from_llm_generator(test_llm_generator, prompts,
+    batch_token_ids = get_token_ids_from_llm_generator(test_llm_generator, prompts,
                                      sampling_params)
+
+    # Expect a generation for each prompt in the batch.
+    assert len(batch_token_ids) == len(prompts)
+
+    # TODO(cadedaniel) check for equality once block truncation is implemented.
+    assert all(len(token_ids) >= output_len for token_ids in batch_token_ids)
 
 @pytest.mark.parametrize(
     "common_llm_kwargs",
