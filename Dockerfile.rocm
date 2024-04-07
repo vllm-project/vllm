@@ -15,7 +15,7 @@ RUN echo "PYTORCH_ROCM_ARCH is $PYTORCH_ROCM_ARCH"
 # Install some basic utilities
 RUN apt-get update && apt-get install python3 python3-pip -
 RUN apt-get update && apt-get install -y \
-    sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev
+    sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev
 
 ### Mount Point ###
 # When launching the container, mount the code directory to /app
@@ -25,7 +25,7 @@ WORKDIR ${APP_MOUNT}
 
 
 ARG BUILD_ROCBLAS="1"
-ARG ROCBLAS_BRANCH="82ab4ba9"
+ARG ROCBLAS_BRANCH="aa5b5a5"
 
 RUN if [ "$BUILD_ROCBLAS" = "1" ]; then \
     echo "ROCBLAS_BRANCH is $ROCBLAS_BRANCH"; \
@@ -37,7 +37,7 @@ RUN if [ "$BUILD_ROCBLAS" = "1" ] ; then \
     && git clone https://github.com/ROCm/rocBLAS \
     && cd rocBLAS \
     && git checkout ${ROCBLAS_BRANCH} \
-    && ./install.sh -i --architecture ${PYTORCH_ROCM_ARCH} \
+    && SCCACHE_IDLE_TIMEOUT=1800 ./install.sh -i --architecture ${PYTORCH_ROCM_ARCH} \
     && cd .. && rm -rf rocBLAS \
     && sed -i 's/, rocblas-dev \(.*\), rocfft-dev/, rocfft-dev/g' /var/lib/dpkg/status \
     && sed -i 's/, rocblas \(.*\), rocfft/, rocfft/g' /var/lib/dpkg/status \
@@ -45,12 +45,13 @@ RUN if [ "$BUILD_ROCBLAS" = "1" ] ; then \
     fi
 
 
-ARG ROCSOLVER_BRANCH="8b27faff"
+ARG BUILD_ROCSOLVER=$BUILD_ROCBLAS
+ARG ROCSOLVER_BRANCH="6bcc458"
 
-RUN if [ "$BUILD_ROCBLAS" = "1" ]; then \
+RUN if [ "$BUILD_ROCSOLVER" = "1" ]; then \
     echo "ROCSOLVER_RBANCH is $ROCSOLVER_BRANCH"; \
     fi
-RUN if [ "$BUILD_ROCBLAS" = "1" ] ; then \
+RUN if [ "$BUILD_ROCSOLVER" = "1" ] ; then \
     mkdir -p libs \
     && cd libs \
     && git clone https://github.com/ROCm/rocSOLVER \
@@ -65,7 +66,7 @@ RUN if [ "$BUILD_ROCBLAS" = "1" ] ; then \
 
 
 ARG BUILD_HIPBLAS="1"
-ARG HIPBLAS_BRANCH="b77a9fb"
+ARG HIPBLAS_BRANCH="75ce021"
 
 RUN if [ "$BUILD_HIPBLAS" = "1" ]; then \
     echo "HIPBLAS_BRANCH is $HIPBLAS_BRANCH"; \
@@ -88,22 +89,20 @@ RUN if [ "$BUILD_HIPBLAS" = "1" ] ; then \
 
 # whether to build hipBLASLt
 ARG BUILD_HIPBLASLT="1"
-ARG HIPBLASLT_BRANCH="80a95e9f"
+ARG HIPBLASLT_BRANCH="c8c3cac"
 
 RUN if [ "$BUILD_HIPBLASLT" = "1" ]; then \
     echo "HIPBLASLT_BRANCH is $HIPBLASLT_BRANCH"; \
     fi
 # Build HipblasLt
 RUN if [ "$BUILD_HIPBLASLT" = "1" ] ; then \
-    sed -i 's/, hipblaslt-dev \(.*\), hipcub-dev/, hipcub-dev/g' /var/lib/dpkg/status \
-    && sed -i 's/, hipblaslt \(.*\), hipfft/, hipfft/g' /var/lib/dpkg/status \
-    && apt-get purge -y hipblaslt \
+    apt-get purge -y hipblaslt \
     && mkdir -p libs \
     && cd libs \
     && git clone https://github.com/ROCm/hipBLASLt \
     && cd hipBLASLt \
     && git checkout ${HIPBLASLT_BRANCH} \
-    && ./install.sh -i --architecture ${PYTORCH_ROCM_ARCH} \
+    && SCCACHE_IDLE_TIMEOUT=1800 ./install.sh -i --architecture ${PYTORCH_ROCM_ARCH} \
     && cd .. && rm -rf hipBLASLt \
     && sed -i 's/, hipblaslt-dev \(.*\), hipcub-dev/, hipcub-dev/g' /var/lib/dpkg/status \
     && sed -i 's/, hipblaslt \(.*\), hipfft/, hipfft/g' /var/lib/dpkg/status \
@@ -122,7 +121,6 @@ RUN if [ "$BUILD_HIPSOLVER" = "1" ] ; then \
     && git clone https://github.com/ROCm/hipSOLVER \
     && cd hipSOLVER \
     && git checkout ${HIPSOLVER_BRANCH} \
-    && apt update && apt install -y libsuitesparse-dev \
     && ./install.sh -i \
     && cd .. && rm -rf hipSOLVER \
     && sed -i 's/hipsolver-dev \(.*\), hipsparse-dev/hipsparse-dev/g' /var/lib/dpkg/status \
@@ -131,8 +129,7 @@ RUN if [ "$BUILD_HIPSOLVER" = "1" ] ; then \
     fi
 
 
-RUN python3 -m pip install --upgrade pip
-RUN rm -rf /var/lib/apt/lists/*
+RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 
 
 # whether to build RCCL
@@ -151,7 +148,8 @@ RUN if [ "$BUILD_RCCL" = "1" ]; then \
     && git checkout ${RCCL_BRANCH} \
     && mkdir build && cd build \
     && CXX=/opt/rocm/bin/hipcc cmake -DCMAKE_PREFIX_PATH=/opt/rocm/ -DAMDGPU_TARGETS=${PYTORCH_ROCM_ARCH} .. \
-    && make -j 32 && make package \
+    && SCCACHE_IDLE_TIMEOUT=1800 make -j 32 \
+    && make package \
     && dpkg -i *.deb \
     && cd ../.. \
     && rm -r rccl \
