@@ -225,17 +225,10 @@ class XFormersBackend:
                                 device=value.device)
             # torch.save(value, f"/local/hanchen/kv_temp/{str(cache_load_metadata['layer'])}_0")
             
-<<<<<<< HEAD
-            # key = cache_load_metadata['loader'].fetch_kv_layer(cache_load_metadata['hash'],
-            #                                                     cache_load_metadata['layer'], True, 'cuda:0')
-            # value =  cache_load_metadata['loader'].fetch_kv_layer(cache_load_metadata['hash'],
-            #                                                         cache_load_metadata['layer'], False, 'cuda:0')
-=======
             #key = cache_load_metadata['loader'].fetch_kv_layer(cache_load_metadata['hash'],
             #                                                    cache_load_metadata['layer'], True, 'cuda:0')
             #value =  cache_load_metadata['loader'].fetch_kv_layer(cache_load_metadata['hash'],
             #                                                        cache_load_metadata['layer'], False, 'cuda:0')
->>>>>>> 6f7567402e82d4fe534d05df031a720b46409cee
             # assert(value_old.shape == key.shape)
             #if (value is None or key is None):
             #    exit("KV failure")
