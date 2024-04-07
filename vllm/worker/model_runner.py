@@ -222,7 +222,6 @@ class ModelRunner:
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
             input_positions.extend(list(range(computed_len, prefill_end)))
-
             lora_id = seq_group_metadata.lora_int_id
 
             if lora_id > 0:
