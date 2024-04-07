@@ -41,6 +41,7 @@ def init_distributed_environment(
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
+    backend: str = "nccl",
 ) -> None:
     """
     Initialize model parallel groups.
@@ -88,7 +89,7 @@ def initialize_model_parallel(
     for i in range(num_tensor_model_parallel_groups):
         ranks = range(i * tensor_model_parallel_size,
                       (i + 1) * tensor_model_parallel_size)
-        group = torch.distributed.new_group(ranks, backend="nccl")
+        group = torch.distributed.new_group(ranks, backend=backend)
         if rank in ranks:
             _TENSOR_MODEL_PARALLEL_GROUP = group
 
@@ -99,7 +100,7 @@ def initialize_model_parallel(
         "pipeline model parallel group is already initialized")
     for i in range(num_pipeline_model_parallel_groups):
         ranks = range(i, world_size, num_pipeline_model_parallel_groups)
-        group = torch.distributed.new_group(ranks, backend="nccl")
+        group = torch.distributed.new_group(ranks, backend=backend)
         if rank in ranks:
             _PIPELINE_MODEL_PARALLEL_GROUP = group
             _PIPELINE_GLOBAL_RANKS = ranks
@@ -108,6 +109,7 @@ def initialize_model_parallel(
 def ensure_model_parallel_initialized(
     tensor_model_parallel_size: int,
     pipeline_model_parallel_size: int,
+    backend: str = "nccl",
 ) -> None:
     """Helper to initialize model parallel groups if they are not initialized,
     or ensure tensor-parallel and pipeline-parallel sizes are equal to expected
@@ -115,7 +117,7 @@ def ensure_model_parallel_initialized(
     """
     if not model_parallel_is_initialized():
         initialize_model_parallel(tensor_model_parallel_size,
-                                  pipeline_model_parallel_size)
+                                  pipeline_model_parallel_size, backend)
         return
 
     assert (
