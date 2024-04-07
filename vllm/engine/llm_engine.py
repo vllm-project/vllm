@@ -627,7 +627,7 @@ class LLMEngine:
             self, output: SamplerOutput,
             scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
 
-        if not isinstance(output, list):
+        if self.speculative_config is None:
             all_output = [output]
         else:
             all_output = output
@@ -638,7 +638,7 @@ class LLMEngine:
         output_by_sequence_group: List[List[SequenceGroupOutputs]] = [
             [] for _ in scheduled_seq_groups
         ]
-        for step in output:
+        for step in all_output:
             for i, sequence_group_output in enumerate(step):
                 output_by_sequence_group[i].append(sequence_group_output)
 

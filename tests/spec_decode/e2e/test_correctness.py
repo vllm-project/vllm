@@ -9,8 +9,6 @@ from vllm import SamplingParams
     [{
         # Use a small model for a fast test.
         "model": "JackFram/llama-68m",
-        "speculative_model": "JackFram/llama-68m",
-        "num_speculative_tokens": 5,
 
         # Skip real loading for fast test.
         "load_format": "dummy",
@@ -23,7 +21,11 @@ from vllm import SamplingParams
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [
     {
-        "tensor_parallel_size": 1,
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+    },
+    {
+        # No spec decode.
     },
 ])
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
