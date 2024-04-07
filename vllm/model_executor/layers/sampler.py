@@ -78,8 +78,15 @@ class Sampler(nn.Module):
         # Get the logprobs query results.
         prompt_logprobs, sample_logprobs = _get_logprobs(
             logprobs, sampling_metadata, sample_results)
+
+        breakpoint()
+
+
         return _build_sampler_output(sample_results, sampling_metadata,
-                                     prompt_logprobs, sample_logprobs)
+                                     prompt_logprobs, sample_logprobs,
+            sampled_token_probs=probs,
+            sampled_token_ids=torch.empty((len(sampling_metadata.seq_groups), 1), device=probs.device, dtype=torch.long),
+                                     )
 
 
 def _get_bin_counts_and_mask(
@@ -668,6 +675,8 @@ def _build_sampler_output(
     sampling_metadata: SamplingMetadata,
     prompt_logprobs: List[Optional[PromptLogprobs]],
     sample_logprobs: List[SampleLogprobs],
+    sampled_token_ids: Optional[torch.Tensor] = None,
+    sampled_token_probs: Optional[torch.Tensor] = None,
 ) -> SamplerOutput:
     sampler_output = []
     for (seq_group, sample_result, group_prompt_logprobs,
@@ -687,7 +696,6 @@ def _build_sampler_output(
 
     return SamplerOutput(
         outputs=sampler_output,
-        # TODO
-        sampled_token_probs=torch.empty((len(sampler_output), 32_000), device='cuda', dtype=torch.float32),
-        sampled_token_ids=torch.empty((len(sampler_output), 1), device='cuda', dtype=torch.long),
+        sampled_token_probs=sampled_token_probs,
+        sampled_token_ids=sampled_token_ids,
     )
