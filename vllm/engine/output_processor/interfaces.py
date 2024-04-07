@@ -11,6 +11,7 @@ class SequenceGroupOutputProcessor(ABC):
         scheduler,
         seq_counter,
         get_tokenizer_for_seq,
+        stop_checker,
     ):
         if scheduler_config.num_lookahead_slots == 0:
             from vllm.engine.output_processor.beam_search import BeamSearchOutputProcessor
@@ -20,6 +21,7 @@ class SequenceGroupOutputProcessor(ABC):
                 scheduler,
                 seq_counter,
                 get_tokenizer_for_seq,
+                stop_checker,
             )
         else:
             from vllm.engine.output_processor.block_decode import BlockDecodeOutputProcessor
@@ -29,6 +31,7 @@ class SequenceGroupOutputProcessor(ABC):
                 scheduler,
                 seq_counter,
                 get_tokenizer_for_seq,
+                stop_checker,
             )
 
     @abstractmethod

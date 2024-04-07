@@ -39,60 +39,18 @@ class BeamSearchOutputProcessor(SequenceGroupOutputProcessor):
         scheduler,
         seq_counter,
         get_tokenizer_for_seq,
+        stop_checker,
     ):
         self.scheduler_config = scheduler_config
         self.detokenizer = detokenizer
         self.scheduler = scheduler
         self.seq_counter = seq_counter
         self.get_tokenizer_for_seq = get_tokenizer_for_seq
+        self.stop_checker = stop_checker
 
     def process_outputs(self, sequence_group: SequenceGroup, outputs: List[SequenceGroupOutput]) -> None:
         assert (len(outputs) == 1), f"{type(self)} does not support multiple outputs per step"
         return self._process_sequence_group_outputs(sequence_group, outputs[0])
-
-    def _check_beam_search_early_stopping(
-        self,
-        early_stopping: Union[bool, str],
-        sampling_params: SamplingParams,
-        best_running_seq: Sequence,
-        current_worst_seq: Sequence,
-    ) -> bool:
-        assert sampling_params.use_beam_search
-        length_penalty = sampling_params.length_penalty
-        if early_stopping is True:
-            return True
-
-        current_worst_score = current_worst_seq.get_beam_search_score(
-            length_penalty=length_penalty,
-            eos_token_id=current_worst_seq.eos_token_id)
-        if early_stopping is False:
-            highest_attainable_score = best_running_seq.get_beam_search_score(
-                length_penalty=length_penalty,
-                eos_token_id=best_running_seq.eos_token_id)
-        else:
-            assert early_stopping == "never"
-            if length_penalty > 0.0:
-                # If length_penalty > 0.0, beam search will prefer longer
-                # sequences. The highest attainable score calculation is
-                # based on the longest possible sequence length in this case.
-                max_possible_length = max(
-                    best_running_seq.get_prompt_len() +
-                    sampling_params.max_tokens,
-                    self.scheduler_config.max_model_len)
-                highest_attainable_score = (
-                    best_running_seq.get_beam_search_score(
-                        length_penalty=length_penalty,
-                        eos_token_id=best_running_seq.eos_token_id,
-                        seq_len=max_possible_length))
-            else:
-                # Otherwise, beam search will prefer shorter sequences. The
-                # highest attainable score calculation is based on the current
-                # sequence length.
-                highest_attainable_score = (
-                    best_running_seq.get_beam_search_score(
-                        length_penalty=length_penalty,
-                        eos_token_id=best_running_seq.eos_token_id))
-        return current_worst_score >= highest_attainable_score
 
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
                                         outputs: SequenceGroupOutput) -> None:
@@ -148,7 +106,7 @@ class BeamSearchOutputProcessor(SequenceGroupOutputProcessor):
             if seq_group.sampling_params.detokenize:
                 self.detokenizer.decode_sequence_inplace(
                     seq, seq_group.sampling_params)
-            self._check_stop(seq, seq_group.sampling_params)
+            self.stop_checker.check_stop(seq, seq_group.sampling_params)
 
         # Non-beam search case
         if not seq_group.sampling_params.use_beam_search:
@@ -268,54 +226,46 @@ class BeamSearchOutputProcessor(SequenceGroupOutputProcessor):
                 seq_group.remove(seq.seq_id)
                 self.scheduler.free_seq(seq)
 
-    def _check_stop(self, seq: Sequence,
-                    sampling_params: SamplingParams) -> None:
-        """Stop the finished sequences."""
-        # Check if the sequence has reached max_model_len.
-        if seq.get_len() > self.scheduler_config.max_model_len:
-            seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
-            return
+    def _check_beam_search_early_stopping(
+        self,
+        early_stopping: Union[bool, str],
+        sampling_params: SamplingParams,
+        best_running_seq: Sequence,
+        current_worst_seq: Sequence,
+    ) -> bool:
+        assert sampling_params.use_beam_search
+        length_penalty = sampling_params.length_penalty
+        if early_stopping is True:
+            return True
 
-        # Check if the sequence has reached max_tokens.
-        if seq.get_output_len() >= int(sampling_params.max_tokens):
-            # TODO should cap block
-            seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
-            return
-
-        # Check if the minimum number of tokens has been generated yet;
-        # skip the stop string/token checks if not
-        if seq.get_output_len() < sampling_params.min_tokens:
-            return
-
-        if sampling_params.detokenize:
-            for stop_str in sampling_params.stop:
-                if seq.output_text.endswith(stop_str):
-                    self._finalize_sequence(seq, sampling_params, stop_str)
-                    seq.status = SequenceStatus.FINISHED_STOPPED
-                    seq.stop_reason = stop_str
-                    return
-        last_token_id = seq.get_last_token_id()
-        if last_token_id in sampling_params.stop_token_ids:
-            stop_str = self.get_tokenizer_for_seq(seq).convert_ids_to_tokens(
-                last_token_id)
-            self._finalize_sequence(seq, sampling_params, stop_str)
-            seq.status = SequenceStatus.FINISHED_STOPPED
-            seq.stop_reason = last_token_id
-            return
-
-        # Check if the sequence has generated the EOS token.
-        if ((not sampling_params.ignore_eos)
-                and seq.get_last_token_id() == seq.eos_token_id):
-            seq.status = SequenceStatus.FINISHED_STOPPED
-            return
-
-    def _finalize_sequence(self, seq: Sequence,
-                           sampling_params: SamplingParams,
-                           stop_string: str) -> None:
-        if sampling_params.include_stop_str_in_output:
-            return
-
-        if stop_string and seq.output_text.endswith(stop_string):
-            # Truncate the output text so that the stop string is
-            # not included in the output.
-            seq.output_text = seq.output_text[:-len(stop_string)]
+        current_worst_score = current_worst_seq.get_beam_search_score(
+            length_penalty=length_penalty,
+            eos_token_id=current_worst_seq.eos_token_id)
+        if early_stopping is False:
+            highest_attainable_score = best_running_seq.get_beam_search_score(
+                length_penalty=length_penalty,
+                eos_token_id=best_running_seq.eos_token_id)
+        else:
+            assert early_stopping == "never"
+            if length_penalty > 0.0:
+                # If length_penalty > 0.0, beam search will prefer longer
+                # sequences. The highest attainable score calculation is
+                # based on the longest possible sequence length in this case.
+                max_possible_length = max(
+                    best_running_seq.get_prompt_len() +
+                    sampling_params.max_tokens,
+                    self.scheduler_config.max_model_len)
+                highest_attainable_score = (
+                    best_running_seq.get_beam_search_score(
+                        length_penalty=length_penalty,
+                        eos_token_id=best_running_seq.eos_token_id,
+                        seq_len=max_possible_length))
+            else:
+                # Otherwise, beam search will prefer shorter sequences. The
+                # highest attainable score calculation is based on the current
+                # sequence length.
+                highest_attainable_score = (
+                    best_running_seq.get_beam_search_score(
+                        length_penalty=length_penalty,
+                        eos_token_id=best_running_seq.eos_token_id))
+        return current_worst_score >= highest_attainable_score
