@@ -151,6 +151,7 @@ class RayGPUExecutor(ExecutorBase):
         device_config = copy.deepcopy(self.device_config)
         lora_config = copy.deepcopy(self.lora_config)
         cache_config = copy.deepcopy(self.cache_config)
+        vision_language_config = copy.deepcopy(self.vision_language_config)
 
         # Initialize the actual workers with the Worker class.
         for rank, (worker, (node_id, _)) in enumerate(
@@ -169,6 +170,7 @@ class RayGPUExecutor(ExecutorBase):
                     rank=rank,
                     distributed_init_method=distributed_init_method,
                     lora_config=lora_config,
+                    vision_language_config=vision_language_config,
                 ))
 
         # Initialize the driver worker with the Worker class.
