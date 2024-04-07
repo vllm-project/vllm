@@ -2,7 +2,7 @@ from vllm import LLM, SamplingParams
 import pdb
 import os
 import torch
-from vllm.metis.kv_loader import kv_manager
+from vllm.metis.kv_manager import kv_manager
 
 os.environ['CUDA_VISIBLE_DEVICES']= '0'
 # Sample prompts.

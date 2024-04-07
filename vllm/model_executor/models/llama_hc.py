@@ -310,8 +310,8 @@ class LlamaModel(nn.Module):
                                     "org_seq_len": None,
                                     "pre_mask":None}
                                     #"batch_indices":[0]}
-        #self.cache_load_metadata = { "loader" :  None,
-        #                            "hash": "kv_temp"}
+        self.loadder = None #This should be from somewhere
+                                #    "hash": "kv_temp"}
 
     def forward(
         self,
@@ -392,7 +392,10 @@ class LlamaModel(nn.Module):
 
             layer = self.layers[i]
 
-            #pre
+            fake_key = self.loader.fetch_kv_layer(cache_load_metadata['hash'],
+                                                                    i+1, True, 'cuda:0')
+            fake_value =  self. load_metadata['loader'].fetch_kv_layer(cache_load_metadata['hash'],
+                                                                   i+1, False, 'cuda:0')
             
             hidden_states, residual = layer(
                 positions, #FIXME(Jiayi): positions need to be changed

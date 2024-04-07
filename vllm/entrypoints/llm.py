@@ -329,6 +329,7 @@ class METIS:
     ) -> None:
         self.llm_engine.tokenizer.tokenizer = tokenizer
 
+    #If it is rag, then the contexts are representing each chunk, question is the real question follwing the chunk
     def generate(
         self,
         prompts: Optional[Union[str, List[str]]] = None,
@@ -376,6 +377,9 @@ class METIS:
         # Add requests to the engine.
         num_requests = len(prompts) if prompts is not None else len(
             prompt_token_ids)
+        
+        #METIS Our generation should be using the rag context and rag length in inference. Maybe get the hash of the string and pass it to other structures.
+         
         for i in range(num_requests):
             prompt = prompts[i] if prompts is not None else None
             token_ids = None if prompt_token_ids is None else prompt_token_ids[
@@ -384,6 +388,7 @@ class METIS:
             #add contexts too
             contexts = rag_contexts[i] if rag_contexts is not None else None
             rag_prompt = rag_question[i] if rag_question is not None else None
+            
             self._add_request(prompt,
                               contexts,
                               rag_prompt,
