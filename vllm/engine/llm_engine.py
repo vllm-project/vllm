@@ -188,7 +188,11 @@ class LLMEngine:
             self.scheduler,
             self.seq_counter,
             self.get_tokenizer_for_seq,
-            stop_checker=StopChecker(scheduler, self.get_tokenizer_for_seq),
+            stop_checker=StopChecker(
+                self.scheduler,
+                self.scheduler_config,
+                self.get_tokenizer_for_seq,
+            ),
         )
 
     def _initialize_kv_caches(self) -> None:

@@ -32,8 +32,9 @@ _LOCAL_LOGGING_INTERVAL_SEC = 5
 
 class StopChecker:
 
-    def __init__(self, scheduler, get_tokenizer_for_seq):
+    def __init__(self, scheduler, scheduler_config, get_tokenizer_for_seq):
         self.scheduler = scheduler
+        self.scheduler_config = scheduler_config
         self.get_tokenizer_for_seq = get_tokenizer_for_seq
 
     def check_stop(self, seq: Sequence,
