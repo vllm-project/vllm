@@ -135,7 +135,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         blocks_to_swap_in: Optional[Dict[int, int]],
         blocks_to_swap_out: Optional[Dict[int, int]],
         blocks_to_copy: Optional[Dict[int, List[int]]],
-        num_spec_tokens: int,
+        num_lookahead_slots: int,
     ) -> List[SamplerOutput]:
         """Perform speculative decoding on the input batch.
         """
@@ -146,7 +146,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         # If no spec tokens, call the proposer and scorer workers normally.
         # Used for prefill.
-        if num_spec_tokens == 0 or len(seq_group_metadata_list) == 0:
+        if num_lookahead_slots == 0 or len(seq_group_metadata_list) == 0:
             return self._run_no_spec(
                 seq_group_metadata_list=seq_group_metadata_list,
                 blocks_to_swap_in=blocks_to_swap_in,
@@ -159,7 +159,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
-            k=num_spec_tokens,
+            k=num_lookahead_slots,
         )
 
     @nvtx_range("spec_decode_worker._run_no_spec")
@@ -180,7 +180,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
-            return_python_output=False)
+            #return_python_output=False
+            )
 
         sampler_output = self.scorer_worker.execute_model(
             seq_group_metadata_list=seq_group_metadata_list,

@@ -11,6 +11,9 @@ from vllm import SamplingParams
         "speculative_model": "facebook/opt-125m",
         "num_speculative_tokens": 5,
 
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
+
         # Required for spec decode.
         "use_v2_block_manager": True
     }])
