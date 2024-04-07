@@ -19,6 +19,60 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+def create_spec_decode_worker():
+    
+    from vllm.worker.worker import Worker
+    from vllm.spec_decode.spec_decode_worker import SpecDecodeWorker
+    from vllm.spec_decode.multi_step_worker import MultiStepWorker
+
+    distributed_init_method = get_distributed_init_method(
+        get_ip(), get_open_port())
+
+    target_worker = Worker(
+        model_config=self.model_config,
+        parallel_config=self.parallel_config,
+        scheduler_config=self.scheduler_config,
+        device_config=self.device_config,
+        cache_config=self.cache_config,
+        local_rank=0,
+        rank=0,
+        distributed_init_method=distributed_init_method,
+        lora_config=self.lora_config,
+        vision_language_config=self.vision_language_config,
+        is_driver_worker=True,
+    )
+    
+    from vllm.spec_decode.multi_step_worker import MultiStepWorker
+    draft_worker = MultiStepWorker(
+        model_config=self.speculative_config.draft_model_config,
+        parallel_config=self.speculative_config.draft_parallel_config,
+        scheduler_config=self.scheduler_config,
+        device_config=self.device_config,
+        cache_config=self.cache_config,
+        local_rank=0,
+        rank=0,
+        distributed_init_method=distributed_init_method,
+        lora_config=self.lora_config,
+        vision_language_config=self.vision_language_config,
+        is_driver_worker=True,
+    )
+    
+    from vllm.spec_decode.spec_decode_worker import SpecDecodeWorker
+    from vllm.model_executor.layers.rejection_sampler import RejectionSampler
+    spec_decode_worker = SpecDecodeWorker(
+        proposer_worker=draft_worker,
+        scorer_worker=target_worker,
+        rejection_sampler=RejectionSampler(),
+    )
+
+    assert self.parallel_config.world_size == 1, (
+        "GPUExecutor only supports single GPU.")
+
+    self.driver_worker = spec_decode_worker
+
+    self.driver_worker.init_device()
+    #self.driver_worker.load_model()
+
 class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     """Worker which implements speculative decoding.
 
@@ -226,7 +280,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             seq_group_metadata_list, blocks_to_swap_in, blocks_to_swap_out,
             blocks_to_copy, k)
 
-        #logger.info(f"score proposals {proposals=}")
         logger.info(f"score proposals")
         proposal_scores = self.scorer.score_proposals(
             seq_group_metadata_list,
