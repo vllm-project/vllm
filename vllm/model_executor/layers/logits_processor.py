@@ -91,8 +91,8 @@ def _apply_logits_processors(
         if logits_processors:
             found_logits_processors = True
             for seq_id in seq_ids:
-                # handle prompt_logprobs by skipping rows in logits added for the prompt
-                # tokens (prompt logprobs are not processed)
+                # handle prompt_logprobs by skipping rows in logits added for
+                # the prompt tokens (prompt logprobs are not processed)
                 if (seq_id < sampling_metadata.num_prompts
                         and sampling_params.prompt_logprobs is not None):
                     logits_row_idx += sampling_metadata.prompt_lens[seq_id]
