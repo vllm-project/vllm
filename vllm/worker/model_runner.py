@@ -789,6 +789,32 @@ class ModelRunner:
         return self.lora_manager.list_loras()
 
     @torch.inference_mode()
+    def warmup_prefix_attn(self, kv_caches: List[torch.Tensor]) -> None:
+        prompt_tokens = list(range(self.block_size + 1))
+        
+        request_0 = SequenceGroupMetadata(
+            request_id=f"first_request",
+            is_prompt=True,
+            seq_data={0: SequenceData(prompt_tokens)},
+            sampling_params=SamplingParams(temperature=0),
+            block_tables={0: [1, 2]},
+        )
+
+        self.execute_model([request_0], kv_caches)
+
+        request_1 = SequenceGroupMetadata(
+            request_id=f"second_request",
+            is_prompt=True,
+            seq_data={0: SequenceData(prompt_tokens)},
+            sampling_params=SamplingParams(temperature=0),
+            block_tables={0: [1, 2]},
+            computed_block_nums=[1],
+        )
+
+        self.execute_model([request_1], kv_caches)
+        return
+
+    @torch.inference_mode()
     def capture_model(self, kv_caches: List[torch.Tensor]) -> None:
         """Cuda graph capture a model.
 

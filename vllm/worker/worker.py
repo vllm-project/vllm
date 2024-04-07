@@ -165,6 +165,8 @@ class Worker:
     def warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model(self.gpu_cache)
+        if self.cache_config.enable_prefix_caching:
+            self.model_runner.warmup_prefix_attn(self.gpu_cache)
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
