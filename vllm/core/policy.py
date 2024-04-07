@@ -38,9 +38,7 @@ class FCFS(Policy):
 
 class PolicyFactory:
 
-    _POLICY_REGISTRY = {
-        'fcfs': FCFS,
-    }
+    _POLICY_REGISTRY = {'fcfs': FCFS}
 
     @classmethod
     def get_policy(cls, policy_name: str, **kwargs) -> Policy:

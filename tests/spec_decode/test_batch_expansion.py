@@ -1,12 +1,13 @@
-import torch
 import pytest
+import torch
 
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 
-from .utils import mock_worker, create_seq_group_metadata_from_prompts
+from .utils import create_seq_group_metadata_from_prompts, mock_worker
 
 
 @pytest.mark.parametrize('num_target_seq_ids', [100])
+@pytest.mark.skip_global_cleanup
 def test_create_target_seq_id_iterator(num_target_seq_ids: int):
     """Verify all new sequence ids are greater than all input
     seq ids.
@@ -27,6 +28,7 @@ def test_create_target_seq_id_iterator(num_target_seq_ids: int):
 
 
 @pytest.mark.parametrize('k', [1, 2, 6])
+@pytest.mark.skip_global_cleanup
 def test_get_token_ids_to_score(k: int):
     """Verify correct tokens are selected for scoring.
     """
@@ -53,6 +55,7 @@ def test_get_token_ids_to_score(k: int):
 
 
 @pytest.mark.parametrize('k', [1, 2, 6])
+@pytest.mark.skip_global_cleanup
 def test_create_single_target_seq_group_metadata(k: int):
     """Verify correct creation of a batch-expanded seq group metadata.
     """

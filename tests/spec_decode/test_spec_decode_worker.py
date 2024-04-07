@@ -1,18 +1,20 @@
-import torch
 import random
-import pytest
 from unittest.mock import MagicMock
 
+import pytest
+import torch
+
+from vllm.model_executor.layers.rejection_sampler import RejectionSampler
+from vllm.model_executor.utils import set_random_seed
+from vllm.spec_decode.interfaces import SpeculativeProposals
+from vllm.spec_decode.metrics import (AsyncMetricsCollector,
+                                      SpecDecodeWorkerMetrics)
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.spec_decode_worker import (SpecDecodeWorker,
                                                  split_num_cache_blocks_evenly)
-from vllm.spec_decode.interfaces import SpeculativeProposals
-from vllm.model_executor.utils import set_random_seed
-from vllm.model_executor.layers.rejection_sampler import RejectionSampler
-from .utils import (mock_worker, create_batch, ExecuteModelData,
-                    create_sampler_output_list)
-from vllm.spec_decode.metrics import (SpecDecodeWorkerMetrics,
-                                      AsyncMetricsCollector)
+
+from .utils import (ExecuteModelData, create_batch, create_sampler_output_list,
+                    mock_worker)
 
 
 @pytest.mark.parametrize('k', [1, 2, 6])
@@ -71,7 +73,7 @@ def test_correctly_calls_target_model(k: int, batch_size: int):
 
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
                               metrics_collector)
-    worker.init_model()
+    worker.init_device()
 
     vocab_size = 32_000
 
@@ -151,7 +153,7 @@ def test_correctly_calls_rejection_sampler(k: int, batch_size: int):
 
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
                               metrics_collector)
-    worker.init_model()
+    worker.init_device()
 
     proposal_token_ids = torch.randint(low=0,
                                        high=vocab_size,
@@ -230,7 +232,7 @@ def test_correctly_formats_output(k: int, batch_size: int):
 
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
                               metrics_collector)
-    worker.init_model()
+    worker.init_device()
 
     proposal_token_ids = torch.randint(low=0,
                                        high=vocab_size,
@@ -342,7 +344,7 @@ def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool):
 
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
                               metrics_collector)
-    worker.init_model()
+    worker.init_device()
 
     proposal_token_ids = torch.randint(low=0,
                                        high=vocab_size,
@@ -485,9 +487,9 @@ def test_empty_input_batch(k: int, batch_size: int):
         **execute_model_data.to_dict())
 
 
-@torch.inference_mode()
-def test_init_model():
-    """Verify SpecDecodeWorker invokes proposer/scorer worker init_model, as
+@pytest.mark.skip_global_cleanup
+def test_init_device():
+    """Verify SpecDecodeWorker invokes proposer/scorer worker init_device, as
     well as other GPU initialization.
     """
     draft_worker = mock_worker(cls=MultiStepWorker)
@@ -499,11 +501,11 @@ def test_init_model():
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
                               metrics_collector)
 
-    worker.init_model()
+    worker.init_device()
 
-    draft_worker.init_model.assert_called_once()
+    draft_worker.init_device.assert_called_once()
 
-    target_worker.init_model.assert_called_once()
+    target_worker.init_device.assert_called_once()
 
     metrics_collector.init_gpu_tensors.assert_called_once()
     rejection_sampler.init_gpu_tensors.assert_called_once()
@@ -535,7 +537,7 @@ def test_init_cache_engine():
 @pytest.mark.parametrize('available_cpu_blocks', [500])
 @pytest.mark.parametrize('target_cache_block_size_bytes', [2 * 2 * 4096])
 @pytest.mark.parametrize('draft_kv_size_bytes', [0, 2 * 2 * 768, 2 * 2 * 4096])
-@torch.inference_mode()
+@pytest.mark.skip_global_cleanup
 def test_profile_num_available_blocks(available_gpu_blocks: int,
                                       available_cpu_blocks: int,
                                       target_cache_block_size_bytes: int,
@@ -582,7 +584,7 @@ def test_profile_num_available_blocks(available_gpu_blocks: int,
 @pytest.mark.parametrize('target_cache_block_size_bytes',
                          [2 * 2 * 4096, 2 * 2 * 8192])
 @pytest.mark.parametrize('draft_kv_size_bytes', [0, 2 * 2 * 768, 2 * 2 * 4096])
-@torch.inference_mode()
+@pytest.mark.skip_global_cleanup
 def test_split_num_cache_blocks_evenly(available_gpu_blocks: int,
                                        target_cache_block_size_bytes: int,
                                        draft_kv_size_bytes: int):
