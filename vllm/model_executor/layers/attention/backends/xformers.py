@@ -81,19 +81,17 @@ class XFormersBackend:
         # Do checking here
         if status in [1]:
             # Get cached KV
-            # In this step, Jiayi is assuming that we have the loaded key and value tensors in value_old and key_old.
-            # He uses empty_like to put in random numbers right now to substitute. 
+
             # import pdb
             # pdb.set_trace()
             
-            # value_old = torch.empty_like(value)
-            # key_old = torch.empty_like(key)
+            value_old = torch.empty_like(value)
+            key_old = torch.empty_like(key)
             # print("We are saving kv for shape: ", value_old.shape)
             # torch.save(value_old, f"/local/hanchen/kv_temp/{str(cache_load_metadata['layer'])}_0")
             # torch.save(key_old, f"/local/hanchen/kv_temp/{str(cache_load_metadata['layer'])}_1")
 
             #FIXME Hanchen need to add cuda device. also change to directly load into GPU memory
-
             key_old = cache_load_metadata['loader'].fetch_kv_layer(cache_load_metadata['hash'],
                                                                     cache_load_metadata['layer'], True, 'cuda:0')
             value_old =  cache_load_metadata['loader'].fetch_kv_layer(cache_load_metadata['hash'],
@@ -168,6 +166,8 @@ class XFormersBackend:
         if key_cache is not None and value_cache is not None:
             if cache_fuse_metadata['check'] and status in [1,2]:
                 if status in [2]:
+                    #key and value are 15% recomputed, key_cache full original, update 15% of key cache.
+                    #Key value 100% original
                     PagedAttentionImpl.reshape_and_cache_ours(key, value, key_cache,
                                                     value_cache, cache_fuse_metadata)
                 elif status in [1]:
@@ -205,10 +205,10 @@ class XFormersBackend:
             #                     device=value.device)
             # torch.save(value, f"/local/hanchen/kv_temp/{str(cache_load_metadata['layer'])}_0")
             
-            key = cache_load_metadata['loader'].fetch_kv_layer(cache_load_metadata['hash'],
-                                                                cache_load_metadata['layer'], True, 'cuda:0')
-            value =  cache_load_metadata['loader'].fetch_kv_layer(cache_load_metadata['hash'],
-                                                                    cache_load_metadata['layer'], False, 'cuda:0')
+            # key = cache_load_metadata['loader'].fetch_kv_layer(cache_load_metadata['hash'],
+            #                                                     cache_load_metadata['layer'], True, 'cuda:0')
+            # value =  cache_load_metadata['loader'].fetch_kv_layer(cache_load_metadata['hash'],
+            #                                                         cache_load_metadata['layer'], False, 'cuda:0')
             # assert(value_old.shape == key.shape)
             if (value is None or key is None):
                 exit("KV failure")
@@ -216,6 +216,7 @@ class XFormersBackend:
             #pdb.set_trace()
             PagedAttentionImpl.load_and_reshape(key, value, key_cache,
                                                  value_cache, cache_fuse_metadata)
+            
         '''
         if seq_len>4000 or cache_fuse_metadata["org_seq_len"]>4000:
             end.record()

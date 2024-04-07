@@ -367,6 +367,10 @@ class LlamaModel(nn.Module):
             
             layer = self.layers[i]
             self.cache_load_metadata['layer'] = i
+
+            #load i+1 layer key_buffer, value_buffer
+            #text load/recompute
+            
             hidden_states, residual = layer(
                 positions, #FIXME(Jiayi): positions need to be changed
                 hidden_states,
