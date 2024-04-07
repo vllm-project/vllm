@@ -794,14 +794,14 @@ class ModelRunner:
 
         In our profile_run() step, we profile with random data, so the case
         with a cache hit is not executed. The triton JIT is generated on
-        the fly, so the first call to context_fwd_attention will take
+        the fly, so the first call to context_attention_fwd will take
         ~3s to process. Without this warmup, this JIT will occur on the hot
         path.
 
         In this case, we make 2 sequences. Sequence 0 runs prompt_fwd with
         self.block_size + 1 tokens, filling up physical block 1. Sequence
         1 then runs the same prompt, but with metadata that block 1 is 
-        computed. This thus triggers context_fwd_attention and generates
+        computed. This thus triggers context_attention_fwd and generates
         the code.
         """
         NUM_ITERATIONS = 10
@@ -821,7 +821,7 @@ class ModelRunner:
         self.execute_model([request_0], kv_caches)
 
         # Prompt forward with block 1 computed. (Triggers
-        # context_fwd_attention).
+        # context_attention_fwd).
         request_1 = SequenceGroupMetadata(
             request_id="second_request",
             is_prompt=True,
