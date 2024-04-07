@@ -312,6 +312,8 @@ class LlamaModel(nn.Module):
                                     #"batch_indices":[0]}
         #self.cache_load_metadata = { "loader" :  None,
         #                            "hash": "kv_temp"}
+        self.loader = None
+        self.cache_fuse_metadata = None
 
     def forward(
         self,
@@ -339,6 +341,7 @@ class LlamaModel(nn.Module):
         
         flag=None
         
+        #HACK(Jiayi): This is a hac to measure accurate time
         if input_ids.shape[1]>3800:
             flag=True
             self.cache_fuse_metadata = {"check_layers":[1],
@@ -354,7 +357,9 @@ class LlamaModel(nn.Module):
                                     "attn_bias": None,
                                     "imp_token_indices": None,
                                     "org_seq_len": None,
-                                    "pre_mask":None}
+                                    "pre_mask":None,
+                                    "key_value_shape":None,
+                                    "stream_activate":False}
             input_metadata.attn_bias = None #Jiayi: delete attn_bias from last inference and 
             torch.cuda.synchronize()
             start = torch.cuda.Event(enable_timing=True)
@@ -373,6 +378,10 @@ class LlamaModel(nn.Module):
         else:
             temp_status = -1 # decode
         
+        if self.cache_fuse_metadata["stream_actvate"]:
+            key_temp = torch.empty(self.cache_fuse_metadata["key_value_shape"], dtype=hidden_states.shape)
+            value_temp = torch.empty(self.cache_fuse_metadata["key_value_shape"], dtype=hidden_states.shape)
+            cache_load_stream = torch.cuda.Stream()
         check_layer_idx = 0
         for i in range(len(self.layers)):
             if self.cache_fuse_metadata["check"]:
@@ -391,8 +400,18 @@ class LlamaModel(nn.Module):
             #Load kv into temprary tensors for Jiayi to use
 
             layer = self.layers[i]
-
-            #pre
+            
+            #FIXME(Jiayi): add double buffer to overcome data races
+            #FIXME(Jiayi): use both cuda streams and multiprocessing to do pipeining (multithreading cause issues in ray)
+            #FIXME(Jiayi): fetch_ky_layer should also include dtype? (type conversion should be postoned for efficiency)
+            if self.cache_fuse_metadata["stream_activate"] and i < len(self.layers)-1:
+                with torch.cuda.stream(cache_load_stream):
+                    key_buffed = self.cache_load_metadata['loader'].fetch_kv_layer(hash=self.cache_load_metadata['key_hash'],
+                                                                                layer_idx=i+1,
+                                                                                device=hidden_states.device)
+                    value_buffed = self.cache_load_metadata['loader'].fetch_kv_layer(hash=self.cache_load_metadata['key_hash'],
+                                                                                    layer_idx=i+1,
+                                                                                    device=hidden_states.device)
             
             hidden_states, residual = layer(
                 positions, #FIXME(Jiayi): positions need to be changed
@@ -408,6 +427,12 @@ class LlamaModel(nn.Module):
 
             if temp_status==1:
                 positions = positions[:,self.cache_fuse_metadata["imp_token_indices"]]
+            
+            #Jiayi: sunchronize loading and recomputation
+            if self.cache_fuse_metadata["stream_activate"] and i < len(self.layers)-1:
+                torch.cuda.synchronize()
+                key_temp.copy_(key_buffed)
+                value_temp.copy_(value_buffed)
         hidden_states, _ = self.norm(hidden_states, residual)
         if flag:
             end.record()
