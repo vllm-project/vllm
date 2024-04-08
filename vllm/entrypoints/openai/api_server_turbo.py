@@ -1,5 +1,5 @@
 from vllm.patch.monkey_patch_api_request import patch_api_server;patch_api_server()
-from vllm.entrypoints.openai.cli_args import cliContext
+from vllm.entrypoints.openai.cli_context_args import cliContext
 import argparse
 import asyncio
 import json
