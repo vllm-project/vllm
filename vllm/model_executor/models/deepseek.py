@@ -394,8 +394,8 @@ class DeepseekForCausalLM(nn.Module):
             ("qkv_proj", "v_proj", "v"),
             ("mlp.gate_up_proj", "mlp.gate_proj", 0),
             ("mlp.gate_up_proj", "mlp.up_proj", 1),
-            ("shared_expert.gate_up_proj", "shared_expert.gate_proj", 0),
-            ("shared_expert.gate_up_proj", "shared_expert.up_proj", 1),
+            ("shared_experts.gate_up_proj", "shared_experts.gate_proj", 0),
+            ("shared_experts.gate_up_proj", "shared_experts.up_proj", 1),
         ]
 
         expert_params_mapping = [
@@ -451,11 +451,6 @@ class DeepseekForCausalLM(nn.Module):
                 else:
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
-                        continue
-                    # Skip experts that are not assigned to this worker.
-                    if (("mlp.experts." in name
-                         or "mlp.shared_experts." in name)
-                            and name not in params_dict):
                         continue
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",
