@@ -345,6 +345,8 @@ class DraftModelTop1Proposer(SpeculativeProposer):
 
         sampler_output = maybe_sampler_output
 
+        # We mock the device tensors until PR 7/9 is merged (e2e correctness).
+        # https://docs.google.com/document/d/1rE4pr3IdspRw97XbImY4fS9IWYuJJ3HGtL7AdIKGrw8/edit#heading=h.qijw1sdidrer
         for step_output in sampler_output:
             maybe_mock_device_tensors(
                 sampler_output=step_output,
@@ -364,7 +366,6 @@ class DraftModelTop1Proposer(SpeculativeProposer):
                                             fill_value=-1,
                                             dtype=torch.long,
                                             device=self._device)
-
         entire_proposal_tokens[nonzero_proposal_len_indices] = proposal_tokens
         entire_proposal_probs = torch.zeros(batch_size,
                                             *proposal_probs.shape[1:],

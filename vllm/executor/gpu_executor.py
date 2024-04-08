@@ -71,6 +71,8 @@ class GPUExecutor(ExecutorBase):
         self.driver_worker.load_model()
 
     def _init_spec_worker(self):
+        """Initialize a SpecDecodeWorker, using a draft model for proposals.
+        """
         from vllm.spec_decode.multi_step_worker import MultiStepWorker
         from vllm.spec_decode.spec_decode_worker import SpecDecodeWorker
         from vllm.worker.worker import Worker

@@ -341,7 +341,6 @@ def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool):
     rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
-
     draft_worker.device = 'cuda'
     target_worker.device = 'cuda'
 

@@ -1,14 +1,15 @@
 from typing import List
 
-from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import Sequence, SequenceStatus
 
-logger = init_logger(__name__)
-_LOCAL_LOGGING_INTERVAL_SEC = 5
-
 
 class StopChecker:
+    """LLMEngine helper class which separates out the logic involving stop
+    checking. This checks things such as: whether the eos token was emitted,
+    whether the max_tokens has been consumed, whether a stop string has been
+    emitted, or if we have exceeded the max model len.
+    """
 
     def __init__(self, scheduler, scheduler_config, get_tokenizer_for_seq):
         self.scheduler = scheduler
@@ -18,7 +19,9 @@ class StopChecker:
     def maybe_stop_sequence(self, seq: Sequence,
                             sampling_params: SamplingParams,
                             new_token_ids: List[int]) -> None:
-        """Stop the finished sequences."""
+        """Check if the sequences should be stopped. If so, mark it as finished.
+        """
+
         # Check if the sequence has reached max_model_len.
         if seq.get_len() > self.scheduler_config.max_model_len:
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
@@ -36,6 +39,7 @@ class StopChecker:
 
         if sampling_params.detokenize:
             for stop_str in sampling_params.stop:
+                # TODO(cade) Fix this for speculative decoding.
                 if seq.output_text.endswith(stop_str):
                     self._finalize_sequence(seq, sampling_params, stop_str)
                     seq.status = SequenceStatus.FINISHED_STOPPED

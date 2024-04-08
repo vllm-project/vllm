@@ -20,6 +20,11 @@ from vllm.utils import Counter
 @pytest.mark.parametrize("num_new_tokens", [1, 12])
 @pytest.mark.skip_global_cleanup
 def test_appends_token_ids(num_new_tokens: int, seq_output_len: int):
+    """Verify block decoding appends token ids correctly.
+
+    We append token ids and verify all the token ids were appended correctly.
+    Note that ignore_eos=True.
+    """
     detokenizer = MagicMock(spec=Detokenizer)
     scheduler = MagicMock(spec=Scheduler)
     stop_checker = MagicMock(spec=StopChecker)
@@ -37,7 +42,8 @@ def test_appends_token_ids(num_new_tokens: int, seq_output_len: int):
         seq_prompt_len=1024,
         seq_output_lens=[seq_output_len],
         sampling_params=SamplingParams(max_tokens=seq_output_len +
-                                       num_new_tokens, ),
+                                       num_new_tokens,
+                                       ignore_eos=True),
     )
 
     seq = seq_group.get_seqs()[0]
@@ -70,6 +76,9 @@ def test_appends_token_ids(num_new_tokens: int, seq_output_len: int):
 @pytest.mark.skip_global_cleanup
 def test_respects_max_tokens(num_new_tokens: int, seq_prompt_len: int,
                              seq_output_len: int, max_tokens: int):
+    """Verify tokens after max_tokens are dropped and not appended to the
+    sequence.
+    """
     detokenizer = MagicMock(spec=Detokenizer)
     scheduler = MagicMock(spec=Scheduler)
     stop_checker = MagicMock(spec=StopChecker)
@@ -126,6 +135,9 @@ def test_respects_max_tokens(num_new_tokens: int, seq_prompt_len: int,
 @pytest.mark.skip_global_cleanup
 def test_respects_eos_token_id(num_new_tokens: int, seq_prompt_len: int,
                                seq_output_len: int, seed: int):
+    """Verify the eos token id is included in the sequence, but subsequent
+    tokens are dropped (not appended to sequence).
+    """
     random.seed(seed)
     detokenizer = MagicMock(spec=Detokenizer)
     scheduler = MagicMock(spec=Scheduler)
@@ -190,6 +202,9 @@ def test_respects_eos_token_id(num_new_tokens: int, seq_prompt_len: int,
 @pytest.mark.skip_global_cleanup
 def test_ignores_eos_token_id(num_new_tokens: int, seq_prompt_len: int,
                               seq_output_len: int, seed: int):
+    """When sampling parameters dictate that we should ignore the eos token id,
+    ensure all token ids are appended even if the eos token id is emitted.
+    """
     random.seed(seed)
     detokenizer = MagicMock(spec=Detokenizer)
     scheduler = MagicMock(spec=Scheduler)

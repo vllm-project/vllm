@@ -38,8 +38,9 @@ from vllm import SamplingParams
 @pytest.mark.parametrize("batch_size", [1, 10])
 @pytest.mark.parametrize("seed", [1])
 def test_spec_decode_e2e_logical_flow(test_llm_generator, batch_size: int):
-    """Run generation with speculative decoding on a batch. Verify the number
-    of output tokens is equal to the expected number.
+    """Run generation with speculative decoding on a batch. Verify the engine
+    generates the correct number of tokens (via ignore_eos=True), and that the
+    detokenization matches HF transformers.
     """
     output_len = 128
     temperature = 0.0
@@ -105,6 +106,8 @@ def test_spec_decode_e2e_logical_flow(test_llm_generator, batch_size: int):
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
 @pytest.mark.parametrize("seed", [1])
 def test_spec_decode_xfail(test_llm_generator):
+    """Verify that speculative decoding with Ray fails.
+    """
     output_len = 128
     temperature = 0.0
 

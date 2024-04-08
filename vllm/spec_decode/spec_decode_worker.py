@@ -99,7 +99,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.scorer_worker.init_device()
         self.proposer_worker.init_device()
 
-        # TODO separate from init_device?
+        # NOTE(cade): load_model is not part of the WorkerBase interface.
         self.scorer_worker.load_model()
         self.proposer_worker.load_model()
 
@@ -195,7 +195,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
-            #return_python_output=False
         )
 
         logger.info("run target worker no spec")

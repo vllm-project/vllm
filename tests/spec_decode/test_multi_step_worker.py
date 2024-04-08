@@ -352,7 +352,6 @@ def test_draft_proposals_no_speculations():
 
 
 @torch.inference_mode()
-#@pytest.skip("Broken because output is padded.")
 def test_draft_proposals_mixed_k():
     """Verify DraftModelTop1Proposer correctly handles case some sequences can
     speculate and some can't.

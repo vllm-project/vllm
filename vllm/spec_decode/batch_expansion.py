@@ -84,7 +84,6 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
-            #return_python_output=False
         )
         assert len(target_sampler_output) == 1, "expected single-step output"
         target_sampler_output = target_sampler_output[0]
@@ -147,6 +146,8 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         sequences.
         """
 
+        # We mock the device tensors until PR 7/9 is merged (e2e correctness).
+        # https://docs.google.com/document/d/1rE4pr3IdspRw97XbImY4fS9IWYuJJ3HGtL7AdIKGrw8/edit#heading=h.qijw1sdidrer
         maybe_mock_device_tensors(
             sampler_output=target_sampler_output,
             batch_size=len(non_spec_indices) + num_scoring_tokens,

@@ -1,24 +1,39 @@
-from typing import List
+from typing import List, Iterable, Callable
 
 from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
+from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (Logprob, Sequence, SequenceGroup,
                            SequenceGroupOutput, SequenceOutput, SequenceStatus)
+from vllm.core.scheduler import Scheduler
+from vllm.transformers_utils.detokenizer import Detokenizer
+from transformers import PreTrainedTokenizer
 
 logger = init_logger(__name__)
 
 
 class BlockDecodeOutputProcessor(SequenceGroupOutputProcessor):
+    """SequenceGroupOutputProcessor which handles logic related to
+    detokenization and stopping conditions. Besides not supporting beam search,
+    this differs from BeamSearchOutputProcessor in that it supports lookahead
+    scheduling (where the model may generate >1 token per scheduler invocation).
+    
+    This allows it to support speculative decoding and cases where the model
+    runs more than once. We generalize these cases as "block decoding", where
+    the model emits a block of tokens at the same time. In this case, this class
+    is responsible for correctly appending all token ids to sequences and
+    detokenizing new token ids.
+    """
 
     def __init__(
         self,
-        detokenizer,
-        scheduler,
-        seq_counter,
-        get_tokenizer_for_seq,
-        stop_checker,
+        detokenizer: Detokenizer,
+        scheduler: Scheduler,
+        seq_counter: Iterable[int],
+        get_tokenizer_for_seq: Callable[[Sequence], PreTrainedTokenizer],
+        stop_checker: StopChecker,
     ):
         self.detokenizer = detokenizer
         self.scheduler = scheduler
@@ -28,6 +43,15 @@ class BlockDecodeOutputProcessor(SequenceGroupOutputProcessor):
 
     def process_outputs(self, sequence_group: SequenceGroup,
                         outputs: List[SequenceGroupOutput]) -> None:
+        """Append new tokens in the outputs to sequences in the sequence group.
+
+        This only supports sequence groups of size 1. It supports greater than
+        one new token per sequence.
+
+        This applies logic like stop condition checking and detokenization,
+        including freeing finished sequences. It also handles cases where there
+        are tokens emitted after the EOS token.
+        """
         seqs = sequence_group.get_seqs(status=SequenceStatus.RUNNING)
 
         assert seqs, "expected running sequences"

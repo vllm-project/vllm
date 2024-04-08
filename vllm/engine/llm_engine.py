@@ -183,6 +183,8 @@ class LLMEngine:
                 labels=dict(model_name=model_config.model))
             self.stat_logger.info("cache_config", self.cache_config)
 
+        # Create sequence output processor, e.g. for beam search or
+        # speculative decoding.
         self.output_processor = (
             SequenceGroupOutputProcessor.create_output_processor(
                 self.scheduler_config,
@@ -426,9 +428,15 @@ class LLMEngine:
             self, output: List[SamplerOutput],
             scheduled_seq_groups: List[SequenceGroup],
             ignored_seq_groups: List[SequenceGroup]) -> List[RequestOutput]:
+        """Apply the model output to the sequences in the scheduled seq groups.
+        
+        Returns RequestOutputs that can be returned to the client.
+        """
 
         now = time.time()
 
+        # Organize outputs by [sequence group][step] instead of
+        # [step][sequence group].
         output_by_sequence_group = create_output_by_sequence_group(
             sampler_outputs=output, num_seq_groups=len(scheduled_seq_groups))
 
@@ -438,7 +446,6 @@ class LLMEngine:
             seq_group = scheduled_seq_group.seq_group
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
-
             self.output_processor.process_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.

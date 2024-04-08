@@ -1,4 +1,4 @@
-from typing import List, Tuple, Union
+from typing import List, Tuple, Union, Iterable
 
 from vllm.config import SchedulerConfig
 from vllm.engine.output_processor.interfaces import (
@@ -7,19 +7,31 @@ from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (Sequence, SequenceGroup, SequenceGroupOutput,
                            SequenceOutput, SequenceStatus)
+from vllm.transformers_utils.detokenizer import Detokenizer
+from vllm.core.scheduler import Scheduler
+from vllm.engine.output_processor.stop_checker import StopChecker
 
 logger = init_logger(__name__)
 
 
 class BeamSearchOutputProcessor(SequenceGroupOutputProcessor):
+    """SequenceGroupOutputProcessor which handles logic related to beam search
+    sequence management and coupled logic like detokenization and stop logic.
+
+    This class is in charge of sorting out which sequences survive after beam
+    sampling. It manages forking and freeing of sequences.
+
+    It does not support lookahead decoding, e.g. where the model generates >1
+    token per scheduling invocation.
+    """
 
     def __init__(
         self,
         scheduler_config: SchedulerConfig,
-        detokenizer,
-        scheduler,
-        seq_counter,
-        stop_checker,
+        detokenizer: Detokenizer,
+        scheduler: Scheduler,
+        seq_counter: Iterable[int],
+        stop_checker: StopChecker,
     ):
         self.scheduler_config = scheduler_config
         self.detokenizer = detokenizer
@@ -29,6 +41,12 @@ class BeamSearchOutputProcessor(SequenceGroupOutputProcessor):
 
     def process_outputs(self, sequence_group: SequenceGroup,
                         outputs: List[SequenceGroupOutput]) -> None:
+        """Append all new tokens to sequences in the sequence group. Fork any
+        surviving beam candidates; free any unsurviving ones.
+
+        Invokes detokenizer to detokenize new tokens, and also marks sequences
+        as finished if they meet stop conditions.
+        """
         assert (len(outputs) == 1
                 ), f"{type(self)} does not support multiple outputs per step"
         return self._process_sequence_group_outputs(sequence_group, outputs[0])
