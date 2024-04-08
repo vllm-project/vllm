@@ -423,7 +423,8 @@ class LLMEngine:
 
     def _process_model_outputs(
             self, output: SamplerOutput,
-            scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
+            scheduled_seq_groups: List[SequenceGroup],
+            ignored_seq_groups: List[SequenceGroup]) -> List[RequestOutput]:
 
         now = time.time()
 
@@ -432,8 +433,6 @@ class LLMEngine:
             all_output = [output]
         else:
             all_output = output
-
-        scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
 
         output_by_sequence_group = create_output_by_sequence_group(sampler_outputs=all_output, num_seq_groups=len(scheduled_seq_groups))
 
@@ -456,13 +455,9 @@ class LLMEngine:
             seq_group.maybe_set_first_token_time(now)
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
-        for seq_group in scheduler_outputs.ignored_seq_groups:
+        for seq_group in ignored_seq_groups:
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
-
-        # Log stats.
-        if self.log_stats:
-            self.stat_logger.log(self._get_stats(scheduler_outputs))
         return request_outputs
 
 
@@ -529,7 +524,13 @@ class LLMEngine:
         else:
             output = []
 
-        return self._process_model_outputs(output, scheduler_outputs)
+        request_outputs = self._process_model_outputs(output, scheduler_outputs.scheduled_seq_groups, scheduler_outputs.ignored_seq_groups)
+
+        # Log stats.
+        if self.log_stats:
+            self.stat_logger.log(self._get_stats(scheduler_outputs))
+
+        return request_outputs
 
     def do_log_stats(self) -> None:
         """Forced log when no requests active."""
