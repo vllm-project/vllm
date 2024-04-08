@@ -45,7 +45,6 @@ def fused_moe_kernel(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
-    GROUP_SIZE_M: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr,
     top_k: tl.constexpr,
     compute_type: tl.constexpr,
@@ -81,13 +80,8 @@ def fused_moe_kernel(
     # This is done in a grouped ordering to promote L2 data reuse.
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
-    group_id = pid // num_pid_in_group
-    first_pid_m = group_id * GROUP_SIZE_M
-    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
-    pid_n = (pid % num_pid_in_group) // group_size_m
+    pid_m = (pid % num_pid_m)
+    pid_n = pid // num_pid_m
 
     # ----------------------------------------------------------
     # Create pointers for the first blocks of A and B.
@@ -370,7 +364,6 @@ def fused_moe(
                 'BLOCK_SIZE_M': 64,
                 'BLOCK_SIZE_N': 64,
                 'BLOCK_SIZE_K': 32,
-                'GROUP_SIZE_M': 8
             }
 
             if M <= E:
@@ -378,7 +371,6 @@ def fused_moe(
                     'BLOCK_SIZE_M': 16,
                     'BLOCK_SIZE_N': 32,
                     'BLOCK_SIZE_K': 64,
-                    'GROUP_SIZE_M': 1
                 }
 
     intermediate_cache1 = torch.empty((M, topk_ids.shape[1], N),
