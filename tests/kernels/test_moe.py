@@ -9,6 +9,7 @@ from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
+from vllm.model_executor.layers.fused_moe import fused_moe_col_major
 from vllm.model_executor.models.mixtral import MixtralMoE
 
 
@@ -49,7 +50,10 @@ def test_fused_moe(
 
     score = torch.randn((m, e), device='cuda', dtype=dtype)
     triton_output = fused_moe(a, w1, w2, score, topk, renormalize=False)
+    triton_output_col_major = fused_moe_col_major(a, w1, w2, score, topk, renormalize=False)
     torch_output = torch_moe(a, w1, w2, score, topk)
+
+    assert torch.allclose(triton_output_col_major, torch_output, atol=1e-2, rtol=0)
     assert torch.allclose(triton_output, torch_output, atol=1e-2, rtol=0)
 
 
