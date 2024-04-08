@@ -62,7 +62,7 @@ def make_arg_parser():
                         "of the provided names. The model name in the model "
                         "field of a response will be the first name in this "
                         "list. If not specified, the model name will be the "
-                        "same as the huggingface name.")
+                        "same as the `--model` argument.")
     parser.add_argument(
         "--lora-modules",
         type=str,
