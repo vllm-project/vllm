@@ -15,7 +15,8 @@ from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
 from vllm.model_executor.parallel_utils.custom_all_reduce import init_custom_ar
 from vllm.model_executor.parallel_utils.parallel_state import (
-    ensure_model_parallel_initialized, init_distributed_environment)
+    ensure_model_parallel_initialized, get_tensor_model_parallel_group,
+    init_distributed_environment)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
@@ -275,16 +276,18 @@ def init_distributed_environment_in_worker(
             init_method=distributed_init_method,
         )
 
-    # A small all_reduce for warmup.
-    torch.distributed.all_reduce(torch.zeros(1).cuda())
-    if pynccl_utils.is_initialized():
-        pynccl_utils.all_reduce(torch.zeros(1).cuda())
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
 
     # Initialize a custom fast all-reduce implementation.
     if not parallel_config.disable_custom_all_reduce:
         init_custom_ar()
+
+    # A small all_reduce for warmup.
+    torch.distributed.all_reduce(torch.zeros(1).cuda(),
+                                 group=get_tensor_model_parallel_group())
+    if pynccl_utils.is_initialized():
+        pynccl_utils.all_reduce(torch.zeros(1).cuda())
 
 
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
