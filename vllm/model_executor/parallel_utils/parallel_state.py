@@ -15,6 +15,20 @@ _TENSOR_MODEL_PARALLEL_GROUP = None
 # Pipeline model parallel group that the current rank belongs to.
 _PIPELINE_MODEL_PARALLEL_GROUP = None
 
+# when people blindly call `torch.distributed.all_reduce` etc,
+# it will use this group. It is initialized with the `backend`
+# parameter of `init_distributed_environment` below.
+_DEVICE_WORLD_GROUP = None
+
+# duing `init_distributed_environment`, we will also initialize a
+# group with `gloo` backend, to allow direct coordination between
+# processes through the CPU.
+_CPU_WORLD_GROUP = None
+
+# In summary, after calling `init_distributed_environment`, we will
+# always have two groups: one for device-specific (and is the default)
+# and one for CPU. All processes will be part of both groups.
+
 # A list of global ranks for each pipeline group to ease calculation of the
 # source rank when broadcasting from the first or last pipeline stage.
 _PIPELINE_GLOBAL_RANKS = None
@@ -25,17 +39,23 @@ def init_distributed_environment(
     rank: int,
     distributed_init_method: Optional[str] = None,
     local_rank: int = -1,
+    backend: str = "nccl",
 ):
     if not torch.distributed.is_initialized():
         assert distributed_init_method is not None, (
             "distributed_init_method must be provided when initializing "
             "distributed environment")
-        # it is important to use gloo backend because it is general
+        # this backend is used for WORLD
         torch.distributed.init_process_group(
-            backend="gloo",
+            backend=backend,
             init_method=distributed_init_method,
             world_size=world_size,
             rank=rank)
+        global _DEVICE_WORLD_GROUP, _CPU_WORLD_GROUP
+        _DEVICE_WORLD_GROUP = torch.distributed.group.WORLD
+        ranks = list(range(torch.distributed.get_world_size()))
+        _CPU_WORLD_GROUP = torch.distributed.new_group(ranks=ranks,
+                                                       backend="gloo")
 
 
 def initialize_model_parallel(
