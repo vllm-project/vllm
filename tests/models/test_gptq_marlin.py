@@ -53,8 +53,7 @@ MODELS = [
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
-# @pytest.mark.parametrize("tensor_parallel_size", TP_SIZES)
-@pytest.mark.parametrize("tensor_parallel_size", [2])
+@pytest.mark.parametrize("tensor_parallel_size", TP_SIZES)
 def test_models(
     vllm_runner,
     example_prompts,
