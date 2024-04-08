@@ -96,19 +96,16 @@ class GPTQMarlinConfig(QuantizationConfig):
             raise ValueError(
                 f"Marlin does not support weight_bits = {self.weight_bits}. "
                 f"Only weight_bits = {GPTQ_MARLIN_SUPPORTED_NUM_BITS} "
-                "are supported."
-            )
+                "are supported.")
         if self.group_size not in GPTQ_MARLIN_SUPPORTED_GROUP_SIZES:
             raise ValueError(
                 f"Marlin does not support group_size = {self.group_size}. "
                 f"Only group_sizes = {GPTQ_MARLIN_SUPPORTED_GROUP_SIZES} "
-                "are supported."
-            )
+                "are supported.")
         if self.is_sym not in GPTQ_MARLIN_SUPPORTED_SYM:
             raise ValueError(
                 f"Marlin does not support is_sym = {self.is_sym}. "
-                f"Only sym = {GPTQ_MARLIN_SUPPORTED_SYM} are supported."
-            ) 
+                f"Only sym = {GPTQ_MARLIN_SUPPORTED_SYM} are supported.")
 
         # Init
         self.pack_factor = get_pack_factor(weight_bits)
@@ -169,10 +166,10 @@ class GPTQMarlinConfig(QuantizationConfig):
         if device_capability < cls.get_min_capability():
             return False
 
-        # Otherwise, can convert if model satisifes marlin constraints.
-        return (num_bits in GPTQ_MARLIN_SUPPORTED_NUM_BITS and
-                group_size in GPTQ_MARLIN_SUPPORTED_GROUP_SIZES and
-                sym in GPTQ_MARLIN_SUPPORTED_SYM)
+        # Otherwise, can convert if model satisfies marlin constraints.
+        return (num_bits in GPTQ_MARLIN_SUPPORTED_NUM_BITS
+                and group_size in GPTQ_MARLIN_SUPPORTED_GROUP_SIZES
+                and sym in GPTQ_MARLIN_SUPPORTED_SYM)
 
 
 class GPTQMarlinState(Enum):
