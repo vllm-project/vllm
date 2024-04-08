@@ -14,7 +14,6 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
-from vllm.utils import is_hip
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -195,33 +194,19 @@ class FlashAttentionImpl(AttentionImpl):
                 # normal attention
                 # When block_tables are not filled, it means q and k are the
                 # prompt, and they have the same length.
-                if is_hip():
-                    output = flash_attn_varlen_func(
-                        q=query,
-                        k=key,
-                        v=value,
-                        cu_seqlens_q=attn_metadata.seq_start_loc,
-                        cu_seqlens_k=attn_metadata.seq_start_loc,
-                        max_seqlen_q=attn_metadata.max_prompt_len,
-                        max_seqlen_k=attn_metadata.max_prompt_len,
-                        softmax_scale=self.scale,
-                        causal=True,
-                    )
-                else:
-                    output = flash_attn_varlen_func(
-                        q=query,
-                        k=key,
-                        v=value,
-                        cu_seqlens_q=attn_metadata.seq_start_loc,
-                        cu_seqlens_k=attn_metadata.seq_start_loc,
-                        max_seqlen_q=attn_metadata.max_prompt_len,
-                        max_seqlen_k=attn_metadata.max_prompt_len,
-                        softmax_scale=self.scale,
-                        causal=True,
-                        window_size=self.sliding_window,
-                        alibi_slopes=self.alibi_slopes,
-                    )
-
+                output = flash_attn_varlen_func(
+                    q=query,
+                    k=key,
+                    v=value,
+                    cu_seqlens_q=attn_metadata.seq_start_loc,
+                    cu_seqlens_k=attn_metadata.seq_start_loc,
+                    max_seqlen_q=attn_metadata.max_prompt_len,
+                    max_seqlen_k=attn_metadata.max_prompt_len,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    window_size=self.sliding_window,
+                    alibi_slopes=self.alibi_slopes,
+                )
             else:
                 # prefix-enabled attention
                 # TODO(Hai) this triton kernel has regression issue (broke) to
