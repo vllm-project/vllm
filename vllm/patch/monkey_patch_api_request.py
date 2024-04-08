@@ -33,6 +33,7 @@ class ChatMessageEx(BaseModel):
     def validate_ignore_resource(cls, value: str) -> str:
         if not value:
             return "assistant"
+        return value
 
 
 class ChatCompletionResponseChoiceEx(BaseModel):
