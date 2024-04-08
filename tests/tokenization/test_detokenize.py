@@ -4,8 +4,8 @@ import pytest
 from transformers import AutoTokenizer
 
 from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
-from vllm.transformers_utils.detokenizer import Detokenizer
-from vllm.transformers_utils.tokenizer import detokenize_incrementally
+from vllm.transformers_utils.detokenizer import (Detokenizer,
+                                                 detokenize_incrementally)
 from vllm.transformers_utils.tokenizer_group import get_tokenizer_group
 
 TRUTH = [
