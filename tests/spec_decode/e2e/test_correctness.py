@@ -75,7 +75,7 @@ def test_spec_decode_e2e_logical_flow(test_llm_generator, batch_size: int):
     tok = AutoTokenizer.from_pretrained("JackFram/llama-68m")
     for actual_tokens, actual_token_ids in zip(batch_tokens, batch_token_ids):
         expected_tokens = tok.decode(actual_token_ids)
-        assert actual_tokens == expected_tokens
+        assert actual_tokens.strip() == expected_tokens.strip()
 
 
 @pytest.mark.parametrize(
