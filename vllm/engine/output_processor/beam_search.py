@@ -38,14 +38,12 @@ class BeamSearchOutputProcessor(SequenceGroupOutputProcessor):
         detokenizer,
         scheduler,
         seq_counter,
-        get_tokenizer_for_seq,
         stop_checker,
     ):
         self.scheduler_config = scheduler_config
         self.detokenizer = detokenizer
         self.scheduler = scheduler
         self.seq_counter = seq_counter
-        self.get_tokenizer_for_seq = get_tokenizer_for_seq
         self.stop_checker = stop_checker
 
     def process_outputs(self, sequence_group: SequenceGroup, outputs: List[SequenceGroupOutput]) -> None:

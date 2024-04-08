@@ -34,21 +34,19 @@ class BlockDecodeOutputProcessor(SequenceGroupOutputProcessor):
     
     def __init__(
         self,
-        scheduler_config: SchedulerConfig,
         detokenizer,
         scheduler,
         seq_counter,
         get_tokenizer_for_seq,
         stop_checker,
     ):
-        self.scheduler_config = scheduler_config
         self.detokenizer = detokenizer
         self.scheduler = scheduler
         self.seq_counter = seq_counter
         self.get_tokenizer_for_seq = get_tokenizer_for_seq
         self.stop_checker = stop_checker
 
-    def process_outputs(self, sequence_group: SequenceGroup, outputs: SequenceGroupOutput) -> None:
+    def process_outputs(self, sequence_group: SequenceGroup, outputs: List[SequenceGroupOutput]) -> None:
         seqs = sequence_group.get_seqs(status=SequenceStatus.RUNNING)
 
         assert seqs, "expected running sequences"
@@ -78,18 +76,17 @@ class BlockDecodeOutputProcessor(SequenceGroupOutputProcessor):
             valid_samples = valid_samples[:remaining_tokens]
             output_token_ids = output_token_ids[:remaining_tokens]
 
-        ## Truncate any tokens after EOS. This is required as spec decode
-        ## generates tokens in fixed blocks, which may go beyond the EOS token.
-        #if not sampling_params.ignore_eos:
-        #    eos_token_id = self.tokenizer.get_lora_tokenizer(
-        #        seq.lora_request).eos_token_id
-        #    # Avoiding .index calls as exception throwing in the happy path
-        #    # is expensive.
-        #    for i in range(len(output_token_ids)):
-        #        if output_token_ids[i] == eos_token_id:
-        #            output_token_ids = output_token_ids[:i + 1]
-        #            valid_samples = valid_samples[:i + 1]
-        #            break
+        # Truncate any tokens after EOS. This is required as spec decode
+        # generates tokens in fixed blocks, which may go beyond the EOS token.
+        if not sampling_params.ignore_eos:
+            eos_token_id = self.get_tokenizer_for_seq(seq).eos_token_id
+            # Avoiding .index calls as exception throwing in the happy path
+            # is expensive.
+            for i in range(len(output_token_ids)):
+                if output_token_ids[i] == eos_token_id:
+                    output_token_ids = output_token_ids[:i + 1]
+                    valid_samples = valid_samples[:i + 1]
+                    break
 
         for output_token_id in output_token_ids:
             seq.append_token_id(

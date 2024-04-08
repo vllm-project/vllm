@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from vllm.config import SchedulerConfig
 from vllm.sequence import SequenceGroup, SequenceGroupOutput
+from typing import List
 
 class SequenceGroupOutputProcessor(ABC):
     
@@ -20,13 +21,11 @@ class SequenceGroupOutputProcessor(ABC):
                 detokenizer,
                 scheduler,
                 seq_counter,
-                get_tokenizer_for_seq,
                 stop_checker,
             )
         else:
             from vllm.engine.output_processor.block_decode import BlockDecodeOutputProcessor
             return BlockDecodeOutputProcessor(
-                scheduler_config,
                 detokenizer,
                 scheduler,
                 seq_counter,
@@ -35,5 +34,5 @@ class SequenceGroupOutputProcessor(ABC):
             )
 
     @abstractmethod
-    def process_outputs(self, sequence_group: SequenceGroup, outputs: SequenceGroupOutput) -> None:
+    def process_outputs(self, sequence_group: SequenceGroup, outputs: List[SequenceGroupOutput]) -> None:
         pass
