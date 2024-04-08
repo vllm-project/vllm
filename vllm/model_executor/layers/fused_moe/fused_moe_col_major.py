@@ -4,14 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# Based on https://github.com/pytorch-labs/applied-ai/blob/main/kernels/triton/inference/col_major_moe_gemm/v2_moe_fused.py
+
 """Fused MoE kernel."""
 from typing import Any, Dict, Optional, Tuple
+
 import torch
 import triton
 import triton.language as tl
-from vllm._C import ops
-import vllm._moe_C as moe_kernels
 
+from vllm._C import ops
+from vllm.utils import is_hip
 
 @triton.jit()
 def col_major(pid,
@@ -224,7 +227,7 @@ def fused_moe_col_major(
     topk: torch.Tensor,
     renormalize: bool,
     inplace=False,
-    override_config: Optional[Dict[str, Any]] = None
+    override_config: Optional[Dict[str, Any]] = None,
 ):
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of weights, w1 and w2, and top-k gating mechanism.
@@ -251,8 +254,34 @@ def fused_moe_col_major(
     M, _ = hidden_states.shape
     E, N, _ = w1.shape
 
-    score = torch.softmax(gating_output, dim=-1, dtype=torch.float32)
-    topk_weights, topk_ids = torch.topk(score, topk)
+    if is_hip():
+        # The MoE kernels are not yet supported on ROCm.
+        score = torch.softmax(gating_output, dim=-1, dtype=torch.float32)
+        topk_weights, topk_ids = torch.topk(score, topk)
+    else:
+        import vllm._moe_C as moe_kernels
+
+        topk_weights = torch.empty(M,
+                                   topk,
+                                   dtype=torch.float32,
+                                   device=hidden_states.device)
+        topk_ids = torch.empty(M,
+                               topk,
+                               dtype=torch.int32,
+                               device=hidden_states.device)
+        token_expert_indicies = torch.empty(M,
+                                            topk,
+                                            dtype=torch.int32,
+                                            device=hidden_states.device)
+        moe_kernels.topk_softmax(
+            topk_weights,
+            topk_ids,
+            token_expert_indicies,
+            gating_output.float(),  # TODO(woosuk): Optimize this.
+        )
+        del token_expert_indicies  # Not used. Will be used in the future.
+    if renormalize:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
     M, _ = hidden_states.shape
     E, N, _ = w1.shape
