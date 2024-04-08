@@ -89,7 +89,7 @@ def test_spec_decode_e2e_logical_flow(test_llm_generator, batch_size: int):
         {
             # Expect failure as spec decode not supported by
             # Ray backend.
-            "tensor_parallel_size": 2,
+            "worker_use_ray": True,
         },
     ])
 @pytest.mark.parametrize("test_llm_kwargs", [{}])

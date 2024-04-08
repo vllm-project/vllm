@@ -422,19 +422,14 @@ class LLMEngine:
         return self.scheduler.has_unfinished_seqs()
 
     def _process_model_outputs(
-            self, output: SamplerOutput,
+            self,
+            output: List[SamplerOutput],
             scheduled_seq_groups: List[SequenceGroup],
             ignored_seq_groups: List[SequenceGroup]) -> List[RequestOutput]:
 
         now = time.time()
 
-        # TODO
-        if self.speculative_config is None:
-            all_output = [output]
-        else:
-            all_output = output
-
-        output_by_sequence_group = create_output_by_sequence_group(sampler_outputs=all_output, num_seq_groups=len(scheduled_seq_groups))
+        output_by_sequence_group = create_output_by_sequence_group(sampler_outputs=output, num_seq_groups=len(scheduled_seq_groups))
 
         # Update the scheduled sequence groups with the model outputs.
         for scheduled_seq_group, outputs in zip(scheduled_seq_groups,
