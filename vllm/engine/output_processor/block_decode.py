@@ -31,7 +31,7 @@ logger = init_logger(__name__)
 
 
 class BlockDecodeOutputProcessor(SequenceGroupOutputProcessor):
-    
+
     def __init__(
         self,
         detokenizer,
@@ -46,7 +46,8 @@ class BlockDecodeOutputProcessor(SequenceGroupOutputProcessor):
         self.get_tokenizer_for_seq = get_tokenizer_for_seq
         self.stop_checker = stop_checker
 
-    def process_outputs(self, sequence_group: SequenceGroup, outputs: List[SequenceGroupOutput]) -> None:
+    def process_outputs(self, sequence_group: SequenceGroup,
+                        outputs: List[SequenceGroupOutput]) -> None:
         seqs = sequence_group.get_seqs(status=SequenceStatus.RUNNING)
 
         assert seqs, "expected running sequences"
@@ -64,14 +65,17 @@ class BlockDecodeOutputProcessor(SequenceGroupOutputProcessor):
         ]
         assert valid_samples
 
-        self._process_seq_outputs(seq, valid_samples, sequence_group.sampling_params)
+        self._process_seq_outputs(seq, valid_samples,
+                                  sequence_group.sampling_params)
 
-    def _process_seq_outputs(self, seq: Sequence, valid_samples: List[SequenceOutput], sampling_params: SamplingParams) -> None:
+    def _process_seq_outputs(self, seq: Sequence,
+                             valid_samples: List[SequenceOutput],
+                             sampling_params: SamplingParams) -> None:
         output_token_ids = [sample.output_token for sample in valid_samples]
 
         # Truncate to max_tokens if necessary.
-        remaining_tokens = sampling_params.max_tokens - (
-            seq.get_output_len() + len(output_token_ids))
+        remaining_tokens = sampling_params.max_tokens - (seq.get_output_len() +
+                                                         len(output_token_ids))
         if remaining_tokens < 0:
             valid_samples = valid_samples[:remaining_tokens]
             output_token_ids = output_token_ids[:remaining_tokens]
@@ -96,7 +100,9 @@ class BlockDecodeOutputProcessor(SequenceGroupOutputProcessor):
             )
 
         # TODO detokenize
-        self.stop_checker.maybe_stop_sequence(seq, sampling_params, new_token_ids=output_token_ids)
+        self.stop_checker.maybe_stop_sequence(seq,
+                                              sampling_params,
+                                              new_token_ids=output_token_ids)
 
         if seq.is_finished():
             self.scheduler.free_seq(seq)

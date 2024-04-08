@@ -422,14 +422,14 @@ class LLMEngine:
         return self.scheduler.has_unfinished_seqs()
 
     def _process_model_outputs(
-            self,
-            output: List[SamplerOutput],
+            self, output: List[SamplerOutput],
             scheduled_seq_groups: List[SequenceGroup],
             ignored_seq_groups: List[SequenceGroup]) -> List[RequestOutput]:
 
         now = time.time()
 
-        output_by_sequence_group = create_output_by_sequence_group(sampler_outputs=output, num_seq_groups=len(scheduled_seq_groups))
+        output_by_sequence_group = create_output_by_sequence_group(
+            sampler_outputs=output, num_seq_groups=len(scheduled_seq_groups))
 
         # Update the scheduled sequence groups with the model outputs.
         for scheduled_seq_group, outputs in zip(scheduled_seq_groups,
@@ -437,7 +437,7 @@ class LLMEngine:
             seq_group = scheduled_seq_group.seq_group
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
-            
+
             self.output_processor.process_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.
@@ -454,7 +454,6 @@ class LLMEngine:
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
         return request_outputs
-
 
     def step(self) -> List[RequestOutput]:
         """Performs one decoding iteration and returns newly generated results.
@@ -519,7 +518,9 @@ class LLMEngine:
         else:
             output = []
 
-        request_outputs = self._process_model_outputs(output, scheduler_outputs.scheduled_seq_groups, scheduler_outputs.ignored_seq_groups)
+        request_outputs = self._process_model_outputs(
+            output, scheduler_outputs.scheduled_seq_groups,
+            scheduler_outputs.ignored_seq_groups)
 
         # Log stats.
         if self.log_stats:
@@ -604,7 +605,6 @@ class LLMEngine:
             time_per_output_tokens=time_per_output_tokens,
             time_e2e_requests=time_e2e_requests,
         )
-
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)

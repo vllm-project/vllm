@@ -13,6 +13,7 @@ from vllm.sequence import SequenceStatus, SequenceGroupOutput, SequenceOutput, L
 from vllm.sampling_params import SamplingParams
 from tests.core.utils import create_seq_group
 
+
 @pytest.mark.parametrize("seq_output_len", [128])
 @pytest.mark.parametrize("num_new_tokens", [1, 12])
 @pytest.mark.skip_global_cleanup
@@ -33,37 +34,40 @@ def test_appends_token_ids(num_new_tokens: int, seq_output_len: int):
     seq_group = create_seq_group(
         seq_prompt_len=1024,
         seq_output_lens=[seq_output_len],
-        sampling_params=SamplingParams(
-            max_tokens=seq_output_len + num_new_tokens,
-        ),
+        sampling_params=SamplingParams(max_tokens=seq_output_len +
+                                       num_new_tokens, ),
     )
-    
+
     seq = seq_group.get_seqs()[0]
     seq.status = SequenceStatus.RUNNING
 
     new_token_ids = list(range(num_new_tokens))
 
-    outputs = [SequenceGroupOutput(
-        samples=[
-            SequenceOutput(
-                parent_seq_id=seq.seq_id,
-                output_token=output_token,
-                logprobs={output_token: Logprob(0.0)},
-            )
-        ],
-        prompt_logprobs=None,
-    ) for output_token in new_token_ids]
+    outputs = [
+        SequenceGroupOutput(
+            samples=[
+                SequenceOutput(
+                    parent_seq_id=seq.seq_id,
+                    output_token=output_token,
+                    logprobs={output_token: Logprob(0.0)},
+                )
+            ],
+            prompt_logprobs=None,
+        ) for output_token in new_token_ids
+    ]
 
     assert seq.get_token_ids()[-len(new_token_ids):] != new_token_ids
     output_processor.process_outputs(seq_group, outputs)
     assert seq.get_token_ids()[-len(new_token_ids):] == new_token_ids
+
 
 @pytest.mark.parametrize("seq_prompt_len", [1024])
 @pytest.mark.parametrize("seq_output_len", [128])
 @pytest.mark.parametrize("num_new_tokens", [5, 6, 7, 8])
 @pytest.mark.parametrize("max_tokens", [128 + 3])
 @pytest.mark.skip_global_cleanup
-def test_respects_max_tokens(num_new_tokens: int, seq_prompt_len: int, seq_output_len: int, max_tokens: int):
+def test_respects_max_tokens(num_new_tokens: int, seq_prompt_len: int,
+                             seq_output_len: int, max_tokens: int):
     detokenizer = MagicMock(spec=Detokenizer)
     scheduler = MagicMock(spec=Scheduler)
     stop_checker = MagicMock(spec=StopChecker)
@@ -80,26 +84,26 @@ def test_respects_max_tokens(num_new_tokens: int, seq_prompt_len: int, seq_outpu
     seq_group = create_seq_group(
         seq_prompt_len=seq_prompt_len,
         seq_output_lens=[seq_output_len],
-        sampling_params=SamplingParams(
-            max_tokens=max_tokens,
-        ),
+        sampling_params=SamplingParams(max_tokens=max_tokens, ),
     )
-    
+
     seq = seq_group.get_seqs()[0]
     seq.status = SequenceStatus.RUNNING
 
     new_token_ids = list(range(num_new_tokens))
 
-    outputs = [SequenceGroupOutput(
-        samples=[
-            SequenceOutput(
-                parent_seq_id=seq.seq_id,
-                output_token=output_token,
-                logprobs={output_token: Logprob(0.0)},
-            )
-        ],
-        prompt_logprobs=None,
-    ) for output_token in new_token_ids]
+    outputs = [
+        SequenceGroupOutput(
+            samples=[
+                SequenceOutput(
+                    parent_seq_id=seq.seq_id,
+                    output_token=output_token,
+                    logprobs={output_token: Logprob(0.0)},
+                )
+            ],
+            prompt_logprobs=None,
+        ) for output_token in new_token_ids
+    ]
 
     assert seq.get_len() == seq_prompt_len + seq_output_len
     output_processor.process_outputs(seq_group, outputs)
@@ -109,14 +113,17 @@ def test_respects_max_tokens(num_new_tokens: int, seq_prompt_len: int, seq_outpu
 
     # Expect the correct tokens were appended.
     expected_appended_tokens = new_token_ids[:max_tokens - seq_output_len]
-    assert seq.get_token_ids()[-len(expected_appended_tokens):] == expected_appended_tokens
+    assert seq.get_token_ids(
+    )[-len(expected_appended_tokens):] == expected_appended_tokens
+
 
 @pytest.mark.parametrize("seq_prompt_len", [1024])
 @pytest.mark.parametrize("seq_output_len", [128])
 @pytest.mark.parametrize("num_new_tokens", [12])
 @pytest.mark.parametrize("seed", list(range(6)))
 @pytest.mark.skip_global_cleanup
-def test_respects_eos_token_id(num_new_tokens: int, seq_prompt_len: int, seq_output_len: int, seed: int):
+def test_respects_eos_token_id(num_new_tokens: int, seq_prompt_len: int,
+                               seq_output_len: int, seed: int):
     random.seed(seed)
     detokenizer = MagicMock(spec=Detokenizer)
     scheduler = MagicMock(spec=Scheduler)
@@ -138,10 +145,9 @@ def test_respects_eos_token_id(num_new_tokens: int, seq_prompt_len: int, seq_out
         seq_output_lens=[seq_output_len],
         sampling_params=SamplingParams(
             # Ensure enough space.
-            max_tokens=seq_output_len + num_new_tokens,
-        ),
+            max_tokens=seq_output_len + num_new_tokens, ),
     )
-    
+
     seq = seq_group.get_seqs()[0]
     seq.status = SequenceStatus.RUNNING
 
@@ -150,16 +156,18 @@ def test_respects_eos_token_id(num_new_tokens: int, seq_prompt_len: int, seq_out
     eos_index = random.randint(0, len(new_token_ids) - 1)
     new_token_ids[eos_index] = eos_token_id
 
-    outputs = [SequenceGroupOutput(
-        samples=[
-            SequenceOutput(
-                parent_seq_id=seq.seq_id,
-                output_token=output_token,
-                logprobs={output_token: Logprob(0.0)},
-            )
-        ],
-        prompt_logprobs=None,
-    ) for output_token in new_token_ids]
+    outputs = [
+        SequenceGroupOutput(
+            samples=[
+                SequenceOutput(
+                    parent_seq_id=seq.seq_id,
+                    output_token=output_token,
+                    logprobs={output_token: Logprob(0.0)},
+                )
+            ],
+            prompt_logprobs=None,
+        ) for output_token in new_token_ids
+    ]
 
     assert seq.get_len() == seq_prompt_len + seq_output_len
     output_processor.process_outputs(seq_group, outputs)
@@ -168,15 +176,18 @@ def test_respects_eos_token_id(num_new_tokens: int, seq_prompt_len: int, seq_out
     assert seq.get_len() == seq_prompt_len + seq_output_len + (eos_index + 1)
 
     # Expect the correct tokens were appended.
-    expected_appended_tokens = new_token_ids[:eos_index+1]
-    assert seq.get_token_ids()[-len(expected_appended_tokens):] == expected_appended_tokens
+    expected_appended_tokens = new_token_ids[:eos_index + 1]
+    assert seq.get_token_ids(
+    )[-len(expected_appended_tokens):] == expected_appended_tokens
+
 
 @pytest.mark.parametrize("seq_prompt_len", [1024])
 @pytest.mark.parametrize("seq_output_len", [128])
 @pytest.mark.parametrize("num_new_tokens", [12])
 @pytest.mark.parametrize("seed", list(range(6)))
 @pytest.mark.skip_global_cleanup
-def test_ignores_eos_token_id(num_new_tokens: int, seq_prompt_len: int, seq_output_len: int, seed: int):
+def test_ignores_eos_token_id(num_new_tokens: int, seq_prompt_len: int,
+                              seq_output_len: int, seed: int):
     random.seed(seed)
     detokenizer = MagicMock(spec=Detokenizer)
     scheduler = MagicMock(spec=Scheduler)
@@ -202,7 +213,7 @@ def test_ignores_eos_token_id(num_new_tokens: int, seq_prompt_len: int, seq_outp
             ignore_eos=True,
         ),
     )
-    
+
     seq = seq_group.get_seqs()[0]
     seq.status = SequenceStatus.RUNNING
 
@@ -211,16 +222,18 @@ def test_ignores_eos_token_id(num_new_tokens: int, seq_prompt_len: int, seq_outp
     eos_index = random.randint(0, len(new_token_ids) - 1)
     new_token_ids[eos_index] = eos_token_id
 
-    outputs = [SequenceGroupOutput(
-        samples=[
-            SequenceOutput(
-                parent_seq_id=seq.seq_id,
-                output_token=output_token,
-                logprobs={output_token: Logprob(0.0)},
-            )
-        ],
-        prompt_logprobs=None,
-    ) for output_token in new_token_ids]
+    outputs = [
+        SequenceGroupOutput(
+            samples=[
+                SequenceOutput(
+                    parent_seq_id=seq.seq_id,
+                    output_token=output_token,
+                    logprobs={output_token: Logprob(0.0)},
+                )
+            ],
+            prompt_logprobs=None,
+        ) for output_token in new_token_ids
+    ]
 
     assert seq.get_len() == seq_prompt_len + seq_output_len
     output_processor.process_outputs(seq_group, outputs)
@@ -229,8 +242,11 @@ def test_ignores_eos_token_id(num_new_tokens: int, seq_prompt_len: int, seq_outp
     assert seq.get_len() == seq_prompt_len + seq_output_len + num_new_tokens
 
     # Expect the correct tokens were appended.
-    expected_appended_tokens = new_token_ids[:seq_output_len + num_new_tokens - seq_output_len]
-    assert seq.get_token_ids()[-len(expected_appended_tokens):] == expected_appended_tokens
+    expected_appended_tokens = new_token_ids[:seq_output_len + num_new_tokens -
+                                             seq_output_len]
+    assert seq.get_token_ids(
+    )[-len(expected_appended_tokens):] == expected_appended_tokens
+
 
 def mock_tokenizer(eos_token_id=1000):
     tokenizer = MagicMock(spec=PreTrainedTokenizer)

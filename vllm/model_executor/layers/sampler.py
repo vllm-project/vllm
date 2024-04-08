@@ -79,7 +79,8 @@ class Sampler(nn.Module):
         prompt_logprobs, sample_logprobs = _get_logprobs(
             logprobs, sampling_metadata, sample_results)
 
-        return _build_sampler_output(sample_results, sampling_metadata, prompt_logprobs, sample_logprobs)
+        return _build_sampler_output(sample_results, sampling_metadata,
+                                     prompt_logprobs, sample_logprobs)
 
 
 def _get_bin_counts_and_mask(

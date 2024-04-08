@@ -3,8 +3,9 @@ from vllm.config import SchedulerConfig
 from vllm.sequence import SequenceGroup, SequenceGroupOutput
 from typing import List
 
+
 class SequenceGroupOutputProcessor(ABC):
-    
+
     @staticmethod
     def create_output_processor(
         scheduler_config: SchedulerConfig,
@@ -34,5 +35,6 @@ class SequenceGroupOutputProcessor(ABC):
             )
 
     @abstractmethod
-    def process_outputs(self, sequence_group: SequenceGroup, outputs: List[SequenceGroupOutput]) -> None:
+    def process_outputs(self, sequence_group: SequenceGroup,
+                        outputs: List[SequenceGroupOutput]) -> None:
         pass

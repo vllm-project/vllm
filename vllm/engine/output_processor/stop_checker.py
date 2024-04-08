@@ -30,6 +30,7 @@ from vllm.engine.output_processor.interfaces import SequenceGroupOutputProcessor
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
 
+
 class StopChecker:
 
     def __init__(self, scheduler, scheduler_config, get_tokenizer_for_seq):
@@ -38,7 +39,8 @@ class StopChecker:
         self.get_tokenizer_for_seq = get_tokenizer_for_seq
 
     def maybe_stop_sequence(self, seq: Sequence,
-                    sampling_params: SamplingParams, new_token_ids: List[int]) -> None:
+                            sampling_params: SamplingParams,
+                            new_token_ids: List[int]) -> None:
         """Stop the finished sequences."""
         # Check if the sequence has reached max_model_len.
         if seq.get_len() > self.scheduler_config.max_model_len:
@@ -64,7 +66,8 @@ class StopChecker:
                     return
 
         # Determine if any stop_token_ids are in new_token_ids.
-        intersection = set(new_token_ids).intersection(sampling_params.stop_token_ids)
+        intersection = set(new_token_ids).intersection(
+            sampling_params.stop_token_ids)
         if intersection:
             # Get arbitrary token id that caused the stop.
             stop_token_id = next(iter(intersection))

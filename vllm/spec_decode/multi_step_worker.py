@@ -70,7 +70,8 @@ class MultiStepWorker(Worker):
                 blocks_to_swap_out=blocks_to_swap_out,
                 blocks_to_copy=blocks_to_copy,
             )
-            assert (len(model_output) == 1), "composing multistep workers not supported"
+            assert (len(model_output) == 1
+                    ), "composing multistep workers not supported"
             model_output = model_output[0]
 
             self._append_new_tokens(model_output,

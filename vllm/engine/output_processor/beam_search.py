@@ -31,7 +31,7 @@ logger = init_logger(__name__)
 
 
 class BeamSearchOutputProcessor(SequenceGroupOutputProcessor):
-    
+
     def __init__(
         self,
         scheduler_config: SchedulerConfig,
@@ -46,8 +46,10 @@ class BeamSearchOutputProcessor(SequenceGroupOutputProcessor):
         self.seq_counter = seq_counter
         self.stop_checker = stop_checker
 
-    def process_outputs(self, sequence_group: SequenceGroup, outputs: List[SequenceGroupOutput]) -> None:
-        assert (len(outputs) == 1), f"{type(self)} does not support multiple outputs per step"
+    def process_outputs(self, sequence_group: SequenceGroup,
+                        outputs: List[SequenceGroupOutput]) -> None:
+        assert (len(outputs) == 1
+                ), f"{type(self)} does not support multiple outputs per step"
         return self._process_sequence_group_outputs(sequence_group, outputs[0])
 
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
@@ -104,7 +106,9 @@ class BeamSearchOutputProcessor(SequenceGroupOutputProcessor):
             if seq_group.sampling_params.detokenize:
                 self.detokenizer.decode_sequence_inplace(
                     seq, seq_group.sampling_params)
-            self.stop_checker.maybe_stop_sequence(seq, seq_group.sampling_params, [seq.get_last_token_id()])
+            self.stop_checker.maybe_stop_sequence(seq,
+                                                  seq_group.sampling_params,
+                                                  [seq.get_last_token_id()])
 
         # Non-beam search case
         if not seq_group.sampling_params.use_beam_search:

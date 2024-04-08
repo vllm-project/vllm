@@ -196,7 +196,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
         )
-        assert len(sampler_output) == 1, "expected single output from scorer worker"
+        assert len(
+            sampler_output) == 1, "expected single output from scorer worker"
         sampler_output = sampler_output[0]
 
         # Clear device tensors from sampler output. This reduces communication
