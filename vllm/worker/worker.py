@@ -184,7 +184,7 @@ class Worker(WorkerBase):
                                         self.parallel_config)
         self.gpu_cache = self.cache_engine.gpu_cache
         self.model_runner.set_block_size(self.cache_engine.block_size)
-        self.model_runner.prepare_contiguous_mamba_cache()
+        self.model_runner.prepare_contiguous_mamba_cache(self.cache_engine.dtype)
 
     def _warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:

@@ -162,9 +162,9 @@ class ModelRunner:
             self.model_config.dtype if model_config is not None else None)
 
     @torch.inference_mode()
-    def prepare_contiguous_mamba_cache(self):
+    def prepare_contiguous_mamba_cache(self, dtype):
         is_mamba = self.model_config.hf_config.model_type == "jamba"
-        if not is_mamba:
+        if not is_mamba or self.mamba_cache is not None:
             return
         hf_config = self.model_config.hf_config
         num_layers = hf_config.num_hidden_layers
@@ -183,10 +183,10 @@ class ModelRunner:
         )
         if self.mamba_cache is None:
             self.mamba_cache = {}
-        self.mamba_cache = (torch.empty(size=conv_state_shape, dtype=torch.float16, device="cuda"),
-                            torch.empty(size=ssm_state_shape, dtype=torch.float16, device="cuda"))
-        self.mamba_cache4gc = (torch.empty(size=conv_state_shape, dtype=torch.float16, device="cuda"),
-                               torch.empty(size=ssm_state_shape, dtype=torch.float16, device="cuda"))
+        self.mamba_cache = (torch.empty(size=conv_state_shape, dtype=dtype, device="cuda"),
+                            torch.empty(size=ssm_state_shape, dtype=dtype, device="cuda"))
+        self.mamba_cache4gc = (torch.empty(size=conv_state_shape, dtype=dtype, device="cuda"),
+                               torch.empty(size=ssm_state_shape, dtype=dtype, device="cuda"))
         
 
     def load_model(self) -> None:
@@ -923,7 +923,7 @@ class ModelRunner:
             return None
 
         if self.mamba_cache is None:
-            self.prepare_contiguous_mamba_cache()
+            self.prepare_contiguous_mamba_cache(self.model_config.dtype)
 
         conv_state, ssm_state, indecies = self._prepare_request_mamba_cache(input_metadata, input_tokens.shape[0])
 
