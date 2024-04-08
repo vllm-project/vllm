@@ -71,7 +71,7 @@ def get_conversation_stop_token_ids(conv: Conversation):
 
 @cache
 def get_default_model_template():
-    from vllm.entrypoints.openai.cli_args import cliContext
+    from vllm.entrypoints.openai.cli_context_args import cliContext
     args = cliContext.args
     if not args:
         return
