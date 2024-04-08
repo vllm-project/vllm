@@ -98,8 +98,8 @@ class BlockDecodeOutputProcessor(SequenceGroupOutputProcessor):
                 # TODO emit logprobs in block decoding.
                 logprobs={output_token_id: Logprob(0.0)},
             )
+            self.detokenizer.decode_sequence_inplace(seq, sampling_params)
 
-        # TODO detokenize
         self.stop_checker.maybe_stop_sequence(seq,
                                               sampling_params,
                                               new_token_ids=output_token_ids)

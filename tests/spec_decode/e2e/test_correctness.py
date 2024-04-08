@@ -1,13 +1,16 @@
 import pytest
 from itertools import cycle
+from typing import Tuple, List
 
 from vllm import SamplingParams
+from transformers import AutoTokenizer
 
 
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
         # Use a small model for a fast test.
+        # Note this is repeated in the test body; to initialize a tokenizer.
         "model": "JackFram/llama-68m",
 
         # Skip real loading for fast test.
@@ -55,14 +58,22 @@ def test_spec_decode_e2e_logical_flow(test_llm_generator, batch_size: int):
         temperature=temperature,
     )
 
-    batch_token_ids = get_token_ids_from_llm_generator(test_llm_generator,
+    batch_tokens, batch_token_ids = get_output_from_llm_generator(test_llm_generator,
                                                        prompts,
                                                        sampling_params)
 
     # Expect a generation for each prompt in the batch.
     assert len(batch_token_ids) == len(prompts)
 
+    # Expect each generation to have expected number of tokens (note
+    # ignore_eos=True).
     assert all(len(token_ids) == output_len for token_ids in batch_token_ids)
+
+    # Expect detokenized string to match.
+    tok = AutoTokenizer.from_pretrained("JackFram/llama-68m")
+    for actual_tokens, actual_token_ids in zip(batch_tokens, batch_token_ids):
+        expected_tokens = tok.decode(actual_token_ids)
+        assert actual_tokens == expected_tokens
 
 
 @pytest.mark.parametrize(
@@ -109,14 +120,15 @@ def test_spec_decode_xfail(test_llm_generator):
 
     with pytest.raises(AssertionError,
                        match="Speculative decoding not yet supported for "):
-        get_token_ids_from_llm_generator(test_llm_generator, prompts,
+        get_output_from_llm_generator(test_llm_generator, prompts,
                                          sampling_params)
 
 
-def get_token_ids_from_llm_generator(llm_generator, prompts, sampling_params):
+def get_output_from_llm_generator(llm_generator, prompts, sampling_params) -> Tuple[List[str], List[List[int]]]:
     for llm in llm_generator:
         outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
         token_ids = [output.outputs[0].token_ids for output in outputs]
+        tokens = [output.outputs[0].text for output in outputs]
         del llm
 
-    return token_ids
+    return tokens, token_ids
