@@ -1,9 +1,4 @@
-"""Attention layer with Flash and PagedAttention.
-
-NOTE(woosuk): At the moment, this file includes a lot of duplicated code from
-XFormers backend. The duplicated code will be removed once we use flash-attn or
-flashinfer for all the attention operations.
-"""
+"""Attention layer ROCm GPUs."""
 import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Type
@@ -181,6 +176,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: ROCmFlashAttentionMetadata,
+        kv_scale: float,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 
@@ -213,6 +209,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 value_cache,
                 attn_metadata.slot_mapping,
                 attn_metadata.kv_cache_dtype,
+                kv_scale,
             )
 
         if attn_metadata.is_prompt:
@@ -280,6 +277,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
+                kv_scale,
             )
 
         # Reshape the output tensor.
