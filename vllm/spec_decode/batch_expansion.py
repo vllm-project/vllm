@@ -86,6 +86,8 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             blocks_to_copy=blocks_to_copy,
             #return_python_output=False
         )
+        assert len(target_sampler_output) == 1, "expected single-step output"
+        target_sampler_output = target_sampler_output[0]
 
         all_tokens, all_probs = self._contract_batch(
             original_bs=len(seq_group_metadata_list),
