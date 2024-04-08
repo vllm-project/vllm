@@ -5,7 +5,7 @@ from transformers import (AutoTokenizer, PreTrainedTokenizer,
 
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.transformers_utils.tokenizers import *
+from vllm.transformers_utils.tokenizers.tnlgv4 import TLGv4Tokenizer
 from vllm.utils import make_async
 
 logger = init_logger(__name__)
@@ -67,12 +67,21 @@ def get_tokenizer(
         kwargs["use_fast"] = False
 
     try:
-        tokenizer = AutoTokenizer.from_pretrained(
-            tokenizer_name,
-            *args,
-            trust_remote_code=trust_remote_code,
-            tokenizer_revision=tokenizer_revision,
-            **kwargs)
+        if 'tnlg' in tokenizer_name or 'tlg' in tokenizer_name or 'TLG' in tokenizer_name:
+            tokenizer = TLGv4Tokenizer('/data/users/yunanzhang/hf/checkpoints/TLG4.7.3/iter_0078678_hf/cl100k_base.tiktoken')
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(
+                tokenizer_name,
+                *args,
+                trust_remote_code=trust_remote_code,
+                tokenizer_revision=tokenizer_revision,
+                **kwargs)        
+        # tokenizer = AutoTokenizer.from_pretrained(
+        #     tokenizer_name,
+        #     *args,
+        #     trust_remote_code=trust_remote_code,
+        #     tokenizer_revision=tokenizer_revision,
+        #     **kwargs)
     except ValueError as e:
         # If the error pertains to the tokenizer class not existing or not
         # currently being imported, suggest using the --trust-remote-code flag.

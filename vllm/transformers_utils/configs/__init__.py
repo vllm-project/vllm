@@ -6,6 +6,8 @@ from vllm.transformers_utils.configs.dbrx import DbrxConfig
 from vllm.transformers_utils.configs.falcon import RWConfig
 from vllm.transformers_utils.configs.jais import JAISConfig
 from vllm.transformers_utils.configs.mpt import MPTConfig
+from vllm.transformers_utils.configs.configuration_tlg import TLGv4Config
+
 
 __all__ = [
     "ChatGLMConfig",
@@ -13,4 +15,5 @@ __all__ = [
     "MPTConfig",
     "RWConfig",
     "JAISConfig",
+    "TLGv4Config",
 ]

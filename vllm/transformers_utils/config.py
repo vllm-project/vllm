@@ -3,6 +3,7 @@ from typing import Optional
 from transformers import AutoConfig, PretrainedConfig
 
 from vllm.transformers_utils.configs import *
+from vllm.transformers_utils.configs.configuration_tlg import TLGv4Config
 
 _CONFIG_REGISTRY = {
     "chatglm": ChatGLMConfig,
@@ -11,6 +12,7 @@ _CONFIG_REGISTRY = {
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
     "jais": JAISConfig,
+    "tnlgv4": TLGv4Config,
 }
 
 
@@ -19,7 +21,7 @@ def get_config(model: str,
                revision: Optional[str] = None,
                code_revision: Optional[str] = None) -> PretrainedConfig:
     try:
-        config = AutoConfig.from_pretrained(
+        config = TLGv4Config(
             model,
             trust_remote_code=trust_remote_code,
             revision=revision,
