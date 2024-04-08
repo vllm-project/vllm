@@ -33,7 +33,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
-from mamba_ssm.ops.selective_scan_interface import mamba_inner_fn, selective_scan_fn
+from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
 from mamba_ssm.ops.triton.selective_state_update import selective_state_update
 from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 
@@ -114,7 +114,7 @@ class JambaMambaMixer(nn.Module):
 
         # 2. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
-        if cache_params is not None and cache_params.seqlen_offset > 0:
+        if cache_params is not None and not cache_params.is_prompt:
             hidden_states = causal_conv1d_update(
                 hidden_states.squeeze(-1),
                 cache_params.conv_state,
@@ -154,7 +154,7 @@ class JambaMambaMixer(nn.Module):
         A = -torch.exp(self.A_log.float())
         # 3.c perform the recurrence y ← SSM(A, B, C)(x)
         time_proj_bias = self.dt_proj.bias.float() if hasattr(self.dt_proj, "bias") else None
-        if cache_params is not None and cache_params.seqlen_offset > 0:
+        if cache_params is not None and not cache_params.is_prompt:
             scan_outputs = selective_state_update(
                 cache_params.ssm_state,
                 hidden_states[..., 0],
@@ -187,49 +187,13 @@ class JambaMambaMixer(nn.Module):
         contextualized_states = self.out_proj(scan_outputs.transpose(1, 2))
         return contextualized_states
 
-    def forward(self, hidden_states: torch.Tensor, input_metadata: InputMetadata):
-        if input_metadata.is_prompt:
-            batch_size = hidden_states.shape[0]
-            conv_cache = torch.zeros(
-                batch_size,
-                self.config.mamba_expand * self.config.hidden_size,
-                self.config.mamba_d_conv,
-                device=hidden_states.device,
-                dtype=hidden_states.dtype
-            )
-            ssm_cache = torch.zeros(
-                batch_size,
-                self.config.mamba_expand * self.config.hidden_size,
-                self.config.mamba_d_state,
-                device=hidden_states.device,
-                dtype=hidden_states.dtype
-            )
-            cache = MambaCacheParams(0, conv_cache, ssm_cache)
-        else:
-            for mamba_cache_request in input_metadata.mamba_cache_batch:
-                # check if batch size of cache fits "n"
-                n = mamba_cache_request.request_info.n 
-                if mamba_cache_request.layer_idx2mamba_cache[self.layer_idx].conv_state.shape[0] < n:
-                    expanded_dims_conv = (n, *mamba_cache_request.layer_idx2mamba_cache[self.layer_idx].conv_state.shape[1:])
-                    conv_state = mamba_cache_request.layer_idx2mamba_cache[self.layer_idx].conv_state.expand(*expanded_dims_conv)
-                    expanded_dims_ssm = (n, *mamba_cache_request.layer_idx2mamba_cache[self.layer_idx].ssm_state.shape[1:])
-                    ssm_state = mamba_cache_request.layer_idx2mamba_cache[self.layer_idx].ssm_state.expand(*expanded_dims_ssm)
-                    mamba_cache_request.layer_idx2mamba_cache[self.layer_idx].conv_state = conv_state
-                    mamba_cache_request.layer_idx2mamba_cache[self.layer_idx].ssm_state = ssm_state
-
-            # mamba requires concatenated cache
-            conv_state = torch.concat([req.layer_idx2mamba_cache[self.layer_idx].conv_state for req in input_metadata.mamba_cache_batch], dim=0)
-            ssm_state = torch.concat([req.layer_idx2mamba_cache[self.layer_idx].ssm_state for req in input_metadata.mamba_cache_batch], dim=0)
-            cache = MambaCacheParams(1, conv_state, ssm_state)
+    def forward(self, hidden_states: torch.Tensor, input_metadata: InputMetadata, conv_state: torch.Tensor, ssm_state: torch.Tensor):
+        cache = MambaCacheParams(
+            input_metadata.is_prompt, 
+            conv_state=conv_state[self.layer_idx],
+            ssm_state=ssm_state[self.layer_idx]
+        )
         hidden_states = self.mamba_forward(hidden_states, cache_params=cache)
-
-        # split cache back to individual requests
-        sample_id = 0
-        for req_mamba_metadata in input_metadata.mamba_cache_batch:
-            n = 1 if input_metadata.is_prompt else req_mamba_metadata.request_info.n
-            req_mamba_metadata.layer_idx2mamba_cache[self.layer_idx].conv_state=cache.conv_state[sample_id:sample_id + n]
-            req_mamba_metadata.layer_idx2mamba_cache[self.layer_idx].ssm_state=cache.ssm_state[sample_id:sample_id + n]
-            sample_id += n
 
         return hidden_states
 
@@ -352,6 +316,8 @@ class JambaMambaDecoderLayer(nn.Module):
                 hidden_states: torch.Tensor,
                 input_metadata: InputMetadata,
                 residual: Optional[torch.Tensor],
+                conv_state: torch.Tensor,
+                ssm_state: torch.Tensor,
                 **kwargs):
 
         if residual is None:
@@ -360,7 +326,12 @@ class JambaMambaDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        hidden_states = self.mamba(hidden_states, input_metadata)
+        hidden_states = self.mamba(
+            hidden_states,
+            input_metadata,
+            conv_state,
+            ssm_state
+        )
         # Fully Connected
         hidden_states, residual = self.pre_moe_layernorm(
             hidden_states, residual)
@@ -433,7 +404,8 @@ class JambaAttentionDecoderLayer(nn.Module):
             positions: torch.Tensor,
             hidden_states: torch.Tensor,
             kv_cache: KVCache,
-            input_metadata: InputMetadata) -> torch.Tensor:
+            input_metadata: InputMetadata,
+            **kwargs) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         #   TODO - add embedding flag
@@ -450,7 +422,8 @@ class JambaAttentionDecoderLayer(nn.Module):
             hidden_states: torch.Tensor,
             kv_cache: KVCache,
             input_metadata: InputMetadata,
-            residual: Optional[torch.Tensor]):
+            residual: Optional[torch.Tensor],
+            **kwargs):
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
@@ -524,6 +497,8 @@ class JambaModel(nn.Module):
             positions: torch.Tensor,
             kv_caches: List[KVCache],
             input_metadata: InputMetadata,
+            conv_state: torch.Tensor,
+            ssm_state: torch.Tensor
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
@@ -534,7 +509,10 @@ class JambaModel(nn.Module):
                                             hidden_states=hidden_states,
                                             kv_cache=kv_caches[i],
                                             input_metadata=input_metadata,
-                                            residual=residual)
+                                            residual=residual,
+                                            conv_state=conv_state,
+                                            ssm_state=ssm_state
+                                            )
         hidden_states, _ = self.final_layernorm(hidden_states, residual)
         return hidden_states
 
@@ -593,9 +571,17 @@ class JambaForCausalLM(nn.Module):
             positions: torch.Tensor,
             kv_caches: List[KVCache],
             input_metadata: InputMetadata,
-    ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   input_metadata)
+            conv_state: torch.Tensor,
+            ssm_state: torch.Tensor
+        ):
+        hidden_states = self.model(
+            input_ids,
+            positions,
+            kv_caches,
+            input_metadata,
+            conv_state,
+            ssm_state
+        )
         return hidden_states
 
     def sample(

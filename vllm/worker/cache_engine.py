@@ -93,7 +93,7 @@ class CacheEngine:
 
         if is_mamba:
             attention_period = model_config.hf_config.attn_layer_period
-            num_layers = num_layers // attention_period
+            num_layers = max(num_layers // attention_period, 1)
 
         key_cache_block = cache_config.block_size * num_heads * head_size
         value_cache_block = key_cache_block

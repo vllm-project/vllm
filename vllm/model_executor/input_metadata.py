@@ -2,7 +2,7 @@ from typing import Dict, List, Optional
 
 import torch
 
-from vllm.model_executor.mamba_metadata import MambaCache, RequestInfo
+from vllm.model_executor.mamba_metadata import RequestInfo
 
 
 class InputMetadata:
@@ -45,7 +45,6 @@ class InputMetadata:
         # Set during the execution of the first attention op.
         # FIXME(woosuk): This is a hack.
         self.attn_bias = None
-        self.mamba_cache_batch: List[MambaCache] = []
         self.requests_info = requests_info
 
     def __repr__(self) -> str:
