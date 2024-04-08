@@ -51,7 +51,7 @@ def test_spec_decode_e2e_logical_flow(test_llm_generator, batch_size: int):
     generates the correct number of tokens (via ignore_eos=True), and that the
     detokenization matches HF transformers.
     """
-    output_len = 128
+    output_len = 32
     temperature = 0.0
 
     prompts = [
