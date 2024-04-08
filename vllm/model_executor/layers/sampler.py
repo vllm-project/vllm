@@ -27,6 +27,12 @@ class Sampler(nn.Module):
     6. Sample the next tokens.
     Here, each sequence group within the batch can have different sampling
     parameters (e.g., sampling method, temperature, top-p, top-k, etc.).
+
+    The structure of the logits tensor is coupled with the seq_groups in
+    sampling_metadata. Typically, each sequence in each seq_group has one row in
+    logits for the next token to be sampled; however, for a seq_group with a
+    prompt request with the prompt_logprobs sampling parameter, there are rows
+    in logits for each token in the input prompt.
     """
 
     def forward(
