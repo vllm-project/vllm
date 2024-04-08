@@ -168,8 +168,8 @@ class cache_ops:
                     block_mapping: Dict[int, int]):
         vllm_cache_ops.swap_blocks(src, dst, block_mapping)
 
-    def convert_fp8():
-        pass
+    def convert_fp8(output: torch.tensor, input: torch.tensor):
+        vllm_cache_ops.convert_fp8(output, input)
 
 
 #TODO: cuda_utils, custom_ar
