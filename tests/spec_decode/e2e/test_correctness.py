@@ -62,8 +62,7 @@ def test_spec_decode_e2e_logical_flow(test_llm_generator, batch_size: int):
     # Expect a generation for each prompt in the batch.
     assert len(batch_token_ids) == len(prompts)
 
-    # TODO(cadedaniel) check for equality once block truncation is implemented.
-    assert all(len(token_ids) >= output_len for token_ids in batch_token_ids)
+    assert all(len(token_ids) == output_len for token_ids in batch_token_ids)
 
 
 @pytest.mark.parametrize(
