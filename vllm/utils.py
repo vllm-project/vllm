@@ -11,10 +11,14 @@ from functools import lru_cache, partial
 from platform import uname
 from typing import (Any, Awaitable, Callable, Generic, Hashable, List,
                     Optional, Tuple, TypeVar, Union)
+from urllib.parse import urlparse
+from urllib.request import urlopen
 
 import psutil
+import requests
 import torch
 from packaging.version import Version, parse
+from PIL import Image
 
 from vllm.logger import init_logger
 
@@ -211,6 +215,29 @@ def get_ip() -> str:
         "The value can be set by the environment variable HOST_IP.",
         stacklevel=2)
     return "0.0.0.0"
+
+
+def get_image(url: str) -> Image.Image:
+    """Retrieves an image from a data URL or an online resource.
+
+    The returned image should be used like a context manager to ensure
+    proper disposal of the underlying buffer.
+    """
+    # Avoid circular import
+    from vllm import __version__ as VLLM_VERSION
+
+    url_components = urlparse(url)
+    if url_components.scheme == 'data':
+        return Image.open(urlopen(url))
+
+    headers = {"User-Agent": f"vLLM/{VLLM_VERSION}"}
+    response = requests.get(url, headers=headers, stream=True)
+    response.raise_for_status()
+
+    return Image.open(response.raw)
+
+
+get_image_async = make_async(get_image)
 
 
 def get_distributed_init_method(ip: str, port: int) -> str:

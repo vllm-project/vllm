@@ -1,0 +1,11 @@
+{%- for message in messages -%}
+    {{ message['role'].upper() + ': ' + message['content'] }}
+    {%- if (loop.last and add_generation_prompt) or not loop.last -%}
+        {{- '\n' -}}
+    {%- endif -%}
+{%- endfor -%}
+
+
+{%- if add_generation_prompt and messages[-1]['role'] != 'assistant' -%}
+    {{- 'ASSISTANT:' -}}
+{% endif %}

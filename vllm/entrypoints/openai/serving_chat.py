@@ -1,21 +1,26 @@
 import codecs
 import time
-from typing import AsyncGenerator, AsyncIterator, List, Optional, Union
+from typing import AsyncGenerator, AsyncIterator, List, Optional, Tuple, Union
 
+import numpy as np
+import torch
 from fastapi import Request
 
+from vllm.config import VisionLanguageConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest, ChatCompletionResponse,
-    ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
-    ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse,
+    ChatCompletionImageContentPart, ChatCompletionRequest,
+    ChatCompletionResponse, ChatCompletionResponseChoice,
+    ChatCompletionResponseStreamChoice, ChatCompletionStreamResponse,
+    ChatCompletionTextContentPart, ChatMessage, DeltaMessage, ErrorResponse,
     UsageInfo)
 from vllm.entrypoints.openai.serving_engine import LoRA, OpenAIServing
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
 from vllm.outputs import RequestOutput
-from vllm.utils import random_uuid
+from vllm.sequence import MultiModalData
+from vllm.utils import get_image_async, random_uuid
 
 logger = init_logger(__name__)
 
@@ -33,6 +38,79 @@ class OpenAIServingChat(OpenAIServing):
                          lora_modules=lora_modules)
         self.response_role = response_role
         self._load_chat_template(chat_template)
+
+    async def parse_chat_message_image_input(
+        self,
+        content: List[Union[ChatCompletionTextContentPart,
+                            ChatCompletionImageContentPart]],
+    ) -> Tuple[List[str], List[MultiModalData]]:
+        """Parse image input according to OpenAI's API."""
+        vlm_config = getattr(self.engine.engine, "vision_language_config",
+                             None)
+        assert isinstance(vlm_config, VisionLanguageConfig), (
+            "Provide `image_input_type` and other vision "
+            "related configurations through LLM entrypoint "
+            "or engine arguments.")
+
+        if len(vlm_config.image_input_shape) == 3:
+            raise ValueError(
+                "The model is configured to accept image features rather than "
+                "pixel values, and thus does not support image inputs")
+
+        batch_size, num_channels, height, width = vlm_config.image_input_shape
+        feature_size = vlm_config.image_feature_size
+
+        if num_channels == 1:
+            image_format = "L"
+        elif num_channels == 3:
+            image_format = "RGB"
+        elif num_channels == 4:
+            image_format = "RGBA"
+        else:
+            msg = f"Unsupported number of channels ({num_channels})"
+            raise NotImplementedError(msg)
+
+        content_texts: List[str] = []
+        content_images: List[MultiModalData] = []
+
+        for i, part in enumerate(content):
+            if isinstance(part, ChatCompletionTextContentPart):
+                content_texts.append(part.text)
+
+            if isinstance(part, ChatCompletionImageContentPart):
+                with await get_image_async(part.image_url.url) as image:
+                    image = image.convert(image_format).resize((height, width))
+                    image_arr = np.array(image, copy=True)
+
+                image_tensor = torch.as_tensor(image_arr) \
+                    .view(batch_size, height, width, num_channels) \
+                    .permute((0, 3, 1, 2)) \
+                    .to(torch.float16)
+
+                content_texts.append("<image>" * feature_size)
+                content_images.append(
+                    MultiModalData(
+                        type=MultiModalData.Type.IMAGE,
+                        data=image_tensor,
+                    ))
+
+                if part.image_url.detail != "auto":
+                    logger.info("content[%s].image_url.detail is ignored", i)
+
+        return content_texts, content_images
+
+    async def parse_chat_message_content(
+        self,
+        content: Optional[Union[str,
+                                List[Union[ChatCompletionTextContentPart,
+                                           ChatCompletionImageContentPart]]]],
+    ) -> Tuple[List[str], List[MultiModalData]]:
+        if content is None:
+            return [], []
+        if isinstance(content, str):
+            return [content], []
+
+        return await self.parse_chat_message_image_input(content)
 
     async def create_chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
@@ -52,10 +130,33 @@ class OpenAIServingChat(OpenAIServing):
             return error_check_ret
 
         try:
+            conversation: List[ChatMessage] = []
+            multi_modal_datas: List[MultiModalData] = []
+
+            for m in request.messages:
+                text, images = await self.parse_chat_message_content(m.content)
+
+                conversation.append(
+                    ChatMessage(
+                        role=m.role,
+                        content="\n".join(text),
+                    ))
+                multi_modal_datas.extend(images)
+
+            if len(multi_modal_datas) == 0:
+                multi_modal_data = None
+            elif len(multi_modal_datas) == 1:
+                multi_modal_data, = multi_modal_datas
+            else:
+                raise NotImplementedError("Multiple image input not supported")
+
             prompt = self.tokenizer.apply_chat_template(
-                conversation=request.messages,
+                conversation=[
+                    message.model_dump() for message in conversation
+                ],
                 tokenize=False,
-                add_generation_prompt=request.add_generation_prompt)
+                add_generation_prompt=request.add_generation_prompt,
+            )
         except Exception as e:
             logger.error(
                 f"Error in applying chat template from request: {str(e)}")
@@ -78,17 +179,32 @@ class OpenAIServingChat(OpenAIServing):
         except ValueError as e:
             return self.create_error_response(str(e))
 
-        result_generator = self.engine.generate(prompt, sampling_params,
-                                                request_id, token_ids,
-                                                lora_request)
+        result_generator = self.engine.generate(
+            prompt,
+            sampling_params,
+            request_id,
+            token_ids,
+            lora_request=lora_request,
+            multi_modal_data=multi_modal_data,
+        )
+
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(
-                request, result_generator, request_id)
+                request,
+                conversation,
+                result_generator,
+                request_id,
+            )
         else:
             try:
                 return await self.chat_completion_full_generator(
-                    request, raw_request, result_generator, request_id)
+                    request,
+                    raw_request,
+                    conversation,
+                    result_generator,
+                    request_id,
+                )
             except ValueError as e:
                 # TODO: Use a vllm-specific Validation Error
                 return self.create_error_response(str(e))
@@ -97,11 +213,14 @@ class OpenAIServingChat(OpenAIServing):
         if request.add_generation_prompt:
             return self.response_role
         else:
-            return request.messages[-1]["role"]
+            return request.messages[-1].role
 
     async def chat_completion_stream_generator(
-            self, request: ChatCompletionRequest,
-            result_generator: AsyncIterator[RequestOutput], request_id: str
+        self,
+        request: ChatCompletionRequest,
+        parsed_conversation: List[ChatMessage],
+        result_generator: AsyncIterator[RequestOutput],
+        request_id: str,
     ) -> Union[ErrorResponse, AsyncGenerator[str, None]]:
 
         model_name = request.model
@@ -142,12 +261,10 @@ class OpenAIServingChat(OpenAIServing):
                     # last message
                     if request.echo:
                         last_msg_content = ""
-                        if request.messages and isinstance(
-                                request.messages,
-                                list) and request.messages[-1].get(
-                                    "content") and request.messages[-1].get(
-                                        "role") == role:
-                            last_msg_content = request.messages[-1]["content"]
+                        if (parsed_conversation
+                                and parsed_conversation[-1].content
+                                and parsed_conversation[-1].role == role):
+                            last_msg_content = parsed_conversation[-1].content
 
                         if last_msg_content:
                             for i in range(request.n):
@@ -242,9 +359,13 @@ class OpenAIServingChat(OpenAIServing):
         yield "data: [DONE]\n\n"
 
     async def chat_completion_full_generator(
-            self, request: ChatCompletionRequest, raw_request: Request,
-            result_generator: AsyncIterator[RequestOutput],
-            request_id: str) -> Union[ErrorResponse, ChatCompletionResponse]:
+        self,
+        request: ChatCompletionRequest,
+        raw_request: Request,
+        parsed_conversation: List[ChatMessage],
+        result_generator: AsyncIterator[RequestOutput],
+        request_id: str,
+    ) -> Union[ErrorResponse, ChatCompletionResponse]:
 
         model_name = request.model
         created_time = int(time.time())
@@ -258,7 +379,7 @@ class OpenAIServingChat(OpenAIServing):
             final_res = res
         assert final_res is not None
 
-        choices = []
+        choices: List[ChatCompletionResponseChoice] = []
 
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
@@ -285,11 +406,9 @@ class OpenAIServingChat(OpenAIServing):
 
         if request.echo:
             last_msg_content = ""
-            if request.messages and isinstance(
-                    request.messages, list) and request.messages[-1].get(
-                        "content") and request.messages[-1].get(
-                            "role") == role:
-                last_msg_content = request.messages[-1]["content"]
+            if (parsed_conversation and parsed_conversation[-1].content
+                    and parsed_conversation[-1].role == role):
+                last_msg_content = parsed_conversation[-1].content
 
             for choice in choices:
                 full_message = last_msg_content + choice.message.content
