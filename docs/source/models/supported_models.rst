@@ -111,6 +111,10 @@ Alongside each architecture, we include some popular models that use it.
     - Phi
     - :code:`microsoft/phi-1_5`, :code:`microsoft/phi-2`, etc.
     - 
+  * - :code:`PersimmonForCausalLM`
+    - Persimmon
+    - :code:`adept/persimmon-8b-base`, :code:`adept/persimmon-8b-chat`, etc.
+    - 
   * - :code:`QWenLMHeadModel`
     - Qwen
     - :code:`Qwen/Qwen-7B`, :code:`Qwen/Qwen-7B-Chat`, etc.
