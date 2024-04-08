@@ -17,30 +17,34 @@ on:
 
 jobs:
 
-    NIGHTLY-MULTI:
-        uses: ./.github/workflows/build-test.yml
+    BUILD:
+        uses: ./.github/workflows/build.yml
         with:
-            build_label: aws-avx2-192G-4-a10g-96G
-            timeout: 480
+            build_label: aws-avx512-192G-4-T4-64G
+            timeout: 60
             gitref: ${{ github.ref }}
             Gi_per_thread: 4
             nvcc_threads: 8
             python: 3.10.12
-            test_skip_list:
         secrets: inherit
 
-    NIGHTLY-SOLO:
-        uses: ./.github/workflows/build-test.yml
+    TEST:
+        needs: [BUILD]
+        if: success()
+        strategy:
+            matrix:
+                test_label: [aws-avx2-32G-a10g-24G, aws-avx2-32G-a10g-24G]
+        uses: ./.github/workflows/test.yml
         with:
-            build_label: aws-avx2-32G-a10g-24G
-            timeout: 480
+            test_label: ${{ matrix.test_label }}
+            timeout: 720
             gitref: ${{ github.ref }}
-            Gi_per_thread: 12
-            nvcc_threads: 1
-            python: 3.11.4
-            test_skip_list:
+            python: 3.10.12
+            whl: ${{ needs.BUILD.outputs.whl }}
+            test_skip_list: nothing
         secrets: inherit
 
+    # TODO: update these to use the generated whl
     # single gpu
     AWS-AVX2-32G-A10G-24G-Benchmark:
         uses: ./.github/workflows/nm-benchmark.yml

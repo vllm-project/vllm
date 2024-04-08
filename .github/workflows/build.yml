@@ -98,7 +98,7 @@ jobs:
 
             - name: create testmo run
               id: create_testmo_run
-              uses: ./.github/actions/nm-testmo-run-create/
+              uses: neuralmagic/nm-actions/actions/testmo-run-create@main
               if: success() || failure()
               with:
                 testmo_url: https://neuralmagic.testmo.net
@@ -161,7 +161,7 @@ jobs:
                 if [ -z "${WHL_STATUS}" ] || [ "${WHL_STATUS}" -ne "0" ]; then exit 1; fi
 
             - name: complete testmo run
-              uses: ./.github/actions/nm-testmo-run-complete/
+              uses: neuralmagic/nm-actions/actions/testmo-run-complete@main
               if: success() || failure()
               with:
                 testmo_url: https://neuralmagic.testmo.net
