@@ -22,10 +22,18 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`BaiChuanForCausalLM`
     - Baichuan
     - :code:`baichuan-inc/Baichuan2-13B-Chat`, :code:`baichuan-inc/Baichuan-7B`, etc.
-    - 
+    - ✅︎
   * - :code:`ChatGLMModel`
     - ChatGLM
     - :code:`THUDM/chatglm2-6b`, :code:`THUDM/chatglm3-6b`, etc.
+    - ✅︎
+  * - :code:`CohereForCausalLM`
+    - Command-R
+    - :code:`CohereForAI/c4ai-command-r-v01`, etc.
+    - 
+  * - :code:`DbrxForCausalLM`
+    - DBRX
+    - :code:`databricks/dbrx-base`, :code:`databricks/dbrx-instruct`, etc.
     - 
   * - :code:`DeciLMForCausalLM`
     - DeciLM
@@ -111,6 +119,10 @@ Alongside each architecture, we include some popular models that use it.
     - Qwen2
     - :code:`Qwen/Qwen2-beta-7B`, :code:`Qwen/Qwen2-beta-7B-Chat`, etc.
     - ✅︎
+  * - :code:`Qwen2MoeForCausalLM`
+    - Qwen2MoE
+    - :code:`Qwen/Qwen1.5-MoE-A2.7B`, :code:`Qwen/Qwen1.5-MoE-A2.7B-Chat`, etc.
+    - 
   * - :code:`StableLmForCausalLM`
     - StableLM
     - :code:`stabilityai/stablelm-3b-4e1t/` , :code:`stabilityai/stablelm-base-alpha-7b-v2`, etc.

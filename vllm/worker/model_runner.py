@@ -15,11 +15,11 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.parallel_utils import cupy_utils, custom_all_reduce
+from vllm.model_executor.parallel_utils import custom_all_reduce, pynccl_utils
 from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
 from vllm.model_executor.parallel_utils.parallel_state import (
-    with_cupy_nccl_for_all_reduce)
+    with_pynccl_for_all_reduce)
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (MultiModalData, SamplerOutput, SequenceData,
                            SequenceGroupMetadata)
@@ -150,39 +150,58 @@ class ModelRunner:
         subquery_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
         multi_modal_input_list: List[torch.Tensor] = []
+
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
             assert len(seq_ids) == 1
             seq_id = seq_ids[0]
 
+            computed_block_nums = seq_group_metadata.computed_block_nums
+            if (self.scheduler_config is not None
+                    and self.scheduler_config.chunked_prefill_enabled
+                    and computed_block_nums is not None):
+                raise RuntimeError(
+                    "chunked prefill cannot be used with prefix caching "
+                    "now.")
+
+            token_chunk_size = seq_group_metadata.token_chunk_size
             seq_data = seq_group_metadata.seq_data[seq_id]
-            prompt_tokens = seq_data.get_token_ids()
+            computed_len = seq_data.get_num_computed_tokens()
+            # We should use get_len here because in case of preemption
+            # it contains output tokens.
+            prefill_end = min(seq_data.get_len(),
+                              computed_len + token_chunk_size)
+            # TODO(sang): Rename it after chunked prefill is introduced.
+            prompt_tokens = seq_data.get_token_ids()[computed_len:prefill_end]
             prompt_len = len(prompt_tokens)
+            # Right now, the prefill_end is always same as the length of
+            # sequence. However, once chunked prefill is introduced, this
+            # assumption can be changed.
+            assert prefill_end == seq_data.get_len()
             prompt_lens.append(prompt_len)
-            computed_len = 0
 
             # NOTE: This only works for oooooooxxx style attention.
-            computed_block_nums = seq_group_metadata.computed_block_nums
             if computed_block_nums is not None and len(
                     computed_block_nums) > 0 and self.sliding_window is None:
                 # Prefix is not supported with sliding_window
                 computed_len = len(computed_block_nums) * self.block_size
                 prompt_tokens = prompt_tokens[computed_len:]
                 prefix_block_tables.append(computed_block_nums)
-                context_len = computed_len
             else:
                 prefix_block_tables.append([])
-                context_len = 0
+                # Right now, prefill start is always 0. However, this
+                # assumption can be changed once chunked prefill is introduced.
+                assert computed_len == 0
+
             # actual prompt lens
-            context_lens.append(context_len)
+            context_lens.append(computed_len)
             subquery_lens.append(prompt_len - computed_len)
 
             input_tokens.extend(prompt_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
-            input_positions.extend(
-                list(range(computed_len, computed_len + len(prompt_tokens))))
+            input_positions.extend(list(range(computed_len, prefill_end)))
 
             lora_id = seq_group_metadata.lora_int_id
 
@@ -218,7 +237,8 @@ class ModelRunner:
                     "Prefix caching is currently not supported with "
                     "sliding window attention")
                 start_idx = max(0, prompt_len - self.sliding_window)
-            for i in range(computed_len, prompt_len):
+
+            for i in range(computed_len, prefill_end):
                 if i < start_idx:
                     slot_mapping.append(_PAD_SLOT_ID)
                     continue
@@ -331,6 +351,7 @@ class ModelRunner:
 
         for seq_group_metadata in seq_group_metadata_list:
             assert not seq_group_metadata.is_prompt
+            assert seq_group_metadata.token_chunk_size == 1
 
             seq_ids = list(seq_group_metadata.seq_data.keys())
             lora_id = seq_group_metadata.lora_int_id
@@ -764,7 +785,7 @@ class ModelRunner:
         """
         # NOTE(woosuk): This is a hack to ensure that the NCCL backend is never
         # deleted before the CUDA graphs.
-        self.cupy_nccl_backend = cupy_utils.get_nccl_backend()
+        self.pynccl_backend = pynccl_utils.get_nccl_backend()
 
         assert not self.model_config.enforce_eager
         logger.info("Capturing the model for CUDA graphs. This may lead to "
@@ -794,11 +815,11 @@ class ModelRunner:
         ]
 
         # NOTE(woosuk): There are 3 backends for all-reduce: custom all-reduce
-        # kernel, CuPy NCCL, and PyTorch NCCL. When using CUDA graph, we use
-        # either custom all-reduce kernel or CuPy NCCL. When not using CUDA
+        # kernel, pynccl, and PyTorch NCCL. When using CUDA graph, we use
+        # either custom all-reduce kernel or pynccl. When not using CUDA
         # graph, we use either custom all-reduce kernel or PyTorch NCCL.
         # We always prioritize using custom all-reduce kernel but fall back
-        # to PyTorch or CuPy NCCL if it is disabled or not supported.
+        # to PyTorch or pynccl if it is disabled or not supported.
         with custom_all_reduce.capture():
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
@@ -846,12 +867,14 @@ class ModelRunner:
         logger.info(f"Graph capturing finished in {elapsed_time:.0f} secs.")
 
     def __del__(self) -> None:
-        # Delete the CUDA graphs before deleting the CuPy NCCL communicator.
+        # Delete the CUDA graphs before deleting the pynccl communicator.
         # NOTE(woosuk): This is necessary because otherwise deadlocks can
         # happen.
         # FIXME(woosuk): This is a bit hacky. Find a more robust solution.
+        # TODO(youkaichao): when we get enough user feedback that pynccl is
+        # more stable than cupy, we can remove this, e.g. in v0.4.1.
         self.graph_runners.clear()
-        self.cupy_nccl_backend = None
+        self.pynccl_backend = None
 
     @property
     def vocab_size(self) -> int:
@@ -879,7 +902,7 @@ class CUDAGraphRunner:
         # Run the model once without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
-        with _maybe_cupy_nccl():
+        with _maybe_pynccl():
             self.model(
                 input_ids,
                 positions,
@@ -894,7 +917,7 @@ class CUDAGraphRunner:
         # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
         self.graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self.graph, pool=memory_pool):  # noqa: SIM117
-            with _maybe_cupy_nccl():
+            with _maybe_pynccl():
                 hidden_states = self.model(
                     input_ids,
                     positions,
@@ -947,9 +970,10 @@ class CUDAGraphRunner:
 
 
 @contextlib.contextmanager
-def _maybe_cupy_nccl():
-    if cupy_utils.is_initialized() and not custom_all_reduce.is_initialized():
-        with with_cupy_nccl_for_all_reduce():
+def _maybe_pynccl():
+    if pynccl_utils.is_initialized(
+    ) and not custom_all_reduce.is_initialized():
+        with with_pynccl_for_all_reduce():
             yield
     else:
         yield

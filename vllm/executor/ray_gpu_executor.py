@@ -188,11 +188,7 @@ class RayGPUExecutor(ExecutorBase):
             is_driver_worker=True,
         )
 
-        # FIXME(woosuk): We are not properly initializing cupy NCCL when
-        # we have multiple nodes.
-        self._run_workers("init_device",
-                          cupy_port=get_open_port()
-                          if not model_config.enforce_eager else None)
+        self._run_workers("init_device")
         self._run_workers(
             "load_model",
             max_concurrent_workers=self.parallel_config.
@@ -234,6 +230,13 @@ class RayGPUExecutor(ExecutorBase):
         # operators can be applied to all workers.
         num_gpu_blocks = min(b[0] for b in num_blocks)
         num_cpu_blocks = min(b[1] for b in num_blocks)
+
+        if self.cache_config.forced_num_gpu_blocks is not None:
+            forced_num_gpu_blocks = self.cache_config.forced_num_gpu_blocks
+            logger.info(f"Replacing profiled {num_gpu_blocks=} with "
+                        f"{forced_num_gpu_blocks=}")
+            num_gpu_blocks = forced_num_gpu_blocks
+
         logger.info(f"# GPU blocks: {num_gpu_blocks}, "
                     f"# CPU blocks: {num_cpu_blocks}")
 

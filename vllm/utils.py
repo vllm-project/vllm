@@ -205,7 +205,9 @@ def get_ip() -> str:
 
 
 def get_distributed_init_method(ip: str, port: int) -> str:
-    return f"tcp://{ip}:{port}"
+    # Brackets are not permitted in ipv4 addresses,
+    # see https://github.com/python/cpython/issues/103848
+    return f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}"
 
 
 def get_open_port() -> int:
@@ -223,6 +225,16 @@ def get_open_port() -> int:
 
 def set_cuda_visible_devices(device_ids: List[int]) -> None:
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, device_ids))
+
+
+def chunk_list(lst, chunk_size):
+    """Yield successive chunk_size chunks from lst."""
+    return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
+
+
+def cdiv(a: int, b: int) -> int:
+    """Ceiling division."""
+    return -(a // -b)
 
 
 @lru_cache(maxsize=None)

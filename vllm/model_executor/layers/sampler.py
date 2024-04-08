@@ -534,7 +534,8 @@ def _get_logprobs(
     # Prepare query indices
     batched_logprobs_query_seq_indices: List[int] = []
     batched_logprobs_query_token_indices: List[int] = []
-    largest_num_logprobs = 0
+    # at least get one logprob for each token
+    largest_num_logprobs = 1
     sample_idx = 0
     for i, (seq_group, sample_result) in enumerate(
             zip(sampling_metadata.seq_groups, sample_results)):
@@ -643,7 +644,7 @@ def _get_logprobs(
                  batched_ranks_query_result[query_result_idx].item())
             }
             query_result_idx += 1
-            if num_logprobs > 0:
+            if num_logprobs >= 0:
                 sample_logprobs_dict.update(
                     zip(
                         top_token_ids[sample_idx +
