@@ -14,7 +14,7 @@ from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.util import (get_all_seq_ids, nvtx_range,
                                    split_batch_by_proposal_len)
 from vllm.worker.worker import Worker
-from vllm.worker.worker_base import LoraNotSupportedWorkerBase
+from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -60,7 +60,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     def __init__(
         self,
         proposer_worker: MultiStepWorker,
-        scorer_worker: Worker,
+        scorer_worker: WorkerBase,
         rejection_sampler: RejectionSampler,
         metrics_collector: Optional[AsyncMetricsCollector] = None,
     ):
