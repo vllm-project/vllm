@@ -176,7 +176,7 @@ class ModelConfig:
 
 
     def _verify_quantization(self) -> None:
-        supported_quantization = ["awq", "gptq", "squeezellm", "gptq_marlin", "marlin"]
+        supported_quantization = ["awq", "gptq", "squeezellm", "marlin"]
         rocm_not_supported_quantization = ["awq", "marlin"]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
@@ -199,11 +199,11 @@ class ModelConfig:
                     quant_method = "marlin"
                     self.quantization = quant_method
                 elif GPTQMarlinConfig.is_marlin_compatible(quant_cfg):
-                    logger.info("The model is compatible with Marlin format. "
+                    logger.info("The GPTQ model is convertable to Marlin format. "
                                 "Using Marlin kernel.")
-                    quant_method = "marlin_gptq"
+                    quant_method = "gptq_marlin"
             
-            # If GPTQ was specified explicitly, then use GPTQ
+            # If GPTQ was specified explicitly, then use GPTQ kernels
             if self.quantization == "gptq" and quant_method == "gptq_marlin":
                 logger.warning(
                     "You specifed --quantization gptq, but your model is compatible with "
