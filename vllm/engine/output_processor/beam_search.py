@@ -1,15 +1,15 @@
-from typing import List, Tuple, Union, Iterable
+from typing import Iterable, List, Tuple, Union
 
 from vllm.config import SchedulerConfig
+from vllm.core.scheduler import Scheduler
 from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
+from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (Sequence, SequenceGroup, SequenceGroupOutput,
                            SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
-from vllm.core.scheduler import Scheduler
-from vllm.engine.output_processor.stop_checker import StopChecker
 
 logger = init_logger(__name__)
 

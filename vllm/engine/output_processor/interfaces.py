@@ -1,11 +1,13 @@
 from abc import ABC, abstractmethod
-from typing import List, Callable, Iterable
+from typing import Callable, Iterable, List
+
+from transformers import PreTrainedTokenizer
 
 from vllm.config import SchedulerConfig
-from vllm.sequence import SequenceGroup, SequenceGroupOutput, Sequence
-from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.core.scheduler import Scheduler
 from vllm.engine.output_processor.stop_checker import StopChecker
+from vllm.sequence import Sequence, SequenceGroup, SequenceGroupOutput
+from vllm.transformers_utils.detokenizer import Detokenizer
 
 
 class SequenceGroupOutputProcessor(ABC):

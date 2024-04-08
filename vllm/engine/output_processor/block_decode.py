@@ -1,5 +1,8 @@
-from typing import List, Iterable, Callable
+from typing import Callable, Iterable, List
 
+from transformers import PreTrainedTokenizer
+
+from vllm.core.scheduler import Scheduler
 from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
 from vllm.engine.output_processor.stop_checker import StopChecker
@@ -7,9 +10,7 @@ from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (Logprob, Sequence, SequenceGroup,
                            SequenceGroupOutput, SequenceOutput, SequenceStatus)
-from vllm.core.scheduler import Scheduler
 from vllm.transformers_utils.detokenizer import Detokenizer
-from transformers import PreTrainedTokenizer
 
 logger = init_logger(__name__)
 
