@@ -45,6 +45,7 @@ def fused_moe_kernel(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
+    SPLIT_K_SIZE: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr,
     top_k: tl.constexpr,
     compute_type: tl.constexpr,
@@ -82,6 +83,7 @@ def fused_moe_kernel(
     num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
     pid_m = (pid % num_pid_m)
     pid_n = pid // num_pid_m
+    pid_k = tl.program_id(axis=1)
 
     # ----------------------------------------------------------
     # Create pointers for the first blocks of A and B.
@@ -97,7 +99,7 @@ def fused_moe_kernel(
     token_mask = offs_token < num_valid_tokens
 
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-    offs_k = tl.arange(0, BLOCK_SIZE_K)
+    offs_k = pid_k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
     a_ptrs = a_ptr + (offs_token[:, None] // top_k * stride_am +
                       offs_k[None, :] * stride_ak)
 
@@ -112,21 +114,21 @@ def fused_moe_kernel(
     # `accumulator` will be converted back to fp16 after the loop.
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K_SIZE)):
         # Load the next block of A and B, generate a mask by checking the
         # K dimension.
         a = tl.load(a_ptrs,
                     mask=token_mask[:, None] &
-                    (offs_k[None, :] < K - k * BLOCK_SIZE_K),
+                    (offs_k[None, :] < K - k * BLOCK_SIZE_K * SPLIT_K_SIZE),
                     other=0.0)
         b = tl.load(b_ptrs,
-                    mask=offs_k[:, None] < K - k * BLOCK_SIZE_K,
+                    mask=offs_k[:, None] < K - k * BLOCK_SIZE_K * SPLIT_K_SIZE,
                     other=0.0)
         # We accumulate along the K dimension.
         accumulator += tl.dot(a, b)
         # Advance the ptrs to the next K block.
-        a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * stride_bk
+        a_ptrs += BLOCK_SIZE_K * SPLIT_K_SIZE * stride_ak
+        b_ptrs += BLOCK_SIZE_K * SPLIT_K_SIZE * stride_bk
 
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token,
@@ -141,7 +143,7 @@ def fused_moe_kernel(
     c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[
         None, :]
     c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
-    tl.store(c_ptrs, accumulator, mask=c_mask)
+    tl.atomic_add(c_ptrs, accumulator, mask=c_mask)
 
 
 def moe_align_block_size(
@@ -210,8 +212,10 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
 
-    grid = lambda META: (triton.cdiv(sorted_token_ids.shape[0], META[
-        'BLOCK_SIZE_M']) * triton.cdiv(B.shape[1], META['BLOCK_SIZE_N']), )
+    grid = lambda META: (
+        triton.cdiv(sorted_token_ids.shape[0], META['BLOCK_SIZE_M']) * triton.cdiv(B.shape[1], META['BLOCK_SIZE_N']),
+        META['SPLIT_K_SIZE']
+    )
 
     fused_moe_kernel[grid](
         A,
@@ -235,6 +239,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         top_k=top_k,
         compute_type=tl.bfloat16 if A.dtype == torch.bfloat16 else tl.float16,
+        SPLIT_K_SIZE=2,
         **config,
     )
 
