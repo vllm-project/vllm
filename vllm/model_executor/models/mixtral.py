@@ -30,6 +30,7 @@ from transformers import MixtralConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import LoRAConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
@@ -37,7 +38,6 @@ from vllm.model_executor.layers.linear import (LinearMethodBase,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.parallel_utils.communication_op import (
