@@ -364,7 +364,7 @@ class DraftModelTop1Proposer(SpeculativeProposer):
                                             fill_value=-1,
                                             dtype=torch.long,
                                             device=self._device)
-        
+
         entire_proposal_tokens[nonzero_proposal_len_indices] = proposal_tokens
         entire_proposal_probs = torch.zeros(batch_size,
                                             *proposal_probs.shape[1:],

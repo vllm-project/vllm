@@ -83,8 +83,10 @@ def sampler_output_to_torch(
 
 
 def maybe_mock_device_tensors(sampler_output: SamplerOutput, batch_size: int,
-                        vocab_size: int, device: str) -> None:
-    values = [sampler_output.sampled_token_probs, sampler_output.sampled_token_ids]
+                              vocab_size: int, device: str) -> None:
+    values = [
+        sampler_output.sampled_token_probs, sampler_output.sampled_token_ids
+    ]
     assert all(v is None for v in values) or not any(v is None for v in values)
     if not any(v is None for v in values):
         return
@@ -92,12 +94,12 @@ def maybe_mock_device_tensors(sampler_output: SamplerOutput, batch_size: int,
     sampler_output.sampled_token_probs = torch.nn.functional.softmax(
         torch.rand(batch_size, vocab_size, dtype=torch.float32, device=device),
         dim=-1)
-    
+
     sampler_output.sampled_token_ids = torch.randint(low=0,
-                                                 high=vocab_size,
-                                                 size=(batch_size, ),
-                                                 dtype=torch.long,
-                                                 device=device)
+                                                     high=vocab_size,
+                                                     size=(batch_size, ),
+                                                     dtype=torch.long,
+                                                     device=device)
 
 
 @contextmanager
