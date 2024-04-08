@@ -380,5 +380,131 @@ class TestPrefixCachingBlockAllocator:
             prev_block = allocator.allocate_immutable(
                 prev_block=prev_block, token_ids=block_token_ids)
             blocks.append(prev_block)
-
         return blocks
+
+    @staticmethod
+    @pytest.mark.parametrize("num_blocks", [1024])
+    @pytest.mark.parametrize("block_size", [16])
+    @pytest.mark.parametrize("seed", list(range(20)))
+    def test_eviction_order(num_blocks: int, block_size: int, seed: int):
+        """Verify sharing occurs by allocating two sequences that share prefixes
+        and incrementally freeing blocks.
+        """
+        random.seed(seed)
+        allocator = PrefixCachingBlockAllocator(num_blocks=num_blocks,
+                                                block_size=block_size)
+        num_blocks_to_consume = num_blocks + 1
+
+        token_ids = list(range(num_blocks_to_consume * block_size))
+
+        # First chain takes the first block
+        first_chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
+            block_size=block_size,
+            token_ids=token_ids[:block_size],
+            allocator=allocator,
+        )
+
+        # There should only be one block allocated at this point
+        assert allocator.get_num_free_blocks() == (num_blocks - 1)
+
+        # Set the last accessed time of the first block to 1
+        allocator.access_all_blocks(1)
+
+        # Second chain takes the rest of the blocks
+        second_chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
+            block_size=block_size,
+            token_ids=token_ids[block_size:-block_size],
+            allocator=allocator,
+        )
+
+        # There shouldn't be any blocks left at this point
+        assert allocator.get_num_free_blocks() == (0)
+
+        # Free the one block in the first chain
+        assert len(first_chain) == 1
+        first_block_id = first_chain[0].block_id
+        allocator.free(first_chain[0])
+
+        # Set the last accessed time on all of the blocks in the second chain
+        # to 2
+        allocator.access_all_blocks(2)
+
+        # Free each block in the second chain.
+        for i, block in enumerate(second_chain):
+            allocator.free(block)
+
+        # Allocate a new block and check that it's the least recently used block
+        # from the first chain.
+        new_block = TestPrefixCachingBlockAllocator.create_immutable_chain(
+            block_size=block_size,
+            token_ids=token_ids[-block_size:],
+            allocator=allocator,
+        )
+
+        assert new_block[0].block_id == first_block_id
+
+    # Test case where two last accessed times are equal
+    @staticmethod
+    @pytest.mark.parametrize("num_blocks", [1024])
+    @pytest.mark.parametrize("block_size", [16])
+    @pytest.mark.parametrize("seed", list(range(20)))
+    def test_eviction_order_num_tokens(num_blocks: int, block_size: int,
+                                       seed: int):
+        """Verify sharing occurs by allocating two sequences that share prefixes
+        and incrementally freeing blocks.
+        """
+        random.seed(seed)
+        allocator = PrefixCachingBlockAllocator(num_blocks=num_blocks,
+                                                block_size=block_size)
+        num_blocks_to_consume = num_blocks + 1
+
+        token_ids = list(range(num_blocks_to_consume * block_size))
+
+        num_blocks_in_first_chain = 2
+        num_tokens_in_first_chain = block_size * num_blocks_in_first_chain
+        # First chain takes the first block
+        first_chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
+            block_size=block_size,
+            token_ids=token_ids[:num_tokens_in_first_chain],
+            allocator=allocator,
+        )
+        # There should only be one block allocated at this point
+        assert allocator.get_num_free_blocks() == (num_blocks -
+                                                   num_blocks_in_first_chain)
+
+        # Set the last accessed time of the first block to 1
+        allocator.access_all_blocks(1)
+
+        # Second chain takes the rest of the blocks
+        second_chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
+            block_size=block_size,
+            token_ids=token_ids[num_tokens_in_first_chain:-block_size],
+            allocator=allocator,
+        )
+
+        # There shouldn't be any blocks left at this point
+        assert allocator.get_num_free_blocks() == (0)
+
+        assert len(first_chain) == num_blocks_in_first_chain
+        last_block_id = first_chain[-1].block_id
+        # Free each block in the first chain.
+        for i, block in enumerate(first_chain):
+            allocator.free(block)
+
+        # Set the last accessed time on all of the blocks in the second chain
+        # to 2
+        allocator.access_all_blocks(2)
+
+        # Free each block in the second chain.
+        for i, block in enumerate(second_chain):
+            allocator.free(block)
+
+        # Allocate a new block and check that it's the least recently used block
+        # from the first chain.
+        new_block = TestPrefixCachingBlockAllocator.create_immutable_chain(
+            block_size=block_size,
+            token_ids=token_ids[-block_size:],
+            allocator=allocator,
+        )
+
+        assert new_block[0].block_id == last_block_id
