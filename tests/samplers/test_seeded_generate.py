@@ -32,7 +32,7 @@ def test_random_sample_with_seed(
 
     sampling_params = SamplingParams(
         # Parameters to ensure sufficient randomness
-        temperature=2.0,
+        temperature=4.0,
         top_p=min(random.random() + 0.3, 1),
         top_k=random.randint(5, 20),
         n=random.randint(1, 10),

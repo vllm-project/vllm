@@ -192,14 +192,14 @@ class SamplingTensors:
                                                sampling_params.prompt_logprobs)
             largest_num_logprobs = max(largest_num_logprobs,
                                        sampling_params.logprobs or 0)
-            for seq_id in seq_ids:
+            for seq_idx, seq_id in enumerate(seq_ids):
                 seq_data = sampling_metadata.seq_data[seq_id]
                 extra_entropy = extra_entropy or ()
                 seq_seeds = cls._get_sequence_seeds(
                     seed,
                     seq_data.get_len(),
                     *extra_entropy,
-                    seq_id,
+                    seq_idx,
                     seeds_to_generate=seeds_to_generate,
                     is_greedy=is_greedy)
                 sampling_seeds.append(seq_seeds)
