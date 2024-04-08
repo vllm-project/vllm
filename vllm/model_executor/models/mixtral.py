@@ -29,7 +29,8 @@ from transformers import MixtralConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import LoRAConfig
-from vllm.model_executor.layers.fused_moe import fused_moe
+# from vllm.model_executor.layers.fused_moe import fused_moe
+from vllm.model_executor.layers.v2_moe_fused import fused_moe
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                QKVParallelLinear,

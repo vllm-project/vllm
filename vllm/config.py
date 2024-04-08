@@ -7,11 +7,13 @@ from typing import TYPE_CHECKING, ClassVar, Optional, Union
 import torch
 from packaging.version import Version
 from transformers import PretrainedConfig
-
+from vllm.model_executor.layers.quantization import get_quantization_config
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import (get_cpu_memory, get_nvcc_cuda_version, is_cpu, is_hip,
                         is_neuron)
+
+GPTQMarlinConfig = get_quantization_config("gptq_marlin")
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -172,8 +174,9 @@ class ModelConfig:
                 "either 'auto' or 'slow'.")
         self.tokenizer_mode = tokenizer_mode
 
+
     def _verify_quantization(self) -> None:
-        supported_quantization = ["awq", "gptq", "squeezellm", "marlin"]
+        supported_quantization = ["awq", "gptq", "squeezellm", "gptq_marlin", "marlin"]
         rocm_not_supported_quantization = ["awq", "marlin"]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
@@ -187,14 +190,27 @@ class ModelConfig:
             is_format_marlin = (quant_cfg.get("checkpoint_format") == "marlin"
                                 or quant_cfg.get("is_marlin_format", False))
 
-            # Use marlin if the GPTQ model is serialized in marlin format.
-            if quant_method == "gptq" and is_format_marlin:
-                logger.info("The model is serialized in Marlin format. "
-                            "Using Marlin kernel.")
-                quant_method = "marlin"
-                if self.quantization == "gptq":
+            # Use Marlin if the AutoGPTQ model is serialized in Marlin format or 
+            # if the model can be converted to the Marlin format.
+            if quant_method == "gptq":
+                if is_format_marlin:
+                    logger.info("The model is serialized in Marlin format. "
+                                "Using Marlin kernel.")
+                    quant_method = "marlin"
                     self.quantization = quant_method
+                elif GPTQMarlinConfig.is_marlin_compatible(quant_cfg):
+                    logger.info("The model is compatible with Marlin format. "
+                                "Using Marlin kernel.")
+                    quant_method = "marlin_gptq"
+            
+            # If GPTQ was specified explicitly, then use GPTQ
+            if self.quantization == "gptq" and quant_method == "gptq_marlin":
+                logger.warning(
+                    "You specifed --quantization gptq, but your model is compatible with "
+                    "Marlin. Use --quantization gptq_marlin for faster inference.")
+                quant_method = "gptq"
 
+            # Verify.
             if self.quantization is None:
                 self.quantization = quant_method
             elif self.quantization != quant_method:
