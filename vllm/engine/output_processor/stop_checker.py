@@ -38,7 +38,7 @@ class StopChecker:
         self.get_tokenizer_for_seq = get_tokenizer_for_seq
 
     def maybe_stop_sequence(self, seq: Sequence,
-                    sampling_params: SamplingParams) -> None:
+                    sampling_params: SamplingParams, new_token_ids: List[int]) -> None:
         """Stop the finished sequences."""
         # Check if the sequence has reached max_model_len.
         if seq.get_len() > self.scheduler_config.max_model_len:
@@ -46,8 +46,7 @@ class StopChecker:
             return
 
         # Check if the sequence has reached max_tokens.
-        if (sampling_params.max_tokens is not None) and (seq.get_output_len() >= sampling_params.max_tokens):
-            # TODO should cap block
+        if seq.get_output_len() == sampling_params.max_tokens:
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
 
@@ -63,18 +62,23 @@ class StopChecker:
                     seq.status = SequenceStatus.FINISHED_STOPPED
                     seq.stop_reason = stop_str
                     return
-        last_token_id = seq.get_last_token_id()
-        if last_token_id in sampling_params.stop_token_ids:
+
+        # Determine if any stop_token_ids are in new_token_ids.
+        intersection = set(new_token_ids).intersection(sampling_params.stop_token_ids)
+        if intersection:
+            # Get arbitrary token id that caused the stop.
+            stop_token_id = next(iter(intersection))
+
             stop_str = self.get_tokenizer_for_seq(seq).convert_ids_to_tokens(
-                last_token_id)
+                stop_token_id)
             self._finalize_sequence(seq, sampling_params, stop_str)
             seq.status = SequenceStatus.FINISHED_STOPPED
-            seq.stop_reason = last_token_id
+            seq.stop_reason = stop_token_id
             return
 
         # Check if the sequence has generated the EOS token.
         if ((not sampling_params.ignore_eos)
-                and seq.get_last_token_id() == seq.eos_token_id):
+                and seq.eos_token_id in new_token_ids):
             seq.status = SequenceStatus.FINISHED_STOPPED
             return
 

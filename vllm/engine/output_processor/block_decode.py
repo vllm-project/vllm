@@ -96,8 +96,7 @@ class BlockDecodeOutputProcessor(SequenceGroupOutputProcessor):
             )
 
         # TODO detokenize
-        # TODO pass output token ids
-        self.stop_checker.maybe_stop_sequence(seq, sampling_params)
+        self.stop_checker.maybe_stop_sequence(seq, sampling_params, new_token_ids=output_token_ids)
 
         if seq.is_finished():
             self.scheduler.free_seq(seq)
