@@ -28,6 +28,10 @@ from vllm import SamplingParams
     [
         {
             "speculative_model": "JackFram/llama-68m",
+            "num_speculative_tokens": 1,
+        },
+        {
+            "speculative_model": "JackFram/llama-68m",
             "num_speculative_tokens": 5,
         },
         {
