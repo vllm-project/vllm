@@ -33,10 +33,23 @@ template<typename T>
 __device__ __forceinline__ T gelu_kernel(const T& x) {
   // Equivalent to PyTorch GELU with 'none' approximation.
   // Refer to:
-  // https://github.com/pytorch/pytorch/blob/8ac9b20d4b090c213799e81acf48a55ea8d437d6/aten/src/ATen/native/cuda/ActivationGeluKernel.cu#L38
+  // https://github.com/pytorch/pytorch/blob/8ac9b20d4b090c213799e81acf48a55ea8d437d6/aten/src/ATen/native/cuda/ActivationGeluKernel.cu#L36-L38
   const float f = (float) x;
   constexpr float ALPHA = M_SQRT1_2;
   return (T) (f * 0.5f * (1.0f + ::erf(f * ALPHA)));
+}
+
+template<typename T>
+__device__ __forceinline__ T gelu_tanh_kernel(const T& x) {
+  // Equivalent to PyTorch GELU with 'tanh' approximation.
+  // Refer to:
+  // https://github.com/pytorch/pytorch/blob/8ac9b20d4b090c213799e81acf48a55ea8d437d6/aten/src/ATen/native/cuda/ActivationGeluKernel.cu#L25-L30
+  const float f = (float) x;
+  constexpr float BETA = M_SQRT2 * M_2_SQRTPI * 0.5f;
+  constexpr float KAPPA = 0.044715;
+  float x_cube = f * f * f;
+  float inner = BETA * (f + KAPPA * x_cube);
+  return (T) (0.5f * f * (1.0f + ::tanhf(inner)));
 }
 
 } // namespace vllm
@@ -71,6 +84,13 @@ void gelu_and_mul(
   torch::Tensor& input)    // [..., 2 * d]
 {
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::gelu_kernel);
+}
+
+void gelu_tanh_and_mul(
+  torch::Tensor& out,      // [..., d]
+  torch::Tensor& input)    // [..., 2 * d]
+{
+  LAUNCH_ACTIVATION_GATE_KERNEL(vllm::gelu_tanh_kernel);
 }
 
 namespace vllm {

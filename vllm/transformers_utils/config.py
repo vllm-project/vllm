@@ -5,12 +5,12 @@ from transformers import AutoConfig, PretrainedConfig
 from vllm.transformers_utils.configs import *
 
 _CONFIG_REGISTRY = {
-    "baichuan": BaiChuanConfig,
     "chatglm": ChatGLMConfig,
+    "dbrx": DbrxConfig,
     "mpt": MPTConfig,
-    "qwen": QWenConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
+    "jais": JAISConfig,
 }
 
 
@@ -41,3 +41,17 @@ def get_config(model: str,
                                               revision=revision,
                                               code_revision=code_revision)
     return config
+
+
+def get_hf_text_config(config: PretrainedConfig):
+    """Get the "sub" config relevant to llm for multi modal models.
+        No op for pure text models.
+    """
+    if hasattr(config, "text_config"):
+        # The code operates under the assumption that text_config should have
+        # `num_attention_heads` (among others). Assert here to fail early
+        # if transformers config doesn't align with this assumption.
+        assert hasattr(config.text_config, "num_attention_heads")
+        return config.text_config
+    else:
+        return config

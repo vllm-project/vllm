@@ -70,15 +70,15 @@ RUN if [ "$BUILD_FA" = "1" ]; then \
     && cd ..; \
     fi
 
-COPY ./ /app/vllm
-
-RUN python3 -m pip install --upgrade pip
-RUN python3 -m pip install xformers==0.0.23 --no-deps
-
 # Error related to odd state for numpy 1.20.3 where there is no METADATA etc, but an extra LICENSES_bundled.txt.
 # Manually removed it so that later steps of numpy upgrade can continue
 RUN if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1" ]; then \
     rm -rf /opt/conda/envs/py_3.9/lib/python3.9/site-packages/numpy-1.20.3.dist-info/; fi
+
+COPY ./ /app/vllm
+
+RUN python3 -m pip install --upgrade pip
+RUN python3 -m pip install xformers==0.0.23 --no-deps
 
 RUN cd /app \
     && cd vllm \
@@ -90,6 +90,6 @@ RUN cd /app \
     && cd ..
 
 RUN python3 -m pip install --upgrade pip
-RUN python3 -m pip install --no-cache-dir ray[all]
+RUN python3 -m pip install --no-cache-dir ray[all]==2.9.3
 
 CMD ["/bin/bash"]

@@ -1,0 +1,14 @@
+cmake >= 3.21
+ninja  # For faster builds.
+psutil
+sentencepiece  # Required for LLaMA tokenizer.
+numpy
+requests
+py-cpuinfo
+transformers >= 4.39.1  # Required for StarCoder2 & Llava.
+fastapi
+uvicorn[standard]
+pydantic >= 2.0  # Required for OpenAI server.
+prometheus_client >= 0.18.0
+tiktoken == 0.6.0  # Required for DBRX tokenizer
+outlines == 0.0.34 # Requires torch >= 2.1.0
