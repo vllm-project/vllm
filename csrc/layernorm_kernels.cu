@@ -59,6 +59,8 @@ __global__ void rms_norm_kernel(
 template<typename torch_type>
 struct _typeConvert { static constexpr bool exists = false; };
 
+#if defined(USE_ROCM) || (defined(CUDA_VERSION) && (CUDA_VERSION >= 12000))
+// CUDA < 12.0 runs into issues with packed type conversion
 template<>
 struct _typeConvert<c10::Half> {
   static constexpr bool exists = true;
@@ -85,8 +87,8 @@ struct _typeConvert<c10::BFloat16> {
   __device__ static inline hip_type convert(float x) { return __float2bfloat16(x); }
   __device__ static inline packed_hip_type convert(float2 x) { return __float22bfloat162_rn(x); }
 };
-#endif
-
+#endif // defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+#endif // defined(USE_ROCM) || (defined(CUDA_VERSION) && (CUDA_VERSION >= 12000))
 
 /* Vector POD struct to generate vectorized and packed FP16/BF16 ops
    for appropriate specializations of fused_add_rms_norm_kernel.
