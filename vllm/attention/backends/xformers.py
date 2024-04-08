@@ -13,7 +13,6 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
-from vllm.utils import is_hip
 
 logger = init_logger(__name__)
 
@@ -330,8 +329,7 @@ class XFormersImpl(AttentionImpl):
                 value[None, start:end],
                 attn_bias=attn_metadata.attn_bias[i],
                 p=0.0,
-                scale=self.scale,
-                op=op)
+                scale=self.scale)
             # TODO(woosuk): Unnecessary copy. Optimize.
             output[start:end].copy_(out.squeeze(0))
             start += prompt_len

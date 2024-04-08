@@ -153,9 +153,9 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         self.use_triton_flash_attn = (os.environ.get(
             "VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in ("true", "1"))
         if self.use_naive_attn:
-            # AMD Radeon 7900 series (gfx1100) currently does not support xFormers
-            # nor FlashAttention. As a temporary workaround, we use naive PyTorch
-            # implementation of attention.
+            # AMD Radeon 7900 series (gfx1100) currently does not support
+            # xFormers nor FlashAttention. As a temporary workaround, we use
+            # naive PyTorch implementation of attention.
             self.attn_fuc = _naive_attention()
             logger.debug("Using naive attention in ROCmBackend")
         elif self.use_triton_flash_attn:
