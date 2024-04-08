@@ -13,6 +13,7 @@ from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (Logprob, PromptLogprobs, SampleLogprobs,
                            SamplerOutput, SequenceData, SequenceGroupOutput,
                            SequenceOutput)
+from vllm.utils import is_cuda
 
 
 class Sampler(nn.Module):
@@ -74,7 +75,7 @@ class Sampler(nn.Module):
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
 
         if any(sampling_params.sampling_type == SamplingType.BEAM
-               for _, sampling_params in sampling_metadata.seq_groups):
+               for _, sampling_params in sampling_metadata.seq_groups) or not is_cuda():
             # Sample the next tokens.
             sample_results = _sample(probs, logprobs, sampling_metadata)
             # Get the logprobs query results.

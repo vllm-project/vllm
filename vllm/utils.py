@@ -135,6 +135,10 @@ def is_neuron() -> bool:
     return transformers_neuronx is not None
 
 
+def is_cuda() -> bool:
+    return not is_hip() and not is_cpu() and not is_neuron()
+
+
 @lru_cache(maxsize=None)
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
