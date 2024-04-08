@@ -70,9 +70,6 @@ class AWQConfig(QuantizationConfig):
     def get_scaled_act_names(self) -> List[str]:
         return ["gelu", "gelu_fast", "gelu_new", "gelu_pytorch_tanh"]
 
-    def support_fused_moe(self) -> bool:
-        return True
-
 
 class AWQLinearMethod(LinearMethodBase):
     """Linear method for AWQ.

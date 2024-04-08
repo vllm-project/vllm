@@ -71,10 +71,6 @@ class GPTQConfig(QuantizationConfig):
     def get_scaled_act_names(self) -> List[str]:
         return []
 
-    def support_fused_moe(self) -> bool:
-        # Fused MoE only supports 4-bit so far.
-        return self.weight_bits == 4
-
 
 class ExllamaState(Enum):
 
@@ -232,10 +228,16 @@ class GPTQLinearMethod(LinearMethodBase):
                     w["g_idx"] = torch.argsort(w["g_idx"],
                                                dim=-1).to(torch.int)
                 else:
-                    w["g_idx"] = torch.empty((1, 1), device="meta")
+                    w["g_idx"] = torch.empty((w["g_idx"].shape[0], 1),
+                                             device="meta")
                 w["exllama_state"] = ExllamaState.READY
                 ops.gptq_shuffle(w["qweight"], w["g_idx"],
                                  self.quant_config.weight_bits)
+
+        # Fused moe only supports 4-bit
+        if self.quant_config.weight_bits != 4:
+            return super().apply_moe_weights(w1, w2, x, gating_output, topk,
+                                             renormalize)
 
         if x.shape[0] >= 128:
             dequant_w1 = ops.dequant_gptq(

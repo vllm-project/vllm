@@ -23,18 +23,22 @@
 """Inference-only Deepseek model."""
 from typing import Any, Dict, List, Optional
 
-import numpy as np
 import torch
 from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (
-    LinearMethodBase, MergedColumnParallelLinear, QKVParallelLinear,
-    ReplicatedLinear, RowParallelLinear, UnquantizedLinearMethod)
+# yapf conflicts with isort for this block
+# yapf: disable
+from vllm.model_executor.layers.linear import (LinearMethodBase,
+                                               MergedColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               ReplicatedLinear,
+                                               RowParallelLinear,
+                                               UnquantizedLinearMethod)
+# yapf: enable
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
@@ -82,39 +86,6 @@ class DeepseekMLP(nn.Module):
         return x
 
 
-class DeepseekExpertMLP(nn.Module):
-
-    def __init__(
-        self,
-        hidden_size: int,
-        intermediate_size: int,
-        hidden_act: str,
-        linear_method: Optional[LinearMethodBase] = None,
-    ) -> None:
-        super().__init__()
-        self.gate_proj = ReplicatedLinear(hidden_size,
-                                          intermediate_size,
-                                          bias=False,
-                                          linear_method=linear_method)
-        self.up_proj = ReplicatedLinear(hidden_size,
-                                        intermediate_size,
-                                        bias=False,
-                                        linear_method=linear_method)
-        self.down_proj = ReplicatedLinear(intermediate_size,
-                                          hidden_size,
-                                          bias=False,
-                                          linear_method=linear_method)
-        self.act_fn = nn.SiLU()
-
-    def forward(self, hidden_states):
-        gate_out, _ = self.gate_proj(hidden_states)
-        gate_out = self.act_fn(gate_out)
-        up_out, _ = self.up_proj(hidden_states)
-        current_hidden_states = gate_out * up_out
-        current_hidden_states, _ = self.down_proj(current_hidden_states)
-        return current_hidden_states
-
-
 class DeepseekMoE(nn.Module):
 
     def __init__(
@@ -132,40 +103,16 @@ class DeepseekMoE(nn.Module):
         if self.linear_method is None:
             self.linear_method = UnquantizedLinearMethod()
 
-        if not isinstance(
-                self.linear_method, UnquantizedLinearMethod
-        ) and not self.linear_method.quant_config.support_fused_moe():
-            if self.tp_size > self.n_routed_experts:
-                raise ValueError(
-                    f"Tensor parallel size {self.tp_size} is greater than "
-                    f"the number of experts {self.n_routed_experts}.")
-            # Split experts equally between ranks
-            self.expert_indicies = np.array_split(range(
-                self.n_routed_experts), self.tp_size)[self.rank].tolist()
-            if not self.expert_indicies:
-                raise ValueError(
-                    f"Rank {self.rank} has no experts assigned to it.")
-
-            self.experts = nn.ModuleList([
-                DeepseekExpertMLP(
-                    hidden_size=config.hidden_size,
-                    intermediate_size=config.moe_intermediate_size,
-                    hidden_act=config.hidden_act,
-                    linear_method=linear_method,
-                ) if idx in self.expert_indicies else None
-                for idx in range(self.n_routed_experts)
-            ])
-        else:
-            self.w1 = MergedColumnParallelLinear(
-                config.hidden_size, [config.moe_intermediate_size] * 2,
-                bias=False,
-                linear_method=linear_method,
-                num_experts=self.n_routed_experts)
-            self.w2 = RowParallelLinear(config.moe_intermediate_size,
-                                        config.hidden_size,
-                                        bias=False,
-                                        linear_method=linear_method,
-                                        num_experts=self.n_routed_experts)
+        self.w1 = MergedColumnParallelLinear(
+            config.hidden_size, [config.moe_intermediate_size] * 2,
+            bias=False,
+            linear_method=linear_method,
+            num_experts=self.n_routed_experts)
+        self.w2 = RowParallelLinear(config.moe_intermediate_size,
+                                    config.hidden_size,
+                                    bias=False,
+                                    linear_method=linear_method,
+                                    num_experts=self.n_routed_experts)
 
         self.gate = ReplicatedLinear(config.hidden_size,
                                      self.n_routed_experts,
@@ -191,35 +138,14 @@ class DeepseekMoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
-        if not isinstance(
-                self.linear_method, UnquantizedLinearMethod
-        ) and not self.linear_method.quant_config.support_fused_moe():
-            routing_weights, selected_experts = fused_topk(
-                router_logits,
-                self.top_k,
-                renormalize=self.config.norm_topk_prob)
-            final_hidden_states = None
-            for expert_idx in self.expert_indicies:
-                expert_layer = self.experts[expert_idx]
-                expert_mask = (selected_experts == expert_idx)
-                expert_weights = (routing_weights * expert_mask).sum(
-                    dim=-1, keepdim=True)
-
-                current_hidden_states = expert_layer(hidden_states).mul_(
-                    expert_weights)
-                if final_hidden_states is None:
-                    final_hidden_states = current_hidden_states
-                else:
-                    final_hidden_states.add_(current_hidden_states)
-        else:
-            final_hidden_states = self.linear_method.apply_moe_weights(
-                self.w1.linear_weights,
-                self.w2.linear_weights,
-                hidden_states,
-                router_logits,
-                self.top_k,
-                renormalize=self.config.norm_topk_prob,
-            )
+        final_hidden_states = self.linear_method.apply_moe_weights(
+            self.w1.linear_weights,
+            self.w2.linear_weights,
+            hidden_states,
+            router_logits,
+            self.top_k,
+            renormalize=self.config.norm_topk_prob,
+        )
 
         if self.config.n_shared_experts is not None:
             final_hidden_states = final_hidden_states + shared_output
@@ -468,8 +394,8 @@ class DeepseekForCausalLM(nn.Module):
             ("qkv_proj", "v_proj", "v"),
             ("mlp.gate_up_proj", "mlp.gate_proj", 0),
             ("mlp.gate_up_proj", "mlp.up_proj", 1),
-            ("shared_experts.gate_up_proj", "shared_experts.gate_proj", 0),
-            ("shared_experts.gate_up_proj", "shared_experts.up_proj", 1),
+            ("shared_expert.gate_up_proj", "shared_expert.gate_proj", 0),
+            ("shared_expert.gate_up_proj", "shared_expert.up_proj", 1),
         ]
 
         expert_params_mapping = [
@@ -480,8 +406,7 @@ class DeepseekForCausalLM(nn.Module):
             for weight_name, shard_id in [("gate_proj",
                                            0), ("up_proj",
                                                 1), ("down_proj", None)]
-        ] if self.linear_method is None or (
-            self.linear_method.quant_config.support_fused_moe()) else []
+        ]
 
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
@@ -498,10 +423,6 @@ class DeepseekForCausalLM(nn.Module):
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
-                    continue
-                # Skip experts that are not assigned to this worker.
-                if (("mlp.experts." in name or "mlp.shared_experts." in name)
-                        and name not in params_dict):
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader

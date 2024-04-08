@@ -5,8 +5,9 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
+from vllm._C import ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import fused_moe
+from vllm.model_executor.layers.fused_moe import fused_moe, fused_topk
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_gather, tensor_model_parallel_all_reduce)
 from vllm.model_executor.parallel_utils.parallel_state import (
@@ -66,14 +67,46 @@ class LinearMethodBase(ABC):
                 linear_weights[name] = new_param
         return linear_weights
 
-    @abstractmethod
     def apply_moe_weights(self, w1: Dict[str,
                                          torch.Tensor], w2: Dict[str,
                                                                  torch.Tensor],
                           x: torch.Tensor, gating_output: torch.Tensor,
                           topk: int, renormalize: bool) -> torch.Tensor:
         """Apply the weights to the input tensor."""
-        raise NotImplementedError
+        routing_weights, selected_experts = fused_topk(gating_output,
+                                                       topk,
+                                                       renormalize=renormalize)
+        final_hidden_states = None
+        num_experts = gating_output.shape[-1]
+        for expert_idx in range(num_experts):
+            w1_expert = {
+                key:
+                value[expert_idx] if isinstance(value, torch.Tensor) else value
+                for key, value in w1.items()
+            }
+            w2_expert = {
+                key:
+                value[expert_idx] if isinstance(value, torch.Tensor) else value
+                for key, value in w2.items()
+            }
+            expert_mask = (selected_experts == expert_idx)
+            expert_weights = (routing_weights * expert_mask).sum(dim=-1,
+                                                                 keepdim=True)
+            hidden_states = self.apply_weights(w1_expert, x)
+            output_shape = (hidden_states.shape[:-1] +
+                            (hidden_states.shape[-1] // 2, ))
+            out = torch.empty(output_shape,
+                              dtype=hidden_states.dtype,
+                              device=hidden_states.device)
+            ops.silu_and_mul(out, hidden_states)
+            current_hidden_states = self.apply_weights(
+                w2_expert, out).mul_(expert_weights)
+
+            if final_hidden_states is None:
+                final_hidden_states = current_hidden_states
+            else:
+                final_hidden_states.add_(current_hidden_states)
+        return final_hidden_states
 
 
 class UnquantizedLinearMethod(LinearMethodBase):

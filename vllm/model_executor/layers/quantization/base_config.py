@@ -62,8 +62,3 @@ class QuantizationConfig(ABC):
         For now, this is only used by AWQ.
         """
         raise NotImplementedError
-
-    @abstractmethod
-    def support_fused_moe(self) -> bool:
-        """Whether fused moe kernel is implemented"""
-        raise NotImplementedError
