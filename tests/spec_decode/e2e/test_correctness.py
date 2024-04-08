@@ -26,6 +26,7 @@ from vllm import SamplingParams
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",
     [
+        # TODO(cade) handle <s> output
         {
             "speculative_model": "JackFram/llama-68m",
             "num_speculative_tokens": 5,
