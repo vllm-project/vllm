@@ -27,6 +27,7 @@ from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
 from vllm.utils import Counter
 from vllm.engine.output_processor.interfaces import SequenceGroupOutputProcessor
 from vllm.engine.output_processor.stop_checker import StopChecker
+from vllm.engine.output_processor.util import create_output_by_sequence_group
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -424,6 +425,9 @@ class LLMEngine:
             self, output: SamplerOutput,
             scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
 
+        now = time.time()
+
+        # TODO
         if self.speculative_config is None:
             all_output = [output]
         else:
@@ -431,33 +435,16 @@ class LLMEngine:
 
         scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
 
-        # Organize list of sampler output by sequence group.
-        output_by_sequence_group: List[List[SequenceGroupOutputs]] = [
-            [] for _ in scheduled_seq_groups
-        ]
-        for step in all_output:
-            for i, sequence_group_output in enumerate(step):
-                output_by_sequence_group[i].append(sequence_group_output)
-
-        now = time.time()
+        output_by_sequence_group = create_output_by_sequence_group(sampler_outputs=all_output, num_seq_groups=len(scheduled_seq_groups))
 
         # Update the scheduled sequence groups with the model outputs.
         for scheduled_seq_group, outputs in zip(scheduled_seq_groups,
                                                 output_by_sequence_group):
-
             seq_group = scheduled_seq_group.seq_group
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
             
             self.output_processor.process_outputs(seq_group, outputs)
-
-            #assert len(outputs) > 0
-            ## TODO can spec decode go through second path?
-            #if len(outputs) > 1:
-            #    self._process_sequence_group_outputs_multi_step(
-            #        seq_group, outputs)
-            #else:
-            #    self._process_sequence_group_outputs(seq_group, outputs[0])
 
         # Free the finished sequence groups.
         self.scheduler.free_finished_seq_groups()
