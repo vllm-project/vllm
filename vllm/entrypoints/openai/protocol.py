@@ -62,7 +62,7 @@ class ResponseFormat(BaseModel):
 class ChatCompletionRequest(BaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
-    messages: List[Dict[str, str]]
+    messages: List[Dict[str, Union[str, Dict[str, str]]]]
     model: str
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
