@@ -137,10 +137,16 @@ class OpenAIServingCompletion(OpenAIServing):
             for i, prompt in enumerate(prompts):
                 if prompt_is_tokens:
                     input_ids = self._validate_prompt_and_tokenize(
-                        request, prompt_ids=prompt)
+                        request,
+                        prompt_ids=prompt,
+                        truncate_prompt_tokens=sampling_params.
+                        truncate_prompt_tokens)
                 else:
                     input_ids = self._validate_prompt_and_tokenize(
-                        request, prompt=prompt)
+                        request,
+                        prompt=prompt,
+                        truncate_prompt_tokens=sampling_params.
+                        truncate_prompt_tokens)
 
                 generators.append(
                     self.engine.generate(prompt,
@@ -251,9 +257,6 @@ class OpenAIServingCompletion(OpenAIServing):
                             i]:] if output.logprobs else None
 
                     if request.logprobs is not None:
-                        assert top_logprobs is not None, (
-                            "top_logprobs must be provided when logprobs "
-                            "is requested")
                         logprobs = self._create_logprobs(
                             token_ids=delta_token_ids,
                             top_logprobs=top_logprobs,
@@ -266,6 +269,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     previous_texts[i] = output.text
                     previous_num_tokens[i] = len(output.token_ids)
                     finish_reason = output.finish_reason
+                    stop_reason = output.stop_reason
                     if output.finish_reason is not None:  # return final usage
                         prompt_tokens = len(res.prompt_token_ids)
                         completion_tokens = len(output.token_ids)
@@ -286,6 +290,7 @@ class OpenAIServingCompletion(OpenAIServing):
                                 text=delta_text,
                                 logprobs=logprobs,
                                 finish_reason=finish_reason,
+                                stop_reason=stop_reason,
                             )
                         ],
                         usage=final_usage,
@@ -342,6 +347,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     text=output_text,
                     logprobs=logprobs,
                     finish_reason=output.finish_reason,
+                    stop_reason=output.stop_reason,
                 )
                 choices.append(choice_data)
 

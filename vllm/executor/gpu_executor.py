@@ -1,7 +1,8 @@
 from typing import Dict, List, Optional
 
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
+                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
+                         VisionLanguageConfig)
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.executor.utils import check_block_size_valid
 from vllm.logger import init_logger
@@ -24,6 +25,7 @@ class GPUExecutor(ExecutorBase):
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
         vision_language_config: Optional[VisionLanguageConfig],
+        speculative_config: Optional[SpeculativeConfig],
     ) -> None:
         self.model_config = model_config
         self.cache_config = cache_config
@@ -32,6 +34,9 @@ class GPUExecutor(ExecutorBase):
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.vision_language_config = vision_language_config
+
+        assert (not speculative_config
+                ), "Speculative decoding not yet supported for GPU backend"
 
         # Instantiate the worker and load the model to GPU.
         self._init_worker()
@@ -84,6 +89,12 @@ class GPUExecutor(ExecutorBase):
                 cpu_swap_space=self.cache_config.swap_space_bytes,
                 cache_dtype=self.cache_config.cache_dtype,
             ))
+
+        if self.cache_config.forced_num_gpu_blocks is not None:
+            forced_num_gpu_blocks = self.cache_config.forced_num_gpu_blocks
+            logger.info(f"Replacing profiled {num_gpu_blocks=} with "
+                        f"{forced_num_gpu_blocks=}")
+            num_gpu_blocks = forced_num_gpu_blocks
 
         logger.info(f"# GPU blocks: {num_gpu_blocks}, "
                     f"# CPU blocks: {num_cpu_blocks}")

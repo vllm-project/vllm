@@ -1,4 +1,4 @@
-.. _fp8_e5m2_kv_cache:
+.. _fp8_kv_cache:
 
 FP8 E5M2 KV Cache
 ==================
@@ -21,7 +21,7 @@ Here is an example of how to enable this feature:
     # Create a sampling params object.
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
     # Create an LLM.
-    llm = LLM(model="facebook/opt-125m", kv_cache_dtype="fp8_e5m2")
+    llm = LLM(model="facebook/opt-125m", kv_cache_dtype="fp8")
     # Generate texts from the prompts. The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
     outputs = llm.generate(prompts, sampling_params)
@@ -30,4 +30,7 @@ Here is an example of how to enable this feature:
         prompt = output.prompt
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+
+Note, current prefix caching doesn't work with FP8 KV cache enabled, forward_prefix kernel should handle different KV and cache type.
 

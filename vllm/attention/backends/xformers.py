@@ -178,6 +178,7 @@ class XFormersImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: Optional[torch.Tensor],
         attn_metadata: XFormersMetadata,
+        kv_scale: float,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
@@ -205,7 +206,8 @@ class XFormersImpl(AttentionImpl):
             PagedAttention.write_to_paged_cache(key, value, key_cache,
                                                 value_cache,
                                                 attn_metadata.slot_mapping,
-                                                attn_metadata.kv_cache_dtype)
+                                                attn_metadata.kv_cache_dtype,
+                                                kv_scale)
 
         if attn_metadata.is_prompt:
             # Prompt run.
@@ -259,6 +261,9 @@ class XFormersImpl(AttentionImpl):
                     query, key, value, attn_metadata)
             else:
                 # prefix-enabled attention
+                # TODO(Hai) this triton kernel has regression issue (broke) to
+                # deal with different data types between KV and FP8 KV cache,
+                # to be addressed separately.
                 output = PagedAttention.forward_prefix(
                     query,
                     key,
@@ -285,6 +290,7 @@ class XFormersImpl(AttentionImpl):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
+                kv_scale,
             )
 
         # Reshape the output tensor.
@@ -405,8 +411,8 @@ def _check_use_naive_attention() -> bool:
     if not is_hip():
         return False
     # For ROCm, check whether flash attention is installed or not.
-    has_flash_attn = importlib.util.find_spec("flash_attn") is None
-    if not has_flash_attn:
+    use_naive_attention = importlib.util.find_spec("flash_attn") is None
+    if use_naive_attention:
         logger.warning("flash_attn is not installed. Using naive attention. "
                        "This will take significantly more GPU memory.")
         return True

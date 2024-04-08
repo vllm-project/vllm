@@ -134,6 +134,16 @@ def gemma_lora_files():
     return snapshot_download(repo_id="wskwon/gemma-7b-test-lora")
 
 
+@pytest.fixture(scope="session")
+def chatglm3_lora_files():
+    return snapshot_download(repo_id="jeeejeee/chatglm3-text2sql-spider")
+
+
+@pytest.fixture(scope="session")
+def baichuan_lora_files():
+    return snapshot_download(repo_id="jeeejeee/baichuan7b-text2sql-spider")
+
+
 @pytest.fixture
 def llama_2_7b_engine_extra_embeddings() -> nn.Module:
     cleanup()
