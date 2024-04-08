@@ -1,5 +1,5 @@
 import time
-from typing import Optional, Tuple, Iterable
+from typing import Iterable, Optional, Tuple
 
 from vllm import SamplingParams
 from vllm.lora.request import LoRARequest

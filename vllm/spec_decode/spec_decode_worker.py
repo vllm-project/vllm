@@ -3,9 +3,10 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
-from vllm.sequence import (SamplerOutput, SequenceGroupMetadata,
-                           SequenceGroupOutput, SequenceOutput, Logprob)
+from vllm.sequence import (Logprob, SamplerOutput, SequenceGroupMetadata,
+                           SequenceGroupOutput, SequenceOutput)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
@@ -13,9 +14,7 @@ from vllm.spec_decode.metrics import AsyncMetricsCollector
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.util import (get_all_seq_ids, nvtx_range,
                                    split_batch_by_proposal_len)
-from vllm.worker.worker import Worker
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
-from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
@@ -49,7 +48,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     """
 
     @classmethod
-    def from_workers(cls, proposer_worker: MultiStepWorker, scorer_worker: WorkerBase) -> "SpecDecodeWorker":
+    def from_workers(cls, proposer_worker: MultiStepWorker,
+                     scorer_worker: WorkerBase) -> "SpecDecodeWorker":
         return SpecDecodeWorker(
             proposer_worker,
             scorer_worker,
@@ -238,7 +238,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             seq_group_metadata_list, blocks_to_swap_in, blocks_to_swap_out,
             blocks_to_copy, k)
 
-        logger.info(f"score proposals")
+        logger.info("score proposals")
         proposal_scores = self.scorer.score_proposals(
             seq_group_metadata_list,
             blocks_to_swap_in,

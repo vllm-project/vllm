@@ -1,9 +1,10 @@
-import pytest
 from itertools import cycle
-from typing import Tuple, List
+from typing import List, Tuple
+
+import pytest
+from transformers import AutoTokenizer
 
 from vllm import SamplingParams
-from transformers import AutoTokenizer
 
 
 @pytest.mark.parametrize(
@@ -58,9 +59,8 @@ def test_spec_decode_e2e_logical_flow(test_llm_generator, batch_size: int):
         temperature=temperature,
     )
 
-    batch_tokens, batch_token_ids = get_output_from_llm_generator(test_llm_generator,
-                                                       prompts,
-                                                       sampling_params)
+    batch_tokens, batch_token_ids = get_output_from_llm_generator(
+        test_llm_generator, prompts, sampling_params)
 
     # Expect a generation for each prompt in the batch.
     assert len(batch_token_ids) == len(prompts)
@@ -121,10 +121,12 @@ def test_spec_decode_xfail(test_llm_generator):
     with pytest.raises(AssertionError,
                        match="Speculative decoding not yet supported for "):
         get_output_from_llm_generator(test_llm_generator, prompts,
-                                         sampling_params)
+                                      sampling_params)
 
 
-def get_output_from_llm_generator(llm_generator, prompts, sampling_params) -> Tuple[List[str], List[List[int]]]:
+def get_output_from_llm_generator(
+        llm_generator, prompts,
+        sampling_params) -> Tuple[List[str], List[List[int]]]:
     for llm in llm_generator:
         outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
         token_ids = [output.outputs[0].token_ids for output in outputs]

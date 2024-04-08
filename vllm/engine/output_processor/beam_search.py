@@ -1,31 +1,12 @@
-import time
-from typing import Iterable, List, Optional, Tuple, Type, Union
+from typing import List, Tuple, Union
 
-from transformers import PreTrainedTokenizer
-
-import vllm
-from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
-                         VisionLanguageConfig)
-from vllm.core.scheduler import Scheduler, SchedulerOutputs
-from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.metrics import StatLogger, Stats
-from vllm.engine.ray_utils import initialize_ray_cluster
-from vllm.executor.executor_base import ExecutorBase
+from vllm.config import SchedulerConfig
+from vllm.engine.output_processor.interfaces import (
+    SequenceGroupOutputProcessor)
 from vllm.logger import init_logger
-from vllm.lora.request import LoRARequest
-from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (MultiModalData, SamplerOutput, Sequence,
-                           SequenceGroup, SequenceGroupOutput, SequenceOutput,
-                           SequenceStatus)
-from vllm.transformers_utils.detokenizer import Detokenizer
-from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
-                                                     get_tokenizer_group)
-from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
-                                  usage_message)
-from vllm.utils import Counter
-from vllm.engine.output_processor.interfaces import SequenceGroupOutputProcessor
+from vllm.sequence import (Sequence, SequenceGroup, SequenceGroupOutput,
+                           SequenceOutput, SequenceStatus)
 
 logger = init_logger(__name__)
 

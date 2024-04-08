@@ -1,7 +1,8 @@
 from abc import ABC, abstractmethod
+from typing import List
+
 from vllm.config import SchedulerConfig
 from vllm.sequence import SequenceGroup, SequenceGroupOutput
-from typing import List
 
 
 class SequenceGroupOutputProcessor(ABC):
@@ -16,7 +17,9 @@ class SequenceGroupOutputProcessor(ABC):
         stop_checker,
     ):
         if scheduler_config.num_lookahead_slots == 0:
-            from vllm.engine.output_processor.beam_search import BeamSearchOutputProcessor
+            # Importing here to avoid cycle.
+            from vllm.engine.output_processor.beam_search import (
+                BeamSearchOutputProcessor)
             return BeamSearchOutputProcessor(
                 scheduler_config,
                 detokenizer,
@@ -25,7 +28,9 @@ class SequenceGroupOutputProcessor(ABC):
                 stop_checker,
             )
         else:
-            from vllm.engine.output_processor.block_decode import BlockDecodeOutputProcessor
+            # Importing here to avoid cycle.
+            from vllm.engine.output_processor.block_decode import (
+                BlockDecodeOutputProcessor)
             return BlockDecodeOutputProcessor(
                 detokenizer,
                 scheduler,

@@ -1,5 +1,5 @@
 """A Neuron worker class."""
-from typing import List, Optional
+from typing import List
 
 import torch
 import torch.distributed

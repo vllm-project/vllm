@@ -1,17 +1,19 @@
-import pytest
-from unittest.mock import MagicMock
 import random
+from unittest.mock import MagicMock
 
+import pytest
 from transformers import PreTrainedTokenizer
 
-from vllm.engine.output_processor.block_decode import BlockDecodeOutputProcessor
-from vllm.engine.output_processor.stop_checker import StopChecker
-from vllm.transformers_utils.detokenizer import Detokenizer
-from vllm.core.scheduler import Scheduler
-from vllm.utils import Counter
-from vllm.sequence import SequenceStatus, SequenceGroupOutput, SequenceOutput, Logprob
-from vllm.sampling_params import SamplingParams
 from tests.core.utils import create_seq_group
+from vllm.core.scheduler import Scheduler
+from vllm.engine.output_processor.block_decode import (
+    BlockDecodeOutputProcessor)
+from vllm.engine.output_processor.stop_checker import StopChecker
+from vllm.sampling_params import SamplingParams
+from vllm.sequence import (Logprob, SequenceGroupOutput, SequenceOutput,
+                           SequenceStatus)
+from vllm.transformers_utils.detokenizer import Detokenizer
+from vllm.utils import Counter
 
 
 @pytest.mark.parametrize("seq_output_len", [128])

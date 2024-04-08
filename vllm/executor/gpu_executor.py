@@ -71,9 +71,9 @@ class GPUExecutor(ExecutorBase):
         self.driver_worker.load_model()
 
     def _init_spec_worker(self):
-        from vllm.worker.worker import Worker
-        from vllm.spec_decode.spec_decode_worker import SpecDecodeWorker
         from vllm.spec_decode.multi_step_worker import MultiStepWorker
+        from vllm.spec_decode.spec_decode_worker import SpecDecodeWorker
+        from vllm.worker.worker import Worker
 
         distributed_init_method = get_distributed_init_method(
             get_ip(), get_open_port())
@@ -106,7 +106,8 @@ class GPUExecutor(ExecutorBase):
             is_driver_worker=True,
         )
 
-        spec_decode_worker = SpecDecodeWorker.from_workers(proposer_worker=draft_worker, scorer_worker=target_worker)
+        spec_decode_worker = SpecDecodeWorker.from_workers(
+            proposer_worker=draft_worker, scorer_worker=target_worker)
 
         assert self.parallel_config.world_size == 1, (
             "GPUExecutor only supports single GPU.")

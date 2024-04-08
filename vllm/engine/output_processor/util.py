@@ -1,5 +1,6 @@
-from vllm.sequence import SequenceGroupOutput, SamplerOutput
 from typing import List
+
+from vllm.sequence import SamplerOutput
 
 
 def create_output_by_sequence_group(sampler_outputs: List[SamplerOutput],
