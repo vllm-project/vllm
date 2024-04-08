@@ -10,7 +10,7 @@ from vllm.model_executor.utils import set_random_seed
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (Logprob, SamplerOutput, SequenceData,
                            SequenceGroupMetadata, SequenceGroupOutput,
-                           SequenceOutput)
+                           SequenceOutput, Logprob)
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.worker import Worker
@@ -211,7 +211,7 @@ def create_sampler_output_list(
                     SequenceOutput(
                         output_token=token_id,
                         parent_seq_id=seq_ids[seq_index],
-                        logprobs={token_id: 0},
+                        logprobs={token_id: Logprob(0)},
                     )
                 ],
                 prompt_logprobs=None,

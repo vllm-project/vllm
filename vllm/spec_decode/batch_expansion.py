@@ -9,7 +9,7 @@ from vllm.spec_decode.interfaces import (SpeculativeProposals,
 from vllm.spec_decode.util import (get_all_seq_ids, nvtx_range,
                                    sampler_output_to_torch,
                                    split_batch_by_proposal_len,
-                                   mock_device_tensors)
+                                   maybe_mock_device_tensors)
 from vllm.worker.worker import Worker
 
 SeqId = int
@@ -147,7 +147,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         sequences.
         """
 
-        mock_device_tensors(
+        maybe_mock_device_tensors(
             sampler_output=target_sampler_output,
             batch_size=len(non_spec_indices) + num_scoring_tokens,
             vocab_size=self._vocab_size,

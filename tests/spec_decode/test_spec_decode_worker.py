@@ -12,6 +12,7 @@ from vllm.spec_decode.metrics import (AsyncMetricsCollector,
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.spec_decode_worker import (SpecDecodeWorker,
                                                  split_num_cache_blocks_evenly)
+from vllm.sequence import SamplerOutput
 
 from .utils import (ExecuteModelData, create_batch, create_sampler_output_list,
                     mock_worker)
@@ -191,7 +192,7 @@ def test_correctly_calls_rejection_sampler(k: int, batch_size: int):
     target_output = create_sampler_output_list(target_token_ids,
                                                target_token_probs)
 
-    target_worker.execute_model.return_value = target_output[0]
+    target_worker.execute_model.return_value = [target_output[0]]
 
     exception_secret = 'artifical stop'
     rejection_sampler.side_effect = ValueError(exception_secret)
@@ -271,7 +272,7 @@ def test_correctly_formats_output(k: int, batch_size: int):
     target_output = create_sampler_output_list(target_token_ids,
                                                target_token_probs)
 
-    target_worker.execute_model.return_value = target_output[0]
+    target_worker.execute_model.return_value = [target_output[0]]
 
     rejection_sampler_output = torch.randint(low=0,
                                              high=vocab_size,
@@ -340,6 +341,7 @@ def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool):
     rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
+
     draft_worker.device = 'cuda'
     target_worker.device = 'cuda'
 
@@ -383,7 +385,7 @@ def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool):
     target_output = create_sampler_output_list(target_token_ids,
                                                target_token_probs)
 
-    target_worker.execute_model.return_value = target_output[0]
+    target_worker.execute_model.return_value = [target_output[0]]
 
     rejection_sampler_output = torch.randint(low=0,
                                              high=vocab_size,
@@ -426,6 +428,8 @@ def test_k_equals_zero(k: int, batch_size: int):
     rejection_sampler.token_id_dtype = torch.int64
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
+    target_worker.execute_model.return_value = [MagicMock(spec=SamplerOutput)]
+
     draft_worker.device = 'cuda'
     target_worker.device = 'cuda'
 
@@ -446,7 +450,7 @@ def test_k_equals_zero(k: int, batch_size: int):
         0].sampled_tokens is None, "expect gpu tensor references to be None"
 
     draft_worker.execute_model.assert_called_once_with(
-        **execute_model_data.to_dict(), return_python_output=False)
+        **execute_model_data.to_dict())
     target_worker.execute_model.assert_called_once_with(
         **execute_model_data.to_dict())
 
@@ -465,6 +469,8 @@ def test_empty_input_batch(k: int, batch_size: int):
     rejection_sampler.token_id_dtype = torch.int64
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
+    target_worker.execute_model.return_value = [MagicMock(spec=SamplerOutput)]
+
     draft_worker.device = 'cuda'
     target_worker.device = 'cuda'
 
@@ -485,7 +491,7 @@ def test_empty_input_batch(k: int, batch_size: int):
         0].sampled_tokens is None, "expect gpu tensor references to be None"
 
     draft_worker.execute_model.assert_called_once_with(
-        **execute_model_data.to_dict(), return_python_output=False)
+        **execute_model_data.to_dict())
     target_worker.execute_model.assert_called_once_with(
         **execute_model_data.to_dict())
 
