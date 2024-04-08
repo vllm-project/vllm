@@ -35,9 +35,6 @@ class GPUExecutor(ExecutorBase):
         self.vision_language_config = vision_language_config
         self.speculative_config = speculative_config
 
-        #assert (not speculative_config
-        #        ), "Speculative decoding not yet supported for GPU backend"
-
         # Instantiate the worker and load the model to GPU.
         self._init_worker()
 
