@@ -255,6 +255,7 @@ class CPUWorker:
             world_size=parallel_config.world_size,
             rank=rank,
             distributed_init_method=distributed_init_method,
+            backend="gloo",
         )
 
         # A small all_reduce for warmup.

@@ -18,6 +18,8 @@ _PIPELINE_MODEL_PARALLEL_GROUP = None
 # when people blindly call `torch.distributed.all_reduce` etc,
 # it will use this group. It is initialized with the `backend`
 # parameter of `init_distributed_environment` below.
+# Essentially, this is `torch.distributed.group.WORLD`.
+# We leave a line here to note that this is device-specific.
 _DEVICE_WORLD_GROUP = None
 
 # duing `init_distributed_environment`, we will also initialize a
@@ -156,6 +158,12 @@ def model_parallel_is_initialized():
     """Check if tensor and pipeline parallel groups are initialized."""
     return (_TENSOR_MODEL_PARALLEL_GROUP is not None
             and _PIPELINE_MODEL_PARALLEL_GROUP is not None)
+
+
+def get_cpu_world_group():
+    """Get the CPU world group."""
+    assert _CPU_WORLD_GROUP is not None, ("CPU world group is not initialized")
+    return _CPU_WORLD_GROUP
 
 
 def get_tensor_model_parallel_group():
