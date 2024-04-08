@@ -148,7 +148,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {suppored_head_sizes}.")
 
-        self.use_naive_attn = _check_use_naive_attention()
+        self.use_naive_attn = torch.cuda.get_device_capability()[0] != 9
         # NOTE: Allow for switching between Triton and CK. Defaulting to triton.
         self.use_triton_flash_attn = (os.environ.get(
             "VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in ("true", "1"))
@@ -183,7 +183,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: ROCmFlashAttentionMetadata,
-        kv_scale: float,
+        kv_scale: float = 1.0,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 
@@ -297,16 +297,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
 
         # Reshape the output tensor.
         return output.view(num_tokens, hidden_size)
-
-
-def _check_use_naive_attention() -> bool:
-    # For ROCm, check whether flash attention is installed or not.
-    use_naive_attention = importlib.util.find_spec("flash_attn") is None
-    if use_naive_attention:
-        logger.warning("flash_attn is not installed. Using naive attention. "
-                       "This will take significantly more GPU memory.")
-        return True
-    return False
 
 
 def _naive_attention(
