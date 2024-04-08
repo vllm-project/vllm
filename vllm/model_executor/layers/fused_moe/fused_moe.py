@@ -143,7 +143,11 @@ def fused_moe_kernel(
     c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[
         None, :]
     c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
-    tl.atomic_add(c_ptrs, accumulator, mask=c_mask)
+
+    if SPLIT_K_SIZE == 1:
+        tl.store(c_ptrs, accumulator, mask=c_mask)
+    else:
+        tl.atomic_add(c_ptrs, accumulator, mask=c_mask)
 
 
 def moe_align_block_size(
