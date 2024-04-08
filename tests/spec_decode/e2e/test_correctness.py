@@ -26,17 +26,25 @@ from vllm import SamplingParams
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",
     [
-        # TODO(cade) handle <s> output
         {
             "speculative_model": "JackFram/llama-68m",
             "num_speculative_tokens": 5,
+        },
+        {
+            "speculative_model": "JackFram/llama-68m",
+            "num_speculative_tokens": 1,
         },
         {
             # No spec decode.
         },
     ])
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
-@pytest.mark.parametrize("batch_size", [1, 10])
+@pytest.mark.parametrize("batch_size", [1])
+# NOTE: We should run more permutations of this test (more BS, more seeds). But
+# because our spec decode generates gibberish token ids, the likelihood of
+# emitting an invalid token combination is nontrivial. This causes divergence in
+# behavior of vLLM detokenization vs. hf tokenizer, for example when two "utf-
+# start" bytes are emitted.
 @pytest.mark.parametrize("seed", [1])
 def test_spec_decode_e2e_logical_flow(test_llm_generator, batch_size: int):
     """Run generation with speculative decoding on a batch. Verify the engine
@@ -59,6 +67,8 @@ def test_spec_decode_e2e_logical_flow(test_llm_generator, batch_size: int):
         max_tokens=output_len,
         ignore_eos=True,
         temperature=temperature,
+        skip_special_tokens=True,
+        spaces_between_special_tokens=False,
     )
 
     batch_tokens, batch_token_ids = get_output_from_llm_generator(
@@ -76,7 +86,7 @@ def test_spec_decode_e2e_logical_flow(test_llm_generator, batch_size: int):
     for actual_tokens, actual_token_ids in zip(batch_tokens, batch_token_ids):
         expected_tokens = tok.decode(actual_token_ids)
         print(f"{actual_token_ids=}")
-        assert actual_tokens.strip() == expected_tokens.strip()
+        assert actual_tokens == expected_tokens
 
 
 @pytest.mark.parametrize(

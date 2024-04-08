@@ -101,8 +101,8 @@ def maybe_mock_device_tensors(sampler_output: SamplerOutput, batch_size: int,
         torch.rand(batch_size, vocab_size, dtype=torch.float32, device=device),
         dim=-1)
 
-    sampler_output.sampled_token_ids = torch.randint(low=0,
-                                                     high=vocab_size,
+    sampler_output.sampled_token_ids = torch.randint(low=10,
+                                                     high=100,
                                                      size=(batch_size, ),
                                                      dtype=torch.long,
                                                      device=device)
