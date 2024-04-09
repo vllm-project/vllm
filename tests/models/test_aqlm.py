@@ -48,6 +48,7 @@ example_prompts = [
 #     input_ids = tokenizer(prompt, return_tensors="pt")["input_ids"].to("cuda")
 #     hf_outputs = quantized_model.generate(input_ids, max_new_tokens=32)
 #     outputs.append(tokenizer.decode(hf_outputs[0][input_ids.shape[1]:]))
+# print(outputs)
 # ```
 ground_truth_generations = [
     '\n### Features\n\n- **High-throughput**: vLLM is designed to be '
@@ -57,17 +58,17 @@ ground_truth_generations = [
     'Compare and contrast artificial intelligence with human intelligence in '
     'terms of processing information. The processing of information is a key '
     'component of artificial intelligence. The processing of information is',
-    'Explain the difference between supervised and unsupervised '
-    'learning.\nExplain the difference between a feedforward neural network '
-    'and a recurrent neural network.\n',
+    'Explain the difference between supervised and unsupervised learning.\n'
+    'Explain the difference between feedforward and recurrent neural networks.'
+    '\nExplain the difference',
     'Write a short story about a robot that dreams for the first time. The '
     'story should be about 1000 words.\nThe story should be',
-    'Analyze the impact of the COVID-19 pandemic on global economic structures '
-    'and future business models. The COVID-19 pandemic has had a',
-    'The Mona Lisa is a painting by Leonardo da Vinci, and it is considered to '
-    'be one of the most famous paintings in the world. The',
-    "Translate the following English sentence into Japanese, French, and "
-    "Swahili: 'The early bird catches the worm.'\nThe early bird catches"
+    'Analyze the impact of the COVID-19 pandemic on global economic structures'
+    ' and future business models. The COVID-19 pandemic has had a',
+    'The Mona Lisa is a painting by Leonardo da Vinci, and it is considered '
+    'to be one of the most famous paintings in the world. The',
+    'The early bird catches the worm.\nThe early bird catches the worm. '
+    '(Japanese)\nLe petit oiseau attrait'
 ]
 
 
