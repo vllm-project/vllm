@@ -3,12 +3,14 @@
 {% set default_working_dir = "/vllm-workspace/tests" %}
 
 steps:
-  - label: "AMD Test"
+  - label: "AMD Test Basic"
     agents:
       queue: amd
-    commands: 
-      - "bash .buildkite/run-amd-test.sh"
-      - "bash .buildkite/run-amd-test_entrypoints.sh"
+    command: "bash .buildkite/run-amd-test.sh"
+  - label: "AMD Test Entrypoints"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_entrypoints.sh"
 
   - label: "CPU Test"
     command: bash .buildkite/run-cpu-test.sh
