@@ -91,9 +91,80 @@ def test_spec_decode_e2e_logical_flow(test_llm_generator, batch_size: int):
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
-        # Use a small model for a fast test.
-        # Note this is repeated in the test body; to initialize a tokenizer.
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
+
+        # Required for spec decode.
+        "use_v2_block_manager": True
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs",[
+    # Try two different tiny base models.
+    # Note that one is equal to the draft model, another isn't.
+    {
         "model": "JackFram/llama-68m",
+    },
+    {
+        "model": "JackFram/llama-160m",
+    },
+])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    # Try two different num spec tokens.
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+    },
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 1,
+    }
+])
+@pytest.mark.parametrize("batch_size", [1])
+@pytest.mark.parametrize("seed", [1])
+def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(baseline_llm_generator, test_llm_generator, batch_size: int):
+    run_greedy_correctness_test(baseline_llm_generator, test_llm_generator, batch_size)
+
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
+
+        # Required for spec decode.
+        "use_v2_block_manager": True
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs",[
+    # Try two different tiny base models.
+    # Note that one is equal to the draft model, another isn't.
+    {
+        "model": "JackFram/llama-68m",
+    },
+    {
+        "model": "JackFram/llama-160m",
+    },
+])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    # Try two different num spec tokens.
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+    },
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 1,
+    }
+])
+@pytest.mark.parametrize("batch_size", [32])
+@pytest.mark.parametrize("seed", [1])
+def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(baseline_llm_generator, test_llm_generator, batch_size: int):
+    run_greedy_correctness_test(baseline_llm_generator, test_llm_generator, batch_size)
+
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        # A "real" model (not tiny).
+        "model": "meta-llama/Llama-2-7b-chat-hf",
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
@@ -102,16 +173,54 @@ def test_spec_decode_e2e_logical_flow(test_llm_generator, batch_size: int):
         "use_v2_block_manager": True
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs",[{}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
+    # Try two different num spec tokens.
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
+    },
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 1,
     }
 ])
-@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("batch_size", [1, 32])
+@pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("seed", [1])
-def test_spec_decode_e2e_greedy_correctness(baseline_llm_generator, test_llm_generator, batch_size: int):
+def test_spec_decode_e2e_greedy_correctness_real_model_bs1(baseline_llm_generator, test_llm_generator, batch_size: int):
+    run_greedy_correctness_test(baseline_llm_generator, test_llm_generator, batch_size)
+
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        # A "real" model (not tiny).
+        "model": "meta-llama/Llama-2-7b-chat-hf",
+
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
+
+        # Required for spec decode.
+        "use_v2_block_manager": True
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs",[{}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    # Try two different num spec tokens.
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+    },
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 1,
+    }
+])
+@pytest.mark.parametrize("batch_size", [32])
+@pytest.mark.parametrize("seed", [1])
+def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(baseline_llm_generator, test_llm_generator, batch_size: int):
+    run_greedy_correctness_test(baseline_llm_generator, test_llm_generator, batch_size)
+
+def run_greedy_correctness_test(baseline_llm_generator, test_llm_generator, batch_size):
     output_len = 32
     temperature = 0.0
 
@@ -134,7 +243,7 @@ def test_spec_decode_e2e_greedy_correctness(baseline_llm_generator, test_llm_gen
         test_llm_generator, prompts, sampling_params)
 
     _, baseline_batch_token_ids = get_output_from_llm_generator(
-        test_llm_generator, prompts, sampling_params)
+        baseline_llm_generator, prompts, sampling_params)
 
     assert len(baseline_batch_token_ids) == len(prompts)
     assert len(spec_batch_token_ids) == len(prompts)
