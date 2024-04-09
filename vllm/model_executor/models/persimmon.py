@@ -20,7 +20,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only persimmon model compatible with HuggingFace weights."""
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import torch
 
@@ -129,17 +129,15 @@ class PersimmonAttention(nn.Module):
                               self.head_dim,
                               scale=self.scaling)
 
-    def _split_heads(
-        self, fused_qkv: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        seq_length = fused_qkv.shape[0]
-        fused_qkv = fused_qkv.view(seq_length, self.num_heads, 3,
-                                   self.head_dim)
-        return fused_qkv[..., 0, :], fused_qkv[..., 1, :], fused_qkv[..., 2, :]
+    def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
+        # [seq_length, hidden_size] -> [seq_length, num_heads, head_dim]
+        seq_length = x.shape[0]
+        return x.view(seq_length, self.num_heads, self.head_dim)
 
     def _merge_heads(self, x: torch.Tensor) -> torch.Tensor:
+        # [seq_length, num_heads, head_dim] -> [seq_length, hidden_size]
         seq_length = x.shape[0]
-        return x.reshape(seq_length, self.num_heads * self.head_dim)
+        return x.view(seq_length, self.num_heads * self.head_dim)
 
     def forward(
         self,
@@ -150,20 +148,18 @@ class PersimmonAttention(nn.Module):
     ) -> torch.Tensor:
         # [seq_length, 3 x hidden_size]
         qkv, _ = self.query_key_value(hidden_states)
+        q, k, v = qkv.chunk(chunks=3, dim=-1)
 
         if self.qk_layernorm:
-            # 3 x [seq_length, num_heads, head_dim]
-            q, k, v = self._split_heads(qkv)
+            # [seq_length, num_heads, head_dim]
+            q = self._split_heads(q)
+            k = self._split_heads(k)
 
             q = self.q_layernorm(q)
             k = self.k_layernorm(k)
 
             q = self._merge_heads(q)
             k = self._merge_heads(k)
-            v = self._merge_heads(v)
-
-        else:
-            q, k, v = qkv.chunk(chunks=3, dim=-1)
 
         q, k = self.rotary_emb(position_ids, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
@@ -320,6 +316,24 @@ class PersimmonForCausalLM(nn.Module):
                 # the checkpoint. Skip them.
                 continue
             param = params_dict[name]
+
+            if "query_key_value" in name:
+                # copy from vllm/model_executor/models/bloom.py
+                # NOTE: BLOOM's fused QKV's output_dim has the shape of
+                # (num_heads * 3 * head_size), while the
+                # required shape is (3 * num_heads * head_size).
+                # Thus, we need weight conversion.
+                output_dim = getattr(param, "output_dim", None)
+                num_heads = self.config.num_attention_heads
+                if output_dim is not None:
+                    loaded_weight_shape = loaded_weight.shape
+                    loaded_weight = loaded_weight.view(
+                        loaded_weight_shape[:output_dim] + (num_heads, 3, -1) +
+                        loaded_weight_shape[output_dim + 1:])
+                    loaded_weight = loaded_weight.transpose(
+                        output_dim, output_dim + 1)
+                    loaded_weight = loaded_weight.reshape(loaded_weight_shape)
+
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
