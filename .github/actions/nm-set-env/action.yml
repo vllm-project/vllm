@@ -15,6 +15,9 @@ runs:
   steps:
   - run: |
       echo "TORCH_CUDA_ARCH_LIST=7.0 7.5 8.0 8.6 8.9 9.0+PTX" >> $GITHUB_ENV
+      echo "MAGIC_WAND_VERSION=0.2.0" >> $GITHUB_ENV
+      echo "DATE=$(date +%Y%m%d)" >> $GITHUB_ENV
+      echo "MAGIC_WAND_NIGHTLY_VERSION=${MAGIC_WAND_VERSION}.${DATE}" >> $GITHUB_ENV
       echo "HF_TOKEN=${HF_TOKEN_SECRET}" >> $GITHUB_ENV
       echo "HF_HOME=/EFS/hf_home" >> $GITHUB_ENV
       NUM_THREADS=$(./.github/scripts/determine-threading -G ${{ inputs.Gi_per_thread }})
