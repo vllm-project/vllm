@@ -76,9 +76,9 @@ class Sampler(nn.Module):
         # Use log_softmax to ensure numerical stability.
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
 
-        if self._enable_triton_kernel and not is_cuda() or any(
+        if not self._enable_triton_kernel or (not is_cuda() or any(
                 sampling_params.sampling_type == SamplingType.BEAM
-                for _, sampling_params in sampling_metadata.seq_groups):
+                for _, sampling_params in sampling_metadata.seq_groups)):
             # Sample the next tokens.
             sample_results = _sample(probs, logprobs, sampling_metadata)
             # Get the logprobs query results.
@@ -670,7 +670,8 @@ def pythonize_sampler_output(
     logprob_ranks_gpu = (raw_sampler_output.logprobs[
         raw_sampler_output.sampling_tensors.sample_indices] >
                          raw_sampler_output.sampled_logprobs.flatten()[:, None]
-                         ).long().sum(1).add_(1)
+                         ).long().sum(1).add_(1).view_as(
+                             raw_sampler_output.sampled_logprobs)
 
     # GPU<->CPU sync happens below.
     samples = torch.empty(*raw_sampler_output.sampled_tokens.shape,
