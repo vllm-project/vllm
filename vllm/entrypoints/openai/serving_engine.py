@@ -106,7 +106,8 @@ class OpenAIServing:
                 token = step_top_logprobs[token_id].decoded_token
             else:
                 token_logprob = None
-                token = None
+                # The tokens in LogProbs are expected to be strings.
+                token = ""
             logprobs.tokens.append(token)
             logprobs.token_logprobs.append(token_logprob)
             if len(logprobs.text_offset) == 0:
