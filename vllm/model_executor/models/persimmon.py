@@ -23,29 +23,25 @@
 from typing import List, Optional
 
 import torch
-
 from torch import nn
-from transformers.activations import ReLUSquaredActivation
 from transformers import PersimmonConfig
+from transformers.activations import ReLUSquaredActivation
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    LinearMethodBase,
-    QKVParallelLinear,
-    RowParallelLinear,
-)
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               LinearMethodBase,
+                                               QKVParallelLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_world_size, )
+    get_tensor_model_parallel_world_size)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.weight_utils import (
-    default_weight_loader,
-    hf_model_weights_iterator,
-)
+from vllm.model_executor.weight_utils import (default_weight_loader,
+                                              hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 
 
@@ -77,12 +73,11 @@ class PersimmonAttention(nn.Module):
                  linear_method: Optional[LinearMethodBase] = None):
         super().__init__()
         self.config = config
-        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size(
-        )
+        tensor_parallel_world_size = get_tensor_model_parallel_world_size()
 
         self.hidden_size = config.hidden_size
         self.total_num_heads = config.num_attention_heads
-        self.num_heads = self.total_num_heads // tensor_model_parallel_world_size
+        self.num_heads = self.total_num_heads // tensor_parallel_world_size
         self.head_dim = self.hidden_size // self.total_num_heads
         self.max_position_embeddings = config.max_position_embeddings
         self.rope_theta = config.rope_theta
@@ -90,7 +85,7 @@ class PersimmonAttention(nn.Module):
         self.is_causal = True
 
         assert (self.head_dim * self.total_num_heads) == self.hidden_size
-        assert self.total_num_heads % tensor_model_parallel_world_size == 0
+        assert self.total_num_heads % tensor_parallel_world_size == 0
 
         self.query_key_value = QKVParallelLinear(
             self.hidden_size,
