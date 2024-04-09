@@ -174,15 +174,15 @@ Model Support Policy
 
 At vLLM, we are committed to facilitating the integration and support of third-party models within our ecosystem. Our approach is designed to balance the need for robustness and the practical limitations of supporting a wide range of models. Here’s how we manage third-party model support:
 
-1. Community-Driven Support: We encourage community contributions for adding new models. When a user requests support for a new model, we welcome pull requests (PRs) from the community. These contributions are evaluated primarily on the sensibility of the output they generate, rather than strict consistency with existing implementations such as those in transformers.
+1. **Community-Driven Support**: We encourage community contributions for adding new models. When a user requests support for a new model, we welcome pull requests (PRs) from the community. These contributions are evaluated primarily on the sensibility of the output they generate, rather than strict consistency with existing implementations such as those in transformers.
 
-2. Best-Effort Consistency: While we aim to maintain a level of consistency between the models implemented in vLLM and other frameworks like transformers, complete alignment is not always feasible. Factors like acceleration techniques and the use of low-precision computations can introduce discrepancies. Our commitment is to ensure that the implemented models are functional and produce sensible results.
+2. **Best-Effort Consistency**: While we aim to maintain a level of consistency between the models implemented in vLLM and other frameworks like transformers, complete alignment is not always feasible. Factors like acceleration techniques and the use of low-precision computations can introduce discrepancies. Our commitment is to ensure that the implemented models are functional and produce sensible results.
 
-3. Issue Resolution and Model Updates: Users are encouraged to report any bugs or issues they encounter with third-party models. Proposed fixes should be submitted via PRs, with a clear explanation of the problem and the rationale behind the proposed solution. If a fix for one model impacts another, we rely on the community to highlight and address these cross-model dependencies.
+3. **Issue Resolution and Model Updates**: Users are encouraged to report any bugs or issues they encounter with third-party models. Proposed fixes should be submitted via PRs, with a clear explanation of the problem and the rationale behind the proposed solution. If a fix for one model impacts another, we rely on the community to highlight and address these cross-model dependencies.
 
-4. Monitoring and Updates: Users interested in specific models should monitor the commit history for those models (e.g., by tracking changes in the main/vllm/model_executor/models directory). This proactive approach helps users stay informed about updates and changes that may affect the models they use.
+4. **Monitoring and Updates**: Users interested in specific models should monitor the commit history for those models (e.g., by tracking changes in the main/vllm/model_executor/models directory). This proactive approach helps users stay informed about updates and changes that may affect the models they use.
 
-5. Selective Focus: Our resources are primarily directed towards models with significant user interest and impact. Models that are less frequently used may receive less attention, and we rely on the community to play a more active role in their upkeep and improvement.
+5. **Selective Focus**: Our resources are primarily directed towards models with significant user interest and impact. Models that are less frequently used may receive less attention, and we rely on the community to play a more active role in their upkeep and improvement.
 
 Through this approach, vLLM fosters a collaborative environment where both the core development team and the broader community contribute to the robustness and diversity of the third-party models supported in our ecosystem.
 
@@ -190,8 +190,27 @@ Note that, as an inference engine, vLLM does not introduce new models. Therefore
 
 We have three levels of testing for models:
 
-1. Strict consistency: We compare the output of the model with the output of the model in the HuggingFace Transformers library under greedy decoding. This is the most stringent test.
-2. Output sensibility: We check if the output of the model is sensible and coherent, by measuring the perplexity of the output and checking for any obvious errors. This is a less stringent test.
-3. Community feedback: We rely on the community to provide feedback on the models. If a model is broken or not working as expected, we encourage users to raise issues to report it or open pull requests to fix it.
-
-#TODO: list which models are tested at which level
+1. **Strict consistency**: We compare the output of the model with the output of the model in the HuggingFace Transformers library under greedy decoding. This is the most stringent test. The following models fall under this category:
+    - facebook/opt-125m
+    - meta-llama/Llama-2-7b-hf
+2. **Output sensibility**: We check if the output of the model is sensible and coherent, by measuring the perplexity of the output and checking for any obvious errors. This is a less stringent test.
+3. **Runtime functionality**: We check if the model can be loaded and run without errors. This is the least stringent test. The following models fall under this category:
+    - facebook/opt-125m
+    - meta-llama/Llama-2-7b-hf
+    - baichuan-inc/Baichuan-7B
+    - THUDM/chatglm3-6b
+    - google/gemma-7b
+    - Felladrin/Llama-68M-Chat-v1
+    - mistralai/Mixtral-8x7B-Instruct-v0.1
+    - TinyLlama/TinyLlama-1.1B-Chat-v1.0
+    - EleutherAI/gpt-j-6b
+    - mosaicml/mpt-7b
+    - llava-hf/llava-1.5-7b-hf
+    - bigcode/starcoder2-3b
+    - stabilityai/stablelm-3b-4e1t
+    - microsoft/phi-2
+    - bigscience/bloom-560m
+    - EleutherAI/pythia-70m
+    - bigcode/tiny_starcoder_py
+    - gpt2
+4. **Community feedback**: We rely on the community to provide feedback on the models. If a model is broken or not working as expected, we encourage users to raise issues to report it or open pull requests to fix it. The rest of the models fall under this category.
