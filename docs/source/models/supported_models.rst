@@ -83,6 +83,24 @@ Alongside each architecture, we include some popular models that use it.
     - LLaMA, LLaMA-2, Vicuna, Alpaca, Yi
     - :code:`meta-llama/Llama-2-13b-hf`, :code:`meta-llama/Llama-2-70b-hf`, :code:`openlm-research/open_llama_13b`, :code:`lmsys/vicuna-13b-v1.3`, :code:`01-ai/Yi-6B`, :code:`01-ai/Yi-34B`, etc.
     - ✅︎
+  * - :code:`LlavaForConditionalGeneration`
+    - LLaVA-1.5
+    - :code:`llava-hf/llava-1.5-7b-hf`\*, :code:`llava-hf/llava-1.5-13b-hf`\*, etc.
+
+      .. note::
+
+          Models with an asterisk (\*) are missing :code:`chat_template` from HuggingFace :code:`config.json`. A predefined template can be found in our repo (:code:`examples/template_llava.jinja`). To host the OpenAI-compatible server, provide the chat template via command-line arguments. You also need to provide the :code:`VisionLanguageConfig` to initialize the model. See the following example:
+
+          .. code-block:: shell
+
+              $ python -m vllm.entrypoints.openai.api_server \
+                  --model llava-hf/llava-1.5-7b-hf \
+                  --chat-template examples/template_llava.jinja \
+                  --image-input-type pixel_values \
+                  --image-token-id 32000 \
+                  --image-input-shape 1,3,336,336 \
+                  --image-feature-size 576
+    - 
   * - :code:`MistralForCausalLM`
     - Mistral, Mistral-Instruct
     - :code:`mistralai/Mistral-7B-v0.1`, :code:`mistralai/Mistral-7B-Instruct-v0.1`, etc.
