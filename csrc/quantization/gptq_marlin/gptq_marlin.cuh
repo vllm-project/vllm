@@ -17,8 +17,6 @@ namespace gptq_marlin {
 static constexpr int default_threads = 256;
 
 static constexpr int pipe_stages = 4; // 4 pipeline stages fit into shared memory
-static constexpr int max_shared_mem =
-    96 * 1024; // max shared memory on compute capability 8.6 (< 8.0)
 
 static constexpr int min_thread_n = 64;
 static constexpr int min_thread_k = 64;

@@ -16,7 +16,6 @@ import pytest
 import torch
 from compare_utils import check_logprobs_close
 
-from tests.conftest import cleanup
 from vllm.model_executor.layers.quantization import (
     _QUANTIZATION_CONFIG_REGISTRY)
 
@@ -65,7 +64,6 @@ def test_models(
 
     # Delete model and clear associated memory.
     del marlin_model
-    cleanup()
 
     gptq_model = vllm_runner(model_pair.model_gptq,
                              dtype=dtype,
@@ -76,7 +74,6 @@ def test_models(
 
     # Delete model and clear associated memory.
     del gptq_model
-    cleanup()
 
     # loop through the prompts
     # use logprobs or else this will consistently run out of memory

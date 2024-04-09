@@ -1264,6 +1264,11 @@ void marlin_cuda(const void *A, const void *B, void *C, void *s, void *g_idx,
     cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
   }
 
+  int max_shared_mem = 0;
+  cudaDeviceGetAttribute(&max_shared_mem,
+                         cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
+  TORCH_CHECK(max_shared_mem > 0);
+
   // Set thread config
   thread_config_t th_config;
   if (thread_k != -1 && thread_n != -1) {
@@ -1398,17 +1403,18 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor &a, torch::Tensor &b_q_weight,
 
   // Verify B
   TORCH_CHECK(size_k % gptq_marlin::tile_size == 0,
-              "size_k = " + str(size_k) +
-                  " is not divisible by tile_size = " + str(gptq_marlin::tile_size));
+              "size_k = " + str(size_k) + " is not divisible by tile_size = " +
+                  str(gptq_marlin::tile_size));
   TORCH_CHECK((size_k / gptq_marlin::tile_size) == b_q_weight.size(0),
               "Shape mismatch: b_q_weight.size(0) = " +
                   str(b_q_weight.size(0)) + ", size_k = " + str(size_k) +
                   ", tile_size = " + str(gptq_marlin::tile_size));
-  TORCH_CHECK(b_q_weight.size(1) % gptq_marlin::tile_size == 0,
-              "b_q_weight.size(1) = " + str(b_q_weight.size(1)) +
-                  " is not divisible by tile_size = " + str(gptq_marlin::tile_size));
-  int actual_size_n =
-      (b_q_weight.size(1) / gptq_marlin::tile_size) * gptq_marlin::pack_factor_4bit;
+  TORCH_CHECK(
+      b_q_weight.size(1) % gptq_marlin::tile_size == 0,
+      "b_q_weight.size(1) = " + str(b_q_weight.size(1)) +
+          " is not divisible by tile_size = " + str(gptq_marlin::tile_size));
+  int actual_size_n = (b_q_weight.size(1) / gptq_marlin::tile_size) *
+                      gptq_marlin::pack_factor_4bit;
   TORCH_CHECK(size_n == actual_size_n,
               "size_n = " + str(size_n) +
                   ", actual_size_n = " + str(actual_size_n));
@@ -1486,11 +1492,12 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor &a, torch::Tensor &b_q_weight,
   }
 
   // Verify workspace size
-  TORCH_CHECK(
-      size_n % gptq_marlin::min_thread_n == 0,
-      "size_n = " + str(size_n) +
-          ", is not divisible by min_thread_n = " + str(gptq_marlin::min_thread_n));
-  int min_workspace_size = (size_n / gptq_marlin::min_thread_n) * gptq_marlin::max_par;
+  TORCH_CHECK(size_n % gptq_marlin::min_thread_n == 0,
+              "size_n = " + str(size_n) +
+                  ", is not divisible by min_thread_n = " +
+                  str(gptq_marlin::min_thread_n));
+  int min_workspace_size =
+      (size_n / gptq_marlin::min_thread_n) * gptq_marlin::max_par;
   TORCH_CHECK(workspace.numel() >= min_workspace_size,
               "workspace.numel = " + str(workspace.numel()) +
                   " is below min_workspace_size = " + str(min_workspace_size));

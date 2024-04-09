@@ -294,22 +294,27 @@ torch::Tensor gptq_marlin_repack(torch::Tensor &b_q_weight, torch::Tensor &perm,
   int blocks;
   cudaDeviceGetAttribute(&blocks, cudaDevAttrMultiProcessorCount, dev);
 
+  int max_shared_mem = 0;
+  cudaDeviceGetAttribute(&max_shared_mem,
+                         cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
+  TORCH_CHECK(max_shared_mem > 0);
+
   if (has_perm) {
     cudaFuncSetAttribute(
         gptq_marlin::marlin_repack_kernel<gptq_marlin::repack_threads, true>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
-        gptq_marlin::max_shared_mem);
+        max_shared_mem);
     gptq_marlin::marlin_repack_kernel<gptq_marlin::repack_threads, true>
-        <<<blocks, gptq_marlin::repack_threads, gptq_marlin::max_shared_mem,
+        <<<blocks, gptq_marlin::repack_threads, max_shared_mem,
            stream>>>(b_q_weight_ptr, perm_ptr, out_ptr, size_k, size_n);
 
   } else {
     cudaFuncSetAttribute(
         gptq_marlin::marlin_repack_kernel<gptq_marlin::repack_threads, false>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
-        gptq_marlin::max_shared_mem);
+        max_shared_mem);
     gptq_marlin::marlin_repack_kernel<gptq_marlin::repack_threads, false>
-        <<<blocks, gptq_marlin::repack_threads, gptq_marlin::max_shared_mem,
+        <<<blocks, gptq_marlin::repack_threads, max_shared_mem,
            stream>>>(b_q_weight_ptr, perm_ptr, out_ptr, size_k, size_n);
   }
 
