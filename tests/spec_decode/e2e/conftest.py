@@ -36,6 +36,8 @@ def create_llm_generator(common_llm_kwargs, per_test_common_llm_kwargs,
         del llm
         cleanup()
 
-    for llm in generator_inner():
-        yield llm
-        del llm
+    def generator_outer():
+        for llm in generator_inner():
+            yield llm
+            del llm
+    return generator_outer

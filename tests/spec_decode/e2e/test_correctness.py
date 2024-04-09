@@ -39,7 +39,7 @@ from vllm import SamplingParams
         },
     ])
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
-@pytest.mark.parametrize("batch_size", [2])
+@pytest.mark.parametrize("batch_size", [1])
 # NOTE: We should run more permutations of this test (more BS, more seeds). But
 # because our spec decode generates gibberish token ids, the likelihood of
 # emitting an invalid token combination is nontrivial. This causes divergence in
@@ -87,6 +87,63 @@ def test_spec_decode_e2e_logical_flow(test_llm_generator, batch_size: int):
         expected_tokens = tok.decode(actual_token_ids)
         print(f"{actual_token_ids=}")
         assert actual_tokens.strip() == expected_tokens.strip()
+
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        # Use a small model for a fast test.
+        # Note this is repeated in the test body; to initialize a tokenizer.
+        "model": "JackFram/llama-68m",
+
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
+
+        # Required for spec decode.
+        "use_v2_block_manager": True
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs",[{}])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+    }
+])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("batch_size", [1])
+@pytest.mark.parametrize("seed", [1])
+def test_spec_decode_e2e_greedy_correctness_bs1(baseline_llm_generator, test_llm_generator, batch_size: int):
+    output_len = 32
+    temperature = 0.0
+
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+
+    prompts = [prompt for prompt, _ in zip(cycle(prompts), range(batch_size))]
+
+    sampling_params = SamplingParams(
+        max_tokens=output_len,
+        ignore_eos=True,
+        temperature=temperature,
+    )
+
+    _, spec_batch_token_ids = get_output_from_llm_generator(
+        test_llm_generator, prompts, sampling_params)
+
+    _, baseline_batch_token_ids = get_output_from_llm_generator(
+        test_llm_generator, prompts, sampling_params)
+
+    assert len(baseline_batch_token_ids) == len(prompts)
+    assert len(spec_batch_token_ids) == len(prompts)
+    assert [len(token_ids) for token_ids in baseline_batch_token_ids + spec_batch_token_ids] == [output_len] * (batch_size * 2)
+
+    for i, (baseline_token_ids, spec_token_ids) in enumerate(zip(baseline_batch_token_ids, spec_batch_token_ids)):
+        print(f'{i=} {baseline_batch_token_ids=}')
+        print(f'{i=}    {spec_batch_token_ids=}')
+        assert baseline_token_ids == spec_token_ids
 
 
 @pytest.mark.parametrize(
@@ -142,7 +199,9 @@ def test_spec_decode_xfail(test_llm_generator):
 def get_output_from_llm_generator(
         llm_generator, prompts,
         sampling_params) -> Tuple[List[str], List[List[int]]]:
-    for llm in llm_generator:
+    tokens = []
+    token_ids = []
+    for llm in llm_generator():
         outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
         token_ids = [output.outputs[0].token_ids for output in outputs]
         tokens = [output.outputs[0].text for output in outputs]
