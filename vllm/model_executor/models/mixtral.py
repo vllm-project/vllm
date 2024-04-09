@@ -91,18 +91,35 @@ class MixtralMoE(nn.Module):
                         2 * self.intermediate_size,
                         self.hidden_size,
                         device="cuda",
-                        dtype=self.params_dtype))
+                        dtype=torch.float8_e4m3fn))
         self.w2s = nn.Parameter(
             torch.empty(self.num_total_experts,
                         self.hidden_size,
                         self.intermediate_size,
                         device="cuda",
-                        dtype=self.params_dtype))
+                        dtype=torch.float8_e4m3fn))
+
+        # Scaling factors for fp8
+        self.s = nn.Parameter(
+            torch.empty(self.hidden_size,
+                        device="cuda",
+                        dtype=torch.float16))
+        self.s2 = nn.Parameter(
+            torch.empty(self.intermediate_size,
+                        device="cuda",
+                        dtype=torch.float8_e4m3fn))
 
         set_weight_attrs(self.ws, {
             "weight_loader": self.weight_loader,
         })
         set_weight_attrs(self.w2s, {
+            "weight_loader": self.weight_loader,
+        })
+
+        set_weight_attrs(self.s, {
+            "weight_loader": self.weight_loader,
+        })
+        set_weight_attrs(self.s2, {
             "weight_loader": self.weight_loader,
         })
 
@@ -119,6 +136,13 @@ class MixtralMoE(nn.Module):
                        shard_size:2 * shard_size, :] = loaded_weight[shard, :]
         if weight_name.endswith("w2.weight"):
             param_data[expert_id, :, :] = loaded_weight[:, shard]
+        # Load scaling factors for fp8
+        if weight_name.endswith("scales.w1") or weight_name.endswith("scales.w3"):
+            param_data[:] = loaded_weight[:]
+            print("loaded scale", weight_name, loaded_weight.shape)
+        if weight_name.endswith("scales.w2"):
+            param_data[:] = loaded_weight[shard]
+            print("loaded scale", weight_name, loaded_weight.shape)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
@@ -128,6 +152,8 @@ class MixtralMoE(nn.Module):
         final_hidden_states = fused_moe(hidden_states,
                                         self.ws,
                                         self.w2s,
+                                        self.s,
+                                        self.s2,
                                         router_logits,
                                         self.top_k,
                                         renormalize=True,
@@ -407,10 +433,17 @@ class MixtralForCausalLM(nn.Module):
         ]
 
         expert_params_mapping = [
+            # These are the weights for the experts
             # (param_name, weight_name, expert_id)
             ("ws" if weight_name in ["w1", "w3"] else "w2s",
              f"experts.{expert_id}.{weight_name}.weight", expert_id)
             for expert_id in range(self.config.num_local_experts)
+            for weight_name in ["w1", "w2", "w3"]
+        ] + [
+            # These are the scales for the experts
+            # (param_name, weight_name, None)
+            ("s" if weight_name in ["w1", "w3"] else "s2",
+             f"scales.{weight_name}", None)
             for weight_name in ["w1", "w2", "w3"]
         ]
 
