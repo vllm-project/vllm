@@ -8,10 +8,12 @@ import json
 
 prompts = ['who is the founder of Microsoft']
 
-model_path="/data/users/yunanzhang/hf/checkpoints/TLG4.7.3/iter_0078678_hf/"
+# model_path="/data/users/yunanzhang/hf/checkpoints/TLG4.7.3/iter_0078678_hf/"
+model_path='/mnt/std-cache/users/xihlin/checkpoints/tlgv4.7-phase2/tlgv4'
+
 sampling_params = SamplingParams(temperature=0)
-llm = LLM(model=model_path,tokenizer='TLGv4Tokenizer',enforce_eager=True)
-outputs = llm.generate(prompts,sampling_params)
+llm = LLM(model=model_path, tokenizer=model_path, enforce_eager=True, trust_remote_code=True)
+outputs = llm.generate(prompts, sampling_params)
 
 for output in outputs:
     prompt = output.prompt

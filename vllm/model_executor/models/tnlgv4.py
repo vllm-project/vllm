@@ -28,6 +28,8 @@ from .tnlgv4_attention import BlockSparseFlashAttention
 
 '''
 Further optimization TODO:
+0. model name should be tlv4, not tnlgv4.
+
 1. fused matmul + activation (this seems to affect quantization)
 2. test if gegelu vs triton version
 3. FP8 bs attn.
@@ -95,11 +97,17 @@ class TLGv4SelfAttention(nn.Module):
     def __init__(self, config: TLGv4Config, layer_idx: Optional[int] = None) -> None:
         super().__init__()
         self.config = config
-        
+        self.sparse_block_size = config.blocksparse_block_size
+        self.homo_heads = config.blocksparse_homo_head_pattern
+        self.lcoal_blocks = config.blocksparse_num_local_blocks
+        self.vert_stride = config.blocksparse_vert_stride
+
+        assert config.blocksparse_block_size == config.blocksparse_triton_kernel_block_size
+
         self.hidden_size = config.hidden_size
         # Number of Query Heads
         self.num_heads = config.num_attention_heads
-        
+
         self.head_dim = self.hidden_size // self.num_heads
         self.tp_size = get_tensor_model_parallel_world_size()
         # Number of total Key Value Heads before tensor parallel
@@ -108,7 +116,7 @@ class TLGv4SelfAttention(nn.Module):
         if self.num_key_value_heads >= self.tp_size:
             assert self.tp_size % self.num_key_value_heads
         self.num_kv_heads = max(1, self.num_key_value_heads // self.tp_size)
-        
+
         self.max_position_embeddings = config.max_position_embeddings
         self.rope_embedding_base = config.rope_embedding_base
         self.rope_position_scale = config.rope_position_scale
@@ -119,6 +127,7 @@ class TLGv4SelfAttention(nn.Module):
             norm_factor = self.head_dim / config.mup_attn_multiplier
         else:
             norm_factor = math.sqrt(self.head_dim)
+        self.scale = 1 / norm_factor
 
         self.query_key_value = QKVParallelLinear(
             self.hidden_size,
@@ -142,15 +151,20 @@ class TLGv4SelfAttention(nn.Module):
             base=self.rope_embedding_base,
             rope_scaling={"type":"linear","factor":self.rope_position_scale},
         )
-        
+
         #blocksparse params
         self.blocksparse_block_size = config.blocksparse_block_size
         self.blocksparse_num_local_blocks = config.blocksparse_num_local_blocks
         self.sliding_window = self.blocksparse_block_size * self.blocksparse_num_local_blocks
-        
-        self.attn = BlockSparseFlashAttention(self.num_heads,
+
+        self.attn = BlockSparseFlashAttention(
+                              self.lcoal_blocks,
+                              self.vert_stride,
+                              self.num_heads,
                               self.head_dim,
-                              norm_factor,
+                              self.scale,
+                              max_seqlen=self.max_position_embeddings,
+                              sparse_block_size=self.sparse_block_size,
                               num_kv_heads=self.num_kv_heads)
 
     def forward(
@@ -185,7 +199,7 @@ class TLGv4DecoderLayer(nn.Module):
 
         self.input_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_epsilon)
         self.post_attention_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_epsilon)
-    
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -209,8 +223,8 @@ class TLGv4DecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
         return hidden_states
-    
-    
+
+
 class TLGv4Model(nn.Module):
 
     def __init__(self, config:TLGv4Config,linear_method: Optional[LinearMethodBase] = None,):
@@ -218,7 +232,7 @@ class TLGv4Model(nn.Module):
         self.config = config
 
         self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size, 
+            config.vocab_size,
             config.hidden_size
             )
 
@@ -230,13 +244,13 @@ class TLGv4Model(nn.Module):
         self.layers = nn.ModuleList([TLGv4DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
 
         self.final_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_epsilon)
-    
+
     def get_input_embeddings(self):
         return self.embed_tokens
-    
+
     def set_input_embeddings(self, value):
         self.embed_tokens = value
-    
+
     def forward(
         self,
         input_ids: torch.LongTensor,
@@ -257,7 +271,7 @@ class TLGv4Model(nn.Module):
             )
         hidden_states = self.final_layernorm(hidden_states)
         return hidden_states
-        
+
 
 class TLGv4ForCausalLM(nn.Module):
     _tied_weights_keys = ["lm_head.weight"]
@@ -266,7 +280,7 @@ class TLGv4ForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.model = TLGv4Model(config)
-        self.vocab_size = config.vocab_size     
+        self.vocab_size = config.vocab_size
         self.mup_width_multiplier = config.mup_width_multiplier
         self.lm_head = ParallelLMHead(
             self.vocab_size,
@@ -298,7 +312,7 @@ class TLGv4ForCausalLM(nn.Module):
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
         logits = self.logits_processor(self.lm_head.weight, hidden_states,
                                        sampling_metadata)
-        return logits  
+        return logits
     def forward(
         self,
         input_ids: torch.LongTensor,
@@ -309,8 +323,8 @@ class TLGv4ForCausalLM(nn.Module):
         output_hidden_states = self.model(input_ids=input_ids, positions=positions, kv_caches=kv_caches, attn_metadata=attn_metadata)
         output_hidden_states = output_hidden_states
         return output_hidden_states
-        
-    
+
+
     def sample(
         self,
         logits: torch.Tensor,

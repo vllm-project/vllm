@@ -2,7 +2,7 @@ import triton
 import triton.language as tl
 import torch
 import math
-from megatron.blocksparse.utils import _get_sparse_attn_mask
+from .tnlgv4_utils import _get_sparse_attn_mask
 
 
 class LocalStridedBlockSparseAttnInference(torch.nn.Module):
@@ -15,18 +15,18 @@ class LocalStridedBlockSparseAttnInference(torch.nn.Module):
 
     NOTE:
     1. Currently does not support autograd
-        
+
     '''
     def __init__(self, n_heads, max_seqlen, local_blocks, vert_stride, block_size, device=None, dtype=torch.bfloat16, homo_heads=False):
         super().__init__()
         device = device or torch.cuda.current_device()
         self.max_seqlen = max_seqlen
         self.block_size = block_size
-        self.sparse_layout, block_mask, dense_mask = _get_sparse_attn_mask(n_heads, max_seqlen, max_seqlen, dtype, device,
+
+        self.sparse_layout, _, _ = _get_sparse_attn_mask(n_heads, max_seqlen, max_seqlen, dtype, device,
                                                 BLOCK=block_size,
                                                 local_blocks=local_blocks, vert_stride=vert_stride,
-                                                homo_head=homo_heads, return_dense=True)
-        import ipdb; ipdb.set_trace()
+                                                homo_head=homo_heads, return_dense=False)
 
     def varlen_attn(self, q, k, v, cu_seqlens_k, cu_seqlens_q=None, sm_scale=None):
         '''

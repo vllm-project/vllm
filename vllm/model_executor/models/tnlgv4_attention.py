@@ -11,7 +11,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 
-from tnlgv4_flash_blocksparse_attn_batch_inference import LocalStridedBlockSparseAttnInference
+from .tnlgv4_flash_blocksparse_attn_batch_inference import LocalStridedBlockSparseAttnInference
 
 
 class BlockSparseFlashAttention(nn.Module):
@@ -28,20 +28,23 @@ class BlockSparseFlashAttention(nn.Module):
 
     def __init__(
         self,
-        local: int,
+        local_blocks: int,
         vert_stride: int,
         num_heads: int,
         head_size: int,
         scale: float,
         num_kv_heads: Optional[int] = None,
-        alibi_slopes: Optional[List[float]] = None,
-        sliding_window: Optional[int] = None,
+        max_seqlen: int = 8192,
+        sparse_block_size: int = 64,
+        **kwargs
     ) -> None:
         super().__init__()
+        self.local_blocks = local_blocks
+        self.vert_stride = vert_stride
         self.backend = BlocksparseFlashAttentionBackend
         impl_cls = self.backend.get_impl_cls()
-        self.impl = impl_cls(local, vert_stride, num_heads, head_size, scale, num_kv_heads,
-                             alibi_slopes, sliding_window)
+        self.impl = impl_cls(local_blocks, vert_stride, num_heads, head_size, scale, num_kv_heads,
+                             max_seqlen=max_seqlen, sparse_block_size=sparse_block_size)
 
     def forward(
         self,
@@ -54,13 +57,13 @@ class BlockSparseFlashAttention(nn.Module):
     ) -> torch.Tensor:
         return self.impl.forward(query, key, value, kv_cache, attn_metadata,
                                  kv_scale)
-    
+
 
 class BlocksparseFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
-    def get_impl_cls() -> Type["FlashAttentionImpl"]:
-        return FlashAttentionImpl
+    def get_impl_cls() -> Type["BlocksparseFlashAttentionImpl"]:
+        return BlocksparseFlashAttentionImpl
 
     @staticmethod
     def make_metadata(*args, **kwargs) -> "BlocksparseFlashAttentionMetadata":
@@ -143,15 +146,29 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadat
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
 
+# the following two functions is only applable to blocksparse with local + vertical_stride patterns
+def check_if_remote(block_seq_id, head_id=0, n_heads=24, vert_stride=4):
+    # does not check if the remote is in local or not
+    head_sliding_step = max(1, int(vert_stride / n_heads))  # if vert_stride <= n_heads, rotating the heads
+    return  (block_seq_id + head_id * head_sliding_step + 1 ) % vert_stride == 0
+
+
+def check_if_local(block_seq_id, block_size, total_seq_len, local_blocks=4):
+    total_block = cdiv(total_seq_len, block_size)
+    # print(f'==>',  block_seq_id, block_size, total_seq_len, total_block)
+    # return (block_seq_id + local_blocks) >= total_block
+    return (total_block - local_blocks) <= block_seq_id < total_block
+
+
 
 class BlocksparseFlashAttentionImpl(AttentionImpl):
     """
     If the input tensors contain prompt tokens, the layout is as follows:
-    |<--------------- num_prompt_tokens -------------->|	
+    |<--------------- num_prompt_tokens -------------->|
     |<--prompt_0-->|<--prompt_1-->|...|<--prompt_N-1-->|
 
-    Otherwise, the layout is as follows:	
-    |<------------------ num_generation_tokens (M) ----------------->|	
+    Otherwise, the layout is as follows:
+    |<------------------ num_generation_tokens (M) ----------------->|
     |<--generation_0-->|..........|<--generation_M-1-->|<--padding-->|
 
     Generation tokens can contain padding when cuda-graph is used.
@@ -163,7 +180,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
 
     def __init__(
         self,
-        local: int,
+        local_blocks: int,
         vert_stride: int,
         num_heads: int,
         head_size: int,
@@ -191,7 +208,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {suppored_head_sizes}.")
 
-        self.bs_attn = LocalStridedBlockSparseAttnInference(num_heads, max_seqlen, local, vert_stride, sparse_block_size)
+        self.bs_attn = LocalStridedBlockSparseAttnInference(num_heads, max_seqlen, local_blocks, vert_stride, sparse_block_size)
         self.block_manager = None
 
     def set_block_manager(self, block_manager):
@@ -234,9 +251,9 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
 
-    
+
             # TODO: decde what to write, and what is not
-            
+
             PagedAttention.write_to_paged_cache(key, value, key_cache,
                                                 value_cache,
                                                 attn_metadata.slot_mapping,
