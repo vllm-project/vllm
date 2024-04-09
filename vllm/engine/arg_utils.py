@@ -14,6 +14,7 @@ from vllm.utils import str_to_int_tuple
 class EngineArgs:
     """Arguments for vLLM engine."""
     model: str
+    served_model_name: Optional[str] = None
     tokenizer: Optional[str] = None
     tokenizer_mode: str = 'auto'
     trust_remote_code: bool = False
@@ -422,7 +423,8 @@ class EngineArgs:
             self.dtype, self.seed, self.revision, self.code_revision,
             self.tokenizer_revision, self.max_model_len, self.quantization,
             self.quantization_param_path, self.enforce_eager,
-            self.max_context_len_to_capture, self.max_logprobs)
+            self.max_context_len_to_capture, self.max_logprobs,
+            self.served_model_name)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,

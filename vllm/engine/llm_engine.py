@@ -81,6 +81,7 @@ class LLMEngine:
         logger.info(
             f"Initializing an LLM engine (v{vllm.__version__}) with config: "
             f"model={model_config.model!r}, "
+            f"served_model_name={model_config.served_model_name!r}, "
             f"speculative_config={speculative_config!r}, "
             f"tokenizer={model_config.tokenizer!r}, "
             f"tokenizer_mode={model_config.tokenizer_mode}, "
@@ -175,7 +176,7 @@ class LLMEngine:
         if self.log_stats:
             self.stat_logger = StatLogger(
                 local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
-                labels=dict(model_name=model_config.model))
+                labels=dict(model_name=model_config.served_model_name))
             self.stat_logger.info("cache_config", self.cache_config)
 
     @classmethod
