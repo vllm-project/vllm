@@ -4,6 +4,7 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 """Tensor and pipeline parallel groups."""
 import contextlib
+from typing import Optional
 
 import torch
 
@@ -14,14 +15,59 @@ _TENSOR_MODEL_PARALLEL_GROUP = None
 # Pipeline model parallel group that the current rank belongs to.
 _PIPELINE_MODEL_PARALLEL_GROUP = None
 
+# when people blindly call `torch.distributed.all_reduce` etc,
+# it will use this group. It is initialized with the `backend`
+# parameter of `init_distributed_environment` below.
+# Essentially, this is `torch.distributed.group.WORLD`.
+# We leave a line here to note that this is device-specific.
+# Note that this variable is not safe to use, because when users
+# call `init_distributed_environment` first, and then destroy
+# the process group themselves, this variable will keep a reference to the
+# destroyed process group, which is not useful.
+_DEVICE_WORLD_GROUP = None
+
+# duing `init_distributed_environment`, we will also initialize a
+# group with `gloo` backend, to allow direct coordination between
+# processes through the CPU.
+_CPU_WORLD_GROUP = None
+
+# In summary, after calling `init_distributed_environment`, we will
+# always have two groups: one for device-specific (and is the default)
+# and one for CPU. All processes will be part of both groups.
+
 # A list of global ranks for each pipeline group to ease calculation of the
 # source rank when broadcasting from the first or last pipeline stage.
 _PIPELINE_GLOBAL_RANKS = None
 
 
+def init_distributed_environment(
+    world_size: int,
+    rank: int,
+    distributed_init_method: Optional[str] = None,
+    local_rank: int = -1,
+    backend: str = "nccl",
+):
+    if not torch.distributed.is_initialized():
+        assert distributed_init_method is not None, (
+            "distributed_init_method must be provided when initializing "
+            "distributed environment")
+        # this backend is used for WORLD
+        torch.distributed.init_process_group(
+            backend=backend,
+            init_method=distributed_init_method,
+            world_size=world_size,
+            rank=rank)
+        global _DEVICE_WORLD_GROUP, _CPU_WORLD_GROUP
+        _DEVICE_WORLD_GROUP = torch.distributed.group.WORLD
+        ranks = list(range(torch.distributed.get_world_size()))
+        _CPU_WORLD_GROUP = torch.distributed.new_group(ranks=ranks,
+                                                       backend="gloo")
+
+
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
+    backend: Optional[str] = None,
 ) -> None:
     """
     Initialize model parallel groups.
@@ -48,6 +94,8 @@ def initialize_model_parallel(
     # Get world size and rank. Ensure some consistencies.
     assert torch.distributed.is_initialized()
     world_size: int = torch.distributed.get_world_size()
+    # get the backend of _DEVICE_WORLD_GROUP
+    backend = backend or torch.distributed.get_backend()
 
     if (world_size !=
             tensor_model_parallel_size * pipeline_model_parallel_size):
@@ -69,7 +117,7 @@ def initialize_model_parallel(
     for i in range(num_tensor_model_parallel_groups):
         ranks = range(i * tensor_model_parallel_size,
                       (i + 1) * tensor_model_parallel_size)
-        group = torch.distributed.new_group(ranks)
+        group = torch.distributed.new_group(ranks, backend=backend)
         if rank in ranks:
             _TENSOR_MODEL_PARALLEL_GROUP = group
 
@@ -80,7 +128,7 @@ def initialize_model_parallel(
         "pipeline model parallel group is already initialized")
     for i in range(num_pipeline_model_parallel_groups):
         ranks = range(i, world_size, num_pipeline_model_parallel_groups)
-        group = torch.distributed.new_group(ranks)
+        group = torch.distributed.new_group(ranks, backend=backend)
         if rank in ranks:
             _PIPELINE_MODEL_PARALLEL_GROUP = group
             _PIPELINE_GLOBAL_RANKS = ranks
@@ -89,14 +137,17 @@ def initialize_model_parallel(
 def ensure_model_parallel_initialized(
     tensor_model_parallel_size: int,
     pipeline_model_parallel_size: int,
+    backend: Optional[str] = None,
 ) -> None:
     """Helper to initialize model parallel groups if they are not initialized,
     or ensure tensor-parallel and pipeline-parallel sizes are equal to expected
     values if the model parallel groups are initialized.
     """
+    # get the backend of _DEVICE_WORLD_GROUP
+    backend = backend or torch.distributed.get_backend()
     if not model_parallel_is_initialized():
         initialize_model_parallel(tensor_model_parallel_size,
-                                  pipeline_model_parallel_size)
+                                  pipeline_model_parallel_size, backend)
         return
 
     assert (
@@ -115,6 +166,12 @@ def model_parallel_is_initialized():
     """Check if tensor and pipeline parallel groups are initialized."""
     return (_TENSOR_MODEL_PARALLEL_GROUP is not None
             and _PIPELINE_MODEL_PARALLEL_GROUP is not None)
+
+
+def get_cpu_world_group():
+    """Get the CPU world group."""
+    assert _CPU_WORLD_GROUP is not None, ("CPU world group is not initialized")
+    return _CPU_WORLD_GROUP
 
 
 def get_tensor_model_parallel_group():
