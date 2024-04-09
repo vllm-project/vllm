@@ -207,11 +207,17 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         # Note: To reuse the cache management procedure,
         # use cpu cache as 'gpu cache'.
         num_cpu_blocks = num_gpu_blocks
-        del num_gpu_blocks
 
+        self._validate_num_cpu_blocks(num_cpu_blocks)
         self.cache_config.num_gpu_blocks = num_cpu_blocks
         self.cache_config.num_cpu_blocks = 0
 
+        # Initialize the cache.
+        self._init_cache_engine()
+
+    def _validate_num_cpu_blocks(self, num_cpu_blocks: int) -> None:
+        """Raise errors if the num_cpu_blocks is invalid.
+        """
         if num_cpu_blocks <= 0:
             raise ValueError("No available memory for the cache blocks. "
                              "Try increasing `VLLM_CPU_KVCACHE_SPACE` when "
@@ -225,9 +231,6 @@ class CPUWorker(LoraNotSupportedWorkerBase):
                 f"stored in KV cache ({max_seq_len}). Try increasing "
                 "`VLLM_CPU_KVCACHE_SPACE` or decreasing `max_model_len` when "
                 "initializing the engine.")
-
-        # Initialize the cache.
-        self._init_cache_engine()
 
     def _init_cache_engine(self) -> None:
         self.cache_engine = CPUCacheEngine(self.cache_config,
