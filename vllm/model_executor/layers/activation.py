@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 from vllm._C import ops
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.parallel_state import (
+from vllm.distributed import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.utils import divide
 from vllm.model_executor.utils import set_weight_attrs

@@ -6,9 +6,9 @@ import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
-from vllm.communication_op import (
+from vllm.distributed import (
     tensor_model_parallel_all_gather, tensor_model_parallel_all_reduce)
-from vllm.parallel_state import (
+from vllm.distributed import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.utils import (
     divide, split_tensor_along_last_dim)

@@ -8,7 +8,7 @@ import pytest
 import ray
 import torch
 
-from vllm.communication_op import (
+from vllm.distributed import (
     broadcast_tensor_dict, tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce)
 from vllm.test_utils import (init_test_distributed_environment,

@@ -10,9 +10,9 @@ from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.model_loader import get_model
-from vllm.communication_op import (
+from vllm.distributed import (
     broadcast_tensor_dict)
-from vllm.parallel_state import (
+from vllm.distributed import (
     ensure_model_parallel_initialized, init_distributed_environment)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE

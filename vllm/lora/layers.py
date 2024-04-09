@@ -18,10 +18,10 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-from vllm.communication_op import (
+from vllm.distributed import (
     tensor_model_parallel_all_gather, tensor_model_parallel_all_reduce,
     tensor_model_parallel_gather)
-from vllm.parallel_state import (
+from vllm.distributed import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.utils import (
     split_tensor_along_last_dim)

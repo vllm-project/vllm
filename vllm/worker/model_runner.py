@@ -16,9 +16,9 @@ from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
 from vllm.device_communicators import custom_all_reduce, pynccl_utils
-from vllm.communication_op import (
+from vllm.distributed import (
     broadcast_tensor_dict)
-from vllm.parallel_state import (
+from vllm.distributed import (
     with_pynccl_for_all_reduce)
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (MultiModalData, SamplerOutput, SequenceData,

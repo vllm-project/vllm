@@ -5,7 +5,7 @@ import torch
 import torch.distributed as dist
 
 from vllm.logger import init_logger
-from vllm.parallel_state import (
+from vllm.distributed import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 
 try:
