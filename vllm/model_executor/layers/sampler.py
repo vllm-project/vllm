@@ -31,6 +31,8 @@ class Sampler(nn.Module):
     parameters (e.g., sampling method, temperature, top-p, top-k, etc.).
     """
 
+    _enable_triton_kernel: bool = True
+
     def forward(
         self,
         logits: torch.Tensor,
@@ -74,7 +76,7 @@ class Sampler(nn.Module):
         # Use log_softmax to ensure numerical stability.
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
 
-        if not is_cuda() or any(
+        if self._enable_triton_kernel and not is_cuda() or any(
                 sampling_params.sampling_type == SamplingType.BEAM
                 for _, sampling_params in sampling_metadata.seq_groups):
             # Sample the next tokens.

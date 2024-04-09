@@ -15,6 +15,8 @@ from vllm.worker.model_runner import ModelRunner
 
 class MockLogitsSampler(Sampler):
 
+    _enable_triton_kernel = False
+
     def __init__(self, fake_logits: torch.Tensor):
         super().__init__()
         self.fake_logits = fake_logits
