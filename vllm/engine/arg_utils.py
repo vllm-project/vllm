@@ -270,17 +270,18 @@ class EngineArgs:
                             action='store_true',
                             help='disable logging statistics')
         # Quantization settings.
-        parser.add_argument('--quantization',
-                            '-q',
-                            type=str,
-                            choices=['awq', 'gptq', 'squeezellm', None],
-                            default=EngineArgs.quantization,
-                            help='Method used to quantize the weights. If '
-                            'None, we first check the `quantization_config` '
-                            'attribute in the model config file. If that is '
-                            'None, we assume the model weights are not '
-                            'quantized and use `dtype` to determine the data '
-                            'type of the weights.')
+        parser.add_argument(
+            '--quantization',
+            '-q',
+            type=str,
+            choices=['awq', 'gptq', 'squeezellm', 'marlin', None],
+            default=EngineArgs.quantization,
+            help='Method used to quantize the weights. If '
+            'None, we first check the `quantization_config` '
+            'attribute in the model config file. If that is '
+            'None, we assume the model weights are not '
+            'quantized and use `dtype` to determine the data '
+            'type of the weights.')
         parser.add_argument('--enforce-eager',
                             action='store_true',
                             help='Always use eager-mode PyTorch. If False, '
