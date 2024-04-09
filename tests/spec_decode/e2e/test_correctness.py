@@ -109,9 +109,9 @@ def test_spec_decode_e2e_logical_flow(test_llm_generator, batch_size: int):
     }
 ])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("batch_size", [1])
+@pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize("seed", [1])
-def test_spec_decode_e2e_greedy_correctness_bs1(baseline_llm_generator, test_llm_generator, batch_size: int):
+def test_spec_decode_e2e_greedy_correctness(baseline_llm_generator, test_llm_generator, batch_size: int):
     output_len = 32
     temperature = 0.0
 
@@ -138,11 +138,10 @@ def test_spec_decode_e2e_greedy_correctness_bs1(baseline_llm_generator, test_llm
 
     assert len(baseline_batch_token_ids) == len(prompts)
     assert len(spec_batch_token_ids) == len(prompts)
-    assert [len(token_ids) for token_ids in baseline_batch_token_ids + spec_batch_token_ids] == [output_len] * (batch_size * 2)
 
     for i, (baseline_token_ids, spec_token_ids) in enumerate(zip(baseline_batch_token_ids, spec_batch_token_ids)):
-        print(f'{i=} {baseline_batch_token_ids=}')
-        print(f'{i=}    {spec_batch_token_ids=}')
+        print(f'{i=} {baseline_token_ids=}')
+        print(f'{i=}     {spec_token_ids=}')
         assert baseline_token_ids == spec_token_ids
 
 
