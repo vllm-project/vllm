@@ -20,6 +20,10 @@ _PIPELINE_MODEL_PARALLEL_GROUP = None
 # parameter of `init_distributed_environment` below.
 # Essentially, this is `torch.distributed.group.WORLD`.
 # We leave a line here to note that this is device-specific.
+# Note that this variable is not safe to use, because when users
+# call `init_distributed_environment` first, and then destroy
+# the process group themselves, this variable will keep a reference to the
+# destroyed process group, which is not useful.
 _DEVICE_WORLD_GROUP = None
 
 # duing `init_distributed_environment`, we will also initialize a
@@ -90,7 +94,8 @@ def initialize_model_parallel(
     # Get world size and rank. Ensure some consistencies.
     assert torch.distributed.is_initialized()
     world_size: int = torch.distributed.get_world_size()
-    backend = backend or torch.distributed.get_backend(_DEVICE_WORLD_GROUP)
+    # get the backend of _DEVICE_WORLD_GROUP
+    backend = backend or torch.distributed.get_backend()
 
     if (world_size !=
             tensor_model_parallel_size * pipeline_model_parallel_size):
@@ -138,7 +143,8 @@ def ensure_model_parallel_initialized(
     or ensure tensor-parallel and pipeline-parallel sizes are equal to expected
     values if the model parallel groups are initialized.
     """
-    backend = backend or torch.distributed.get_backend(_DEVICE_WORLD_GROUP)
+    # get the backend of _DEVICE_WORLD_GROUP
+    backend = backend or torch.distributed.get_backend()
     if not model_parallel_is_initialized():
         initialize_model_parallel(tensor_model_parallel_size,
                                   pipeline_model_parallel_size, backend)
