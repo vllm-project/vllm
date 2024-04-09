@@ -5,7 +5,6 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from vllm.model_executor.layers.ops.sample import sample as sample_triton
 from vllm.model_executor.sampling_metadata import (SamplingMetadata,
                                                    SamplingTensors)
 from vllm.sampling_params import SamplingParams, SamplingType
@@ -77,13 +76,14 @@ class Sampler(nn.Module):
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
 
         # Sample the next tokens.
-        sample_results, sampled_tokens_tensor = _sample(probs, logprobs, sampling_metadata,
-                                 sampling_tensors)
+        sample_results, sampled_tokens_tensor = _sample(
+            probs, logprobs, sampling_metadata, sampling_tensors)
         # Get the logprobs query results.
         prompt_logprobs, sample_logprobs = _get_logprobs(
             logprobs, sampling_metadata, sample_results)
         return _build_sampler_output(sample_results, sampling_metadata,
-                                     prompt_logprobs, sample_logprobs, (probs, sampled_tokens_tensor))
+                                     prompt_logprobs, sample_logprobs,
+                                     (probs, sampled_tokens_tensor))
 
 
 def _get_bin_counts_and_mask(
@@ -358,7 +358,10 @@ def _sample_with_torch(
     sample_metadata = {}
     multinomial_samples = {}
 
-    sampled_token_ids_tensor = torch.empty(logprobs.shape[0], 1, dtype=torch.long, device=logprobs.device)
+    sampled_token_ids_tensor = torch.empty(logprobs.shape[0],
+                                           1,
+                                           dtype=torch.long,
+                                           device=logprobs.device)
 
     # Counterintiutively, having two loops here is actually faster.
     # The first loop can run without waiting on GPU<->CPU sync.
@@ -398,9 +401,8 @@ def _sample_with_torch(
 
             s_i = sample_indices.long()
 
-            mn_samples = _multinomial(
-                probs[s_i], max_best_of_in_batch,
-                **seeded_args)
+            mn_samples = _multinomial(probs[s_i], max_best_of_in_batch,
+                                      **seeded_args)
             multinomial_samples[sampling_type] = mn_samples
 
             sampled_token_ids_tensor[s_i] = mn_samples
@@ -707,7 +709,6 @@ def _build_sampler_output(
                 SequenceOutput(seq_ids[parent_id], next_token_id, logprobs))
         sampler_output.append(
             SequenceGroupOutput(seq_outputs, group_prompt_logprobs))
-
 
     probs, token_ids = spec_decode_data
     return SamplerOutput(
