@@ -274,6 +274,11 @@ class GPTNeoXForCausalLM(nn.Module):
             if ("attention.bias" in name or "attention.masked_bias" in name
                     or "rotary_emb.inv_freq" in name):
                 continue
+            if ("rotary_emb.cos_cached" in name
+                    or "rotary_emb.sin_cached" in name):
+                # Models trained using OpenRLHF may include
+                # these tensors in the checkpoint. Skip them.
+                continue
             param = params_dict[name]
 
             if "query_key_value" in name:

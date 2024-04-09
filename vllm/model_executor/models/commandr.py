@@ -140,7 +140,9 @@ class CohereAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.max_position_embeddings = config.max_position_embeddings
+        self.max_position_embeddings = getattr(
+            config, "model_max_length", None) or getattr(
+                config, "max_position_embeddings", 8192)
         self.rope_theta = config.rope_theta
         self.rope_scaling = getattr(config, "rope_scaling", None)
         self.use_qk_norm = getattr(config, "use_qk_norm", False)
