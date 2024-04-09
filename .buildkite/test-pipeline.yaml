@@ -4,6 +4,8 @@
 # the final pipeline yaml file.
 
 steps:
+- label: Dummy Test
+  command: ls 
 """
 We remove conventional CI steps to test AMD CI, that runs in the container at .buildkite/run-amd-test.sh 
 """
