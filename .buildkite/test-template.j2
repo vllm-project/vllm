@@ -7,8 +7,8 @@ steps:
     agents:
       queue: amd
     commands: 
-      - bash .buildkite/run-amd-test.sh
-      - bash .buildkite/run-amd-test_entrypoints.sh
+      - "bash .buildkite/run-amd-test.sh"
+      - "bash .buildkite/run-amd-test_entrypoints.sh"
 
   - label: "CPU Test"
     command: bash .buildkite/run-cpu-test.sh
