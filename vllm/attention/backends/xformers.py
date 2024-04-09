@@ -1,5 +1,4 @@
 """Attention layer with xFormers and PagedAttention."""
-import importlib
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Type
 
@@ -14,7 +13,6 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
-from vllm.utils import is_hip
 
 logger = init_logger(__name__)
 
@@ -166,11 +164,6 @@ class XFormersImpl(AttentionImpl):
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {suppored_head_sizes}.")
 
-        # AMD Radeon 7900 series (gfx1100) currently does not support xFormers
-        # nor FlashAttention. As a temporary workaround, we use naive PyTorch
-        # implementation of attention.
-        self.use_naive_attention = _check_use_naive_attention()
-
     def forward(
         self,
         query: torch.Tensor,
@@ -232,30 +225,6 @@ class XFormersImpl(AttentionImpl):
                                                   self.num_kv_heads,
                                                   self.num_queries_per_kv,
                                                   value.shape[-1])
-
-                if self.use_naive_attention:
-                    output = torch.empty_like(query)
-                    start = 0
-                    for _, prompt_len in enumerate(attn_metadata.prompt_lens):
-                        end = start + prompt_len
-                        out = _naive_masked_attention(
-                            query[None, start:end],
-                            key[None, start:end],
-                            value[None, start:end],
-                            self.num_heads,
-                            self.num_kv_heads,
-                            self.head_size,
-                            self.scale,
-                        )
-                        # TODO(woosuk): Unnecessary copy. Optimize.
-                        output[start:end].copy_(out)
-                        start += prompt_len
-
-                    # Using view got RuntimeError: view size is not compatible
-                    # with input tensor's size and stride (at least one
-                    # dimension spans across two contiguous subspaces).
-                    # Use reshape instead.
-                    return output.reshape(num_tokens, hidden_size)
 
                 output = self._run_memory_efficient_xformers_forward(
                     query, key, value, attn_metadata)
@@ -329,8 +298,6 @@ class XFormersImpl(AttentionImpl):
                     self.alibi_slopes, self.num_kv_heads, query.dtype,
                     attn_metadata.prompt_lens)
 
-        op = xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if (
-            is_hip()) else None
         # No alibi slopes.
         # TODO(woosuk): Too many view operations. Let's try to reduce
         # them in the future for code readability.
@@ -344,8 +311,7 @@ class XFormersImpl(AttentionImpl):
                 value,
                 attn_bias=attn_metadata.attn_bias[0],
                 p=0.0,
-                scale=self.scale,
-                op=op)
+                scale=self.scale)
 
             return out.view_as(query)
 
@@ -363,8 +329,7 @@ class XFormersImpl(AttentionImpl):
                 value[None, start:end],
                 attn_bias=attn_metadata.attn_bias[i],
                 p=0.0,
-                scale=self.scale,
-                op=op)
+                scale=self.scale)
             # TODO(woosuk): Unnecessary copy. Optimize.
             output[start:end].copy_(out.squeeze(0))
             start += prompt_len
@@ -405,42 +370,3 @@ def _make_alibi_bias(
         attn_biases.append(LowerTriangularMaskWithTensorBias(bias))
 
     return attn_biases
-
-
-def _check_use_naive_attention() -> bool:
-    if not is_hip():
-        return False
-    # For ROCm, check whether flash attention is installed or not.
-    use_naive_attention = importlib.util.find_spec("flash_attn") is None
-    if use_naive_attention:
-        logger.warning("flash_attn is not installed. Using naive attention. "
-                       "This will take significantly more GPU memory.")
-        return True
-    return False
-
-
-def _naive_masked_attention(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    num_heads: int,
-    num_kv_heads: int,
-    head_size: int,
-    scale: float,
-) -> torch.Tensor:
-    query = query.view(-1, num_heads, head_size)
-    key = key.view(-1, num_kv_heads, head_size)
-    value = value.view(-1, num_kv_heads, head_size)
-    seq_len, _, _ = query.shape
-    attn_mask = torch.triu(torch.ones(seq_len,
-                                      seq_len,
-                                      dtype=query.dtype,
-                                      device=query.device),
-                           diagonal=1)
-    attn_mask = attn_mask * torch.finfo(query.dtype).min
-
-    attn_weights = scale * torch.einsum("qhd,khd->hqk", query, key).float()
-    attn_weights = attn_weights + attn_mask.float()
-    attn_weights = torch.softmax(attn_weights, dim=-1).to(value.dtype)
-    out = torch.einsum("hqk,khd->qhd", attn_weights, value)
-    return out
