@@ -48,13 +48,13 @@ def run_grid(bs, method):
     for block_size_n in [32, 64, 128, 256]:
         for block_size_m in BLOCK_SIZES_M:
             for block_size_k in [64, 128, 256]:
-                for group_size_m in [1, 16, 32, 64]:
+                for split_k_size in [1, 2, 4]:
                     for num_warps in [4, 8]:
                         configs.append({
                             "BLOCK_SIZE_M": block_size_m,
                             "BLOCK_SIZE_N": block_size_n,
                             "BLOCK_SIZE_K": block_size_k,
-                            "GROUP_SIZE_M": group_size_m,
+                            "SPLIT_K_SIZE": split_k_size,
                             "num_warps": num_warps,
                             "num_stages": 4,
                         })
@@ -134,7 +134,7 @@ def run_timing(num_calls: int, bs: int, d_model: int, num_total_experts: int,
     hidden_states = torch.rand(
         (bs, d_model),
         device="cuda:0",
-        dtype=torch.bfloat16,
+        dtype=torch.float16,
     )
 
     ws = torch.rand(
