@@ -103,9 +103,10 @@ class OpenAIServing:
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is not None:
                 token_logprob = step_top_logprobs[token_id].logprob
+                token = step_top_logprobs[token_id].decoded_token
             else:
                 token_logprob = None
-            token = step_top_logprobs[token_id].decoded_token
+                token = None
             logprobs.tokens.append(token)
             logprobs.token_logprobs.append(token_logprob)
             if len(logprobs.text_offset) == 0:
