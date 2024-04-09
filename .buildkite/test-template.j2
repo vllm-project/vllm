@@ -6,7 +6,9 @@ steps:
   - label: "AMD Test"
     agents:
       queue: amd
-    command: bash .buildkite/run-amd-test.sh
+    commands: 
+	bash .buildkite/run-amd-test.sh
+	bash .buildkite/run-amd-test_entrypoints.sh
 
   - label: "CPU Test"
     command: bash .buildkite/run-cpu-test.sh
