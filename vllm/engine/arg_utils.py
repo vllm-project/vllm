@@ -412,7 +412,14 @@ class EngineArgs:
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         # Set the attributes from the parsed arguments.
-        engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
+        engine_args = cls(**{
+            attr: getattr(args, attr)
+            for attr in attrs if hasattr(args, attr)
+        })
+        if hasattr(args, "served_model_name"):
+            engine_args.served_model_name = args.served_model_name
+        else:
+            engine_args.served_model_name = args.model
         return engine_args
 
     def create_engine_config(self, ) -> EngineConfig:
