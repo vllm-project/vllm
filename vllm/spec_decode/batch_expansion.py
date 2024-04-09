@@ -148,12 +148,12 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
 
         # We mock the device tensors until PR 7/9 is merged (e2e correctness).
         # https://docs.google.com/document/d/1rE4pr3IdspRw97XbImY4fS9IWYuJJ3HGtL7AdIKGrw8/edit#heading=h.qijw1sdidrer
-        maybe_mock_device_tensors(
-            sampler_output=target_sampler_output,
-            batch_size=len(non_spec_indices) + num_scoring_tokens,
-            vocab_size=self._vocab_size,
-            device=self._device,
-        )
+        #maybe_mock_device_tensors(
+        #    sampler_output=target_sampler_output,
+        #    batch_size=len(non_spec_indices) + num_scoring_tokens,
+        #    vocab_size=self._vocab_size,
+        #    device=self._device,
+        #)
 
         (target_token_ids, target_probs, non_spec_target_token_ids,
          non_spec_target_probs) = self._split_scoring_output(
