@@ -16,9 +16,10 @@ class SequenceGroupOutputProcessor(ABC):
     the scheduler.
 
     This is highly coupled with the LLMEngine and should be seen as an extension
-    of it. The logic is separated out to simplify the LLMEngine class and to
-    allow a beam search implementation (which handles forking, etc) and a block
-    decode implementation (which handles decoding >1 token per step).
+    of it. The logic is separated to simplify the LLMEngine class and allow
+    separate implementations for single-step decoding (which supports beam
+    search sequence forking) and multi-step decoding (which does not support
+    beam search, but does support speculative decoding).
     """
 
     @staticmethod
@@ -32,16 +33,14 @@ class SequenceGroupOutputProcessor(ABC):
     ):
         """Create an output processor.
 
-        This returns an output processor compatible with beam search if the
-        scheduler is not configured to scheduler lookahead slots. Otherwise, it
-        returns an output processor that is incompatible with beam search but
-        which supports decoding more than one token per scheduling invocation.
+        This returns a single-step output processor if num_lookahead_slots is
+        zero, else returns a multi-step output processor.
         """
         if scheduler_config.num_lookahead_slots == 0:
             # Importing here to avoid cycle.
-            from vllm.engine.output_processor.beam_search import (
-                BeamSearchOutputProcessor)
-            return BeamSearchOutputProcessor(
+            from vllm.engine.output_processor.single_step import (
+                SingleStepOutputProcessor)
+            return SingleStepOutputProcessor(
                 scheduler_config,
                 detokenizer,
                 scheduler,
@@ -50,9 +49,9 @@ class SequenceGroupOutputProcessor(ABC):
             )
         else:
             # Importing here to avoid cycle.
-            from vllm.engine.output_processor.block_decode import (
-                BlockDecodeOutputProcessor)
-            return BlockDecodeOutputProcessor(
+            from vllm.engine.output_processor.multi_step import (
+                MultiStepOutputProcessor)
+            return MultiStepOutputProcessor(
                 detokenizer,
                 scheduler,
                 seq_counter,

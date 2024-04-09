@@ -14,15 +14,18 @@ from vllm.transformers_utils.detokenizer import Detokenizer
 logger = init_logger(__name__)
 
 
-class BeamSearchOutputProcessor(SequenceGroupOutputProcessor):
-    """SequenceGroupOutputProcessor which handles logic related to beam search
-    sequence management and coupled logic like detokenization and stop logic.
+class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
+    """SequenceGroupOutputProcessor which handles "output processing" logic,
+    which happens after the model returns generated token ids and before
+    scheduling of the next batch. Output processing logic includes
+    detokenization, and determining if a sequence is finished (e.g. via max len
+    or eos token).
 
-    This class is in charge of sorting out which sequences survive after beam
-    sampling. It manages forking and freeing of sequences.
-
-    It does not support lookahead decoding, e.g. where the model generates >1
-    token per scheduling invocation.
+    The SingleStepOutputProcessor is specialized to the case where the model
+    emits at most a single token per invocation, which precludes configurations
+    such as speculative decoding or multi-step decoding. This enables beam
+    search sampling, which requires forking/finishing/freeing sequences in a way
+    that is currently difficult to schedule multiple steps ahead of time.
     """
 
     def __init__(

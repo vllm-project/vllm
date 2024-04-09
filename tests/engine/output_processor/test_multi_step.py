@@ -6,8 +6,7 @@ from transformers import PreTrainedTokenizer
 
 from tests.core.utils import create_seq_group
 from vllm.core.scheduler import Scheduler
-from vllm.engine.output_processor.block_decode import (
-    BlockDecodeOutputProcessor)
+from vllm.engine.output_processor.multi_step import MultiStepOutputProcessor
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (Logprob, SequenceGroupOutput, SequenceOutput,
@@ -20,7 +19,7 @@ from vllm.utils import Counter
 @pytest.mark.parametrize("num_new_tokens", [1, 12])
 @pytest.mark.skip_global_cleanup
 def test_appends_token_ids(num_new_tokens: int, seq_output_len: int):
-    """Verify block decoding appends token ids correctly.
+    """Verify multi-step decoding appends token ids correctly.
 
     We append token ids and verify all the token ids were appended correctly.
     Note that ignore_eos=True.
@@ -30,7 +29,7 @@ def test_appends_token_ids(num_new_tokens: int, seq_output_len: int):
     stop_checker = MagicMock(spec=StopChecker)
     seq_counter = Counter()
 
-    output_processor = BlockDecodeOutputProcessor(
+    output_processor = MultiStepOutputProcessor(
         detokenizer=detokenizer,
         scheduler=scheduler,
         seq_counter=seq_counter,
@@ -84,7 +83,7 @@ def test_respects_max_tokens(num_new_tokens: int, seq_prompt_len: int,
     stop_checker = MagicMock(spec=StopChecker)
     seq_counter = Counter()
 
-    output_processor = BlockDecodeOutputProcessor(
+    output_processor = MultiStepOutputProcessor(
         detokenizer=detokenizer,
         scheduler=scheduler,
         seq_counter=seq_counter,
@@ -146,7 +145,7 @@ def test_respects_eos_token_id(num_new_tokens: int, seq_prompt_len: int,
 
     eos_token_id = 100
 
-    output_processor = BlockDecodeOutputProcessor(
+    output_processor = MultiStepOutputProcessor(
         detokenizer=detokenizer,
         scheduler=scheduler,
         seq_counter=seq_counter,
@@ -213,7 +212,7 @@ def test_ignores_eos_token_id(num_new_tokens: int, seq_prompt_len: int,
 
     eos_token_id = 100
 
-    output_processor = BlockDecodeOutputProcessor(
+    output_processor = MultiStepOutputProcessor(
         detokenizer=detokenizer,
         scheduler=scheduler,
         seq_counter=seq_counter,

@@ -15,17 +15,18 @@ from vllm.transformers_utils.detokenizer import Detokenizer
 logger = init_logger(__name__)
 
 
-class BlockDecodeOutputProcessor(SequenceGroupOutputProcessor):
+class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
     """SequenceGroupOutputProcessor which handles logic related to
-    detokenization and stopping conditions. Besides not supporting beam search,
-    this differs from BeamSearchOutputProcessor in that it supports lookahead
-    scheduling (where the model may generate >1 token per scheduler invocation).
-    
-    This allows it to support speculative decoding and cases where the model
-    runs more than once. We generalize these cases as "block decoding", where
-    the model emits a block of tokens at the same time. In this case, this class
-    is responsible for correctly appending all token ids to sequences and
-    detokenizing new token ids.
+    detokenization and stopping conditions. It specializes to "multi-step
+    decoding", where vLLM's worker may generate multiple tokens per invocation.
+    This is currently mutually exclusive with advanced sampling techniques like
+    beam search, which motivates the separation of this logic from the single
+    step output processor.
+
+    This class is responsible for things such as correctly appending all new
+    token ids to their sequence, detokenizing new token ids, truncating new
+    output tokens after an eos token, and correctly handling the case where the
+    number of new output tokens per sequence differs in a single batch.
     """
 
     def __init__(
@@ -56,7 +57,8 @@ class BlockDecodeOutputProcessor(SequenceGroupOutputProcessor):
         seqs = sequence_group.get_seqs(status=SequenceStatus.RUNNING)
 
         assert seqs, "expected running sequences"
-        assert len(seqs) == 1, ("Beam search not supported in block decoding.")
+        assert len(seqs) == 1, (
+            "Beam search not supported in multi-step decoding.")
         seq = seqs[0]
 
         # Since there's only one sequence per sequence group, we can take the
@@ -86,7 +88,9 @@ class BlockDecodeOutputProcessor(SequenceGroupOutputProcessor):
             output_token_ids = output_token_ids[:remaining_tokens]
 
         # Truncate any tokens after EOS. This is required as spec decode
-        # generates tokens in fixed blocks, which may go beyond the EOS token.
+        # generates a fixed number of tokens without evaluating stopping
+        # conditions within the block. This can cause an eos token to be
+        # unintentionally ignored.
         if not sampling_params.ignore_eos:
             eos_token_id = self.get_tokenizer_for_seq(seq).eos_token_id
             # Avoiding .index calls as exception throwing in the happy path
@@ -100,7 +104,7 @@ class BlockDecodeOutputProcessor(SequenceGroupOutputProcessor):
         for output_token_id in output_token_ids:
             seq.append_token_id(
                 token_id=output_token_id,
-                # TODO emit logprobs in block decoding.
+                # TODO emit logprobs in multi-step decoding.
                 logprobs={output_token_id: Logprob(0.0)},
             )
             self.detokenizer.decode_sequence_inplace(seq, sampling_params)
