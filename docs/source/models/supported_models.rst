@@ -188,7 +188,7 @@ Through this approach, vLLM fosters a collaborative environment where both the c
 
 Note that, as an inference engine, vLLM does not introduce new models. Therefore, all models supported by vLLM are third-party models in this regard.
 
-We have three levels of testing for models:
+We have the following levels of testing for models:
 
 1. **Strict consistency**: We compare the output of the model with the output of the model in the HuggingFace Transformers library under greedy decoding. This is the most stringent test. The following models fall under this category:
     - facebook/opt-125m
