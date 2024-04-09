@@ -213,6 +213,7 @@ class Worker(WorkerBase):
     ) -> Optional[SamplerOutput]:
         assert self.is_driver_worker
         if seq_group_metadata_list is None:
+            # No data to run, notify other workers to stop the execution loop.
             num_seq_groups = 0
             data = {}
         else:
@@ -238,7 +239,7 @@ class Worker(WorkerBase):
                                                self.gpu_cache)
 
     @torch.inference_mode()
-    def execute_model_parallel(self) -> None:
+    def start_worker_execution_loop(self) -> None:
         """Execute model loop in parallel worker."""
         assert not self.is_driver_worker
         while True:

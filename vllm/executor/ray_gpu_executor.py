@@ -3,7 +3,8 @@ import copy
 import os
 import pickle
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
+from typing import (TYPE_CHECKING, Any, Awaitable, Dict, List, Optional, Set,
+                    Tuple, Union)
 
 from vllm.engine.ray_utils import RayWorkerVllm, ray
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
@@ -38,7 +39,7 @@ class RayGPUExecutor(ExecutorBase):
 
         # This is non-None when the execute model loop is running
         # in the parallel workers
-        self.parallel_worker_tasks = None
+        self.parallel_worker_tasks: Optional[Union[Any, Awaitable[Any]]] = None
 
         # Disable Ray usage stats collection.
         ray_usage = os.environ.get("RAY_USAGE_STATS_ENABLED", "0")
@@ -229,11 +230,10 @@ class RayGPUExecutor(ExecutorBase):
                       blocks_to_copy: Dict[int, List[int]]) -> SamplerOutput:
         if self.parallel_worker_tasks is None:
             # Start model execution loop running in the parallel workers
-            parallel_worker_tasks = self._run_workers(
-                "execute_model_parallel",
-                async_remote_only=True,
+            self.parallel_worker_tasks = self._run_workers(
+                "start_worker_execution_loop",
+                remote_workers_only_async=True,
                 use_ray_compiled_dag=USE_RAY_COMPILED_DAG)
-            self.parallel_worker_tasks = asyncio.gather(*parallel_worker_tasks)
 
         # Only the driver worker returns the sampling results.
         return self.driver_worker.execute_model(
@@ -242,7 +242,7 @@ class RayGPUExecutor(ExecutorBase):
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy)
 
-    def halt_model(self) -> None:
+    def stop_remote_worker_execution_loop(self) -> None:
         if self.parallel_worker_tasks is None:
             return
 
@@ -274,7 +274,7 @@ class RayGPUExecutor(ExecutorBase):
         self,
         method: str,
         *args,
-        async_remote_only: bool = False,
+        remote_workers_only_async: bool = False,
         max_concurrent_workers: Optional[int] = None,
         use_ray_compiled_dag: bool = False,
         **kwargs,
@@ -290,7 +290,7 @@ class RayGPUExecutor(ExecutorBase):
             # input. TODO(sang): Fix it.
             assert self.forward_dag is not None
             output_channels = self.forward_dag.execute(1)
-            ray_worker_outputs = None
+            ray_worker_outputs = []
         else:
             # Start the ray workers first.
             ray_worker_outputs = [
@@ -298,7 +298,7 @@ class RayGPUExecutor(ExecutorBase):
                 for worker in self.workers
             ]
 
-        if async_remote_only:
+        if remote_workers_only_async:
             # Just return futures
             return ray_worker_outputs
 
@@ -373,7 +373,7 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
         if self.parallel_worker_tasks is None:
             # Start model execution loop running in the parallel workers
             self.parallel_worker_tasks = asyncio.create_task(
-                self._execute_model_parallel())
+                self._start_worker_execution_loop())
 
         # Only the driver worker returns the sampling results.
         return await make_async(self.driver_worker.execute_model)(
@@ -382,14 +382,14 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy)
 
-    async def _execute_model_parallel(self):
+    async def _start_worker_execution_loop(self):
         coros = [
-            worker.execute_method.remote("execute_model_parallel")
+            worker.execute_method.remote("start_worker_execution_loop")
             for worker in self.workers
         ]
         return await asyncio.gather(*coros)
 
-    async def halt_model_async(self) -> None:
+    async def stop_remote_worker_execution_loop_async(self) -> None:
         if self.parallel_worker_tasks is None:
             return
 

@@ -220,7 +220,7 @@ class _AsyncLLMEngine(LLMEngine):
         outputs = self._process_model_outputs(output, scheduler_outputs)
         if not outputs:
             # Stop the execute model loop in parallel workers for now
-            await self.model_executor.halt_model_async()
+            await self.model_executor.stop_remote_worker_execution_loop_async()
         return outputs
 
     async def encode_request_async(

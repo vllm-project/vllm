@@ -729,7 +729,7 @@ class LLMEngine:
         outputs = self._process_model_outputs(output, scheduler_outputs)
         if not outputs:
             # Stop the execute model loop in parallel workers for now
-            self.model_executor.halt_model()
+            self.model_executor.stop_remote_worker_execution_loop()
         return outputs
 
     def do_log_stats(self) -> None:

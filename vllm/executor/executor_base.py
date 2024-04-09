@@ -76,7 +76,7 @@ class ExecutorBase(ABC):
         """Executes one model step on the given sequences."""
         raise NotImplementedError
 
-    async def halt_model(self) -> None:
+    def stop_remote_worker_execution_loop(self) -> None:
         """Releases parallel workers from model loop."""
         return
 
@@ -112,7 +112,7 @@ class ExecutorAsyncBase(ExecutorBase):
         """Executes one model step on the given sequences."""
         raise NotImplementedError
 
-    async def halt_model_async(self) -> None:
+    async def stop_remote_worker_execution_loop_async(self) -> None:
         """Releases parallel workers from model loop."""
         return
 
