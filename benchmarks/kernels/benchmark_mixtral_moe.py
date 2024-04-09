@@ -141,13 +141,13 @@ def run_timing(num_calls: int, bs: int, d_model: int, num_total_experts: int,
         (num_total_experts, 2 * shard_intermediate_size, d_model),
         device=hidden_states.device,
         dtype=hidden_states.dtype,
-    )
+    ).to(torch.float8_e4m3fn)
 
     w2s = torch.rand(
         (num_total_experts, d_model, shard_intermediate_size),
         device=hidden_states.device,
         dtype=hidden_states.dtype,
-    )
+    ).to(torch.float8_e4m3fn)
 
     gating_output = F.softmax(torch.rand(
         (num_calls, bs, num_total_experts),
