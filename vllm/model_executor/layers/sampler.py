@@ -74,9 +74,9 @@ class Sampler(nn.Module):
         # Use log_softmax to ensure numerical stability.
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
 
-        if any(sampling_params.sampling_type == SamplingType.BEAM
-               for _, sampling_params in
-               sampling_metadata.seq_groups) or not is_cuda():
+        if not is_cuda() or any(
+                sampling_params.sampling_type == SamplingType.BEAM
+                for _, sampling_params in sampling_metadata.seq_groups):
             # Sample the next tokens.
             sample_results = _sample(probs, logprobs, sampling_metadata)
             # Get the logprobs query results.
@@ -109,6 +109,7 @@ class Sampler(nn.Module):
                 sampled_logprobs=sampled_logprobs,
                 prompt_logprobs=prompt_logprobs,
                 probs=probs,
+                logprobs=logprobs,
                 sampling_tensors=sampling_tensors,
                 top_logprobs=top_logprobs,
                 top_token_ids=top_token_ids,
@@ -645,6 +646,7 @@ class RawSamplerOutput:
     sampled_logprobs: torch.Tensor
     prompt_logprobs: torch.Tensor
     probs: torch.Tensor
+    logprobs: torch.Tensor
     sampling_tensors: "SamplingTensors"
     top_logprobs: Optional[torch.Tensor]
     top_token_ids: Optional[torch.Tensor]
@@ -663,6 +665,10 @@ def pythonize_sampler_output(
     This blocks the CPU until the GPU catches up, so should only be used when
     necessary.
     """
+    logprob_ranks_gpu = (
+        raw_sampler_output.logprobs >
+        raw_sampler_output.sampled_logprobs[:, None]).long().sum(1).add_(1)
+
     # GPU<->CPU sync happens below.
     samples = torch.empty(*raw_sampler_output.sampled_tokens.shape,
                           dtype=raw_sampler_output.sampled_tokens.dtype,
@@ -672,6 +678,10 @@ def pythonize_sampler_output(
                            dtype=raw_sampler_output.sampled_logprobs.dtype,
                            device="cpu",
                            pin_memory=True)
+    logprob_ranks = torch.empty(*logprob_ranks_gpu.shape,
+                                dtype=logprob_ranks_gpu.dtype,
+                                device="cpu",
+                                pin_memory=True)
     prompt_logprobs = torch.empty(
         *raw_sampler_output.prompt_logprobs.shape,
         dtype=raw_sampler_output.prompt_logprobs.dtype,
@@ -690,6 +700,7 @@ def pythonize_sampler_output(
 
     logprobs = logprobs.copy_(raw_sampler_output.sampled_logprobs,
                               non_blocking=True)
+    logprob_ranks = logprob_ranks.copy_(logprob_ranks_gpu, non_blocking=True)
     prompt_logprobs = prompt_logprobs.copy_(raw_sampler_output.prompt_logprobs,
                                             non_blocking=True)
     if raw_sampler_output.top_logprobs is not None:
@@ -704,6 +715,7 @@ def pythonize_sampler_output(
 
     samples = samples.tolist()
     logprobs = logprobs.tolist()
+    logprob_ranks = logprob_ranks.tolist()
     prompt_logprobs = prompt_logprobs.tolist()
     if raw_sampler_output.top_logprobs is not None:
         top_logprobs = top_logprobs.tolist()
@@ -726,12 +738,14 @@ def pythonize_sampler_output(
             parent_ids = list(range(num_parent_seqs))
             token_ids = samples[sample_idx][0:1]
             seq_logprobs = logprobs[sample_idx][0:1]
+            seq_logprob_ranks = logprob_ranks[sample_idx][0:1]
             offset = 1
         elif is_prompt:
             actual_best_of = sampling_params.best_of
             parent_ids = [0] * actual_best_of
             token_ids = samples[sample_idx][:actual_best_of]
             seq_logprobs = logprobs[sample_idx][:actual_best_of]
+            seq_logprob_ranks = logprob_ranks[sample_idx][:actual_best_of]
             offset = 1
         else:
             parent_ids = list(range(num_parent_seqs))
@@ -739,6 +753,8 @@ def pythonize_sampler_output(
                                               num_parent_seqs])
             seq_logprobs = _flatten_list(logprobs[sample_idx:sample_idx +
                                                   num_parent_seqs])
+            seq_logprob_ranks = _flatten_list(
+                logprob_ranks[sample_idx:sample_idx + num_parent_seqs])
             offset = num_parent_seqs
 
         if is_prompt and sampling_params.prompt_logprobs is not None:
@@ -783,12 +799,14 @@ def pythonize_sampler_output(
 
         group_sample_logprobs: SampleLogprobs = []
 
-        for next_token_id, logprob, parent_id in zip(token_ids, seq_logprobs,
-                                                     parent_ids):
-            sample_logprobs_dict = {next_token_id: Logprob(logprob)}
+        for next_token_id, logprob, logprob_rank, parent_id in zip(
+                token_ids, seq_logprobs, seq_logprob_ranks, parent_ids):
+            sample_logprobs_dict = {
+                next_token_id: Logprob(logprob, logprob_rank)
+            }
             if num_logprobs > 0:
                 top_sample_logprobs = [
-                    Logprob(logprob)
+                    Logprob(logprob, logprob_rank)
                     for logprob in top_logprobs[top_logprob_idx +
                                                 parent_id][:num_logprobs]
                 ]

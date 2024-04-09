@@ -242,7 +242,7 @@ def _sample(probs: torch.Tensor,
     Args:
         probs [batch_size, vocab_size]: probs to sample from.
         logprobs [batch_size, vocab_size]: logprobs (used when
-            save_logprobsis True).
+            save_logprobs is True).
         sample_indices [n]: Indices of the samples to use for each row of probs.
         output_samples [n, n_best]: Output tensor to store samples in.
         output_logprobs [n, n_best]: Output tensor to store logprobs in.
