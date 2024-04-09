@@ -23,10 +23,23 @@ from vllm.model_executor.weight_utils import (default_weight_loader,
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs import TLGv4Config
 # from .triton_flash_blocksparse_attn import get_local_strided_sparse_attention_op, BlockSparseParams
+from .tnlgv4_attention import BlockSparseFlashAttention
+
+
+'''
+Further optimization TODO:
+1. fused matmul + activation (this seems to affect quantization)
+2. test if gegelu vs triton version
+3. FP8 bs attn.
+4. Does bs attn work well with tensor-paralllelization?
+
+'''
+
 
 @torch.jit.script
 def quick_gelu(x):
     return x * torch.sigmoid(1.702 * x)
+
 
 
 @torch.jit.script
@@ -77,7 +90,7 @@ class TLGv4MLP(nn.Module):
         x = gegelu(gate_up)
         x, _ = self.down_proj(x)
         return x
-        
+
 class TLGv4SelfAttention(nn.Module):
     def __init__(self, config: TLGv4Config, layer_idx: Optional[int] = None) -> None:
         super().__init__()
@@ -135,7 +148,7 @@ class TLGv4SelfAttention(nn.Module):
         self.blocksparse_num_local_blocks = config.blocksparse_num_local_blocks
         self.sliding_window = self.blocksparse_block_size * self.blocksparse_num_local_blocks
         
-        self.attn = Attention(self.num_heads,
+        self.attn = BlockSparseFlashAttention(self.num_heads,
                               self.head_dim,
                               norm_factor,
                               num_kv_heads=self.num_kv_heads)
@@ -209,9 +222,9 @@ class TLGv4Model(nn.Module):
             config.hidden_size
             )
 
-
+        # NOTE: we don't need this?
         self.embedding_dropout = nn.Dropout(config.embedding_dropout_prob)
-        
+
         self.mup_embedding_multiplier = config.mup_embedding_multiplier
 
         self.layers = nn.ModuleList([TLGv4DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
