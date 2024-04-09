@@ -10,11 +10,11 @@ from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
-from vllm.model_executor.parallel_utils import pynccl_utils
-from vllm.model_executor.parallel_utils.communication_op import (
+from vllm.device_communicators import pynccl_utils
+from vllm.communication_op import (
     broadcast_tensor_dict)
-from vllm.model_executor.parallel_utils.custom_all_reduce import init_custom_ar
-from vllm.model_executor.parallel_utils.parallel_state import (
+from vllm.device_communicators.custom_all_reduce import init_custom_ar
+from vllm.parallel_state import (
     ensure_model_parallel_initialized, init_distributed_environment)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine

@@ -9,7 +9,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 try:
-    from vllm.model_executor.parallel_utils.pynccl import (NCCLCommunicator,
+    from vllm.device_communicators.pynccl.pynccl import (NCCLCommunicator,
                                                            ncclGetVersion)
 except Exception as e:
     # in non-NVIDIA environments, we can't import the nccl module

@@ -8,7 +8,7 @@ from typing import Optional
 
 import torch
 
-from vllm.model_executor.parallel_utils import pynccl_utils
+from vllm.device_communicators import pynccl_utils
 
 # Tensor model parallel group that the current rank belongs to.
 _TENSOR_MODEL_PARALLEL_GROUP = None

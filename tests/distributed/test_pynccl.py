@@ -4,7 +4,7 @@ import os
 import pytest
 import torch
 
-from vllm.model_executor.parallel_utils.pynccl import (NCCLCommunicator,
+from vllm.device_communicators.pynccl.pynccl import (NCCLCommunicator,
                                                        ncclGetUniqueId)
 
 

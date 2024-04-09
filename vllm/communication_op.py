@@ -4,10 +4,10 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 from torch.distributed import ProcessGroup
 
-from vllm.model_executor.parallel_utils import pynccl_utils
-from vllm.model_executor.parallel_utils.custom_all_reduce import (
+from vllm.device_communicators import pynccl_utils
+from vllm.device_communicators.custom_all_reduce import (
     custom_all_reduce)
-from vllm.model_executor.parallel_utils.parallel_state import (
+from vllm.parallel_state import (
     get_tensor_model_parallel_group, get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size, is_pynccl_enabled_for_all_reduce)
 

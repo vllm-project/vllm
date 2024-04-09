@@ -6,8 +6,8 @@ import ray
 import torch
 import torch.distributed as dist
 
-from vllm.model_executor.parallel_utils import custom_all_reduce as custom_ar
-from vllm.model_executor.parallel_utils.communication_op import (
+from vllm.device_communicators import custom_all_reduce as custom_ar
+from vllm.communication_op import (
     tensor_model_parallel_all_reduce)
 from vllm.test_utils import (init_test_distributed_environment,
                              multi_process_tensor_parallel)

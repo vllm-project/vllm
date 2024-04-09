@@ -4,7 +4,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from vllm.model_executor.parallel_utils.communication_op import (
+from vllm.communication_op import (
     tensor_model_parallel_gather)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 
