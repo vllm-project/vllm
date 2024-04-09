@@ -17,6 +17,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.worker.model_runner import ModelRunner
+from vllm.worker.worker_base import LoraNotSupportedWorkerBase
 
 logger = init_logger(__name__)
 
@@ -112,7 +113,7 @@ class CPUCacheEngine:
         return dtype_size * total
 
 
-class CPUWorker:
+class CPUWorker(LoraNotSupportedWorkerBase):
     """A worker class that executes (a partition of) the model on a CPU socket.
 
     Each worker is associated with a single CPU socket. The worker is 
@@ -127,6 +128,7 @@ class CPUWorker:
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
+        cache_config: CacheConfig,
         local_rank: int,
         rank: int,
         distributed_init_method: str,
@@ -138,6 +140,7 @@ class CPUWorker:
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
+        self.cache_config = cache_config
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
@@ -154,8 +157,7 @@ class CPUWorker:
                                            kv_cache_dtype=kv_cache_dtype,
                                            is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
-        # self.init_cache_engine().
-        self.cache_config = None
+        # initialize_cache.
         self.cache_engine = None
         self.cpu_cache = None
 
@@ -167,28 +169,70 @@ class CPUWorker:
     def load_model(self):
         self.model_runner.load_model()
 
-    def get_cpu_cache_block_num(
-        self,
-        block_size: int,
-        cache_space: int,
-        cache_dtype: str,
-    ) -> int:
-        """
-        Args:
-            block_size: The size of the cache block.
-            cache_space: The size of the CPU KV cache space in bytes.
+    def determine_num_available_blocks(self) -> tuple[int, int]:
+        """Determine the number of blocks available for the KV cache.
+
+        This determines how many KV blocks can fit into the configured CPU
+        KV cache space.
+
+        Note that since vLLM assumes a block resides on GPU if it can be
+        modified, we return num_gpu_blocks=num_cpu_blocks and num_cpu_blocks=0.
+        This allows us to reuse the scheduler of vLLM without generalizing it
+        to different devices.
         """
         # For CPU device, the block number will be calculated based on the
         # cpu_kvcache_space.
-        cache_block_size = CPUCacheEngine.get_cache_block_size(
-            block_size, cache_dtype, self.model_config, self.parallel_config)
-        num_cpu_blocks = int(cache_space // cache_block_size)
+        cache_block_size = self.get_cache_block_size_bytes()
+        num_cpu_blocks = int(self.cache_config.cpu_kvcache_space_bytes //
+                             cache_block_size)
         num_cpu_blocks = max(num_cpu_blocks, 0)
 
-        return num_cpu_blocks
+        # Note: To reuse the cache management procedure,
+        # use cpu cache as 'gpu cache'.
+        num_gpu_blocks = num_cpu_blocks
+        num_cpu_blocks = 0
+        return num_gpu_blocks, num_cpu_blocks
 
-    def init_cache_engine(self, cache_config: CacheConfig) -> None:
-        self.cache_config = cache_config
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
+        """Initialize the KV cache. Currently, swappable CPU memory is not
+        supported.
+
+        Since this worker does not support GPUs, we use the num_gpu_blocks to
+        determine how many non-swappable CPU blocks to allocate.
+        """
+        assert (num_cpu_blocks == 0
+                ), f"{type(self)} does not support swappable cache"
+
+        # Note: To reuse the cache management procedure,
+        # use cpu cache as 'gpu cache'.
+        num_cpu_blocks = num_gpu_blocks
+
+        self._validate_num_cpu_blocks(num_cpu_blocks)
+        self.cache_config.num_gpu_blocks = num_cpu_blocks
+        self.cache_config.num_cpu_blocks = 0
+
+        # Initialize the cache.
+        self._init_cache_engine()
+
+    def _validate_num_cpu_blocks(self, num_cpu_blocks: int) -> None:
+        """Raise errors if the num_cpu_blocks is invalid.
+        """
+        if num_cpu_blocks <= 0:
+            raise ValueError("No available memory for the cache blocks. "
+                             "Try increasing `VLLM_CPU_KVCACHE_SPACE` when "
+                             "initializing the engine.")
+
+        max_seq_len = self.cache_config.block_size * num_cpu_blocks
+        if self.model_config.max_model_len > max_seq_len:
+            raise ValueError(
+                f"The model's max seq len ({self.model_config.max_model_len}) "
+                "is larger than the maximum number of tokens that can be "
+                f"stored in KV cache ({max_seq_len}). Try increasing "
+                "`VLLM_CPU_KVCACHE_SPACE` or decreasing `max_model_len` when "
+                "initializing the engine.")
+
+    def _init_cache_engine(self) -> None:
         self.cache_engine = CPUCacheEngine(self.cache_config,
                                            self.model_config,
                                            self.parallel_config,
@@ -264,3 +308,10 @@ class CPUWorker:
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,
             parallel_config.pipeline_parallel_size)
+
+    def get_cache_block_size_bytes(self) -> int:
+        """Return the size in bytes of a single KV cache block.
+        """
+        return CPUCacheEngine.get_cache_block_size(
+            self.cache_config.block_size, self.cache_config.cache_dtype,
+            self.model_config, self.parallel_config)

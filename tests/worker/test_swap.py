@@ -11,8 +11,8 @@ def test_swap() -> None:
                              dtype="half",
                              load_format="dummy")
     engine_config = engine_args.create_engine_config()
-    engine_config.cache_config.num_gpu_blocks = 100
-    engine_config.cache_config.num_cpu_blocks = 100
+    engine_config.cache_config.num_gpu_blocks = 1000
+    engine_config.cache_config.num_cpu_blocks = 1000
 
     # Create the worker.
     distributed_init_method = get_distributed_init_method(
@@ -22,6 +22,7 @@ def test_swap() -> None:
         parallel_config=engine_config.parallel_config,
         scheduler_config=engine_config.scheduler_config,
         device_config=engine_config.device_config,
+        cache_config=engine_config.cache_config,
         local_rank=0,
         rank=0,
         distributed_init_method=distributed_init_method,
@@ -31,8 +32,9 @@ def test_swap() -> None:
     # Initialize the worker.
     worker.init_device()
     worker.load_model()
-    worker.init_cache_engine(engine_config.cache_config)
-    worker.warm_up_model()
+    worker.initialize_cache(
+        num_gpu_blocks=engine_config.cache_config.num_gpu_blocks,
+        num_cpu_blocks=engine_config.cache_config.num_cpu_blocks)
 
     # Randomly initialize the cache.
     gpu_cache = worker.cache_engine.gpu_cache
