@@ -16,7 +16,7 @@ from vllm import SamplingParams
 
         # Allow only 5 sequences of ~1024 tokens in worst case.
         "block_size": 16,
-        "forced_num_gpu_blocks": 5 * (64 + 1),
+        "num_gpu_blocks_override": 5 * (64 + 1),
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{
@@ -162,14 +162,14 @@ def test_v1_v2_greedy_equality_with_cow(baseline_llm_generator,
 
             # Allow only 2 sequences of ~128 tokens in worst case.
             # Note 8 = 128/block_size
-            "forced_num_gpu_blocks": 2 * (8 + 1),
+            "num_gpu_blocks_override": 2 * (8 + 1),
         },
         {
             "block_size": 8,
 
             # Allow only 2 sequences of ~128 tokens in worst case.
             # Note 16 = 128/block_size
-            "forced_num_gpu_blocks": 2 * (16 + 1),
+            "num_gpu_blocks_override": 2 * (16 + 1),
         }
     ])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{
