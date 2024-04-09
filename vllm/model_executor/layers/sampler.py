@@ -29,6 +29,10 @@ class Sampler(nn.Module):
     parameters (e.g., sampling method, temperature, top-p, top-k, etc.).
     """
 
+    def __init__(self):
+        super().__init__()
+        self._include_gpu_probs_tensor = True
+
     def forward(
         self,
         logits: torch.Tensor,
@@ -73,13 +77,13 @@ class Sampler(nn.Module):
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
 
         # Sample the next tokens.
-        sample_results = _sample(probs, logprobs, sampling_metadata,
+        sample_results, sampled_tokens_tensor = _sample(probs, logprobs, sampling_metadata,
                                  sampling_tensors)
         # Get the logprobs query results.
         prompt_logprobs, sample_logprobs = _get_logprobs(
             logprobs, sampling_metadata, sample_results)
         return _build_sampler_output(sample_results, sampling_metadata,
-                                     prompt_logprobs, sample_logprobs)
+                                     prompt_logprobs, sample_logprobs, (probs, sampled_tokens_tensor))
 
 
 def _get_bin_counts_and_mask(
@@ -354,6 +358,8 @@ def _sample_with_torch(
     sample_metadata = {}
     multinomial_samples = {}
 
+    sampled_token_ids_tensor = torch.empty(logprobs.shape[0], 1, dtype=torch.long, device=logprobs.device)
+
     # Counterintiutively, having two loops here is actually faster.
     # The first loop can run without waiting on GPU<->CPU sync.
     for sampling_type in SamplingType:
@@ -367,8 +373,17 @@ def _sample_with_torch(
         sample_metadata[sampling_type] = (seq_group_ids, seq_groups,
                                           is_prompts, sample_indices)
         if sampling_type == SamplingType.GREEDY:
-            greedy_samples = torch.argmax(logprobs[sample_indices.long()],
-                                          dim=-1)
+            s_i = sample_indices.long()
+            greedy_samples = torch.argmax(logprobs[s_i], dim=-1)
+
+            # TODO clean up
+            # self._include_gpu_probs_tensor
+            logprobs[s_i, :] = -float('inf')
+            logprobs[s_i, greedy_samples] = 0.0
+            probs[s_i, :] = 0
+            probs[s_i, greedy_samples] = 1.0
+            sampled_token_ids_tensor[s_i] = greedy_samples.unsqueeze(-1)
+
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
             max_best_of_in_batch = 1
             for seq_group, is_prompt in zip(seq_groups, is_prompts):
@@ -380,9 +395,15 @@ def _sample_with_torch(
                 "seq_groups": seq_groups,
                 "generators": sampling_metadata.generators,
             }
-            multinomial_samples[sampling_type] = _multinomial(
-                probs[sample_indices.long()], max_best_of_in_batch,
+
+            s_i = sample_indices.long()
+
+            mn_samples = _multinomial(
+                probs[s_i], max_best_of_in_batch,
                 **seeded_args)
+            multinomial_samples[sampling_type] = mn_samples
+
+            sampled_token_ids_tensor[s_i] = mn_samples
         elif sampling_type == SamplingType.BEAM:
             beam_search_logprobs = logprobs[sample_indices]
         else:
@@ -396,6 +417,7 @@ def _sample_with_torch(
         seq_group_ids, seq_groups, is_prompts, sample_indices = sample_metadata[
             sampling_type]
         if sampling_type == SamplingType.GREEDY:
+            # This merely serializes the samples.
             sample_results = _greedy_sample(seq_groups, greedy_samples)
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
             sample_results = _random_sample(seq_groups, is_prompts,
@@ -410,87 +432,87 @@ def _sample_with_torch(
         sample_results_dict[i]
         for i in range(len(sampling_metadata.seq_groups))
     ]
-    return sample_results
+    return sample_results, sampled_token_ids_tensor
 
 
-def _sample_with_triton_kernel(
-    probs: torch.Tensor,
-    logprobs: torch.Tensor,
-    sampling_metadata: SamplingMetadata,
-    sampling_tensors: SamplingTensors,
-) -> List[Tuple[List[int], List[int]]]:
-    categorized_seq_group_ids = {t: [] for t in SamplingType}
-    categorized_sample_indices = sampling_metadata.categorized_sample_indices
-    for i, seq_group in enumerate(sampling_metadata.seq_groups):
-        _, sampling_params = seq_group
-        sampling_type = sampling_params.sampling_type
-        categorized_seq_group_ids[sampling_type].append(i)
-
-    sample_results_dict: Dict[int, Tuple[List[int], List[int]]] = {}
-    sample_metadata = {}
-    max_best_of_in_batch = 1
-
-    # Counterintiutively, having two loops here is actually faster.
-    # The first loop can run without waiting on GPU<->CPU sync.
-    for sampling_type in SamplingType:
-        sample_indices = categorized_sample_indices[sampling_type][:, 0]
-        sampled_token_indices = categorized_sample_indices[sampling_type][:, 1]
-        num_tokens = len(sample_indices)
-        if num_tokens == 0:
-            continue
-        seq_group_ids = categorized_seq_group_ids[sampling_type]
-        seq_groups = [sampling_metadata.seq_groups[i] for i in seq_group_ids]
-        is_prompts = [i < sampling_metadata.num_prompts for i in seq_group_ids]
-        sample_metadata[sampling_type] = (seq_group_ids, seq_groups,
-                                          is_prompts, sample_indices,
-                                          sampled_token_indices)
-        if sampling_type in (SamplingType.GREEDY, SamplingType.RANDOM,
-                             SamplingType.RANDOM_SEED):
-            for seq_group, is_prompt in zip(seq_groups, is_prompts):
-                if is_prompt:
-                    _, sampling_params = seq_group
-                    max_best_of_in_batch = max(max_best_of_in_batch,
-                                               sampling_params.best_of)
-        elif sampling_type == SamplingType.BEAM:
-            beam_search_logprobs = logprobs[sample_indices]
-        else:
-            raise ValueError(f"Unsupported sampling type: {sampling_type}")
-
-    sampled_tokens, _, _ = sample_triton(
-        probs=probs,
-        seeds=sampling_tensors.sampling_seeds,
-        max_best_of=max_best_of_in_batch,
-        sample_indices=sampling_tensors.sample_indices,
-        logprobs=logprobs,
-        # don't save logprobs because we have logic for that below
-        # TODO: use this instead of the CPU-based logic below
-        save_logprobs=False,
-    )
-
-    # GPU<->CPU sync happens in the loop below.
-
-    for sampling_type in SamplingType:
-        if sampling_type not in sample_metadata:
-            continue
-        (seq_group_ids, seq_groups, is_prompts, sample_indices,
-         sampled_token_indices) = sample_metadata[sampling_type]
-        if sampling_type == SamplingType.GREEDY:
-            sample_results = _greedy_sample(
-                seq_groups, sampled_tokens[sampled_token_indices][:, 0])
-        elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
-            sample_results = _random_sample(
-                seq_groups, is_prompts, sampled_tokens[sampled_token_indices])
-        elif sampling_type == SamplingType.BEAM:
-            sample_results = _beam_search_sample(seq_groups, is_prompts,
-                                                 sampling_metadata.seq_data,
-                                                 beam_search_logprobs)
-        sample_results_dict.update(zip(seq_group_ids, sample_results))
-
-    sample_results = [
-        sample_results_dict[i]
-        for i in range(len(sampling_metadata.seq_groups))
-    ]
-    return sample_results
+#def _sample_with_triton_kernel(
+#    probs: torch.Tensor,
+#    logprobs: torch.Tensor,
+#    sampling_metadata: SamplingMetadata,
+#    sampling_tensors: SamplingTensors,
+#) -> List[Tuple[List[int], List[int]]]:
+#    categorized_seq_group_ids = {t: [] for t in SamplingType}
+#    categorized_sample_indices = sampling_metadata.categorized_sample_indices
+#    for i, seq_group in enumerate(sampling_metadata.seq_groups):
+#        _, sampling_params = seq_group
+#        sampling_type = sampling_params.sampling_type
+#        categorized_seq_group_ids[sampling_type].append(i)
+#
+#    sample_results_dict: Dict[int, Tuple[List[int], List[int]]] = {}
+#    sample_metadata = {}
+#    max_best_of_in_batch = 1
+#
+#    # Counterintiutively, having two loops here is actually faster.
+#    # The first loop can run without waiting on GPU<->CPU sync.
+#    for sampling_type in SamplingType:
+#        sample_indices = categorized_sample_indices[sampling_type][:, 0]
+#        sampled_token_indices = categorized_sample_indices[sampling_type][:, 1]
+#        num_tokens = len(sample_indices)
+#        if num_tokens == 0:
+#            continue
+#        seq_group_ids = categorized_seq_group_ids[sampling_type]
+#        seq_groups = [sampling_metadata.seq_groups[i] for i in seq_group_ids]
+#        is_prompts = [i < sampling_metadata.num_prompts for i in seq_group_ids]
+#        sample_metadata[sampling_type] = (seq_group_ids, seq_groups,
+#                                          is_prompts, sample_indices,
+#                                          sampled_token_indices)
+#        if sampling_type in (SamplingType.GREEDY, SamplingType.RANDOM,
+#                             SamplingType.RANDOM_SEED):
+#            for seq_group, is_prompt in zip(seq_groups, is_prompts):
+#                if is_prompt:
+#                    _, sampling_params = seq_group
+#                    max_best_of_in_batch = max(max_best_of_in_batch,
+#                                               sampling_params.best_of)
+#        elif sampling_type == SamplingType.BEAM:
+#            beam_search_logprobs = logprobs[sample_indices]
+#        else:
+#            raise ValueError(f"Unsupported sampling type: {sampling_type}")
+#
+#    sampled_tokens, _, _ = sample_triton(
+#        probs=probs,
+#        seeds=sampling_tensors.sampling_seeds,
+#        max_best_of=max_best_of_in_batch,
+#        sample_indices=sampling_tensors.sample_indices,
+#        logprobs=logprobs,
+#        # don't save logprobs because we have logic for that below
+#        # TODO: use this instead of the CPU-based logic below
+#        save_logprobs=False,
+#    )
+#
+#    # GPU<->CPU sync happens in the loop below.
+#
+#    for sampling_type in SamplingType:
+#        if sampling_type not in sample_metadata:
+#            continue
+#        (seq_group_ids, seq_groups, is_prompts, sample_indices,
+#         sampled_token_indices) = sample_metadata[sampling_type]
+#        if sampling_type == SamplingType.GREEDY:
+#            sample_results = _greedy_sample(
+#                seq_groups, sampled_tokens[sampled_token_indices][:, 0])
+#        elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
+#            sample_results = _random_sample(
+#                seq_groups, is_prompts, sampled_tokens[sampled_token_indices])
+#        elif sampling_type == SamplingType.BEAM:
+#            sample_results = _beam_search_sample(seq_groups, is_prompts,
+#                                                 sampling_metadata.seq_data,
+#                                                 beam_search_logprobs)
+#        sample_results_dict.update(zip(seq_group_ids, sample_results))
+#
+#    sample_results = [
+#        sample_results_dict[i]
+#        for i in range(len(sampling_metadata.seq_groups))
+#    ]
+#    return sample_results
 
 
 def _sample(
@@ -668,6 +690,7 @@ def _build_sampler_output(
     sampling_metadata: SamplingMetadata,
     prompt_logprobs: List[Optional[PromptLogprobs]],
     sample_logprobs: List[SampleLogprobs],
+    spec_decode_data,
 ) -> SamplerOutput:
     sampler_output = []
     for (seq_group, sample_result, group_prompt_logprobs,
@@ -684,4 +707,11 @@ def _build_sampler_output(
                 SequenceOutput(seq_ids[parent_id], next_token_id, logprobs))
         sampler_output.append(
             SequenceGroupOutput(seq_outputs, group_prompt_logprobs))
-    return SamplerOutput(outputs=sampler_output)
+
+
+    probs, token_ids = spec_decode_data
+    return SamplerOutput(
+        outputs=sampler_output,
+        sampled_token_probs=probs,
+        sampled_token_ids=token_ids,
+    )

@@ -39,7 +39,7 @@ from vllm import SamplingParams
         },
     ])
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
-@pytest.mark.parametrize("batch_size", [1])
+@pytest.mark.parametrize("batch_size", [2])
 # NOTE: We should run more permutations of this test (more BS, more seeds). But
 # because our spec decode generates gibberish token ids, the likelihood of
 # emitting an invalid token combination is nontrivial. This causes divergence in
