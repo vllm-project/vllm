@@ -88,6 +88,7 @@ vLLM seamlessly supports many Hugging Face models, including the following archi
 
 Install vLLM with pip or [from source](https://vllm.readthedocs.io/en/latest/getting_started/installation.html#build-from-source):
 
+GPU CUDA Compute Capability version >= 8.0, please refer to [nvidia](https://developer.nvidia.com/cuda-gpus#compute) Check the corresponding list provided to see if your GPU supports it.
 ```bash
 pip install vllm
 ```
