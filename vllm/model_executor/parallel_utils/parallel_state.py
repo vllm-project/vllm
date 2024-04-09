@@ -63,7 +63,7 @@ def init_distributed_environment(
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
-    backend: str = "nccl",
+    backend: Optional[str] = None,
 ) -> None:
     """
     Initialize model parallel groups.
@@ -90,6 +90,7 @@ def initialize_model_parallel(
     # Get world size and rank. Ensure some consistencies.
     assert torch.distributed.is_initialized()
     world_size: int = torch.distributed.get_world_size()
+    backend = backend or torch.distributed.get_backend(_DEVICE_WORLD_GROUP)
 
     if (world_size !=
             tensor_model_parallel_size * pipeline_model_parallel_size):
