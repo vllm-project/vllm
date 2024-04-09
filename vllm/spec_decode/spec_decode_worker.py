@@ -18,6 +18,7 @@ from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
 
 logger = init_logger(__name__)
 
+
 class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     """Worker which implements speculative decoding.
 
