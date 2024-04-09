@@ -667,9 +667,10 @@ def pythonize_sampler_output(
     This blocks the CPU until the GPU catches up, so should only be used when
     necessary.
     """
-    logprob_ranks_gpu = (
-        raw_sampler_output.logprobs >
-        raw_sampler_output.sampled_logprobs[:, None]).long().sum(1).add_(1)
+    logprob_ranks_gpu = (raw_sampler_output.logprobs[
+        raw_sampler_output.sampling_tensors.sample_indices] >
+                         raw_sampler_output.sampled_logprobs.flatten()[:, None]
+                         ).long().sum(1).add_(1)
 
     # GPU<->CPU sync happens below.
     samples = torch.empty(*raw_sampler_output.sampled_tokens.shape,
