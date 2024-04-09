@@ -4,17 +4,6 @@
 # the final pipeline yaml file.
 
 steps:
-- label: Entrypoints Test
-  commands:
-  # these tests have to be separated, because each one will allocate all posible GPU memory
-  - pytest -v -s entrypoints --ignore=entrypoints/test_server_oot_registration.py
-  - pytest -v -s entrypoints/test_server_oot_registration.py
-
-- label: Kernels Test %N
-  command: pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 4
-
-- label: LoRA Test %N
-  command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 4
-
+"""
+We remove conventional CI steps to test AMD CI, that runs in the container at .buildkite/run-amd-test.sh 
+"""
