@@ -405,7 +405,7 @@ def _sample_with_torch(
                                       **seeded_args)
             multinomial_samples[sampling_type] = mn_samples
 
-            sampled_token_ids_tensor[s_i] = mn_samples
+            sampled_token_ids_tensor[s_i] = mn_samples.unsqueeze(-1)
         elif sampling_type == SamplingType.BEAM:
             beam_search_logprobs = logprobs[sample_indices]
         else:
