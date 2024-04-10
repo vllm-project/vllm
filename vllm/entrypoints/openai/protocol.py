@@ -63,6 +63,8 @@ class ChatCompletionRequest(BaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
     messages: List[Dict[str, str]]
+    tools: Optional[List[Dict[str, Union[str, Dict]]]] = None
+    documents: Optional[List[Dict[str, str]]] = None
     model: str
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None

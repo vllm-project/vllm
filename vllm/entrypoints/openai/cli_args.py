@@ -73,6 +73,18 @@ def make_arg_parser():
                         help="The file path to the chat template, "
                         "or the template in single-line form "
                         "for the specified model")
+    parser.add_argument("--tool-template",
+                        type=str,
+                        default=None,
+                        help="The file path to the tool template, "
+                        "or the template in single-line form "
+                        "for the specified model")
+    parser.add_argument("--rag-template",
+                        type=str,
+                        default=None,
+                        help="The file path to the rag template, "
+                        "or the template in single-line form "
+                        "for the specified model")
     parser.add_argument("--response-role",
                         type=str,
                         default="assistant",

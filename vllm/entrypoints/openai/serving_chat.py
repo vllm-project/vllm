@@ -22,17 +22,26 @@ logger = init_logger(__name__)
 
 class OpenAIServingChat(OpenAIServing):
 
-    def __init__(self,
-                 engine: AsyncLLMEngine,
-                 served_model: str,
-                 response_role: str,
-                 lora_modules: Optional[List[LoRA]] = None,
-                 chat_template=None):
+    def __init__(
+        self,
+        engine: AsyncLLMEngine,
+        served_model: str,
+        response_role: str,
+        lora_modules: Optional[List[LoRA]] = None,
+        chat_template=None,
+        tool_template=None,
+        rag_template=None,
+    ):
         super().__init__(engine=engine,
                          served_model=served_model,
                          lora_modules=lora_modules)
         self.response_role = response_role
         self._load_chat_template(chat_template)
+        if tool_template is not None:
+            self._load_tool_template(tool_template)
+
+        if rag_template is not None:
+            self._load_rag_template(rag_template)
 
     async def create_chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
@@ -52,10 +61,25 @@ class OpenAIServingChat(OpenAIServing):
             return error_check_ret
 
         try:
-            prompt = self.tokenizer.apply_chat_template(
-                conversation=request.messages,
-                tokenize=False,
-                add_generation_prompt=request.add_generation_prompt)
+            if request.tools is not None:
+                prompt = self.tokenizer.apply_chat_template(
+                    conversation=request.messages,
+                    chat_template="tool_use",
+                    tools=request.tools,
+                    tokenize=False,
+                    add_generation_prompt=request.add_generation_prompt)
+            elif request.documents is not None:
+                prompt = self.tokenizer.apply_chat_template(
+                    conversation=request.messages,
+                    chat_template="rag",
+                    documents=request.documents,
+                    tokenize=False,
+                    add_generation_prompt=request.add_generation_prompt)
+            else:
+                prompt = self.tokenizer.apply_chat_template(
+                    conversation=request.messages,
+                    tokenize=False,
+                    add_generation_prompt=request.add_generation_prompt)
         except Exception as e:
             logger.error(
                 f"Error in applying chat template from request: {str(e)}")
@@ -334,3 +358,41 @@ class OpenAIServingChat(OpenAIServing):
         else:
             logger.warning(
                 "No chat template provided. Chat API will not work.")
+
+    def _load_tool_template(self, tool_template):
+        try:
+            with open(tool_template, "r") as f:
+                tool_template = f.read()
+        except OSError:
+            # If opening a file fails, set chat template to be args to
+            # ensure we decode so our escape are interpreted correctly
+            tool_template = codecs.decode(tool_template, "unicode_escape")
+
+        if isinstance(self.tokenizer.chat_template, dict):
+            self.tokenizer.chat_template['tool_use'] = tool_template
+        else:
+            self.tokenizer.chat_template = {
+                "default": self.tokenizer.chat_template,
+                'tool_use': tool_template
+            }
+
+        logger.info(f"Using supplied tool template:\n{tool_template}")
+
+    def _load_rag_template(self, rag_template):
+        try:
+            with open(rag_template, "r") as f:
+                rag_template = f.read()
+        except OSError:
+            # If opening a file fails, set chat template to be args to
+            # ensure we decode so our escape are interpreted correctly
+            rag_template = codecs.decode(rag_template, "unicode_escape")
+
+        if isinstance(self.tokenizer.chat_template, dict):
+            self.tokenizer.chat_template['rag'] = rag_template
+        else:
+            self.tokenizer.chat_template = {
+                "default": self.tokenizer.chat_template,
+                'rag': rag_template
+            }
+
+        logger.info(f"Using supplied rag template:\n{rag_template}")
