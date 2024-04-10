@@ -11,6 +11,7 @@ from typing import Optional, Type, Union
 from tensorizer import DecryptionParams, TensorDeserializer, stream_io
 from tensorizer.utils import convert_bytes, get_mem_usage, no_init_or_tensor
 from torch import nn
+import torch
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
@@ -208,6 +209,13 @@ class TensorizerAgent:
         with no_init_or_tensor():
             return self.model_cls(model_args)
 
+    def _patch_linear_weights(self):
+        for child in self.model.modules():
+            if hasattr(child, "linear_weights"):
+                for name, weight in child.linear_weights.items():
+                    if isinstance(weight, torch.Tensor):
+                        child.linear_weights[name] = getattr(child, name)
+
     def deserialize(self):
         """
         Deserialize the model using the TensorDeserializer. This method is
@@ -246,4 +254,5 @@ class TensorizerAgent:
         logger.info(f"Memory usage before: {before_mem}")
         logger.info(f"Memory usage after: {after_mem}")
 
+        self._patch_linear_weights()
         return self.model.eval()
