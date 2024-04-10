@@ -24,13 +24,10 @@ def load_with_tensorizer(model_cls: Type[nn.Module],
     tensorizer = TensorizerAgent(model_cls, model_config)
     return tensorizer.deserialize()
 
-
-def _is_vllm_model(model_config: ModelConfig = None,
-                   file_uri: Optional[str] = None) -> bool:
-    if file_uri:
-        return "vllm" in file_uri
-    else:
-        return "vllm" in model_config.tensorizer_args.tensorizer_uri
+def _is_vllm_model(model_config: ModelConfig) -> bool:
+    if model_config.tensorizer_args is None:
+        return False
+    return model_config.tensorizer_args.vllm_tensorized
 
 
 class ParameterizedLoadFormat(str):
@@ -60,6 +57,7 @@ class TensorizerArgs:
     s3_access_key_id: Optional[str] = None
     s3_secret_access_key: Optional[str] = None
     s3_endpoint: Optional[str] = None
+    vllm_tensorized: Optional[bool] = False
     """
   Args for the TensorizerAgent class. These are used to configure the behavior 
   of the TensorDeserializer when loading tensors from a serialized model.
@@ -83,7 +81,11 @@ class TensorizerArgs:
           be set via the S3_SECRET_ACCESS_KEY environment variable.
       s3_endpoint: The endpoint for the S3 bucket. Can also be set via the
           S3_ENDPOINT_URL environment variable.
-        
+      vllm_tensorized: If True, indicates that the serialized model is a 
+          vLLM model. This is used to determine the behavior of the 
+          TensorDeserializer when loading tensors from a serialized model.
+          It is far faster to deserialize a vLLM model as it utilizes
+          tensorizer's optimized GPU loading.
   """
 
     def __post_init__(self):
@@ -167,6 +169,13 @@ class TensorizerArgs:
             default=None,
             help="The endpoint for the S3 bucket. Can also be set via the "
             "S3_ENDPOINT_URL environment variable.",
+        )
+        group.add_argument(
+            "--vllm-tensorized",
+            action="store_true",
+            help="If enabled, indicates that the serialized model is a vLLM "
+            "model. This is used to determine the behavior of the "
+            "TensorDeserializer when loading tensors from a serialized model."
         )
 
         return parser
