@@ -53,6 +53,21 @@ class PreparePromptMetadata(NamedTuple):
     multi_modal_input: Optional[torch.Tensor]
     slot_mapping: List[int]
 
+    @classmethod
+    def empty(cls):
+        return PreparePromptMetadata(
+            input_tokens=[],
+            input_positions=[],
+            attn_metadata=None,
+            prompt_lens=[],
+            subquery_lens=[],
+            lora_index_mapping=[],
+            lora_prompt_mapping=[],
+            lora_requests=set(),
+            multi_modal_input=None,
+            slot_mapping=[],
+        )
+
 
 class PrepareDecodeMetadata(NamedTuple):
     input_tokens: List[int]
@@ -62,6 +77,18 @@ class PrepareDecodeMetadata(NamedTuple):
     lora_prompt_mapping: List[int]
     lora_requests: Set[LoRARequest]
     slot_mapping: List[int]
+
+    @classmethod
+    def empty(cls):
+        return PrepareDecodeMetadata(
+            input_tokens=[],
+            input_positions=[],
+            attn_metadata=None,
+            lora_index_mapping=[],
+            lora_prompt_mapping=[],
+            lora_requests=set(),
+            slot_mapping=[],
+        )
 
 
 # How batches are constructed.
@@ -204,7 +231,7 @@ class ModelRunner:
         multi_modal_input_list: List[torch.Tensor] = []
 
         if len(seq_group_metadata_list) == 0:
-            return [], [], None, [], [], [], [], set(), None, []
+            return PreparePromptMetadata.empty()
 
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
@@ -400,7 +427,7 @@ class ModelRunner:
         lora_requests: Set[LoRARequest] = set()
 
         if len(seq_group_metadata_list) == 0:
-            return [], [], None, [], [], set(), []
+            return PrepareDecodeMetadata.empty()
 
         for seq_group_metadata in seq_group_metadata_list:
             assert not seq_group_metadata.is_prompt
