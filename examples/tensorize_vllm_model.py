@@ -19,6 +19,40 @@ from vllm.model_executor.parallel_utils.parallel_state import (
     initialize_model_parallel)
 from vllm.model_executor.tensorizer_loader import TensorizerArgs
 
+"""
+tensorize_vllm_model.py is a script that can be used to serialize and deserialize
+vLLM models. These models can be loaded using tensorizer directly to the GPU
+extremely quickly. Tensor encryption and decryption is also supported, although
+libsodium must be installed to use it. 
+
+To serialize a model, you can run something like this:
+
+python tensorize_vllm_model.py \
+   --model EleutherAI/gpt-j-6B \
+   --dtype float16 \
+   serialize \
+   --serialized-directory s3://my-bucket/ \
+   --suffix vllm
+   
+Which downloads the model from HuggingFace, loads it into vLLM, serializes it, and saves it to your S3 bucket. 
+A local directory can also be used.
+
+You can also encrypt the model weights with a randomly-generated key by providing a `--keyfile` argument.
+
+To deserialize a model, you can run something like this:
+
+python tensorize_vllm_model.py \
+   --model EleutherAI/gpt-j-6B \
+   --dtype float16 \
+   deserialize \
+   --path-to-tensors s3://my-bucket/vllm/EleutherAI/gpt-j-6B/vllm/model.tensors
+
+Which downloads the model tensors from your S3 bucket and deserializes them.
+
+You can also provide a `--keyfile` argument to decrypt the model weights if they were serialized with encryption.
+
+For more information on the available arguments, run `python tensorize_vllm_model.py --help`.
+"""
 
 def parse_args():
     parser = argparse.ArgumentParser(
