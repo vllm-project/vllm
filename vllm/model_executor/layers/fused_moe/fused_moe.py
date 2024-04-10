@@ -221,6 +221,10 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
         META['SPLIT_K_SIZE']
     )
 
+    if config['SPLIT_K_SIZE'] > 1:
+        # If we are using split k, we need to zero the result to prepare for atomic_add
+        C.zero_()
+
     fused_moe_kernel[grid](
         A,
         B,
@@ -383,13 +387,13 @@ def fused_moe(
                     'BLOCK_SIZE_K': 64,
                 }
 
-    intermediate_cache1 = torch.zeros((M, topk_ids.shape[1], N),
+    intermediate_cache1 = torch.empty((M, topk_ids.shape[1], N),
                                       device=hidden_states.device,
                                       dtype=hidden_states.dtype)
-    intermediate_cache2 = torch.zeros((M * topk_ids.shape[1], N // 2),
+    intermediate_cache2 = torch.empty((M * topk_ids.shape[1], N // 2),
                                       device=hidden_states.device,
                                       dtype=hidden_states.dtype)
-    intermediate_cache3 = torch.zeros((M, topk_ids.shape[1], w2.shape[1]),
+    intermediate_cache3 = torch.empty((M, topk_ids.shape[1], w2.shape[1]),
                                       device=hidden_states.device,
                                       dtype=hidden_states.dtype)
 
