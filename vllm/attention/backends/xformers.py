@@ -219,10 +219,7 @@ class XFormersImpl(AttentionImpl):
         assert query.shape[0] == num_prefill_tokens
         assert decode_query.shape[0] == num_decode_tokens
 
-        if num_prefill_tokens > 0:
-            prefill_meta = attn_metadata.prefill_metadata
-            assert prefill_meta is not None
-
+        if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
             if kv_cache is None or prefill_meta.block_tables.numel() == 0:
                 # normal attention.

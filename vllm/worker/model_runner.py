@@ -1,6 +1,7 @@
 import contextlib
 import time
-from typing import Dict, List, Optional, Set, Tuple
+from enum import IntEnum
+from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 
 import numpy as np
 import torch
@@ -38,6 +39,39 @@ _BATCH_SIZE_ALIGNMENT = 8
 _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
     _BATCH_SIZE_ALIGNMENT * i for i in range(1, 33)
 ]
+
+
+class PreparePromptMetadata(NamedTuple):
+    input_tokens: List[int]
+    input_positions: List[int]
+    attn_metadata: Optional[AttentionMetadataPerStage]
+    prompt_lens: List[int]
+    subquery_lens: List[int]
+    lora_index_mapping: List[int]
+    lora_prompt_mapping: List[int]
+    lora_requests: Set[LoRARequest]
+    multi_modal_input: Optional[torch.Tensor]
+    slot_mapping: List[int]
+
+
+class PrepareDecodeMetadata(NamedTuple):
+    input_tokens: List[int]
+    input_positions: List[int]
+    attn_metadata: Optional[AttentionMetadata]
+    lora_index_mapping: List[int]
+    lora_prompt_mapping: List[int]
+    lora_requests: Set[LoRARequest]
+    slot_mapping: List[int]
+
+
+# How batches are constructed.
+class BatchType(IntEnum):
+    # Every batch is prefill.
+    PREFILL = 0
+    # Every batch is decode.
+    DECODE = 1
+    # Batch is a mixture of prefill and decode.
+    MIXED = 2
 
 
 class ModelRunner:
@@ -155,9 +189,7 @@ class ModelRunner:
     def _prepare_prompt(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[List[int], List[int], Optional[AttentionMetadataPerStage],
-               List[int], List[int], List[int], List[int], Set[LoRARequest],
-               Optional[torch.Tensor], List[int]]:
+    ) -> PreparePromptMetadata:
         input_tokens: List[int] = []
         input_positions: List[int] = []
         slot_mapping: List[int] = []
@@ -341,15 +373,23 @@ class ModelRunner:
             block_tables=block_tables,
             use_cuda_graph=False,
         )
-        return (input_tokens, input_positions, attn_metadata, prompt_lens,
-                subquery_lens, lora_index_mapping, lora_prompt_mapping,
-                lora_requests, multi_modal_input, slot_mapping)
+        return PreparePromptMetadata(
+            input_tokens=input_tokens,
+            input_positions=input_positions,
+            attn_metadata=attn_metadata,
+            prompt_lens=prompt_lens,
+            subquery_lens=subquery_lens,
+            lora_index_mapping=lora_index_mapping,
+            lora_prompt_mapping=lora_prompt_mapping,
+            lora_requests=lora_requests,
+            multi_modal_input=multi_modal_input,
+            slot_mapping=slot_mapping,
+        )
 
     def _prepare_decode(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[List[int], List[int], Optional[AttentionMetadata], List[int],
-               List[int], Set[LoRARequest], List[int]]:
+    ) -> PrepareDecodeMetadata:
         input_tokens: List[int] = []
         input_positions: List[int] = []
         slot_mapping: List[int] = []
@@ -462,9 +502,15 @@ class ModelRunner:
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
         )
-        return (input_tokens, input_positions, attn_metadata,
-                lora_index_mapping, lora_prompt_mapping, lora_requests,
-                slot_mapping)
+        return PrepareDecodeMetadata(
+            input_tokens=input_tokens,
+            input_positions=input_positions,
+            attn_metadata=attn_metadata,
+            lora_index_mapping=lora_index_mapping,
+            lora_prompt_mapping=lora_prompt_mapping,
+            lora_requests=lora_requests,
+            slot_mapping=slot_mapping,
+        )
 
     def _prepare_sample(
         self,
@@ -643,11 +689,11 @@ class ModelRunner:
             # If it only contains 1 type, it triggers a single broadcast.
             if (prefill_attn_metadata is not None
                     and decode_attn_metadata is not None):
-                batch_type = "mixed"
+                batch_type = BatchType.MIXED
             elif prefill_attn_metadata is not None:
-                batch_type = "prefill"
+                batch_type = BatchType.PREFILL
             else:
-                batch_type = "decode"
+                batch_type = BatchType.DECODE
 
             metadata_dict = {
                 "input_tokens": input_tokens,
@@ -672,7 +718,7 @@ class ModelRunner:
             # Broadcast decode attn metadata for mixed batch type.
             # The additional broadcast costs 300us overhead on 4 A10 GPUs.
             # We can potentially reduce the overhead by coelescing tensors.
-            if batch_type == "mixed":
+            if batch_type == BatchType.MIXED:
                 assert decode_attn_metadata is not None
                 metadata_dict = decode_attn_metadata.asdict_zerocopy()
                 broadcast_tensor_dict(metadata_dict, src=0)
@@ -694,7 +740,7 @@ class ModelRunner:
             # Create an attention metadata.
             prefill_attn_metadata = None
             decode_attn_metadata = None
-            if batch_type == "prefill" or batch_type == "mixed":
+            if batch_type == BatchType.PREFILL or batch_type == BatchType.MIXED:
                 prefill_attn_metadata = self.attn_backend.make_metadata(
                     **metadata_dict)
             else:
@@ -712,7 +758,7 @@ class ModelRunner:
 
             # if it is a mixed batch, decode attn_metadata is broadcasted
             # separately.
-            if batch_type == "mixed":
+            if batch_type == BatchType.MIXED:
                 metadata_dict = broadcast_tensor_dict(src=0)
                 decode_attn_metadata = self.attn_backend.make_metadata(
                     **metadata_dict)

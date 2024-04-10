@@ -35,6 +35,8 @@ def test_models(
             and not enforce_eager):
         pytest.skip(f"Skip {chunked_prefill_token_size=} and {enforce_eager=} "
                     "for high TP to save testing time.")
+    max_num_seqs = min(chunked_prefill_token_size, 256)
+
     # To pass the small model tests, we need full precision.
     # assert dtype == "float"
     enable_chunked_prefill = False
@@ -54,6 +56,7 @@ def test_models(
         enable_chunked_prefill=enable_chunked_prefill,
         tensor_parallel_size=tensor_parallel_size,
         enforce_eager=enforce_eager,
+        max_num_seqs=max_num_seqs,
     )
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model

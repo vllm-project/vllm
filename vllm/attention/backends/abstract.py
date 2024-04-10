@@ -82,6 +82,13 @@ class AttentionMetadata(Generic[T]):
     prefill_metadata: Optional[T]
     decode_metadata: Optional[T]
 
+    def __post_init__(self):
+        if self.num_prefill_tokens > 0:
+            assert self.num_prefills > 0
+            assert self.prefill_metadata is not None
+        if self.num_decode_tokens > 0:
+            assert self.decode_metadata is not None
+
 
 class AttentionImpl(ABC):
 

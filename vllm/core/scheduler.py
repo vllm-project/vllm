@@ -140,12 +140,11 @@ class SchedulerOutputs:
 
     @property
     def lora_requests(self) -> Set[LoRARequest]:
-        result = {}
-        for g in self.scheduled_seq_groups:
-            lora_request = g.seq_group.lora_request
-            if lora_request is not None:
-                result.add(lora_request)
-        return result
+        return {
+            g.seq_group.lora_request
+            for g in self.scheduled_seq_groups
+            if g.seq_group.lora_request is not None
+        }
 
 
 @dataclass
