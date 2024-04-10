@@ -1,3 +1,3 @@
-from vllm.distributed.parallel_state import *
-from vllm.distributed.communication_op import *
-from vllm.distributed.utils import *
+from .parallel_state import *
+from .communication_op import *
+from .utils import *
