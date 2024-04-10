@@ -18,7 +18,7 @@ prompts = [
     "The future of AI is",
 ]
 # Create a sampling params object.
-sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+sampling_params = SamplingParams(temperature=0.8, top_p=0.95, seed=0)
 
 model_ref = "facebook/opt-125m"
 
@@ -56,7 +56,7 @@ def test_load_with_tensorizer(mock_agent, model_config):
 
 
 def test_is_vllm_model_with_vllm_in_uri(model_config):
-    model_config.tensorizer_args.tensorizer_uri = "vllm"
+    model_config.tensorizer_args.vllm_tensorized = True
 
     result = _is_vllm_model(model_config)
 
@@ -64,14 +64,14 @@ def test_is_vllm_model_with_vllm_in_uri(model_config):
 
 
 def test_is_vllm_model_without_vllm_in_uri(model_config):
-    model_config.tensorizer_args.tensorizer_uri = "blabla"
+    model_config.tensorizer_args.vllm_tensorized = False
 
     result = _is_vllm_model(model_config)
 
     assert result is False
 
 
-def test_deserialized_model_has_same_outputs(vllm_runner, tmp_path):
+def test_deserialized_vllm_model_has_same_outputs(vllm_runner, tmp_path):
     vllm_model = vllm_runner(model_ref, dtype=dtype)
     model_path = tmp_path / (model_ref + ".tensors")
     outputs = vllm_model.generate(prompts, sampling_params)
@@ -80,14 +80,37 @@ def test_deserialized_model_has_same_outputs(vllm_runner, tmp_path):
     with stream_io.open_stream(model_path, "wb+") as stream:
         serializer = TensorSerializer(stream)
         serializer.write_module(model)
-    del vllm_model
+    del vllm_model, model
     gc.collect()
     torch.cuda.empty_cache()
     loaded_vllm_model = vllm_runner(model_ref,
                                     tensorizer_args=TensorizerArgs(
                                         tensorizer_uri=model_path,
-                                        num_readers=1),
+                                        num_readers=1,
+                                        vllm_tensorized=True),
                                     dtype=dtype)
     deserialized_outputs = loaded_vllm_model.generate(prompts, sampling_params)
+
+    # Assumes SamplingParams being seeded ensures the outputs are deterministic
+    assert outputs == deserialized_outputs
+
+def test_deserialized_hf_model_has_same_outputs(hf_runner, vllm_runner, tmp_path):
+    hf_model = hf_runner(model_ref, dtype=dtype)
+    model_path = tmp_path / (model_ref + ".tensors")
+    max_tokens = 50
+    outputs = hf_model.generate_greedy(prompts, max_tokens=max_tokens)
+    with stream_io.open_stream(model_path, "wb+") as stream:
+        serializer = TensorSerializer(stream)
+        serializer.write_module(hf_model.model)
+    del hf_model
+    gc.collect()
+    torch.cuda.empty_cache()
+    loaded_hf_model = vllm_runner(model_ref,
+                                    tensorizer_args=TensorizerArgs(
+                                        tensorizer_uri=model_path,
+                                        num_readers=1,
+                                        vllm_tensorized=False),
+                                    dtype=dtype)
+    deserialized_outputs = loaded_hf_model.generate_greedy(prompts, max_tokens=max_tokens)
 
     assert outputs == deserialized_outputs
