@@ -25,12 +25,13 @@ logger = init_logger(__name__)
 class CPUModelRunner(ModelRunner):
 
     def load_model(self) -> None:
-        self.model = get_model(self.model_config,
-                               self.device_config,
-                               lora_config=self.lora_config,
-                               vision_language_config=self.vision_language_config,
-                               parallel_config=self.parallel_config,
-                               scheduler_config=self.scheduler_config)
+        self.model = get_model(
+            self.model_config,
+            self.device_config,
+            lora_config=self.lora_config,
+            vision_language_config=self.vision_language_config,
+            parallel_config=self.parallel_config,
+            scheduler_config=self.scheduler_config)
 
 
 class CPUCacheEngine:
@@ -152,14 +153,15 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
 
-        self.model_runner = CPUModelRunner(model_config,
-                                           parallel_config,
-                                           scheduler_config,
-                                           device_config,
-                                           lora_config=self.lora_config,
-                                           vision_language_config=self.vision_language_config,
-                                           kv_cache_dtype=kv_cache_dtype,
-                                           is_driver_worker=is_driver_worker)
+        self.model_runner = CPUModelRunner(
+            model_config,
+            parallel_config,
+            scheduler_config,
+            device_config,
+            lora_config=self.lora_config,
+            vision_language_config=self.vision_language_config,
+            kv_cache_dtype=kv_cache_dtype,
+            is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine = None

@@ -16,13 +16,16 @@ logger = init_logger(__name__)
 
 class CPUExecutor(ExecutorBase):
 
-    def __init__(self, model_config: ModelConfig, cache_config: CacheConfig,
+    def __init__(self,
+                 model_config: ModelConfig,
+                 cache_config: CacheConfig,
                  parallel_config: ParallelConfig,
                  scheduler_config: SchedulerConfig,
                  device_config: DeviceConfig,
                  lora_config: Optional[LoRAConfig],
                  vision_language_config: Optional[VisionLanguageConfig] = None,
-                 *args, **kwargs) -> None:
+                 *args,
+                 **kwargs) -> None:
         assert device_config.device_type == "cpu"
         assert lora_config is None, "cpu backend doesn't support LoRA"
         model_config = _verify_and_get_model_config(model_config)
