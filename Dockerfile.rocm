@@ -91,7 +91,7 @@ RUN if [ "$BUILD_TRITON" = "1" ]; then \
 
 COPY ./ /app/vllm
 
-RUN python3 -m pip install --upgrade pip
+RUN python3 -m pip install --upgrade pip numba
 RUN python3 -m pip install xformers==0.0.23 --no-deps
 
 RUN cd /app \
