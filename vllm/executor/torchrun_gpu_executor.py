@@ -24,17 +24,13 @@ DEVICE_TO_WORKER_MODULE_MAP = {
 
 class TorchrunGPUExecutor(GPUExecutor):
 
-    def __init__(
-        self,
-        model_config: ModelConfig,
-        cache_config: CacheConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        lora_config: Optional[LoRAConfig],
-        vision_language_config: Optional[VisionLanguageConfig],
-        speculative_config: Optional[SpeculativeConfig]
-    ) -> None:
+    def __init__(self, model_config: ModelConfig, cache_config: CacheConfig,
+                 parallel_config: ParallelConfig,
+                 scheduler_config: SchedulerConfig,
+                 device_config: DeviceConfig,
+                 lora_config: Optional[LoRAConfig],
+                 vision_language_config: Optional[VisionLanguageConfig],
+                 speculative_config: Optional[SpeculativeConfig]) -> None:
         self.local_rank = int(os.getenv("LOCAL_RANK", "0"))
         self.is_driver_worker = self.local_rank == 0
         super().__init__(model_config, cache_config, parallel_config,

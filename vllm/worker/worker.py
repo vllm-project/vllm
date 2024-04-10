@@ -272,8 +272,8 @@ def init_worker_distributed_environment(
         init_distributed_environment(parallel_config.world_size, rank,
                                      distributed_init_method, local_rank)
     else:
-        init_distributed_environment(parallel_config.world_size, -1,
-                                     "env://", local_rank)
+        init_distributed_environment(parallel_config.world_size, -1, "env://",
+                                     local_rank)
 
     if pynccl_utils.is_initialized():
         pynccl_world_size = pynccl_utils.get_world_size()
