@@ -2,7 +2,8 @@ import os
 from typing import Dict, List, Optional
 
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
+                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
+                         VisionLanguageConfig)
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
@@ -32,12 +33,13 @@ class TorchrunGPUExecutor(GPUExecutor):
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
         vision_language_config: Optional[VisionLanguageConfig],
+        speculative_config: Optional[SpeculativeConfig]
     ) -> None:
         self.local_rank = int(os.getenv("LOCAL_RANK", "0"))
         self.is_driver_worker = self.local_rank == 0
         super().__init__(model_config, cache_config, parallel_config,
                          scheduler_config, device_config, lora_config,
-                         vision_language_config)
+                         vision_language_config, speculative_config)
 
     def _init_worker(self):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
@@ -54,11 +56,12 @@ class TorchrunGPUExecutor(GPUExecutor):
             self.parallel_config,
             self.scheduler_config,
             self.device_config,
+            self.cache_config,
             local_rank=self.local_rank,
             rank=self.local_rank,
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
-            kv_cache_dtype=self.cache_config.cache_dtype,
+            vision_language_config=self.vision_language_config,
             is_driver_worker=self.is_driver_worker,
         )
         self.driver_worker.init_device()

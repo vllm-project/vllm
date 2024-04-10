@@ -268,8 +268,12 @@ def init_worker_distributed_environment(
     local_rank: int = -1,
 ) -> None:
     """Initialize the distributed environment."""
-    init_distributed_environment(parallel_config.world_size, rank,
-                                 distributed_init_method, local_rank)
+    if not parallel_config.worker_use_torchrun:
+        init_distributed_environment(parallel_config.world_size, rank,
+                                     distributed_init_method, local_rank)
+    else:
+        init_distributed_environment(parallel_config.world_size, -1,
+                                     "env://", local_rank)
 
     if pynccl_utils.is_initialized():
         pynccl_world_size = pynccl_utils.get_world_size()
@@ -281,19 +285,12 @@ def init_worker_distributed_environment(
     elif parallel_config.world_size > 1:
         # NOTE(woosuk): We don't initialize pynccl process group when world size
         # is 1.
-        if parallel_config.worker_use_torchrun:
-            pynccl_utils.init_process_group(
-                world_size=parallel_config.world_size,
-                rank=rank,
-                init_method="env://",
-            )
-        else:
-            pynccl_utils.init_process_group(
-                world_size=parallel_config.world_size,
-                local_rank=local_rank,
-                rank=rank,
-                init_method=distributed_init_method,
-            )
+        pynccl_utils.init_process_group(
+            world_size=parallel_config.world_size,
+            local_rank=local_rank,
+            rank=rank,
+            init_method=distributed_init_method,
+        )
 
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
