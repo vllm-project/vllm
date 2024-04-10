@@ -112,18 +112,27 @@ class ReplicatedLinear(torch.nn.Module):
         if linear_method is None:
             linear_method = UnquantizedLinearMethod()
         self.linear_method = linear_method
-        self.linear_weights = self.linear_method.create_weights(
+        linear_weights = self.linear_method.create_weights(
             self.input_size, self.output_size, self.input_size,
             self.output_size, self.params_dtype)
-        for name, weight in self.linear_weights.items():
+        self._linear_weights_names = []
+        for name, weight in linear_weights.items():
             if isinstance(weight, torch.Tensor):
                 self.register_parameter(name, weight)
+                self._linear_weights_names.append(name)
         if bias:
             self.bias = Parameter(
                 torch.empty(self.output_size, dtype=self.params_dtype))
             set_weight_attrs(self.bias, {"output_dim": 0})
         else:
             self.register_parameter("bias", None)
+
+    @property
+    def linear_weights(self) -> Dict[str, torch.Tensor]:
+        return {
+            name: getattr(self, name)
+            for name in self._linear_weights_names
+        }
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         bias = self.bias if not self.skip_bias_add else None
@@ -178,13 +187,15 @@ class ColumnParallelLinear(torch.nn.Module):
         if linear_method is None:
             linear_method = UnquantizedLinearMethod()
         self.linear_method = linear_method
-        self.linear_weights = self.linear_method.create_weights(
+        linear_weights = self.linear_method.create_weights(
             self.input_size, self.output_size_per_partition, self.input_size,
             self.output_size, self.params_dtype)
-        for name, weight in self.linear_weights.items():
+        self._linear_weights_names = []
+        for name, weight in linear_weights.items():
             if isinstance(weight, torch.Tensor):
                 self.register_parameter(name, weight)
                 set_weight_attrs(weight, {"weight_loader": self.weight_loader})
+                self._linear_weights_names.append(name)
         if bias:
             self.bias = Parameter(
                 torch.empty(self.output_size_per_partition,
@@ -195,6 +206,13 @@ class ColumnParallelLinear(torch.nn.Module):
             })
         else:
             self.register_parameter("bias", None)
+
+    @property
+    def linear_weights(self) -> Dict[str, torch.Tensor]:
+        return {
+            name: getattr(self, name)
+            for name in self._linear_weights_names
+        }
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         tp_rank = get_tensor_model_parallel_rank()
@@ -524,13 +542,15 @@ class RowParallelLinear(torch.nn.Module):
         if linear_method is None:
             linear_method = UnquantizedLinearMethod()
         self.linear_method = linear_method
-        self.linear_weights = self.linear_method.create_weights(
+        linear_weights = self.linear_method.create_weights(
             self.input_size_per_partition, self.output_size, self.input_size,
             self.output_size, self.params_dtype)
-        for name, weight in self.linear_weights.items():
+        self._linear_weights_names = []
+        for name, weight in linear_weights.items():
             if isinstance(weight, torch.Tensor):
                 self.register_parameter(name, weight)
                 set_weight_attrs(weight, {"weight_loader": self.weight_loader})
+                self._linear_weights_names.append(name)
 
         if not reduce_results and (bias and not skip_bias_add):
             raise ValueError("When not reduce the results, adding bias to the "
@@ -545,6 +565,13 @@ class RowParallelLinear(torch.nn.Module):
             })
         else:
             self.register_parameter("bias", None)
+
+    @property
+    def linear_weights(self) -> Dict[str, torch.Tensor]:
+        return {
+            name: getattr(self, name)
+            for name in self._linear_weights_names
+        }
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         tp_rank = get_tensor_model_parallel_rank()
