@@ -132,7 +132,7 @@ class RotaryEmbedding(nn.Module):
         key = key.flatten(-2)
         return query, key
 
-    def _forward_single(self, positions, x, model_context_len):
+    def _forward_single(self, positions, x):
         """
         Same thing as above, except only for either q or k.
         PyTorch-native implementation equivalent to forward()."""
@@ -142,8 +142,7 @@ class RotaryEmbedding(nn.Module):
         if self.rotary_dim < self.head_size:
             x_pass = x[..., self.rotary_dim:]
 
-        # need mod to avoid cuda index error
-        cos_sin = self.cos_sin_cache[positions % model_context_len]
+        cos_sin = self.cos_sin_cache[positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
         if self.is_neox_style:
             # NOTE(woosuk): Here we assume that the positions tensor has the

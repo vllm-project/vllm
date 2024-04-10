@@ -161,8 +161,11 @@ class LlamaAttention(nn.Module):
             k_original = k.clone().detach()
             # streamingLLM: use pos in cache
             positions = torch.clamp(positions, max=llama_context_len - 1)
-            q = self.rotary_emb._forward_single(positions, q, llama_context_len)
-            k = self.rotary_emb._forward_single(positions, k, llama_context_len)
+            q = self.rotary_emb._forward_single(positions, q)
+            k = self.rotary_emb._forward_single(positions, k)
+            seq_len = positions[0][0] + 1
+            key_positions = torch.arange(seq_len, device=positions.device).unsqueeze(0)
+            # k = self.rotary_emb._forward_single(key_positions, k)
         else:
             k_original = None
             q, k = self.rotary_emb(positions, q, k)

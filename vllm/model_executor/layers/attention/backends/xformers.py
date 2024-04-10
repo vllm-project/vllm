@@ -186,7 +186,6 @@ class XFormersBackend:
             use_attn_sinks = False
             if use_attn_sinks:
                 if key_cache is not None and value_cache is not None:
-                    # need to first evict the rotated key cached above (line 83)
                     key_original = key_original.view(-1, self.num_kv_heads, self.head_size)
                     PagedAttentionImpl.reshape_and_cache(key_original, value, key_cache,
                                                         value_cache, input_metadata)
