@@ -4,7 +4,6 @@ from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          VisionLanguageConfig)
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
-from vllm.executor.utils import check_block_size_valid
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
@@ -41,9 +40,6 @@ class GPUExecutor(ExecutorBase):
         # Instantiate the worker and load the model to GPU.
         self._init_worker()
 
-        # Profile the memory usage and initialize the cache.
-        self._init_cache()
-
     def _init_worker(self):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
@@ -55,61 +51,37 @@ class GPUExecutor(ExecutorBase):
         distributed_init_method = get_distributed_init_method(
             get_ip(), get_open_port())
         self.driver_worker = Worker(
-            self.model_config,
-            self.parallel_config,
-            self.scheduler_config,
-            self.device_config,
+            model_config=self.model_config,
+            parallel_config=self.parallel_config,
+            scheduler_config=self.scheduler_config,
+            device_config=self.device_config,
+            cache_config=self.cache_config,
             local_rank=0,
             rank=0,
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
             vision_language_config=self.vision_language_config,
-            kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )
         self.driver_worker.init_device()
         self.driver_worker.load_model()
 
-    def _init_cache(self) -> None:
-        """Profiles the memory usage and initializes the KV cache.
-
-        The engine first profiles the existing memory usage.
-        Then, it allocates the remaining memory for KV blocks.
-
-        .. tip::
-            You may limit the usage of GPU memory
-            by adjusting the `gpu_memory_utilization` parameter.
+    def determine_num_available_blocks(self) -> tuple[int, int]:
+        """Determine the number of available KV blocks by invoking the
+        underlying worker.
         """
-        # Get the maximum number of blocks that can be allocated on GPU and CPU.
-        num_gpu_blocks, num_cpu_blocks = (
-            self.driver_worker.profile_num_available_blocks(
-                block_size=self.cache_config.block_size,
-                gpu_memory_utilization=self.cache_config.
-                gpu_memory_utilization,
-                cpu_swap_space=self.cache_config.swap_space_bytes,
-                cache_dtype=self.cache_config.cache_dtype,
-            ))
+        return self.driver_worker.determine_num_available_blocks()
 
-        if self.cache_config.forced_num_gpu_blocks is not None:
-            forced_num_gpu_blocks = self.cache_config.forced_num_gpu_blocks
-            logger.info(f"Replacing profiled {num_gpu_blocks=} with "
-                        f"{forced_num_gpu_blocks=}")
-            num_gpu_blocks = forced_num_gpu_blocks
-
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks) -> None:
+        """Initialize the KV cache by invoking the underlying worker.
+        """
+        # NOTE: This is logged in the executor because there can be >1 worker
+        # with other executors. We could log in the engine level, but work
+        # remains to abstract away the device for non-GPU configurations.
         logger.info(f"# GPU blocks: {num_gpu_blocks}, "
                     f"# CPU blocks: {num_cpu_blocks}")
 
-        check_block_size_valid(num_gpu_blocks, self.cache_config.block_size,
-                               self.model_config.max_model_len)
-
-        self.cache_config.num_gpu_blocks = num_gpu_blocks
-        self.cache_config.num_cpu_blocks = num_cpu_blocks
-
-        # Initialize the cache.
-        self.driver_worker.init_cache_engine(cache_config=self.cache_config)
-        # Warm up the model. This includes capturing the model into CUDA graph
-        # if enforce_eager is False.
-        self.driver_worker.warm_up_model()
+        self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     def execute_model(self,
                       seq_group_metadata_list: List[SequenceGroupMetadata],
