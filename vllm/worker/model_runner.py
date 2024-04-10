@@ -9,7 +9,7 @@ import torch.nn as nn
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (DeviceConfig, LoRAConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VisionLanguageConfig)
-from vllm.device_communicators import custom_all_reduce, pynccl_utils
+from vllm.distributed.device_communicators import custom_all_reduce, pynccl_utils
 from vllm.distributed import broadcast_tensor_dict, with_pynccl_for_all_reduce
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping

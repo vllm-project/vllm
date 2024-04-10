@@ -264,7 +264,7 @@ def destroy_model_parallel():
     _PIPELINE_MODEL_PARALLEL_GROUP = None
     global _PIPELINE_GLOBAL_RANKS
     _PIPELINE_GLOBAL_RANKS = None
-    from vllm.device_communicators import pynccl_utils
+    from vllm.distributed.device_communicators import pynccl_utils
 
     # Destroy the pynccl states if any.
     pynccl_utils.destroy_process_group()
@@ -278,7 +278,7 @@ _ENABLE_PYNCCL_FOR_ALL_REDUCE = False
 
 @contextlib.contextmanager
 def with_pynccl_for_all_reduce():
-    from vllm.device_communicators import pynccl_utils
+    from vllm.distributed.device_communicators import pynccl_utils
     """use pynccl instead of torch.distributed for all reduce"""
     tp_size = get_tensor_model_parallel_world_size()
     if tp_size == 1:

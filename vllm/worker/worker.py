@@ -8,8 +8,8 @@ import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
-from vllm.device_communicators import pynccl_utils
-from vllm.device_communicators.custom_all_reduce import init_custom_ar
+from vllm.distributed.device_communicators import pynccl_utils
+from vllm.distributed.device_communicators.custom_all_reduce import init_custom_ar
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
                               init_distributed_environment)
