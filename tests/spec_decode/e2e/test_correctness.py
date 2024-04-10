@@ -6,6 +6,9 @@ from transformers import AutoTokenizer
 
 from vllm import SamplingParams
 
+# TODO test preemption
+# TODO test integration (cuda graph, tp)
+# TODO test smoke (sampling params)
 
 @pytest.mark.parametrize(
     "common_llm_kwargs",
@@ -14,8 +17,8 @@ from vllm import SamplingParams
         # Note this is repeated in the test body; to initialize a tokenizer.
         "model": "JackFram/llama-68m",
 
-        # Skip real loading for fast test.
-        "load_format": "dummy",
+        ## Skip real loading for fast test.
+        # "load_format": "dummy",
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
@@ -31,20 +34,11 @@ from vllm import SamplingParams
             "num_speculative_tokens": 5,
         },
         {
-            "speculative_model": "JackFram/llama-68m",
-            "num_speculative_tokens": 1,
-        },
-        {
             # No spec decode.
         },
     ])
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
-@pytest.mark.parametrize("batch_size", [1])
-# NOTE: We should run more permutations of this test (more BS, more seeds). But
-# because our spec decode generates gibberish token ids, the likelihood of
-# emitting an invalid token combination is nontrivial. This causes divergence in
-# behavior of vLLM detokenization vs. hf tokenizer, for example when two "utf-
-# start" bytes are emitted.
+@pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize("seed", [1])
 def test_spec_decode_e2e_logical_flow(test_llm_generator, batch_size: int):
     """Run generation with speculative decoding on a batch. Verify the engine
@@ -67,8 +61,6 @@ def test_spec_decode_e2e_logical_flow(test_llm_generator, batch_size: int):
         max_tokens=output_len,
         ignore_eos=True,
         temperature=temperature,
-        skip_special_tokens=True,
-        spaces_between_special_tokens=False,
     )
 
     batch_tokens, batch_token_ids = get_output_from_llm_generator(
@@ -135,7 +127,7 @@ def test_spec_decode_e2e_logical_flow(test_llm_generator, batch_size: int):
 def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
         baseline_llm_generator, test_llm_generator, batch_size: int,
         output_len: int):
-    run_greedy_correctness_test(baseline_llm_generator,
+    run_greedy_equality_correctness_test(baseline_llm_generator,
                                 test_llm_generator,
                                 batch_size,
                                 max_output_len=output_len,
@@ -188,7 +180,7 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
 def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(
         baseline_llm_generator, test_llm_generator, batch_size: int,
         output_len: int):
-    run_greedy_correctness_test(baseline_llm_generator,
+    run_greedy_equality_correctness_test(baseline_llm_generator,
                                 test_llm_generator,
                                 batch_size,
                                 max_output_len=output_len,
@@ -238,7 +230,7 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(
 def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_diff_output_len(
         baseline_llm_generator, test_llm_generator, batch_size: int,
         max_output_len: int):
-    run_greedy_correctness_test(baseline_llm_generator,
+    run_greedy_equality_correctness_test(baseline_llm_generator,
                                 test_llm_generator,
                                 batch_size,
                                 max_output_len,
@@ -283,7 +275,7 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_diff_output_len(
 def test_spec_decode_e2e_greedy_correctness_real_model_bs1(
         baseline_llm_generator, test_llm_generator, batch_size: int,
         output_len: int):
-    run_greedy_correctness_test(baseline_llm_generator,
+    run_greedy_equality_correctness_test(baseline_llm_generator,
                                 test_llm_generator,
                                 batch_size,
                                 max_output_len=output_len,
@@ -328,14 +320,14 @@ def test_spec_decode_e2e_greedy_correctness_real_model_bs1(
 def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(
         baseline_llm_generator, test_llm_generator, batch_size: int,
         output_len: int):
-    run_greedy_correctness_test(baseline_llm_generator,
+    run_greedy_equality_correctness_test(baseline_llm_generator,
                                 test_llm_generator,
                                 batch_size,
                                 max_output_len=output_len,
                                 force_output_len=True)
 
 
-def run_greedy_correctness_test(baseline_llm_generator, test_llm_generator,
+def run_greedy_equality_correctness_test(baseline_llm_generator, test_llm_generator,
                                 batch_size, max_output_len,
                                 force_output_len: bool):
     temperature = 0.0
