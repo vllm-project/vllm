@@ -10,6 +10,9 @@ from vllm import SamplingParams
 # TODO test integration (cuda graph, tp)
 # TODO test smoke (sampling params)
 # TODO investigate <unk> token with 68m/68m k=5 temp=1.0
+# TODO test for when sequences skip speculation
+# TODO test different block sizes
+# TODO validate acceptance rate
 
 
 @pytest.mark.parametrize(
@@ -328,6 +331,57 @@ def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(
                                          batch_size,
                                          max_output_len=output_len,
                                          force_output_len=True)
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        #"block_size": 8,
+        # 2 for small prompt, 256//8 for generated.
+        #"num_gpu_blocks_override": 2 + 256//8,
+        #"max_model_len": (2 + 256//8)*8,
+
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
+
+        # Required for spec decode.
+        "use_v2_block_manager": True
+    }])
+@pytest.mark.parametrize(
+    "per_test_common_llm_kwargs",
+    [
+        {
+            #"model": "JackFram/llama-160m",
+            "model": "meta-llama/Llama-2-7b-chat-hf",
+        },
+    ])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize(
+    "test_llm_kwargs",
+    [
+        {
+            "speculative_model": "JackFram/llama-68m",
+            "num_speculative_tokens": 5,
+        },
+    ])
+@pytest.mark.parametrize(
+    "output_len",
+    [
+        # Use small output len for fast test.
+        256,
+    ])
+@pytest.mark.parametrize("batch_size", [4])
+@pytest.mark.parametrize("seed", [1])
+def test_spec_decode_e2e_greedy_correctness_with_preemption(
+        baseline_llm_generator, test_llm_generator, batch_size: int,
+        output_len: int):
+    """
+    NOTE(cade): this test fails, unclear why
+    """
+    run_greedy_equality_correctness_test(baseline_llm_generator,
+                                         test_llm_generator,
+                                         batch_size,
+                                         max_output_len=output_len,
+                                         force_output_len=True)
+
 
 
 def run_greedy_equality_correctness_test(baseline_llm_generator,
