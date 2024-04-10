@@ -137,7 +137,7 @@ class ChatCompletionRequest(BaseModel):
         default=None,
         description=(
             "If specified, will override the default guided decoding backend "
-            "of the server for this specific request. If set, must be one of "
+            "of the server for this specific request. If set, must be either "
             "'outlines' / 'lm-format-enforcer'"))
 
     # doc: end-chat-completion-extra-params
