@@ -1,16 +1,2 @@
-psutil
-ray >= 2.9
-sentencepiece  # Required for LLaMA tokenizer.
-numpy
-torch ~= 2.2.0
-torch_xla[tpu] ~= 2.2.0
-jax[tpu]  # Required for Pallas kernels.
-requests
-py-cpuinfo
-transformers >= 4.39.1  # Required for StarCoder2 & Llava.
-fastapi
-uvicorn[standard]
-pydantic >= 2.0  # Required for OpenAI server.
-prometheus_client >= 0.18.0
-outlines == 0.0.34
-tiktoken == 0.6.0 # Required for DBRX tokenizer
+# Common dependencies
+-r requirements-common.txt
