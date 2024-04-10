@@ -51,7 +51,7 @@ if (os.getenv("VLLM_SILENCE_PERFORMANCE_WARNINGS", "").lower()
 class TensorizerArgs:
     tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, typing.BinaryIO,
                           str, bytes, os.PathLike, int]
-    vllm_tensorized: bool = False
+    vllm_tensorized: bool
     verify_hash: Optional[bool] = False
     num_readers: Optional[int] = 1
     encryption_keyfile: Optional[str] = None
