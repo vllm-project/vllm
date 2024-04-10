@@ -23,7 +23,7 @@ from vllm.distributed import (
     tensor_model_parallel_gather)
 from vllm.distributed import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.utils import (
+from vllm.distributed import (
     split_tensor_along_last_dim)
 
 if TYPE_CHECKING:
