@@ -523,9 +523,13 @@ class RowParallelLinear(torch.nn.Module):
         if linear_method is None:
             linear_method = UnquantizedLinearMethod()
         self.linear_method = linear_method
-        self.linear_method.create_weights(self, self.input_size_per_partition,
-                                          self.output_size, self.input_size,
-                                          self.output_size, self.params_dtype)
+        self.linear_method.create_weights(self,
+                                          self.input_size_per_partition,
+                                          self.output_size,
+                                          self.input_size,
+                                          self.output_size,
+                                          self.params_dtype,
+                                          weight_loader=self.weight_loader)
 
         if not reduce_results and (bias and not skip_bias_add):
             raise ValueError("When not reduce the results, adding bias to the "
