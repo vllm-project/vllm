@@ -34,7 +34,9 @@ class LinearMethodBase(ABC):
                        output_size_per_partition: int, input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
-        """Create weights for a linear layer."""
+        """Create weights for a linear layer.
+
+        The weights will be set as attributes of the layer."""
         raise NotImplementedError
 
     @abstractmethod
@@ -42,7 +44,9 @@ class LinearMethodBase(ABC):
                       layer: torch.nn.Module,
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Apply the weights to the input tensor."""
+        """Apply the weights in layer to the input tensor.
+
+        Expects create_weights to have been called before on the layer."""
         raise NotImplementedError
 
 
