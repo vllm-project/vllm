@@ -119,6 +119,8 @@ class ReplicatedLinear(torch.nn.Module):
         for name, weight in linear_weights.items():
             if isinstance(weight, torch.Tensor):
                 self.register_parameter(name, weight)
+            else:
+                setattr(self, name, weight)
             self._linear_weights_names.append(name)
         if bias:
             self.bias = Parameter(
@@ -195,6 +197,8 @@ class ColumnParallelLinear(torch.nn.Module):
             if isinstance(weight, torch.Tensor):
                 self.register_parameter(name, weight)
                 set_weight_attrs(weight, {"weight_loader": self.weight_loader})
+            else:
+                setattr(self, name, weight)
             self._linear_weights_names.append(name)
         if bias:
             self.bias = Parameter(
@@ -550,6 +554,8 @@ class RowParallelLinear(torch.nn.Module):
             if isinstance(weight, torch.Tensor):
                 self.register_parameter(name, weight)
                 set_weight_attrs(weight, {"weight_loader": self.weight_loader})
+            else:
+                setattr(self, name, weight)
             self._linear_weights_names.append(name)
 
         if not reduce_results and (bias and not skip_bias_add):
