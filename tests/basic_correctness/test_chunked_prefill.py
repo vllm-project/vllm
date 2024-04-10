@@ -19,7 +19,9 @@ MODELS = [
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16])
 @pytest.mark.parametrize("enforce_eager", [False, True])
-@pytest.mark.parametrize("tensor_parallel_size", [2, 1])
+# NOTE: Increasing this in this suite will fail CI because we currently cannot
+# reset distributed env properly. Use a value > 1 just when you test.
+@pytest.mark.parametrize("tensor_parallel_size", [1])
 def test_models(
     hf_runner,
     vllm_runner,
@@ -36,9 +38,6 @@ def test_models(
         pytest.skip(f"Skip {chunked_prefill_token_size=} and {enforce_eager=} "
                     "for high TP to save testing time.")
     max_num_seqs = min(chunked_prefill_token_size, 256)
-
-    # To pass the small model tests, we need full precision.
-    # assert dtype == "float"
     enable_chunked_prefill = False
     max_num_batched_tokens = None
     if chunked_prefill_token_size != -1:

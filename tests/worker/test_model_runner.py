@@ -8,7 +8,11 @@ from vllm.worker.model_runner import ModelRunner, _get_graph_batch_size
 
 @pytest.mark.parametrize("batch_size", list(range(1, 257)))
 def test_prepare_prompt(batch_size):
-    model_runner = ModelRunner(None, None, None, None, None)
+    scheduler_config = SchedulerConfig(100000,
+                                       100000,
+                                       100000,
+                                       enable_chunked_prefill=False)
+    model_runner = ModelRunner(None, None, scheduler_config, None, None)
     model_runner.set_block_size(16)
 
     prompt_lens = []
@@ -47,8 +51,6 @@ def test_prepare_prompt(batch_size):
     assert torch.allclose(attn_metadata.prompt_lens_tensor,
                           torch.tensor(prompt_lens, device=device))
     assert attn_metadata.prompt_lens == prompt_lens
-    assert attn_metadata.num_prompt_tokens == sum(prompt_lens)
-    assert attn_metadata.num_generation_tokens == 0
     assert attn_metadata.max_prompt_len == max(prompt_lens)
 
     # Test subquery start locs.
@@ -85,7 +87,6 @@ def test_prepare_prompt(batch_size):
     assert torch.allclose(attn_metadata.block_tables, expected)
     # Cuda graph should not be used for prerill.
     assert attn_metadata.use_cuda_graph is False
-    assert attn_metadata.kv_cache_dtype == "auto"
 
     assert len(input_tokens) == sum(prompt_lens)
     assert len(input_positions) == sum(prompt_lens)
@@ -124,7 +125,12 @@ def test_prepare_decode_cuda_graph(batch_size):
         revision=None,
         enforce_eager=False,
     )
-    model_runner = ModelRunner(model_config, None, None, None, None)
+    scheduler_config = SchedulerConfig(100000,
+                                       100000,
+                                       100000,
+                                       enable_chunked_prefill=False)
+    model_runner = ModelRunner(model_config, None, scheduler_config, None,
+                               None)
     model_runner.set_block_size(16)
 
     prompt_lens = []
@@ -154,8 +160,6 @@ def test_prepare_decode_cuda_graph(batch_size):
     device = model_runner.device
     assert attn_metadata.is_prompt is False
     assert attn_metadata.prompt_lens is None
-    assert attn_metadata.num_prompt_tokens == 0
-    assert attn_metadata.num_generation_tokens == expected_bs
     assert attn_metadata.max_prompt_len is None
     assert attn_metadata.subquery_start_loc is None
     assert attn_metadata.seq_start_loc is None
@@ -173,7 +177,6 @@ def test_prepare_decode_cuda_graph(batch_size):
         model_runner.get_max_block_per_batch())
     # Cuda graph should not be used for prerill.
     assert attn_metadata.use_cuda_graph is True
-    assert attn_metadata.kv_cache_dtype == "auto"
 
     assert len(input_tokens) == expected_bs
     assert len(input_positions) == expected_bs
@@ -316,6 +319,7 @@ def test_hybrid_batches(batch_size, enforce_eager, monkeypatch):
 
     assert len(attn_metadata.slot_mapping) == len(input_tokens)
     assert len(input_positions) == len(input_tokens)
+    assert attn_metadata.kv_cache_dtype == "auto"
     assert attn_metadata.num_prefills == prefill_batch_size
     if enforce_eager:
         assert attn_metadata.num_decode_tokens == decode_batch_size

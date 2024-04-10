@@ -662,7 +662,7 @@ class ModelRunner:
             input_tokens.extend(decode_input_tokens)
             input_positions.extend(decode_input_positions)
             slot_mapping.extend(decode_slot_mapping)
-            lora_prompt_mapping.extend(decode_lora_index_mapping)
+            lora_index_mapping.extend(decode_lora_index_mapping)
             lora_prompt_mapping.extend(decode_lora_prompt_mapping)
             lora_requests.update(decode_lora_requests)
 

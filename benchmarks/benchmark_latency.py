@@ -177,8 +177,7 @@ if __name__ == '__main__':
                         help='block size of key/value cache')
     parser.add_argument(
         '--enable-chunked-prefill',
-        type=bool,
-        default=False,
+        action='store_true',
         help='If True, the prefill requests can be chunked based on the '
         'max_num_batched_tokens')
     parser.add_argument(
