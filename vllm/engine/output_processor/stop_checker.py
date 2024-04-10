@@ -1,4 +1,6 @@
-from typing import List
+from typing import Callable, List
+
+from transformers import PreTrainedTokenizer
 
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import Sequence, SequenceStatus
@@ -11,9 +13,10 @@ class StopChecker:
     emitted, or if we have exceeded the max model len.
     """
 
-    def __init__(self, scheduler, scheduler_config, get_tokenizer_for_seq):
-        self.scheduler = scheduler
-        self.scheduler_config = scheduler_config
+    def __init__(self, max_model_len: int,
+                 get_tokenizer_for_seq: Callable[[Sequence],
+                                                 PreTrainedTokenizer]):
+        self.max_model_len = max_model_len
         self.get_tokenizer_for_seq = get_tokenizer_for_seq
 
     def maybe_stop_sequence(self, seq: Sequence,
@@ -23,7 +26,7 @@ class StopChecker:
         """
 
         # Check if the sequence has reached max_model_len.
-        if seq.get_len() > self.scheduler_config.max_model_len:
+        if seq.get_len() > self.max_model_len:
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
 
