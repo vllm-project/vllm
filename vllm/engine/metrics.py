@@ -4,7 +4,7 @@ from typing import Dict, List
 
 import numpy as np
 from prometheus_client import (REGISTRY, Counter, Gauge, Histogram, Info,
-                               disable_created_metrics)
+                               disable_created_metrics, generate_latest)
 
 from vllm.logger import init_logger
 
@@ -94,6 +94,10 @@ class Metrics:
             documentation="Average generation throughput in tokens/s.",
             labelnames=labelnames,
         )
+
+    def info(self) -> str:
+        metrics_data = generate_latest(REGISTRY)
+        return metrics_data.decode("utf-8")
 
 
 # end-metrics-definitions

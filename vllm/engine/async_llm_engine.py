@@ -685,6 +685,12 @@ class AsyncLLMEngine:
         else:
             self.engine.do_log_stats()
 
+    async def show_metrics(self) -> str:
+        if self.engine_use_ray:
+            return ray.get(self.engine.show_metrics.remote())
+        else:
+            return self.engine.show_metrics()
+
     async def check_health(self) -> None:
         """Raises an error if engine is unhealthy."""
         t = time.perf_counter()

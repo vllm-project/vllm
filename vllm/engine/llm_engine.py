@@ -700,6 +700,11 @@ class LLMEngine:
         if self.log_stats:
             self.stat_logger.log(self._get_stats(scheduler_outputs=None))
 
+    def show_metrics(self) -> str:
+        if self.log_stats:
+            return self.stat_logger.metrics.info()
+        return ""
+
     def _get_stats(self,
                    scheduler_outputs: Optional[SchedulerOutputs]) -> Stats:
         """Get Stats to be Logged to Prometheus."""

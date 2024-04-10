@@ -11,7 +11,6 @@ from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from prometheus_client import make_asgi_app
 
 import vllm
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -53,9 +52,9 @@ def parse_args():
     return parser.parse_args()
 
 
-# Add prometheus asgi middleware to route /metrics requests
-metrics_app = make_asgi_app()
-app.mount("/metrics", metrics_app)
+@app.get("/metrics")
+async def metrics():
+    return Response(content=await engine.show_metrics(), status_code=200)
 
 
 @app.exception_handler(RequestValidationError)
