@@ -79,26 +79,29 @@ def get_model(model_config: ModelConfig, device_config: DeviceConfig,
     with _set_default_torch_dtype(model_config.dtype):
         # Create a model instance.
         # The weights will be initialized as empty tensors.
+        extra_kwargs = {}
+        if hasattr(model_class, "supported_lora_modules"):
+            extra_kwargs["lora_config"] = lora_config
+        elif lora_config:
+            raise ValueError(
+                f"Model {model_class.__name__} does not support LoRA, "
+                "but LoRA is enabled. Support for this model may "
+                "be added in the future. If this is important to you, "
+                "please open an issue on github.")
+        elif model_class in _VISION_MODEL_CLASSES:
+            extra_kwargs["vision_language_config"] = vision_language_config
+
         with torch.device(device_config.device):
             if model_config.load_format == "tensorizer" and _is_vllm_model(
                     model_config):
-                model = load_with_tensorizer(model_class, model_config)
+                model = load_with_tensorizer(model_class,
+                                             model_config,
+                                             linear_method=linear_method,
+                                             **extra_kwargs)
                 return model.eval()
-            elif hasattr(model_class, "supported_lora_modules"):
-                model = model_class(model_config.hf_config, linear_method,
-                                    lora_config)
-            elif lora_config:
-                raise ValueError(
-                    f"Model {model_class.__name__} does not support LoRA, "
-                    "but LoRA is enabled. Support for this model may "
-                    "be added in the future. If this is important to you, "
-                    "please open an issue on github.")
-            else:
-                if model_class not in _VISION_MODEL_CLASSES:
-                    model = model_class(model_config.hf_config, linear_method)
-                else:
-                    model = model_class(model_config.hf_config,
-                                        vision_language_config, linear_method)
+            model = model_class(config=model_config.hf_config,
+                                linear_method=linear_method,
+                                **extra_kwargs)
         if model_config.load_format == "dummy":
             # NOTE(woosuk): For accurate performance evaluation, we assign
             # random values to the weights.

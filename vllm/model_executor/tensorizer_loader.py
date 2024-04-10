@@ -15,13 +15,19 @@ import torch
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.layers.linear import LinearMethodBase
 
 logger = init_logger(__name__)
 
 
 def load_with_tensorizer(model_cls: Type[nn.Module],
-                         model_config: ModelConfig) -> nn.Module:
-    tensorizer = TensorizerAgent(model_cls, model_config)
+                         model_config: ModelConfig,
+                         linear_method: LinearMethodBase,
+                         **extra_kwargs
+                         ) -> nn.Module:
+    tensorizer = TensorizerAgent(model_cls, model_config, linear_method,
+                                 **extra_kwargs)
     return tensorizer.deserialize()
 
 def _is_vllm_model(model_config: ModelConfig) -> bool:
@@ -206,9 +212,13 @@ class TensorizerAgent:
         self,
         model_cls: Type[nn.Module],
         model_config: ModelConfig,
+        linear_method: LinearMethodBase,
+        **extra_kwargs
     ):
         self.model_cls = model_cls
         self.model_config = model_config
+        self.linear_method = linear_method
+        self.extra_kwargs = extra_kwargs
         self.tensorizer_args = self.model_config.tensorizer_args
         self.model = self._init_model()
 
@@ -216,14 +226,30 @@ class TensorizerAgent:
         model_args = self.model_config.hf_config
         model_args.torch_dtype = self.model_config.dtype
         with no_init_or_tensor():
-            return self.model_cls(model_args)
-
+            return self.model_cls(config=model_args,
+                                linear_method=self.linear_method,
+                                **self.extra_kwargs)
     def _patch_linear_weights(self):
         for child in self.model.modules():
             if hasattr(child, "linear_weights"):
                 for name, weight in child.linear_weights.items():
                     if isinstance(weight, torch.Tensor):
                         child.linear_weights[name] = getattr(child, name)
+
+    def _resize_lora_embeddings(self):
+        """Modify LoRA embedding layers to use bigger tensors
+        to allow for adapter added tokens."""
+        for child in self.model.modules():
+            if (isinstance(child, VocabParallelEmbedding)
+                    and child.weight.shape[0] <
+                    child.num_embeddings_per_partition):
+                new_weight = torch.empty(child.num_embeddings_per_partition,
+                                         child.embedding_dim,
+                                         dtype=child.weight.dtype,
+                                         device=child.weight.device)
+                new_weight[:child.weight.shape[0]].copy_(child.weight.data)
+                new_weight[child.weight.shape[0]:].fill_(0)
+                child.weight.data = new_weight
 
     def deserialize(self):
         """
@@ -264,4 +290,5 @@ class TensorizerAgent:
         logger.info(f"Memory usage after: {after_mem}")
 
         self._patch_linear_weights()
+        self._resize_lora_embeddings()
         return self.model.eval()
