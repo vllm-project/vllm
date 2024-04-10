@@ -27,6 +27,12 @@ class Sampler(nn.Module):
     6. Sample the next tokens.
     Here, each sequence group within the batch can have different sampling
     parameters (e.g., sampling method, temperature, top-p, top-k, etc.).
+
+    The structure of the logits tensor is coupled with the seq_groups in
+    sampling_metadata. Typically, each sequence in each seq_group has one row in
+    logits for the next token to be sampled; however, for a seq_group with a
+    prompt request with the prompt_logprobs sampling parameter, there are rows
+    in logits for each token in the input prompt.
     """
 
     def forward(
@@ -106,7 +112,16 @@ def _apply_min_tokens_penalty(
     # list of indices in logits that will be set to -inf
     logits_to_penalize = []
     start_idx = 0
-    for seq_ids, sampling_params in sampling_metadata.seq_groups:
+    for i, seq_group in enumerate(sampling_metadata.seq_groups):
+        seq_ids, sampling_params = seq_group
+
+        # handle prompt_logprobs by skipping rows in logits added for the prompt
+        # tokens (prompt logprobs are not penalized)
+        if (i < sampling_metadata.num_prompts
+                and sampling_params.prompt_logprobs is not None):
+            assert len(seq_ids) == 1
+            start_idx += sampling_metadata.prompt_lens[i] - 1
+
         min_tokens = sampling_params.min_tokens
         if min_tokens > 0:
             seqs_to_penalize = []
@@ -132,6 +147,8 @@ def _apply_min_tokens_penalty(
         # eg. [ (1,2), (1,3), (5,6) ] -> ( (1,1,5), (2,3,6) )
         logits[tuple(zip(*logits_to_penalize))] = -float("inf")
 
+    # verifies that no rows in logits were missed unexpectedly
+    assert start_idx == logits.shape[0]
     return logits
 
 
