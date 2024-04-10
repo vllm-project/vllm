@@ -1,7 +1,7 @@
 """Token blocks."""
 from itertools import takewhile
 from os.path import commonprefix
-from typing import Dict, Iterable, List, Optional, Set
+from typing import Dict, Iterable, List, Optional, Set, OrderedDict
 
 from vllm.core.block.common import (CopyOnWriteTracker,
                                     get_all_blocks_recursively)
@@ -37,12 +37,13 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     ):
         # A mapping of prefix hash to block index. All blocks which have a
         # prefix hash will be in this dict, even if they have refcount 0.
-        self._cached_blocks: Dict[PrefixHash, BlockId] = {}
+        self._cached_blocks: OrderedDict[PrefixHash, BlockId] = OrderedDict()
 
         # A mapping of prefix hash to block index. All blocks which have a
         # prefix hash AND refcount 0 will be in this dict. Thus, it is a subset
         # of self._cached_blocks.
-        self._unused_cached_blocks: Dict[PrefixHash, BlockId] = {}
+        self._unused_cached_blocks: OrderedDict[PrefixHash,
+                                                BlockId] = OrderedDict()
 
         self._computed_blocks: Set[BlockId] = set()
 
@@ -136,11 +137,12 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                 evicted_block_id]
             block_last_accessed = self._last_accessed_times[block_id]
 
-            if block_last_accessed < evicted_block_last_accessed:
+            if evicted_block_last_accessed < block_last_accessed:
+                break
+            if self._token_ids_lens[block_id] > self._token_ids_lens[
+                    evicted_block_id]:
                 evicted_block_hash = block_hash
-            elif block_last_accessed == evicted_block_last_accessed and self._token_ids_lens[
-                    block_id] > self._token_ids_lens[evicted_block_id]:
-                evicted_block_hash = block_hash
+            assert block_last_accessed == evicted_block_last_accessed
 
         return evicted_block_hash
 
@@ -325,10 +327,12 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
     def mark_blocks_as_computed(self) -> None:
         """Mark blocks as computed, used in prefix caching."""
-        # TODO (Sage) It would be good to limit the overhead of
-        # this by only adding new blocks
-        for block_id in self._cached_blocks.values():
-            self._computed_blocks.add(block_id)
+        # Reverse iterate over the blocks in _cached_blocks and break the first time we find a computed block
+        for hash_key, block_id in reversed(self._cached_blocks.items()):
+            if block_id in self._computed_blocks:
+                break
+            if hash_key not in self._unused_cached_blocks:
+                self._computed_blocks.add(block_id)
 
     def get_all_computed_blocks(self, seq: List[int]) -> List[int]:
 

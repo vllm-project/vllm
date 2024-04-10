@@ -45,7 +45,6 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self.block_size = block_size
         self.num_total_gpu_blocks = num_gpu_blocks
         self.num_total_cpu_blocks = num_cpu_blocks
-
         assert sliding_window is None, "Sliding window not yet supported"
 
         self.block_sliding_window = None
@@ -53,7 +52,6 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self.watermark = watermark
         assert watermark >= 0.0
 
-        print("ENABLE CACHING: " + str(enable_caching))
         self.enable_caching = enable_caching
 
         self.watermark_blocks = int(watermark * num_gpu_blocks)
