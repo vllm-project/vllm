@@ -351,7 +351,7 @@ class XFormersImpl(AttentionImpl):
                 p=0.0,
                 scale=self.scale)
             # TODO(woosuk): Unnecessary copy. Optimize.
-            output[start:end].copy_(out.view_as(original_query))
+            output[start:end].copy_(out.view_as(original_query[start:end]))
             start += prompt_len
         return output
 
