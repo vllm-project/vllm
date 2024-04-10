@@ -4,7 +4,7 @@ vLLM provides an HTTP server that implements OpenAI's [Completions](https://plat
 
 You can start the server using Python, or using [Docker](deploying_with_docker.rst):
 ```bash
-python -m vllm.entrypoints.openai.api_server --model meta-llama/Llama-2-7b-hf --dtype float32 --api-key token-abc123
+python -m vllm.entrypoints.openai.api_server --model mistralai/Mistral-7B-Instruct-v0.2 --dtype auto --api-key token-abc123
 ```
 
 To call the server, you can use the official OpenAI Python client library, or any other HTTP client.
@@ -16,9 +16,8 @@ client = OpenAI(
 )
 
 completion = client.chat.completions.create(
-  model="meta-llama/Llama-2-7b-hf",
+  model="mistralai/Mistral-7B-Instruct-v0.2",
   messages=[
-    {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": "Hello!"}
   ]
 )
@@ -38,9 +37,8 @@ Or directly merge them into the JSON payload if you are using HTTP call directly
 
 ```python
 completion = client.chat.completions.create(
-  model="meta-llama/Llama-2-7b-hf",
+  model="mistralai/Mistral-7B-Instruct-v0.2",
   messages=[
-    {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
   ],
   extra_body={
@@ -89,7 +87,7 @@ In order for the language model to support chat protocol, vLLM requires the mode
 a chat template in its tokenizer configuration. The chat template is a Jinja2 template that
 specifies how are roles, messages, and other chat-specific tokens are encoded in the input.
 
-An example chat template for `meta-llama/Llama-2-7b-chat-hf` can be found [here](https://huggingface.co/meta-llama/Llama-2-7b-chat-hf/blob/09bd0f49e16738cdfaa6e615203e126038736eb0/tokenizer_config.json#L12)
+An example chat template for `mistralai/Mistral-7B-Instruct-v0.2` can be found [here](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.2#instruction-format)
 
 Some models do not provide a chat template even though they are instruction/chat fine-tuned. For those model,
 you can manually specify their chat template in the `--chat-template` parameter with the file path to the chat
