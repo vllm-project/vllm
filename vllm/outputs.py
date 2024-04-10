@@ -119,7 +119,7 @@ class RequestOutput:
         finished: bool,
         metrics: Optional[RequestMetrics] = None,
         lora_request: Optional[LoRARequest] = None,
-        embed = None
+        embedding = None
     ) -> None:
         self.request_id = request_id
         self.prompt = prompt
@@ -129,7 +129,7 @@ class RequestOutput:
         self.finished = finished
         self.metrics = metrics
         self.lora_request = lora_request
-        self.embed = embed
+        self.embedding = embedding
 
     @classmethod
     def from_seq_group(cls, seq_group: SequenceGroup) -> "RequestOutput":
@@ -176,7 +176,7 @@ class RequestOutput:
                    finished,
                    seq_group.metrics,
                    lora_request=seq_group.lora_request,
-                   embed = seq_group.embed)
+                   embedding = seq_group.embedding)
 
     def __repr__(self) -> str:
         return (f"RequestOutput(request_id={self.request_id}, "
@@ -187,5 +187,5 @@ class RequestOutput:
                 f"finished={self.finished}, "
                 f"metrics={self.metrics}, "
                 f"lora_request={self.lora_request}),"
-                f"embed={self.embed}")
+                f"embed={self.embedding}")
 

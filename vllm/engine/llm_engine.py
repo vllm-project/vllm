@@ -21,6 +21,7 @@ from vllm.transformers_utils.tokenizer import detokenize_incrementally
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
 from vllm.utils import Counter
+from vllm.embedding_params import EmbeddingParams
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -545,8 +546,8 @@ class LLMEngine:
         if self.embedding_model: 
             for i, seq_group in enumerate(scheduled_seq_groups):
                 for seq in seq_group.get_seqs():
-                    seq.status = SequenceStatus.FINISHED_STOPPED
-                seq_group.embed = output[i]
+                   self._check_stop(seq, seq_group.sampling_params )
+                seq_group.embedding = output[i]
         else:
             for seq_group, outputs in zip(scheduled_seq_groups, output):
                 self._process_sequence_group_outputs(seq_group, outputs)
@@ -756,6 +757,11 @@ class LLMEngine:
     def _check_stop(self, seq: Sequence,
                     sampling_params: SamplingParams) -> None:
         """Stop the finished sequences."""
+
+        if isinstance(sampling_params, EmbeddingParams):
+            seq.status = SequenceStatus.FINISHED_STOPPED
+            return
+
         for stop_str in sampling_params.stop:
             if seq.output_text.endswith(stop_str):
                 self._finalize_sequence(seq, sampling_params, stop_str)

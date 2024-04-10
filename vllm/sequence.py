@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Union, TYPE_CHECKING
 
 from vllm.block import LogicalTokenBlock
 from vllm.sampling_params import SamplingParams
+from vllm.embedding_params import EmbeddingParams
 from vllm.lora.request import LoRARequest
 
 if TYPE_CHECKING:
@@ -307,10 +308,10 @@ class SequenceGroup:
         self,
         request_id: str,
         seqs: List[Sequence],
-        sampling_params: SamplingParams,
+        sampling_params: Union[SamplingParams, EmbeddingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest] = None,
-        embed = None, 
+        embedding = None, 
     ) -> None:
         self.request_id = request_id
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
@@ -322,7 +323,7 @@ class SequenceGroup:
                                       time_in_queue=None)
         self.lora_request = lora_request
         self.prompt_logprobs: Optional[PromptLogprobs] = None
-        self.embed = embed
+        self.embedding = embedding
         self.state = SequenceGroupState()
 
     @property

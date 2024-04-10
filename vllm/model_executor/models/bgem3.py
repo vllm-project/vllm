@@ -106,7 +106,6 @@ class BGEM3Model(nn.Module):
             self.world_size = dist.get_world_size()
 
     def load_model(self, model_name, colbert_dim: int = -1):
-        print("called once")
         if not os.path.exists(model_name):
             cache_folder = os.getenv('HF_HUB_CACHE')
             model_name = snapshot_download(repo_id=model_name,
