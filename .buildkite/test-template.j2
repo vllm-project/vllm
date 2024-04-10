@@ -13,7 +13,7 @@ steps:
 
   - label: ":docker: build image"
     commands:
-      - "docker build --build-arg max_jobs=16 --tag {{ docker_image }} --target test --progress plain ."
+      - "docker build --no-cache-filter vllm_nccl_cleanup --build-arg max_jobs=16 --tag {{ docker_image }} --target test --progress plain ."
       - "docker push {{ docker_image }}"
     env:
       DOCKER_BUILDKIT: "1"

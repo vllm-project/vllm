@@ -19,8 +19,6 @@ WORKDIR /workspace
 # install build and runtime dependencies
 COPY requirements-common.txt requirements-common.txt
 COPY requirements-cuda.txt requirements-cuda.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements-cuda.txt
 
 # install development dependencies
 COPY requirements-dev.txt requirements-dev.txt
@@ -37,7 +35,7 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 
 
 #################### WHEEL BUILD IMAGE ####################
-FROM dev AS build
+FROM dev AS tmp1
 
 # install build dependencies
 COPY requirements-build.txt requirements-build.txt
@@ -67,16 +65,25 @@ ENV NVCC_THREADS=$nvcc_threads
 ENV VLLM_INSTALL_PUNICA_KERNELS=1
 
 ENV CCACHE_DIR=/root/.cache/ccache
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    --mount=type=cache,target=/root/.cache/pip \
-    python3 setup.py bdist_wheel --dist-dir=dist
+
+FROM tmp1 as vllm_nccl_cleanup
 
 # the `vllm_nccl` package must be installed from source distribution
 # pip is too smart to store a wheel in the cache, and other CI jobs
 # will directly use the wheel from the cache, which is not what we want.
-# we need to remove it manually
+# In addition, because `cache` is shared across build, chances are that
+# the wheel is already stored by another job, so we need to remove it manually
+# just before the build.
+# this command is separated into a stage `vllm_nccl_cleanup`,
+# so that we can use `--no-cache-filter` to enforce the cache removal
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip cache remove vllm_nccl*
+
+FROM vllm_nccl_cleanup as build
+
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/pip \
+    python3 setup.py bdist_wheel --dist-dir=dist
 #################### EXTENSION Build IMAGE ####################
 
 #################### FLASH_ATTENTION Build IMAGE ####################
