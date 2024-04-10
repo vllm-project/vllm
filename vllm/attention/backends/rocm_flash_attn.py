@@ -68,10 +68,6 @@ class ROCmFlashAttentionMetadata(AttentionMetadataPerStage,
     prompt_lens: Optional[List[int]]
     # prompt_lens stored as a tensor.
     prompt_lens_tensor: Optional[torch.Tensor]
-    # The number of prompt tokens. Doesn't include padding.
-    num_prompt_tokens: int
-    # The number of generation tokens. Doesn't include padding.
-    num_generation_tokens: int
 
     # NOTE(sang): Definition of context_len, subquery_len, and seqlen.
     # |---------- N-1 iteration --------|
