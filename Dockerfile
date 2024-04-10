@@ -16,7 +16,9 @@ RUN ldconfig /usr/local/cuda-12.1/compat/
 
 WORKDIR /workspace
 
-# install build and runtime dependencies
+# copy build and runtime dependency files
+# no need to install now, just copy the files
+# they will be used by `setup.py` to install the dependencies
 COPY requirements-common.txt requirements-common.txt
 COPY requirements-cuda.txt requirements-cuda.txt
 
