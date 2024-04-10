@@ -4,10 +4,7 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 from torch.distributed import ProcessGroup
 
-from vllm.device_communicators import pynccl_utils
-from vllm.device_communicators.custom_all_reduce import (
-    custom_all_reduce)
-from vllm.distributed import (
+from .parallel_state import (
     get_tensor_model_parallel_group, get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size, is_pynccl_enabled_for_all_reduce)
 
@@ -24,6 +21,9 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     TLDR: always assume this function modifies its input, but use the return
     value as the output.
     """
+    from vllm.device_communicators import pynccl_utils
+    from vllm.device_communicators.custom_all_reduce import (
+        custom_all_reduce)
     # Bypass the function if we are using only 1 GPU.
     if get_tensor_model_parallel_world_size() == 1:
         return input_
