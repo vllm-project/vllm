@@ -14,5 +14,8 @@ trap remove_docker_container EXIT
 remove_docker_container
 
 # Run the image
-docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_core rocm python3 -m pytest -v -s vllm/tests/engine
+docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_engine rocm python3 -m pytest -v -s vllm/tests/engine
+docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_tokenization rocm python3 -m pytest -v -s vllm/tests/tokenization
+docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_sequence rocm python3 -m pytest -v -s vllm/tests/test_sequence.py
+docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_config rocm python3 -m pytest -v -s vllm/tests/test_config.py
 
