@@ -5,9 +5,10 @@ import pytest
 from vllm import SamplingParams
 from vllm.config import ModelConfig
 from vllm.model_executor.tensorizer_loader import (TensorizerArgs,
-                                                   _is_vllm_model,
-                                                   load_with_tensorizer)
-from tensorizer import TensorSerializer, stream_io
+                                                   is_vllm_serialized_tensorizer,
+                                                   load_with_tensorizer,
+                                                   TensorSerializer,
+                                                   open_stream)
 import gc
 import torch
 
@@ -38,19 +39,20 @@ def model_config():
         dtype="float16",
         revision=None,
     )
-    config.tensorizer_args = TensorizerArgs(tensorizer_uri="vllm", )
+    config.tensorizer_args = TensorizerArgs(tensorizer_uri="vllm", vllm_tensorized=False)
     return config
 
 
 @patch('vllm.model_executor.tensorizer_loader.TensorizerAgent')
 def test_load_with_tensorizer(mock_agent, model_config):
     mock_model_cls = MagicMock()
+    mock_linear_method = MagicMock()
     mock_agent_instance = mock_agent.return_value
     mock_agent_instance.deserialize.return_value = MagicMock()
 
-    result = load_with_tensorizer(mock_model_cls, model_config)
+    result = load_with_tensorizer(mock_model_cls, model_config, mock_linear_method)
 
-    mock_agent.assert_called_once_with(mock_model_cls, model_config)
+    mock_agent.assert_called_once_with(mock_model_cls, model_config, mock_linear_method)
     mock_agent_instance.deserialize.assert_called_once()
     assert result == mock_agent_instance.deserialize.return_value
 
@@ -58,7 +60,7 @@ def test_load_with_tensorizer(mock_agent, model_config):
 def test_is_vllm_model_with_vllm_in_uri(model_config):
     model_config.tensorizer_args.vllm_tensorized = True
 
-    result = _is_vllm_model(model_config)
+    result = is_vllm_serialized_tensorizer(model_config)
 
     assert result is True
 
@@ -66,7 +68,7 @@ def test_is_vllm_model_with_vllm_in_uri(model_config):
 def test_is_vllm_model_without_vllm_in_uri(model_config):
     model_config.tensorizer_args.vllm_tensorized = False
 
-    result = _is_vllm_model(model_config)
+    result = is_vllm_serialized_tensorizer(model_config)
 
     assert result is False
 
@@ -77,7 +79,7 @@ def test_deserialized_vllm_model_has_same_outputs(vllm_runner, tmp_path):
     outputs = vllm_model.generate(prompts, sampling_params)
     model = (vllm_model.model.llm_engine.model_executor.driver_worker.
              model_runner.model)
-    with stream_io.open_stream(model_path, "wb+") as stream:
+    with open_stream(model_path, "wb+") as stream:
         serializer = TensorSerializer(stream)
         serializer.write_module(model)
     del vllm_model, model
@@ -99,7 +101,7 @@ def test_deserialized_hf_model_has_same_outputs(hf_runner, vllm_runner, tmp_path
     model_path = tmp_path / (model_ref + ".tensors")
     max_tokens = 50
     outputs = hf_model.generate_greedy(prompts, max_tokens=max_tokens)
-    with stream_io.open_stream(model_path, "wb+") as stream:
+    with open_stream(model_path, "wb+") as stream:
         serializer = TensorSerializer(stream)
         serializer.write_module(hf_model.model)
     del hf_model
@@ -112,5 +114,49 @@ def test_deserialized_hf_model_has_same_outputs(hf_runner, vllm_runner, tmp_path
                                         vllm_tensorized=False),
                                     dtype=dtype)
     deserialized_outputs = loaded_hf_model.generate_greedy(prompts, max_tokens=max_tokens)
+
+    assert outputs == deserialized_outputs
+
+def test_vllm_model_with_lora_has_same_outputs(vllm_runner, tmp_path):
+    from examples.multilora_inference import create_test_prompts, process_requests
+    from huggingface_hub import snapshot_download
+
+    model_ref = "meta-llama/Llama-2-7b-hf"
+    lora_path = snapshot_download(repo_id="yard1/llama-2-7b-sql-lora-test")
+    test_prompts = create_test_prompts(lora_path)
+
+    vllm_model = vllm_runner(model_ref,
+                             dtype=dtype,
+                             enable_lora=True,
+                             max_loras=1,
+                             max_lora_rank=8,
+                             max_cpu_loras=2,
+                             max_num_seqs=50,
+                             max_model_len=1000,
+                             )
+    model_path = tmp_path / (model_ref + ".tensors")
+    outputs = process_requests(vllm_model.model.llm_engine, test_prompts)
+    model = (vllm_model.model.llm_engine.model_executor.driver_worker.
+             model_runner.model)
+    with open_stream(model_path, "wb+") as stream:
+        serializer = TensorSerializer(stream)
+        serializer.write_module(model)
+    del vllm_model, model
+    gc.collect()
+    torch.cuda.empty_cache()
+    loaded_vllm_model = vllm_runner(model_ref,
+                                    tensorizer_args=TensorizerArgs(
+                                        tensorizer_uri=model_path,
+                                        num_readers=1,
+                                        vllm_tensorized=True),
+                                    enable_lora=True,
+                                    max_loras=1,
+                                    max_lora_rank=8,
+                                    max_cpu_loras=2,
+                                    max_num_seqs=50,
+                                    max_model_len=1000,
+                                    dtype=dtype)
+    deserialized_outputs = process_requests(loaded_vllm_model.model.llm_engine, test_prompts)
+
 
     assert outputs == deserialized_outputs
