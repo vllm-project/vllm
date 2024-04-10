@@ -9,17 +9,15 @@ import torch.nn as nn
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (DeviceConfig, LoRAConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VisionLanguageConfig)
+from vllm.distributed import broadcast_tensor_dict, with_pynccl_for_all_reduce
+from vllm.distributed.device_communicators import (custom_all_reduce,
+                                                   pynccl_utils)
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.parallel_utils import custom_all_reduce, pynccl_utils
-from vllm.model_executor.parallel_utils.communication_op import (
-    broadcast_tensor_dict)
-from vllm.model_executor.parallel_utils.parallel_state import (
-    with_pynccl_for_all_reduce)
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (MultiModalData, SamplerOutput, SequenceData,
                            SequenceGroupMetadata)

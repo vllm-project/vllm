@@ -8,14 +8,14 @@ import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
+from vllm.distributed import (broadcast_tensor_dict,
+                              ensure_model_parallel_initialized,
+                              init_distributed_environment)
+from vllm.distributed.device_communicators import pynccl_utils
+from vllm.distributed.device_communicators.custom_all_reduce import (
+    init_custom_ar)
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
-from vllm.model_executor.parallel_utils import pynccl_utils
-from vllm.model_executor.parallel_utils.communication_op import (
-    broadcast_tensor_dict)
-from vllm.model_executor.parallel_utils.custom_all_reduce import init_custom_ar
-from vllm.model_executor.parallel_utils.parallel_state import (
-    ensure_model_parallel_initialized, init_distributed_environment)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner

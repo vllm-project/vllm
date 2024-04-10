@@ -5,8 +5,6 @@ import torch
 import torch.distributed as dist
 
 from vllm.logger import init_logger
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 
 try:
     import pynvml
@@ -25,6 +23,9 @@ _SUPPORTED_WORLD_SIZES = [2, 4, 6, 8]
 
 
 def init_custom_ar() -> None:
+    from vllm.distributed import (get_tensor_model_parallel_rank,
+                                  get_tensor_model_parallel_world_size)
+
     global _CA_HANDLE
     if _CA_HANDLE is not None:
         return
