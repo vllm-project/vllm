@@ -133,8 +133,8 @@ class ops:
     def marlin_gemm(a: torch.tensor, b_q_weight: torch.tensor,
                     b_scales: torch.tensor, workspace: torch.tensor,
                     size_m: int, size_n: int, size_k: int):
-        vllm_ops.marlin_gemm(a, b_q_weight, b_scales, workspace, size_m,
-                             size_n, size_k)
+        return vllm_ops.marlin_gemm(a, b_q_weight, b_scales, workspace, size_m,
+                                    size_n, size_k)
 
     # moe
     def moe_align_block_size(topk_ids: torch.tensor, num_experts: int,
