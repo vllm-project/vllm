@@ -51,13 +51,13 @@ if (os.getenv("VLLM_SILENCE_PERFORMANCE_WARNINGS", "").lower()
 class TensorizerArgs:
     tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, typing.BinaryIO,
                           str, bytes, os.PathLike, int]
-    verify_hash: bool = False
+    vllm_tensorized: bool = False
+    verify_hash: Optional[bool] = False
+    num_readers: Optional[int] = 1
     encryption_keyfile: Optional[str] = None
-    num_readers: Optional[int] = None
     s3_access_key_id: Optional[str] = None
     s3_secret_access_key: Optional[str] = None
     s3_endpoint: Optional[str] = None
-    vllm_tensorized: Optional[bool] = False
     """
   Args for the TensorizerAgent class. These are used to configure the behavior 
   of the TensorDeserializer when loading tensors from a serialized model.
@@ -65,27 +65,27 @@ class TensorizerArgs:
   Args:
       tensorizer_uri: Path to serialized model tensors. Can be a local file 
           path or a S3 URI.
+      vllm_tensorized: If True, indicates that the serialized model is a 
+          vLLM model. This is used to determine the behavior of the 
+          TensorDeserializer when loading tensors from a serialized model.
+          It is far faster to deserialize a vLLM model as it utilizes
+          tensorizer's optimized GPU loading.
       verify_hash: If True, the hashes of each tensor will be verified against 
           the hashes stored in the metadata. A `HashMismatchError` will be 
           raised if any of the hashes do not match.
+      num_readers: Controls how many threads are allowed to read concurrently
+          from the source file. Default is 1. This greatly increases
+          performance.
       encryption_keyfile: File path to a binary file containing a  
           binary key to use for decryption. `None` (the default) means 
           no decryption. See the example script in 
           examples/tensorize_vllm_model.py. 
-      num_readers: Controls how many threads are allowed to read concurrently
-          from the source file. Default is 1. This greatly increases
-          performance.
       s3_access_key_id: The access key for the S3 bucket. Can also be set via
           the S3_ACCESS_KEY_ID environment variable.
       s3_secret_access_key: The secret access key for the S3 bucket. Can also
           be set via the S3_SECRET_ACCESS_KEY environment variable.
       s3_endpoint: The endpoint for the S3 bucket. Can also be set via the
           S3_ENDPOINT_URL environment variable.
-      vllm_tensorized: If True, indicates that the serialized model is a 
-          vLLM model. This is used to determine the behavior of the 
-          TensorDeserializer when loading tensors from a serialized model.
-          It is far faster to deserialize a vLLM model as it utilizes
-          tensorizer's optimized GPU loading.
   """
 
     def __post_init__(self):
