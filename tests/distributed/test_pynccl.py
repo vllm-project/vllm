@@ -4,7 +4,8 @@ import os
 import pytest
 import torch
 
-from vllm.distributed.device_communicators.pynccl import NCCLCommunicator, ncclGetUniqueId
+from vllm.distributed.device_communicators.pynccl import (NCCLCommunicator,
+                                                          ncclGetUniqueId)
 
 
 def distributed_run(fn, world_size):
