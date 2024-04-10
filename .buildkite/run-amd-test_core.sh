@@ -9,7 +9,7 @@ rocminfo
 docker build -t rocm -f Dockerfile.rocm .
 
 # Setup cleanup
-remove_docker_container() { docker rm -f rocm || true; }
+remove_docker_container() { docker rm -f rocm_test_core || true; }
 trap remove_docker_container EXIT
 remove_docker_container
 
