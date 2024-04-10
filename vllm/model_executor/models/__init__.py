@@ -70,6 +70,8 @@ _NEURON_SUPPORTED_MODELS = {
 }
 
 
+embedding_models = ["BAAI/bge-m3"]
+
 class ModelRegistry:
 
     @staticmethod
@@ -101,6 +103,10 @@ class ModelRegistry:
     @staticmethod
     def get_supported_archs() -> List[str]:
         return list(_MODELS.keys())
+
+    @staticmethod
+    def is_embedding_model(model: str):
+        return model in embedding_models
 
 
 __all__ = [

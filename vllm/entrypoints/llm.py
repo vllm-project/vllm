@@ -10,7 +10,7 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.utils import Counter
 from vllm.embedding_params import EmbeddingParams
-
+from vllm.model_executor.models import ModelRegistry
 class LLM:
     """An LLM for generating texts from given prompts and sampling parameters.
 
@@ -89,6 +89,7 @@ class LLM:
     ) -> None:
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
+        is_embedded_model = ModelRegistry.is_embedding_model(model)
         engine_args = EngineArgs(
             model=model,
             tokenizer=tokenizer,
@@ -102,14 +103,14 @@ class LLM:
             seed=seed,
             gpu_memory_utilization=gpu_memory_utilization,
             swap_space=swap_space,
-            enforce_eager=enforce_eager,
+            enforce_eager= True if is_embedded_model else enforce_eager,
             max_context_len_to_capture=max_context_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
-            embedding_model = embedding_model,
+            embedding_model = is_embedded_model,
             **kwargs,
         )
         self.llm_engine = LLMEngine.from_engine_args(engine_args)
-        self.llm_engine.embedding_model = embedding_model
+        self.llm_engine.embedding_model = is_embedded_model
         self.request_counter = Counter()
 
     def get_tokenizer(

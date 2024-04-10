@@ -10,7 +10,7 @@ sampling_params = EmbeddingParams(temperature=0.8, top_p=0.95)
 
 # Create an LLM.
 # llm = LLM(model="facebook/opt-125m")
-llm = LLM(model="BAAI/bge-m3", enforce_eager = True, embedding_model = True)
+llm = LLM(model="BAAI/bge-m3", enforce_eager = True)
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.
 
@@ -22,7 +22,7 @@ for output1 in outputs1:
     lst1.append(np.array(generated_text))
 lst1 = np.array(lst1)
 outputs2 = llm.generate(sentences_2, sampling_params)
-print(lst1)
+
 lst2 = []
 for output2 in outputs2:
     prompt = output2.prompt
