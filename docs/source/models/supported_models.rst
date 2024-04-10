@@ -190,11 +190,11 @@ Note that, as an inference engine, vLLM does not introduce new models. Therefore
 
 We have the following levels of testing for models:
 
-1. **Strict consistency**: We compare the output of the model with the output of the model in the HuggingFace Transformers library under greedy decoding. This is the most stringent test. The following models fall under this category:
+1. **Strict Consistency**: We compare the output of the model with the output of the model in the HuggingFace Transformers library under greedy decoding. This is the most stringent test. The following models fall under this category:
     - facebook/opt-125m
     - meta-llama/Llama-2-7b-hf
-2. **Output sensibility**: We check if the output of the model is sensible and coherent, by measuring the perplexity of the output and checking for any obvious errors. This is a less stringent test.
-3. **Runtime functionality**: We check if the model can be loaded and run without errors. This is the least stringent test. The following models fall under this category:
+2. **Output Sensibility**: We check if the output of the model is sensible and coherent, by measuring the perplexity of the output and checking for any obvious errors. This is a less stringent test.
+3. **Runtime Functionality**: We check if the model can be loaded and run without errors. This is the least stringent test. The following models fall under this category:
     - facebook/opt-125m
     - meta-llama/Llama-2-7b-hf
     - baichuan-inc/Baichuan-7B
@@ -213,4 +213,4 @@ We have the following levels of testing for models:
     - EleutherAI/pythia-70m
     - bigcode/tiny_starcoder_py
     - gpt2
-4. **Community feedback**: We rely on the community to provide feedback on the models. If a model is broken or not working as expected, we encourage users to raise issues to report it or open pull requests to fix it. The rest of the models fall under this category.
+4. **Community Feedback**: We rely on the community to provide feedback on the models. If a model is broken or not working as expected, we encourage users to raise issues to report it or open pull requests to fix it. The rest of the models fall under this category.
