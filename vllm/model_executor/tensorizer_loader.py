@@ -17,14 +17,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmb
 from vllm.model_executor.layers.linear import LinearMethodBase
 
 try:
-    from tensorizer import DecryptionParams, TensorDeserializer
+    from tensorizer import DecryptionParams, TensorDeserializer, TensorSerializer
     from tensorizer.stream_io import open_stream
     from tensorizer.utils import convert_bytes, get_mem_usage, no_init_or_tensor
 except ImportError:
-    raise ImportError("Please install the tensorizer package to use this module. "
-                      "You can install it with `pip install vllm[tensorizer]`.")
+    tensorizer_load_fail = True
 
-__all__ = ['DecryptionParams', 'TensorDeserializer', 'open_stream', 'convert_bytes', 'get_mem_usage', 'no_init_or_tensor']
+__all__ = ['DecryptionParams', 'TensorDeserializer', 'TensorSerializer','open_stream', 'convert_bytes',
+       'get_mem_usage', 'no_init_or_tensor']
 
 logger = init_logger(__name__)
 
@@ -229,6 +229,10 @@ class TensorizerAgent:
         self.extra_kwargs = extra_kwargs
         self.tensorizer_args = self.model_config.tensorizer_args
         self.model = self._init_model()
+
+        if tensorizer_load_fail:
+            raise ImportError("Tensorizer is not installed. Please install tensorizer to use this feature.")
+
 
     def _init_model(self):
         model_args = self.model_config.hf_config
