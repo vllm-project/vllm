@@ -73,14 +73,17 @@ class AttentionMetadata(Generic[T]):
     # Number of decode tokens. Note that it is equivalent to the number of
     # decode requests.
     num_decode_tokens: int
+    # The attention metadata for prefill requests in a batch.
+    prefill_metadata: Optional[T]
+    # The attention metadata for decode requests in a batch.
+    decode_metadata: Optional[T]
     # (num_tokens,). The indices of the token slots that input tokens will be
     # stored into. E.g., if `slot_mapping` is [35, 2, 17] and the block size
     # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
     # in block 0, and 1st slot in block 1, respectively.
     slot_mapping: torch.Tensor
+    # The kv cache's data type.
     kv_cache_dtype: str
-    prefill_metadata: Optional[T]
-    decode_metadata: Optional[T]
 
     def __post_init__(self):
         if self.num_prefill_tokens > 0:
