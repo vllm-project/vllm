@@ -203,9 +203,7 @@ class TorchSDPABackendImpl(AttentionImpl):
                 raise RuntimeError(
                     "Torch SDPA backend doesn't support prefix decoding.")
 
-        if num_decode_tokens > 0:
-            decode_meta = attn_metadata.decode_metadata
-            assert decode_meta is not None
+        if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
             out = PagedAttention.forward_decode(
                 decode_query,

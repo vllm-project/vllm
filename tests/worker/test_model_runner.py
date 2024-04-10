@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, SchedulerConfig
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.worker.model_runner import ModelRunner, _get_graph_batch_size
 
@@ -229,4 +229,111 @@ def test_empty_seq_group():
     assert len(return_prompt_lens) == 0
 
 
-# SANG-TODO Test chunked prefill case.
+@pytest.mark.parametrize("batch_size", list(range(2, 128)))
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_hybrid_batches(batch_size, enforce_eager, monkeypatch):
+
+    def get_world_size(group=None):
+        return 1
+
+    def mock_get_process_group_ranks(group=None):
+        return [0]
+
+    monkeypatch.setattr(torch.distributed, "get_world_size", get_world_size)
+    monkeypatch.setattr(torch.distributed, "get_process_group_ranks",
+                        mock_get_process_group_ranks)
+
+    model_config = ModelConfig(
+        "facebook/opt-125m",
+        "facebook/opt-125m",
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        download_dir=None,
+        load_format="dummy",
+        seed=0,
+        dtype="float16",
+        revision=None,
+        enforce_eager=enforce_eager,
+    )
+    scheduler_config = SchedulerConfig(100000,
+                                       100000,
+                                       100000,
+                                       enable_chunked_prefill=True)
+    model_runner = ModelRunner(model_config,
+                               None,
+                               scheduler_config,
+                               None,
+                               None,
+                               is_driver_worker=True)
+    model_runner.set_block_size(16)
+
+    # Add prefill requests.
+    prompt_lens = []
+    seq_group_metadata_list = []
+    prefill_metadata_list = []
+    decode_metadata_list = []
+    block_tables = {0: [1]}
+    prefill_batch_size = batch_size // 2
+    decode_batch_size = batch_size - prefill_batch_size
+    for i in range(prefill_batch_size):
+        # make sure all tokens fit into one block
+        prompt_len = i % (model_runner.block_size - 1) + 1
+        prompt_lens.append(prompt_len)
+        seq_data = SequenceData(list(range(prompt_len)))
+        seq_group_metadata = SequenceGroupMetadata(
+            request_id=f"test_{i}",
+            is_prompt=True,
+            seq_data={0: seq_data},
+            sampling_params=SamplingParams(temperature=0),
+            block_tables=block_tables,
+        )
+        assert seq_group_metadata.token_chunk_size == seq_data.get_len()
+        seq_group_metadata_list.append(seq_group_metadata)
+        prefill_metadata_list.append(seq_group_metadata)
+
+    # Add decode requests
+    for i in range(prefill_batch_size, batch_size):
+        # make sure all tokens fit into one block
+        prompt_len = i % (model_runner.block_size - 1) + 1
+        prompt_toks = list(range(prompt_len))
+        seq_data = SequenceData(prompt_toks)
+        seq_group_metadata = SequenceGroupMetadata(
+            request_id=f"test_{i}",
+            is_prompt=False,
+            seq_data={0: seq_data},
+            sampling_params=SamplingParams(temperature=0),
+            block_tables={0: [1]},
+        )
+        assert seq_group_metadata.token_chunk_size == 1
+        seq_group_metadata_list.append(seq_group_metadata)
+        decode_metadata_list.append(seq_group_metadata)
+
+    (input_tokens, input_positions, attn_metadata, _, _, _,
+     _) = model_runner.prepare_input_tensors(seq_group_metadata_list)
+
+    prefill_meta_actual = attn_metadata.prefill_metadata
+    decode_meta_actual = attn_metadata.decode_metadata
+
+    assert len(attn_metadata.slot_mapping) == len(input_tokens)
+    assert len(input_positions) == len(input_tokens)
+    assert attn_metadata.num_prefills == prefill_batch_size
+    if enforce_eager:
+        assert attn_metadata.num_decode_tokens == decode_batch_size
+    else:
+        assert attn_metadata.num_decode_tokens == _get_graph_batch_size(
+            decode_batch_size)
+    assert attn_metadata.num_prefill_tokens == sum(prompt_lens)
+
+    # Verify attn metadata is consistent. We don't need to test individual
+    # values here because they are tested above.
+    prefill_meta = model_runner._prepare_prompt(
+        prefill_metadata_list).attn_metadata
+    decode_meta = model_runner._prepare_decode(
+        decode_metadata_list).attn_metadata
+
+    for attr_expected, attr_actual in zip(vars(prefill_meta),
+                                          vars(prefill_meta_actual)):
+        assert attr_expected[1] == attr_actual[1]
+    for attr_expected, attr_actual in zip(vars(decode_meta),
+                                          vars(decode_meta_actual)):
+        assert attr_expected[1] == attr_actual[1]

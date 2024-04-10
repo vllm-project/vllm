@@ -115,12 +115,12 @@ class XFormersMetadata(AttentionMetadataPerStage, PagedAttentionMetadata):
 class XFormersImpl(AttentionImpl):
     """
     If the input tensors contain prompt tokens, the layout is as follows:
-    |<--------------- num_prefill_tokens -------------->|	
-    |<--prompt_0-->|<--prompt_1-->|...|<--prompt_N-1--->|
+    |<--------------- num_prefill_tokens ----------------->|	
+    |<--prefill_0-->|<--prefill_1-->|...|<--prefill_N-1--->|
 
     Otherwise, the layout is as follows:	
-    |<---------------------- num_decode_tokens --------------------->|	
-    |<--generation_0-->|..........|<--generation_M-1-->|<--padding-->|
+    |<----------------- num_decode_tokens ------------------>|	
+    |<--decode_0-->|..........|<--decode_M-1-->|<--padding-->|
 
     Generation tokens can contain padding when cuda-graph is used.
     Currently, prompt tokens don't contain any padding.
@@ -131,8 +131,8 @@ class XFormersImpl(AttentionImpl):
     If chunked prefill is enabled, prefill tokens and decode tokens can be
     batched together in a flattened 1D query.
 
-    |<----- num_prefill_tokens ---->|<------- num_decode_tokens ----------->|	
-    |<-prompt_0->|...|<-prompt_N-1->|<-generation_0->|...|<-generation_M-1->|
+    |<----- num_prefill_tokens ---->|<------- num_decode_tokens --------->|
+    |<-prefill_0->|...|<-prefill_N-1->|<--decode_0-->|...|<--decode_M-1-->|
 
     Currently, cuda graph is disabled for chunked prefill, meaning there's no
     padding between prefill and decode tokens.
@@ -225,26 +225,8 @@ class XFormersImpl(AttentionImpl):
                 # normal attention.
                 # block tables are empty if the prompt does not have a cached
                 # prefix.
-                if self.num_kv_heads != self.num_heads:
-                    # As of Nov 2023, xformers only supports MHA. For MQA/GQA,
-                    # project the key and value tensors to the desired number of
-                    # heads.
-                    # TODO(woosuk): Use MQA/GQA kernels for higher performance.
-                    query = query.view(query.shape[0], self.num_kv_heads,
-                                       self.num_queries_per_kv,
-                                       query.shape[-1])
-                    key = key[:, :,
-                              None, :].expand(key.shape[0], self.num_kv_heads,
-                                              self.num_queries_per_kv,
-                                              key.shape[-1])
-                    value = value[:, :,
-                                  None, :].expand(value.shape[0],
-                                                  self.num_kv_heads,
-                                                  self.num_queries_per_kv,
-                                                  value.shape[-1])
-
                 out = self._run_memory_efficient_xformers_forward(
-                    query, key, value, prefill_meta).squeeze(0)
+                    query, key, value, prefill_meta)
                 assert out.shape == output[:num_prefill_tokens].shape
                 output[:num_prefill_tokens] = out
             else:
@@ -268,9 +250,7 @@ class XFormersImpl(AttentionImpl):
                 assert output[:num_prefill_tokens].shape == out.shape
                 output[:num_prefill_tokens] = out
 
-        if num_decode_tokens > 0:
-            decode_meta = attn_metadata.decode_metadata
-            assert decode_meta is not None
+        if decode_meta := attn_metadata.decode_metadata:
             output[num_prefill_tokens:] = PagedAttention.forward_decode(
                 decode_query,
                 key_cache,
@@ -298,6 +278,9 @@ class XFormersImpl(AttentionImpl):
         """Attention for 1D query of multiple prompts. Multiple prompt
         tokens are flattened in to `query` input.
 
+        See https://facebookresearch.github.io/xformers/components/ops.html
+        for API spec.
+
         Args:
             output: shape = [num_prefill_tokens, num_heads, head_size]
             query: shape = [num_prefill_tokens, num_heads, head_size]
@@ -305,6 +288,20 @@ class XFormersImpl(AttentionImpl):
             value: shape = [num_prefill_tokens, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         """
+        original_query = query
+        if self.num_kv_heads != self.num_heads:
+            # GQA/MQA requires the shape [B, M, G, H, K].
+            # Note that the output also has the same shape (which is different
+            # from a spec from the doc).
+            query = query.view(query.shape[0], self.num_kv_heads,
+                               self.num_queries_per_kv, query.shape[-1])
+            key = key[:, :,
+                      None, :].expand(key.shape[0], self.num_kv_heads,
+                                      self.num_queries_per_kv, key.shape[-1])
+            value = value[:, :,
+                          None, :].expand(value.shape[0], self.num_kv_heads,
+                                          self.num_queries_per_kv,
+                                          value.shape[-1])
         # Set attention bias if not provided. This typically happens at
         # the very attention layer of every iteration.
         # FIXME(woosuk): This is a hack.
@@ -325,6 +322,7 @@ class XFormersImpl(AttentionImpl):
         # TODO(woosuk): Too many view operations. Let's try to reduce
         # them in the future for code readability.
         if self.alibi_slopes is None:
+            # Add the batch dimension.
             query = query.unsqueeze(0)
             key = key.unsqueeze(0)
             value = value.unsqueeze(0)
@@ -335,14 +333,13 @@ class XFormersImpl(AttentionImpl):
                 attn_bias=attn_metadata.attn_bias[0],
                 p=0.0,
                 scale=self.scale)
-
-            return out.view_as(query)
+            return out.view_as(original_query)
 
         # Attention with alibi slopes.
         # FIXME(woosuk): Because xformers does not support dynamic sequence
         # lengths with custom attention bias, we process each prompt one by
         # one. This is inefficient, especially when we have many short prompts.
-        output = torch.empty_like(query)
+        output = torch.empty_like(original_query)
         start = 0
         for i, prompt_len in enumerate(attn_metadata.prompt_lens):
             end = start + prompt_len
@@ -354,7 +351,7 @@ class XFormersImpl(AttentionImpl):
                 p=0.0,
                 scale=self.scale)
             # TODO(woosuk): Unnecessary copy. Optimize.
-            output[start:end].copy_(out.squeeze(0))
+            output[start:end].copy_(out.view_as(original_query))
             start += prompt_len
         return output
 

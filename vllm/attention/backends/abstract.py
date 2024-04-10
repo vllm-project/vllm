@@ -74,8 +74,10 @@ class AttentionMetadata(Generic[T]):
     # decode requests.
     num_decode_tokens: int
     # The attention metadata for prefill requests in a batch.
+    # None if there's no prefill requests in a batch.
     prefill_metadata: Optional[T]
     # The attention metadata for decode requests in a batch.
+    # None if there's no decode requests in a batch.
     decode_metadata: Optional[T]
     # (num_tokens,). The indices of the token slots that input tokens will be
     # stored into. E.g., if `slot_mapping` is [35, 2, 17] and the block size

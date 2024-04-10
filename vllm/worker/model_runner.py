@@ -372,6 +372,7 @@ class ModelRunner:
             block_tables=block_tables,
             use_cuda_graph=False,
         )
+
         return PreparePromptMetadata(
             input_tokens=input_tokens,
             input_positions=input_positions,

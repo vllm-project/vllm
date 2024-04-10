@@ -105,12 +105,12 @@ class FlashAttentionMetadata(AttentionMetadataPerStage,
 class FlashAttentionImpl(AttentionImpl):
     """
     If the input tensors contain prompt tokens, the layout is as follows:
-    |<--------------- num_prompt_tokens -------------->|	
-    |<--prompt_0-->|<--prompt_1-->|...|<--prompt_N-1-->|
+    |<--------------- num_prefill_tokens ----------------->|	
+    |<--prefill_0-->|<--prefill_1-->|...|<--prefill_N-1--->|
 
     Otherwise, the layout is as follows:	
-    |<------------------ num_generation_tokens (M) ----------------->|	
-    |<--generation_0-->|..........|<--generation_M-1-->|<--padding-->|
+    |<----------------- num_decode_tokens ------------------>|	
+    |<--decode_0-->|..........|<--decode_M-1-->|<--padding-->|
 
     Generation tokens can contain padding when cuda-graph is used.
     Currently, prompt tokens don't contain any padding.
@@ -121,8 +121,8 @@ class FlashAttentionImpl(AttentionImpl):
     If chunked prefill is enabled, prefill tokens and decode tokens can be
     batched together in a flattened 1D query.
 
-    |<----- num_prefill_tokens ---->|<------- num_decode_tokens ----------->|	
-    |<-prompt_0->|...|<-prompt_N-1->|<-generation_0->|...|<-generation_M-1->|
+    |<----- num_prefill_tokens ---->|<------- num_decode_tokens --------->|
+    |<-prefill_0->|...|<-prefill_N-1->|<--decode_0-->|...|<--decode_M-1-->|
 
     Currently, cuda graph is disabled for chunked prefill, meaning there's no
     padding between prefill and decode tokens.
@@ -250,10 +250,8 @@ class FlashAttentionImpl(AttentionImpl):
                     prefill_meta.max_subquery_len,
                     self.alibi_slopes,
                 )
-        if num_decode_tokens > 0:
+        if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
-            decode_meta = attn_metadata.decode_metadata
-            assert decode_meta is not None
             output[num_prefill_tokens:] = PagedAttention.forward_decode(
                 decode_query,
                 key_cache,
