@@ -9,8 +9,8 @@ import warnings
 from collections import OrderedDict, defaultdict
 from functools import lru_cache, partial
 from platform import uname
-from typing import (Any, Awaitable, Callable, Generic, Hashable, List,
-                    Optional, Tuple, TypeVar, Union, Dict)
+from typing import (Any, Awaitable, Callable, Dict, Generic, Hashable, List,
+                    Optional, Tuple, TypeVar, Union)
 
 import psutil
 import torch
