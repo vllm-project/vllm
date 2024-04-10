@@ -25,7 +25,7 @@ def run_grid(bs, method):
     d_model = 4096
     num_total_experts = 8
     top_k = 2
-    tp_size = 2
+    tp_size = 4
     model_intermediate_size = 14336
     num_layers = 32
     num_calls = 100
@@ -149,6 +149,13 @@ def run_timing(num_calls: int, bs: int, d_model: int, num_total_experts: int,
         dtype=hidden_states.dtype,
     ).to(torch.float8_e4m3fn)
 
+    s = torch.rand(d_model,
+                   device=hidden_states.device,
+                   dtype=torch.float16)
+    s2 = torch.rand(shard_intermediate_size,
+                    device=hidden_states.device,
+                    dtype=torch.float16)
+
     gating_output = F.softmax(torch.rand(
         (num_calls, bs, num_total_experts),
         device=hidden_states.device,
@@ -165,6 +172,8 @@ def run_timing(num_calls: int, bs: int, d_model: int, num_total_experts: int,
             hidden_states=hidden_states,
             w1=ws,
             w2=w2s,
+            s=s,
+            s2=s2,
             gating_output=gating_output[i],
             topk=2,
             renormalize=True,
