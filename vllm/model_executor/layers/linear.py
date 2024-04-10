@@ -119,7 +119,7 @@ class ReplicatedLinear(torch.nn.Module):
         for name, weight in linear_weights.items():
             if isinstance(weight, torch.Tensor):
                 self.register_parameter(name, weight)
-                self._linear_weights_names.append(name)
+            self._linear_weights_names.append(name)
         if bias:
             self.bias = Parameter(
                 torch.empty(self.output_size, dtype=self.params_dtype))
@@ -195,7 +195,7 @@ class ColumnParallelLinear(torch.nn.Module):
             if isinstance(weight, torch.Tensor):
                 self.register_parameter(name, weight)
                 set_weight_attrs(weight, {"weight_loader": self.weight_loader})
-                self._linear_weights_names.append(name)
+            self._linear_weights_names.append(name)
         if bias:
             self.bias = Parameter(
                 torch.empty(self.output_size_per_partition,
@@ -550,7 +550,7 @@ class RowParallelLinear(torch.nn.Module):
             if isinstance(weight, torch.Tensor):
                 self.register_parameter(name, weight)
                 set_weight_attrs(weight, {"weight_loader": self.weight_loader})
-                self._linear_weights_names.append(name)
+            self._linear_weights_names.append(name)
 
         if not reduce_results and (bias and not skip_bias_add):
             raise ValueError("When not reduce the results, adding bias to the "
