@@ -56,5 +56,5 @@ fi
 
 source $(pyenv root)/versions/${PYTHON}/envs/${VENV}/bin/activate
 pip3 install --index-url http://${PYPI_IP}:8080/ --trusted-host ${PYPI_IP} nm-magic-wand-nightly
-pip3 install -r requirements.txt
+pip3 install -r requirements-cuda.txt -r requirements-build.txt
 pip3 install -e .

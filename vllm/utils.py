@@ -6,7 +6,7 @@ import socket
 import subprocess
 import uuid
 import warnings
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from functools import lru_cache, partial
 from platform import uname
 from typing import (Any, Awaitable, Callable, Generic, Hashable, List,
@@ -25,7 +25,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
     "bfloat16": torch.bfloat16,
     "float": torch.float,
-    "fp8_e5m2": torch.uint8,
+    "fp8": torch.uint8,
 }
 
 
@@ -119,11 +119,11 @@ def is_hip() -> bool:
 
 @lru_cache(maxsize=None)
 def is_cpu() -> bool:
-    from importlib.metadata import version
-
-    # UPSTREAM SYNC: needed for nm-vllm
-    is_cpu_flag = "cpu" in version("nm-vllm")
-    return is_cpu_flag
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        return "cpu" in version("nm-vllm")
+    except PackageNotFoundError:
+        return False
 
 
 @lru_cache(maxsize=None)
@@ -266,7 +266,7 @@ def get_nvcc_cuda_version() -> Optional[Version]:
     return nvcc_cuda_version
 
 
-def _generate_random_fp8_e5m2(
+def _generate_random_fp8(
     tensor: torch.tensor,
     low: float,
     high: float,
@@ -282,7 +282,7 @@ def _generate_random_fp8_e5m2(
     from vllm._C import cache_ops
     tensor_tmp = torch.empty_like(tensor, dtype=torch.float16)
     tensor_tmp.uniform_(low, high)
-    cache_ops.convert_fp8_e5m2(tensor_tmp, tensor)
+    cache_ops.convert_fp8(tensor_tmp, tensor)
     del tensor_tmp
 
 
@@ -311,7 +311,7 @@ def create_kv_caches_with_random(
                 raise ValueError(f"Invalid model dtype: {model_dtype}")
         elif cache_dtype in ["half", "bfloat16", "float"]:
             torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
-        elif cache_dtype == "fp8_e5m2":
+        elif cache_dtype == "fp8":
             torch_dtype = torch.uint8
         else:
             raise ValueError(f"Invalid kv cache dtype: {cache_dtype}")
@@ -328,10 +328,10 @@ def create_kv_caches_with_random(
         key_cache = torch.empty(size=key_cache_shape,
                                 dtype=torch_dtype,
                                 device=device)
-        if cache_dtype == 'fp8_e5m2':
-            _generate_random_fp8_e5m2(key_cache, -scale, scale)
-        elif torch_dtype in [torch.half, torch.bfloat16, torch.float]:
+        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
             key_cache.uniform_(-scale, scale)
+        elif cache_dtype == 'fp8':
+            _generate_random_fp8(key_cache, -scale, scale)
         else:
             raise ValueError(
                 f"Does not support key cache of type {cache_dtype}")
@@ -343,10 +343,10 @@ def create_kv_caches_with_random(
         value_cache = torch.empty(size=value_cache_shape,
                                   dtype=torch_dtype,
                                   device=device)
-        if cache_dtype == 'fp8_e5m2':
-            _generate_random_fp8_e5m2(value_cache, -scale, scale)
-        elif torch_dtype in [torch.half, torch.bfloat16, torch.float]:
+        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
             value_cache.uniform_(-scale, scale)
+        elif cache_dtype == 'fp8':
+            _generate_random_fp8(value_cache, -scale, scale)
         else:
             raise ValueError(
                 f"Does not support value cache of type {cache_dtype}")
@@ -450,3 +450,20 @@ def maybe_expand_dim(tensor: torch.Tensor,
     if tensor.ndim < target_dims:
         tensor = tensor.view(-1, *([size] * (target_dims - tensor.ndim)))
     return tensor
+
+
+def merge_dicts(dict1: dict[Any, list[Any]],
+                dict2: dict[Any, list[Any]]) -> dict[Any, list[Any]]:
+    """Merge 2 dicts that have key -> List of items.
+    
+    When a key conflicts, the values in dict1 is prioritized.
+    """
+    merged_dict = defaultdict(list)
+
+    for key, value in dict1.items():
+        merged_dict[key].extend(value)
+
+    for key, value in dict2.items():
+        merged_dict[key].extend(value)
+
+    return dict(merged_dict)

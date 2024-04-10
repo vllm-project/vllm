@@ -81,7 +81,7 @@ RUN if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1" 
 COPY ./ /app/vllm
 
 RUN python3 -m pip install --upgrade pip
-RUN python3 -m pip install xformers==0.0.23 --no-deps
+RUN python3 -m pip install xformers==0.0.25 --no-deps
 
 RUN cd /app \
     && cd vllm \

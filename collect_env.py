@@ -74,7 +74,7 @@ DEFAULT_PIP_PATTERNS = {
     "optree",
     "onnx",
     # UPSTREAM SYNC: needed for sparsity
-    "nm-magic-wand",
+    "nm-magic-wand-nightly",
 }
 
 

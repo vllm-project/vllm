@@ -12,6 +12,7 @@ tests/distributed/test_comm_ops.py
 tests/prefix_caching/test_prefix_caching.py
 tests/models/test_models_logprobs.py
 tests/models/test_models.py
+tests/models/test_compressed_memory.py
 tests/spec_decode/test_utils.py
 tests/spec_decode/test_spec_decode_worker.py
 tests/spec_decode/test_metrics.py

@@ -25,7 +25,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (MultiModalData, SamplerOutput, SequenceData,
                            SequenceGroupMetadata)
-from vllm.utils import (CudaMemoryProfiler, async_tensor_h2d,
+from vllm.utils import (CudaMemoryProfiler, async_tensor_h2d, is_hip,
                         is_pin_memory_available, make_tensor_with_pad,
                         maybe_expand_dim)
 
@@ -122,6 +122,26 @@ class ModelRunner:
                 self.model.embedding_padding_modules)
             self.model = self.lora_manager.create_lora_manager(self.model)
 
+        if self.kv_cache_dtype == "fp8" and is_hip():
+            # Currently scaled KV cache is only enabled on ROCm
+            if self.model_config.quantization_param_path is not None:
+                if callable(getattr(self.model, "load_kv_cache_scales", None)):
+                    self.model.load_kv_cache_scales(
+                        self.model_config.quantization_param_path)
+                else:
+                    raise RuntimeError("Using FP8 KV cache and scaling "
+                                       "factors provided but model "
+                                       f"{self.model.__class__} does not "
+                                       "support loading scaling factors.")
+            else:
+                logger.warn("Using FP8 KV cache but no scaling factors "
+                            "provided. Defaulting to scaling factors of 1.0. "
+                            "This may lead to less accurate results!")
+        elif self.model_config.quantization_param_path is not None:
+            logger.warn("KV cache scaling factors provided, "
+                        "but the KV cache data type is not FP8. "
+                        "KV cache scaling factors will not be used.")
+
     def set_block_size(self, block_size: int) -> None:
         self.block_size = block_size
 
@@ -204,7 +224,6 @@ class ModelRunner:
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
             input_positions.extend(list(range(computed_len, prefill_end)))
-
             lora_id = seq_group_metadata.lora_int_id
 
             if lora_id > 0:
