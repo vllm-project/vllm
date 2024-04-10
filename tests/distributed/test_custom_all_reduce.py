@@ -7,8 +7,8 @@ import torch
 import torch.distributed as dist
 
 from vllm.distributed import tensor_model_parallel_all_reduce
-from vllm.distributed.device_communicators import (
-    custom_all_reduce as custom_ar)
+from vllm.distributed.device_communicators import (custom_all_reduce as
+                                                   custom_ar)
 from vllm.test_utils import (init_test_distributed_environment,
                              multi_process_tensor_parallel)
 
