@@ -14,8 +14,6 @@ import numpy as np
 import torch
 from huggingface_hub import HfFileSystem, snapshot_download
 from safetensors.torch import load_file, safe_open, save_file
-from tensorizer.serialization import TensorDeserializer
-from tensorizer.stream_io import open_stream
 from tqdm.auto import tqdm
 
 from vllm.config import ModelConfig
@@ -23,7 +21,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
 from vllm.model_executor.layers.quantization.schema import QuantParamSchema
-from vllm.model_executor.tensorizer_loader import PerformanceWarning
+from vllm.model_executor.tensorizer_loader import (PerformanceWarning, TensorDeserializer,
+                                                  open_stream)
+
+
 
 logger = init_logger(__name__)
 

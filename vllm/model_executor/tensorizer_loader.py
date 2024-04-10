@@ -8,8 +8,6 @@ import warnings
 from dataclasses import dataclass
 from typing import Optional, Type, Union
 
-from tensorizer import DecryptionParams, TensorDeserializer, stream_io
-from tensorizer.utils import convert_bytes, get_mem_usage, no_init_or_tensor
 from torch import nn
 import torch
 
@@ -17,6 +15,16 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.layers.linear import LinearMethodBase
+
+try:
+    from tensorizer import DecryptionParams, TensorDeserializer
+    from tensorizer.stream_io import open_stream
+    from tensorizer.utils import convert_bytes, get_mem_usage, no_init_or_tensor
+except ImportError:
+    raise ImportError("Please install the tensorizer package to use this module. "
+                      "You can install it with `pip install vllm[tensorizer]`.")
+
+__all__ = ['DecryptionParams', 'TensorDeserializer', 'open_stream', 'convert_bytes', 'get_mem_usage', 'no_init_or_tensor']
 
 logger = init_logger(__name__)
 
@@ -30,7 +38,7 @@ def load_with_tensorizer(model_cls: Type[nn.Module],
                                  **extra_kwargs)
     return tensorizer.deserialize()
 
-def _is_vllm_model(model_config: ModelConfig) -> bool:
+def is_vllm_serialized_tensorizer(model_config: ModelConfig) -> bool:
     if model_config.tensorizer_args is None:
         return False
     return model_config.tensorizer_args.vllm_tensorized
@@ -116,7 +124,7 @@ class TensorizerArgs:
             "num_readers": self.num_readers
         }
         if self.encryption_keyfile:
-            with stream_io.open_stream(
+            with open_stream(
                     self.encryption_keyfile,
                     **self.stream_params,
             ) as stream:
@@ -268,7 +276,7 @@ class TensorizerAgent:
         before_mem = get_mem_usage()
         # Lazy load the tensors from S3 into the model.
         start = time.perf_counter()
-        with stream_io.open_stream(
+        with open_stream(
                 self.tensorizer_args.tensorizer_uri,
                 mode="rb",
                 **self.tensorizer_args.stream_params,
