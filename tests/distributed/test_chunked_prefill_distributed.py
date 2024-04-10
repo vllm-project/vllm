@@ -46,7 +46,14 @@ def test_models(
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
     del hf_model
 
-    vllm_model = vllm_runner(model, dtype=dtype, tensor_parallel_size=2, max_num_seqs=max_num_seqs, enable_chunked_prefill=enable_chunked_prefill, max_num_batched_tokens=max_num_batched_tokens,)
+    vllm_model = vllm_runner(
+        model,
+        dtype=dtype,
+        tensor_parallel_size=2,
+        max_num_seqs=max_num_seqs,
+        enable_chunked_prefill=enable_chunked_prefill,
+        max_num_batched_tokens=max_num_batched_tokens,
+    )
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
 
