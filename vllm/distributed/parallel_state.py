@@ -265,6 +265,7 @@ def destroy_model_parallel():
     global _PIPELINE_GLOBAL_RANKS
     _PIPELINE_GLOBAL_RANKS = None
     from vllm.device_communicators import pynccl_utils
+
     # Destroy the pynccl states if any.
     pynccl_utils.destroy_process_group()
 

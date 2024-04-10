@@ -10,7 +10,7 @@ logger = init_logger(__name__)
 
 try:
     from vllm.device_communicators.pynccl import (NCCLCommunicator,
-                                                           ncclGetVersion)
+                                                  ncclGetVersion)
 except Exception as e:
     # in non-NVIDIA environments, we can't import the nccl module
     # e.g. when running on machines with AMD GPUs
