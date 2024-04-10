@@ -83,7 +83,7 @@ class LLMEngine:
             f"model={model_config.model!r}, "
             f"speculative_config={speculative_config!r}, "
             f"tokenizer={model_config.tokenizer!r}, "
-            f"disable_tokenizer={model_config.disable_tokenizer}, "
+            f"skip_tokenizer_init={model_config.skip_tokenizer_init}, "
             f"tokenizer_mode={model_config.tokenizer_mode}, "
             f"revision={model_config.revision}, "
             f"tokenizer_revision={model_config.tokenizer_revision}, "
@@ -113,7 +113,7 @@ class LLMEngine:
         self.speculative_config = speculative_config
         self.log_stats = log_stats
 
-        if not self.model_config.disable_tokenizer:
+        if not self.model_config.skip_tokenizer_init:
             self._init_tokenizer()
             self.detokenizer = Detokenizer(self.tokenizer)
         else:
