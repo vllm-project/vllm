@@ -23,7 +23,9 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     value as the output.
     """
     from vllm.distributed.device_communicators import pynccl_utils
-    from vllm.distributed.device_communicators.custom_all_reduce import custom_all_reduce
+    from vllm.distributed.device_communicators.custom_all_reduce import (
+        custom_all_reduce,
+    )
 
     # Bypass the function if we are using only 1 GPU.
     if get_tensor_model_parallel_world_size() == 1:
