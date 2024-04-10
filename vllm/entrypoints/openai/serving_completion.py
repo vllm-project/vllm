@@ -137,10 +137,16 @@ class OpenAIServingCompletion(OpenAIServing):
             for i, prompt in enumerate(prompts):
                 if prompt_is_tokens:
                     input_ids = self._validate_prompt_and_tokenize(
-                        request, prompt_ids=prompt)
+                        request,
+                        prompt_ids=prompt,
+                        truncate_prompt_tokens=sampling_params.
+                        truncate_prompt_tokens)
                 else:
                     input_ids = self._validate_prompt_and_tokenize(
-                        request, prompt=prompt)
+                        request,
+                        prompt=prompt,
+                        truncate_prompt_tokens=sampling_params.
+                        truncate_prompt_tokens)
 
                 generators.append(
                     self.engine.generate(prompt,
@@ -251,9 +257,6 @@ class OpenAIServingCompletion(OpenAIServing):
                             i]:] if output.logprobs else None
 
                     if request.logprobs is not None:
-                        assert top_logprobs is not None, (
-                            "top_logprobs must be provided when logprobs "
-                            "is requested")
                         logprobs = self._create_logprobs(
                             token_ids=delta_token_ids,
                             top_logprobs=top_logprobs,
