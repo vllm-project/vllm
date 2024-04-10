@@ -190,27 +190,7 @@ Note that, as an inference engine, vLLM does not introduce new models. Therefore
 
 We have the following levels of testing for models:
 
-1. **Strict Consistency**: We compare the output of the model with the output of the model in the HuggingFace Transformers library under greedy decoding. This is the most stringent test. The following models fall under this category:
-    - facebook/opt-125m
-    - meta-llama/Llama-2-7b-hf
+1. **Strict Consistency**: We compare the output of the model with the output of the model in the HuggingFace Transformers library under greedy decoding. This is the most stringent test. Please refer to https://github.com/vllm-project/vllm/tree/main/tests/basic_correctness folder for the models that have passed this test.
 2. **Output Sensibility**: We check if the output of the model is sensible and coherent, by measuring the perplexity of the output and checking for any obvious errors. This is a less stringent test.
-3. **Runtime Functionality**: We check if the model can be loaded and run without errors. This is the least stringent test. The following models fall under this category:
-    - facebook/opt-125m
-    - meta-llama/Llama-2-7b-hf
-    - baichuan-inc/Baichuan-7B
-    - THUDM/chatglm3-6b
-    - google/gemma-7b
-    - Felladrin/Llama-68M-Chat-v1
-    - mistralai/Mixtral-8x7B-Instruct-v0.1
-    - TinyLlama/TinyLlama-1.1B-Chat-v1.0
-    - EleutherAI/gpt-j-6b
-    - mosaicml/mpt-7b
-    - llava-hf/llava-1.5-7b-hf
-    - bigcode/starcoder2-3b
-    - stabilityai/stablelm-3b-4e1t
-    - microsoft/phi-2
-    - bigscience/bloom-560m
-    - EleutherAI/pythia-70m
-    - bigcode/tiny_starcoder_py
-    - gpt2
+3. **Runtime Functionality**: We check if the model can be loaded and run without errors. This is the least stringent test. Please refer to https://github.com/vllm-project/vllm/tree/main/tests and https://github.com/vllm-project/vllm/tree/main/examples for the models that have passed this test.
 4. **Community Feedback**: We rely on the community to provide feedback on the models. If a model is broken or not working as expected, we encourage users to raise issues to report it or open pull requests to fix it. The rest of the models fall under this category.
