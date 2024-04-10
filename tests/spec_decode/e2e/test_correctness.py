@@ -9,6 +9,7 @@ from vllm import SamplingParams
 # TODO test preemption
 # TODO test integration (cuda graph, tp)
 # TODO test smoke (sampling params)
+# TODO investigate <unk> token with 68m/68m k=5 temp=1.0
 
 
 @pytest.mark.parametrize(
@@ -70,9 +71,10 @@ def test_spec_decode_e2e_logical_flow(test_llm_generator, batch_size: int):
     # Expect a generation for each prompt in the batch.
     assert len(batch_token_ids) == len(prompts)
 
-    # Expect each generation to have expected number of tokens (note
-    # ignore_eos=True).
-    assert all(len(token_ids) == output_len for token_ids in batch_token_ids)
+    # Expect each generation to have expected number of tokens (note ignore_eos
+    # is True).
+    assert [len(token_ids)
+            for token_ids in batch_token_ids] == ([output_len] * batch_size)
 
     # Expect detokenized string to match.
     tok = AutoTokenizer.from_pretrained("JackFram/llama-68m")
