@@ -4,7 +4,7 @@ from typing import Dict, List, Optional
 import torch
 
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig)
+                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -20,7 +20,9 @@ class CPUExecutor(ExecutorBase):
                  parallel_config: ParallelConfig,
                  scheduler_config: SchedulerConfig,
                  device_config: DeviceConfig,
-                 lora_config: Optional[LoRAConfig], *args, **kwargs) -> None:
+                 lora_config: Optional[LoRAConfig],
+                 vision_language_config: Optional[VisionLanguageConfig] = None,
+                 *args, **kwargs) -> None:
         assert device_config.device_type == "cpu"
         assert lora_config is None, "cpu backend doesn't support LoRA"
         model_config = _verify_and_get_model_config(model_config)
@@ -29,6 +31,7 @@ class CPUExecutor(ExecutorBase):
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
+        self.vision_language_config = vision_language_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
@@ -54,6 +57,7 @@ class CPUExecutor(ExecutorBase):
             rank=0,
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
+            vision_language_config=self.vision_language_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )

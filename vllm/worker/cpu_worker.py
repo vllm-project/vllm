@@ -6,7 +6,7 @@ import torch.distributed
 
 from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig)
+                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.model_loader import get_model
@@ -28,6 +28,7 @@ class CPUModelRunner(ModelRunner):
         self.model = get_model(self.model_config,
                                self.device_config,
                                lora_config=self.lora_config,
+                               vision_language_config=self.vision_language_config,
                                parallel_config=self.parallel_config,
                                scheduler_config=self.scheduler_config)
 
@@ -133,6 +134,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         rank: int,
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
+        vision_language_config: Optional[VisionLanguageConfig] = None,
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
     ) -> None:
@@ -145,6 +147,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         self.rank = rank
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
+        self.vision_language_config = vision_language_config
         self.is_driver_worker = is_driver_worker
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
@@ -154,6 +157,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
                                            scheduler_config,
                                            device_config,
                                            lora_config=self.lora_config,
+                                           vision_language_config=self.vision_language_config,
                                            kv_cache_dtype=kv_cache_dtype,
                                            is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
