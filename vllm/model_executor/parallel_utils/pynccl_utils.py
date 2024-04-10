@@ -1,16 +1,16 @@
 import contextlib
-import logging
 from typing import Optional
 
 import torch
 from torch.distributed import ReduceOp
 
-logger = logging.getLogger(__name__)
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 try:
     from vllm.model_executor.parallel_utils.pynccl import (NCCLCommunicator,
                                                            ncclGetVersion)
-    logger.info(f"vLLM is using nccl=={ncclGetVersion()}")
 except Exception as e:
     # in non-NVIDIA environments, we can't import the nccl module
     # e.g. when running on machines with AMD GPUs
@@ -36,11 +36,16 @@ def set_pynccl_stream(stream: torch.cuda.Stream):
         pass
 
 
-def init_process_group(world_size: int, rank: int, init_method: str) -> None:
+def init_process_group(world_size: int,
+                       rank: int,
+                       init_method: str,
+                       local_rank: int = -1) -> None:
     assert not is_initialized()
     global comm
+    logger.info(f"vLLM is using nccl=={ncclGetVersion()}")
     comm = NCCLCommunicator(init_method=init_method,
                             world_size=world_size,
+                            local_rank=local_rank,
                             rank=rank)
 
 

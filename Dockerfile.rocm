@@ -24,9 +24,6 @@ ARG BUILD_FA="1"
 # whether to build triton on rocm
 ARG BUILD_TRITON="1"
 
-# whether to build triton on rocm
-ARG BUILD_TRITON="1"
-
 # whether to build hipBLASLt
 ARG BUILD_HIPBLASLT="1"
 

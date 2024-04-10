@@ -1,6 +1,6 @@
 """Test the communication operators.
 
-Run `pytest tests/distributed/test_comm_ops.py --forked`.
+Run `pytest tests/distributed/test_comm_ops.py`.
 """
 import os
 
