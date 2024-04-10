@@ -91,12 +91,14 @@ class MarlinLinearMethod(LinearMethodBase):
 
     def create_weights(
         self,
+        layer: torch.nn.Module,
         input_size_per_partition: int,
         output_size_per_partition: int,
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
-    ) -> Dict[str, Any]:
+        **extra_weight_attrs,
+    ):
         del output_size  # Unused.
 
         if params_dtype != torch.float16:
@@ -187,21 +189,22 @@ class MarlinLinearMethod(LinearMethodBase):
                                           dtype=torch.int),
                               requires_grad=False)
 
-        return {
-            "B": qweight,
-            "s": scales,
-            "workspace": workspace,
-        }
+        layer.register_parameter("B", qweight)
+        set_weight_attrs(qweight, extra_weight_attrs)
+        layer.register_parameter("s", scales)
+        set_weight_attrs(scales, extra_weight_attrs)
+        layer.register_parameter("workspace", workspace)
+        set_weight_attrs(workspace, extra_weight_attrs)
 
     def apply_weights(
         self,
-        weights: Dict[str, Any],
+        layer: torch.nn.Module,
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        qweight = weights["B"]
-        scales = weights["s"]
-        workspace = weights["workspace"]
+        qweight = layer.B
+        scales = layer.s
+        workspace = layer.workspace
 
         x_2d = x.view(-1, x.shape[-1])
 

@@ -89,12 +89,14 @@ class GPTQLinearMethod(LinearMethodBase):
 
     def create_weights(
         self,
+        layer: torch.nn.Module,
         input_size_per_partition: int,
         output_size_per_partition: int,
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
-    ) -> Dict[str, Any]:
+        **extra_weight_attrs,
+    ):
         del output_size  # Unused.
         if input_size_per_partition % self.quant_config.group_size != 0:
             raise ValueError(
@@ -179,37 +181,40 @@ class GPTQLinearMethod(LinearMethodBase):
             "input_dim": scale_and_zero_input_dim,
             "output_dim": 1,
         })
-        return {
-            "qweight": qweight,
-            "g_idx": g_idx,
-            "qzeros": qzeros,
-            "scales": scales,
-            "exllama_state": exllama_state,
-        }
+
+        layer.register_parameter("qweight", qweight)
+        set_weight_attrs(qweight, extra_weight_attrs)
+        layer.register_parameter("g_idx", g_idx)
+        set_weight_attrs(g_idx, extra_weight_attrs)
+        layer.register_parameter("qzeros", qzeros)
+        set_weight_attrs(qzeros, extra_weight_attrs)
+        layer.register_parameter("scales", scales)
+        set_weight_attrs(scales, extra_weight_attrs)
+
+        layer.exllama_state = exllama_state
 
     def apply_weights(self,
-                      weights: Dict[str, Any],
+                      layer: torch.nn.Module,
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        qweight = weights["qweight"]
+        qweight = layer.qweight
         out_shape = x.shape[:-1] + (qweight.shape[-1], )
         reshaped_x = x.reshape(-1, x.shape[-1])
         # exllama needs to shuffle the weight after the weight is loaded
         # here we do the shuffle on first forward pass
-        if weights["exllama_state"] == ExllamaState.UNINITIALIZED:
+        if layer.exllama_state == ExllamaState.UNINITIALIZED:
             if self.quant_config.desc_act:
-                weights["g_idx"] = torch.argsort(weights["g_idx"]).to(
-                    torch.int)
+                layer.g_idx.data = torch.argsort(layer.g_idx).to(torch.int)
             else:
-                weights["g_idx"] = torch.empty((1, 1), device="meta")
-            weights["exllama_state"] = ExllamaState.READY
-            ops.gptq_shuffle(weights["qweight"], weights["g_idx"],
+                layer.g_idx.data = torch.empty((0, ),
+                                               device=layer.g_idx.device)
+            layer.exllama_state = ExllamaState.READY
+            ops.gptq_shuffle(layer.qweight, layer.g_idx,
                              self.quant_config.weight_bits)
-        output = ops.gptq_gemm(reshaped_x, weights["qweight"],
-                               weights["qzeros"], weights["scales"],
-                               weights["g_idx"],
-                               weights["exllama_state"] == ExllamaState.READY,
+        output = ops.gptq_gemm(reshaped_x, layer.qweight, layer.qzeros,
+                               layer.scales, layer.g_idx,
+                               layer.exllama_state == ExllamaState.READY,
                                self.quant_config.weight_bits)
         if bias is not None:
-            output = output + bias
+            output.add_(bias)
         return output.reshape(out_shape)
