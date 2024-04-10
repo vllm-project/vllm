@@ -1,4 +1,5 @@
 import enum
+import os
 from functools import lru_cache
 from typing import Type
 
@@ -9,6 +10,8 @@ from vllm.logger import init_logger
 from vllm.utils import is_cpu, is_hip
 
 logger = init_logger(__name__)
+
+VLLM_ATTENTION_BACKEND = "VLLM_ATTENTION_BACKEND"
 
 
 class _Backend(enum.Enum):
@@ -75,4 +78,15 @@ def _which_attn_to_use(dtype: torch.dtype) -> _Backend:
             "Cannot use FlashAttention backend because the flash_attn package "
             "is not found. Please install it for better performance.")
         return _Backend.XFORMERS
-    return _Backend.FLASH_ATTN
+
+    backend_by_env_var = os.getenv(VLLM_ATTENTION_BACKEND)
+    if backend_by_env_var == "XFORMER":
+        return _Backend.XFORMERS
+    elif backend_by_env_var == "FLASH":
+        return _Backend.FLASH_ATTN
+    elif backend_by_env_var is None:
+        # Default case.
+        return _Backend.FLASH_ATTN
+    else:
+        raise AssertionError(
+            f"{VLLM_ATTENTION_BACKEND}={backend_by_env_var} is not supported.")
