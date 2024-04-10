@@ -10,6 +10,7 @@ from vllm import SamplingParams
 # TODO test integration (cuda graph, tp)
 # TODO test smoke (sampling params)
 
+
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -128,10 +129,10 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
         baseline_llm_generator, test_llm_generator, batch_size: int,
         output_len: int):
     run_greedy_equality_correctness_test(baseline_llm_generator,
-                                test_llm_generator,
-                                batch_size,
-                                max_output_len=output_len,
-                                force_output_len=True)
+                                         test_llm_generator,
+                                         batch_size,
+                                         max_output_len=output_len,
+                                         force_output_len=True)
 
 
 @pytest.mark.parametrize(
@@ -181,10 +182,10 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(
         baseline_llm_generator, test_llm_generator, batch_size: int,
         output_len: int):
     run_greedy_equality_correctness_test(baseline_llm_generator,
-                                test_llm_generator,
-                                batch_size,
-                                max_output_len=output_len,
-                                force_output_len=True)
+                                         test_llm_generator,
+                                         batch_size,
+                                         max_output_len=output_len,
+                                         force_output_len=True)
 
 
 @pytest.mark.parametrize(
@@ -231,10 +232,10 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_diff_output_len(
         baseline_llm_generator, test_llm_generator, batch_size: int,
         max_output_len: int):
     run_greedy_equality_correctness_test(baseline_llm_generator,
-                                test_llm_generator,
-                                batch_size,
-                                max_output_len,
-                                force_output_len=False)
+                                         test_llm_generator,
+                                         batch_size,
+                                         max_output_len,
+                                         force_output_len=False)
 
 
 @pytest.mark.parametrize(
@@ -276,10 +277,10 @@ def test_spec_decode_e2e_greedy_correctness_real_model_bs1(
         baseline_llm_generator, test_llm_generator, batch_size: int,
         output_len: int):
     run_greedy_equality_correctness_test(baseline_llm_generator,
-                                test_llm_generator,
-                                batch_size,
-                                max_output_len=output_len,
-                                force_output_len=True)
+                                         test_llm_generator,
+                                         batch_size,
+                                         max_output_len=output_len,
+                                         force_output_len=True)
 
 
 @pytest.mark.parametrize(
@@ -321,15 +322,16 @@ def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(
         baseline_llm_generator, test_llm_generator, batch_size: int,
         output_len: int):
     run_greedy_equality_correctness_test(baseline_llm_generator,
-                                test_llm_generator,
-                                batch_size,
-                                max_output_len=output_len,
-                                force_output_len=True)
+                                         test_llm_generator,
+                                         batch_size,
+                                         max_output_len=output_len,
+                                         force_output_len=True)
 
 
-def run_greedy_equality_correctness_test(baseline_llm_generator, test_llm_generator,
-                                batch_size, max_output_len,
-                                force_output_len: bool):
+def run_greedy_equality_correctness_test(baseline_llm_generator,
+                                         test_llm_generator, batch_size,
+                                         max_output_len,
+                                         force_output_len: bool):
     temperature = 0.0
 
     prompts = [
