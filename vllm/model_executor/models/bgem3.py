@@ -33,6 +33,8 @@ from vllm.model_executor.weight_utils import (default_weight_loader,
 from vllm.sequence import SamplerOutput
 from vllm.config import LoRAConfig
 
+from transformers import XLMRobertaConfig
+from vllm.model_executor.models.xlm_roberta import XLMRobertaModel
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -104,13 +106,16 @@ class BGEM3Model(nn.Module):
             self.world_size = dist.get_world_size()
 
     def load_model(self, model_name, colbert_dim: int = -1):
+        print("called once")
         if not os.path.exists(model_name):
             cache_folder = os.getenv('HF_HUB_CACHE')
             model_name = snapshot_download(repo_id=model_name,
                                            cache_dir=cache_folder,
                                            ignore_patterns=['flax_model.msgpack', 'rust_model.ot', 'tf_model.h5'])
 
-        self.model = AutoModel.from_pretrained(model_name)
+        model_id = "BAAI/bge-m3"
+        config = XLMRobertaConfig.from_pretrained(model_id)
+        self.model = XLMRobertaModel(config=config)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
 
         self.colbert_linear = RowParallelLinear(self.model.config.hidden_size, self.model.config.hidden_size if colbert_dim == -1 else colbert_dim)
@@ -205,16 +210,15 @@ class BGEM3ForInference(BGEM3Model):
         return_colbert_vecs: bool = False,
     ) -> torch.Tensor:
         tensor_list = []
-        for start_index in tqdm(range(0, input_ids.shape[0], batch_size), desc="Inference Embeddings",
-                                    disable=input_ids.shape[0] < 256):
-                dict = {}
-                dict['input_ids'] = input_ids[start_index:start_index+batch_size,:]
-                dict['attention_mask'] =(input_metadata.slot_mapping[start_index:start_index+batch_size,:] != -1).int()
-                output = self._forward(dict,
-                                return_dense=return_dense,
-                                return_sparse=return_sparse,
-                                return_colbert=return_colbert_vecs)
-                tensor_list.append(output['dense_vecs'])
+
+        i = 0
+        ret = self.model(input_ids, positions, kv_caches, input_metadata)
+        for start_index in tqdm(range(0, input_ids.shape[0], batch_size), desc="Inference Embeddings", disable=input_ids.shape[0] < 256):
+            ids = input_ids[start_index:start_index+batch_size,:]
+            attention_mask =(input_metadata.slot_mapping[start_index:start_index+batch_size,:] != -1).int()
+            dvs = self.dense_embedding(ret[i].last_hidden_state, attention_mask)
+            tensor_list.append(dvs)
+            i = i + 1
         return torch.cat(tensor_list, dim=0)
 
     def sample(
@@ -280,7 +284,7 @@ class BGEM3FlagForCausalLM:
                      load_format: str = "auto",
                      revision: Optional[str] = None,
                      colbert_dim: int = -1):
-            return 
+            return
 
     def eval(self):
         return self.model.eval()

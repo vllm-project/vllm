@@ -52,7 +52,7 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
     ray_workers_use_nsight: bool = False
-    embedded_model : bool = False
+    embedding_model : bool = False
 
     def __post_init__(self):
         if self.tokenizer is None:

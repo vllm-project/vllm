@@ -22,7 +22,7 @@ tokens and a tensor of the logits for the next token, and returns a modified
 tensor of logits to sample from."""
 
 
-class SamplingParams:
+class EmbeddingParams:
     """Sampling parameters for text generation.
 
     Overall, we follow the sampling parameters from the OpenAI text completion
@@ -133,7 +133,7 @@ class SamplingParams:
         self.use_beam_search = use_beam_search
         self.length_penalty = length_penalty
         self.early_stopping = early_stopping
-        self.embedding_model = embedding_model
+        self.embeddedd_model = embedding_model
         if stop is None:
             self.stop = []
         elif isinstance(stop, str):

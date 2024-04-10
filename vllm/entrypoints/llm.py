@@ -9,7 +9,7 @@ from vllm.engine.llm_engine import LLMEngine
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.utils import Counter
-
+from vllm.embedding_params import EmbeddingParams
 
 class LLM:
     """An LLM for generating texts from given prompts and sampling parameters.
@@ -84,7 +84,7 @@ class LLM:
         enforce_eager: bool = False,
         max_context_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
-        embedded_model: bool = False, 
+        embedding_model: bool = False, 
         **kwargs,
     ) -> None:
         if "disable_log_stats" not in kwargs:
@@ -105,11 +105,11 @@ class LLM:
             enforce_eager=enforce_eager,
             max_context_len_to_capture=max_context_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
-            embedded_model = embedded_model,
+            embedding_model = embedding_model,
             **kwargs,
         )
         self.llm_engine = LLMEngine.from_engine_args(engine_args)
-        self.llm_engine.embedded_model = embedded_model
+        self.llm_engine.embedding_model = embedding_model
         self.request_counter = Counter()
 
     def get_tokenizer(
@@ -126,6 +126,61 @@ class LLM:
         self,
         prompts: Optional[Union[str, List[str]]] = None,
         sampling_params: Optional[SamplingParams] = None,
+        prompt_token_ids: Optional[List[List[int]]] = None,
+        use_tqdm: bool = True,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> List[RequestOutput]:
+        """Generates the completions for the input prompts.
+
+        NOTE: This class automatically batches the given prompts, considering
+        the memory constraint. For the best performance, put all of your prompts
+        into a single list and pass it to this method.
+
+        Args:
+            prompts: A list of prompts to generate completions for.
+            sampling_params: The sampling parameters for text generation. If
+                None, we use the default sampling parameters.
+            prompt_token_ids: A list of token IDs for the prompts. If None, we
+                use the tokenizer to convert the prompts to token IDs.
+            use_tqdm: Whether to use tqdm to display the progress bar.
+            lora_request: LoRA request to use for generation, if any.
+
+        Returns:
+            A list of `RequestOutput` objects containing the generated
+            completions in the same order as the input prompts.
+        """
+        if prompts is None and prompt_token_ids is None:
+            raise ValueError("Either prompts or prompt_token_ids must be "
+                             "provided.")
+        if isinstance(prompts, str):
+            # Convert a single prompt to a list.
+            prompts = [prompts]
+        if (prompts is not None and prompt_token_ids is not None
+                and len(prompts) != len(prompt_token_ids)):
+            raise ValueError("The lengths of prompts and prompt_token_ids "
+                             "must be the same.")
+        if sampling_params is None:
+            # Use default sampling params.
+            sampling_params = SamplingParams()
+
+        # Add requests to the engine.
+        num_requests = len(prompts) if prompts is not None else len(
+            prompt_token_ids)
+        for i in range(num_requests):
+            prompt = prompts[i] if prompts is not None else None
+            token_ids = None if prompt_token_ids is None else prompt_token_ids[
+                i]
+            self._add_request(prompt,
+                              sampling_params,
+                              token_ids,
+                              lora_request=lora_request)
+        return self._run_engine(use_tqdm)
+
+
+    def encode(
+        self,
+        prompts: Optional[Union[str, List[str]]] = None,
+        sampling_params: Optional[EmbeddingParams] = None,
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,

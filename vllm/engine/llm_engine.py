@@ -542,7 +542,7 @@ class LLMEngine:
             for seq_group in scheduled_seq_groups:
                 self.scheduler.mark_blocks_as_computed(seq_group)
 
-        if self.embedded_model: 
+        if self.embedding_model: 
             for i, seq_group in enumerate(scheduled_seq_groups):
                 for seq in seq_group.get_seqs():
                     seq.status = SequenceStatus.FINISHED_STOPPED
