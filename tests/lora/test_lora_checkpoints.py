@@ -28,7 +28,7 @@ def test_load_checkpoints(lora_name, chatglm3_lora_files, baichuan_lora_files):
             embedding_padding_modules=embed_padding_modules)
     else:
         # For the baichuan7B model, load chatglm3-6b's LoRA,
-        # and the test should raise the following error
+        # and the test should raise the following error.
         expected_error = "Please verify that the loaded LoRA module is correct"  # noqa: E501
         with pytest.raises(ValueError, match=expected_error):
             LoRAModel.from_local_checkpoint(
