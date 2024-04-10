@@ -96,7 +96,6 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             block_size=self.block_size,
         )
 
-        assert self.block_sliding_window is None
         if self.block_sliding_window is not None:
             num_required_blocks = min(num_required_blocks,
                                       self.block_sliding_window)
@@ -125,8 +124,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         block_table = BlockTable(
             block_size=self.block_size,
             block_allocator=self.block_allocator,
+            sliding_window=self.block_sliding_window,
         )
-        assert self.block_sliding_window is None
+
         block_table.allocate(seq.get_token_ids())
         self.block_tables[seq.seq_id] = block_table
 

@@ -37,14 +37,17 @@ class BlockTable:
         block_size: int,
         block_allocator: DeviceAwareBlockAllocator,
         _blocks: Optional[List[Block]] = None,
+        sliding_window: Optional[int] = None,
     ):
         self._block_size = block_size
         self._allocator = block_allocator
         self._blocks: Optional[List[Block]] = _blocks
 
+        self._sliding_window = sliding_window
         # Use helper method instead of directly calculating, as blocks
         # may not be allocated.
         self._num_full_slots = len(self._get_all_token_ids())
+        self._num_tokens = self._num_full_slots
 
     @staticmethod
     def get_num_required_blocks(token_ids: List[int], block_size: int) -> int:
@@ -84,6 +87,7 @@ class BlockTable:
                                                            token_ids=token_ids,
                                                            device=device)
         self._num_full_slots = len(token_ids)
+        self._num_tokens = len(token_ids)
 
     def append_token_ids(self,
                          token_ids: List[int],
@@ -103,12 +107,21 @@ class BlockTable:
         Args:
             token_ids (List[int]): The sequence of token IDs to be appended.
         """
-        assert self._is_allocated
+        assert self._is_allocated, "no blocks have been allocated"
         assert token_ids, "can't append empty token ids"
 
+        # free some blocks outside of the sliding window
+        if self._sliding_window is not None:
+            while (self.num_full_slots - self._block_size) >= self._sliding_window:
+                self._allocator.free(self._blocks.pop(0))
+                self._num_full_slots -= self._block_size
+
+
+        # Ensure there are enough empty slots for the new tokens plus lookahead slots
         self.ensure_num_empty_slots(num_empty_slots=len(token_ids) +
                                     num_lookahead_slots)
 
+        # Update the blocks with the new tokens
         blocks = self._blocks[self._num_full_slots // self._block_size:]
         token_blocks = self._chunk_token_blocks_for_append(token_ids)
 
@@ -116,6 +129,7 @@ class BlockTable:
             block.append_token_ids(token_block)
 
         self._num_full_slots += len(token_ids)
+        self._num_tokens += len(token_ids)
 
     def ensure_num_empty_slots(self, num_empty_slots: int) -> None:
         """Ensures that the BlockTable has at least the specified number of
