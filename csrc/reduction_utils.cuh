@@ -20,33 +20,45 @@
 #include "cuda_compat.h"
 
 namespace vllm {
-
-template<typename T>
+template<typename T, int numLanes = WARP_SIZE>
 __inline__ __device__ T warpReduceSum(T val) {
-#pragma unroll
-  for (int mask = 16; mask > 0; mask >>= 1)
+  static_assert(numLanes > 0 && (numLanes & (numLanes - 1)) == 0,
+                "numLanes is not a positive power of 2!");
+  static_assert(numLanes <= WARP_SIZE);
+  #pragma unroll
+  for (int mask = numLanes >> 1; mask > 0; mask >>= 1)
     val += VLLM_SHFL_XOR_SYNC(val, mask);
   return val;
 }
 
+// Helper function to return the next largest power of 2
+static constexpr int _nextPow2(unsigned int num) {
+  if (num <= 1) return num;
+  return 1 << (CHAR_BIT * sizeof(num) - __builtin_clz(num - 1));
+}
+
 /* Calculate the sum of all elements in a block */
-template<typename T>
+template<typename T, int maxBlockSize = 1024>
 __inline__ __device__ T blockReduceSum(T val) {
-  static __shared__ T shared[32];
-  int lane = threadIdx.x & 0x1f;
-  int wid = threadIdx.x >> 5;
+  static_assert(maxBlockSize <= 1024);
+  if constexpr (maxBlockSize > WARP_SIZE) {
+    val = warpReduceSum<T>(val);
+    // Calculates max number of lanes that need to participate in the last warpReduce
+    constexpr int maxActiveLanes = (maxBlockSize + WARP_SIZE - 1) / WARP_SIZE;
+    static __shared__ T shared[maxActiveLanes];
+    int lane = threadIdx.x % WARP_SIZE;
+    int wid = threadIdx.x / WARP_SIZE;
+    if (lane == 0)
+      shared[wid] = val;
 
-  val = warpReduceSum<T>(val);
+    __syncthreads();
 
-  if (lane == 0)
-    shared[wid] = val;
-
-  __syncthreads();
-
-  // Modify from blockDim.x << 5 to blockDim.x / 32. to prevent
-  // blockDim.x is not divided by 32
-  val = (threadIdx.x < (blockDim.x / 32.f)) ? shared[lane] : (T)(0.0f);
-  val = warpReduceSum<T>(val);
+    val = (threadIdx.x < blockDim.x / float(WARP_SIZE)) ? shared[lane] : (T)(0.0f);
+    val = warpReduceSum<T, _nextPow2(maxActiveLanes)>(val);
+  } else {
+    // A single warpReduce is equal to blockReduce
+    val = warpReduceSum<T, _nextPow2(maxBlockSize)>(val);
+  }
   return val;
 }
 

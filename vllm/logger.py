@@ -2,8 +2,10 @@
 # https://github.com/skypilot-org/skypilot/blob/86dc0f6283a335e4aa37b3c10716f90999f48ab6/sky/sky_logging.py
 """Logging configuration for vLLM."""
 import logging
-import sys
 import os
+import sys
+
+VLLM_CONFIGURE_LOGGING = int(os.getenv("VLLM_CONFIGURE_LOGGING", "1"))
 
 _FORMAT = "%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s"
 _DATE_FORMAT = "%m-%d %H:%M:%S"
@@ -45,13 +47,15 @@ def _setup_logger():
 # The logger is initialized when the module is imported.
 # This is thread-safe as the module is only imported once,
 # guaranteed by the Python GIL.
-_setup_logger()
+if VLLM_CONFIGURE_LOGGING:
+    _setup_logger()
 
 
 def init_logger(name: str):
     # Use the same settings as above for root logger
     logger = logging.getLogger(name)
     logger.setLevel(os.getenv("LOG_LEVEL", "DEBUG"))
-    logger.addHandler(_default_handler)
-    logger.propagate = False
+    if VLLM_CONFIGURE_LOGGING:
+        logger.addHandler(_default_handler)
+        logger.propagate = False
     return logger
