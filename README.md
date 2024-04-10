@@ -1,4 +1,7 @@
-# nm-vllm
+<h1 style="display: flex; align-items: center;" >
+     <img width="100" height="100" alt="tool icon" src="https://neuralmagic.com/wp-content/uploads/2024/04/icon_nm_vllm-002-copy.svg" />
+      <span>&nbsp;&nbsp;nm-vllm</span>
+  </h1>
 
 ## Overview
 
