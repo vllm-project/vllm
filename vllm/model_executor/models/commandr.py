@@ -140,7 +140,9 @@ class CohereAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.max_position_embeddings = config.max_position_embeddings
+        self.max_position_embeddings = getattr(
+            config, "model_max_length", None) or getattr(
+                config, "max_position_embeddings", 8192)
         self.rope_theta = config.rope_theta
         self.rope_scaling = getattr(config, "rope_scaling", None)
         self.use_qk_norm = getattr(config, "use_qk_norm", False)
@@ -349,11 +351,21 @@ class CohereForCausalLM(nn.Module):
                 if shard_name not in name:
                     continue
                 name = name.replace(shard_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                # lm_head is not used in vllm as it is tied with embed_token.
+                # To prevent errors, skip loading lm_head.weight.
+                if "lm_head.weight" in name:
+                    continue
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
