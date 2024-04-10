@@ -96,6 +96,7 @@ class TLGv4MLP(nn.Module):
 class TLGv4SelfAttention(nn.Module):
     def __init__(self, config: TLGv4Config, layer_idx: Optional[int] = None) -> None:
         super().__init__()
+        self.layer_idx = layer_idx
         self.config = config
         self.sparse_block_size = config.blocksparse_block_size
         self.homo_heads = config.blocksparse_homo_head_pattern
@@ -165,7 +166,8 @@ class TLGv4SelfAttention(nn.Module):
                               self.scale,
                               max_seqlen=self.max_position_embeddings,
                               sparse_block_size=self.sparse_block_size,
-                              num_kv_heads=self.num_kv_heads)
+                              num_kv_heads=self.num_kv_heads,
+                              layer_idx=layer_idx)
 
     def forward(
         self,

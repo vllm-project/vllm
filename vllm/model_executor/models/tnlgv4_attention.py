@@ -36,15 +36,17 @@ class BlockSparseFlashAttention(nn.Module):
         num_kv_heads: Optional[int] = None,
         max_seqlen: int = 8192,
         sparse_block_size: int = 64,
+        layer_idx: int = 0,
         **kwargs
     ) -> None:
         super().__init__()
+        self.layer_idx = layer_idx
         self.local_blocks = local_blocks
         self.vert_stride = vert_stride
         self.backend = BlocksparseFlashAttentionBackend
         impl_cls = self.backend.get_impl_cls()
         self.impl = impl_cls(local_blocks, vert_stride, num_heads, head_size, scale, num_kv_heads,
-                             max_seqlen=max_seqlen, sparse_block_size=sparse_block_size)
+                             max_seqlen=max_seqlen, sparse_block_size=sparse_block_size, layer_idx=layer_idx)
 
     def forward(
         self,
@@ -146,18 +148,33 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadat
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
 
-# the following two functions is only applable to blocksparse with local + vertical_stride patterns
-def check_if_remote(block_seq_id, head_id=0, n_heads=24, vert_stride=4):
-    # does not check if the remote is in local or not
-    head_sliding_step = max(1, int(vert_stride / n_heads))  # if vert_stride <= n_heads, rotating the heads
-    return  (block_seq_id + head_id * head_sliding_step + 1 ) % vert_stride == 0
+    # slot_mapping
+    # block_tables
 
+    # blocksparse attributes:
+    # TODO: metadata maker is from backend class, instead of backend instance.
+    #       we can not set this info. 
+    #       Hack: is made optional, and will be set inside the real attention object initialization.
+    
+    # TODO: is block_tables padded? since it per sequence.
 
-def check_if_local(block_seq_id, block_size, total_seq_len, local_blocks=4):
-    total_block = cdiv(total_seq_len, block_size)
-    # print(f'==>',  block_seq_id, block_size, total_seq_len, total_block)
-    # return (block_seq_id + local_blocks) >= total_block
-    return (total_block - local_blocks) <= block_seq_id < total_block
+    # store the block_ids (relative sparse_block_size) of slot in block_tables
+    sparse_block_ids: Optional[torch.Tensor]
+    # Note that this is different from block_size in the block_table/block_manager.
+    sparse_block_size: Optional[int]
+
+    
+    # the following two functions is only applable to blocksparse with local + vertical_stride patterns
+    def check_if_remote(self, block_seq_id, head_id=0, n_heads=24, vert_stride=4):
+        # does not check if the remote is in the current local or not
+        head_sliding_step = max(1, int(vert_stride / n_heads))  # if vert_stride <= n_heads, rotating the heads
+        return  (block_seq_id + head_id * head_sliding_step + 1 ) % vert_stride == 0
+
+    def check_if_local(self, block_seq_id, block_size, total_seq_len, local_blocks=4):
+        total_block = (total_seq_len + block_size - 1) // block_size
+        # print(f'==>',  block_seq_id, block_size, total_seq_len, total_block)
+        # return (block_seq_id + local_blocks) >= total_block
+        return (total_block - local_blocks) <= block_seq_id < total_block
 
 
 
@@ -189,8 +206,10 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         max_seqlen: int = 8192,
         sparse_block_size: int = 64,
         alibi_slopes: Optional[List[float]] = None,
+        layer_idx: int = 0,
         **kwargs, # for compatibiliy
     ) -> None:
+        self.layer_idx = layer_idx
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -240,6 +259,9 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
+        # print(f'----> {self.layer_idx=}')
+
+
         if kv_cache is not None:
             key_cache, value_cache = PagedAttention.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
@@ -254,17 +276,30 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
 
             # TODO: decde what to write, and what is not
 
+            if self.layer_idx == 0:
+                print(f'>> {attn_metadata=}')
+                print(f'>> {attn_metadata.slot_mapping.shape=}\n {key.shape=}, {key_cache.shape=}, {value_cache.shape=}, {kv_cache.shape=}')
+                # import ipdb; ipdb.set_trace()
+
+            # # one head per sample
+            # key2 = key.repeat((1, 4, 1)).view(-1, 2, key.size(2))
+            # value2 = value.repeat((1, 4, 1)).view(-1, 2, value.size(2))
+
             PagedAttention.write_to_paged_cache(key, value, key_cache,
                                                 value_cache,
                                                 attn_metadata.slot_mapping,
                                                 attn_metadata.kv_cache_dtype,
                                                 kv_scale)
-
         if attn_metadata.is_prompt:
+
             # Prompt run.
             # normal attention
             # When block_tables are not filled, it means q and k are the
             # prompt, and they have the same length.
+
+            if self.layer_idx == 0:
+                print(attn_metadata.seq_start_loc)
+                # print(f'>>> {query.shape=}, {key.shape=}, {value.shape=}, {attn_metadata.seq_start_loc=}')
             output = self.bs_attn(
                 q=query,
                 k=key,
@@ -276,6 +311,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
 
         else:
             # Decoding run.
+            # query2 = query.view(-1, 1, query.size(2))
             output = PagedAttention.forward_decode(
                 query,
                 key_cache,
