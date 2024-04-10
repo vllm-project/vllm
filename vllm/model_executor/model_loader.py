@@ -7,12 +7,14 @@ import torch.nn as nn
 
 from vllm.config import DeviceConfig, ModelConfig
 from vllm.model_executor.models import ModelRegistry
+from vllm.model_executor.models.fuyu import FuyuForCausalLM
 from vllm.model_executor.models.llava import LlavaForConditionalGeneration
 from vllm.model_executor.weight_utils import (get_quant_config,
                                               initialize_dummy_weights)
 
 _VISION_MODEL_CLASSES = [
     LlavaForConditionalGeneration,
+    FuyuForCausalLM,
 ]
 
 

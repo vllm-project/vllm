@@ -47,6 +47,10 @@ Alongside each architecture, we include some popular models that use it.
     - Falcon
     - :code:`tiiuae/falcon-7b`, :code:`tiiuae/falcon-40b`, :code:`tiiuae/falcon-rw-7b`, etc.
     - 
+  * - :code:`FuyuForCausalLM`
+    - Fuyu
+    - :code:`adept/fuyu-8b` etc.
+    - 
   * - :code:`GemmaForCausalLM`
     - Gemma
     - :code:`google/gemma-2b`, :code:`google/gemma-7b`, etc.
