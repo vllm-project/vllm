@@ -8,7 +8,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce)
 from vllm.distributed import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.utils import divide
+from vllm.distributed import divide
 from vllm.model_executor.utils import set_weight_attrs
 
 DEFAULT_VOCAB_PADDING_SIZE = 64
