@@ -88,9 +88,9 @@ class ModelConfig:
         tokenizer_revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
+        quantization_param_path: Optional[str] = None,
         # UPSTREAM SYNC: keep sparsity
         sparsity: Optional[str] = None,
-        quantization_param_path: Optional[str] = None,
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
         max_logprobs: int = 5,
@@ -106,9 +106,9 @@ class ModelConfig:
         self.code_revision = code_revision
         self.tokenizer_revision = tokenizer_revision
         self.quantization = quantization
+        self.quantization_param_path = quantization_param_path
         # UPSTREAM SYNC: keep sparsity
         self.sparsity = sparsity
-        self.quantization_param_path = quantization_param_path
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
         self.max_logprobs = max_logprobs
