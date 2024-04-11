@@ -3,6 +3,8 @@ from typing import Dict, List, Optional, Protocol
 
 from vllm.utils import Device
 
+BlockId = int
+
 
 class Block(ABC):
 
@@ -82,6 +84,21 @@ class BlockAllocator(ABC):
     @abstractmethod
     def get_common_computed_block_ids(
             self, seq_block_ids: List[List[int]]) -> List[int]:
+        pass
+
+    @abstractmethod
+    def cow_block_if_not_appendable(self, block: Block) -> Optional[BlockId]:
+        """Performs a copy-on-write operation on the given block if it is not
+        appendable.
+
+        Args:
+            block (Block): The block to check for copy-on-write.
+
+        Returns:
+            Optional[BlockId]: The block index of the new block if a copy-on
+                -write operation was performed, or the original block index if
+                no copy-on-write was necessary.
+        """
         pass
 
     class NoFreeBlocksError(ValueError):
