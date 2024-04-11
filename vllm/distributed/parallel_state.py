@@ -39,9 +39,9 @@ _PIPELINE_GLOBAL_RANKS = None
 
 
 def init_distributed_environment(
-    world_size: int,
-    rank: int,
-    distributed_init_method: Optional[str] = None,
+    world_size: int = -1,
+    rank: int = -1,
+    distributed_init_method: str = "env://",
     local_rank: int = -1,
     backend: str = "nccl",
 ):
