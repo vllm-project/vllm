@@ -842,7 +842,7 @@ class ModelRunner:
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
         self.execute_model(seqs, kv_caches)
-        torch.cuda.synchronize()
+        device_sync()
         return
 
     def remove_all_loras(self):

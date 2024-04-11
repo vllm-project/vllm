@@ -7,7 +7,7 @@ import torch
 import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
-from vllm.utils import is_cpu, is_hip, is_tpu
+from vllm.utils import is_cpu, is_hip, is_tpu, is_xpu
 
 logger = init_logger(__name__)
 
@@ -102,7 +102,7 @@ def which_attn_to_use(
                 "(case-sensitive).")
         selected_backend = _Backend[backend_by_env_var]
 
-    if is_cpu():
+    if is_cpu() or is_xpu():
         if selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         return _Backend.TORCH_SDPA

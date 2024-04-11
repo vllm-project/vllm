@@ -21,6 +21,12 @@ import numpy as np
 import psutil
 import torch
 
+try:
+    import intel_extension_for_pytorch  # noqa: F401
+    _import_ipex = True
+except ImportError:
+    _import_ipex = False
+
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import enable_trace_function_call, init_logger
@@ -153,6 +159,20 @@ def is_tpu() -> bool:
     except ImportError:
         libtpu = None
     return libtpu is not None
+
+
+@lru_cache(maxsize=None)
+def is_xpu() -> bool:
+    from importlib.metadata import version
+    is_xpu_flag = "xpu" in version("vllm")
+    # vllm is not build with xpu
+    if not is_xpu_flag:
+        return False
+    # ipex dependency is not ready
+    if not _import_ipex:
+        logger.warning("not found ipex lib")
+        return False
+    return hasattr(torch, "xpu") and torch.xpu.is_available()
 
 
 @lru_cache(maxsize=None)
@@ -474,12 +494,22 @@ def is_pin_memory_available() -> bool:
         print_warning_once("Using 'pin_memory=False' as WSL is detected. "
                            "This may slow down the performance.")
         return False
+    elif is_xpu():
+        print_warning_once("Pin memory is not supported on XPU.")
+        return False
     elif is_neuron():
         print_warning_once("Pin memory is not supported on Neuron.")
         return False
     elif is_cpu():
         return False
     return True
+
+
+def device_sync():
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    elif is_xpu():
+        torch.xpu.synchronize()
 
 
 class CudaMemoryProfiler:
@@ -489,8 +519,12 @@ class CudaMemoryProfiler:
 
     def current_memory_usage(self) -> float:
         # Return the memory usage in bytes.
-        torch.cuda.reset_peak_memory_stats(self.device)
-        mem = torch.cuda.max_memory_allocated(self.device)
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats(self.device)
+            mem = torch.cuda.max_memory_allocated(self.device)
+        elif is_xpu():
+            torch.xpu.reset_peak_memory_stats(self.device)
+            mem = torch.xpu.max_memory_allocated(self.device)
         return mem
 
     def __enter__(self):

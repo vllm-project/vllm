@@ -121,6 +121,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         self.alibi_slopes = alibi_slopes
         self.sliding_window = sliding_window
         self.kv_cache_dtype = kv_cache_dtype
+        self.fuse_batch = is_xpu()
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -136,6 +137,22 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
             raise NotImplementedError(
                 "Torch SDPA backend does not support FP8 KV cache. "
                 "Please use xFormers backend instead.")
+
+    def split_kv_cache(
+        self,
+        kv_cache: torch.Tensor,
+        num_kv_heads: int,
+        head_size: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        x = 1
+        num_blocks = kv_cache.shape[1]
+
+        key_cache = kv_cache[0]
+        key_cache = key_cache.view(num_blocks, num_kv_heads, head_size // x,
+                                   -1, x)
+        value_cache = kv_cache[1]
+        value_cache = value_cache.view(num_blocks, num_kv_heads, head_size, -1)
+        return key_cache, value_cache
 
     def forward(
         self,
@@ -165,7 +182,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
         if kv_cache is not None:
-            key_cache, value_cache = PagedAttention.split_kv_cache(
+            key_cache, value_cache = self.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
             PagedAttention.write_to_paged_cache(key, value, key_cache,
                                                 value_cache,
@@ -190,12 +207,21 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                             attn_metadata.seq_lens, self.sliding_window,
                             query.dtype)  # type: ignore
                     else:
-                        att_masks = [None] * len(attn_metadata.seq_lens)
+                        if self.fuse_batch:
+                            att_masks = _make_sliding_window_bias(
+                                attn_metadata.seq_lens,
+                                None,
+                                dtype=query.dtype)
+                        else:
+                            att_masks = [None] * len(attn_metadata.seq_lens)
                     attn_metadata.attn_bias = att_masks
 
-                query = query.movedim(0, query.dim() - 2)
-                key = key.movedim(0, key.dim() - 2)
-                value = value.movedim(0, value.dim() - 2)
+                query = query.unsqueeze(0)
+                key = key.unsqueeze(0)
+                value = value.unsqueeze(0)
+                query = query.movedim(1, query.dim() - 2)
+                key = key.movedim(1, key.dim() - 2)
+                value = value.movedim(1, value.dim() - 2)
 
                 start = 0
                 output = torch.empty(
@@ -238,6 +264,28 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
 
         # Reshape the output tensor.
         return output.view(-1, self.num_heads * self.head_size)
+
+
+def _make_attention_mask(
+    att_bias: List[torch.Tensor],
+    seq_lens: List[int],
+    prompt_token_num: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    assert att_bias[0].dim() == 3
+    assert len(att_bias) == len(seq_lens)
+    head_size, _, _ = att_bias[0].size()
+    mask = torch.empty(head_size,
+                       prompt_token_num,
+                       prompt_token_num,
+                       dtype=dtype)
+    mask.fill_(-torch.inf)
+    start = 0
+    for seq_len, sub_mask in zip(seq_lens, att_bias):
+        end = start + seq_len
+        mask[:, start:end, start:end] = sub_mask
+        start += seq_len
+    return mask
 
 
 def _make_alibi_bias(
