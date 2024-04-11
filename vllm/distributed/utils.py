@@ -2,6 +2,8 @@
 # Adapted from
 # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/tensor_parallel/utils.py
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+import json
+import os
 from typing import Sequence
 
 import torch
@@ -46,3 +48,24 @@ def split_tensor_along_last_dim(
         return tuple(chunk.contiguous() for chunk in tensor_list)
 
     return tensor_list
+
+
+def gpu_p2p_access_check(i: int, j: int) -> bool:
+    """Check if GPU i can access GPU j."""
+    num_dev = torch.cuda.device_count()
+    cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+    if cuda_visible_devices is None:
+        cuda_visible_devices = ",".join(str(i) for i in range(num_dev))
+    path = os.path.expanduser(
+        f"~/.config/vllm/gpu_p2p_access_cache_for_{cuda_visible_devices}.json")
+    if os.parh.exists(path):
+        with open(path, "r") as f:
+            cache = json.load(f)
+    else:
+        cache = {}
+        for i in range(num_dev):
+            for j in range(num_dev):
+                cache[(i, j)] = torch.cuda.can_device_access_peer(i, j)
+        with open(path, "w") as f:
+            json.dump(cache, f)
+    return cache[(i, j)]
