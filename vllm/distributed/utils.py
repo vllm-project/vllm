@@ -53,6 +53,18 @@ def split_tensor_along_last_dim(
     return tensor_list
 
 
+# code partly borrowed from
+# https://github.com/turboderp/exllamav2/blob/1c67f97f3d2a968605a9c31ab791a05c85bb7879/exllamav2/compat.py#L10
+# License: MIT
+def _can_actually_p2p(idx_a, idx_b):
+    dev_i = f"cuda:{idx_a}"
+    dev_j = f"cuda:{idx_b}"
+    a = torch.randn(5, device=dev_i) + 123.0
+    b = a.to(dev_j)
+    c = b.to(dev_i)
+    return torch.all(a == c)
+
+
 _gpu_p2p_access_cache = None
 
 
@@ -81,8 +93,11 @@ def gpu_p2p_access_check(i: int, j: int) -> bool:
         cache = {}
         for _i in range(num_dev):
             for _j in range(num_dev):
+                # on some platforms, P2P support might be buggy and we need
+                # additional checks. See also:
+                # https://github.com/vllm-project/vllm/issues/2728
                 cache[f"{_i}->{_j}"] = torch.cuda.can_device_access_peer(
-                    _i, _j)
+                    _i, _j) and _can_actually_p2p(_i, _j)
         with open(path, "w") as f:
             json.dump(cache, f, indent=4)
     if is_distributed and cpu_world_group is not None:

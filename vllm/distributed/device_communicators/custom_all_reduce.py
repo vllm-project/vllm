@@ -158,24 +158,7 @@ def _can_p2p(rank: int, world_size: int) -> bool:
             continue
         if not gpu_p2p_access_check(rank, i):
             return False
-        # on some platforms, P2P support might be buggy and we need
-        # additional checks. See also:
-        # https://github.com/vllm-project/vllm/issues/2728
-        if not _can_actually_p2p(rank, i):
-            return False
     return True
-
-
-# code partly borrowed from
-# https://github.com/turboderp/exllamav2/blob/1c67f97f3d2a968605a9c31ab791a05c85bb7879/exllamav2/compat.py#L10
-# License: MIT
-def _can_actually_p2p(idx_a, idx_b):
-    dev_i = f"cuda:{idx_a}"
-    dev_j = f"cuda:{idx_b}"
-    a = torch.randn(5, device=dev_i) + 123.0
-    b = a.to(dev_j)
-    c = b.to(dev_i)
-    return torch.all(a == c)
 
 
 class CustomAllreduce:
