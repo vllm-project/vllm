@@ -500,7 +500,8 @@ class SequenceGroup:
     def get_num_uncomputed_tokens(self) -> int:
         num_uncomputed_tokens = 0
         for seq in self.get_seqs():
-            num_uncomputed_tokens += seq.data.get_num_uncomputed_tokens()
+            if not seq.is_finished():
+                num_uncomputed_tokens += seq.data.get_num_uncomputed_tokens()
         return num_uncomputed_tokens
 
     def num_seqs(self, status: Optional[SequenceStatus] = None) -> int:

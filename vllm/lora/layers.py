@@ -267,12 +267,13 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         added_tokens_mask = x > self.base_layer.org_vocab_size - 1
-        indices = self.embeddings_indices[1][:self.indices_len[3]].view_as(x)
+        embedding_len = self.indices_len[3]
+        indices = self.embeddings_indices[1][:embedding_len].view_as(x)
         full_lora_a_embeddings = F.embedding(
             x + indices,
             self.lora_a_stacked_2d,
         )
-        indices = self.embeddings_indices[0][:self.indices_len[3]].view_as(x)
+        indices = self.embeddings_indices[0][:embedding_len].view_as(x)
         full_output = self.base_layer.forward(
             x.add_(indices * added_tokens_mask))
 

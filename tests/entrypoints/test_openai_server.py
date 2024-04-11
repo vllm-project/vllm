@@ -141,7 +141,7 @@ def server(zephyr_lora_files):
         "--max-cpu-loras",
         "2",
         "--max-num-seqs",
-        "128"
+        "128",
     ])
     ray.get(server_runner.ready.remote())
     yield server_runner
