@@ -103,7 +103,6 @@ def initialize_engine() -> LLMEngine:
     #   numbers will cause higher memory usage. If you know that all LoRAs will
     #   use the same rank, it is recommended to set this as low as possible.
     # max_cpu_loras: controls the size of the CPU LoRA cache.
-    from vllm.model_executor.tensorizer_loader import TensorizerArgs
     engine_args = EngineArgs(model="meta-llama/Llama-2-7b-hf",
                              enable_lora=True,
                              max_loras=1,

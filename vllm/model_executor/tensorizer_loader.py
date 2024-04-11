@@ -246,13 +246,6 @@ class TensorizerAgent:
                 linear_method=self.linear_method,
                 **self.extra_kwargs)
 
-    def _patch_linear_weights(self):
-        for child in self.model.modules():
-            if hasattr(child, "linear_weights"):
-                for name, weight in child.linear_weights.items():
-                    if isinstance(weight, torch.Tensor):
-                        child.linear_weights[name] = getattr(child, name)
-
     def _resize_lora_embeddings(self):
         """Modify LoRA embedding layers to use bigger tensors
         to allow for adapter added tokens."""
@@ -306,6 +299,5 @@ class TensorizerAgent:
         logger.info(f"Memory usage before: {before_mem}")
         logger.info(f"Memory usage after: {after_mem}")
 
-        self._patch_linear_weights()
         self._resize_lora_embeddings()
         return self.model.eval()
