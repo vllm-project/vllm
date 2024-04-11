@@ -13,11 +13,6 @@ _PARTITION_SIZE = 512
 @dataclass
 class PagedAttentionMetadata:
     """Metadata for PagedAttention."""
-    # (num_tokens,). The indices of the token slots that input tokens will be
-    # stored into. E.g., if `slot_mapping` is [35, 2, 17] and the block size
-    # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
-    # in block 0, and 1st slot in block 1, respectively.
-    slot_mapping: torch.Tensor
     # (batch_size,). The length of context (tokens stored in KV cache) per
     # sequence. WARNING: When it is a prefill request, it doesn't include new
     # tokens. When it is for decoding, it includes a new token.
@@ -31,7 +26,6 @@ class PagedAttentionMetadata:
     # 2nd dimensions are padded up to max_blocks_per_seq if it is cuda-graph
     # captured.
     block_tables: Optional[torch.Tensor]
-    kv_cache_dtype: str
 
 
 class PagedAttention:

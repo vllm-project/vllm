@@ -173,10 +173,18 @@ def broadcast_tensor_dict(
         torch.distributed.broadcast_object_list([metadata_list],
                                                 src=src,
                                                 group=group)
+        async_handles = []
         for key, value in metadata_list:
             if isinstance(value, TensorMetadata):
                 tensor = tensor_dict[key]
-                torch.distributed.broadcast(tensor, src=src, group=group)
+                async_handles.append(
+                    torch.distributed.broadcast(tensor,
+                                                src=src,
+                                                group=group,
+                                                async_op=True))
+        for async_handle in async_handles:
+            async_handle.wait()
+
     else:
         recv_metadata_list = [None]
         torch.distributed.broadcast_object_list(recv_metadata_list,
