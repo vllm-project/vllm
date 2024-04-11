@@ -72,14 +72,14 @@ async def test_single_chat_session_image(server, client: openai.AsyncOpenAI,
         "user",
         "content": [
             {
-                "type": "text",
-                "text": "What's in this image? Describe in detail."
-            },
-            {
                 "type": "image_url",
                 "image_url": {
                     "url": image_url
                 }
+            },
+            {
+                "type": "text",
+                "text": "What's in this image?"
             },
         ],
     }]
@@ -122,14 +122,14 @@ async def test_chat_streaming_image(server, client: openai.AsyncOpenAI,
         "user",
         "content": [
             {
-                "type": "text",
-                "text": "What's in this image? Describe in detail."
-            },
-            {
                 "type": "image_url",
                 "image_url": {
                     "url": image_url
                 }
+            },
+            {
+                "type": "text",
+                "text": "What's in this image?"
             },
         ],
     }]
