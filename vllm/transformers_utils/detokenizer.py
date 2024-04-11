@@ -87,12 +87,15 @@ class Detokenizer:
                 prev_tokens.extend(next_iter_tokens)
 
     def decode_sequence_inplace(self, seq: Sequence,
-                                prms: SamplingParams) -> None:
+                                prms: SamplingParams) -> int:
         """Decodes the new token for a sequence. In-place operation.
 
         Args:
             seq: The sequence to decode.
             prms: The sampling parameters used to generate the sequence.
+
+        Returns:
+            The number of characters added to the output text.
         """
         all_input_ids = seq.get_token_ids()
         token_id_generated_this_iteration = all_input_ids[-1]
@@ -150,6 +153,8 @@ class Detokenizer:
         seq.prefix_offset = prefix_offset
         seq.read_offset = read_offset
         seq.output_text += new_decoded_token_text
+
+        return len(new_decoded_token_text)
 
 
 def _convert_tokens_to_string_with_added_encoders(

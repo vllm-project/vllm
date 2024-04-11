@@ -112,8 +112,10 @@ class RequestOutput:
         # always has the logprobs of the sampled tokens even if the
         # logprobs are not requested.
         include_logprobs = seq_group.sampling_params.logprobs is not None
+        text_buffer_length = seq_group.sampling_params.output_text_buffer_length
         outputs = [
-            CompletionOutput(seqs.index(seq), seq.output_text,
+            CompletionOutput(seqs.index(seq),
+                             seq.get_output_text_to_return(text_buffer_length),
                              seq.get_output_token_ids(),
                              seq.get_cumulative_logprob(),
                              seq.output_logprobs if include_logprobs else None,
