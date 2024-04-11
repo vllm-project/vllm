@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from typing import List
 
 import pytest
-import ray
 
 import vllm
 from vllm.lora.request import LoRARequest
@@ -178,4 +177,3 @@ def test_quant_model_tp_equality(tinyllama_lora_files, model):
     cleanup()
 
     assert output_tp1 == output_tp2
-
