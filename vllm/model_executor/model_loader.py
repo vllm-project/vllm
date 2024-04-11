@@ -9,7 +9,7 @@ from vllm.config import DeviceConfig, ModelConfig
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.llava import LlavaForConditionalGeneration
 from vllm.model_executor.tensorizer_loader import (ParameterizedLoadFormat,
-                                                   _is_vllm_model,
+                                                   is_vllm_serialized_tensorizer,
                                                    load_with_tensorizer)
 from vllm.model_executor.weight_utils import (get_quant_config,
                                               initialize_dummy_weights)
@@ -54,6 +54,7 @@ def get_model(model_config: ModelConfig, device_config: DeviceConfig,
               **kwargs) -> nn.Module:
     lora_config = kwargs.get("lora_config", None)
     vision_language_config = kwargs.get("vision_language_config", None)
+    tensorizer_config = kwargs.get("tensorizer_config", None)
     model_class = _get_model_architecture(model_config)[0]
 
     # Get the (maybe quantized) linear method.
@@ -92,11 +93,13 @@ def get_model(model_config: ModelConfig, device_config: DeviceConfig,
             extra_kwargs["vision_language_config"] = vision_language_config
 
         with torch.device(device_config.device):
-            if model_config.load_format == "tensorizer" and _is_vllm_model(
-                    model_config):
-                model = load_with_tensorizer(model_class,
-                                             model_config,
-                                             linear_method=linear_method,
+            if model_config.load_format == "tensorizer" and is_vllm_serialized_tensorizer(
+                    tensorizer_config):
+                extra_kwargs["linear_method"] = linear_method
+                tensorizer_config.model_class = model_class
+                tensorizer_config.hf_config = model_config.hf_config
+                tensorizer_config.dtype = model_config.dtype
+                model = load_with_tensorizer(tensorizer_config,
                                              **extra_kwargs)
                 return model.eval()
             model = model_class(config=model_config.hf_config,

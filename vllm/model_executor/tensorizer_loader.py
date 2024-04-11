@@ -11,10 +11,12 @@ from typing import Optional, Type, Union
 from torch import nn
 import torch
 
-from vllm.config import ModelConfig
+from vllm.config import TensorizerConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.layers.linear import LinearMethodBase
+
+tensorizer_load_fail = False
 
 try:
     from tensorizer import DecryptionParams, TensorDeserializer, TensorSerializer
@@ -29,19 +31,17 @@ __all__ = ['DecryptionParams', 'TensorDeserializer', 'TensorSerializer','open_st
 logger = init_logger(__name__)
 
 
-def load_with_tensorizer(model_cls: Type[nn.Module],
-                         model_config: ModelConfig,
-                         linear_method: LinearMethodBase,
+def load_with_tensorizer(tensorizer_config: TensorizerConfig,
                          **extra_kwargs
                          ) -> nn.Module:
-    tensorizer = TensorizerAgent(model_cls, model_config, linear_method,
+    tensorizer = TensorizerAgent(tensorizer_config,
                                  **extra_kwargs)
     return tensorizer.deserialize()
 
-def is_vllm_serialized_tensorizer(model_config: ModelConfig) -> bool:
-    if model_config.tensorizer_args is None:
+def is_vllm_serialized_tensorizer(tensorizer_config: TensorizerConfig) -> bool:
+    if tensorizer_config is None:
         return False
-    return model_config.tensorizer_args.vllm_tensorized
+    return tensorizer_config.vllm_tensorized
 
 
 class ParameterizedLoadFormat(str):
@@ -218,16 +218,17 @@ class TensorizerAgent:
 
     def __init__(
         self,
-        model_cls: Type[nn.Module],
-        model_config: ModelConfig,
+        tensorizer_config: TensorizerConfig,
         linear_method: LinearMethodBase,
         **extra_kwargs
     ):
-        self.model_cls = model_cls
-        self.model_config = model_config
-        self.linear_method = linear_method
+        self.tensorizer_config = tensorizer_config
+        self.tensorizer_args = self.tensorizer_config._construct_tensorizer_args()
         self.extra_kwargs = extra_kwargs
-        self.tensorizer_args = self.model_config.tensorizer_args
+        if extra_kwargs.get("linear_method", None) is not None:
+            self.linear_method = extra_kwargs["linear_method"]
+        else:
+            self.linear_method = linear_method
         self.model = self._init_model()
 
         if tensorizer_load_fail:
@@ -235,10 +236,10 @@ class TensorizerAgent:
 
 
     def _init_model(self):
-        model_args = self.model_config.hf_config
-        model_args.torch_dtype = self.model_config.dtype
+        model_args = self.tensorizer_config.hf_config
+        model_args.torch_dtype = self.tensorizer_config.dtype
         with no_init_or_tensor():
-            return self.model_cls(config=model_args,
+            return self.tensorizer_config.model_class(config=model_args,
                                 linear_method=self.linear_method,
                                 **self.extra_kwargs)
     def _patch_linear_weights(self):
@@ -286,7 +287,7 @@ class TensorizerAgent:
                 **self.tensorizer_args.stream_params,
         ) as stream, TensorDeserializer(
                 stream,
-                dtype=self.model_config.dtype,
+                dtype=self.tensorizer_config.dtype,
                 **self.tensorizer_args.deserializer_params) as deserializer:
             deserializer.load_into_module(self.model)
             end = time.perf_counter()

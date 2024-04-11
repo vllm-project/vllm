@@ -1,13 +1,14 @@
 import argparse
 import dataclasses
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, BinaryIO, Union
+import io
+import os
 
 from vllm.config import (CacheConfig, DeviceConfig, EngineConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          SpeculativeConfig, TokenizerPoolConfig,
-                         VisionLanguageConfig)
-from vllm.model_executor.tensorizer_loader import TensorizerArgs
+                         VisionLanguageConfig, TensorizerConfig)
 from vllm.utils import str_to_int_tuple
 
 
@@ -59,12 +60,22 @@ class EngineArgs:
     forced_num_gpu_blocks: Optional[int] = None
     num_lookahead_slots: int = 0
 
+    # Tensorizer configuration parameters
+    tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, BinaryIO,
+                          str, bytes, os.PathLike, int] = None
+    vllm_tensorized: bool = False
+    verify_hash: Optional[bool] = False
+    num_readers: Optional[int] = 1
+    encryption_keyfile: Optional[str] = None
+    s3_access_key_id: Optional[str] = None
+    s3_secret_access_key: Optional[str] = None
+    s3_endpoint: Optional[str] = None
+
     # Related to Vision-language models such as llava
     image_input_type: Optional[str] = None
     image_token_id: Optional[int] = None
     image_input_shape: Optional[str] = None
     image_feature_size: Optional[int] = None
-    tensorizer_args: Optional[TensorizerArgs] = None
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: bool = False
 
@@ -415,16 +426,9 @@ class EngineArgs:
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace) -> 'EngineArgs':
         # Get the list of attributes of this dataclass.
-        attrs = [
-            attr.name for attr in dataclasses.fields(cls)
-            if attr.name != "tensorizer_args"
-        ]
+        attrs = [attr.name for attr in dataclasses.fields(cls)]
         # Set the attributes from the parsed arguments.
         engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
-
-        engine_args.tensorizer_args = TensorizerArgs.from_cli_args(args) if (
-            engine_args.load_format == "tensorizer") else None
-
         return engine_args
 
     def create_engine_config(self, ) -> EngineConfig:
@@ -435,8 +439,7 @@ class EngineArgs:
             self.dtype, self.seed, self.revision, self.code_revision,
             self.tokenizer_revision, self.max_model_len, self.quantization,
             self.quantization_param_path, self.enforce_eager,
-            self.max_context_len_to_capture, self.tensorizer_args,
-            self.max_logprobs)
+            self.max_context_len_to_capture, self.max_logprobs)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
@@ -480,6 +483,17 @@ class EngineArgs:
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
 
+        tensorizer_config = TensorizerConfig(
+            tensorizer_uri = self.tensorizer_uri,
+            vllm_tensorized = self.vllm_tensorized,
+            verify_hash = self.verify_hash,
+            num_readers = self.num_readers,
+            encryption_keyfile = self.encryption_keyfile,
+            s3_access_key_id = self.s3_access_key_id,
+            s3_secret_access_key = self.s3_secret_access_key,
+            s3_endpoint = self.s3_endpoint,
+        )
+
         if self.image_input_type:
             if (not self.image_token_id or not self.image_input_shape
                     or not self.image_feature_size):
@@ -503,7 +517,8 @@ class EngineArgs:
                             device_config=device_config,
                             lora_config=lora_config,
                             vision_language_config=vision_language_config,
-                            speculative_config=speculative_config)
+                            speculative_config=speculative_config,
+                            tensorizer_config=tensorizer_config)
 
 
 @dataclass

@@ -2,6 +2,7 @@ import enum
 import json
 import os
 from dataclasses import dataclass, fields
+import typing
 from typing import TYPE_CHECKING, ClassVar, Optional, Union
 
 import torch
@@ -12,6 +13,9 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import (get_cpu_memory, get_nvcc_cuda_version, is_cpu, is_hip,
                         is_neuron)
+
+
+import io
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -882,6 +886,35 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
 _ROCM_NOT_SUPPORTED_DTYPE = ["float", "float32"]
 
 
+@dataclass
+class TensorizerConfig:
+    tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, typing.BinaryIO,
+                          str, bytes, os.PathLike, int]
+    vllm_tensorized: bool
+    verify_hash: Optional[bool] = False
+    num_readers: Optional[int] = 1
+    encryption_keyfile: Optional[str] = None
+    s3_access_key_id: Optional[str] = None
+    s3_secret_access_key: Optional[str] = None
+    s3_endpoint: Optional[str] = None
+    model_class: Optional[torch.nn.Module] = None
+    hf_config: Optional[PretrainedConfig] = None
+    dtype: Union[str, torch.dtype] = None
+
+    def _construct_tensorizer_args(self) -> "TensorizerArgs":
+        from vllm.model_executor.tensorizer_loader import TensorizerArgs
+        tensorizer_args = {
+            "tensorizer_uri": self.tensorizer_uri,
+            "vllm_tensorized": self.vllm_tensorized,
+            "verify_hash": self.verify_hash,
+            "num_readers": self.num_readers,
+            "encryption_keyfile": self.encryption_keyfile,
+            "s3_access_key_id": self.s3_access_key_id,
+            "s3_secret_access_key": self.s3_secret_access_key,
+            "s3_endpoint": self.s3_endpoint,
+        }
+        return TensorizerArgs(**tensorizer_args)
+
 def _get_and_verify_dtype(
     config: PretrainedConfig,
     dtype: Union[str, torch.dtype],
@@ -1018,6 +1051,7 @@ class EngineConfig:
     lora_config: Optional[LoRAConfig]
     vision_language_config: Optional[VisionLanguageConfig]
     speculative_config: Optional[SpeculativeConfig]
+    tensorizer_config: Optional[TensorizerConfig]
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.
