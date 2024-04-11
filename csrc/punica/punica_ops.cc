@@ -21,7 +21,7 @@ inline void check_shape(const torch::Tensor &a, const torch::Tensor &b,
 }
 
 inline constexpr uint64_t pack_u32(uint32_t a, uint32_t b) {
-  return (uint64_t(a) << 32) | uint32_t(b);
+  return (uint64_t(a) << 32) | uint64_t(b);
 }
 
 #define CHECK_CUDA(x) TORCH_CHECK(x.is_cuda(), #x " must be a CUDA tensor")
