@@ -21,6 +21,7 @@ class EngineArgs:
     load_format: str = 'auto'
     dtype: str = 'auto'
     kv_cache_dtype: str = 'auto'
+    quantization_param_path: Optional[str] = None
     seed: int = 0
     max_model_len: Optional[int] = None
     worker_use_ray: bool = False
@@ -54,7 +55,7 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
     ray_workers_use_nsight: bool = False
-    forced_num_gpu_blocks: Optional[int] = None
+    num_gpu_blocks_override: Optional[int] = None
     num_lookahead_slots: int = 0
 
     # Related to Vision-language models such as llava
@@ -159,11 +160,23 @@ class EngineArgs:
         parser.add_argument(
             '--kv-cache-dtype',
             type=str,
-            choices=['auto', 'fp8_e5m2'],
+            choices=['auto', 'fp8'],
             default=EngineArgs.kv_cache_dtype,
             help='Data type for kv cache storage. If "auto", will use model '
-            'data type. Note FP8 is not supported when cuda version is '
-            'lower than 11.8.')
+            'data type. FP8_E5M2 (without scaling) is only supported on cuda '
+            'version greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead '
+            'supported for common inference criteria. ')
+        parser.add_argument(
+            '--quantization-param-path',
+            type=str,
+            default=None,
+            help='Path to the JSON file containing the KV cache '
+            'scaling factors. This should generally be supplied, when '
+            'KV cache dtype is FP8. Otherwise, KV cache scaling factors '
+            'default to 1.0, which may cause accuracy issues. '
+            'FP8_E5M2 (without scaling) is only supported on cuda version'
+            'greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead '
+            'supported for common inference criteria. ')
         parser.add_argument('--max-model-len',
                             type=int,
                             default=EngineArgs.max_model_len,
@@ -233,7 +246,7 @@ class EngineArgs:
             'the model executor, which can range from 0 to 1.'
             'If unspecified, will use the default value of 0.9.')
         parser.add_argument(
-            '--forced-num-gpu-blocks',
+            '--num-gpu-blocks-override',
             type=int,
             default=None,
             help='If specified, ignore GPU profiling result and use this number'
@@ -373,9 +386,8 @@ class EngineArgs:
             'prompt latency) before scheduling next prompt.')
         parser.add_argument(
             '--enable-chunked-prefill',
-            type=bool,
-            default=False,
-            help='If True, the prefill requests can be chunked based on the '
+            action='store_true',
+            help='If set, the prefill requests can be chunked based on the '
             'max_num_batched_tokens')
 
         parser.add_argument(
@@ -408,12 +420,12 @@ class EngineArgs:
             self.trust_remote_code, self.download_dir, self.load_format,
             self.dtype, self.seed, self.revision, self.code_revision,
             self.tokenizer_revision, self.max_model_len, self.quantization,
-            self.enforce_eager, self.max_context_len_to_capture,
-            self.max_logprobs)
+            self.quantization_param_path, self.enforce_eager,
+            self.max_context_len_to_capture, self.max_logprobs)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
-                                   self.forced_num_gpu_blocks,
+                                   self.num_gpu_blocks_override,
                                    model_config.get_sliding_window(),
                                    self.enable_prefix_caching)
         parallel_config = ParallelConfig(

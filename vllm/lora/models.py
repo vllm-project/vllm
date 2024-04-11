@@ -191,6 +191,7 @@ class LoRAModel:
     def from_local_checkpoint(
         cls,
         lora_dir: str,
+        expected_lora_modules: List[str],
         lora_model_id: Optional[int] = None,
         device: str = "cuda",
         dtype: Optional[torch.dtype] = None,
@@ -206,6 +207,20 @@ class LoRAModel:
             lora_dir, "new_embeddings.safetensors")
         new_embeddings_bin_file_path = os.path.join(lora_dir,
                                                     "new_embeddings.bin")
+        with open(lora_config_path) as f:
+            config = json.load(f)
+        target_modules = config["target_modules"]
+        unexpected_modules = []
+        for module in target_modules:
+            if module not in expected_lora_modules:
+                unexpected_modules.append(module)
+        # loaded lora's target modules must be a subset of expected_lora_modules
+        if unexpected_modules:
+            raise ValueError(
+                f"While loading {lora_dir}, expected"
+                f" target modules in {expected_lora_modules}"
+                f" but received {unexpected_modules}."
+                f" Please verify that the loaded LoRA module is correct")
         if os.path.isfile(lora_tensor_path):
             tensors = safetensors.torch.load_file(lora_tensor_path)
         elif os.path.isfile(lora_bin_file_path):
@@ -220,8 +235,6 @@ class LoRAModel:
         elif os.path.isfile(new_embeddings_bin_file_path):
             embeddings = torch.load(new_embeddings_bin_file_path)
 
-        with open(lora_config_path) as f:
-            config = json.load(f)
         rank = config["r"]
         lora_alpha = config["lora_alpha"]
         return cls.from_lora_tensors(

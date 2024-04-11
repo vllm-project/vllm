@@ -97,6 +97,7 @@ class LLMEngine:
             f"quantization={model_config.quantization}, "
             f"enforce_eager={model_config.enforce_eager}, "
             f"kv_cache_dtype={cache_config.cache_dtype}, "
+            f"quantization_param_path={model_config.quantization_param_path}, "
             f"device_config={device_config.device}, "
             f"seed={model_config.seed})")
         # TODO(woosuk): Print more configs in debug mode.
@@ -125,6 +126,8 @@ class LLMEngine:
             vision_language_config=vision_language_config,
             speculative_config=speculative_config,
         )
+
+        self._initialize_kv_caches()
 
         # If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
@@ -176,6 +179,26 @@ class LLMEngine:
                 local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
                 labels=dict(model_name=model_config.model))
             self.stat_logger.info("cache_config", self.cache_config)
+
+    def _initialize_kv_caches(self) -> None:
+        """Initialize the KV cache in the worker(s).
+
+        The workers will determine the number of blocks in both the GPU cache
+        and the swap CPU cache.
+        """
+        num_gpu_blocks, num_cpu_blocks = (
+            self.model_executor.determine_num_available_blocks())
+
+        if self.cache_config.num_gpu_blocks_override is not None:
+            num_gpu_blocks_override = self.cache_config.num_gpu_blocks_override
+            logger.info(f"Overriding {num_gpu_blocks=} with "
+                        f"{num_gpu_blocks_override=}")
+            num_gpu_blocks = num_gpu_blocks_override
+
+        self.cache_config.num_gpu_blocks = num_gpu_blocks
+        self.cache_config.num_cpu_blocks = num_cpu_blocks
+
+        self.model_executor.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     @classmethod
     def from_engine_args(
@@ -431,7 +454,7 @@ class LLMEngine:
 
         # Process prompt logprobs
         prompt_logprobs = outputs.prompt_logprobs
-        if prompt_logprobs is not None:
+        if prompt_logprobs is not None and seq_group.sampling_params.detokenize:
             self.detokenizer.decode_prompt_logprobs_inplace(
                 seq_group, prompt_logprobs)
             seq_group.prompt_logprobs = prompt_logprobs
@@ -477,8 +500,9 @@ class LLMEngine:
             child_seqs.append((parent, parent))
 
         for seq, _ in child_seqs:
-            self.detokenizer.decode_sequence_inplace(seq,
-                                                     seq_group.sampling_params)
+            if seq_group.sampling_params.detokenize:
+                self.detokenizer.decode_sequence_inplace(
+                    seq, seq_group.sampling_params)
             self._check_stop(seq, seq_group.sampling_params)
 
         # Non-beam search case
@@ -605,12 +629,14 @@ class LLMEngine:
         now = time.time()
         # Update the scheduled sequence groups with the model outputs.
         scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
-
         for scheduled_seq_group, outputs in zip(scheduled_seq_groups, output):
             seq_group = scheduled_seq_group.seq_group
-            token_chunk_size = scheduled_seq_group.token_chunk_size
-            seq_group.update_num_computed_tokens(token_chunk_size)
-            self._process_sequence_group_outputs(seq_group, outputs)
+            seq_group.update_num_computed_tokens(
+                scheduled_seq_group.token_chunk_size)
+            # If uncomputed tokens > 0, it means prefill is chunked.
+            # We don't need to process outputs in that case.
+            if seq_group.get_num_uncomputed_tokens() == 0:
+                self._process_sequence_group_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.
         self.scheduler.free_finished_seq_groups()
@@ -728,7 +754,7 @@ class LLMEngine:
         time_per_output_tokens = []
         time_e2e_requests = []
         if scheduler_outputs is not None:
-            prompt_run = scheduler_outputs.prompt_run
+            prompt_run = scheduler_outputs.num_prefill_groups > 0
 
             # Number of Tokens.
             if prompt_run:
@@ -790,12 +816,13 @@ class LLMEngine:
         if seq.get_output_len() < sampling_params.min_tokens:
             return
 
-        for stop_str in sampling_params.stop:
-            if seq.output_text.endswith(stop_str):
-                self._finalize_sequence(seq, sampling_params, stop_str)
-                seq.status = SequenceStatus.FINISHED_STOPPED
-                seq.stop_reason = stop_str
-                return
+        if sampling_params.detokenize:
+            for stop_str in sampling_params.stop:
+                if seq.output_text.endswith(stop_str):
+                    self._finalize_sequence(seq, sampling_params, stop_str)
+                    seq.status = SequenceStatus.FINISHED_STOPPED
+                    seq.stop_reason = stop_str
+                    return
         last_token_id = seq.get_last_token_id()
         if last_token_id in sampling_params.stop_token_ids:
             stop_str = self.get_tokenizer_for_seq(seq).convert_ids_to_tokens(

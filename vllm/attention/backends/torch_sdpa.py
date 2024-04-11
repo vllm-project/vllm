@@ -7,7 +7,8 @@ import torch
 from torch.nn.functional import scaled_dot_product_attention
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata)
+                                              AttentionMetadata,
+                                              AttentionMetadataPerStage)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 
@@ -49,7 +50,8 @@ class TorchSDPABackend(AttentionBackend):
 
 
 @dataclass
-class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
+class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata,
+                        AttentionMetadataPerStage):
     """Metadata for TorchSDPABackend.
     """
     # Currently, input sequences can only contain all prompts
@@ -57,15 +59,6 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
     is_prompt: bool
     slot_mapping: torch.Tensor
     prompt_lens: Optional[List[int]]
-    prompt_lens_tensor: Optional[torch.Tensor]
-    num_prompt_tokens: int
-    num_generation_tokens: int
-
-    max_subquery_len: Optional[int] = None
-    max_prompt_len: Optional[int] = None
-    subquery_start_loc: Optional[torch.Tensor] = None
-    seq_start_loc: Optional[torch.Tensor] = None
-    use_cuda_graph: bool = False
 
     def __post_init__(self):
         # Set during the execution of the first attention op.
@@ -114,6 +107,7 @@ class TorchSDPABackendImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: Optional[torch.Tensor],
         attn_metadata: TorchSDPAMetadata,
+        kv_scale: float,
     ) -> torch.Tensor:
         """Forward pass with torch SDPA and PagedAttention.
 
@@ -138,7 +132,8 @@ class TorchSDPABackendImpl(AttentionImpl):
             PagedAttention.write_to_paged_cache(key, value, key_cache,
                                                 value_cache,
                                                 attn_metadata.slot_mapping,
-                                                attn_metadata.kv_cache_dtype)
+                                                attn_metadata.kv_cache_dtype,
+                                                kv_scale)
 
         if attn_metadata.is_prompt:
             if (kv_cache is None or attn_metadata.block_tables.numel() == 0):
@@ -199,6 +194,7 @@ class TorchSDPABackendImpl(AttentionImpl):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
+                kv_scale,
             )
 
         # Reshape the output tensor.
@@ -221,7 +217,7 @@ def _make_alibi_bias(
         bias = bias[None, :] - bias[:, None]
 
         num_heads = alibi_slopes.shape[0]
-        bias = bias[None, :].expand(num_heads, prompt_len, prompt_len)
+        bias = bias[None, :].repeat((num_heads, 1, 1))
         bias.mul_(alibi_slopes[:, None, None])
         inf_mask = torch.empty(
             (1, prompt_len, prompt_len),

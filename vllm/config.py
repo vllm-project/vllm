@@ -60,6 +60,11 @@ class ModelConfig:
             output). If None, will be derived from the model.
         quantization: Quantization method that was used to quantize the model
             weights. If None, we assume the model weights are not quantized.
+        quantization_param_path: Path to JSON file containing scaling factors.
+            Used to load KV cache scaling factors into the model when KV cache
+            type is FP8_E4M3 on ROCm (AMD GPU). In the future these will also 
+            be used to load activation and weight scaling factors when the 
+            model dtype is FP8_E4M3 on ROCm.
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
@@ -83,6 +88,7 @@ class ModelConfig:
         tokenizer_revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
+        quantization_param_path: Optional[str] = None,
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
         max_logprobs: int = 5,
@@ -98,6 +104,7 @@ class ModelConfig:
         self.code_revision = code_revision
         self.tokenizer_revision = tokenizer_revision
         self.quantization = quantization
+        self.quantization_param_path = quantization_param_path
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
         self.max_logprobs = max_logprobs
@@ -151,7 +158,9 @@ class ModelConfig:
 
         # TODO: Remove this check once HF updates the pt weights of Mixtral.
         architectures = getattr(self.hf_config, "architectures", [])
-        if "MixtralForCausalLM" in architectures and load_format == "pt":
+        # architectures can be None instead of []
+        if architectures and "MixtralForCausalLM" in architectures \
+            and load_format == "pt":
             raise ValueError(
                 "Currently, the 'pt' format is not supported for Mixtral. "
                 "Please use the 'safetensors' format instead. ")
@@ -327,7 +336,7 @@ class CacheConfig:
             vLLM execution.
         swap_space: Size of the CPU swap space per GPU (in GiB).
         cache_dtype: Data type for kv cache storage.
-        forced_num_gpu_blocks: Number of GPU blocks to use. This overrides the
+        num_gpu_blocks_override: Number of GPU blocks to use. This overrides the
             profiled num_gpu_blocks if specified. Does nothing if None.
     """
 
@@ -337,14 +346,14 @@ class CacheConfig:
         gpu_memory_utilization: float,
         swap_space: int,
         cache_dtype: str,
-        forced_num_gpu_blocks: Optional[int] = None,
+        num_gpu_blocks_override: Optional[int] = None,
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
         self.swap_space_bytes = swap_space * _GB
-        self.forced_num_gpu_blocks = forced_num_gpu_blocks
+        self.num_gpu_blocks_override = num_gpu_blocks_override
         self.cache_dtype = cache_dtype
         self.sliding_window = sliding_window
         self.enable_prefix_caching = enable_prefix_caching
@@ -369,21 +378,20 @@ class CacheConfig:
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":
             pass
-        elif self.cache_dtype == "fp8_e5m2":
-            if is_hip():
-                raise NotImplementedError(
-                    "FP8_E5M2 KV Cache on AMD GPU has not been supported yet.")
-            nvcc_cuda_version = get_nvcc_cuda_version()
-            if nvcc_cuda_version and nvcc_cuda_version < Version("11.8"):
-                raise ValueError(
-                    "FP8 is not supported when cuda version is lower than 11.8."
-                )
+        elif self.cache_dtype == "fp8":
+            if not is_hip():
+                nvcc_cuda_version = get_nvcc_cuda_version()
+                if nvcc_cuda_version < Version("11.8"):
+                    raise ValueError(
+                        "FP8 is not supported when cuda version is"
+                        "lower than 11.8.")
             logger.info(
-                "Using fp8_e5m2 data type to store kv cache. It reduces "
-                "the GPU memory footprint and boosts the performance. "
-                "But it may cause slight accuracy drop. "
-                "Currently we only support fp8 without scaling factors and "
-                "make e5m2 as a default format.")
+                "Using fp8 data type to store kv cache. It reduces the GPU "
+                "memory footprint and boosts the performance. "
+                "But it may cause slight accuracy drop without scaling "
+                "factors. FP8_E5M2 (without scaling) is only supported on "
+                "cuda version greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 "
+                "is instead supported for common inference criteria.")
         else:
             raise ValueError(f"Unknown kv cache dtype: {self.cache_dtype}")
 
@@ -557,9 +565,16 @@ class SchedulerConfig:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
         else:
-            # If max_model_len is too short, use 2048 as the default value for
-            # higher throughput.
-            self.max_num_batched_tokens = max(max_model_len, 2048)
+            if enable_chunked_prefill:
+                # For chunked prefill, choose the well-tuned batch size.
+                self.max_num_batched_tokens = 768
+            else:
+                # If max_model_len is too short, use 2048 as the default value
+                # for higher throughput.
+                self.max_num_batched_tokens = max(max_model_len, 2048)
+        if enable_chunked_prefill:
+            logger.info("Chunked prefill is enabled (EXPERIMENTAL).")
+
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
         self.use_v2_block_manager = use_v2_block_manager
@@ -570,7 +585,8 @@ class SchedulerConfig:
         self._verify_args()
 
     def _verify_args(self) -> None:
-        if self.max_num_batched_tokens < self.max_model_len:
+        if (self.max_num_batched_tokens < self.max_model_len
+                and not self.chunked_prefill_enabled):
             raise ValueError(
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) is "
                 f"smaller than max_model_len ({self.max_model_len}). "
