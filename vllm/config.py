@@ -14,7 +14,6 @@ from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import (get_cpu_memory, get_nvcc_cuda_version, is_cpu, is_hip,
                         is_neuron)
 
-
 import io
 
 if TYPE_CHECKING:
@@ -914,6 +913,7 @@ class TensorizerConfig:
             "s3_endpoint": self.s3_endpoint,
         }
         return TensorizerArgs(**tensorizer_args)
+
 
 def _get_and_verify_dtype(
     config: PretrainedConfig,

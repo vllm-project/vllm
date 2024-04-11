@@ -103,12 +103,22 @@ def initialize_engine() -> LLMEngine:
     #   numbers will cause higher memory usage. If you know that all LoRAs will
     #   use the same rank, it is recommended to set this as low as possible.
     # max_cpu_loras: controls the size of the CPU LoRA cache.
-    engine_args = EngineArgs(model="meta-llama/Llama-2-7b-hf",
-                             enable_lora=True,
-                             max_loras=1,
-                             max_lora_rank=8,
-                             max_cpu_loras=2,
-                             max_num_seqs=256)
+    from vllm.model_executor.tensorizer_loader import TensorizerArgs
+    engine_args = EngineArgs(
+        model="meta-llama/Llama-2-7b-hf",
+        load_format="tensorizer",
+        enable_lora=True,
+        tensorizer_args=TensorizerArgs(
+            tensorizer_uri=
+            "s3://tensorized-ssteel/Llama-2-7b-hf-vllm.tensors",  ## To serialized model from HF model hub
+            num_readers=1,
+            vllm_tensorized=True),
+        max_loras=1,
+        max_lora_rank=8,
+        max_cpu_loras=2,
+        max_num_seqs=50,
+        max_model_len=1000,
+    )
     return LLMEngine.from_engine_args(engine_args)
 
 

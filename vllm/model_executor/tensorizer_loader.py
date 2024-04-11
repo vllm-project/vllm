@@ -6,37 +6,41 @@ import time
 import typing
 import warnings
 from dataclasses import dataclass
-from typing import Optional, Type, Union
+from typing import Optional, Union
 
 from torch import nn
 import torch
 
 from vllm.config import TensorizerConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.layers.vocab_parallel_embedding import \
+    VocabParallelEmbedding
 from vllm.model_executor.layers.linear import LinearMethodBase
 
 tensorizer_load_fail = False
 
 try:
-    from tensorizer import DecryptionParams, TensorDeserializer, TensorSerializer
+    from tensorizer import DecryptionParams, TensorDeserializer, \
+        TensorSerializer
     from tensorizer.stream_io import open_stream
-    from tensorizer.utils import convert_bytes, get_mem_usage, no_init_or_tensor
+    from tensorizer.utils import (convert_bytes, get_mem_usage,
+                                  no_init_or_tensor)
 except ImportError:
     tensorizer_load_fail = True
 
-__all__ = ['DecryptionParams', 'TensorDeserializer', 'TensorSerializer','open_stream', 'convert_bytes',
-       'get_mem_usage', 'no_init_or_tensor']
+__all__ = [
+    'DecryptionParams', 'TensorDeserializer', 'TensorSerializer',
+    'open_stream', 'convert_bytes', 'get_mem_usage', 'no_init_or_tensor'
+]
 
 logger = init_logger(__name__)
 
 
 def load_with_tensorizer(tensorizer_config: TensorizerConfig,
-                         **extra_kwargs
-                         ) -> nn.Module:
-    tensorizer = TensorizerAgent(tensorizer_config,
-                                 **extra_kwargs)
+                         **extra_kwargs) -> nn.Module:
+    tensorizer = TensorizerAgent(tensorizer_config, **extra_kwargs)
     return tensorizer.deserialize()
+
 
 def is_vllm_serialized_tensorizer(tensorizer_config: TensorizerConfig) -> bool:
     if tensorizer_config is None:
@@ -189,8 +193,8 @@ class TensorizerArgs:
             action="store_true",
             help="If enabled, indicates that the serialized model is a vLLM "
             "model. This is used to determine the behavior of the "
-            "TensorDeserializer when loading tensors from a serialized model."
-        )
+            "TensorDeserializer when loading tensors from a "
+            "serialized model.")
 
         return parser
 
@@ -216,14 +220,11 @@ class TensorizerAgent:
     in vllm/model_executor/weight_utils.py
     """
 
-    def __init__(
-        self,
-        tensorizer_config: TensorizerConfig,
-        linear_method: LinearMethodBase,
-        **extra_kwargs
-    ):
+    def __init__(self, tensorizer_config: TensorizerConfig,
+                 linear_method: LinearMethodBase, **extra_kwargs):
         self.tensorizer_config = tensorizer_config
-        self.tensorizer_args = self.tensorizer_config._construct_tensorizer_args()
+        self.tensorizer_args = (
+            self.tensorizer_config._construct_tensorizer_args())
         self.extra_kwargs = extra_kwargs
         if extra_kwargs.get("linear_method", None) is not None:
             self.linear_method = extra_kwargs["linear_method"]
@@ -232,16 +233,19 @@ class TensorizerAgent:
         self.model = self._init_model()
 
         if tensorizer_load_fail:
-            raise ImportError("Tensorizer is not installed. Please install tensorizer to use this feature.")
-
+            raise ImportError(
+                "Tensorizer is not installed. Please install tensorizer "
+                "to use this feature.")
 
     def _init_model(self):
         model_args = self.tensorizer_config.hf_config
         model_args.torch_dtype = self.tensorizer_config.dtype
         with no_init_or_tensor():
-            return self.tensorizer_config.model_class(config=model_args,
-                                linear_method=self.linear_method,
-                                **self.extra_kwargs)
+            return self.tensorizer_config.model_class(
+                config=model_args,
+                linear_method=self.linear_method,
+                **self.extra_kwargs)
+
     def _patch_linear_weights(self):
         for child in self.model.modules():
             if hasattr(child, "linear_weights"):

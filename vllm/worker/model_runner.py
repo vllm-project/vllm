@@ -8,7 +8,8 @@ import torch.nn as nn
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (DeviceConfig, LoRAConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, VisionLanguageConfig, TensorizerConfig)
+                         SchedulerConfig, VisionLanguageConfig,
+                         TensorizerConfig)
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -101,7 +102,8 @@ class ModelRunner:
                 vision_language_config=self.vision_language_config,
                 parallel_config=self.parallel_config,
                 scheduler_config=self.scheduler_config,
-                tensorizer_config=self.tensorizer_config,)
+                tensorizer_config=self.tensorizer_config,
+            )
 
         self.model_memory_usage = m.consumed_memory
         logger.info(f"Loading model weights took "

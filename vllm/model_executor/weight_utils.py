@@ -21,10 +21,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
 from vllm.model_executor.layers.quantization.schema import QuantParamSchema
-from vllm.model_executor.tensorizer_loader import (PerformanceWarning, TensorDeserializer,
-                                                  open_stream)
-
-
+from vllm.model_executor.tensorizer_loader import (PerformanceWarning,
+                                                   TensorDeserializer,
+                                                   open_stream)
 
 logger = init_logger(__name__)
 

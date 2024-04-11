@@ -7,7 +7,8 @@ import torch
 import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, VisionLanguageConfig, TensorizerConfig)
+                         ParallelConfig, SchedulerConfig, VisionLanguageConfig,
+                         TensorizerConfig)
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.parallel_utils import pynccl_utils
@@ -71,7 +72,8 @@ class Worker:
             kv_cache_dtype=kv_cache_dtype,
             is_driver_worker=is_driver_worker,
             vision_language_config=vision_language_config,
-            tensorizer_config=tensorizer_config,)
+            tensorizer_config=tensorizer_config,
+        )
         # Uninitialized cache engine. Will be initialized by
         # self.init_cache_engine().
         self.cache_config = None

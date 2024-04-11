@@ -61,8 +61,8 @@ class EngineArgs:
     num_lookahead_slots: int = 0
 
     # Tensorizer configuration parameters
-    tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, BinaryIO,
-                          str, bytes, os.PathLike, int] = None
+    tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, BinaryIO, str,
+                          bytes, os.PathLike, int] = None
     vllm_tensorized: bool = False
     verify_hash: Optional[bool] = False
     num_readers: Optional[int] = 1
@@ -484,14 +484,14 @@ class EngineArgs:
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
 
         tensorizer_config = TensorizerConfig(
-            tensorizer_uri = self.tensorizer_uri,
-            vllm_tensorized = self.vllm_tensorized,
-            verify_hash = self.verify_hash,
-            num_readers = self.num_readers,
-            encryption_keyfile = self.encryption_keyfile,
-            s3_access_key_id = self.s3_access_key_id,
-            s3_secret_access_key = self.s3_secret_access_key,
-            s3_endpoint = self.s3_endpoint,
+            tensorizer_uri=self.tensorizer_uri,
+            vllm_tensorized=self.vllm_tensorized,
+            verify_hash=self.verify_hash,
+            num_readers=self.num_readers,
+            encryption_keyfile=self.encryption_keyfile,
+            s3_access_key_id=self.s3_access_key_id,
+            s3_secret_access_key=self.s3_secret_access_key,
+            s3_endpoint=self.s3_endpoint,
         )
 
         if self.image_input_type:

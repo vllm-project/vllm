@@ -16,18 +16,14 @@ logger = init_logger(__name__)
 
 class GPUExecutor(ExecutorBase):
 
-    def __init__(
-        self,
-        model_config: ModelConfig,
-        cache_config: CacheConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        lora_config: Optional[LoRAConfig],
-        vision_language_config: Optional[VisionLanguageConfig],
-        speculative_config: Optional[SpeculativeConfig],
-        tensorizer_config: Optional[TensorizerConfig]
-    ) -> None:
+    def __init__(self, model_config: ModelConfig, cache_config: CacheConfig,
+                 parallel_config: ParallelConfig,
+                 scheduler_config: SchedulerConfig,
+                 device_config: DeviceConfig,
+                 lora_config: Optional[LoRAConfig],
+                 vision_language_config: Optional[VisionLanguageConfig],
+                 speculative_config: Optional[SpeculativeConfig],
+                 tensorizer_config: Optional[TensorizerConfig]) -> None:
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
