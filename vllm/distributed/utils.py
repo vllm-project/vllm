@@ -78,7 +78,6 @@ def gpu_p2p_access_check(i: int, j: int) -> bool:
         return _gpu_p2p_access_cache[f"{i}->{j}"]
 
     is_distributed = dist.is_initialized()
-    cpu_world_group = get_cpu_world_group()
 
     num_dev = torch.cuda.device_count()
     cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
@@ -87,7 +86,7 @@ def gpu_p2p_access_check(i: int, j: int) -> bool:
     path = os.path.expanduser(
         f"~/.config/vllm/gpu_p2p_access_cache_for_{cuda_visible_devices}.json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    if (not is_distributed or dist.get_rank(cpu_world_group)== 0) \
+    if (not is_distributed or dist.get_rank()== 0) \
         and (not os.path.exists(path)):
         # only the master process can enter this block to calculate the cache
         cache = {}
@@ -100,7 +99,8 @@ def gpu_p2p_access_check(i: int, j: int) -> bool:
                     _i, _j) and _can_actually_p2p(_i, _j)
         with open(path, "w") as f:
             json.dump(cache, f, indent=4)
-    if is_distributed and cpu_world_group is not None:
+    if is_distributed:
+        cpu_world_group = get_cpu_world_group()
         dist.barrier(cpu_world_group)
     with open(path, "r") as f:
         cache = json.load(f)
