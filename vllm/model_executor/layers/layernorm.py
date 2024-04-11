@@ -4,7 +4,7 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from vllm._C import ops
+from vllm import _custom_ops as ops
 
 
 class RMSNorm(nn.Module):
