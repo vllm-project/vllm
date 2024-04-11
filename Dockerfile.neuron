@@ -22,6 +22,7 @@ RUN python3 -m pip install --pre neuronx-cc==2.12.* --extra-index-url=https://pi
 
 COPY ./vllm /app/vllm/vllm
 COPY ./setup.py /app/vllm/setup.py
+COPY ./requirements-common.txt /app/vllm/requirements-common.txt
 COPY ./requirements-neuron.txt /app/vllm/requirements-neuron.txt
 
 RUN cd /app/vllm \
