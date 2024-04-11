@@ -83,5 +83,5 @@ def _which_attn_to_use(dtype: torch.dtype) -> _Backend:
     if backend_by_env_var is not None:
         return _Backend[backend_by_env_var]
 
-        # Default case.
+    # Default case.
     return _Backend.FLASH_ATTN
