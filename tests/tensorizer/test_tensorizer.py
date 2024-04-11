@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from vllm import SamplingParams
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, TensorizerConfig
 from vllm.model_executor.tensorizer_loader import (TensorizerArgs,
                                                    is_vllm_serialized_tensorizer,
                                                    load_with_tensorizer,
@@ -39,36 +39,41 @@ def model_config():
         dtype="float16",
         revision=None,
     )
-    config.tensorizer_args = TensorizerArgs(tensorizer_uri="vllm", vllm_tensorized=False)
     return config
 
+@pytest.fixture(autouse=True)
+def tensorizer_config():
+    config = TensorizerConfig(
+        tensorizer_uri="vllm",
+        vllm_tensorized=True
+    )
+    return config
 
 @patch('vllm.model_executor.tensorizer_loader.TensorizerAgent')
-def test_load_with_tensorizer(mock_agent, model_config):
-    mock_model_cls = MagicMock()
+def test_load_with_tensorizer(mock_agent, tensorizer_config):
     mock_linear_method = MagicMock()
     mock_agent_instance = mock_agent.return_value
     mock_agent_instance.deserialize.return_value = MagicMock()
 
-    result = load_with_tensorizer(mock_model_cls, model_config, mock_linear_method)
+    result = load_with_tensorizer(tensorizer_config, linear_method=mock_linear_method)
 
-    mock_agent.assert_called_once_with(mock_model_cls, model_config, mock_linear_method)
+    mock_agent.assert_called_once_with(tensorizer_config, linear_method=mock_linear_method)
     mock_agent_instance.deserialize.assert_called_once()
     assert result == mock_agent_instance.deserialize.return_value
 
 
-def test_is_vllm_model_with_vllm_in_uri(model_config):
-    model_config.tensorizer_args.vllm_tensorized = True
+def test_is_vllm_model_with_vllm_in_uri(tensorizer_config):
+    tensorizer_config.vllm_tensorized = True
 
-    result = is_vllm_serialized_tensorizer(model_config)
+    result = is_vllm_serialized_tensorizer(tensorizer_config)
 
     assert result is True
 
 
-def test_is_vllm_model_without_vllm_in_uri(model_config):
-    model_config.tensorizer_args.vllm_tensorized = False
+def test_is_vllm_model_without_vllm_in_uri(tensorizer_config):
+    tensorizer_config.vllm_tensorized = False
 
-    result = is_vllm_serialized_tensorizer(model_config)
+    result = is_vllm_serialized_tensorizer(tensorizer_config)
 
     assert result is False
 
