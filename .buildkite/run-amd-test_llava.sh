@@ -9,11 +9,11 @@ rocminfo
 docker build -t rocm -f Dockerfile.rocm .
 
 # Setup cleanup
-remove_docker_container() { docker rm -f rocm_test_regression || true; }
+remove_docker_container() { docker rm -f rocm_test_llava || true; }
 trap remove_docker_container EXIT
 remove_docker_container
 
 # Run the image
-docker run --device /dev/kfd --device /dev/dri --network host \
-	--name rocm_test_regression rocm python3 -m pytest -v -s vllm/tests/test_regression.py
+docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_llava \
+	rocm /bin/bash -c "cd vllm/tests; /bin/bash ../.buildkite/download-images.sh; python3 -m pytest -v -s models/test_llava.py"
 

@@ -33,6 +33,11 @@ steps:
       queue: amd
     command: "bash .buildkite/run-amd-test_examples.sh"
 
+  - label: "AMD Test Llava"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_llava.sh"
+
   - label: "AMD Test Prefix Caching"
     agents:
       queue: amd
