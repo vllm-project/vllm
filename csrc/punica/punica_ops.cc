@@ -20,8 +20,8 @@ inline void check_shape(const torch::Tensor &a, const torch::Tensor &b,
   }
 }
 
-inline constexpr uint32_t pack_u16(uint16_t a, uint16_t b) {
-  return (uint32_t(a) << 16) | uint32_t(b);
+inline constexpr uint64_t pack_u32(uint32_t a, uint32_t b) {
+  return (uint64_t(a) << 32) | uint64_t(b);
 }
 
 #define CHECK_CUDA(x) TORCH_CHECK(x.is_cuda(), #x " must be a CUDA tensor")
@@ -46,13 +46,13 @@ inline constexpr uint32_t pack_u16(uint16_t a, uint16_t b) {
 template <typename in_T, typename out_T, typename W_T>
 inline bool launch_bgmv_kernel(out_T *Y, const in_T *X, const W_T *W,
                                const int64_t *lora_indices,
-                               uint16_t in_features, uint16_t out_features,
+                               uint32_t in_features, uint32_t out_features,
                                int64_t y_offset, int64_t full_y_size,
                                int64_t batch_size, int64_t num_layers,
                                int64_t layer_idx, float scale) {
-  switch (pack_u16(in_features, out_features)) {
+  switch (pack_u32(in_features, out_features)) {
 #define CASE_ONESIDE(_in_T, _out_T, _W_T, feat_in, feat_out)                   \
-  case pack_u16(feat_in, feat_out):                                            \
+  case pack_u32(feat_in, feat_out):                                            \
     bgmv_kernel<feat_in, feat_out>(Y, X, W, lora_indices, y_offset,            \
                                    full_y_size, batch_size, num_layers,        \
                                    layer_idx, scale);                          \
@@ -93,7 +93,7 @@ void dispatch_bgmv(torch::Tensor y, torch::Tensor x, torch::Tensor w,
   CHECK_EQ(y.size(0), x.size(0));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
   bool ok = false;
-  if (h_in < 65536 && h_out < 65536) {
+  if (h_in <= 128512 && h_out <= 128512) {
     // TODO: See if we can get rid of this massive nested switch
     switch (x.scalar_type()) {
     case at::ScalarType::Half:
@@ -325,7 +325,7 @@ void dispatch_bgmv_low_level(torch::Tensor y, torch::Tensor x, torch::Tensor w,
   CHECK_EQ(y.size(0), x.size(0));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
   bool ok = false;
-  if (h_in < 65536 && h_out < 65536) {
+  if (h_in <= 128512 && h_out <= 128512) {
     // TODO: See if we can get rid of this massive nested switch
     switch (x.scalar_type()) {
     case at::ScalarType::Half:
