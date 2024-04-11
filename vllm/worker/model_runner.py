@@ -12,7 +12,6 @@ from vllm.attention import (AttentionMetadata, AttentionMetadataPerStage,
 from vllm.config import (DeviceConfig, LoRAConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VisionLanguageConfig,
                          TensorizerConfig)
-                         SchedulerConfig, VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict, with_pynccl_for_all_reduce
 from vllm.distributed.device_communicators import (custom_all_reduce,
                                                    pynccl_utils)
