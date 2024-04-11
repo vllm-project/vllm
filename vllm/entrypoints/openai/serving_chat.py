@@ -5,6 +5,8 @@ from typing import AsyncGenerator, AsyncIterator, List, Optional, Tuple, Union
 import numpy as np
 import torch
 from fastapi import Request
+from PIL import Image
+from transformers import PreTrainedTokenizerBase
 
 from vllm.config import VisionLanguageConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -23,6 +25,46 @@ from vllm.sequence import MultiModalData
 from vllm.utils import get_image_async, random_uuid
 
 logger = init_logger(__name__)
+
+
+def parse_image(
+    config: VisionLanguageConfig,
+    tokenizer: PreTrainedTokenizerBase,
+    image: Image.Image,
+    image_idx: int,
+) -> Tuple[str, MultiModalData]:
+    text = config.openai_api.value \
+        .get_image_token_text(config, tokenizer, image_idx)
+
+    if len(config.image_input_shape) == 3:
+        raise ValueError(
+            "The model is configured to accept image features rather than "
+            "pixel values, and thus does not support image inputs")
+
+    batch_size, num_channels, height, width = config.image_input_shape
+
+    if num_channels == 1:
+        image_format = "L"
+    elif num_channels == 3:
+        image_format = "RGB"
+    elif num_channels == 4:
+        image_format = "RGBA"
+    else:
+        msg = f"Unsupported number of channels ({num_channels})"
+        raise NotImplementedError(msg)
+
+    with image:
+        image = image.convert(image_format).resize((height, width))
+        image_arr = np.array(image, copy=True)
+
+    image_tensor = torch.as_tensor(image_arr) \
+        .view(batch_size, height, width, num_channels) \
+        .permute((0, 3, 1, 2)) \
+        .to(torch.float16)
+
+    data = MultiModalData(type=MultiModalData.Type.IMAGE, data=image_tensor)
+
+    return text, data
 
 
 class OpenAIServingChat(OpenAIServing):
@@ -44,31 +86,12 @@ class OpenAIServingChat(OpenAIServing):
         content: List[Union[ChatCompletionTextContentPart,
                             ChatCompletionImageContentPart]],
     ) -> Tuple[List[str], List[MultiModalData]]:
-        """Parse image input according to OpenAI's API."""
-        vlm_config = getattr(self.engine.engine, "vision_language_config",
-                             None)
-        assert isinstance(vlm_config, VisionLanguageConfig), (
-            "Provide `image_input_type` and other vision "
-            "related configurations through LLM entrypoint "
-            "or engine arguments.")
+        config = getattr(self.engine.engine, "vision_language_config", None)
+        if not isinstance(config, VisionLanguageConfig):
+            raise ValueError("GPT-4 with Vision API is only supported for "
+                             "vision language models.")
 
-        if len(vlm_config.image_input_shape) == 3:
-            raise ValueError(
-                "The model is configured to accept image features rather than "
-                "pixel values, and thus does not support image inputs")
-
-        batch_size, num_channels, height, width = vlm_config.image_input_shape
-        feature_size = vlm_config.image_feature_size
-
-        if num_channels == 1:
-            image_format = "L"
-        elif num_channels == 3:
-            image_format = "RGB"
-        elif num_channels == 4:
-            image_format = "RGBA"
-        else:
-            msg = f"Unsupported number of channels ({num_channels})"
-            raise NotImplementedError(msg)
+        tokenizer = self.tokenizer
 
         content_texts: List[str] = []
         content_images: List[MultiModalData] = []
@@ -78,21 +101,12 @@ class OpenAIServingChat(OpenAIServing):
                 content_texts.append(part.text)
 
             if isinstance(part, ChatCompletionImageContentPart):
-                with await get_image_async(part.image_url.url) as image:
-                    image = image.convert(image_format).resize((height, width))
-                    image_arr = np.array(image, copy=True)
+                image = await get_image_async(part.image_url.url)
+                image_idx = len(content_images)
+                text, data = parse_image(config, tokenizer, image, image_idx)
 
-                image_tensor = torch.as_tensor(image_arr) \
-                    .view(batch_size, height, width, num_channels) \
-                    .permute((0, 3, 1, 2)) \
-                    .to(torch.float16)
-
-                content_texts.append("<image>" * feature_size)
-                content_images.append(
-                    MultiModalData(
-                        type=MultiModalData.Type.IMAGE,
-                        data=image_tensor,
-                    ))
+                content_texts.append(text)
+                content_images.append(data)
 
                 if part.image_url.detail != "auto":
                     logger.info("content[%s].image_url.detail is ignored", i)
@@ -135,12 +149,9 @@ class OpenAIServingChat(OpenAIServing):
 
             for m in request.messages:
                 text, images = await self.parse_chat_message_content(m.content)
+                cm = ChatMessage(role=m.role, content="\n".join(text))
 
-                conversation.append(
-                    ChatMessage(
-                        role=m.role,
-                        content="\n".join(text),
-                    ))
+                conversation.append(cm)
                 multi_modal_datas.extend(images)
 
             if len(multi_modal_datas) == 0:
@@ -151,9 +162,7 @@ class OpenAIServingChat(OpenAIServing):
                 raise NotImplementedError("Multiple image input not supported")
 
             prompt = self.tokenizer.apply_chat_template(
-                conversation=[
-                    message.model_dump() for message in conversation
-                ],
+                conversation=[msg.model_dump() for msg in conversation],
                 tokenize=False,
                 add_generation_prompt=request.add_generation_prompt,
             )
@@ -190,7 +199,7 @@ class OpenAIServingChat(OpenAIServing):
 
         # Streaming response
         if request.stream:
-            return self.chat_completion_stream_generator(
+            return await self.chat_completion_stream_generator(
                 request,
                 conversation,
                 result_generator,
