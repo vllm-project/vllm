@@ -893,8 +893,8 @@ class VisionLanguageConfig:
         PIXEL_VALUES = enum.auto()
         IMAGE_FEATURES = enum.auto()
 
-    class OpenAIVisionAPI(enum.Enum):
-        """Specifies how the model supports
+    class ImageOpenAI(enum.Enum):
+        """Specifies how the model implements
         `OpenAI's GPT-4 with Vision API <https://platform.openai.com/docs/guides/vision>`_.
         """
         UNSUPPORTED = OpenAIVisionAdapterForNoImage()
@@ -910,7 +910,7 @@ class VisionLanguageConfig:
     image_input_shape: tuple
     image_feature_size: int
 
-    openai_api: OpenAIVisionAPI = OpenAIVisionAPI.SINGLE_IMAGE
+    image_openai: ImageOpenAI = ImageOpenAI.SINGLE_IMAGE
 
     @classmethod
     def get_image_input_enum_type(cls, value: str) -> ImageInputType:
@@ -921,6 +921,16 @@ class VisionLanguageConfig:
             raise ValueError(f"{value} is not a valid choice. "
                              f"Expecting to choose from "
                              f"{[x.name for x in cls.ImageInputType]}.") from e
+
+    @classmethod
+    def get_image_openai_enum_type(cls, value: str) -> ImageOpenAI:
+        """Get the GPT-4 with Vision API implementation from a string."""
+        try:
+            return cls.ImageOpenAI[value.upper()]
+        except KeyError as e:
+            raise ValueError(f"{value} is not a valid choice. "
+                             f"Expecting to choose from "
+                             f"{[x.name for x in cls.ImageOpenAI]}.") from e
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {

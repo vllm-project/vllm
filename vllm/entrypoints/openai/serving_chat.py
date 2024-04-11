@@ -33,7 +33,7 @@ def parse_image(
     image: Image.Image,
     image_idx: int,
 ) -> Tuple[str, MultiModalData]:
-    text = config.openai_api.value \
+    text = config.image_openai.value \
         .get_image_token_text(config, tokenizer, image_idx)
 
     if len(config.image_input_shape) == 3:
@@ -199,7 +199,7 @@ class OpenAIServingChat(OpenAIServing):
 
         # Streaming response
         if request.stream:
-            return await self.chat_completion_stream_generator(
+            return self.chat_completion_stream_generator(
                 request,
                 conversation,
                 result_generator,

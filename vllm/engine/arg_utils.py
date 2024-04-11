@@ -63,6 +63,7 @@ class EngineArgs:
     image_token_id: Optional[int] = None
     image_input_shape: Optional[str] = None
     image_feature_size: Optional[int] = None
+    image_openai: str = VisionLanguageConfig.ImageOpenAI.SINGLE_IMAGE.name
 
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: bool = False
@@ -354,15 +355,14 @@ class EngineArgs:
                             choices=["auto", "cuda", "neuron", "cpu"],
                             help='Device type for vLLM execution.')
         # Related to Vision-language models such as llava
-        parser.add_argument(
-            '--image-input-type',
-            type=str,
-            default=None,
-            choices=[
-                t.name.lower() for t in VisionLanguageConfig.ImageInputType
-            ],
-            help=('The image input type passed into vLLM. '
-                  'Should be one of "pixel_values" or "image_features".'))
+        parser.add_argument('--image-input-type',
+                            type=str,
+                            default=None,
+                            choices=[
+                                t.name.lower()
+                                for t in VisionLanguageConfig.ImageInputType
+                            ],
+                            help=('The image input type passed into vLLM.'))
         parser.add_argument('--image-token-id',
                             type=int,
                             default=None,
@@ -378,6 +378,12 @@ class EngineArgs:
             type=int,
             default=None,
             help=('The image feature size along the context dimension.'))
+        parser.add_argument(
+            '--image-openai',
+            type=str,
+            default=VisionLanguageConfig.ImageOpenAI.SINGLE_IMAGE.name.lower(),
+            choices=[t.name.lower() for t in VisionLanguageConfig.ImageOpenAI],
+            help=('Specifies how the model implements GPT-4 with Vision API.'))
         parser.add_argument(
             '--scheduler-delay-factor',
             type=float,
@@ -477,6 +483,8 @@ class EngineArgs:
                 image_token_id=self.image_token_id,
                 image_input_shape=str_to_int_tuple(self.image_input_shape),
                 image_feature_size=self.image_feature_size,
+                image_openai=VisionLanguageConfig.get_image_openai_enum_type(
+                    self.image_openai),
             )
         else:
             vision_language_config = None
