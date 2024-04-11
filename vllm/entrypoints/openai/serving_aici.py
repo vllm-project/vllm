@@ -31,25 +31,21 @@ class AiciRunnerCompletion(OpenAIServing):
         yield runner.data_line(
             runner.initial_json(request_id, self.served_model))
 
+        prompt = request.prompt
         inst_res = await self.aici_runner.instantiate_async(
-            request_id, self.empty_prompt, request.controller,
+            request_id, prompt, request.controller,
             request.controller_arg)
 
-        prompt = self.empty_prompt
-
-        if isinstance(inst_res, list):
-            prompt += inst_res
-        else:
+        if inst_res is not None:
             # error case
             yield runner.data_line(inst_res)
             yield runner.final_data()
             return
 
         sampling_params = request.to_sampling_params()
-        generator = self.engine.generate(None,
+        generator = self.engine.generate(prompt,
                                          sampling_params,
-                                         request_id,
-                                         prompt_token_ids=prompt)
+                                         request_id)
 
         previous_texts = []
         ff_tokens = len(prompt)

@@ -329,6 +329,7 @@ class CompletionRequest(BaseModel):
 
 
 class RunRequest(BaseModel):
+    prompt: str
     controller: str
     controller_arg: Union[str, dict]
     temperature: Optional[float] = 0.0

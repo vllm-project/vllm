@@ -110,19 +110,24 @@ def _apply_min_tokens_penalty(
     logits: torch.Tensor,
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
-    runner = AiciRunner.instance
-    if runner:
-        mapping, arr = runner.recv_logit_bias()
+    aici_runner = AiciRunner.instance
+    if aici_runner:
+        mid_results, arr = aici_runner.recv_logit_bias()
         bias = torch.from_numpy(arr).to(logits.device).to(logits.dtype)
         if bias.shape[0] > 0:
             logits_row_idx = 0
             for seq_ids, sampling_params in sampling_metadata.seq_groups:
-                n = len(seq_ids)
                 if sampling_params.has_aici:
-                    bias_idx = mapping[seq_ids[0]]
-                    logits[logits_row_idx:logits_row_idx +
-                           n] += bias[bias_idx:bias_idx + n]
-                logits_row_idx += n
+                    for id in seq_ids:
+                        r = mid_results.get(id)
+                        if r and len(r.branches) >= 1:
+                            assert len(r.branches) <= 1, "Only one branch is supported"
+                            mask = r.branches[0].mask
+                            if mask is not None:
+                                logits[logits_row_idx] += bias[mask]
+                        logits_row_idx += 1
+                else:
+                    logits_row_idx += len(seq_ids)
 
     # list of indices in logits that will be set to -inf
     logits_to_penalize = []

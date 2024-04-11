@@ -884,8 +884,6 @@ class Scheduler:
 
     def schedule(self) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs]:
         runner = self.aici_runner
-        if runner:
-            runner.exec_post_pre()
 
         # Schedule sequence groups.
         # This function call changes the internal states of the scheduler
@@ -909,13 +907,6 @@ class Scheduler:
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
                 if seq_group.sampling_params.has_aici:
-                    suspend, num_forks, ff_tokens = runner.pre_status(seq_id)
-                    assert not suspend, "suspend not supported yet"
-                    assert len(ff_tokens) == 0, "ff_tokens not supported yet"
-                    if num_forks == 0:
-                        seq.status = SequenceStatus.FINISHED_STOPPED
-                        continue
-                    assert num_forks <= 1, "forking not supported yet"
                     runner.add_mid(seq_id)
                 seq_data[seq_id] = seq.data
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)

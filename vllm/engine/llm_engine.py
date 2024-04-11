@@ -502,11 +502,18 @@ class LLMEngine:
                                    last_child_sample.logprobs)
             child_seqs.append((parent, parent))
 
+        if self.scheduler.aici_runner:
+            to_stop = self.scheduler.aici_runner.get_seqs_to_stop()
+        else:
+            to_stop = set()
+
         for seq, _ in child_seqs:
             if seq_group.sampling_params.detokenize:
                 self.detokenizer.decode_sequence_inplace(
                     seq, seq_group.sampling_params)
             self._check_stop(seq, seq_group.sampling_params)
+            if seq.seq_id in to_stop:
+                seq.status = SequenceStatus.FINISHED_STOPPED
 
         # Non-beam search case
         if not seq_group.sampling_params.use_beam_search:
