@@ -48,4 +48,4 @@ jobs:
               context: .
               target: vllm-openai
               push: true
-              tags: ghcr.io/neuralmagic/nm-vllm-openai:${{ steps.extract_tag.outputs.tag }},ghcr.io/neuralmagic/nm-vllm-openai:latest
+              tags: ghcr.io/neuralmagic/nm-vllm-openai:${{ steps.extract_tag.outputs.tag }}
