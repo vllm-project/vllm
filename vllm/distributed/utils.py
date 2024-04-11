@@ -62,7 +62,7 @@ def _can_actually_p2p(idx_a, idx_b):
     a = torch.randn(5, device=dev_i) + 123.0
     b = a.to(dev_j)
     c = b.to(dev_i)
-    return torch.all(a == c)
+    return torch.all(a == c).cpu().item()
 
 
 _gpu_p2p_access_cache = None
