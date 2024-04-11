@@ -58,14 +58,14 @@ def gpu_p2p_access_check(i: int, j: int) -> bool:
         cuda_visible_devices = ",".join(str(i) for i in range(num_dev))
     path = os.path.expanduser(
         f"~/.config/vllm/gpu_p2p_access_cache_for_{cuda_visible_devices}.json")
-    if os.parh.exists(path):
+    if os.path.exists(path):
         with open(path, "r") as f:
             cache = json.load(f)
     else:
         cache = {}
-        for i in range(num_dev):
-            for j in range(num_dev):
-                cache[(i, j)] = torch.cuda.can_device_access_peer(i, j)
+        for _i in range(num_dev):
+            for _j in range(num_dev):
+                cache[f"{_i}->{_j}"] = torch.cuda.can_device_access_peer(_i, _j)
         with open(path, "w") as f:
-            json.dump(cache, f)
-    return cache[(i, j)]
+            json.dump(cache, f, indent=4)
+    return cache[f"{i}->{j}"]
