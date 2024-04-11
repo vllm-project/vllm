@@ -80,13 +80,8 @@ def _which_attn_to_use(dtype: torch.dtype) -> _Backend:
         return _Backend.XFORMERS
 
     backend_by_env_var = os.getenv(VLLM_ATTENTION_BACKEND)
-    if backend_by_env_var == "XFORMER":
-        return _Backend.XFORMERS
-    elif backend_by_env_var == "FLASH":
-        return _Backend.FLASH_ATTN
-    elif backend_by_env_var is None:
+    if backend_by_env_var is not None:
+        return _Backend[backend_by_env_var]
+
         # Default case.
-        return _Backend.FLASH_ATTN
-    else:
-        raise AssertionError(
-            f"{VLLM_ATTENTION_BACKEND}={backend_by_env_var} is not supported.")
+    return _Backend.FLASH_ATTN
