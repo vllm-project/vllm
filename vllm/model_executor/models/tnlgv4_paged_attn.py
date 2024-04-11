@@ -131,7 +131,6 @@ def _fwd_kernel_inner_with_blocktable(
     LAST_K_BLOCK: tl.constexpr,
     BLOCK_M_LOADING: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    M_LT_N: tl.constexpr,
 ):    
     start_n = k_block_id * BLOCK_N
     # -- compute qk ----
@@ -141,7 +140,7 @@ def _fwd_kernel_inner_with_blocktable(
     qk *= sm_scale
 
     # the following is needed only when LAST_K_BLOCK or BLOCK_M < BLOCK_N
-    if LAST_K_BLOCK | M_LT_N:
+    if LAST_K_BLOCK:
         qk += tl.where(offs_m[:, None] + past_len >= (start_n + offs_n[None, :]), 0, float('-inf'))
 
     # -- compute m_ij, p, l_ij
@@ -172,11 +171,6 @@ def _fwd_kernel_inner_with_blocktable(
     return acc, l_i, m_i
 
 
-@triton.heuristics(
-    {
-        'M_LT_N': lambda kwargs: kwargs['BLOCK_M'] < kwargs['BLOCK_N'],
-    }
-)
 @triton.jit
 def _fwd_kernel_batch_inference_with_blocktable(
     Q, K, V, Out,
@@ -213,7 +207,6 @@ def _fwd_kernel_batch_inference_with_blocktable(
     BLOCK_D: tl.constexpr,
     BLOCK_M_LOADING: tl.constexpr,
     EVEN_D: tl.constexpr,
-    M_LT_N: tl.constexpr
 ):
     '''
     NOTATION:
@@ -289,7 +282,7 @@ def _fwd_kernel_batch_inference_with_blocktable(
     V += off_h_for_kv * stride_vh
 
     # TABLE_BLOCK_SIZE = BLOCK_N
-    for k_block_col_idx in range(k_block_start, k_block_end):
+    for k_block_col_idx in range(k_block_start, k_block_end - 1):
         k_block_id = tl.load(layout_col_ptr +  off_h * layout_col_stride_h + k_block_col_idx * layout_col_stride_m).to(tl.int32)
 
         # x = 8
@@ -307,92 +300,43 @@ def _fwd_kernel_batch_inference_with_blocktable(
         k_ptrs = tl.reshape(k_ptrs, (D_HEAD, BLOCK_N))
         k = tl.load(k_ptrs)
         v = tl.load(v_ptrs)
-        
-        tl.store(KO + tl.arange(0, BLOCK_N)[None, :] * stride_ko1 + tl.arange(0, D_HEAD)[:, None] * stride_ko2, k)
-        # for ki in range(1, block_factor):
-        #     bt_id = tl.load(block_tables + off_z * stride_btb + (k_block_id * block_factor + ki) * stride_btt)
-        #     k_ptrs = K + (bt_id + tl.arange(0, TABLE_BLOCK_SIZE))[:, None] * stride_kt + off_h_for_kv * stride_kh + \
-        #         (tl.arange(0, D_HEAD // x) * stride_kd + tl.arange(0, x) * stride_kx)[None, :]
-        #     v_ptrs = V + (bt_id + tl.arange(0, TABLE_BLOCK_SIZE))[:, None] * stride_vt + off_h_for_kv * stride_vh + \
-        #         tl.arange(0, D_HEAD)[None, :] * stride_vd
-        
-        #     k2 = tl.load(k_ptrs)
-        #     v2 = tl.load(v_ptrs)
-        #     k = tl.cat(k, k2)
-        #     v = tl.cat(v, v2)
+
+        acc, l_i, m_i = _fwd_kernel_inner_with_blocktable(
+                acc, l_i, m_i,
+                q, k, v, Q,
+                k_block_id,
+                offs_m, offs_n,
+                sm_scale,
+                past_len,
+                False,
+                BLOCK_M_LOADING,
+                BLOCK_N)
 
 
-        start_n = k_block_id * BLOCK_N
-        # tl.device_print('>> bt_id', bt_id)
-        # tl.device_print('>> k_block_id', k_block_id)
-        # tl.device_print('>> k_block_col_idx', k_block_col_idx)
-        # tl.device_print('>> q_pbid', q_pbid)
+    k_block_id = tl.load(layout_col_ptr +  off_h * layout_col_stride_h + (k_block_end - 1) * layout_col_stride_m).to(tl.int32)
 
+    bt_id = tl.load(block_tables + off_z * stride_btb + k_block_id * stride_btt)
 
-        # -- compute qk ----
-        qk = tl.zeros([BLOCK_N, BLOCK_N], dtype=tl.float32)
-        qk += tl.dot(q, k)
-        tl.store(QK + tl.arange(0, BLOCK_N)[:, None] * stride_qk1 + tl.arange(0, BLOCK_N)[None, :] * stride_qk2, qk)
-
-        qk *= sm_scale
-
-        # the following is needed only when LAST_K_BLOCK or BLOCK_M < BLOCK_N
-        # if LAST_K_BLOCK | M_LT_N:
-        qk += tl.where(offs_m[:, None] + past_len >= (start_n + offs_n[None, :]), 0, float('-inf'))
-
-        # -- compute m_ij, p, l_ij
-        m_ij = tl.max(qk, 1)
-        p = tl.exp(qk - m_ij[:, None])
-
-
-
-        l_ij = tl.sum(p, 1)
-        # -- update m_i and l_i
-        m_i_new = tl.maximum(m_i, m_ij)
-        alpha = tl.exp(m_i - m_i_new)
-        beta = tl.exp(m_ij - m_i_new)
-        l_i_new = alpha * l_i + beta * l_ij
-        # -- update output accumulator --
-        # scale p
-        p_scale = beta / l_i_new
-        p = p * p_scale[:, None]
-        # scale acc
-        acc_scale = l_i / l_i_new * alpha
-        acc = acc * acc_scale[:, None]
-
-        p = p.to(Q.dtype.element_ty)
-        # update acc
-
-        acc += tl.dot(p, v)
-        # update m_i and l_i
-        l_i = l_i_new
-        m_i = m_i_new
-
-        # acc, l_i, m_i = _fwd_kernel_inner_with_blocktable(
-        #         acc, l_i, m_i,
-        #         q, k, v, Q,
-        #         k_block_id,
-        #         offs_m, offs_n,
-        #         sm_scale,
-        #         past_len,
-        #         True,
-        #         BLOCK_M_LOADING,
-        #         BLOCK_N,
-        #         M_LT_N)
-
+    k_ptrs = K + bt_id * stride_kb + tl.arange(0, BLOCK_N)[None, None] * stride_kt + \
+        tl.arange(0, D_HEAD // 8)[:, None, None] * stride_kd + tl.arange(0, 8)[None, :, None] * stride_kx
+    v_ptrs = V + bt_id * stride_vb + tl.arange(0, BLOCK_N)[:, None] * stride_vt + \
+        tl.arange(0, D_HEAD)[None, :] * stride_vd
     
-        # acc, l_i, m_i = _fwd_kernel_inner_with_blocktable(
-        #         acc, l_i, m_i,
-        #         q, k, v, Q,
-        #         k_block_id,
-        #         offs_m, offs_n,
-        #         sm_scale,
-        #         past_len,
-        #         False,
-        #         BLOCK_M_LOADING,
-        #         BLOCK_N,
-        #         M_LT_N)
-        
+    k_ptrs = tl.reshape(k_ptrs, (D_HEAD, BLOCK_N))
+    k = tl.load(k_ptrs)
+    v = tl.load(v_ptrs)
+    
+    acc, l_i, m_i = _fwd_kernel_inner_with_blocktable(
+            acc, l_i, m_i,
+            q, k, v, Q,
+            k_block_id,
+            offs_m, offs_n,
+            sm_scale,
+            past_len,
+            True,
+            BLOCK_M_LOADING,
+            BLOCK_N)
+    
 
     # write output
     if EVEN_D:
