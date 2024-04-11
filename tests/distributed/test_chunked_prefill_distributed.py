@@ -27,6 +27,7 @@ MODELS = [
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("chunked_prefill_token_size", [16])
+@pytest.mark.parametrize("worker_use_ray", [False, True])
 def test_models(
     hf_runner,
     vllm_runner,
@@ -35,6 +36,7 @@ def test_models(
     dtype: str,
     max_tokens: int,
     chunked_prefill_token_size: int,
+    worker_use_ray: bool,
 ) -> None:
     # Add a chunked prefill config.
     max_num_seqs = min(chunked_prefill_token_size, 256)
@@ -53,6 +55,7 @@ def test_models(
         max_num_seqs=max_num_seqs,
         enable_chunked_prefill=enable_chunked_prefill,
         max_num_batched_tokens=max_num_batched_tokens,
+        worker_use_ray=worker_use_ray,
     )
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
