@@ -48,6 +48,11 @@ python tensorize_vllm_model.py \
    --path-to-tensors s3://my-bucket/vllm/EleutherAI/gpt-j-6B/vllm/model.tensors
 
 Which downloads the model tensors from your S3 bucket and deserializes them.
+To provide S3 credentials, you can provide `--s3-access-key-id` and 
+`--s3-secret-access-key`, as well as `--s3-endpoint` as CLI args to this script,
+the OpenAI entrypoint, as arguments for LLM(), or as environment variables
+in the form of `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, and `S3_ENDPOINT`.
+
 
 You can also provide a `--keyfile` argument to decrypt the model weights if 
 they were serialized with encryption.
