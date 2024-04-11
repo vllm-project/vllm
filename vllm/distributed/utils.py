@@ -4,7 +4,7 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 import json
 import os
-from typing import Sequence, Optional, Dict
+from typing import Dict, Optional, Sequence
 
 import torch
 import torch.distributed as dist
