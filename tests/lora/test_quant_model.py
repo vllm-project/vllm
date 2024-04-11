@@ -69,7 +69,6 @@ def test_quant_model_lora(tinyllama_lora_files, model, tp_size):
                    max_model_len=400,
                    tensor_parallel_size=tp_size,
                    quantization=model.quantization,
-                   gpu_memory_utilization=0.4,
                    trust_remote_code=True)
 
     if model.quantization is None:
@@ -161,7 +160,6 @@ def test_quant_model_tp_equality(tinyllama_lora_files, model):
                        max_loras=4,
                        tensor_parallel_size=1,
                        quantization=model.quantization,
-                       gpu_memory_utilization=0.3,
                        trust_remote_code=True)
     output_tp1 = do_sample(llm_tp1, tinyllama_lora_files, lora_id=1)
 
@@ -173,7 +171,6 @@ def test_quant_model_tp_equality(tinyllama_lora_files, model):
                        max_num_seqs=16,
                        max_loras=4,
                        tensor_parallel_size=2,
-                       gpu_memory_utilization=0.3,
                        quantization=model.quantization)
     output_tp2 = do_sample(llm_tp2, tinyllama_lora_files, lora_id=1)
 
@@ -225,6 +222,3 @@ def test_llama_lora_warmup(model):
         "conservative than without lora, therefore the number of "
         "memory blocks for the KV cache should be "
         "less when using lora than when not using lora")
-
-
-# pytest.main(["test_llama.py::test_llama_tensor_parallel_equality"])
