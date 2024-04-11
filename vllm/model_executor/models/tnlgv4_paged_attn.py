@@ -71,13 +71,13 @@ def blocksparse_flash_attn_varlen_fwd_with_blocktable(
     # grid = (1, 1, 1)
 
 
-    qk = torch.zeros((vllm_block_size, vllm_block_size), dtype=torch.float32, device=q.device)
-    ko = torch.zeros((vllm_block_size, head_size)).type_as(k)
+    # qk = torch.zeros((vllm_block_size, vllm_block_size), dtype=torch.float32, device=q.device)
+    # ko = torch.zeros((vllm_block_size, head_size)).type_as(k)
 
     _fwd_kernel_batch_inference_with_blocktable[grid](
     q, k, v, out,
-    qk, 
-    ko,
+    # qk, 
+    # ko,
 
     sm_scale,
     q_batch_starts,
@@ -92,8 +92,8 @@ def blocksparse_flash_attn_varlen_fwd_with_blocktable(
     *v.stride(),
     *out.stride(),
 
-    *qk.stride(),
-    *ko.stride(),
+    # *qk.stride(),
+    # *ko.stride(),
 
     layout_crow_indices,
     layout_col_indices,
@@ -118,6 +118,38 @@ def blocksparse_flash_attn_varlen_fwd_with_blocktable(
     # print(f'...{ko=}')
     return out
 
+
+@triton.jit
+def _load_kv(
+    k_block_id,
+    K, V, Q,
+    block_tables,
+    stride_kb, stride_kd, stride_kt, stride_kx,
+    stride_vb, stride_vd, stride_vt,
+    stride_btb, stride_btt,
+    off_z, 
+    kv_scale,
+    BLOCK_N: tl.constexpr,
+    D_HEAD: tl.constexpr,
+    X: tl.constexpr,
+    IS_FP8: tl.constexpr,
+    ):
+    bt_id = tl.load(block_tables + off_z * stride_btb + k_block_id * stride_btt)
+
+    k_ptrs = K + bt_id * stride_kb + tl.arange(0, BLOCK_N)[None, None] * stride_kt + \
+        tl.arange(0, D_HEAD // X)[:, None, None] * stride_kd + tl.arange(0, X)[None, :, None] * stride_kx
+    v_ptrs = V + bt_id * stride_vb + tl.arange(0, BLOCK_N)[:, None] * stride_vt + \
+        tl.arange(0, D_HEAD)[None, :] * stride_vd
+    
+    k_ptrs = tl.reshape(k_ptrs, (D_HEAD, BLOCK_N))
+    k = tl.load(k_ptrs)
+    v = tl.load(v_ptrs)
+
+    if IS_FP8:
+        k = k.to(Q.dtype.element_ty) * kv_scale
+        v = v.to(Q.dtype.element_ty) * kv_scale
+
+    return k, v
 
 
 @triton.jit
@@ -175,8 +207,8 @@ def _fwd_kernel_inner_with_blocktable(
 def _fwd_kernel_batch_inference_with_blocktable(
     Q, K, V, Out,
 
-    QK,
-    KO,
+    # QK,
+    # KO,
     sm_scale,
     q_batch_starts,
     q_batch_ends,
@@ -189,8 +221,8 @@ def _fwd_kernel_batch_inference_with_blocktable(
     stride_kb, stride_kh, stride_kd, stride_kt, stride_kx,
     stride_vb, stride_vh, stride_vd, stride_vt,
     stride_ot, stride_oh, stride_od,
-    stride_qk1, stride_qk2,
-    stride_ko1, stride_ko2,
+    # stride_qk1, stride_qk2,
+    # stride_ko1, stride_ko2,
 
     layout_crow_ptr,
     layout_col_ptr,
@@ -285,22 +317,21 @@ def _fwd_kernel_batch_inference_with_blocktable(
     for k_block_col_idx in range(k_block_start, k_block_end - 1):
         k_block_id = tl.load(layout_col_ptr +  off_h * layout_col_stride_h + k_block_col_idx * layout_col_stride_m).to(tl.int32)
 
-        # x = 8
-        # block_factor = BLOCK_N // TABLE_BLOCK_SIZE
-
-        # ki = 0
-        # bt_id = tl.load(block_tables + off_z * stride_btb + (k_block_id * block_factor + ki) * stride_btt)
-        bt_id = tl.load(block_tables + off_z * stride_btb + k_block_id * stride_btt)
-
-        k_ptrs = K + bt_id * stride_kb + tl.arange(0, BLOCK_N)[None, None] * stride_kt + \
-            tl.arange(0, D_HEAD // 8)[:, None, None] * stride_kd + tl.arange(0, 8)[None, :, None] * stride_kx
-        v_ptrs = V + bt_id * stride_vb + tl.arange(0, BLOCK_N)[:, None] * stride_vt + \
-            tl.arange(0, D_HEAD)[None, :] * stride_vd
+        k, v = _load_kv(
+            k_block_id,
+            K, V, Q,
+            block_tables,
+            stride_kb, stride_kd, stride_kt, stride_kx,
+            stride_vb, stride_vd, stride_vt,
+            stride_btb, stride_btt,
+            off_z, 
+            1.,  # kv_scale
+            BLOCK_N,
+            D_HEAD,
+            8, # X = 16/ #bytes of k dtype
+            False # IS_FP8,
+            )
         
-        k_ptrs = tl.reshape(k_ptrs, (D_HEAD, BLOCK_N))
-        k = tl.load(k_ptrs)
-        v = tl.load(v_ptrs)
-
         acc, l_i, m_i = _fwd_kernel_inner_with_blocktable(
                 acc, l_i, m_i,
                 q, k, v, Q,
@@ -314,18 +345,21 @@ def _fwd_kernel_batch_inference_with_blocktable(
 
 
     k_block_id = tl.load(layout_col_ptr +  off_h * layout_col_stride_h + (k_block_end - 1) * layout_col_stride_m).to(tl.int32)
+    k, v = _load_kv(
+        k_block_id,
+        K, V, Q,
+        block_tables,
+        stride_kb, stride_kd, stride_kt, stride_kx,
+        stride_vb, stride_vd, stride_vt,
+        stride_btb, stride_btt,
+        off_z, 
+        1.,  # kv_scale
+        BLOCK_N,
+        D_HEAD,
+        8, # X = 16/ #bytes of k dtype
+        False # IS_FP8,
+        )
 
-    bt_id = tl.load(block_tables + off_z * stride_btb + k_block_id * stride_btt)
-
-    k_ptrs = K + bt_id * stride_kb + tl.arange(0, BLOCK_N)[None, None] * stride_kt + \
-        tl.arange(0, D_HEAD // 8)[:, None, None] * stride_kd + tl.arange(0, 8)[None, :, None] * stride_kx
-    v_ptrs = V + bt_id * stride_vb + tl.arange(0, BLOCK_N)[:, None] * stride_vt + \
-        tl.arange(0, D_HEAD)[None, :] * stride_vd
-    
-    k_ptrs = tl.reshape(k_ptrs, (D_HEAD, BLOCK_N))
-    k = tl.load(k_ptrs)
-    v = tl.load(v_ptrs)
-    
     acc, l_i, m_i = _fwd_kernel_inner_with_blocktable(
             acc, l_i, m_i,
             q, k, v, Q,
