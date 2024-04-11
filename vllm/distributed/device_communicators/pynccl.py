@@ -21,6 +21,7 @@
 
 import ctypes
 import datetime
+import glob
 import os
 
 # ===================== import region =====================
@@ -34,18 +35,27 @@ logger = init_logger(__name__)
 
 so_file = os.environ.get("VLLM_NCCL_SO_PATH", "")
 
+# check if we have vllm-managed nccl
+vllm_nccl_path = None
+if torch.version.cuda is not None:
+    cuda_major = torch.version.cuda.split(".")[0]
+    path = os.path.expanduser(
+        f"~/.config/vllm/nccl/cu{cuda_major}/libnccl.so.*")
+    files = glob.glob(path)
+    vllm_nccl_path = files[0] if files else None
+
 # manually load the nccl library
 if so_file:
     logger.info(
         f"Loading nccl from environment variable VLLM_NCCL_SO_PATH={so_file}")
 else:
     if torch.version.cuda is not None:
-        so_file = "libnccl.so.2"
+        so_file = vllm_nccl_path or "libnccl.so.2"
     elif torch.version.hip is not None:
         so_file = "librccl.so.1"
     else:
         raise ValueError("NCCL only supports CUDA and ROCm backends.")
-    logger.debug(f"Loading nccl from library {so_file}")
+    logger.info(f"Loading nccl from library {so_file}")
 
 try:
     nccl = ctypes.CDLL(so_file)
@@ -226,22 +236,25 @@ class NCCLCommunicator:
         if local_rank == -1:
             local_rank = self.rank
         self.local_rank = local_rank
-        torch.cuda.set_device(local_rank)
-        if rank == 0:
+        # don't use these args, as they can be -1
+        # use `self.rank`, `self.local_rank` and `self.world_size` instead
+        del world_size, rank, local_rank
+        torch.cuda.set_device(self.local_rank)
+        if self.rank == 0:
             self.unique_id = ncclGetUniqueId()
         else:
             self.unique_id = NcclUniqueId()
-        tensor = torch.ByteTensor(list(
-            self.unique_id.internal)).cuda(local_rank)
+        tensor = torch.ByteTensor(list(self.unique_id.internal)).cuda(
+            self.local_rank)
         dist.broadcast(tensor, src=0)
         byte_list = tensor.cpu().tolist()
         for i, byte in enumerate(byte_list):
             self.unique_id.internal[i] = byte
         self.comm = ctypes.c_void_p()
-        result = _c_ncclCommInitRank(ctypes.byref(self.comm), world_size,
-                                     self.unique_id, rank)
+        result = _c_ncclCommInitRank(ctypes.byref(self.comm), self.world_size,
+                                     self.unique_id, self.rank)
         assert result == 0
-        self.stream = torch.cuda.Stream(device=f"cuda:{local_rank}")
+        self.stream = torch.cuda.Stream(device=f"cuda:{self.local_rank}")
 
     def all_reduce(self,
                    tensor: torch.Tensor,
@@ -261,4 +274,6 @@ class NCCLCommunicator:
         # `dist` module might have been already destroyed
         if hasattr(dist, 'destroy_process_group'):
             dist.destroy_process_group()
-        _c_ncclCommDestroy(self.comm)
+        # function might have been already destroyed
+        if _c_ncclCommDestroy is not None:
+            _c_ncclCommDestroy(self.comm)

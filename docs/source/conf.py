@@ -11,12 +11,9 @@
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 
 import logging
-import os
 import sys
 
 from sphinx.ext import autodoc
-
-sys.path.insert(0, os.path.abspath(os.path.join('..', '..')))
 
 logger = logging.getLogger(__name__)
 
