@@ -24,5 +24,5 @@ docker run --device /dev/kfd --device /dev/dri --network host \
 docker run --device /dev/kfd --device /dev/dri --network host \
 	--name rocm_test_llm_engine_example rocm python3 vllm/examples/llm_engine_example.py
 docker run --device /dev/kfd --device /dev/dri --network host \
-	--name rocm_test_llava_example rocm python3 vllm/examples/llava_example.py
+	--name rocm_test_llava_example rocm /bin/bash -c "pip install awscli; python3 vllm/examples/llava_example.py"
 
