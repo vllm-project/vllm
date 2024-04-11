@@ -136,8 +136,19 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
 
     def _load_lora(self, lora_request: LoRARequest) -> LoRAModel:
         try:
+            model = self._lora_manager.model
+            supported_lora_modules = model.supported_lora_modules
+            packed_modules_mapping = model.packed_modules_mapping
+            expected_lora_modules = []
+            for module in supported_lora_modules:
+                if module in packed_modules_mapping:
+                    expected_lora_modules.extend(
+                        packed_modules_mapping[module])
+                else:
+                    expected_lora_modules.append(module)
             lora = self._lora_model_cls.from_local_checkpoint(
                 lora_request.lora_local_path,
+                expected_lora_modules,
                 lora_model_id=lora_request.lora_int_id,
                 device="cpu",
                 dtype=self.lora_config.lora_dtype,
