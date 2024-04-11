@@ -170,6 +170,7 @@ class LLM:
             multi_modal_data.data = multi_modal_data.data.to(torch.float16)
 
         # Add requests to the engine.
+        assert prompt_token_ids is not None
         num_requests = len(prompts) if prompts is not None else len(
             prompt_token_ids)
         for i in range(num_requests):

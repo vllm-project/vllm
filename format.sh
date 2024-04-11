@@ -93,9 +93,12 @@ fi
 echo 'vLLM yapf: Done'
 
 # Run mypy
-# TODO(zhuohan): Enable mypy
-# echo 'vLLM mypy:'
-# mypy
+echo 'vLLM mypy:'
+mypy vllm/attention/*.py --follow-imports=skip --config-file pyproject.toml
+mypy vllm/core/*.py --follow-imports=skip --config-file pyproject.toml
+mypy vllm/distributed/*.py --follow-imports=skip --config-file pyproject.toml
+mypy vllm/entrypoints/*.py --follow-imports=skip --config-file pyproject.toml
+mypy vllm/executor/*.py --follow-imports=skip --config-file pyproject.toml
 
 CODESPELL_EXCLUDES=(
     '--skip' '*docs/source/_build/**'

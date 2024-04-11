@@ -276,7 +276,7 @@ class RayGPUExecutor(ExecutorBase):
         self,
         method: str,
         *args,
-        driver_args: Optional[List[Any]] = None,
+        driver_args: Optional[tuple[Any, ...]] = None,
         driver_kwargs: Optional[Dict[str, Any]] = None,
         max_concurrent_workers: Optional[int] = None,
         use_ray_compiled_dag: bool = False,
@@ -291,6 +291,7 @@ class RayGPUExecutor(ExecutorBase):
         if use_ray_compiled_dag:
             # Right now, compiled DAG can only accept a single
             # input. TODO(sang): Fix it.
+            assert self.forward_dag is not None
             output_channels = self.forward_dag.execute(1)
         else:
             # Start the ray workers first.
@@ -369,7 +370,7 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
         self,
         method: str,
         *args,
-        driver_args: Optional[List[Any]] = None,
+        driver_args: Optional[tuple[Any, ...]] = None,
         driver_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> Any:
