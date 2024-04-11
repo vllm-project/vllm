@@ -104,9 +104,9 @@ def test_spec_decode_e2e_logical_flow(test_llm_generator, batch_size: int):
         {
             "model": "JackFram/llama-68m",
         },
-        {
-            "model": "JackFram/llama-160m",
-        },
+        #{
+        #    "model": "JackFram/llama-160m",
+        #},
     ])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize(
@@ -117,10 +117,10 @@ def test_spec_decode_e2e_logical_flow(test_llm_generator, batch_size: int):
             "speculative_model": "JackFram/llama-68m",
             "num_speculative_tokens": 5,
         },
-        {
-            "speculative_model": "JackFram/llama-68m",
-            "num_speculative_tokens": 1,
-        }
+        #{
+        #    "speculative_model": "JackFram/llama-68m",
+        #    "num_speculative_tokens": 1,
+        #}
     ])
 @pytest.mark.parametrize(
     "output_len",

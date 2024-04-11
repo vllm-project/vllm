@@ -316,6 +316,10 @@ class RejectionSampler(nn.Module):
         self.num_emitted_tokens += (output_with_bonus_tokens != -1).sum()
         self.num_draft_tokens += batch_size * k
 
+        print(f'{self.num_accepted_tokens=}')
+        print(f'{self.num_emitted_tokens=}')
+        print(f'{self.num_draft_tokens=}')
+
         return output_with_bonus_tokens
 
     def _raise_if_incorrect_shape(
