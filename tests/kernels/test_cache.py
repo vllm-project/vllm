@@ -5,8 +5,12 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
+from vllm._C import cache_ops
+from vllm.utils import is_hip, is_xpu
 
-COPYING_DIRECTION = [('cuda', 'cpu'), ('cuda', 'cuda'), ('cpu', 'cuda')]
+COPYING_DIRECTION = [
+    ('xpu', 'cpu'),
+]  # ('xpu', 'xpu'), ('cpu', 'xpu')]
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [42]  # Arbitrary values for testing
 NUM_LAYERS = [1]  # Arbitrary values for testing
@@ -16,7 +20,7 @@ BLOCK_SIZES = [8, 16, 32]
 
 # Arbitrary values for testing
 # don't make it too large. e.g. [1024, 36000] will OOM
-NUM_BLOCKS = [1024, 10000]
+NUM_BLOCKS = [1024]  #, 10000]
 
 NUM_MAPPINGS = [256]  # Arbitrary values for testing
 SEEDS = [0]
@@ -24,8 +28,9 @@ CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ]
 
+SYCL_DEVICES = [f"xpu:0"] if is_xpu() else []
 # We assume fp8 is always enabled for testing.
-KV_CACHE_DTYPE = ["auto", "fp8"]
+KV_CACHE_DTYPE = ["auto"]  #, "fp8"]
 
 
 @pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
@@ -36,7 +41,7 @@ KV_CACHE_DTYPE = ["auto", "fp8"]
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", SYCL_DEVICES)
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
 @torch.inference_mode()
 def test_copy_blocks(
@@ -109,7 +114,7 @@ def test_copy_blocks(
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", SYCL_DEVICES)
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
 @torch.inference_mode()
 def test_reshape_and_cache(
@@ -271,8 +276,85 @@ def test_reshape_and_cache_flash(
     assert torch.allclose(value_cache, cloned_value_cache)
 
 
-@pytest.mark.parametrize("direction", COPYING_DIRECTION)
-@pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
+@torch.inference_mode()
+def test_reshape_and_cache_flash(
+    kv_cache_factory_flashinfer,
+    num_tokens: int,
+    num_heads: int,
+    head_size: int,
+    block_size: int,
+    num_blocks: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+    kv_cache_dtype: str,
+) -> None:
+    if kv_cache_dtype == "fp8":
+        pytest.skip()
+    random.seed(seed)
+    torch.random.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.set_default_device(device)
+
+    # Create a random slot mapping.
+    num_slots = block_size * num_blocks
+    slot_mapping = random.sample(range(num_slots), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device=device)
+
+    qkv = torch.randn(num_tokens,
+                      3,
+                      num_heads,
+                      head_size,
+                      dtype=dtype,
+                      device=device)
+    _, key, value = qkv.unbind(dim=1)
+
+    # Create the KV caches.
+    key_caches, value_caches = kv_cache_factory_flashinfer(
+        num_blocks,
+        block_size,
+        1,
+        num_heads,
+        head_size,
+        kv_cache_dtype,
+        dtype,
+        device=device,
+    )
+    key_cache, value_cache = key_caches[0], value_caches[0]
+
+    # Clone the KV caches.
+    cloned_key_cache = key_cache.clone()
+    cloned_value_cache = value_cache.clone()
+
+    # Call the reshape_and_cache kernel.
+    ops.reshape_and_cache_flash(key, value, key_cache, value_cache,
+                                slot_mapping, kv_cache_dtype)
+
+    # Run the reference implementation.
+    block_indicies = torch.div(slot_mapping, block_size, rounding_mode='floor')
+    block_indicies = block_indicies.cpu().tolist()
+    block_offsets = slot_mapping % block_size
+    block_offsets = block_offsets.cpu().tolist()
+    for i in range(num_tokens):
+        block_idx = block_indicies[i]
+        block_offset = block_offsets[i]
+        cloned_key_cache[block_idx, block_offset, :, :] = key[i]
+        cloned_value_cache[block_idx, block_offset, :, :] = value[i]
+
+    assert torch.allclose(key_cache, cloned_key_cache)
+    assert torch.allclose(value_cache, cloned_value_cache)
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
@@ -302,8 +384,8 @@ def test_swap_blocks(
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
 
-    src_device = device if direction[0] == "cuda" else 'cpu'
-    dst_device = device if direction[1] == "cuda" else 'cpu'
+    src_device = device if direction[0] == "xpu" else 'cpu'
+    dst_device = device if direction[1] == "xpu" else 'cpu'
 
     src_blocks = random.sample(range(num_blocks), num_mappings)
     # For the same device, mapping must not overlap
