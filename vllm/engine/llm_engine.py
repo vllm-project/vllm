@@ -127,6 +127,8 @@ class LLMEngine:
             speculative_config=speculative_config,
         )
 
+        self._initialize_kv_caches()
+
         # If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
             from vllm.model_executor.model_loader import (
@@ -177,6 +179,26 @@ class LLMEngine:
                 local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
                 labels=dict(model_name=model_config.model))
             self.stat_logger.info("cache_config", self.cache_config)
+
+    def _initialize_kv_caches(self) -> None:
+        """Initialize the KV cache in the worker(s).
+
+        The workers will determine the number of blocks in both the GPU cache
+        and the swap CPU cache.
+        """
+        num_gpu_blocks, num_cpu_blocks = (
+            self.model_executor.determine_num_available_blocks())
+
+        if self.cache_config.num_gpu_blocks_override is not None:
+            num_gpu_blocks_override = self.cache_config.num_gpu_blocks_override
+            logger.info(f"Overriding {num_gpu_blocks=} with "
+                        f"{num_gpu_blocks_override=}")
+            num_gpu_blocks = num_gpu_blocks_override
+
+        self.cache_config.num_gpu_blocks = num_gpu_blocks
+        self.cache_config.num_cpu_blocks = num_cpu_blocks
+
+        self.model_executor.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     @classmethod
     def from_engine_args(
@@ -611,7 +633,10 @@ class LLMEngine:
             seq_group = scheduled_seq_group.seq_group
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
-            self._process_sequence_group_outputs(seq_group, outputs)
+            # If uncomputed tokens > 0, it means prefill is chunked.
+            # We don't need to process outputs in that case.
+            if seq_group.get_num_uncomputed_tokens() == 0:
+                self._process_sequence_group_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.
         self.scheduler.free_finished_seq_groups()
