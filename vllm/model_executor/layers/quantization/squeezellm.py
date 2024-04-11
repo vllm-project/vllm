@@ -68,10 +68,11 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: SqueezeLLMConfig):
         self.quant_config = quant_config
 
-    def create_weights(self, input_size_per_partition: int,
+    def create_weights(self, layer: torch.nn.Module,
+                       input_size_per_partition: int,
                        output_size_per_partition: int, input_size: int,
-                       output_size: int,
-                       params_dtype: torch.dtype) -> Dict[str, Any]:
+                       output_size: int, params_dtype: torch.dtype,
+                       **extra_weight_attrs):
         if input_size_per_partition % self.quant_config.pack_factor != 0:
             raise ValueError(
                 "The input size is not aligned with the quantized "
@@ -103,17 +104,18 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
         set_weight_attrs(lookup_table, {
             "output_dim": 0,
         })
-        return {
-            "qweight": qweight,
-            "lookup_table": lookup_table,
-        }
+
+        layer.register_parameter("qweight", qweight)
+        set_weight_attrs(qweight, extra_weight_attrs)
+        layer.register_parameter("lookup_table", lookup_table)
+        set_weight_attrs(lookup_table, extra_weight_attrs)
 
     def apply_weights(self,
-                      weights: Dict[str, Any],
+                      layer: torch.nn.Module,
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        qweight = weights["qweight"]
-        lookup_table = weights["lookup_table"]
+        qweight = layer.qweight
+        lookup_table = layer.lookup_table
         out_shape = x.shape[:-1] + (qweight.shape[-1], )
         reshaped_x = x.reshape(-1, x.shape[-1])
         if is_hip():
@@ -126,5 +128,5 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
             ops.squeezellm_gemm(reshaped_x, qweight, out, lookup_table)
 
         if bias is not None:
-            out = out + bias
+            out.add_(bias)
         return out.reshape(out_shape)

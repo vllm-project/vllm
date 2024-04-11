@@ -73,7 +73,7 @@ def test_mixtral_moe(dtype: torch.dtype):
     ).cuda()
 
     # Load the weights
-    vllm_moe.gate.linear_weights["weight"][:] = hf_moe.gate.weight.data
+    vllm_moe.gate.weight.data[:] = hf_moe.gate.weight.data
     for i in range(config.num_local_experts):
         weights = (hf_moe.experts[i].w1.weight.data,
                    hf_moe.experts[i].w3.weight.data)

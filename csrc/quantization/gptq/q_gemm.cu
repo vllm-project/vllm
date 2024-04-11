@@ -2067,7 +2067,7 @@ void gptq_shuffle
     const at::cuda::OptionalCUDAGuard device_guard(device_of(q_weight));
     vllm::gptq::shuffle_exllama_weight(
         (uint32_t*) q_weight.data_ptr(),
-        q_perm.device().is_meta() ? NULL : (int*) q_perm.data_ptr(),
+        q_perm.device().is_meta() || q_perm.numel() == 0 ? NULL : (int*) q_perm.data_ptr(),
         q_weight.size(0) * 32 / bit,
         q_weight.size(1),
         bit
