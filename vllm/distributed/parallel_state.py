@@ -8,8 +8,6 @@ from typing import Optional
 
 import torch
 
-from vllm.model_executor.parallel_utils import pynccl_utils
-
 # Tensor model parallel group that the current rank belongs to.
 _TENSOR_MODEL_PARALLEL_GROUP = None
 # Pipeline model parallel group that the current rank belongs to.
@@ -41,9 +39,9 @@ _PIPELINE_GLOBAL_RANKS = None
 
 
 def init_distributed_environment(
-    world_size: int,
-    rank: int,
-    distributed_init_method: Optional[str] = None,
+    world_size: int = -1,
+    rank: int = -1,
+    distributed_init_method: str = "env://",
     local_rank: int = -1,
     backend: str = "nccl",
 ):
@@ -266,6 +264,7 @@ def destroy_model_parallel():
     _PIPELINE_MODEL_PARALLEL_GROUP = None
     global _PIPELINE_GLOBAL_RANKS
     _PIPELINE_GLOBAL_RANKS = None
+    from vllm.distributed.device_communicators import pynccl_utils
 
     # Destroy the pynccl states if any.
     pynccl_utils.destroy_process_group()
@@ -279,6 +278,7 @@ _ENABLE_PYNCCL_FOR_ALL_REDUCE = False
 
 @contextlib.contextmanager
 def with_pynccl_for_all_reduce():
+    from vllm.distributed.device_communicators import pynccl_utils
     """use pynccl instead of torch.distributed for all reduce"""
     tp_size = get_tensor_model_parallel_world_size()
     if tp_size == 1:

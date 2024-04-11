@@ -7,29 +7,17 @@ import torch.distributed
 from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
+from vllm.distributed import (broadcast_tensor_dict,
+                              ensure_model_parallel_initialized,
+                              init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
-from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.parallel_utils.communication_op import (
-    broadcast_tensor_dict)
-from vllm.model_executor.parallel_utils.parallel_state import (
-    ensure_model_parallel_initialized, init_distributed_environment)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.worker.model_runner import ModelRunner
+from vllm.worker.cpu_model_runner import CPUModelRunner
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase
 
 logger = init_logger(__name__)
-
-
-class CPUModelRunner(ModelRunner):
-
-    def load_model(self) -> None:
-        self.model = get_model(self.model_config,
-                               self.device_config,
-                               lora_config=self.lora_config,
-                               parallel_config=self.parallel_config,
-                               scheduler_config=self.scheduler_config)
 
 
 class CPUCacheEngine:

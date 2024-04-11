@@ -10,6 +10,12 @@ import torch.nn.functional as F
 from transformers import PretrainedConfig
 
 from vllm.config import LoRAConfig
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size,
+                              split_tensor_along_last_dim,
+                              tensor_model_parallel_all_gather,
+                              tensor_model_parallel_all_reduce,
+                              tensor_model_parallel_gather)
 from vllm.lora.punica import add_lora, add_lora_slice, bgmv
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
@@ -18,13 +24,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.parallel_utils.communication_op import (
-    tensor_model_parallel_all_gather, tensor_model_parallel_all_reduce,
-    tensor_model_parallel_gather)
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.utils import (
-    split_tensor_along_last_dim)
 
 if TYPE_CHECKING:
     pass
@@ -268,12 +267,13 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         added_tokens_mask = x > self.base_layer.org_vocab_size - 1
-        indices = self.embeddings_indices[1][:self.indices_len[3]].view_as(x)
+        embedding_len = self.indices_len[3]
+        indices = self.embeddings_indices[1][:embedding_len].view_as(x)
         full_lora_a_embeddings = F.embedding(
             x + indices,
             self.lora_a_stacked_2d,
         )
-        indices = self.embeddings_indices[0][:self.indices_len[3]].view_as(x)
+        indices = self.embeddings_indices[0][:embedding_len].view_as(x)
         full_output = self.base_layer.forward(
             x.add_(indices * added_tokens_mask))
 
@@ -368,7 +368,7 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
     def apply_weights(self, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.linear_method.apply_weights(
-            self.base_layer.linear_weights, x, bias)
+            self.base_layer, x, bias)
         _apply_lora(
             x,
             self.lora_a_stacked,
@@ -401,10 +401,6 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
         output_bias = (self.base_layer.bias
                        if self.base_layer.skip_bias_add else None)
         return output, output_bias
-
-    @property
-    def linear_weights(self):
-        return self.base_layer.linear_weights
 
     @classmethod
     def can_replace_layer(cls, source_layer: nn.Module,
@@ -505,7 +501,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     def apply_weights(self, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.linear_method.apply_weights(
-            self.base_layer.linear_weights, x, bias)
+            self.base_layer, x, bias)
         _apply_lora_packed_nslice(
             x,
             self.lora_a_stacked,
@@ -746,7 +742,7 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
     def apply_weights(self, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.linear_method.apply_weights(
-            self.base_layer.linear_weights, x, bias)
+            self.base_layer, x, bias)
         _apply_lora_packed_nslice(
             x,
             self.lora_a_stacked,
@@ -838,7 +834,7 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
 
     def apply_weights(self, x: torch.Tensor) -> torch.Tensor:
         output = self.base_layer.linear_method.apply_weights(
-            self.base_layer.linear_weights, x)
+            self.base_layer, x)
         _apply_lora(
             x,
             self.lora_a_stacked,

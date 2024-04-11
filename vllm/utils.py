@@ -279,10 +279,10 @@ def _generate_random_fp8(
     #-----|-------------|-------------------
     # Inf | N/A         | s.11111.00
     # NaN | s.1111.111  | s.11111.{01,10,11}
-    from vllm._C import cache_ops
+    from vllm import _custom_ops as ops
     tensor_tmp = torch.empty_like(tensor, dtype=torch.float16)
     tensor_tmp.uniform_(low, high)
-    cache_ops.convert_fp8(tensor_tmp, tensor)
+    ops.convert_fp8(tensor_tmp, tensor)
     del tensor_tmp
 
 
@@ -372,7 +372,6 @@ def is_pin_memory_available() -> bool:
         print_warning_once("Pin memory is not supported on Neuron.")
         return False
     elif is_cpu():
-        print_warning_once("Pin memory is not supported on CPU.")
         return False
     return True
 
