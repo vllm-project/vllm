@@ -2,7 +2,8 @@ from typing import Optional
 
 from transformers import AutoConfig, PretrainedConfig
 
-from vllm.transformers_utils.configs import *
+from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
+                                             JAISConfig, MPTConfig, RWConfig)
 
 _CONFIG_REGISTRY = {
     "chatglm": ChatGLMConfig,

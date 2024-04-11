@@ -56,6 +56,8 @@ def init_logger(name: str):
     logger = logging.getLogger(name)
     logger.setLevel(os.getenv("LOG_LEVEL", "DEBUG"))
     if VLLM_CONFIGURE_LOGGING:
+        assert _default_handler is not None, (
+            "`_setup_logger` has to be called.")
         logger.addHandler(_default_handler)
         logger.propagate = False
     return logger

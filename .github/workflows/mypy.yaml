@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.10"]
+        python-version: ["3.8"]
     steps:
     - uses: actions/checkout@v2
     - name: Set up Python ${{ matrix.python-version }}
@@ -28,4 +28,7 @@ jobs:
         pip install ruff==0.1.5 codespell==2.2.6 tomli==2.0.1 isort==5.13.2 mypy==1.9.0
     - name: Mypy
       run: |
-        mypy vllm/core/
+        ls
+        chmod u+x run_mypy.sh
+        ./run_mypy.sh
+

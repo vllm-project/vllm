@@ -1,5 +1,6 @@
 """A block manager that manages token blocks."""
 from abc import ABC, abstractmethod
+from collections.abc import Sequence as GenericSequence
 from itertools import count, takewhile
 from os.path import commonprefix
 from typing import Dict, List, Optional, Set
@@ -588,8 +589,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             for b in takewhile(lambda b: b.computed, block_table[:-1])
         ]
 
-    def get_common_computed_block_ids(self,
-                                      seqs: List[Sequence]) -> Sequence[int]:
+    def get_common_computed_block_ids(
+            self, seqs: List[Sequence]) -> GenericSequence[int]:
         """Return the block ids that are common for a given sequence group.
 
         Used in prefill (can skip prefill of some blocks).

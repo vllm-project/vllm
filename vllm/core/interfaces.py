@@ -1,5 +1,6 @@
 import enum
 from abc import ABC, abstractmethod
+from collections.abc import Sequence as GenericSequence
 from typing import Dict, List
 
 from vllm.sequence import Sequence, SequenceGroup
@@ -103,7 +104,8 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def get_common_computed_block_ids(self, seqs: List[Sequence]) -> List[int]:
+    def get_common_computed_block_ids(
+            self, seqs: List[Sequence]) -> GenericSequence[int]:
         pass
 
     @abstractmethod

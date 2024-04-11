@@ -497,7 +497,7 @@ class Scheduler:
         now = time.time()
         swapped_queue = policy.sort_by_priority(now, swapped_queue)
 
-        leftover_swapped: deque = deque()
+        leftover_swapped: Deque[SequenceGroup] = deque()
         while swapped_queue:
             seq_group = swapped_queue[0]
 
@@ -596,7 +596,7 @@ class Scheduler:
         # Copy the queue so that the input queue is not modified.
         waiting_queue = deque([s for s in waiting_queue])
 
-        leftover_waiting_sequences: deque = deque()
+        leftover_waiting_sequences: Deque[SequenceGroup] = deque()
         while self._passed_delay(time.time()) and waiting_queue:
             seq_group = waiting_queue[0]
 
