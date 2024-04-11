@@ -7,7 +7,8 @@ import torch
 from torch.nn.functional import scaled_dot_product_attention
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata, AttentionMetadataPerStage)
+                                              AttentionMetadata,
+                                              AttentionMetadataPerStage)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 
@@ -49,7 +50,8 @@ class TorchSDPABackend(AttentionBackend):
 
 
 @dataclass
-class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata, AttentionMetadataPerStage):
+class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata,
+                        AttentionMetadataPerStage):
     """Metadata for TorchSDPABackend.
     """
     # Currently, input sequences can only contain all prompts
