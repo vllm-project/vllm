@@ -15,7 +15,6 @@ Finally, one of the most impactful ways to support us is by raising awareness ab
 Talk about it in your blog posts, highlighting how it's driving your incredible projects.
 Express your support on Twitter if vLLM aids you, or simply offer your appreciation by starring our repository.
 
-
 ## Setup for development
 
 ### Build from source
@@ -36,8 +35,14 @@ mypy
 # Unit tests
 pytest tests/
 ```
-**Note:** Currently, the repository does not pass the mypy tests.
 
+Be sure to set the `TEST_DIST_MODEL` environment variable before running tests, e.g.:
+
+```bash
+export TEST_DIST_MODEL=/home/username/models/facebook/opt-125m
+```
+
+**Note:** Currently, the repository does not pass the mypy tests.
 
 ## Contributing Guidelines
 

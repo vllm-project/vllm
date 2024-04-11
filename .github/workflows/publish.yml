@@ -47,10 +47,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-          os: ['ubuntu-20.04']
-          python-version: ['3.8', '3.9', '3.10', '3.11']
-          pytorch-version: ['2.2.1']  # Must be the most recent version that meets requirements-cuda.txt.
-          cuda-version: ['11.8', '12.1']
+        os: ["ubuntu-20.04"]
+        python-version: ["3.8", "3.9", "3.10", "3.11"]
+        pytorch-version: ["2.2.2"] # Must be the most recent version that meets requirements-cuda.txt.
+        cuda-version: ["11.8", "12.1"]
 
     steps:
       - name: Checkout
@@ -64,7 +64,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-            python-version: ${{ matrix.python-version }}
+          python-version: ${{ matrix.python-version }}
 
       - name: Install CUDA ${{ matrix.cuda-version }}
         run: |
