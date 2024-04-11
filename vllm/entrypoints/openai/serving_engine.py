@@ -169,11 +169,11 @@ class OpenAIServing:
         raise ValueError("The model `{request.model}` does not exist.")
 
     def _validate_prompt_and_tokenize(
-            self,
-            request: Union[ChatCompletionRequest, CompletionRequest],
-            prompt: Optional[str] = None,
-            prompt_ids: Optional[List[int]] = None,
-            truncate_prompt_tokens: Optional[conint(ge=1)] = None
+        self,
+        request: Union[ChatCompletionRequest, CompletionRequest],
+        prompt: Optional[str] = None,
+        prompt_ids: Optional[List[int]] = None,
+        truncate_prompt_tokens: Optional[conint(ge=1)] = None
     ) -> Tuple[List[int], str]:
         if not (prompt or prompt_ids):
             raise ValueError("Either prompt or prompt_ids should be provided.")
