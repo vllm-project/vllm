@@ -3,25 +3,55 @@
 {% set default_working_dir = "/vllm-workspace/tests" %}
 
 steps:
-  - label: "AMD Test Basic"
+  - label: "AMD Test Default"
     agents:
       queue: amd
     command: "bash .buildkite/run-amd-test.sh"
+
+  - label: "AMD Test Regression"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_regression.sh"
 
   - label: "AMD Test Core"
     agents:
       queue: amd
     command: "bash .buildkite/run-amd-test_core.sh"
 
+  - label: "AMD Test Engine"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_engine.sh"
+
   - label: "AMD Test Entrypoints"
     agents:
       queue: amd
     command: "bash .buildkite/run-amd-test_entrypoints.sh"
 
-  - label: "AMD Test Engine"
+  - label: "AMD Test Examples"
     agents:
       queue: amd
-    command: "bash .buildkite/run-amd-test_engine.sh"
+    command: "bash .buildkite/run-amd-test_examples.sh"
+
+  - label: "AMD Test Prefix Caching"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_prefix_caching.sh"
+
+  - label: "AMD Test Logits Processor"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_logits_processor.sh"
+
+  - label: "AMD Test Worker"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_worker.sh"
+
+  - label: "AMD Test Speculative Decoding"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-speculative_decoding.sh"
 
   - label: "CPU Test"
     command: bash .buildkite/run-cpu-test.sh
