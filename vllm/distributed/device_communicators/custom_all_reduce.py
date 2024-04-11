@@ -143,6 +143,7 @@ def _is_full_nvlink(rank, world_size):
 
 
 def _can_p2p(rank: int, world_size: int) -> bool:
+    from vllm.distributed.utils import gpu_p2p_access_check
     num_dev = torch.cuda.device_count()
     # note: num dev can be larger than world_size if we're only using
     # first few GPUs
@@ -155,7 +156,7 @@ def _can_p2p(rank: int, world_size: int) -> bool:
     for i in range(world_size):
         if i == rank:
             continue
-        if not torch.cuda.can_device_access_peer(rank, i):
+        if not gpu_p2p_access_check(rank, i):
             return False
         # on some platforms, P2P support might be buggy and we need
         # additional checks. See also:
