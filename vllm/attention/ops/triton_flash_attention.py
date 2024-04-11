@@ -415,7 +415,7 @@ def attn_fwd(
             return
 
     is_mqa = hq != hk
-    if is_mqa:
+    if is_mqa:  # noqa: SIM108
         off_h_k = off_h_q % hk
     else:
         off_h_k = off_h_q
