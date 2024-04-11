@@ -10,6 +10,7 @@ import requests
 
 MAX_SERVER_START_WAIT_S = 600  # wait for server to start for 60 seconds
 
+
 @ray.remote(num_gpus=1)
 class ServerRunner:
 
