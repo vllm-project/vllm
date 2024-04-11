@@ -1,21 +1,20 @@
+# imports for guided decoding tests
+import json
 import os
+import re
 import subprocess
+import sys
 import time
 
-import sys
+import jsonschema
+import openai  # use the official client for correctness check
 import pytest
-import requests
 # using Ray for overall ease of process management, parallel requests,
 # and debugging.
 import ray
-import openai  # use the official client for correctness check
+import requests
 # downloading lora to test lora requests
 from huggingface_hub import snapshot_download
-
-# imports for guided decoding tests
-import json
-import jsonschema
-import re
 
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -142,7 +141,7 @@ def server(zephyr_lora_files):
         "--max-cpu-loras",
         "2",
         "--max-num-seqs",
-        "128"
+        "128",
     ])
     ray.get(server_runner.ready.remote())
     yield server_runner
@@ -198,6 +197,27 @@ async def test_single_completion(server, client: openai.AsyncOpenAI,
     )
     assert completion.choices[0].text is not None and len(
         completion.choices[0].text) >= 5
+
+
+@pytest.mark.parametrize(
+    # first test base model, then test loras
+    "model_name",
+    [MODEL_NAME, "zephyr-lora", "zephyr-lora2"],
+)
+async def test_zero_logprobs(server, client: openai.AsyncOpenAI,
+                             model_name: str):
+    # test using token IDs
+    completion = await client.completions.create(
+        model=MODEL_NAME,
+        prompt=[0, 0, 0, 0, 0],
+        max_tokens=5,
+        temperature=0.0,
+        logprobs=0,
+    )
+    choice = completion.choices[0]
+    assert choice.logprobs is not None
+    assert choice.logprobs.token_logprobs is not None
+    assert choice.logprobs.top_logprobs is None
 
 
 @pytest.mark.parametrize(
@@ -323,9 +343,15 @@ async def test_completion_streaming(server, client: openai.AsyncOpenAI,
                                              temperature=0.0,
                                              stream=True)
     chunks = []
+    finish_reason_count = 0
     async for chunk in stream:
         chunks.append(chunk.choices[0].text)
+        if chunk.choices[0].finish_reason is not None:
+            finish_reason_count += 1
+    # finish reason should only return in last block
+    assert finish_reason_count == 1
     assert chunk.choices[0].finish_reason == "length"
+    assert chunk.choices[0].text
     assert chunk.usage == single_usage
     assert "".join(chunks) == single_output
 
@@ -364,13 +390,19 @@ async def test_chat_streaming(server, client: openai.AsyncOpenAI,
         stream=True,
     )
     chunks = []
+    finish_reason_count = 0
     async for chunk in stream:
         delta = chunk.choices[0].delta
         if delta.role:
             assert delta.role == "assistant"
         if delta.content:
             chunks.append(delta.content)
+        if chunk.choices[0].finish_reason is not None:
+            finish_reason_count += 1
+    # finish reason should only return in last block
+    assert finish_reason_count == 1
     assert chunk.choices[0].finish_reason == stop_reason
+    assert delta.content
     assert "".join(chunks) == output
 
 
@@ -708,6 +740,37 @@ number: "1" | "2"
     ground_truth = "SELECT col_1 from table_1 where col_1 = 1".replace(" ", "")
 
     assert content.strip() == ground_truth
+
+
+@pytest.mark.parametrize(
+    # first test base model, then test loras
+    "model_name",
+    [MODEL_NAME, "zephyr-lora", "zephyr-lora2"],
+)
+async def test_echo_logprob_completion(server, client: openai.AsyncOpenAI,
+                                       model_name: str):
+    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
+    # test using text and token IDs
+    for prompt in ("Hello, my name is", [0, 0, 0, 0, 0]):
+        completion = await client.completions.create(model=model_name,
+                                                     prompt=prompt,
+                                                     max_tokens=5,
+                                                     temperature=0.0,
+                                                     echo=True,
+                                                     logprobs=1)
+
+        prompt_text = tokenizer.decode(prompt) if isinstance(prompt,
+                                                             list) else prompt
+        assert (completion.choices[0].text is not None
+                and re.search(r"^" + prompt_text, completion.choices[0].text))
+        logprobs = completion.choices[0].logprobs
+        assert logprobs is not None
+        assert len(logprobs.text_offset) > 5
+        assert (len(logprobs.token_logprobs) > 5
+                and logprobs.token_logprobs[0] is None)
+        assert (len(logprobs.top_logprobs) > 5
+                and logprobs.top_logprobs[0] is None)
+        assert len(logprobs.tokens) > 5
 
 
 if __name__ == "__main__":

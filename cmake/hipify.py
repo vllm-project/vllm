@@ -9,8 +9,8 @@
 #
 
 import argparse
-import shutil
 import os
+import shutil
 
 from torch.utils.hipify.hipify_python import hipify
 

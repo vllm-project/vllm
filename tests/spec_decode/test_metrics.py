@@ -1,8 +1,8 @@
-import torch
 import math
-import pytest
-
 from unittest.mock import MagicMock
+
+import pytest
+import torch
 
 from vllm.spec_decode.metrics import AsyncMetricsCollector
 

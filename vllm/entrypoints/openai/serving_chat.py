@@ -1,19 +1,21 @@
-import time
 import codecs
+import time
+from typing import AsyncGenerator, AsyncIterator, List, Optional, Union
+
 from fastapi import Request
-from typing import AsyncGenerator, AsyncIterator, Optional, List, Union
-from vllm.logger import init_logger
-from vllm.utils import random_uuid
+
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse,
     UsageInfo)
-from vllm.outputs import RequestOutput
-from vllm.entrypoints.openai.serving_engine import OpenAIServing, LoRA
+from vllm.entrypoints.openai.serving_engine import LoRA, OpenAIServing
+from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
+from vllm.outputs import RequestOutput
+from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -61,8 +63,9 @@ class OpenAIServingChat(OpenAIServing):
 
         request_id = f"cmpl-{random_uuid()}"
         try:
-            token_ids = self._validate_prompt_and_tokenize(request,
-                                                           prompt=prompt)
+            # Tokenize/detokenize depending on prompt format (string/token list)
+            prompt_ids, prompt_text = self._validate_prompt_and_tokenize(
+                request, prompt=prompt)
             sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
             guided_decode_logits_processor = (
@@ -76,8 +79,8 @@ class OpenAIServingChat(OpenAIServing):
         except ValueError as e:
             return self.create_error_response(str(e))
 
-        result_generator = self.engine.generate(prompt, sampling_params,
-                                                request_id, token_ids,
+        result_generator = self.engine.generate(prompt_text, sampling_params,
+                                                request_id, prompt_ids,
                                                 lora_request)
         # Streaming response
         if request.stream:
@@ -218,7 +221,8 @@ class OpenAIServingChat(OpenAIServing):
                             index=i,
                             delta=DeltaMessage(content=delta_text),
                             logprobs=logprobs,
-                            finish_reason=output.finish_reason)
+                            finish_reason=output.finish_reason,
+                            stop_reason=output.stop_reason)
                         chunk = ChatCompletionStreamResponse(
                             id=request_id,
                             object=chunk_object_type,
@@ -276,6 +280,7 @@ class OpenAIServingChat(OpenAIServing):
                 message=ChatMessage(role=role, content=output.text),
                 logprobs=logprobs,
                 finish_reason=output.finish_reason,
+                stop_reason=output.stop_reason,
             )
             choices.append(choice_data)
 

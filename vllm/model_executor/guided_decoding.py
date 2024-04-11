@@ -5,16 +5,16 @@ from enum import Enum
 from functools import lru_cache
 from json import dumps as json_dumps
 from re import escape as regex_escape
-from typing import Union, Tuple
+from typing import Tuple, Union
 
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import (CompletionRequest,
-                                              ChatCompletionRequest)
-from vllm.model_executor.guided_logits_processors import (JSONLogitsProcessor,
-                                                          RegexLogitsProcessor,
-                                                          CFGLogitsProcessor)
+from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              CompletionRequest)
+from vllm.model_executor.guided_logits_processors import (CFGLogitsProcessor,
+                                                          JSONLogitsProcessor,
+                                                          RegexLogitsProcessor)
 
 
 class GuidedDecodingMode(Enum):
@@ -91,7 +91,7 @@ def _get_guide_and_mode(
         json = request.guided_json
         if isinstance(json, dict):
             # turn dict into hashable string
-            json = json_dumps(json, sort_keys=True)
+            json = json_dumps(json)
         elif isinstance(json, BaseModel):
             # use pydantic signature so that different model classes
             # with the same fields will get hashed the same

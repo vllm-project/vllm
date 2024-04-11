@@ -3,12 +3,11 @@
 import time
 from typing import Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, model_validator
-
-from vllm.utils import random_uuid
-from vllm.sampling_params import SamplingParams
-
 import torch
+from pydantic import BaseModel, Field, conint, model_validator
+
+from vllm.sampling_params import SamplingParams
+from vllm.utils import random_uuid
 
 
 class ErrorResponse(BaseModel):
@@ -89,6 +88,7 @@ class ChatCompletionRequest(BaseModel):
     length_penalty: Optional[float] = 1.0
     early_stopping: Optional[bool] = False
     ignore_eos: Optional[bool] = False
+    min_tokens: Optional[int] = 0
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     skip_special_tokens: Optional[bool] = True
     spaces_between_special_tokens: Optional[bool] = True
@@ -166,6 +166,7 @@ class ChatCompletionRequest(BaseModel):
             stop=self.stop,
             stop_token_ids=self.stop_token_ids,
             max_tokens=self.max_tokens,
+            min_tokens=self.min_tokens,
             logprobs=self.top_logprobs if self.logprobs else None,
             prompt_logprobs=self.top_logprobs if self.echo else None,
             best_of=self.best_of,
@@ -225,8 +226,10 @@ class CompletionRequest(BaseModel):
     early_stopping: Optional[bool] = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     ignore_eos: Optional[bool] = False
+    min_tokens: Optional[int] = 0
     skip_special_tokens: Optional[bool] = True
     spaces_between_special_tokens: Optional[bool] = True
+    truncate_prompt_tokens: Optional[conint(ge=1)] = None
     # doc: end-completion-sampling-params
 
     # doc: begin-completion-extra-params
@@ -297,6 +300,7 @@ class CompletionRequest(BaseModel):
             stop_token_ids=self.stop_token_ids,
             ignore_eos=self.ignore_eos,
             max_tokens=self.max_tokens if not echo_without_generation else 1,
+            min_tokens=self.min_tokens,
             logprobs=self.logprobs,
             use_beam_search=self.use_beam_search,
             early_stopping=self.early_stopping,
@@ -306,6 +310,7 @@ class CompletionRequest(BaseModel):
             include_stop_str_in_output=self.include_stop_str_in_output,
             length_penalty=self.length_penalty,
             logits_processors=logits_processors,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
         )
 
     @model_validator(mode="before")
@@ -327,7 +332,7 @@ class LogProbs(BaseModel):
     text_offset: List[int] = Field(default_factory=list)
     token_logprobs: List[Optional[float]] = Field(default_factory=list)
     tokens: List[str] = Field(default_factory=list)
-    top_logprobs: Optional[List[Optional[Dict[int, float]]]] = None
+    top_logprobs: Optional[List[Optional[Dict[str, float]]]] = None
 
 
 class CompletionResponseChoice(BaseModel):
@@ -335,6 +340,13 @@ class CompletionResponseChoice(BaseModel):
     text: str
     logprobs: Optional[LogProbs] = None
     finish_reason: Optional[Literal["stop", "length"]] = None
+    stop_reason: Union[None, int, str] = Field(
+        default=None,
+        description=(
+            "The stop string or token id that caused the completion "
+            "to stop, None if the completion finished for some other reason "
+            "including encountering the EOS token"),
+    )
 
 
 class CompletionResponse(BaseModel):
@@ -351,6 +363,13 @@ class CompletionResponseStreamChoice(BaseModel):
     text: str
     logprobs: Optional[LogProbs] = None
     finish_reason: Optional[Literal["stop", "length"]] = None
+    stop_reason: Union[None, int, str] = Field(
+        default=None,
+        description=(
+            "The stop string or token id that caused the completion "
+            "to stop, None if the completion finished for some other reason "
+            "including encountering the EOS token"),
+    )
 
 
 class CompletionStreamResponse(BaseModel):
@@ -372,6 +391,7 @@ class ChatCompletionResponseChoice(BaseModel):
     message: ChatMessage
     logprobs: Optional[LogProbs] = None
     finish_reason: Optional[Literal["stop", "length"]] = None
+    stop_reason: Union[None, int, str] = None
 
 
 class ChatCompletionResponse(BaseModel):
@@ -393,6 +413,7 @@ class ChatCompletionResponseStreamChoice(BaseModel):
     delta: DeltaMessage
     logprobs: Optional[LogProbs] = None
     finish_reason: Optional[Literal["stop", "length"]] = None
+    stop_reason: Union[None, int, str] = None
 
 
 class ChatCompletionStreamResponse(BaseModel):
