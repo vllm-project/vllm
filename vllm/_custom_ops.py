@@ -115,21 +115,23 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
 # awq
 def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
                    zeros: torch.Tensor, split_k_iters: int, thx: int,
-                   thy: int) -> None:
-    vllm_ops.awq_dequantize(qweight, scales, zeros, split_k_iters, thx, thy)
+                   thy: int) -> torch.Tensor:
+    return vllm_ops.awq_dequantize(qweight, scales, zeros, split_k_iters, thx,
+                                   thy)
 
 
 def awq_gemm(input: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
-             scales: torch.Tensor, split_k_iters: int) -> None:
-    vllm_ops.awq_gemm(input, qweight, qzeros, scales, split_k_iters)
+             scales: torch.Tensor, split_k_iters: int) -> torch.Tensor:
+    return vllm_ops.awq_gemm(input, qweight, qzeros, scales, split_k_iters)
 
 
 # gptq
 def gptq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
               b_gptq_qzeros: torch.Tensor, b_gptq_scales: torch.Tensor,
-              b_g_idx: torch.Tensor, use_exllama: bool, bit: int) -> None:
-    vllm_ops.gptq_gemm(a, b_q_weight, b_gptq_qzeros, b_gptq_scales, b_g_idx,
-                       use_exllama, bit)
+              b_g_idx: torch.Tensor, use_exllama: bool,
+              bit: int) -> torch.Tensor:
+    return vllm_ops.gptq_gemm(a, b_q_weight, b_gptq_qzeros, b_gptq_scales,
+                              b_g_idx, use_exllama, bit)
 
 
 def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
