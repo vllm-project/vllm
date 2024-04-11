@@ -93,8 +93,7 @@ def blocksparse_flash_attn_varlen_fwd_with_blocktable(
     *out.stride(),
 
     # *qk.stride(),
-    # *ko.stride(),
-
+    # *ko.stride(
     layout_crow_indices,
     layout_col_indices,
     *layout_crow_indices.stride(),
@@ -108,7 +107,7 @@ def blocksparse_flash_attn_varlen_fwd_with_blocktable(
     BLOCK_M = vllm_block_size,
     BLOCK_N = vllm_block_size,
     BLOCK_D = block_d,
-    BLOCK_M_LOADING = vllm_block_size,
+    BLOCK_M_LOADING = 16,
     EVEN_D = block_d == head_size,
     num_warps = 1,
     num_stages = 3
@@ -275,7 +274,7 @@ def _fwd_kernel_batch_inference_with_blocktable(
     q_start_sid = tl.load(q_start_sids + off_zm)
     start_m = q_start_sid // BLOCK_M # q_sbid
 
-    offs_m = start_m * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M_LOADING)
     offs_n = tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, D_HEAD)
 
@@ -306,9 +305,9 @@ def _fwd_kernel_batch_inference_with_blocktable(
     k_block_start = tl.load(sparse_crow_ptr).to(tl.int32)
     k_block_end = tl.load(sparse_crow_ptr + 1).to(tl.int32)
 
-    m_i = tl.zeros([BLOCK_N], dtype=tl.float32) - float('inf')
-    l_i = tl.zeros([BLOCK_N], dtype=tl.float32)
-    acc = tl.zeros([BLOCK_N, D_HEAD], dtype=tl.float32)
+    m_i = tl.zeros([BLOCK_M_LOADING], dtype=tl.float32) - float('inf')
+    l_i = tl.zeros([BLOCK_M_LOADING], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_M_LOADING, D_HEAD], dtype=tl.float32)
 
     K += off_h_for_kv * stride_kh 
     V += off_h_for_kv * stride_vh
@@ -380,8 +379,6 @@ def _fwd_kernel_batch_inference_with_blocktable(
         tl.store(Out + offs_m[:, None] * stride_ot + offs_d[None, :] * stride_od, acc,
                 mask=(offs_m[:, None] < q_seqlen) & (offs_d[None, :] < D_HEAD))
         
-
-
 
 class LocalStridedBlockSparseAttnInferenceBT(torch.nn.Module):
     '''
@@ -502,24 +499,24 @@ if __name__ == '__main__':
     print(f'> {ref_output.shape=}, {ref_output=}')
 
 
-    print(f'> {k[block_tables[0]].shape=}')
-    k2 = k[block_tables[0]].permute(0, 3, 1, 2, 4).contiguous().reshape(-1, 8, 128)[:context_lens[0]] # (n_tokens, 8, 128)
-    v2 = v[block_tables[0]].permute(0, 3, 1, 2).contiguous().reshape(-1, 8, 128)[:context_lens[0]]
+    # print(f'> {k[block_tables[0]].shape=}')
+    # k2 = k[block_tables[0]].permute(0, 3, 1, 2, 4).contiguous().reshape(-1, 8, 128)[:context_lens[0]] # (n_tokens, 8, 128)
+    # v2 = v[block_tables[0]].permute(0, 3, 1, 2).contiguous().reshape(-1, 8, 128)[:context_lens[0]]
 
 
-    k2 = torch.repeat_interleave(k2, 4, dim=1)
-    v2 = torch.repeat_interleave(v2, 4, dim=1)
-    print(f'> {k2.shape=}, {v2.shape=}')
-    qk = torch.einsum('qhd,khd->hqk', q, k2)
-    p = (qk.float() * scale).softmax(-1).type_as(q)
-    ref_output2 = torch.einsum('hqk,khd->qhd', p, v2)[0]
-    print(f'>> {ref_output2.shape=}, {ref_output2=}')
-    # print(f'>> {p[0][0]=}')
-    qk = torch.einsum('qhd,khd->hqk', q.float(), k2.float())
-    print(f'{qk[0, :, :32]=}\n{qk[0, :, 32:]=}')
-    print(f'{k2[:32, 0]=}')
+    # k2 = torch.repeat_interleave(k2, 4, dim=1)
+    # v2 = torch.repeat_interleave(v2, 4, dim=1)
+    # print(f'> {k2.shape=}, {v2.shape=}')
+    # qk = torch.einsum('qhd,khd->hqk', q, k2)
+    # p = (qk.float() * scale).softmax(-1).type_as(q)
+    # ref_output2 = torch.einsum('hqk,khd->qhd', p, v2)[0]
+    # print(f'>> {ref_output2.shape=}, {ref_output2=}')
+    # # print(f'>> {p[0][0]=}')
+    # qk = torch.einsum('qhd,khd->hqk', q.float(), k2.float())
+    # print(f'{qk[0, :, :32]=}\n{qk[0, :, 32:]=}')
+    # print(f'{k2[:32, 0]=}')
 
-    print(f'{(output - ref_output).abs().max()=}')
+    # print(f'{(output - ref_output).abs().max()=}')
 
 
     from vllm.model_executor.models.tnlgv4_flash_blocksparse_attn_batch_inference import LocalStridedBlockSparseAttnInference
@@ -543,4 +540,4 @@ if __name__ == '__main__':
 
     print(f'{(output - ref_output_varlen).abs().max()=}')
 
-    _b()
+    # _b()
