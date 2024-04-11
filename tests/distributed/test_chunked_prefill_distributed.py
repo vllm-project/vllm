@@ -2,12 +2,13 @@
 vLLM will allocate all the available memory, so we need to run the tests one
 by one. The solution is to pass arguments (model name) by environment
 variables.
+
 Run:
 ```sh
 TEST_DIST_MODEL=facebook/opt-125m pytest \
-    test_basic_distributed_correctness.py
+    test_chunked_prefill_distributed.py
 TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf \
-    test_basic_distributed_correctness.py
+    test_chunked_prefill_distributed.py
 ```
 """
 import os
@@ -25,6 +26,7 @@ MODELS = [
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
+@pytest.mark.parametrize("chunked_prefill_token_size", [16])
 def test_models(
     hf_runner,
     vllm_runner,
@@ -32,7 +34,13 @@ def test_models(
     model: str,
     dtype: str,
     max_tokens: int,
+    chunked_prefill_token_size: int,
 ) -> None:
+    # Add a chunked prefill config.
+    max_num_seqs = min(chunked_prefill_token_size, 256)
+    assert chunked_prefill_token_size != -1
+    enable_chunked_prefill = True
+    max_num_batched_tokens = chunked_prefill_token_size
 
     hf_model = hf_runner(model, dtype=dtype)
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
@@ -42,6 +50,9 @@ def test_models(
         model,
         dtype=dtype,
         tensor_parallel_size=2,
+        max_num_seqs=max_num_seqs,
+        enable_chunked_prefill=enable_chunked_prefill,
+        max_num_batched_tokens=max_num_batched_tokens,
     )
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
