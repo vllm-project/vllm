@@ -331,6 +331,8 @@ def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(
                                          batch_size,
                                          max_output_len=output_len,
                                          force_output_len=True)
+
+
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -354,14 +356,12 @@ def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(
         },
     ])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize(
-    "test_llm_kwargs",
-    [
-        {
-            "speculative_model": "JackFram/llama-68m",
-            "num_speculative_tokens": 5,
-        },
-    ])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+    },
+])
 @pytest.mark.parametrize(
     "output_len",
     [
@@ -381,7 +381,6 @@ def test_spec_decode_e2e_greedy_correctness_with_preemption(
                                          batch_size,
                                          max_output_len=output_len,
                                          force_output_len=True)
-
 
 
 def run_greedy_equality_correctness_test(baseline_llm_generator,
