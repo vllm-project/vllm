@@ -4,7 +4,7 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 import json
 import os
-from typing import Sequence
+from typing import Sequence, Optional, Dict
 
 import torch
 import torch.distributed as dist
@@ -69,7 +69,7 @@ def _can_actually_p2p(idx_a, idx_b):
     return torch.all(a == c).cpu().item()
 
 
-_gpu_p2p_access_cache = None
+_gpu_p2p_access_cache: Optional[Dict[str, bool]] = None
 
 
 def gpu_p2p_access_check(i: int, j: int) -> bool:
