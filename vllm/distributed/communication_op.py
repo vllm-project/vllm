@@ -4,12 +4,10 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 from torch.distributed import ProcessGroup
 
-from vllm.model_executor.parallel_utils import pynccl_utils
-from vllm.model_executor.parallel_utils.custom_all_reduce import (
-    custom_all_reduce)
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_group, get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size, is_pynccl_enabled_for_all_reduce)
+from .parallel_state import (get_tensor_model_parallel_group,
+                             get_tensor_model_parallel_rank,
+                             get_tensor_model_parallel_world_size,
+                             is_pynccl_enabled_for_all_reduce)
 
 
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
@@ -24,6 +22,10 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     TLDR: always assume this function modifies its input, but use the return
     value as the output.
     """
+    from vllm.distributed.device_communicators import pynccl_utils
+    from vllm.distributed.device_communicators.custom_all_reduce import (
+        custom_all_reduce)
+
     # Bypass the function if we are using only 1 GPU.
     if get_tensor_model_parallel_world_size() == 1:
         return input_
@@ -171,10 +173,18 @@ def broadcast_tensor_dict(
         torch.distributed.broadcast_object_list([metadata_list],
                                                 src=src,
                                                 group=group)
+        async_handles = []
         for key, value in metadata_list:
             if isinstance(value, TensorMetadata):
                 tensor = tensor_dict[key]
-                torch.distributed.broadcast(tensor, src=src, group=group)
+                async_handles.append(
+                    torch.distributed.broadcast(tensor,
+                                                src=src,
+                                                group=group,
+                                                async_op=True))
+        for async_handle in async_handles:
+            async_handle.wait()
+
     else:
         recv_metadata_list = [None]
         torch.distributed.broadcast_object_list(recv_metadata_list,
