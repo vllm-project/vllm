@@ -1,9 +1,9 @@
 import gc
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-import subprocess
 
 from vllm import SamplingParams
 from vllm.config import ModelConfig, TensorizerConfig
@@ -209,8 +209,7 @@ def test_vllm_model_can_load_with_lora(vllm_runner, tmp_path):
                                     max_num_seqs=50,
                                     max_model_len=1000,
                                     dtype=dtype)
-    deserialized_outputs = process_requests(loaded_vllm_model.model.llm_engine,
-                                            test_prompts)
+    process_requests(loaded_vllm_model.model.llm_engine, test_prompts)
 
     assert loaded_vllm_model
 
@@ -219,15 +218,13 @@ def test_load_without_tensorizer_load_format(vllm_runner):
     with pytest.raises(ValueError):
         vllm_runner(model_ref, tensorizer_uri="test")
 
+
 def test_tensorize_vllm_model(tmp_path):
     # Test serialize command
     serialize_args = [
-        "python3", "/vllm/examples/tensorize_vllm_model.py",
-        "--model", model_ref,
-        "--dtype", "float16",
-        "serialize",
-        "--serialized-directory", tmp_path,
-        "--suffix", "tests"
+        "python3", "/vllm/examples/tensorize_vllm_model.py", "--model",
+        model_ref, "--dtype", "float16", "serialize", "--serialized-directory",
+        tmp_path, "--suffix", "tests"
     ]
     result = subprocess.run(serialize_args, capture_output=True, text=True)
     print(result.stdout)  # Print the output of the serialize command
@@ -239,14 +236,10 @@ def test_tensorize_vllm_model(tmp_path):
 
     # Test deserialize command
     deserialize_args = [
-        "python3", "/vllm/examples/tensorize_vllm_model.py",
-        "--model", model_ref,
-        "--dtype", "float16",
-        "deserialize",
-        "--path-to-tensors",
+        "python3", "/vllm/examples/tensorize_vllm_model.py", "--model",
+        model_ref, "--dtype", "float16", "deserialize", "--path-to-tensors",
         path_to_tensors
     ]
-    result = subprocess.run(deserialize_args, capture_output=True,
-                            text=True)
+    result = subprocess.run(deserialize_args, capture_output=True, text=True)
     assert result.returncode == 0, (f"Deserialize command failed with output:"
                                     f"\n{result.stdout}\n{result.stderr}")

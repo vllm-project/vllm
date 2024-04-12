@@ -14,8 +14,8 @@ from tensorizer.utils import convert_bytes, get_mem_usage, no_init_or_tensor
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig
 
 from vllm.config import _get_and_verify_dtype
-from vllm.model_executor.models import ModelRegistry
 from vllm.distributed import initialize_model_parallel
+from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.tensorizer_loader import TensorizerArgs
 
 """
