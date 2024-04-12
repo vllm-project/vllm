@@ -70,8 +70,7 @@ class BlockTable:
 
     def allocate(self,
                  token_ids: List[int],
-                 device: Device = Device.GPU,
-                 by_block: bool = False) -> Optional[Block]:
+                 device: Device = Device.GPU) -> None:
         """Allocates memory blocks for storing the given sequence of token IDs.
 
         This method allocates the required number of blocks to store the given
@@ -81,23 +80,13 @@ class BlockTable:
             token_ids (List[int]): The sequence of token IDs to be stored.
             device (Device, optional): The device on which the blocks should be
                 allocated. Defaults to Device.GPU.
-            by_block (bool, optional): whether we are allocate block by block.
-            Set to True when doing cache swapping. Default to False. 
         """
-        assert not self._is_allocated or by_block
         assert token_ids
-        blocks = self._allocate_blocks_for_token_ids(prev_block=None,
-                                                     token_ids=token_ids,
-                                                     device=device)
-        self._num_full_slots += len(token_ids)
-        if not (by_block and self._is_allocated):
-            self._blocks = blocks
-        else:
-            # Note: whenever we call allocate with by_block set to True,
-            # because of swapping, the tokens must fit in a block
-            assert len(blocks) == 1
-            self._blocks.append(blocks[0])
-        return blocks[0]
+        assert not self._is_allocated
+        self._blocks = self._allocate_blocks_for_token_ids(prev_block=None,
+                                                           token_ids=token_ids,
+                                                           device=device)
+        self._num_full_slots = len(token_ids)
 
     def append_token_ids(self,
                          token_ids: List[int],
