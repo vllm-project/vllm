@@ -42,8 +42,8 @@ class SchedulingBudget:
     """
     token_budget: int
     max_num_seqs: int
-    _requeset_ids_num_batched_tokens: Set[int] = field(default_factory=set)
-    _requeset_ids_num_curr_seqs: Set[int] = field(default_factory=set)
+    _requeset_ids_num_batched_tokens: Set[str] = field(default_factory=set)
+    _requeset_ids_num_curr_seqs: Set[str] = field(default_factory=set)
     _num_batched_tokens: int = 0
     _num_curr_seqs: int = 0
 
@@ -133,7 +133,7 @@ class SchedulerOutputs:
         return (not self.scheduled_seq_groups and not self.blocks_to_swap_in
                 and not self.blocks_to_swap_out and not self.blocks_to_copy)
 
-    def _sort_by_lora_ids(self) -> bool:
+    def _sort_by_lora_ids(self):
         self.scheduled_seq_groups = sorted(
             self.scheduled_seq_groups,
             key=lambda g: (g.seq_group.lora_int_id, g.seq_group.request_id))
@@ -337,7 +337,8 @@ class Scheduler:
                     self.free_seq(seq)
 
     def has_unfinished_seqs(self) -> bool:
-        return self.waiting or self.running or self.swapped
+        return len(self.waiting) != 0 or len(self.running) != 0 or len(
+            self.swapped) != 0
 
     def get_num_unfinished_seq_groups(self) -> int:
         return len(self.waiting) + len(self.running) + len(self.swapped)
@@ -404,7 +405,7 @@ class Scheduler:
                 budget.subtract_num_seqs(seq_group.request_id,
                                          num_running_seqs)
                 if curr_loras is not None and seq_group.lora_int_id > 0:
-                    curr_loras.pop(seq_group.lora_int_id)
+                    curr_loras.remove(seq_group.lora_int_id)
 
                 if running_queue:
                     # Preempt the lowest-priority sequence groups.
@@ -496,7 +497,7 @@ class Scheduler:
         now = time.time()
         swapped_queue = policy.sort_by_priority(now, swapped_queue)
 
-        leftover_swapped = deque()
+        leftover_swapped: Deque[SequenceGroup] = deque()
         while swapped_queue:
             seq_group = swapped_queue[0]
 
@@ -507,7 +508,9 @@ class Scheduler:
             lora_int_id = 0
             if self.lora_enabled:
                 lora_int_id = seq_group.lora_int_id
-                if (lora_int_id > 0 and lora_int_id not in curr_loras
+                assert curr_loras is not None
+                assert self.lora_config is not None
+                if (lora_int_id > 0 and (lora_int_id not in curr_loras)
                         and len(curr_loras) >= self.lora_config.max_loras):
                     # We don't have a space for another LoRA, so
                     # we ignore this request for now.
@@ -593,7 +596,7 @@ class Scheduler:
         # Copy the queue so that the input queue is not modified.
         waiting_queue = deque([s for s in waiting_queue])
 
-        leftover_waiting_sequences = deque()
+        leftover_waiting_sequences: Deque[SequenceGroup] = deque()
         while self._passed_delay(time.time()) and waiting_queue:
             seq_group = waiting_queue[0]
 
@@ -635,6 +638,8 @@ class Scheduler:
             lora_int_id = 0
             if self.lora_enabled:
                 lora_int_id = seq_group.lora_int_id
+                assert curr_loras is not None
+                assert self.lora_config is not None
                 if (self.lora_enabled and lora_int_id > 0
                         and lora_int_id not in curr_loras
                         and len(curr_loras) >= self.lora_config.max_loras):
@@ -780,7 +785,7 @@ class Scheduler:
             token_budget=self.scheduler_config.max_num_batched_tokens,
             max_num_seqs=self.scheduler_config.max_num_seqs,
         )
-        curr_loras = set()
+        curr_loras: Set[int] = set()
 
         remaining_waiting, prefills = (self.waiting,
                                        SchedulerPrefillOutputs.create_empty())
@@ -1087,7 +1092,7 @@ class Scheduler:
 
     def _get_num_new_tokens(self, seq_group: SequenceGroup,
                             status: SequenceStatus, enable_chunking: bool,
-                            budget: SchedulingBudget) -> Tuple[int, bool]:
+                            budget: SchedulingBudget) -> int:
         """Get the next new tokens to compute for a given sequence group
             that's in a given `status`.
 
