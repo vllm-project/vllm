@@ -1,6 +1,6 @@
 import time
 from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, List,
-                    Optional, Tuple)
+                    Literal, Optional, Tuple, TypedDict, Union)
 
 from fastapi import Request
 
@@ -26,27 +26,45 @@ TypeCreateLogProbsFn = Callable[
     [TypeTokenIDs, TypeTopLogProbs, Optional[int], int], LogProbs]
 
 
-def parse_prompt_format(prompt) -> Tuple[bool, list]:
+class PromptStrings(TypedDict):
+    prompt: str
+    is_tokens: Literal[False]
+
+
+class PromptTokens(TypedDict):
+    prompt: List[int]
+    is_tokens: Literal[True]
+
+
+def _parse_prompt_element_format(
+        elem: Union[str, int,
+                    List[int]]) -> Union[PromptStrings, PromptTokens]:
+    if isinstance(elem, str):
+        # case 2: array of strings
+        return PromptStrings(prompt=elem, is_tokens=False)
+    if isinstance(elem, int):
+        # case 3: array of tokens
+        return PromptTokens(prompt=[elem], is_tokens=True)
+    if isinstance(elem, list):
+        # case 4: array of token arrays
+        return PromptTokens(prompt=elem, is_tokens=True)
+
+
+def parse_prompt_format(
+    prompt: Union[str, List[str], List[int], List[List[int]]]
+) -> List[Union[PromptStrings, PromptTokens]]:
     # get the prompt, openai supports the following
     # "a string, array of strings, array of tokens, or array of token arrays."
-    prompt_is_tokens = False
-    prompts = [prompt]  # case 1: a string
+
+    if isinstance(prompt, str):
+        # case 1: a string
+        return [_parse_prompt_element_format(prompt)]
+
     if isinstance(prompt, list):
-        if len(prompt) == 0:
-            raise ValueError("please provide at least one prompt")
-        elif isinstance(prompt[0], str):
-            prompt_is_tokens = False
-            prompts = prompt  # case 2: array of strings
-        elif isinstance(prompt[0], int):
-            prompt_is_tokens = True
-            prompts = [prompt]  # case 3: array of tokens
-        elif isinstance(prompt[0], list) and isinstance(prompt[0][0], int):
-            prompt_is_tokens = True
-            prompts = prompt  # case 4: array of token arrays
-        else:
-            raise ValueError("prompt must be a string, array of strings, "
-                             "array of tokens, or array of token arrays")
-    return prompt_is_tokens, prompts
+        return [_parse_prompt_element_format(elem) for elem in prompt]
+
+    raise ValueError("prompt must be a string, array of strings, "
+                     "array of tokens, or array of token arrays")
 
 
 class OpenAIServingCompletion(OpenAIServing):
@@ -84,7 +102,7 @@ class OpenAIServingCompletion(OpenAIServing):
         created_time = int(time.time())
 
         # Schedule the request and get the result generator.
-        generators = []
+        generators: List[AsyncIterator[RequestOutput]] = []
         try:
             sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
@@ -96,21 +114,23 @@ class OpenAIServingCompletion(OpenAIServing):
                     sampling_params.logits_processors = []
                 sampling_params.logits_processors.append(
                     guided_decode_logit_processor)
-            prompt_is_tokens, prompts = parse_prompt_format(request.prompt)
+
+            prompts = parse_prompt_format(request.prompt)
+            truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
 
             for i, prompt in enumerate(prompts):
-                if prompt_is_tokens:
+                if prompt["is_tokens"]:
                     prompt_formats = self._validate_prompt_and_tokenize(
                         request,
-                        prompt_ids=prompt,
-                        truncate_prompt_tokens=sampling_params.
-                        truncate_prompt_tokens)
+                        prompt_ids=prompt["prompt"],
+                        truncate_prompt_tokens=truncate_prompt_tokens,
+                    )
                 else:
                     prompt_formats = self._validate_prompt_and_tokenize(
                         request,
-                        prompt=prompt,
-                        truncate_prompt_tokens=sampling_params.
-                        truncate_prompt_tokens)
+                        prompt=prompt["prompt"],
+                        truncate_prompt_tokens=truncate_prompt_tokens,
+                    )
                 prompt_ids, prompt_text = prompt_formats
 
                 generators.append(
