@@ -128,7 +128,7 @@ class WorkerWrapperBase:
             init_hf_modules()
         mod = importlib.import_module(self.worker_module_name)
         worker_class = getattr(mod, self.worker_class_name)
-        self.worker = worker_class(*args, **self.kwargs)
+        self.worker = worker_class(*args, **kwargs)
 
     def execute_method(self, method, *args, **kwargs):
         try:
