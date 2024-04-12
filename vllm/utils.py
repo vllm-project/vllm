@@ -235,10 +235,8 @@ def get_open_port() -> int:
 def update_environment_variables(envs: Dict[str, str]):
     for k, v in envs.items():
         if k in os.environ:
-            warnings.warn(
-                f"Overwriting environment variable {k} "
-                f"from {os.environ[k]} to {v}",
-                stacklevel=2)
+            logger.warning(f"Overwriting environment variable {k} "
+                           f"from {os.environ[k]} to {v}")
         os.environ[k] = v
 
 
