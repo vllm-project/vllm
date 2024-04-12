@@ -818,7 +818,7 @@ class LoRAConfig:
         ]:
             # TODO support marlin and squeezellm
             logger.warning(f"{model_config.quantization} quantization is not "
-                           "tested yet.")
+                           "tested with LoRA yet.")
 
     def verify_with_scheduler_config(self, scheduler_config: SchedulerConfig):
         if scheduler_config.max_num_batched_tokens > 65528:
