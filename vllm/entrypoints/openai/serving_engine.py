@@ -223,13 +223,15 @@ class OpenAIServing:
         else:
             return input_ids, input_text
 
-    # https://platform.openai.com/docs/api-reference/embeddings/create
     def _tokenize_input_text(
         self,
         request: Union[ChatCompletionRequest, CompletionRequest],
         input_text: Union[str, List[int]],
         truncate_prompt_tokens: Optional[conint(ge=1)] = None,
     ) -> Tuple[List[int], str]:
+        """A simpler implementation of
+        :meth:`~vllm.entrypoints.openai.serving_engine.OpenAIServing._tokenize_input_text_or_texts`
+        that assumes single input."""
         return next(
             self._tokenize_input_texts(
                 request,
@@ -243,6 +245,9 @@ class OpenAIServing:
         input_texts: Iterable[Union[str, List[int]]],
         truncate_prompt_tokens: Optional[conint(ge=1)] = None,
     ) -> Iterator[Tuple[List[int], str]]:
+        """A simpler implementation of
+        :meth:`~vllm.entrypoints.openai.serving_engine.OpenAIServing._tokenize_input_text_or_texts`
+        that assumes multiple input."""
         for input_text in input_texts:
             if isinstance(input_text, str):
                 yield self._validate_prompt_and_tokenize(
@@ -275,9 +280,6 @@ class OpenAIServing:
         self,
         input_text_or_texts: Union[str, List[str], List[int], List[List[int]]],
     ) -> List[Union[InputStrings, InputTokens]]:
-        # get the prompt, openai supports the following:
-        # a string, array of strings, array of tokens, or array of token arrays
-
         if isinstance(input_text_or_texts, str):
             # case 1: a string
             return [self._parse_input_element(input_text_or_texts)]
@@ -294,6 +296,12 @@ class OpenAIServing:
         input_text_or_texts: Union[str, List[str], List[int], List[List[int]]],
         truncate_prompt_tokens: Optional[conint(ge=1)] = None,
     ) -> Iterator[Tuple[List[int], str]]:
+        """Tokenize/detokenize depending on the input format.
+        
+        According to `OpenAI API <https://platform.openai.com/docs/api-reference/embeddings/create>`_
+        , each input can be a string or array of tokens. Note that each request
+        can pass one or more inputs.
+        """
         for input_ in self._parse_input_text_or_texts(input_text_or_texts):
             # Although our type checking is based on mypy,
             # VSCode Pyright extension should still work properly
