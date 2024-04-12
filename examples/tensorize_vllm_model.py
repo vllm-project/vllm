@@ -17,6 +17,7 @@ from vllm.config import _get_and_verify_dtype
 from vllm.distributed import initialize_model_parallel
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.tensorizer_loader import TensorizerArgs
+
 """
 tensorize_vllm_model.py is a script that can be used to serialize and 
 deserialize vLLM models. These models can be loaded using tensorizer directly 
