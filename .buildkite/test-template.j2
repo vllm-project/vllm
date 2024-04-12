@@ -13,6 +13,11 @@ steps:
       queue: amd
     command: "bash .buildkite/run-amd-test_async_engine.sh"
 
+  - label: "AMD Test Basic Correctness"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_basic_correctness.sh"
+
   - label: "AMD Test Regression"
     agents:
       queue: amd
@@ -22,6 +27,16 @@ steps:
     agents:
       queue: amd
     command: "bash .buildkite/run-amd-test_core.sh"
+
+  - label: "AMD Test Distributed Comm Ops"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_distributed_comm_ops.sh"
+
+  - label: "AMD Test Distributed"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_distributed.sh"
 
   - label: "AMD Test Engine"
     agents:
