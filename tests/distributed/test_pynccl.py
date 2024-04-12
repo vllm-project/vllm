@@ -13,7 +13,7 @@ def distributed_run(fn, world_size):
     number_of_processes = world_size
     processes = []
     for i in range(number_of_processes):
-        env = os.environ.copy()
+        env = {}
         env['RANK'] = str(i)
         env['LOCAL_RANK'] = str(i)
         env['WORLD_SIZE'] = str(number_of_processes)
