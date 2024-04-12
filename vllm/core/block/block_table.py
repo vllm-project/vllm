@@ -87,7 +87,8 @@ class BlockTable:
 
     def append_token_ids(self,
                          token_ids: List[int],
-                         num_lookahead_slots: int = 0) -> None:
+                         num_lookahead_slots: int = 0,
+                         backtrack: int = 0) -> None:
         """Appends a sequence of token IDs to the existing blocks in the
         BlockTable.
 
@@ -102,9 +103,16 @@ class BlockTable:
 
         Args:
             token_ids (List[int]): The sequence of token IDs to be appended.
+            num_lookahead_slots (int, optional): The number of lookahead slots
+                required after the appended tokens. Defaults to 0.
+            backtrack (int, optional): The number of tokens to backtrack before
+                appending the token_ids. Defaults to 0.
         """
         assert self._is_allocated
         assert token_ids, "can't append empty token ids"
+
+        assert backtrack <= self._num_full_slots
+        self._num_full_slots -= backtrack
 
         self.ensure_num_empty_slots(num_empty_slots=len(token_ids) +
                                     num_lookahead_slots)

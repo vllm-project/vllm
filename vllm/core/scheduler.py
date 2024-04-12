@@ -994,7 +994,8 @@ class Scheduler:
         num_lookahead_slots = self._get_num_lookahead_slots(is_prefill=False)
 
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-            cows = self.block_manager.append_slots(seq, num_lookahead_slots)
+            cows = self.block_manager.append_slots(seq, num_lookahead_slots, backtrack=seq.backtrack)
+            seq.backtrack = 0
 
             for src, dests in cows.items():
                 if src not in blocks_to_copy:

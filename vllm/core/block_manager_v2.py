@@ -167,6 +167,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self,
         seq: Sequence,
         num_lookahead_slots: int,
+        backtrack: int = 0,
     ) -> Dict[int, List[int]]:
 
         block_table = self.block_tables[seq.seq_id]
@@ -174,6 +175,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         block_table.append_token_ids(
             token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
             num_lookahead_slots=num_lookahead_slots,
+            backtrack=backtrack,
         )
 
         # Return any new copy-on-writes.

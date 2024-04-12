@@ -219,6 +219,7 @@ class Sequence:
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
         self.has_aici = False
+        self.backtrack = 0
 
         self.logical_token_blocks: List[LogicalTokenBlock] = []
         # Initialize the logical token blocks with the prompt token ids.
@@ -285,6 +286,28 @@ class Sequence:
         self._append_tokens_to_blocks([token_id])
         self.output_logprobs.append(logprobs)
         self.data.append_token_id(token_id, logprobs[token_id].logprob)
+
+    def splice_tokens(self, backtrack: int, token_ids: List[int]):
+        assert self.backtrack == 0
+        self.backtrack = backtrack
+        if backtrack > 0:
+            assert backtrack <= self.get_output_len(), "can't backtrack into prompt yet"
+            del self.data.output_token_ids[-backtrack:]
+            del self.output_logprobs[-backtrack:]
+            self.data._num_computed_tokens = min(self.data._num_computed_tokens, len(self.data.output_token_ids))
+            needed_blocks = (self.get_len() + self.block_size - 1) // self.block_size
+            if len(self.logical_token_blocks) > needed_blocks:
+                del self.logical_token_blocks[needed_blocks:]
+            if needed_blocks > 0:
+                last_block = self.logical_token_blocks[-1]
+                last_num_tokens = self.get_len() % self.block_size
+                if last_num_tokens == 0:
+                    last_num_tokens = self.block_size
+                last_block.num_tokens = last_num_tokens
+        for t in token_ids:
+            self.append_token_id(t, {t: Logprob(logprob=0.0)})
+        if self.data.get_num_uncomputed_tokens() > 0:
+            self.data._stage = SequenceStage.PREFILL
 
     def get_len(self) -> int:
         return self.data.get_len()
