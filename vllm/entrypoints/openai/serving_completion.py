@@ -164,7 +164,7 @@ class OpenAIServingCompletion(OpenAIServing):
                                                     num_prompts=len(prompts))
 
         # Non-streaming response
-        final_res_batch: RequestOutput = [None] * len(prompts)
+        final_res_batch: List[Optional[RequestOutput]] = [None] * len(prompts)
         try:
             async for i, res in result_generator:
                 if await raw_request.is_disconnected():
@@ -201,9 +201,10 @@ class OpenAIServingCompletion(OpenAIServing):
         model_name: str,
         num_prompts: int,
     ) -> AsyncGenerator[str, None]:
-        previous_texts = [""] * request.n * num_prompts
-        previous_num_tokens = [0] * request.n * num_prompts
-        has_echoed = [False] * request.n * num_prompts
+        num_choices = 1 if request.n is None else request.n
+        previous_texts = [""] * num_choices * num_prompts
+        previous_num_tokens = [0] * num_choices * num_prompts
+        has_echoed = [False] * num_choices * num_prompts
 
         try:
             async for prompt_idx, res in result_generator:
@@ -214,7 +215,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     raise StopAsyncIteration()
 
                 for output in res.outputs:
-                    i = output.index + prompt_idx * request.n
+                    i = output.index + prompt_idx * num_choices
                     # TODO(simon): optimize the performance by avoiding full
                     # text O(n^2) sending.
 
@@ -295,9 +296,10 @@ class OpenAIServingCompletion(OpenAIServing):
         created_time: int,
         model_name: str,
     ) -> CompletionResponse:
-        choices = []
+        choices: List[CompletionResponseChoice] = []
         num_prompt_tokens = 0
         num_generated_tokens = 0
+
         for final_res in final_res_batch:
             assert final_res is not None
             prompt_token_ids = final_res.prompt_token_ids
