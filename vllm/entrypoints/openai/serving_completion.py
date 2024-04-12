@@ -123,8 +123,19 @@ class OpenAIServingCompletion(OpenAIServing):
                     await self.engine.abort(f"{request_id}-{i}")
                     return self.create_error_response("Client disconnected")
                 final_res_batch[i] = res
+
+            final_res_batch_checked: List[RequestOutput] = []
+            for final_res in final_res_batch:
+                assert final_res is not None
+                final_res_batch_checked.append(final_res)
+
             response = self.request_output_to_completion_response(
-                final_res_batch, request, request_id, created_time, model_name)
+                final_res_batch_checked,
+                request,
+                request_id,
+                created_time,
+                model_name,
+            )
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
@@ -252,7 +263,6 @@ class OpenAIServingCompletion(OpenAIServing):
         num_generated_tokens = 0
 
         for final_res in final_res_batch:
-            assert final_res is not None
             prompt_token_ids = final_res.prompt_token_ids
             prompt_logprobs = final_res.prompt_logprobs
             prompt_text = final_res.prompt
