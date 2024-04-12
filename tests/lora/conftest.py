@@ -143,6 +143,11 @@ def baichuan_lora_files():
     return snapshot_download(repo_id="jeeejeee/baichuan7b-text2sql-spider")
 
 
+@pytest.fixture(scope="session")
+def tinyllama_lora_files():
+    return snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
+
+
 @pytest.fixture
 def llama_2_7b_engine_extra_embeddings() -> nn.Module:
     cleanup()
