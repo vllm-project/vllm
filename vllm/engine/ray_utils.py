@@ -1,3 +1,4 @@
+import os
 import pickle
 from typing import Dict, List, Optional, Tuple
 
@@ -53,6 +54,9 @@ try:
             return node_id, gpu_ids
 
         def update_environment_variables(self, envs: Dict[str, str]) -> None:
+            if 'CUDA_VISIBLE_DEVICES' in envs:
+                # avoid overwritten warning
+                del os.environ['CUDA_VISIBLE_DEVICES']
             update_environment_variables(envs)
 
         def execute_model_compiled_dag_remote(self, ignored):
