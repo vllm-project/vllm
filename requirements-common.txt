@@ -5,7 +5,6 @@ sentencepiece  # Required for LLaMA tokenizer.
 numpy
 requests
 py-cpuinfo
-tensorizer == 2.9.0a0
 transformers >= 4.39.1  # Required for StarCoder2 & Llava.
 fastapi
 uvicorn[standard]

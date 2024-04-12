@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+import subprocess
 
 from vllm import SamplingParams
 from vllm.config import ModelConfig, TensorizerConfig
@@ -110,6 +111,7 @@ def test_can_deserialize_s3(vllm_runner, tmp_path):
                                   load_format="tensorizer",
                                   num_readers=1,
                                   vllm_tensorized=False,
+                                  s3_endpoint="object.ord1.coreweave.com",
                                   dtype=dtype)
     deserialized_outputs = loaded_hf_model.generate(prompts, sampling_params)
 
@@ -222,3 +224,35 @@ def test_vllm_model_with_lora_has_same_outputs(vllm_runner, tmp_path):
 def test_load_without_tensorizer_load_format(vllm_runner):
     with pytest.raises(ValueError):
         vllm_runner(model_ref, tensorizer_uri="test")
+
+def test_tensorize_vllm_model(tmp_path):
+    # Test serialize command
+    serialize_args = [
+        "python3", "/vllm/examples/tensorize_vllm_model.py",
+        "--model", model_ref,
+        "--dtype", "float16",
+        "serialize",
+        "--serialized-directory", tmp_path,
+        "--suffix", "tests"
+    ]
+    result = subprocess.run(serialize_args, capture_output=True, text=True)
+    print(result.stdout)  # Print the output of the serialize command
+
+    assert result.returncode == 0, (f"Serialize command failed with output:"
+                                    f"\n{result.stdout}\n{result.stderr}")
+
+    path_to_tensors = f"{tmp_path}/vllm/{model_ref}/tests/model.tensors"
+
+    # Test deserialize command
+    deserialize_args = [
+        "python3", "/vllm/examples/tensorize_vllm_model.py",
+        "--model", model_ref,
+        "--dtype", "float16",
+        "deserialize",
+        "--path-to-tensors",
+        path_to_tensors
+    ]
+    result = subprocess.run(deserialize_args, capture_output=True,
+                            text=True)
+    assert result.returncode == 0, (f"Deserialize command failed with output:"
+                                    f"\n{result.stdout}\n{result.stderr}")
