@@ -15,8 +15,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig
 
 from vllm.config import _get_and_verify_dtype
 from vllm.model_executor.models import ModelRegistry
-from vllm.model_executor.parallel_utils.parallel_state import (
-    initialize_model_parallel)
+from vllm.distributed import initialize_model_parallel
 from vllm.model_executor.tensorizer_loader import TensorizerArgs
 
 """
