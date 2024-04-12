@@ -157,7 +157,8 @@ class RayGPUExecutor(ExecutorBase):
         init_worker_all_kwargs = []
         # Initialize the driver worker with the Worker class.
         driver_rank = 0
-        driver_local_rank = node_workers[driver_ip].index(driver_rank)
+        driver_local_rank = node_workers[worker_node_and_gpu_ids[0][0]].index(
+            driver_rank)
         init_worker_all_kwargs.append(
             collect_arg_helper_func(
                 model_config=self.model_config,
