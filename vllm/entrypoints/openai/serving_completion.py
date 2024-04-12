@@ -76,7 +76,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     guided_decode_logit_processor)
 
             prompts = list(
-                self._tokenize_input_text_or_texts(
+                self._tokenize_prompt_input_or_inputs(
                     request,
                     request.prompt,
                     truncate_prompt_tokens=sampling_params.

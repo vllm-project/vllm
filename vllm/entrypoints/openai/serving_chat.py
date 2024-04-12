@@ -197,7 +197,7 @@ class OpenAIServingChat(OpenAIServing):
                 sampling_params.logits_processors.append(
                     guided_decode_logits_processor)
 
-            prompt_ids, prompt_text = self._tokenize_input_text(
+            prompt_ids, prompt_text = self._tokenize_prompt_input(
                 request,
                 prompt,
                 truncate_prompt_tokens=sampling_params.truncate_prompt_tokens,
