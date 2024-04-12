@@ -1,11 +1,11 @@
-from typing import List, Set
+from typing import List, Set, Tuple
 
 import torch
 
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SequenceGroupMetadata
 from vllm.utils import make_tensor_with_pad
-from vllm.worker.model_runner import ModelRunner, PreparePromptMetadata
+from vllm.worker.model_runner import ModelRunner, PreparePromptMetadata, AttentionMetadata
 
 _PAD_SLOT_ID = -1
 
@@ -13,6 +13,90 @@ _PAD_SLOT_ID = -1
 class XPUModelRunner(ModelRunner):
 
     def _prepare_prompt(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, List[int]]:
+        assert len(seq_group_metadata_list) > 0
+        input_tokens: List[int] = []
+        input_positions: List[int] = []
+        slot_mapping: List[int] = []
+        prompt_lens: List[int] = []
+
+        for seq_group_metadata in seq_group_metadata_list:
+            assert seq_group_metadata.is_prompt
+            seq_ids = list(seq_group_metadata.seq_data.keys())
+            assert len(seq_ids) == 1
+            seq_id = seq_ids[0]
+
+            seq_data = seq_group_metadata.seq_data[seq_id]
+            prompt_tokens = seq_data.get_token_ids()
+            computed_len = seq_data.get_num_computed_tokens()
+            prompt_len = len(prompt_tokens)
+
+            prompt_lens.append(prompt_len)  # Prompt token num
+            input_tokens.extend(prompt_tokens)  # Token ids
+
+            # Token position ids
+            # NOTE(woosuk): Here we assume that the first token in the prompt
+            # is always the first token in the sequence.
+            input_positions.extend(list(range(computed_len, prompt_len)))
+
+            # Compute the slot mapping.
+            block_table = seq_group_metadata.block_tables[seq_id]
+            # Mask the [0, start_idx) tokens of the prompt with _PAD_SLOT_ID,
+            # where start_idx is max(0, prompt_len - sliding_window).
+            # For example, if the prompt len is 10, sliding window is 8, and
+            # block size is 4, the first two tokens are masked and the slot
+            # mapping will be [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
+            start_idx = 0
+            if self.sliding_window is not None:
+                start_idx = max(0, prompt_len - self.sliding_window)
+
+            for i in range(computed_len, prompt_len):
+                if i < start_idx:
+                    slot_mapping.append(_PAD_SLOT_ID)
+                    continue
+
+                block_number = block_table[i //
+                                           self.block_size]  # type: ignore
+                block_offset = i % self.block_size  # type: ignore
+                slot = block_number * self.block_size + block_offset
+                slot_mapping.append(slot)
+
+        num_prompt_tokens = len(input_tokens)
+
+        input_tokens = torch.tensor(input_tokens,
+                                    dtype=torch.long,
+                                    device=self.device)  # type: ignore
+        input_positions = torch.tensor(input_positions,
+                                       dtype=torch.long,
+                                       device=self.device)  # type: ignore
+        slot_mapping = torch.tensor(slot_mapping,
+                                    dtype=torch.long,
+                                    device=self.device)  # type: ignore
+
+        attn_metadata = self.attn_backend.make_metadata(
+            is_prompt=True,
+            prompt_lens=prompt_lens,
+            num_prefills=len(prompt_lens),
+            num_prefill_tokens=num_prompt_tokens,
+            num_decode_tokens=0,
+            prefill_metadata=None,
+            decode_metadata=None,
+            max_context_len=None,
+            context_lens=None,
+            block_tables=torch.tensor([]),
+            slot_mapping=slot_mapping,
+            kv_cache_dtype=self.kv_cache_dtype,
+        )
+        return (
+            input_tokens,
+            input_positions,
+            attn_metadata,
+            prompt_lens,
+        )
+
+    def a_prepare_prompt(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> PreparePromptMetadata:
@@ -191,28 +275,20 @@ class XPUModelRunner(ModelRunner):
 
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=True,
-            # slot_mapping=slot_mapping,
-            prompt_lens=prompt_lens,
-            prompt_lens_tensor=prompt_lens_tensor,
-            # num_prompt_tokens=num_prompt_tokens,
-            # num_generation_tokens=0,
-            max_subquery_len=max_subquery_len,
+            num_prefills=len(prompt_lens),
+            num_prefill_tokens=num_prompt_tokens,
+            num_decode_tokens=0,
+            prefill_metadata=None,
+            decode_metadata=None,
             max_context_len=None,
-            max_prompt_len=max_prompt_len,
-            subquery_start_loc=subquery_start_loc,
-            seq_start_loc=seq_start_loc,
-            context_lens=context_lens_tensor,
-            block_tables=block_tables,
-            use_cuda_graph=False,
-            # kv_cache_dtype=self.kv_cache_dtype,
+            context_lens=None,
+            block_tables=torch.tensor([]),
+            slot_mapping=slot_mapping,
+            kv_cache_dtype=self.kv_cache_dtype,
         )
-        return PreparePromptMetadata(input_tokens,
-                                     input_positions,
-                                     attn_metadata,
-                                     prompt_lens,
-                                     subquery_lens,
-                                     lora_index_mapping,
-                                     lora_prompt_mapping,
-                                     lora_requests,
-                                     multi_modal_input,
-                                     slot_mapping=slot_mapping)
+        return (
+            input_tokens,
+            input_positions,
+            attn_metadata,
+            prompt_lens,
+        )
