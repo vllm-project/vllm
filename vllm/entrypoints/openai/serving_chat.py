@@ -59,7 +59,7 @@ async def get_and_parse_image(image_url: str,
     return MultiModalData(type=MultiModalData.Type.IMAGE, data=image_tensor)
 
 
-@final
+@final  # So that it should be compatible with Dict[str, str]
 class ConversationMessage(TypedDict):
     role: str
     content: str
@@ -115,7 +115,7 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 raise NotImplementedError(f"Unknown part type: {part['type']}")
 
-        messages = [ConversationMessage(role=role, content="\n".join(text))]
+        messages = [ConversationMessage(role=role, content="\n".join(texts))]
         data_futures = image_futures
 
         return messages, data_futures
