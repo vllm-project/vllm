@@ -98,13 +98,22 @@ class RayGPUExecutor(ExecutorBase):
                 num_gpus=num_gpus,
                 scheduling_strategy=scheduling_strategy,
                 **ray_remote_kwargs,
-            )(RayWorkerVllm).remote(self.model_config.trust_remote_code)
+            )(RayWorkerVllm).remote(
+                init_cached_hf_modules=self.model_config.trust_remote_code,
+                worker_module_name="vllm.worker.worker",
+                worker_class_name="Worker",
+            )
 
             worker_ip = ray.get(worker.get_node_ip.remote())
             if worker_ip == driver_ip and self.driver_dummy_worker is None:
                 # If the worker is on the same node as the driver, we use it
                 # as the resource holder for the driver process.
                 self.driver_dummy_worker = worker
+                self.driver_worker = RayWorkerVllm(
+                    init_cached_hf_modules=self.model_config.trust_remote_code,
+                    worker_module_name="vllm.worker.worker",
+                    worker_class_name="Worker",
+                )
             else:
                 # Else, added to the list of workers.
                 self.workers.append(worker)
@@ -116,10 +125,9 @@ class RayGPUExecutor(ExecutorBase):
                 "GPU node.")
 
         # Get the set of GPU IDs used on each node.
-        driver_node_id, driver_gpu_ids = ray.get(
-            self.driver_dummy_worker.get_node_and_gpu_ids.remote())
-        worker_node_and_gpu_ids = ray.get(
-            [worker.get_node_and_gpu_ids.remote() for worker in self.workers])
+        (driver_node_id,
+         driver_gpu_ids), *worker_node_and_gpu_ids = self._run_workers(
+             "get_node_and_gpu_ids", use_dummy_driver=True)
 
         node_workers = defaultdict(list)
         node_gpus = defaultdict(list)
@@ -147,9 +155,28 @@ class RayGPUExecutor(ExecutorBase):
         distributed_init_method = get_distributed_init_method(
             driver_ip, get_open_port())
 
-        # Lazy import the Worker to avoid importing torch.cuda/xformers
-        # before CUDA_VISIBLE_DEVICES is set in the Worker
-        from vllm.worker.worker import Worker
+        def collect_arg_helper_func(**kwargs):
+            # avoid writing `{"name": value}` manually
+            return kwargs
+
+        init_worker_all_kwargs = []
+        # Initialize the driver worker with the Worker class.
+        driver_rank = 0
+        driver_local_rank = node_workers[driver_node_id].index(driver_rank)
+        init_worker_all_kwargs.append(
+            collect_arg_helper_func(
+                model_config=self.model_config,
+                parallel_config=self.parallel_config,
+                scheduler_config=self.scheduler_config,
+                device_config=self.device_config,
+                cache_config=self.cache_config,
+                local_rank=driver_local_rank,
+                rank=driver_rank,
+                distributed_init_method=distributed_init_method,
+                lora_config=self.lora_config,
+                vision_language_config=self.vision_language_config,
+                is_driver_worker=True,
+            ))
 
         model_config = copy.deepcopy(self.model_config)
         parallel_config = copy.deepcopy(self.parallel_config)
@@ -165,8 +192,8 @@ class RayGPUExecutor(ExecutorBase):
                 start=1,
         ):
             local_rank = node_workers[node_id].index(rank)
-            worker.init_worker.remote(
-                lambda rank=rank, local_rank=local_rank: Worker(
+            init_worker_all_kwargs.append(
+                collect_arg_helper_func(
                     model_config=model_config,
                     parallel_config=parallel_config,
                     scheduler_config=scheduler_config,
@@ -178,23 +205,7 @@ class RayGPUExecutor(ExecutorBase):
                     lora_config=lora_config,
                     vision_language_config=vision_language_config,
                 ))
-
-        # Initialize the driver worker with the Worker class.
-        driver_rank = 0
-        driver_local_rank = node_workers[driver_node_id].index(driver_rank)
-        self.driver_worker = Worker(
-            model_config=self.model_config,
-            parallel_config=self.parallel_config,
-            scheduler_config=self.scheduler_config,
-            device_config=self.device_config,
-            cache_config=self.cache_config,
-            local_rank=driver_local_rank,
-            rank=driver_rank,
-            distributed_init_method=distributed_init_method,
-            lora_config=self.lora_config,
-            vision_language_config=self.vision_language_config,
-            is_driver_worker=True,
-        )
+        self._run_workers("init_worker", all_kwargs=init_worker_all_kwargs)
 
         self._run_workers("init_device")
         self._run_workers(
