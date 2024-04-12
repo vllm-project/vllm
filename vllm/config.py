@@ -883,18 +883,6 @@ class VisionLanguageConfig:
                              f"Expecting to choose from "
                              f"{[x.name for x in cls.ImageInputType]}.") from e
 
-
-_STR_DTYPE_TO_TORCH_DTYPE = {
-    "half": torch.float16,
-    "float16": torch.float16,
-    "float": torch.float32,
-    "float32": torch.float32,
-    "bfloat16": torch.bfloat16,
-}
-
-_ROCM_NOT_SUPPORTED_DTYPE = ["float", "float32"]
-
-
 @dataclass
 class TensorizerConfig:
     tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, typing.BinaryIO,
@@ -923,6 +911,16 @@ class TensorizerConfig:
             "s3_endpoint": self.s3_endpoint,
         }
         return TensorizerArgs(**tensorizer_args)
+
+_STR_DTYPE_TO_TORCH_DTYPE = {
+    "half": torch.float16,
+    "float16": torch.float16,
+    "float": torch.float32,
+    "float32": torch.float32,
+    "bfloat16": torch.bfloat16,
+}
+
+_ROCM_NOT_SUPPORTED_DTYPE = ["float", "float32"]
 
 
 def _get_and_verify_dtype(

@@ -213,3 +213,9 @@ def test_vllm_model_with_lora_has_same_outputs(vllm_runner, tmp_path):
                                             test_prompts)
 
     assert outputs == deserialized_outputs
+
+def test_load_without_tensorizer_load_format(vllm_runner):
+    with pytest.raises(ValueError):
+        vllm_model = vllm_runner(model_ref,
+                                 tensorizer_uri="test")
+
