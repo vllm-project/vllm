@@ -4,7 +4,7 @@ import torch
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (DeviceConfig, LoRAConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig)
+                         SchedulerConfig, VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
@@ -27,6 +27,7 @@ class CPUModelRunner:
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
+        vision_language_config: Optional[VisionLanguageConfig],
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         *args,
@@ -36,6 +37,7 @@ class CPUModelRunner:
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.lora_config = lora_config
+        self.vision_language_config = vision_language_config
         self.is_driver_worker = is_driver_worker
 
         # model_config can be None in tests/samplers/test_sampler.py.
@@ -58,6 +60,7 @@ class CPUModelRunner:
         self.model = get_model(self.model_config,
                                self.device_config,
                                lora_config=self.lora_config,
+                               vision_language_config=self.vision_language_config,
                                parallel_config=self.parallel_config,
                                scheduler_config=self.scheduler_config)
 
