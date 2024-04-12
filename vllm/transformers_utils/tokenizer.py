@@ -5,7 +5,7 @@ from transformers import (AutoTokenizer, PreTrainedTokenizer,
 
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.transformers_utils.tokenizers import *
+from vllm.transformers_utils.tokenizers import BaichuanTokenizer
 from vllm.utils import make_async
 
 logger = init_logger(__name__)
@@ -28,7 +28,7 @@ def get_cached_tokenizer(
     tokenizer_all_special_tokens = set(tokenizer.all_special_tokens)
     tokenizer_len = len(tokenizer)
 
-    class CachedTokenizer(tokenizer.__class__):
+    class CachedTokenizer(tokenizer.__class__):  # type: ignore
 
         @property
         def all_special_ids(self):

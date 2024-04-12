@@ -7,7 +7,7 @@ codespell==2.2.6
 isort==5.13.2
 
 # type checking
-mypy==0.991
+mypy==1.9.0
 types-PyYAML
 types-requests
 types-setuptools
