@@ -34,7 +34,6 @@ class Block(ABC):
     def trim(self, num_tokens: int):
         pass
 
-
     class Factory(Protocol):
 
         @abstractmethod

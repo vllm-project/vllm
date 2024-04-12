@@ -296,7 +296,8 @@ class Sequence:
             del self.data.output_token_ids[-backtrack:]
             del self.output_logprobs[-backtrack:]
             self.data._num_computed_tokens = min(
-                self.data._num_computed_tokens, len(self.data.output_token_ids))
+                self.data._num_computed_tokens,
+                len(self.data.output_token_ids))
             needed_blocks = \
                 (self.get_len() + self.block_size - 1) // self.block_size
             if len(self.logical_token_blocks) > needed_blocks:

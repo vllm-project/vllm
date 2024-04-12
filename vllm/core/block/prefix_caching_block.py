@@ -363,7 +363,7 @@ class PrefixCachingBlock(Block):
 
     def trim(self, num_tokens: int):
         return self._block.trim(num_tokens)
-    
+
     def append_token_ids(self, token_ids: List[int]) -> None:
         """Appends the given token IDs to the block and registers the block as
         immutable if the block becomes full.

@@ -36,8 +36,7 @@ class AiciRunnerCompletion(OpenAIServing):
 
         prompt = request.prompt
         inst_res = await self.aici_runner.instantiate_async(
-            request_id, prompt, request.controller,
-            request.controller_arg)
+            request_id, prompt, request.controller, request.controller_arg)
 
         if inst_res is not None:
             # error case
@@ -46,9 +45,7 @@ class AiciRunnerCompletion(OpenAIServing):
             return
 
         sampling_params = request.to_sampling_params()
-        generator = self.engine.generate(prompt,
-                                         sampling_params,
-                                         request_id)
+        generator = self.engine.generate(prompt, sampling_params, request_id)
 
         previous_texts = []
         ff_tokens = len(prompt)

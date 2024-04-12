@@ -506,10 +506,11 @@ class LLMEngine:
                 if r.branches:
                     splice = r.branches[0].find_splice(sampled_token)
                     if splice:
-                        parent.splice_tokens(splice.backtrack, splice.ff_tokens)
+                        parent.splice_tokens(splice.backtrack,
+                                             splice.ff_tokens)
                         aici_runner.tokens_generated(
                             sid, splice.ff_tokens, backtrack=splice.backtrack)
-                        continue # don't call append_token_id()
+                        continue  # don't call append_token_id()
                     else:
                         aici_runner.tokens_generated(sid, [sampled_token])
             parent.append_token_id(last_child_sample.output_token,
