@@ -14,5 +14,6 @@ trap remove_docker_container EXIT
 remove_docker_container
 
 # Run the image
-docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_speculative_decoding rocm python3 -m pytest -v -s vllm/tests/spec_decode
+docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_speculative_decoding \
+        rocm python3 -m pytest -v -s vllm/tests/spec_decode
 

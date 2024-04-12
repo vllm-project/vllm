@@ -9,7 +9,9 @@ rocminfo
 docker build -t rocm -f Dockerfile.rocm .
 
 # Setup cleanup
-remove_docker_container() { docker rm -f rocm_test_distributed || true; }
+remove_docker_container() { docker rm -f rocm_test_distributed || true; \
+						docker rm -f rocm_test_basic_distributed_correctness_opt || true; \
+						docker rm -f rocm_test_basic_distributed_correctness_opt || true; }
 trap remove_docker_container EXIT
 remove_docker_container
 
@@ -17,11 +19,11 @@ remove_docker_container
 docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_distributed \
        	rocm  python3 -m pytest -v-s vllm/tests/test_pynccl.py
 
-docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_distributed \
+docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_basic_distributed_correctness_opt \
 	        rocm  /bin/bash -c "TEST_DIST_MODEL=facebook/opt-125m python3 -m pytest \
 		-v-s vllm/tests/test_basic_distributed_correctness.py"
 
-docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_distributed \
-	                rocm  /bin/bash -c "TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf python3 -m pytest \
-			                -v-s vllm/tests/test_basic_distributed_correctness.py"
+docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_basic_distributed_correctness_llama \
+	        rocm  /bin/bash -c "TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf python3 -m pytest \
+		-v-s vllm/tests/test_basic_distributed_correctness.py"
 

@@ -15,5 +15,6 @@ remove_docker_container
 
 # Run the image
 docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_llava \
-	rocm /bin/bash -c "cd vllm/tests; /bin/bash ../.buildkite/download-images.sh; python3 -m pytest -v -s models/test_llava.py"
+	rocm /bin/bash -c "cd vllm/tests; /bin/bash ../.buildkite/download-images.sh; python3 \
+	-m pytest -v -s models/test_llava.py"
 

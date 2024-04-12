@@ -9,11 +9,12 @@ rocminfo
 docker build -t rocm -f Dockerfile.rocm .
 
 # Setup cleanup
-remove_docker_container() { docker rm -f rocm_test_entrypoints || true; }
+remove_docker_container() { docker rm -f rocm_test_lora || true; }
 trap remove_docker_container EXIT
 remove_docker_container
 
 # Run the image
-docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_entrypoints \
-        rocm python3 -m pytest -v -s vllm/tests/entrypoints 
+docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_lora \
+	rocm python3 -m pytest -v -s vllm/tests/lora \
+	--shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
