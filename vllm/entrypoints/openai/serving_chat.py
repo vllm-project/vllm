@@ -231,17 +231,18 @@ class OpenAIServingChat(OpenAIServing):
         parsed_conversation: List[ChatMessage],
         result_generator: AsyncIterator[RequestOutput],
         request_id: str,
-    ) -> Union[ErrorResponse, AsyncGenerator[str, None]]:
-
+    ) -> AsyncGenerator[str, None]:
         model_name = request.model
         created_time = int(time.time())
         chunk_object_type = "chat.completion.chunk"
         first_iteration = True
 
         # Send response for each token for each request.n (index)
-        previous_texts = [""] * request.n
-        previous_num_tokens = [0] * request.n
-        finish_reason_sent = [False] * request.n
+        num_choices = 1 if request.n is None else request.n
+        previous_texts = [""] * num_choices
+        previous_num_tokens = [0] * num_choices
+        finish_reason_sent = [False] * num_choices
+
         try:
             async for res in result_generator:
                 res: RequestOutput
@@ -252,7 +253,7 @@ class OpenAIServingChat(OpenAIServing):
                     # Send first response for each request.n (index) with
                     # the role
                     role = self.get_chat_request_role(request)
-                    for i in range(request.n):
+                    for i in range(num_choices):
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
                             delta=DeltaMessage(role=role),
@@ -277,19 +278,19 @@ class OpenAIServingChat(OpenAIServing):
                             last_msg_content = parsed_conversation[-1].content
 
                         if last_msg_content:
-                            for i in range(request.n):
+                            for i in range(num_choices):
                                 choice_data = (
                                     ChatCompletionResponseStreamChoice(
                                         index=i,
                                         delta=DeltaMessage(
                                             content=last_msg_content),
+                                        logprobs=None,
                                         finish_reason=None))
                                 chunk = ChatCompletionStreamResponse(
                                     id=request_id,
                                     object=chunk_object_type,
                                     created=created_time,
                                     choices=[choice_data],
-                                    logprobs=None,
                                     model=model_name)
                                 data = chunk.model_dump_json(
                                     exclude_unset=True)
@@ -376,10 +377,9 @@ class OpenAIServingChat(OpenAIServing):
         result_generator: AsyncIterator[RequestOutput],
         request_id: str,
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
-
         model_name = request.model
         created_time = int(time.time())
-        final_res: RequestOutput = None
+        final_res: Optional[RequestOutput] = None
 
         async for res in result_generator:
             if await raw_request.is_disconnected():
