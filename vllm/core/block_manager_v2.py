@@ -226,19 +226,10 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         src_block_table = self.block_tables[parent_seq.seq_id]
         self.block_tables[child_seq.seq_id] = src_block_table.fork()
 
-    def get_num_free_gpu_blocks(self) -> int:
-        return self.block_allocator.get_num_free_blocks(Device.GPU)
-
-    def get_num_free_cpu_blocks(self) -> int:
-        return self.block_allocator.get_num_free_blocks(Device.CPU)
-
     def can_swap_in(self, seq_group: SequenceGroup,
                     num_lookahead_slots: int) -> bool:
         return self._can_swap(seq_group, Device.GPU, SequenceStatus.SWAPPED,
                               num_lookahead_slots, self.watermark_blocks)
-
-    def can_swap_out(self, seq_group: SequenceGroup) -> bool:
-        return self._can_swap(seq_group, Device.CPU, SequenceStatus.RUNNING)
 
     def swap_in(self,
                 sequence_group: SequenceGroup,
@@ -260,6 +251,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         }
         return block_number_mapping
 
+    def can_swap_out(self, seq_group: SequenceGroup) -> bool:
+        return self._can_swap(seq_group, Device.CPU, SequenceStatus.RUNNING)
+
     def swap_out(self, sequence_group: SequenceGroup) -> Dict[int, int]:
         blocks = self._get_blocks_for_swap(sequence_group,
                                            SequenceStatus.RUNNING)
@@ -272,6 +266,12 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             for gpu_block_id, cpu_block_id in mapping.items()
         }
         return block_number_mapping
+
+    def get_num_free_gpu_blocks(self) -> int:
+        return self.block_allocator.get_num_free_blocks(Device.GPU)
+
+    def get_num_free_cpu_blocks(self) -> int:
+        return self.block_allocator.get_num_free_blocks(Device.CPU)
 
     def _can_swap(self,
                   seq_group: SequenceGroup,

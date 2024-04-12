@@ -93,9 +93,6 @@ class NaiveBlockAllocator(BlockAllocator):
         self._free_block_id(block.block_id)
         block.block_id = None
 
-    def reference(self, block_id: int) -> None:
-        self._refcounter.incr(block_id)
-
     def fork(self, last_block: Block) -> List[Block]:
         """Creates a new sequence of blocks that shares the same underlying
         memory as the original sequence.
