@@ -1,10 +1,11 @@
 import importlib
 import pickle
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 from vllm.utils import get_ip, is_hip
+from vllm.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
 
@@ -30,6 +31,10 @@ try:
             # The flag indicates is set_device is called on
             # that thread.
             self.compiled_dag_cuda_device_set = False
+
+        @staticmethod
+        def update_environment_variables(cls, envs: Dict[str, str]) -> None:
+            WorkerBase.update_environment_variables(cls, envs)
 
         def init_worker(self):
             if self.init_cached_hf_modules:
