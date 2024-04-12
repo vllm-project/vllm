@@ -82,7 +82,7 @@ class BlockTable:
             device (Device, optional): The device on which the blocks should be
                 allocated. Defaults to Device.GPU.
             by_block (bool, optional): whether we are allocate block by block.
-            Set to True when doing cache swapping. Defaults to False. 
+            Set to True when doing cache swapping. Default to False. 
         """
         assert not self._is_allocated or by_block
         assert token_ids
@@ -318,39 +318,3 @@ class BlockTable:
         token_blocks = [token_ids[:first_chunk_size]] + chunk_list(
             token_ids[first_chunk_size:], self._block_size)
         return token_blocks
-
-    def get_num_cache_blocks_touched_by_swapping(self, token_ids: List[int],
-                                                 num_lookahead_slots: int,
-                                                 device: Device) -> int:
-        """Determine how many blocks will be "touched" by swapping in/out the 
-        token ids.
-
-        This is required for the scheduler to determine whether a sequence can
-        be swapped in/out.
-        """
-        all_token_ids = token_ids + [-1] * num_lookahead_slots
-        token_blocks = self._chunk_token_blocks_for_append(all_token_ids)
-        prev_block = None
-        num_blocks_touched = 0
-        for token_block in token_blocks:
-            block = self.block_allocator.mock_mutable(prev_block, token_block,
-                                                      device)
-            if not block.prefix_caching_allocator.is_block_cached(block):
-                num_blocks_touched += 1
-            prev_block = block
-        return num_blocks_touched
-
-    def get_num_naive_blocks_touched_by_swapping(self, token_ids: List[int],
-                                                 num_lookahead_slots: int,
-                                                 total_touched_blocks: int,
-                                                 block_set: set) -> None:
-        num_blocks_touched = self.get_num_blocks_touched_by_append_slots(
-            token_ids, num_lookahead_slots)
-        blocks = self.get_blocks()
-        if num_blocks_touched > len(blocks):
-            total_touched_blocks += 1
-        for block in blocks:
-            if not block.is_full:
-                total_touched_blocks += 1
-            else:
-                block_set.add(block.block_id)

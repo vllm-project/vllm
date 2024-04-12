@@ -204,6 +204,14 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         """
         return self._allocators[device].get_num_free_blocks()
 
+    def can_swap(self,
+                 blocks: List[Block],
+                 device: Device,
+                 num_lookahead_slots: int = 0,
+                 watermark_blocks: int = 0) -> bool:
+        return self._allocators[device].can_swap(blocks, num_lookahead_slots,
+                                                 watermark_blocks)
+
     def clear_copy_on_writes(self) -> Dict[int, List[int]]:
         """Clears the copy-on-write (CoW) state and returns the mapping of
             source to destination block IDs.

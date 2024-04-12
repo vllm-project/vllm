@@ -345,6 +345,35 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         ]
         return commonprefix([ids for ids in ids_list if ids != []])
 
+    def can_swap(self,
+                 blocks: List[Block],
+                 num_lookahead_slots: int = 0,
+                 watermark_blocks: int = 0) -> bool:
+        """Determine can we swap in/out the given blocks from certain sequence
+        group with the provided num_lookahead_slots.
+
+        Args:
+            blocks (List[Block]): The potential blocks to swap.
+            num_lookahead_slots (int): number of lookahead slots (0 for 
+                swap out).
+        
+        Returns:
+            bool: whether the allocator has capacity to accept the swap 
+                with given blocks and num_lookahead_slots.
+        """
+        num_touched_blocks = 0
+        for block in blocks:
+            if not block.is_full:
+                if block.num_empty_slots >= num_lookahead_slots:
+                    num_touched_blocks += 1
+                else:
+                    num_touched_blocks += 2
+            else:
+                if not self.is_block_cached(block):
+                    num_touched_blocks += 1
+        return self.get_num_free_blocks(
+        ) - num_touched_blocks >= watermark_blocks
+
 
 class PrefixCachingBlock(Block):
     """A block implementation that supports prefix caching.

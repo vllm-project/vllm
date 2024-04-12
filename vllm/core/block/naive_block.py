@@ -221,6 +221,40 @@ class NaiveBlockAllocator(BlockAllocator):
         """
         return []
 
+    def can_swap(self,
+                 blocks: List[Block],
+                 num_lookahead_slots: int = 0,
+                 watermark_blocks: int = 0) -> bool:
+        """Determine can we swap in/out the given blocks from certain sequence
+        group with the provided num_lookahead_slots.
+
+        Args:
+            blocks (List[Block]): The potential blocks to swap.
+            num_lookahead_slots (int): number of lookahead slots (0 for swap 
+                out).
+        
+        Returns:
+            bool: whether the allocator has capacity to accept the swap 
+                with given blocks and num_lookahead_slots.
+        """
+        # NOTE: for naive block, we use set to eliminate common blocks among
+        # seqs, also we compare the empty slots in the mutable blocks with
+        # lookahead slots to get the number of unique new block that are
+        # needed.
+        old_block_set = set()
+        new_block_count = 0
+        for block in blocks:
+            if not block.is_full and num_lookahead_slots != 0:
+                if block.num_empty_slots >= num_lookahead_slots:
+                    new_block_count += 1
+                else:
+                    new_block_count += 2
+            else:
+                old_block_set.add(block.block_id)
+        num_touched_blocks = new_block_count + len(old_block_set)
+        return self.get_num_free_blocks(
+        ) - num_touched_blocks >= watermark_blocks
+
 
 class NaiveBlock(Block):
     """An implementation of the Block class that does not support prefix
