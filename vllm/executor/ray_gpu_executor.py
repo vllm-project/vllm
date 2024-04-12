@@ -125,17 +125,13 @@ class RayGPUExecutor(ExecutorBase):
                 "GPU node.")
 
         # Get the set of GPU IDs used on each node.
-        (driver_node_id,
-         driver_gpu_ids), *worker_node_and_gpu_ids = self._run_workers(
-             "get_node_and_gpu_ids", use_dummy_driver=True)
+        worker_node_and_gpu_ids = self._run_workers("get_node_and_gpu_ids",
+                                                    use_dummy_driver=True)
 
         node_workers = defaultdict(list)
         node_gpus = defaultdict(list)
 
-        node_workers[driver_node_id].append(0)
-        node_gpus[driver_node_id].extend(driver_gpu_ids)
-        for i, (node_id, gpu_ids) in enumerate(worker_node_and_gpu_ids,
-                                               start=1):
+        for i, (node_id, gpu_ids) in enumerate(worker_node_and_gpu_ids):
             node_workers[node_id].append(i)
             node_gpus[node_id].extend(gpu_ids)
         for node_id, gpu_ids in node_gpus.items():
@@ -143,8 +139,7 @@ class RayGPUExecutor(ExecutorBase):
 
         # Set CUDA_VISIBLE_DEVICES for the driver and workers.
         all_args_to_update_environment_variables = []
-        for (node_id, _) in [(driver_node_id, driver_gpu_ids)
-                             ] + worker_node_and_gpu_ids:
+        for (node_id, _) in worker_node_and_gpu_ids:
             all_args_to_update_environment_variables.append([{
                 "CUDA_VISIBLE_DEVICES":
                 ",".join(map(str, node_gpus[node_id]))
@@ -162,7 +157,7 @@ class RayGPUExecutor(ExecutorBase):
         init_worker_all_kwargs = []
         # Initialize the driver worker with the Worker class.
         driver_rank = 0
-        driver_local_rank = node_workers[driver_node_id].index(driver_rank)
+        driver_local_rank = node_workers[driver_ip].index(driver_rank)
         init_worker_all_kwargs.append(
             collect_arg_helper_func(
                 model_config=self.model_config,
@@ -188,7 +183,7 @@ class RayGPUExecutor(ExecutorBase):
 
         # Initialize the actual workers with the Worker class.
         for rank, (worker, (node_id, _)) in enumerate(
-                zip(self.workers, worker_node_and_gpu_ids),
+                zip(self.workers, worker_node_and_gpu_ids[1:]),
                 start=1,
         ):
             local_rank = node_workers[node_id].index(rank)
