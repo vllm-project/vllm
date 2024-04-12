@@ -340,9 +340,8 @@ class RayGPUExecutor(ExecutorBase):
 
         # Start the driver worker after all the ray workers.
         if not use_dummy_driver:
-            driver_worker_output = getattr(self.driver_worker,
-                                           method)(*all_args[0],
-                                                   **all_kwargs[0])
+            driver_worker_output = self.driver_worker.execute_method(
+                method, *all_args[0], **all_kwargs[0])
         else:
             driver_worker_output = ray.get(
                 self.driver_dummy_worker.execute_method.remote(
