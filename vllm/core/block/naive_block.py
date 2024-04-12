@@ -247,6 +247,9 @@ class NaiveBlock(Block):
         assert self.num_empty_slots >= len(token_ids)
         self._token_ids.extend(token_ids)
 
+    def trim(self, num_tokens: int):
+        del self._token_ids[num_tokens:]
+
     @property
     def block_id(self) -> Optional[int]:
         return self._block_id
