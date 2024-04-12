@@ -8,9 +8,9 @@ from typing import Optional
 
 import torch
 
-from vllm.logger import get_logger
+from vllm.logger import init_logger
 
-logger = get_logger(__name__)
+logger = init_logger(__name__)
 
 # Tensor model parallel group that the current rank belongs to.
 _TENSOR_MODEL_PARALLEL_GROUP = None
