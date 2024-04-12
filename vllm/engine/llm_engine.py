@@ -501,9 +501,11 @@ class LLMEngine:
 
         for seq, _ in child_seqs:
             if seq_group.sampling_params.detokenize:
-                self.detokenizer.decode_sequence_inplace(
+                new_char_count = self.detokenizer.decode_sequence_inplace(
                     seq, seq_group.sampling_params)
-            self._check_stop(seq, seq_group.sampling_params)
+            else:
+                new_char_count = 0
+            self._check_stop(seq, new_char_count, seq_group.sampling_params)
 
         # Non-beam search case
         if not seq_group.sampling_params.use_beam_search:
@@ -798,9 +800,45 @@ class LLMEngine:
             time_e2e_requests=time_e2e_requests,
         )
 
-    def _check_stop(self, seq: Sequence,
+    def _check_stop(self, seq: Sequence, new_char_count: int,
                     sampling_params: SamplingParams) -> None:
-        """Stop the finished sequences."""
+        """Stop the finished sequences.
+
+       new_char_count is the number of chars added to the
+           sequence's output text for the newly generated token
+        """
+
+        # Check if the minimum number of tokens has been generated yet;
+        # skip the stop string/token checks if not
+        if seq.get_output_len() < sampling_params.min_tokens:
+            return
+
+        # Check if the sequence has generated the EOS token.
+        if ((not sampling_params.ignore_eos)
+                and seq.get_last_token_id() == seq.eos_token_id):
+            seq.status = SequenceStatus.FINISHED_STOPPED
+            return
+
+        # Check if a stop token was encountered.
+        # This assumes a single token produced per step.
+        last_token_id = seq.get_last_token_id()
+        if last_token_id in sampling_params.stop_token_ids:
+            if new_char_count and (
+                    not sampling_params.include_stop_str_in_output):
+                # Remove last token
+                seq.output_text = seq.output_text[:-new_char_count]
+            seq.status = SequenceStatus.FINISHED_STOPPED
+            seq.stop_reason = last_token_id
+            return
+
+        # Check if any stop strings are matched.
+        stop_str = self._check_stop_strings(seq, new_char_count,
+                                            sampling_params)
+        if stop_str is not None:
+            seq.status = SequenceStatus.FINISHED_STOPPED
+            seq.stop_reason = stop_str
+            return
+
         # Check if the sequence has reached max_model_len.
         if seq.get_len() > self.scheduler_config.max_model_len:
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
@@ -811,43 +849,37 @@ class LLMEngine:
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
 
-        # Check if the minimum number of tokens has been generated yet;
-        # skip the stop string/token checks if not
-        if seq.get_output_len() < sampling_params.min_tokens:
-            return
+    @staticmethod
+    def _check_stop_strings(seq: Sequence, new_char_count: int,
+                            sampling_params: SamplingParams) -> Optional[str]:
+        """Check if any stop strings are matched and truncate sequence
+        output text accordingly.
 
-        if sampling_params.detokenize:
-            for stop_str in sampling_params.stop:
-                if seq.output_text.endswith(stop_str):
-                    self._finalize_sequence(seq, sampling_params, stop_str)
-                    seq.status = SequenceStatus.FINISHED_STOPPED
-                    seq.stop_reason = stop_str
-                    return
-        last_token_id = seq.get_last_token_id()
-        if last_token_id in sampling_params.stop_token_ids:
-            stop_str = self.get_tokenizer_for_seq(seq).convert_ids_to_tokens(
-                last_token_id)
-            self._finalize_sequence(seq, sampling_params, stop_str)
-            seq.status = SequenceStatus.FINISHED_STOPPED
-            seq.stop_reason = last_token_id
-            return
+        Returns the stop string if matched or else None.
+        """
+        if not new_char_count:
+            return None
 
-        # Check if the sequence has generated the EOS token.
-        if ((not sampling_params.ignore_eos)
-                and seq.get_last_token_id() == seq.eos_token_id):
-            seq.status = SequenceStatus.FINISHED_STOPPED
-            return
+        for stop_str in sampling_params.stop:
+            stop_string_len = len(stop_str)
+            # Avoid searching already-searched text.
+            stop_index = seq.output_text.find(
+                stop_str, -new_char_count - stop_string_len)
+            if stop_index == -1:
+                continue
 
-    def _finalize_sequence(self, seq: Sequence,
-                           sampling_params: SamplingParams,
-                           stop_string: str) -> None:
-        if sampling_params.include_stop_str_in_output:
-            return
+            if sampling_params.include_stop_str_in_output:
+                # Truncate to end of stop string.
+                stop_index += stop_string_len
+                if stop_index >= len(seq.output_text):
+                    # No truncation required.
+                    return stop_str
 
-        if stop_string and seq.output_text.endswith(stop_string):
-            # Truncate the output text so that the stop string is
-            # not included in the output.
-            seq.output_text = seq.output_text[:-len(stop_string)]
+            # Truncate the output text to either the beginning
+            # or end of the stop string.
+            seq.output_text = seq.output_text[:stop_index]
+            return stop_str
+        return None
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)

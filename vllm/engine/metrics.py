@@ -1,6 +1,6 @@
 import time
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Protocol
 
 import numpy as np
 from prometheus_client import (REGISTRY, Counter, Gauge, Histogram, Info,
@@ -119,6 +119,12 @@ class Stats:
     time_e2e_requests: List[float]
 
 
+class SupportsMetricsInfo(Protocol):
+
+    def metrics_info(self) -> Dict[str, str]:
+        ...
+
+
 class StatLogger:
     """StatLogger is used LLMEngine to log to Promethus and Stdout."""
 
@@ -135,7 +141,7 @@ class StatLogger:
         self.labels = labels
         self.metrics = Metrics(labelnames=list(labels.keys()))
 
-    def info(self, type: str, obj: object) -> None:
+    def info(self, type: str, obj: SupportsMetricsInfo) -> None:
         if type == "cache_config":
             self.metrics.info_cache_config.info(obj.metrics_info())
 
