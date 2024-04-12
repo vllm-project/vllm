@@ -138,7 +138,8 @@ class RayGPUExecutor(ExecutorBase):
             else:
                 # Else, added to the list of workers.
                 self.workers.append(worker)
-            worker.kwargs["local_rank"] = local_rank_dict[worker_ip]
+            ray.wait(
+                worker.update_kwargs(local_rank=local_rank_dict[worker_ip]))
             local_rank_dict[worker_ip] += 1
 
         if self.driver_dummy_worker is None:

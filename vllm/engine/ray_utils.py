@@ -40,6 +40,9 @@ try:
             self.worker = worker_class(**self.kwargs)
             self.worker.init_worker()
 
+        def update_kwargs(self, **kwargs):
+            self.kwargs.update(kwargs)
+
         def execute_method(self, method, *args, **kwargs):
             try:
                 if hasattr(self, method):
