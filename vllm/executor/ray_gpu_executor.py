@@ -155,51 +155,23 @@ class RayGPUExecutor(ExecutorBase):
             return kwargs
 
         init_worker_all_kwargs = []
-        # Initialize the driver worker with the Worker class.
-        driver_rank = 0
-        driver_local_rank = node_workers[worker_node_and_gpu_ids[0][0]].index(
-            driver_rank)
-        init_worker_all_kwargs.append(
-            collect_arg_helper_func(
-                model_config=self.model_config,
-                parallel_config=self.parallel_config,
-                scheduler_config=self.scheduler_config,
-                device_config=self.device_config,
-                cache_config=self.cache_config,
-                local_rank=driver_local_rank,
-                rank=driver_rank,
-                distributed_init_method=distributed_init_method,
-                lora_config=self.lora_config,
-                vision_language_config=self.vision_language_config,
-                is_driver_worker=True,
-            ))
 
-        model_config = copy.deepcopy(self.model_config)
-        parallel_config = copy.deepcopy(self.parallel_config)
-        scheduler_config = copy.deepcopy(self.scheduler_config)
-        device_config = copy.deepcopy(self.device_config)
-        lora_config = copy.deepcopy(self.lora_config)
-        cache_config = copy.deepcopy(self.cache_config)
-        vision_language_config = copy.deepcopy(self.vision_language_config)
-
-        # Initialize the actual workers with the Worker class.
-        for rank, (worker, (node_id, _)) in enumerate(
-                zip(self.workers, worker_node_and_gpu_ids[1:]),
-                start=1,
-        ):
+        # Initialize the actual workers inside worker wrapper.
+        for rank, (node_id, _) in enumerate(worker_node_and_gpu_ids, ):
             local_rank = node_workers[node_id].index(rank)
             init_worker_all_kwargs.append(
                 collect_arg_helper_func(
-                    model_config=model_config,
-                    parallel_config=parallel_config,
-                    scheduler_config=scheduler_config,
-                    device_config=device_config,
-                    cache_config=cache_config,
+                    model_config=self.model_config,
+                    parallel_config=self.parallel_config,
+                    scheduler_config=self.scheduler_config,
+                    device_config=self.device_config,
+                    cache_config=self.cache_config,
                     local_rank=local_rank,
                     rank=rank,
                     distributed_init_method=distributed_init_method,
-                    lora_config=lora_config,
-                    vision_language_config=vision_language_config,
+                    lora_config=self.lora_config,
+                    vision_language_config=self.vision_language_config,
+                    is_driver_worker=rank == 0,
                 ))
         self._run_workers("init_worker", all_kwargs=init_worker_all_kwargs)
 
