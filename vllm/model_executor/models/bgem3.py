@@ -67,66 +67,20 @@ class BGEM3Model(nn.Module):
         super().__init__()
 
         self.config = config
-        self.padding_idx = config.pad_token_id
         lora_vocab = (lora_config.lora_extra_vocab_size *
                       (lora_config.max_loras or 1)) if lora_config else 0
         self.vocab_size = config.vocab_size + lora_vocab
-        self.org_vocab_size = config.vocab_size
-
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-        )
 
         self.load_model(model_name, colbert_dim=colbert_dim)
         self.vocab_size = self.model.config.vocab_size
-        self.cross_entropy = nn.CrossEntropyLoss(reduction='mean')
-        self.unified_finetuning = unified_finetuning
-        if not self.unified_finetuning:
-            self.colbert_linear = None
-            self.sparse_linear = None
-
         self.normlized = normlized
         self.sentence_pooling_method = sentence_pooling_method
-        self.enable_sub_batch = enable_sub_batch
-        self.temperature = temperature
-        self.use_self_distill = use_self_distill
-        self.ensemble_distill_start_step = ensemble_distill_start_step
-
-        self.step = 0
-        if not normlized:
-            self.temperature = 1.0
-        self.negatives_cross_device = negatives_cross_device
-        if self.negatives_cross_device:
-            if not dist.is_initialized():
-                raise ValueError('Distributed training has not been initialized for representation all gather.')
-
-            self.process_rank = dist.get_rank()
-            self.world_size = dist.get_world_size()
 
     def load_model(self, model_name, colbert_dim: int = -1):
-        if not os.path.exists(model_name):
-            cache_folder = os.getenv('HF_HUB_CACHE')
-            model_name = snapshot_download(repo_id=model_name,
-                                           cache_dir=cache_folder,
-                                           ignore_patterns=['flax_model.msgpack', 'rust_model.ot', 'tf_model.h5'])
-
         model_id = "BAAI/bge-m3"
         config = XLMRobertaConfig.from_pretrained(model_id)
         self.model = XLMRobertaModel(config=config)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-        self.colbert_linear = RowParallelLinear(self.model.config.hidden_size, self.model.config.hidden_size if colbert_dim == -1 else colbert_dim)
-        self.sparse_linear = RowParallelLinear(self.model.config.hidden_size, 1)
-
-        if os.path.exists(os.path.join(model_name, 'colbert_linear.pt')) and os.path.exists(
-                os.path.join(model_name, 'sparse_linear.pt')):
-            print('loading existing colbert_linear and sparse_linear---------')
-            self.load_pooler(model_dir=model_name)
-        else:
-            print(
-                'The parameters of colbert_linear and sparse linear is new initialize. Make sure the model is loaded for training, not inferencing')
 
 
     def dense_embedding(self, hidden_state, mask):
@@ -166,36 +120,6 @@ class BGEM3Model(nn.Module):
 
 class BGEM3ForInference(BGEM3Model):
 
-    def _forward(self,
-                text_input: Dict[str, Tensor] = None,
-                return_dense: bool = True,
-                return_sparse: bool = False,
-                return_colbert: bool = False,
-                return_sparse_embedding: bool = False):
-                assert return_dense or return_sparse or return_colbert, 'Must choose one or more from `return_colbert`, `return_sparse`, `return_dense` to set `True`!'
-                # print("Text input", text_input)
-                last_hidden_state = self.model(**text_input, return_dict=True).last_hidden_state
-                # print("last hidden state", last_hidden_state)
-                output = {}
-                if return_dense:
-                    dense_vecs = self.dense_embedding(last_hidden_state, text_input['attention_mask'])
-                    output['dense_vecs'] = dense_vecs
-                if return_sparse:
-                    sparse_vecs = self.sparse_embedding(last_hidden_state, text_input['input_ids'],
-                                                        return_embedding=return_sparse_embedding)
-                    output['sparse_vecs'] = sparse_vecs
-                if return_colbert:
-                    colbert_vecs = self.colbert_embedding(last_hidden_state, text_input['attention_mask'])
-                    output['colbert_vecs'] = colbert_vecs
-
-                if self.normlized:
-                    # print("normal")
-                    if 'dense_vecs' in output:
-                        output['dense_vecs'] = torch.nn.functional.normalize(output['dense_vecs'], dim=-1)
-                    if 'colbert_vecs' in output:
-                        output['colbert_vecs'] = torch.nn.functional.normalize(output['colbert_vecs'], dim=-1)
-                return output
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -216,6 +140,8 @@ class BGEM3ForInference(BGEM3Model):
             ids = input_ids[start_index:start_index+batch_size,:]
             attention_mask =(input_metadata.slot_mapping[start_index:start_index+batch_size,:] != -1).int()
             dvs = self.dense_embedding(ret[i].last_hidden_state, attention_mask)
+            if self.normlized:
+                dvs = torch.nn.functional.normalize(dvs, dim=-1)
             tensor_list.append(dvs)
             i = i + 1
         return torch.cat(tensor_list, dim=0)
@@ -269,7 +195,6 @@ class BGEM3FlagForCausalLM:
         if device is None:
             self.num_gpus = torch.cuda.device_count()
             if self.num_gpus > 1:
-                print(f"----------using {self.num_gpus}*GPUs----------")
                 self.model.model = torch.nn.DataParallel(self.model.model)
         else:
             self.num_gpus = 1
@@ -283,7 +208,8 @@ class BGEM3FlagForCausalLM:
                      load_format: str = "auto",
                      revision: Optional[str] = None,
                      colbert_dim: int = -1):
-            return
+                     return
+        
 
     def eval(self):
         return self.model.eval()

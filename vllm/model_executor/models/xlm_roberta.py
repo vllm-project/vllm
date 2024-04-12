@@ -83,7 +83,6 @@ class XLMRobertaModel(torch.nn.Module):
         for start_index in tqdm(range(0, input_ids.shape[0], batch_size), desc="Inference Embeddings", disable=input_ids.shape[0] < 256):
             ids = input_ids[start_index:start_index+batch_size,:]
             attention_mask =(input_metadata.slot_mapping[start_index:start_index+batch_size,:] != -1).int()
-
             output_attentions = self.config.output_attentions
             output_hidden_states = self.config.output_hidden_states
             return_dict = self.config.use_return_dict
