@@ -1,6 +1,6 @@
 import time
 from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, List,
-                    Literal, Optional, Tuple, TypedDict, Union)
+                    Optional, Tuple)
 
 from fastapi import Request
 
@@ -11,7 +11,8 @@ from vllm.entrypoints.openai.protocol import (CompletionRequest,
                                               CompletionResponseStreamChoice,
                                               CompletionStreamResponse,
                                               LogProbs, UsageInfo)
-from vllm.entrypoints.openai.serving_engine import LoRA, OpenAIServing
+from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
+                                                    OpenAIServing)
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
@@ -26,53 +27,12 @@ TypeCreateLogProbsFn = Callable[
     [TypeTokenIDs, TypeTopLogProbs, Optional[int], int], LogProbs]
 
 
-class PromptStrings(TypedDict):
-    prompt: str
-    is_tokens: Literal[False]
-
-
-class PromptTokens(TypedDict):
-    prompt: List[int]
-    is_tokens: Literal[True]
-
-
-def _parse_prompt_element_format(
-        elem: Union[str, int,
-                    List[int]]) -> Union[PromptStrings, PromptTokens]:
-    if isinstance(elem, str):
-        # case 2: array of strings
-        return PromptStrings(prompt=elem, is_tokens=False)
-    if isinstance(elem, int):
-        # case 3: array of tokens
-        return PromptTokens(prompt=[elem], is_tokens=True)
-    if isinstance(elem, list):
-        # case 4: array of token arrays
-        return PromptTokens(prompt=elem, is_tokens=True)
-
-
-def parse_prompt_format(
-    prompt: Union[str, List[str], List[int], List[List[int]]]
-) -> List[Union[PromptStrings, PromptTokens]]:
-    # get the prompt, openai supports the following
-    # "a string, array of strings, array of tokens, or array of token arrays."
-
-    if isinstance(prompt, str):
-        # case 1: a string
-        return [_parse_prompt_element_format(prompt)]
-
-    if isinstance(prompt, list):
-        return [_parse_prompt_element_format(elem) for elem in prompt]
-
-    raise ValueError("prompt must be a string, array of strings, "
-                     "array of tokens, or array of token arrays")
-
-
 class OpenAIServingCompletion(OpenAIServing):
 
     def __init__(self,
                  engine: AsyncLLMEngine,
                  served_model: str,
-                 lora_modules: Optional[List[LoRA]] = None):
+                 lora_modules: Optional[List[LoRAModulePath]] = None):
         super().__init__(engine=engine,
                          served_model=served_model,
                          lora_modules=lora_modules)
@@ -115,24 +75,13 @@ class OpenAIServingCompletion(OpenAIServing):
                 sampling_params.logits_processors.append(
                     guided_decode_logit_processor)
 
-            prompts = parse_prompt_format(request.prompt)
-            truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
-
-            for i, prompt in enumerate(prompts):
-                if prompt["is_tokens"]:
-                    prompt_formats = self._validate_prompt_and_tokenize(
+            for i, (prompt_ids, prompt_text) in enumerate(
+                    self._tokenize_input_text_or_texts(
                         request,
-                        prompt_ids=prompt["prompt"],
-                        truncate_prompt_tokens=truncate_prompt_tokens,
-                    )
-                else:
-                    prompt_formats = self._validate_prompt_and_tokenize(
-                        request,
-                        prompt=prompt["prompt"],
-                        truncate_prompt_tokens=truncate_prompt_tokens,
-                    )
-                prompt_ids, prompt_text = prompt_formats
-
+                        request.prompt,
+                        truncate_prompt_tokens=sampling_params.
+                        truncate_prompt_tokens,
+                    )):
                 generators.append(
                     self.engine.generate(prompt_text,
                                          sampling_params,
@@ -155,16 +104,18 @@ class OpenAIServingCompletion(OpenAIServing):
 
         # Streaming response
         if stream:
-            return self.completion_stream_generator(request,
-                                                    raw_request,
-                                                    result_generator,
-                                                    request_id,
-                                                    created_time,
-                                                    model_name,
-                                                    num_prompts=len(prompts))
+            return self.completion_stream_generator(
+                request,
+                raw_request,
+                result_generator,
+                request_id,
+                created_time,
+                model_name,
+                num_prompts=len(generators))
 
         # Non-streaming response
-        final_res_batch: List[Optional[RequestOutput]] = [None] * len(prompts)
+        final_res_batch: List[Optional[RequestOutput]] = [None
+                                                          ] * len(generators)
         try:
             async for i, res in result_generator:
                 if await raw_request.is_disconnected():
