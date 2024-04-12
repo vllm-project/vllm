@@ -1,9 +1,10 @@
 import enum
 import time
-from pyaici.comms import AiciRunner
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
+
+from pyaici.comms import AiciRunner
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager

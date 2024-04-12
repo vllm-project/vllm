@@ -1,10 +1,13 @@
-from pyaici.comms import AiciRunner
-from fastapi import Request
 from typing import List
-from vllm.utils import random_uuid
+
+from fastapi import Request
+from pyaici.comms import AiciRunner
+
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from .protocol import RunRequest
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.utils import random_uuid
+
+from .protocol import RunRequest
 
 # logger = init_logger(__name__)
 

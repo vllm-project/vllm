@@ -5,8 +5,8 @@ import os
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 
-import pyaici
 import fastapi
+import pyaici
 import uvicorn
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
@@ -18,13 +18,12 @@ import vllm
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.entrypoints.openai.protocol import (CompletionRequest,
-                                              ChatCompletionRequest,
-                                              ErrorResponse, RunRequest,
-                                              SetTagsRequest)
+from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              CompletionRequest, ErrorResponse,
+                                              RunRequest, SetTagsRequest)
+from vllm.entrypoints.openai.serving_aici import AiciRunnerCompletion
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.serving_aici import AiciRunnerCompletion
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 
