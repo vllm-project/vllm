@@ -275,10 +275,6 @@ class BlockTable:
         return self._blocks is not None
 
     @property
-    def _num_touched_blocks(self) -> int:
-        return len(self._blocks)
-
-    @property
     def _num_empty_slots(self) -> int:
         assert self._is_allocated
         return len(self._blocks) * self._block_size - self._num_full_slots
