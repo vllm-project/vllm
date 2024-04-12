@@ -17,14 +17,6 @@ class WorkerBase(ABC):
     """
 
     @abstractmethod
-    def init_worker(self) -> None:
-        """
-        Constructor of the worker should only save construction arguments.
-        Initialization should be done in this method, for lazy initialization.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
     def init_device(self) -> None:
         """Initialize device state, such as loading the model or other on-device
         memory allocations.
