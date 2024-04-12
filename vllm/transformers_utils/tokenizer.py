@@ -1,7 +1,7 @@
 from typing import Optional, Union
 
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
-                          PreTrainedTokenizerBase, PreTrainedTokenizerFast)
+                          PreTrainedTokenizerFast)
 
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
