@@ -10,6 +10,7 @@ from vllm.config import (CacheConfig, DeviceConfig, EngineConfig, LoRAConfig,
                          SpeculativeConfig, TensorizerConfig,
                          TokenizerPoolConfig, VisionLanguageConfig)
 from vllm.utils import str_to_int_tuple
+from vllm.model_executor.tensorizer_loader import TensorizerArgs
 
 
 @dataclass
@@ -420,6 +421,7 @@ class EngineArgs:
             default=None,
             help='The number of speculative tokens to sample from '
             'the draft model in speculative decoding')
+        parser = TensorizerArgs.add_cli_args(parser)
         return parser
 
     @classmethod
