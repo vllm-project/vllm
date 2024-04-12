@@ -4,6 +4,7 @@ import time
 from typing import Dict, List, Literal, Optional, Union
 
 import torch
+from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel, Field, conint, model_validator
 
 from vllm.sampling_params import SamplingParams
@@ -59,65 +60,10 @@ class ResponseFormat(BaseModel):
     type: str = Literal["text", "json_object"]
 
 
-class ChatCompletionSystemMessage(BaseModel):
-    role: Literal["system"]
-    content: str
-    name: Optional[str] = None
-
-
-class ChatCompletionTextContentPart(BaseModel):
-    type: Literal['text']
-    text: str
-
-
-class ChatCompletionImageURL(BaseModel):
-    url: str
-    detail: Literal["low", "high", "auto"] = "auto"
-
-
-class ChatCompletionImageContentPart(BaseModel):
-    type: Literal['image_url']
-    image_url: ChatCompletionImageURL
-
-
-class ChatCompletionUserMessage(BaseModel):
-    role: Literal["user"]
-    content: Union[str, List[Union[ChatCompletionTextContentPart,
-                                   ChatCompletionImageContentPart]]]
-    name: Optional[str] = None
-
-
-class ChatCompletionAssistantFunctionTool(BaseModel):
-    name: str
-    arguments: str
-
-
-class ChatCompletionAssistantFunctionToolCall(BaseModel):
-    id: str
-    type: Literal["function"]
-    function: ChatCompletionAssistantFunctionTool
-
-
-class ChatCompletionAssistantMessage(BaseModel):
-    role: Literal["assistant"]
-    content: Optional[str] = None
-    name: Optional[str] = None
-    tool_calls: Optional[List[ChatCompletionAssistantFunctionToolCall]] = None
-
-
-class ChatCompletionToolMessage(BaseModel):
-    role: Literal["tool"]
-    content: str
-    tool_call_id: str
-
-
 class ChatCompletionRequest(BaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
-    messages: List[Union[ChatCompletionSystemMessage,
-                         ChatCompletionUserMessage,
-                         ChatCompletionAssistantMessage,
-                         ChatCompletionToolMessage]]
+    messages: List[ChatCompletionMessageParam]
     model: str
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None

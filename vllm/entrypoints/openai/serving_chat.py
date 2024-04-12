@@ -1,20 +1,20 @@
 import codecs
 import time
-from typing import AsyncGenerator, AsyncIterator, List, Optional, Tuple, Union
+from typing import (AsyncGenerator, AsyncIterator, Awaitable, Iterable, List,
+                    Optional, Tuple, TypedDict, Union, final)
 
 import numpy as np
 import torch
 from fastapi import Request
-from PIL import Image
-from transformers import PreTrainedTokenizerBase
+from openai.types.chat import (ChatCompletionContentPartParam,
+                               ChatCompletionRole)
 
 from vllm.config import VisionLanguageConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (
-    ChatCompletionImageContentPart, ChatCompletionRequest,
-    ChatCompletionResponse, ChatCompletionResponseChoice,
-    ChatCompletionResponseStreamChoice, ChatCompletionStreamResponse,
-    ChatCompletionTextContentPart, ChatMessage, DeltaMessage, ErrorResponse,
+    ChatCompletionRequest, ChatCompletionResponse,
+    ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
+    ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse,
     UsageInfo)
 from vllm.entrypoints.openai.serving_engine import LoRA, OpenAIServing
 from vllm.logger import init_logger
@@ -27,14 +27,8 @@ from vllm.utils import get_image_async, random_uuid
 logger = init_logger(__name__)
 
 
-def parse_image(
-    config: VisionLanguageConfig,
-    tokenizer: PreTrainedTokenizerBase,
-    image: Image.Image,
-    image_idx: int,
-) -> Tuple[str, MultiModalData]:
-    text = config.image_openai.value \
-        .get_image_token_text(config, tokenizer, image_idx)
+async def get_and_parse_image(image_url: str,
+                              config: VisionLanguageConfig) -> MultiModalData:
 
     if len(config.image_input_shape) == 3:
         raise ValueError(
@@ -53,7 +47,7 @@ def parse_image(
         msg = f"Unsupported number of channels ({num_channels})"
         raise NotImplementedError(msg)
 
-    with image:
+    with await get_image_async(image_url) as image:
         image = image.convert(image_format).resize((height, width))
         image_arr = np.array(image, copy=True)
 
@@ -62,9 +56,13 @@ def parse_image(
         .permute((0, 3, 1, 2)) \
         .to(torch.float16)
 
-    data = MultiModalData(type=MultiModalData.Type.IMAGE, data=image_tensor)
+    return MultiModalData(type=MultiModalData.Type.IMAGE, data=image_tensor)
 
-    return text, data
+
+@final
+class ConversationMessage(TypedDict):
+    role: str
+    content: str
 
 
 class OpenAIServingChat(OpenAIServing):
@@ -81,50 +79,59 @@ class OpenAIServingChat(OpenAIServing):
         self.response_role = response_role
         self._load_chat_template(chat_template)
 
-    async def parse_chat_message_image_input(
+    def _parse_chat_message_image_input(
         self,
-        content: List[Union[ChatCompletionTextContentPart,
-                            ChatCompletionImageContentPart]],
-    ) -> Tuple[List[str], List[MultiModalData]]:
+        role: ChatCompletionRole,
+        content: Iterable[ChatCompletionContentPartParam],
+    ) -> Tuple[List[ConversationMessage], List[Awaitable[MultiModalData]]]:
+        """Parse image input defined by OpenAI Chat Completions API."""
         config = getattr(self.engine.engine, "vision_language_config", None)
         if not isinstance(config, VisionLanguageConfig):
             raise ValueError("GPT-4 with Vision API is only supported for "
                              "vision language models.")
 
         tokenizer = self.tokenizer
+        assert tokenizer is not None
 
-        content_texts: List[str] = []
-        content_images: List[MultiModalData] = []
+        texts: List[str] = []
+        image_futures: List[Awaitable[MultiModalData]] = []
 
         for i, part in enumerate(content):
-            if isinstance(part, ChatCompletionTextContentPart):
-                content_texts.append(part.text)
+            if part["type"] == "text":
+                text = part["text"]
 
-            if isinstance(part, ChatCompletionImageContentPart):
-                image = await get_image_async(part.image_url.url)
-                image_idx = len(content_images)
-                text, data = parse_image(config, tokenizer, image, image_idx)
-
-                content_texts.append(text)
-                content_images.append(data)
-
-                if part.image_url.detail != "auto":
+                texts.append(text)
+            elif part["type"] == "image_url":
+                image_url = part["image_url"]
+                if image_url.get("detail", "auto") != "auto":
                     logger.info("content[%s].image_url.detail is ignored", i)
 
-        return content_texts, content_images
+                text = config.image_openai.value.get_image_token_text(
+                    config, tokenizer, image_idx=len(image_futures))
+                image_future = get_and_parse_image(image_url["url"], config)
 
-    async def parse_chat_message_content(
+                texts.append(text)
+                image_futures.append(image_future)
+            else:
+                raise NotImplementedError(f"Unknown part type: {part['type']}")
+
+        messages = [ConversationMessage(role=role, content="\n".join(text))]
+        data_futures = image_futures
+
+        return messages, data_futures
+
+    def _parse_chat_message_content(
         self,
+        role: ChatCompletionRole,
         content: Optional[Union[str,
-                                List[Union[ChatCompletionTextContentPart,
-                                           ChatCompletionImageContentPart]]]],
-    ) -> Tuple[List[str], List[MultiModalData]]:
+                                Iterable[ChatCompletionContentPartParam]]],
+    ) -> Tuple[List[ConversationMessage], List[Awaitable[MultiModalData]]]:
         if content is None:
             return [], []
         if isinstance(content, str):
-            return [content], []
+            return [ConversationMessage(role=role, content=content)], []
 
-        return await self.parse_chat_message_image_input(content)
+        return self._parse_chat_message_image_input(role, content)
 
     async def create_chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
@@ -144,31 +151,36 @@ class OpenAIServingChat(OpenAIServing):
             return error_check_ret
 
         try:
-            conversation: List[ChatMessage] = []
-            multi_modal_datas: List[MultiModalData] = []
+            conversation: List[ConversationMessage] = []
+            multi_modal_futures: List[Awaitable[MultiModalData]] = []
 
             for m in request.messages:
-                text, images = await self.parse_chat_message_content(m.content)
-                cm = ChatMessage(role=m.role, content="\n".join(text))
+                messages, futures = self._parse_chat_message_content(
+                    m["role"], m["content"])
 
-                conversation.append(cm)
-                multi_modal_datas.extend(images)
-
-            if len(multi_modal_datas) == 0:
-                multi_modal_data = None
-            elif len(multi_modal_datas) == 1:
-                multi_modal_data, = multi_modal_datas
-            else:
-                raise NotImplementedError("Multiple image input not supported")
+                conversation.extend(messages)
+                multi_modal_futures.extend(futures)
 
             prompt = self.tokenizer.apply_chat_template(
-                conversation=[msg.model_dump() for msg in conversation],
+                conversation=conversation,
                 tokenize=False,
                 add_generation_prompt=request.add_generation_prompt,
             )
         except Exception as e:
             logger.error(
                 f"Error in applying chat template from request: {str(e)}")
+            return self.create_error_response(str(e))
+
+        try:
+            if len(multi_modal_futures) == 0:
+                multi_modal_data = None
+            elif len(multi_modal_futures) == 1:
+                multi_modal_data = await multi_modal_futures[0]
+            else:
+                # multi_modal_datas = await asyncio.gather(*multi_modal_futures)
+                raise NotImplementedError("Multiple image input not supported")
+        except Exception as e:
+            logger.error(f"Error in loading multi-modal data: {str(e)}")
             return self.create_error_response(str(e))
 
         request_id = f"cmpl-{random_uuid()}"
@@ -210,8 +222,8 @@ class OpenAIServingChat(OpenAIServing):
             try:
                 return await self.chat_completion_full_generator(
                     request,
-                    raw_request,
                     conversation,
+                    raw_request,
                     result_generator,
                     request_id,
                 )
@@ -223,12 +235,12 @@ class OpenAIServingChat(OpenAIServing):
         if request.add_generation_prompt:
             return self.response_role
         else:
-            return request.messages[-1].role
+            return request.messages[-1]["role"]
 
     async def chat_completion_stream_generator(
         self,
         request: ChatCompletionRequest,
-        parsed_conversation: List[ChatMessage],
+        conversation: List[ConversationMessage],
         result_generator: AsyncIterator[RequestOutput],
         request_id: str,
     ) -> AsyncGenerator[str, None]:
@@ -272,10 +284,9 @@ class OpenAIServingChat(OpenAIServing):
                     # last message
                     if request.echo:
                         last_msg_content = ""
-                        if (parsed_conversation
-                                and parsed_conversation[-1].content
-                                and parsed_conversation[-1].role == role):
-                            last_msg_content = parsed_conversation[-1].content
+                        if (conversation and conversation[-1]["content"]
+                                and conversation[-1]["role"] == role):
+                            last_msg_content = conversation[-1]["content"]
 
                         if last_msg_content:
                             for i in range(num_choices):
@@ -372,8 +383,8 @@ class OpenAIServingChat(OpenAIServing):
     async def chat_completion_full_generator(
         self,
         request: ChatCompletionRequest,
+        conversation: List[ConversationMessage],
         raw_request: Request,
-        parsed_conversation: List[ChatMessage],
         result_generator: AsyncIterator[RequestOutput],
         request_id: str,
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
@@ -416,9 +427,9 @@ class OpenAIServingChat(OpenAIServing):
 
         if request.echo:
             last_msg_content = ""
-            if (parsed_conversation and parsed_conversation[-1].content
-                    and parsed_conversation[-1].role == role):
-                last_msg_content = parsed_conversation[-1].content
+            if (conversation and conversation[-1]["content"]
+                    and conversation[-1]["role"] == role):
+                last_msg_content = conversation[-1]["content"]
 
             for choice in choices:
                 full_message = last_msg_content + choice.message.content
@@ -443,23 +454,24 @@ class OpenAIServingChat(OpenAIServing):
         return response
 
     def _load_chat_template(self, chat_template):
+        tokenizer = self.tokenizer
+        assert tokenizer is not None
+
         if chat_template is not None:
             try:
                 with open(chat_template, "r") as f:
-                    self.tokenizer.chat_template = f.read()
+                    tokenizer.chat_template = f.read()
             except OSError:
                 # If opening a file fails, set chat template to be args to
                 # ensure we decode so our escape are interpreted correctly
-                self.tokenizer.chat_template = codecs.decode(
+                tokenizer.chat_template = codecs.decode(
                     chat_template, "unicode_escape")
 
             logger.info(
-                f"Using supplied chat template:\n{self.tokenizer.chat_template}"
-            )
-        elif self.tokenizer.chat_template is not None:
+                f"Using supplied chat template:\n{tokenizer.chat_template}")
+        elif tokenizer.chat_template is not None:
             logger.info(
-                f"Using default chat template:\n{self.tokenizer.chat_template}"
-            )
+                f"Using default chat template:\n{tokenizer.chat_template}")
         else:
             logger.warning(
                 "No chat template provided. Chat API will not work.")
