@@ -272,3 +272,10 @@ def test_openai_apiserver_with_tensorizer(tmp_path):
 
     print("Server ready.")
     assert server.ready.remote()
+
+
+def test_raise_value_error_on_invalid_load_format(vllm_runner):
+    with pytest.raises(ValueError):
+        vllm_runner(model_ref,
+                    load_format="safetensors",
+                    tensorizer_uri="test")
