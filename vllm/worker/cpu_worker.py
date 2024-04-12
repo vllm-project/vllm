@@ -147,18 +147,22 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         self.is_driver_worker = is_driver_worker
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
+        self.kv_cache_dtype = kv_cache_dtype
 
-        self.model_runner = CPUModelRunner(model_config,
-                                           parallel_config,
-                                           scheduler_config,
-                                           device_config,
-                                           lora_config=self.lora_config,
-                                           kv_cache_dtype=kv_cache_dtype,
-                                           is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine = None
         self.cpu_cache = None
+
+    def init_worker(self) -> None:
+        self.model_runner = CPUModelRunner(
+            self.model_config,
+            self.parallel_config,
+            self.scheduler_config,
+            self.device_config,
+            lora_config=self.lora_config,
+            kv_cache_dtype=self.kv_cache_dtype,
+            is_driver_worker=self.is_driver_worker)
 
     def init_device(self) -> None:
         self.init_distributed_environment()

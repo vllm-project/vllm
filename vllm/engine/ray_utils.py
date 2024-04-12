@@ -1,3 +1,4 @@
+import importlib
 import pickle
 from typing import List, Optional, Tuple
 
@@ -14,10 +15,15 @@ try:
         """Ray wrapper for vllm.worker.Worker, allowing Worker to be
         lazliy initialized after Ray sets CUDA_VISIBLE_DEVICES."""
 
-        def __init__(self, init_cached_hf_modules=False) -> None:
-            if init_cached_hf_modules:
-                from transformers.dynamic_module_utils import init_hf_modules
-                init_hf_modules()
+        def __init__(self,
+                     init_cached_hf_modules=False,
+                     worker_module=None,
+                     worker_class_name=None,
+                     **kwargs) -> None:
+            self.worker_module = worker_module
+            self.worker_class_name = worker_class_name
+            self.kwargs = kwargs
+            self.init_cached_hf_modules = init_cached_hf_modules
             self.worker = None
             # Since the compiled DAG runs a main execution
             # in a different thread that calls cuda.set_device.
@@ -25,10 +31,18 @@ try:
             # that thread.
             self.compiled_dag_cuda_device_set = False
 
-        def init_worker(self, worker_init_fn):
-            self.worker = worker_init_fn()
+        def init_worker(self):
+            if self.init_cached_hf_modules:
+                from transformers.dynamic_module_utils import init_hf_modules
+                init_hf_modules()
+            mod = importlib.import_module(self.worker_module)
+            worker_class = getattr(mod, self.worker_class_name)
+            self.worker = worker_class(**self.kwargs)
+            self.worker.init_worker()
 
         def __getattr__(self, name):
+            if hasattr(self, name):
+                return getattr(self, name)
             return getattr(self.worker, name)
 
         def execute_method(self, method, *args, **kwargs):

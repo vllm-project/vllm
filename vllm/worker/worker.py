@@ -62,19 +62,21 @@ class Worker(WorkerBase):
             assert not self.lora_config, (
                 "To be tested: vision language model with LoRA settings.")
 
-        self.model_runner = ModelRunner(
-            model_config,
-            parallel_config,
-            scheduler_config,
-            device_config,
-            lora_config=self.lora_config,
-            kv_cache_dtype=self.cache_config.cache_dtype,
-            is_driver_worker=is_driver_worker,
-            vision_language_config=vision_language_config)
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine = None
         self.gpu_cache = None
+
+    def init_worker(self) -> None:
+        self.model_runner = ModelRunner(
+            self.model_config,
+            self.parallel_config,
+            self.scheduler_config,
+            self.device_config,
+            lora_config=self.lora_config,
+            kv_cache_dtype=self.cache_config.cache_dtype,
+            is_driver_worker=self.is_driver_worker,
+            vision_language_config=self.vision_language_config)
 
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":

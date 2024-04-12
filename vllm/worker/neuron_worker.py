@@ -30,8 +30,11 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
         self.device_config = device_config
         self.cache_config = cache_config
 
-        self.model_runner = NeuronModelRunner(model_config, parallel_config,
-                                              scheduler_config, device_config)
+    def init_worker(self) -> None:
+        self.model_runner = NeuronModelRunner(self.model_config,
+                                              self.parallel_config,
+                                              self.scheduler_config,
+                                              self.device_config)
 
     def init_device(self) -> None:
         # Set random seed.
