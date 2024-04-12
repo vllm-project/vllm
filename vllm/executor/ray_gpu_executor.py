@@ -128,7 +128,6 @@ class RayGPUExecutor(ExecutorBase):
                 lora_config=lora_config,
                 vision_language_config=vision_language_config,
             )
-            rank += 1
 
             worker_ip = ray.get(worker.get_node_ip.remote())
             if worker_ip == driver_ip and self.driver_dummy_worker is None:
@@ -139,6 +138,7 @@ class RayGPUExecutor(ExecutorBase):
                 # Else, added to the list of workers.
                 self.workers.append(worker)
                 # don't update local_rank for the dummy worker
+                rank += 1
                 ray.get(
                     worker.update_kwargs.remote(
                         local_rank=local_rank_dict[worker_ip]))
