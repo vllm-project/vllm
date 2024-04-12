@@ -97,7 +97,9 @@ class RayGPUExecutor(ExecutorBase):
             driver_ip, get_open_port())
 
         rank = 1
-        local_rank = -1  # todo: on-the-fly local rank assignment
+        local_rank_dict = defaultdict(int)
+        local_rank_dict[driver_ip] = 1
+        local_rank = -1  # placeholder
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
             if not bundle.get("GPU", 0):
                 continue
@@ -136,6 +138,8 @@ class RayGPUExecutor(ExecutorBase):
             else:
                 # Else, added to the list of workers.
                 self.workers.append(worker)
+            worker.kwargs["local_rank"] = local_rank_dict[worker_ip]
+            local_rank_dict[worker_ip] += 1
 
         if self.driver_dummy_worker is None:
             raise ValueError(
@@ -176,7 +180,7 @@ class RayGPUExecutor(ExecutorBase):
 
         # Initialize the driver worker with the Worker class.
         driver_rank = 0
-        driver_local_rank = node_workers[driver_node_id].index(driver_rank)
+        driver_local_rank = 0
         self.driver_worker = Worker(
             model_config=self.model_config,
             parallel_config=self.parallel_config,
@@ -191,10 +195,9 @@ class RayGPUExecutor(ExecutorBase):
             is_driver_worker=True,
         )
 
-        self._run_workers("init_worker")
-
         self._run_workers("update_environment_variables",
                           all_args=all_args_to_update_environment_variables)
+        self._run_workers("init_worker")
         self._run_workers("init_device")
         self._run_workers(
             "load_model",
