@@ -57,12 +57,13 @@ class CPUModelRunner:
             self.model_config.dtype if model_config is not None else None)
 
     def load_model(self) -> None:
-        self.model = get_model(self.model_config,
-                               self.device_config,
-                               lora_config=self.lora_config,
-                               vision_language_config=self.vision_language_config,
-                               parallel_config=self.parallel_config,
-                               scheduler_config=self.scheduler_config)
+        self.model = get_model(
+            self.model_config,
+            self.device_config,
+            lora_config=self.lora_config,
+            vision_language_config=self.vision_language_config,
+            parallel_config=self.parallel_config,
+            scheduler_config=self.scheduler_config)
 
     def _prepare_prompt(
         self,
