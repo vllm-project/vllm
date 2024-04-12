@@ -674,7 +674,7 @@ class Scheduler:
     def _schedule_default(self) -> SchedulerOutputs:
         """Schedule queued requests.
         
-        The current policy is designed to opimimize the throughput. First,
+        The current policy is designed to optimize the throughput. First,
         it batches as many prefill requests as possible. And it schedules
         decodes. If there's a pressure on GPU memory, decode requests can
         be swapped or preempted.
