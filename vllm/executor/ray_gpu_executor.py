@@ -1,5 +1,4 @@
 import asyncio
-import copy
 import os
 import pickle
 from collections import defaultdict
