@@ -13,7 +13,7 @@ class WorkerBase(ABC):
     """
 
     @staticmethod
-    def update_environment_variables(cls, envs: Dict[str, str]) -> None:
+    def update_environment_variables(envs: Dict[str, str]) -> None:
         key = 'CUDA_VISIBLE_DEVICES'
         if key in envs and key in os.environ:
             # overwriting CUDA_VISIBLE_DEVICES is desired behavior

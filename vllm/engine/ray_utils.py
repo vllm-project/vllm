@@ -33,8 +33,8 @@ try:
             self.compiled_dag_cuda_device_set = False
 
         @staticmethod
-        def update_environment_variables(cls, envs: Dict[str, str]) -> None:
-            WorkerBase.update_environment_variables(cls, envs)
+        def update_environment_variables(envs: Dict[str, str]) -> None:
+            WorkerBase.update_environment_variables(envs)
 
         def init_worker(self):
             if self.init_cached_hf_modules:
