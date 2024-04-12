@@ -2,7 +2,7 @@ import enum
 import json
 import os
 from dataclasses import dataclass, fields
-from typing import TYPE_CHECKING, ClassVar, Optional, Union
+from typing import TYPE_CHECKING, ClassVar, List, Optional, Union
 
 import torch
 from packaging.version import Version
@@ -141,7 +141,7 @@ class ModelConfig:
         supported_load_format = [
             "auto", "pt", "safetensors", "npcache", "dummy"
         ]
-        rocm_not_supported_load_format = []
+        rocm_not_supported_load_format: List[str] = []
         if load_format not in supported_load_format:
             raise ValueError(
                 f"Unknown load format: {self.load_format}. Must be one of "
@@ -679,6 +679,9 @@ class SpeculativeConfig:
                 "num_speculative_tokens to be provided, but found "
                 f"{speculative_model=} and {num_speculative_tokens=}.")
 
+        assert (speculative_model is not None
+                and num_speculative_tokens is not None)
+
         # TODO: The user should be able to specify revision/quantization/max
         # model len for the draft model. It is not currently supported.
         draft_revision = None
@@ -822,9 +825,12 @@ class LoRAConfig:
             self.lora_dtype = model_config.dtype
         elif isinstance(self.lora_dtype, str):
             self.lora_dtype = getattr(torch, self.lora_dtype)
-        if model_config.quantization is not None:
-            raise ValueError(
-                "LoRA is not supported with quantized models yet.")
+        if model_config.quantization and model_config.quantization not in [
+                "awq", "gptq"
+        ]:
+            # TODO support marlin and squeezellm
+            logger.warning(f"{model_config.quantization} quantization is not "
+                           "tested with LoRA yet.")
 
     def verify_with_scheduler_config(self, scheduler_config: SchedulerConfig):
         if scheduler_config.max_num_batched_tokens > 65528:
@@ -990,7 +996,7 @@ def _get_and_verify_max_len(
         derived_max_model_len *= scaling_factor
 
     if max_model_len is None:
-        max_model_len = derived_max_model_len
+        max_model_len = int(derived_max_model_len)
     elif max_model_len > derived_max_model_len:
         # Some models might have a separate key for specifying model_max_length
         # that will be bigger than derived_max_model_len. We compare user input
