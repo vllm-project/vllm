@@ -27,9 +27,7 @@ class LoRA:
 
 class OpenAIServing:
 
-    def __init__(self,
-                 engine: AsyncLLMEngine,
-                 served_model: str,
+    def __init__(self, engine: AsyncLLMEngine, served_model: str,
                  lora_modules: Optional[List[LoRA]]):
         self.engine = engine
         self.served_model = served_model
