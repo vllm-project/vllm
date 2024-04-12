@@ -8,6 +8,11 @@ steps:
       queue: amd
     command: "bash .buildkite/run-amd-test.sh"
 
+  - label: "AMD Test Async Engine"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_async_engine.sh"
+
   - label: "AMD Test Regression"
     agents:
       queue: amd
@@ -32,6 +37,11 @@ steps:
     agents:
       queue: amd
     command: "bash .buildkite/run-amd-test_examples.sh"
+
+  - label: "AMD Test Kernels"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_kernels.sh"
 
   - label: "AMD Test Llava"
     agents:
