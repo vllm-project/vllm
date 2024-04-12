@@ -92,13 +92,11 @@ class XLMRobertaModel(torch.nn.Module):
             else:
                 use_cache = False
 
-            # self.warn_if_padding_and_no_attention_mask(input_ids, attention_mask)
             input_shape = ids.size()
 
             batch_size, seq_length = input_shape
             device = ids.device 
 
-            # # past_key_values_length
             past_key_values_length = 0
 
             if attention_mask is None:
@@ -111,19 +109,8 @@ class XLMRobertaModel(torch.nn.Module):
             else:
                 token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=device)
 
-            # # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
-            # # ourselves in which case we just need to make it broadcastable to all heads.
             extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(attention_mask, input_shape)
-
-            # # If a 2D or 3D attention mask is provided for the cross-attention
-            # # we need to make broadcastable to [batch_size, num_heads, seq_length, seq_length]
             encoder_extended_attention_mask = None
-
-            # # Prepare head mask if needed
-            # # 1.0 in head_mask indicate we keep the head
-            # # attention_probs has shape bsz x n_heads x N x N
-            # # input head_mask has shape [num_heads] or [num_hidden_layers x num_heads]
-            # # and head_mask is converted to shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
             head_mask = self.get_head_mask(None, self.config.num_hidden_layers)
 
             embedding_output = self.embeddings(
