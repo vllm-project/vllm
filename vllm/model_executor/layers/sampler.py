@@ -121,7 +121,8 @@ def _apply_min_tokens_penalty(
                     for id in seq_ids:
                         r = mid_results.get(id)
                         if r and len(r.branches) >= 1:
-                            assert len(r.branches) <= 1, "Only one branch is supported"
+                            assert len(r.branches) <= 1, \
+                                "Only one branch is supported"
                             mask = r.branches[0].mask
                             if mask is not None:
                                 logits[logits_row_idx] += bias[mask]

@@ -291,11 +291,14 @@ class Sequence:
         assert self.backtrack == 0
         self.backtrack = backtrack
         if backtrack > 0:
-            assert backtrack <= self.get_output_len(), "can't backtrack into prompt yet"
+            assert backtrack <= self.get_output_len(), \
+                "can't backtrack into prompt yet"
             del self.data.output_token_ids[-backtrack:]
             del self.output_logprobs[-backtrack:]
-            self.data._num_computed_tokens = min(self.data._num_computed_tokens, len(self.data.output_token_ids))
-            needed_blocks = (self.get_len() + self.block_size - 1) // self.block_size
+            self.data._num_computed_tokens = min(
+                self.data._num_computed_tokens, len(self.data.output_token_ids))
+            needed_blocks = \
+                (self.get_len() + self.block_size - 1) // self.block_size
             if len(self.logical_token_blocks) > needed_blocks:
                 del self.logical_token_blocks[needed_blocks:]
             if needed_blocks > 0:
