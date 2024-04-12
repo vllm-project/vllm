@@ -370,7 +370,7 @@ class SequenceGroupState:
     """Mutable state tied to a specific sequence group"""
 
     # torch.Generator used in seeded sampling
-    generator: Optional[torch.Generator] = None
+    generator: Optional = None  # type: ignore
 
 
 class MultiModalData:
