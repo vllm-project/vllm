@@ -143,6 +143,8 @@ class FlashAttentionImpl(AttentionImpl):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
+        print(f'> {self.num_heads=}, {self.num_kv_heads=}, {self.head_size}')
+
         suppored_head_sizes = PagedAttention.get_supported_head_sizes()
         if head_size not in suppored_head_sizes:
             raise ValueError(
@@ -175,6 +177,9 @@ class FlashAttentionImpl(AttentionImpl):
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
+
+        print(f'> {query.shape=}, {key.shape=}, {self.num_heads=}, {self.num_kv_heads=}, {self.head_size}')
+        import ipdb; ipdb.set_trace()
         if kv_cache is not None:
             key_cache, value_cache = PagedAttention.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)

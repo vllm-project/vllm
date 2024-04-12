@@ -12,6 +12,10 @@ from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 
 from .tnlgv4_flash_blocksparse_attn_batch_inference import LocalStridedBlockSparseAttnInference
+from .tnlgv4_paged_attn import LocalStridedBlockSparseAttnInferenceBT
+
+from vllm.model_executor.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 
 
 class BlockSparseFlashAttention(nn.Module):
@@ -153,9 +157,9 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadat
 
     # blocksparse attributes:
     # TODO: metadata maker is from backend class, instead of backend instance.
-    #       we can not set this info. 
+    #       we can not set this info.
     #       Hack: is made optional, and will be set inside the real attention object initialization.
-    
+
     # TODO: is block_tables padded? since it per sequence.
 
     # store the block_ids (relative sparse_block_size) of slot in block_tables
@@ -163,7 +167,7 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadat
     # Note that this is different from block_size in the block_table/block_manager.
     sparse_block_size: Optional[int]
 
-    
+
     # the following two functions is only applable to blocksparse with local + vertical_stride patterns
     def check_if_remote(self, block_seq_id, head_id=0, n_heads=24, vert_stride=4):
         # does not check if the remote is in the current local or not
@@ -214,6 +218,8 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+
+
         if alibi_slopes is not None:
             assert ValueError('Alibi not support for blocksparse flash attention.')
         self.alibi_slopes = alibi_slopes
@@ -227,7 +233,14 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {suppored_head_sizes}.")
 
-        self.bs_attn = LocalStridedBlockSparseAttnInference(num_heads, max_seqlen, local_blocks, vert_stride, sparse_block_size)
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+        active_head_range = (tp_rank * self.num_heads, (tp_rank + 1) * self.num_heads)
+
+        total_num_heads = num_heads * tp_size
+        self.bs_attn = LocalStridedBlockSparseAttnInference(total_num_heads, max_seqlen, local_blocks, vert_stride, sparse_block_size, active_head_range=active_head_range)
+        self.bs_paged_attn = LocalStridedBlockSparseAttnInferenceBT(total_num_heads, max_seqlen, local_blocks, vert_stride, sparse_block_size, active_head_range=active_head_range)
+
         self.block_manager = None
 
     def set_block_manager(self, block_manager):
@@ -259,6 +272,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
+        # print(f'>> {self.num_heads=}, {self.num_kv_heads}')
         # print(f'----> {self.layer_idx=}')
 
 
@@ -276,10 +290,10 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
 
             # TODO: decde what to write, and what is not
 
-            if self.layer_idx == 0:
-                print(f'>> {attn_metadata=}')
-                print(f'>> {attn_metadata.slot_mapping.shape=}\n {key.shape=}, {key_cache.shape=}, {value_cache.shape=}, {kv_cache.shape=}')
-                # import ipdb; ipdb.set_trace()
+            # if self.layer_idx == 0:
+            #     print(f'>> {attn_metadata=}')
+            #     print(f'>> {attn_metadata.slot_mapping.shape=}\n {key.shape=}, {key_cache.shape=}, {value_cache.shape=}, {kv_cache.shape=}')
+            #     # import ipdb; ipdb.set_trace()
 
             # # one head per sample
             # key2 = key.repeat((1, 4, 1)).view(-1, 2, key.size(2))
@@ -290,6 +304,14 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                                                 attn_metadata.slot_mapping,
                                                 attn_metadata.kv_cache_dtype,
                                                 kv_scale)
+
+
+            # torch.save({'q': query, 'k': key, 'v': value,
+            # 'slot_mapping': attn_metadata.slot_mapping,
+            # }, '/tmp/vllm_promt.pt')
+
+            # print('\n\n1\n\n')
+
         if attn_metadata.is_prompt:
 
             # Prompt run.
@@ -297,9 +319,10 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             # When block_tables are not filled, it means q and k are the
             # prompt, and they have the same length.
 
-            if self.layer_idx == 0:
-                print(attn_metadata.seq_start_loc)
+            # if self.layer_idx == 0:
+            #     print(attn_metadata.seq_start_loc)
                 # print(f'>>> {query.shape=}, {key.shape=}, {value.shape=}, {attn_metadata.seq_start_loc=}')
+
             output = self.bs_attn(
                 q=query,
                 k=key,
@@ -312,19 +335,32 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         else:
             # Decoding run.
             # query2 = query.view(-1, 1, query.size(2))
-            output = PagedAttention.forward_decode(
-                query,
-                key_cache,
-                value_cache,
-                attn_metadata.block_tables,
-                attn_metadata.context_lens,
-                attn_metadata.max_context_len,
-                attn_metadata.kv_cache_dtype,
-                self.num_kv_heads,
-                self.scale,
-                self.alibi_slopes,
-                kv_scale,
-            )
+
+            # output = PagedAttention.forward_decode(
+            #     query,
+            #     key_cache,
+            #     value_cache,
+            #     attn_metadata.block_tables,
+            #     attn_metadata.context_lens,
+            #     attn_metadata.max_context_len,
+            #     attn_metadata.kv_cache_dtype,
+            #     self.num_kv_heads,
+            #     self.scale,
+            #     self.alibi_slopes,
+            #     kv_scale,
+            # )
+
+            # print('\n\n2\n\n')
+            # torch.save({'q': query, 'k': key_cache, 'v': value_cache,
+            #             'output': output,
+            #             'block_tables': attn_metadata.block_tables,
+            #             'context_lens': attn_metadata.context_lens,
+            #             'num_kv_heads':  self.num_kv_heads,
+            #             'scale': self.scale,
+            #             }, '/tmp/vllm.pt')
+
+            # exit()
+            output = self.bs_paged_attn(query, key_cache, value_cache, attn_metadata.block_tables, attn_metadata.context_lens, sm_scale=self.scale)
 
         # Reshape the output tensor.
         return output.view(num_tokens, hidden_size)

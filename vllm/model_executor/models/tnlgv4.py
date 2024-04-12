@@ -16,6 +16,7 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding, DEFAULT_VOCAB_PADDING_SIZE)
 from vllm.model_executor.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
@@ -23,7 +24,7 @@ from vllm.model_executor.weight_utils import (default_weight_loader,
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs import TLGv4Config
 # from .triton_flash_blocksparse_attn import get_local_strided_sparse_attention_op, BlockSparseParams
-from .tnlgv4_attention import BlockSparseFlashAttention
+from vllm.model_executor.models.tnlgv4_attention import BlockSparseFlashAttention
 
 
 '''
@@ -38,10 +39,39 @@ Further optimization TODO:
 '''
 
 
+def load_column_parallel_weight(
+            param: torch.nn.Parameter,
+            loaded_weight: torch.Tensor
+            ):
+        tp = get_tensor_model_parallel_world_size()
+        rk = get_tensor_model_parallel_rank()
+        assert param.size(0) * tp == loaded_weight.size(0)
+        s = rk * param.size(0)
+        e = (rk + 1) * param.size(0)
+        loaded_weight = loaded_weight[s:e]
+        assert param.shape == loaded_weight.shape
+        param.data.copy_(loaded_weight)
+
+
+class QKVParallelLinear2(QKVParallelLinear):
+    def weight_loader(self,
+                      param: torch.nn.Parameter,
+                      loaded_weight: torch.Tensor
+                    ):
+        return load_column_parallel_weight(param, loaded_weight)
+
+
+class MergedColumnParallelLinear2(MergedColumnParallelLinear):
+    def weight_loader(self,
+                    param: torch.nn.Parameter,
+                    loaded_weight: torch.Tensor
+                    ):
+        return load_column_parallel_weight(param, loaded_weight)
+
+
 @torch.jit.script
 def quick_gelu(x):
     return x * torch.sigmoid(1.702 * x)
-
 
 
 @torch.jit.script
@@ -72,7 +102,7 @@ class TLGv4MLP(nn.Module):
         self.intermediate_size = config.intermediate_size
 
         # self.up_proj = nn.Linear(self.hidden_size, 2 * self.intermediate_size)
-        self.up_proj = MergedColumnParallelLinear(
+        self.up_proj = MergedColumnParallelLinear2(
             self.hidden_size,
             2* [self.intermediate_size],
             bias=True,
@@ -92,6 +122,7 @@ class TLGv4MLP(nn.Module):
         x = gegelu(gate_up)
         x, _ = self.down_proj(x)
         return x
+
 
 class TLGv4SelfAttention(nn.Module):
     def __init__(self, config: TLGv4Config, layer_idx: Optional[int] = None) -> None:
@@ -116,7 +147,8 @@ class TLGv4SelfAttention(nn.Module):
         self.num_q_per_kv = self.num_heads // self.num_key_value_heads
         if self.num_key_value_heads >= self.tp_size:
             assert self.tp_size % self.num_key_value_heads
-        self.num_kv_heads = max(1, self.num_key_value_heads // self.tp_size)
+        self.num_kv_heads_per_partion = max(1, self.num_key_value_heads // self.tp_size)
+        self.num_heads_per_partition = self.num_heads // self.tp_size
 
         self.max_position_embeddings = config.max_position_embeddings
         self.rope_embedding_base = config.rope_embedding_base
@@ -130,7 +162,7 @@ class TLGv4SelfAttention(nn.Module):
             norm_factor = math.sqrt(self.head_dim)
         self.scale = 1 / norm_factor
 
-        self.query_key_value = QKVParallelLinear(
+        self.query_key_value = QKVParallelLinear2(
             self.hidden_size,
             self.head_dim,
             self.num_heads,
@@ -138,6 +170,7 @@ class TLGv4SelfAttention(nn.Module):
             bias=True,
             linear_method=None,
         )
+
         self.dense = RowParallelLinear(
             self.hidden_size,
             self.hidden_size,
@@ -158,15 +191,20 @@ class TLGv4SelfAttention(nn.Module):
         self.blocksparse_num_local_blocks = config.blocksparse_num_local_blocks
         self.sliding_window = self.blocksparse_block_size * self.blocksparse_num_local_blocks
 
+        # self.attn = Attention(self.num_heads,
+        #                       self.num_heads_per_partition,
+        #                       self.scale,
+        #                       num_kv_heads=self.num_kv_heads_per_partion)
+
         self.attn = BlockSparseFlashAttention(
                               self.lcoal_blocks,
                               self.vert_stride,
-                              self.num_heads,
+                              self.num_heads_per_partition,
                               self.head_dim,
                               self.scale,
                               max_seqlen=self.max_position_embeddings,
                               sparse_block_size=self.sparse_block_size,
-                              num_kv_heads=self.num_kv_heads,
+                              num_kv_heads=self.num_kv_heads_per_partion,
                               layer_idx=layer_idx)
 
     def forward(
@@ -178,19 +216,24 @@ class TLGv4SelfAttention(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         """_summary_
         """
+
+        # TODO: why the bias is not used?
         qkv, _ = self.query_key_value(hidden_states)
-        qkv = qkv.reshape(qkv.shape[:-1]+(-1, (2+self.num_q_per_kv),self.head_dim))
+
+        qkv = qkv.view(qkv.shape[:-1]+ (-1, (self.num_q_per_kv + 2), self.head_dim))
         q, k, v = qkv.split([self.num_q_per_kv, 1, 1], dim=-2)
-        q = q.reshape(q.shape[:2]+ (-1,))
-        k = k.reshape(q.shape[:2]+ (-1,))
-        v = v.reshape(q.shape[:2]+ (-1,))
-        q = q.reshape(-1, self.head_dim*self.num_heads)
-        k = k.reshape(-1, self.head_dim*self.num_kv_heads)
-        v = v.reshape(-1, self.head_dim*self.num_kv_heads)
+
+        # NOTE: maybe we should change the order of qkv weights so that we don't need to reshape, but using view
+        q = q.reshape(-1, self.head_dim*self.num_heads_per_partition)
+        k = k.reshape(-1, self.head_dim*self.num_kv_heads_per_partion)
+        v = v.reshape(-1, self.head_dim*self.num_kv_heads_per_partion)
+
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata=attn_metadata)
         output, _ = self.dense(attn_output)
+
         return output
+
 
 class TLGv4DecoderLayer(nn.Module):
     def __init__(self, config: TLGv4Config, layer_idx: int, linear_method: Optional[LinearMethodBase] = None,):

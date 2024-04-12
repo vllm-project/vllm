@@ -621,6 +621,8 @@ class LocalStridedBlockSparseAttnInferenceBT(torch.nn.Module):
         device = device or torch.cuda.current_device()
         self.max_seqlen = max_seqlen
         self.block_size = block_size
+        self.local_blocks = local_blocks
+        self.vert_stride = vert_stride
         sparse_layout, sparse_pattern, _ = _get_sparse_attn_mask(n_heads, max_seqlen, max_seqlen, dtype, device,
                                                 BLOCK=block_size,
                                                 local_blocks=local_blocks, vert_stride=vert_stride,
@@ -651,6 +653,7 @@ class LocalStridedBlockSparseAttnInferenceBT(torch.nn.Module):
         kernel_block_size = vllm_block_size
 
         assert sparse_block_size % kernel_block_size == 0
+        # self.block_size = self.vllm_block_size
         if sparse_block_size // kernel_block_size > 1:
             _mul = sparse_block_size // kernel_block_size
             # need to consider if block_m and block_n are different
@@ -662,6 +665,14 @@ class LocalStridedBlockSparseAttnInferenceBT(torch.nn.Module):
             self.sparse_layout = sparse_layout
             self.sparse_pattern = self.sparse_pattern
 
+    def split_local_stride(self):
+
+        sparse_layout, sparse_pattern, _ = _get_sparse_attn_mask(n_heads, max_seqlen, max_seqlen, dtype, device,
+                                            BLOCK=block_size,
+                                            local_blocks=local_blocks, vert_stride=vert_stride,
+                                            homo_head=homo_head, return_dense=False)
+            
+        # sparse_pattern =
 
     def forward(self, q, k, v, block_tables, context_lens, sm_scale=None):
         '''
