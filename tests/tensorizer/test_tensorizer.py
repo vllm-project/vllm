@@ -5,8 +5,8 @@ import pytest
 from vllm import SamplingParams
 from vllm.config import ModelConfig, TensorizerConfig
 from vllm.model_executor.tensorizer_loader import (
-    TensorizerArgs, is_vllm_serialized_tensorizer, load_with_tensorizer,
-    TensorSerializer, open_stream)
+     is_vllm_serialized_tensorizer, load_with_tensorizer,
+    TensorSerializer, open_stream, EncryptionParams, DecryptionParams)
 import gc
 import torch
 
@@ -90,7 +90,51 @@ def test_deserialized_vllm_model_has_same_outputs(vllm_runner, tmp_path):
     gc.collect()
     torch.cuda.empty_cache()
     loaded_vllm_model = vllm_runner(model_ref,
+                                    load_format="tensorizer",
                                     tensorizer_uri=model_path,
+                                    num_readers=1,
+                                    vllm_tensorized=True,
+                                    dtype=dtype)
+    deserialized_outputs = loaded_vllm_model.generate(prompts, sampling_params)
+
+    # Assumes SamplingParams being seeded ensures the outputs are deterministic
+    assert outputs == deserialized_outputs
+
+def test_can_deserialize_s3(vllm_runner, tmp_path):
+    model_ref = "EleutherAI/pythia-1.4b"
+    tensorized_path = f"s3://tensorized/{model_ref}/fp16/model.tensors"
+
+    loaded_hf_model = vllm_runner(model_ref,
+                                    tensorizer_uri=tensorized_path,
+                                    load_format="tensorizer",
+                                    num_readers=1,
+                                    vllm_tensorized=False,
+                                    dtype=dtype)
+    deserialized_outputs = loaded_hf_model.generate(prompts, sampling_params)
+
+    assert deserialized_outputs
+
+def test_deserialized_encrypted_vllm_model_has_same_outputs(vllm_runner, tmp_path):
+    vllm_model = vllm_runner(model_ref, dtype=dtype)
+    model_path = tmp_path / (model_ref + ".tensors")
+    key_path = tmp_path / (model_ref + ".key")
+    outputs = vllm_model.generate(prompts, sampling_params)
+    model = (vllm_model.model.llm_engine.model_executor.driver_worker.
+             model_runner.model)
+
+    encryption_params = EncryptionParams.random()
+    with open_stream(model_path, "wb+") as stream:
+        serializer = TensorSerializer(stream, encryption=encryption_params)
+        serializer.write_module(model)
+    with open_stream(key_path, "wb+") as stream:
+        stream.write(encryption_params.key)
+    del vllm_model, model
+    gc.collect()
+    torch.cuda.empty_cache()
+    loaded_vllm_model = vllm_runner(model_ref,
+                                    tensorizer_uri=model_path,
+                                    load_format="tensorizer",
+                                    encryption_keyfile=key_path,
                                     num_readers=1,
                                     vllm_tensorized=True,
                                     dtype=dtype)
@@ -114,8 +158,9 @@ def test_deserialized_hf_model_has_same_outputs(hf_runner, vllm_runner,
     torch.cuda.empty_cache()
     loaded_hf_model = vllm_runner(model_ref,
                                   tensorizer_uri=model_path,
+                                  load_format="tensorizer",
                                   num_readers=1,
-                                  vllm_tensorized=True,
+                                  vllm_tensorized=False,
                                   dtype=dtype)
     deserialized_outputs = loaded_hf_model.generate_greedy(
         prompts, max_tokens=max_tokens)
@@ -153,10 +198,10 @@ def test_vllm_model_with_lora_has_same_outputs(vllm_runner, tmp_path):
     gc.collect()
     torch.cuda.empty_cache()
     loaded_vllm_model = vllm_runner(model_ref,
-                                    tensorizer_args=TensorizerArgs(
-                                        tensorizer_uri=model_path,
-                                        num_readers=1,
-                                        vllm_tensorized=True),
+                                    tensorizer_uri=model_path,
+                                    load_format="tensorizer",
+                                    num_readers=1,
+                                    vllm_tensorized=True,
                                     enable_lora=True,
                                     max_loras=1,
                                     max_lora_rank=8,

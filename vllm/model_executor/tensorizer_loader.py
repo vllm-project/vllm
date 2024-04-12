@@ -20,7 +20,7 @@ from vllm.model_executor.layers.linear import LinearMethodBase
 tensorizer_load_fail = False
 
 try:
-    from tensorizer import DecryptionParams, TensorDeserializer, \
+    from tensorizer import EncryptionParams, DecryptionParams, TensorDeserializer, \
         TensorSerializer
     from tensorizer.stream_io import open_stream
     from tensorizer.utils import (convert_bytes, get_mem_usage,
@@ -29,8 +29,9 @@ except ImportError:
     tensorizer_load_fail = True
 
 __all__ = [
-    'DecryptionParams', 'TensorDeserializer', 'TensorSerializer',
-    'open_stream', 'convert_bytes', 'get_mem_usage', 'no_init_or_tensor'
+    'EncryptionParams','DecryptionParams', 'TensorDeserializer',
+    'TensorSerializer','open_stream', 'convert_bytes', 'get_mem_usage',
+    'no_init_or_tensor'
 ]
 
 logger = init_logger(__name__)
