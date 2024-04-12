@@ -1,14 +1,14 @@
+import gc
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 
 from vllm import SamplingParams
 from vllm.config import ModelConfig, TensorizerConfig
 from vllm.model_executor.tensorizer_loader import (
-     is_vllm_serialized_tensorizer, load_with_tensorizer,
-    TensorSerializer, open_stream, EncryptionParams, DecryptionParams)
-import gc
-import torch
+    EncryptionParams, TensorSerializer, is_vllm_serialized_tensorizer,
+    load_with_tensorizer, open_stream)
 
 prompts = [
     "Hello, my name is",
@@ -100,21 +100,24 @@ def test_deserialized_vllm_model_has_same_outputs(vllm_runner, tmp_path):
     # Assumes SamplingParams being seeded ensures the outputs are deterministic
     assert outputs == deserialized_outputs
 
+
 def test_can_deserialize_s3(vllm_runner, tmp_path):
     model_ref = "EleutherAI/pythia-1.4b"
     tensorized_path = f"s3://tensorized/{model_ref}/fp16/model.tensors"
 
     loaded_hf_model = vllm_runner(model_ref,
-                                    tensorizer_uri=tensorized_path,
-                                    load_format="tensorizer",
-                                    num_readers=1,
-                                    vllm_tensorized=False,
-                                    dtype=dtype)
+                                  tensorizer_uri=tensorized_path,
+                                  load_format="tensorizer",
+                                  num_readers=1,
+                                  vllm_tensorized=False,
+                                  dtype=dtype)
     deserialized_outputs = loaded_hf_model.generate(prompts, sampling_params)
 
     assert deserialized_outputs
 
-def test_deserialized_encrypted_vllm_model_has_same_outputs(vllm_runner, tmp_path):
+
+def test_deserialized_encrypted_vllm_model_has_same_outputs(
+        vllm_runner, tmp_path):
     vllm_model = vllm_runner(model_ref, dtype=dtype)
     model_path = tmp_path / (model_ref + ".tensors")
     key_path = tmp_path / (model_ref + ".key")
@@ -169,9 +172,10 @@ def test_deserialized_hf_model_has_same_outputs(hf_runner, vllm_runner,
 
 
 def test_vllm_model_with_lora_has_same_outputs(vllm_runner, tmp_path):
+    from huggingface_hub import snapshot_download
+
     from examples.multilora_inference import (create_test_prompts,
                                               process_requests)
-    from huggingface_hub import snapshot_download
 
     model_ref = "meta-llama/Llama-2-7b-hf"
     lora_path = snapshot_download(repo_id="yard1/llama-2-7b-sql-lora-test")
@@ -214,8 +218,7 @@ def test_vllm_model_with_lora_has_same_outputs(vllm_runner, tmp_path):
 
     assert outputs == deserialized_outputs
 
+
 def test_load_without_tensorizer_load_format(vllm_runner):
     with pytest.raises(ValueError):
-        vllm_model = vllm_runner(model_ref,
-                                 tensorizer_uri="test")
-
+        vllm_runner(model_ref, tensorizer_uri="test")

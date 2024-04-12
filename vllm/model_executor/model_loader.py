@@ -57,14 +57,13 @@ def get_model(model_config: ModelConfig, device_config: DeviceConfig,
     tensorizer_config = kwargs.get("tensorizer_config", None)
     model_class = _get_model_architecture(model_config)[0]
 
-    if tensorizer_config:
-        if (model_config.load_format != "tensorizer"
-                and tensorizer_config.tensorizer_uri is not None):
-            raise ValueError(
-                "A tensorizer uri was passed for tensorizer loading, but the "
-                f"load format was set to {model_config.load_format}. "
-                "Please set the load format to 'tensorizer' to use "
-                f"tensorizer args.")
+    if tensorizer_config and (model_config.load_format != "tensorizer" and
+                              tensorizer_config.tensorizer_uri is not None):
+        raise ValueError(
+            "A tensorizer uri was passed for tensorizer loading, but the "
+            f"load format was set to {model_config.load_format}. "
+            "Please set the load format to 'tensorizer' to use "
+            f"tensorizer args.")
 
     # Get the (maybe quantized) linear method.
     linear_method = None
@@ -124,8 +123,8 @@ def get_model(model_config: ModelConfig, device_config: DeviceConfig,
                 # to retain tensorizer args from CLI.
                 model_config.load_format = ParameterizedLoadFormat(
                     model_config.load_format)
-                model_config.load_format.params = (tensorizer_config
-                                            ._construct_tensorizer_args())
+                model_config.load_format.params = (
+                    tensorizer_config._construct_tensorizer_args())
 
             model.load_weights(
                 model_config.model,

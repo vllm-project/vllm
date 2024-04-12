@@ -1,8 +1,9 @@
 import enum
+import io
 import json
 import os
-from dataclasses import dataclass, fields
 import typing
+from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, ClassVar, Optional, Union
 
 import torch
@@ -13,8 +14,6 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import (get_cpu_memory, get_nvcc_cuda_version, is_cpu, is_hip,
                         is_neuron)
-
-import io
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -883,6 +882,7 @@ class VisionLanguageConfig:
                              f"Expecting to choose from "
                              f"{[x.name for x in cls.ImageInputType]}.") from e
 
+
 @dataclass
 class TensorizerConfig:
     tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, typing.BinaryIO,
@@ -911,6 +911,7 @@ class TensorizerConfig:
             "s3_endpoint": self.s3_endpoint,
         }
         return TensorizerArgs(**tensorizer_args)
+
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.float16,

@@ -1,14 +1,14 @@
 import argparse
 import dataclasses
-from dataclasses import dataclass
-from typing import Optional, BinaryIO, Union
 import io
 import os
+from dataclasses import dataclass
+from typing import BinaryIO, Optional, Union
 
 from vllm.config import (CacheConfig, DeviceConfig, EngineConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
-                         SpeculativeConfig, TokenizerPoolConfig,
-                         VisionLanguageConfig, TensorizerConfig)
+                         SpeculativeConfig, TensorizerConfig,
+                         TokenizerPoolConfig, VisionLanguageConfig)
 from vllm.utils import str_to_int_tuple
 
 

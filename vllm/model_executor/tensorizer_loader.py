@@ -8,20 +8,20 @@ import warnings
 from dataclasses import dataclass
 from typing import Optional, Union
 
-from torch import nn
 import torch
+from torch import nn
 
 from vllm.config import TensorizerConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.vocab_parallel_embedding import \
-    VocabParallelEmbedding
 from vllm.model_executor.layers.linear import LinearMethodBase
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding)
 
 tensorizer_load_fail = False
 
 try:
-    from tensorizer import EncryptionParams, DecryptionParams, TensorDeserializer, \
-        TensorSerializer
+    from tensorizer import (DecryptionParams, EncryptionParams,
+                            TensorDeserializer, TensorSerializer)
     from tensorizer.stream_io import open_stream
     from tensorizer.utils import (convert_bytes, get_mem_usage,
                                   no_init_or_tensor)
@@ -29,8 +29,8 @@ except ImportError:
     tensorizer_load_fail = True
 
 __all__ = [
-    'EncryptionParams','DecryptionParams', 'TensorDeserializer',
-    'TensorSerializer','open_stream', 'convert_bytes', 'get_mem_usage',
+    'EncryptionParams', 'DecryptionParams', 'TensorDeserializer',
+    'TensorSerializer', 'open_stream', 'convert_bytes', 'get_mem_usage',
     'no_init_or_tensor'
 ]
 

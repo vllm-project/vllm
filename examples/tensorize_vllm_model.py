@@ -18,11 +18,13 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.parallel_utils.parallel_state import (
     initialize_model_parallel)
 from vllm.model_executor.tensorizer_loader import TensorizerArgs
+
 """
 tensorize_vllm_model.py is a script that can be used to serialize and 
 deserialize vLLM models. These models can be loaded using tensorizer directly 
 to the GPU extremely quickly. Tensor encryption and decryption is also 
-supported, although libsodium must be installed to use it. 
+supported, although libsodium must be installed to use it. Install
+vllm with tensorizer support using `pip install vllm[tensorizer]`.
 
 To serialize a model, you can run something like this:
 
