@@ -3,8 +3,9 @@ import os
 import sys
 import tempfile
 
-from vllm.logger import (_DATE_FORMAT, _FORMAT, NewLineFormatter,
-                         enable_trace_function_call, init_logger)
+from vllm.logger import (_DATE_FORMAT, _FORMAT, enable_trace_function_call,
+                         init_logger)
+from vllm.logging import NewLineFormatter
 
 
 def f1(x):
