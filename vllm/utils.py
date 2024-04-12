@@ -9,8 +9,8 @@ import warnings
 from collections import OrderedDict, defaultdict
 from functools import lru_cache, partial
 from platform import uname
-from typing import (Any, Awaitable, Callable, Dict, Generic, Hashable, List,
-                    Optional, Tuple, TypeVar, Union)
+from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
+                    Hashable, List, Optional, Tuple, TypeVar, Union)
 
 import psutil
 import torch
@@ -179,6 +179,42 @@ def make_async(func: Callable[..., T]) -> Callable[..., Awaitable[T]]:
         return loop.run_in_executor(executor=None, func=p_func)
 
     return _async_wrapper
+
+
+def merge_async_iterators(
+        *iterators: AsyncIterator[T]) -> AsyncIterator[Tuple[int, T]]:
+    """Merge multiple asynchronous iterators into a single iterator.
+
+    This method handle the case where some iterators finish before others.
+    When it yields, it yields a tuple (i, item) where i is the index of the
+    iterator that yields the item.
+    """
+    queue: asyncio.Queue[Union[Tuple[int, T], Exception]] = asyncio.Queue()
+
+    finished = [False] * len(iterators)
+
+    async def producer(i: int, iterator: AsyncIterator[T]):
+        try:
+            async for item in iterator:
+                await queue.put((i, item))
+        except Exception as e:
+            await queue.put(e)
+        finished[i] = True
+
+    _tasks = [
+        asyncio.create_task(producer(i, iterator))
+        for i, iterator in enumerate(iterators)
+    ]
+
+    async def consumer():
+        while not all(finished) or not queue.empty():
+            item = await queue.get()
+            if isinstance(item, Exception):
+                raise item
+            yield item
+        await asyncio.gather(*_tasks)
+
+    return consumer()
 
 
 def get_ip() -> str:

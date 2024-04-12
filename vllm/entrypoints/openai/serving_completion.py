@@ -1,4 +1,3 @@
-import asyncio
 import time
 from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, List,
                     Optional, Tuple)
@@ -17,7 +16,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
 from vllm.outputs import RequestOutput
-from vllm.utils import random_uuid
+from vllm.utils import merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
 
@@ -48,41 +47,6 @@ def parse_prompt_format(prompt) -> Tuple[bool, list]:
             raise ValueError("prompt must be a string, array of strings, "
                              "array of tokens, or array of token arrays")
     return prompt_is_tokens, prompts
-
-
-def merge_async_iterators(*iterators):
-    """Merge multiple asynchronous iterators into a single iterator.
-
-    This method handle the case where some iterators finish before others.
-    When it yields, it yields a tuple (i, item) where i is the index of the
-    iterator that yields the item.
-    """
-    queue = asyncio.Queue()
-
-    finished = [False] * len(iterators)
-
-    async def producer(i, iterator):
-        try:
-            async for item in iterator:
-                await queue.put((i, item))
-        except Exception as e:
-            await queue.put(e)
-        finished[i] = True
-
-    _tasks = [
-        asyncio.create_task(producer(i, iterator))
-        for i, iterator in enumerate(iterators)
-    ]
-
-    async def consumer():
-        while not all(finished) or not queue.empty():
-            item = await queue.get()
-            if isinstance(item, Exception):
-                raise item
-            yield item
-        await asyncio.gather(*_tasks)
-
-    return consumer()
 
 
 class OpenAIServingCompletion(OpenAIServing):
