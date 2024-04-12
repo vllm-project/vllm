@@ -95,7 +95,6 @@ class ModelConfig:
         quantization_param_path: Optional[str] = None,
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
-        tensorizer_args: Optional["TensorizerArgs"] = None,
         max_logprobs: int = 5,
     ) -> None:
         self.model = model
@@ -112,7 +111,6 @@ class ModelConfig:
         self.quantization_param_path = quantization_param_path
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
-        self.tensorizer_args = tensorizer_args
         self.max_logprobs = max_logprobs
 
         if os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true":
