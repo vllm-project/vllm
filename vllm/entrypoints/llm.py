@@ -143,9 +143,9 @@ class LLM:
             prompts: A list of prompts to generate completions for.
             sampling_params: The sampling parameters for text generation. If
                 None, we use the default sampling parameters. 
-                When it is a single value, it should be applied to every prompt. 
-                When it is a list, the list must have same length as the prompts 
-                and it is paired one by one with the prompt.
+                When it is a single value, it is applied to every prompt. 
+                When it is a list, the list must have the same length as the 
+                prompts and it is paired one by one with the prompt.
             prompt_token_ids: A list of token IDs for the prompts. If None, we
                 use the tokenizer to convert the prompts to token IDs.
             use_tqdm: Whether to use tqdm to display the progress bar.

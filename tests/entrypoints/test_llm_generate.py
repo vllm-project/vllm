@@ -26,7 +26,7 @@ def test_multiple_sampling_params():
     outputs = llm.generate(prompts, sampling_params=sampling_params)
     assert len(prompts) == len(outputs)
 
-    # Exception raised, if the size of params does not matched the size of prompts
+    # Exception raised, if the size of params does not match the size of prompts
     with pytest.raises(ValueError):
         outputs = llm.generate(prompts, sampling_params=sampling_params[:3])
 
