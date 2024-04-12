@@ -18,9 +18,11 @@ def blocksparse_flash_attn_varlen_fwd_with_blocktable(
     *,
     vllm_block_size=16,
     block_size=64,
+    kv_scale=1,
+    k_split=1,
     max_seqlen=None,
 ):
-    print(f'> {q.shape=}, {k.shape=}, {v.shape=}, {block_tables.shape=}, {context_lens.shape=}')
+    # print(f'> {q.shape=}, {k.shape=}, {v.shape=}, {block_tables.shape=}, {context_lens.shape=}')
 
     # split q to blocks
     _, n_heads, head_size = q.shape
@@ -74,6 +76,8 @@ def blocksparse_flash_attn_varlen_fwd_with_blocktable(
     # qk = torch.zeros((vllm_block_size, vllm_block_size), dtype=torch.float32, device=q.device)
     # ko = torch.zeros((vllm_block_size, head_size)).type_as(k)
 
+    IS_FP8 = k.element_size() == 1
+    X = 16 // k.element_size()
     _fwd_kernel_batch_inference_with_blocktable[grid](
     q, k, v, out,
     # qk, 
@@ -102,6 +106,10 @@ def blocksparse_flash_attn_varlen_fwd_with_blocktable(
     q_k_ratio,
     block_tables,
     *block_tables.stride(),
+
+    kv_scale,
+    X,
+    IS_FP8,
 
     D_HEAD = head_size,
     BLOCK_M = vllm_block_size,
@@ -132,17 +140,24 @@ def _load_kv(
     D_HEAD: tl.constexpr,
     X: tl.constexpr,
     IS_FP8: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    EVEN_D: tl.constexpr,
     ):
     bt_id = tl.load(block_tables + off_z * stride_btb + k_block_id * stride_btt)
 
     k_ptrs = K + bt_id * stride_kb + tl.arange(0, BLOCK_N)[None, None] * stride_kt + \
-        tl.arange(0, D_HEAD // X)[:, None, None] * stride_kd + tl.arange(0, X)[None, :, None] * stride_kx
+        tl.arange(0, BLOCK_D // X)[:, None, None] * stride_kd + tl.arange(0, X)[None, :, None] * stride_kx
     v_ptrs = V + bt_id * stride_vb + tl.arange(0, BLOCK_N)[:, None] * stride_vt + \
-        tl.arange(0, D_HEAD)[None, :] * stride_vd
+        tl.arange(0, BLOCK_D)[None, :] * stride_vd
     
-    k_ptrs = tl.reshape(k_ptrs, (D_HEAD, BLOCK_N))
-    k = tl.load(k_ptrs)
-    v = tl.load(v_ptrs)
+    k_ptrs = tl.reshape(k_ptrs, (BLOCK_D, BLOCK_N))
+
+    if EVEN_D:
+        k = tl.load(k_ptrs)
+        v = tl.load(v_ptrs)
+    else:
+        k = tl.load(k_ptrs, mask=tl.arange(0, BLOCK_D)[:, None] < D_HEAD)
+        v = tl.load(v_ptrs, mask=tl.arange(0, BLOCK_D)[None, :] < D_HEAD)
 
     if IS_FP8:
         k = k.to(Q.dtype.element_ty) * kv_scale
@@ -161,7 +176,7 @@ def _fwd_kernel_inner_with_blocktable(
     past_len,
     LAST_K_BLOCK: tl.constexpr,
     BLOCK_M_LOADING: tl.constexpr,
-    BLOCK_N: tl.constexpr,
+    BLOCK_N: tl.constexpr
 ):    
     start_n = k_block_id * BLOCK_N
     # -- compute qk ----
@@ -232,6 +247,9 @@ def _fwd_kernel_batch_inference_with_blocktable(
     block_tables,
     stride_btb, stride_btt,
 
+    kv_scale,
+    X: tl.constexpr,
+    IS_FP8: tl.constexpr,
     D_HEAD: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -324,11 +342,13 @@ def _fwd_kernel_batch_inference_with_blocktable(
             stride_vb, stride_vd, stride_vt,
             stride_btb, stride_btt,
             off_z, 
-            1.,  # kv_scale
+            kv_scale,  # kv_scale
             BLOCK_N,
             D_HEAD,
-            8, # X = 16/ #bytes of k dtype
-            False # IS_FP8,
+            X, # X = 16/ #bytes of k dtype
+            IS_FP8, # IS_FP8,
+            BLOCK_D,
+            EVEN_D
             )
         
         acc, l_i, m_i = _fwd_kernel_inner_with_blocktable(
@@ -352,11 +372,13 @@ def _fwd_kernel_batch_inference_with_blocktable(
         stride_vb, stride_vd, stride_vt,
         stride_btb, stride_btt,
         off_z, 
-        1.,  # kv_scale
+        kv_scale,  # kv_scale
         BLOCK_N,
         D_HEAD,
-        8, # X = 16/ #bytes of k dtype
-        False # IS_FP8,
+        X, # X = 16/ #bytes of k dtype
+        IS_FP8, # IS_FP8
+        BLOCK_D,
+        EVEN_D
         )
 
     acc, l_i, m_i = _fwd_kernel_inner_with_blocktable(
@@ -378,7 +400,205 @@ def _fwd_kernel_batch_inference_with_blocktable(
     else:
         tl.store(Out + offs_m[:, None] * stride_ot + offs_d[None, :] * stride_od, acc,
                 mask=(offs_m[:, None] < q_seqlen) & (offs_d[None, :] < D_HEAD))
+    
+
+
+
+@triton.jit
+def _fwd_kernel_batch_inference_split_k_with_blocktable(
+    Q, K, V, Out,
+
+    # QK,
+    # KO,
+    sm_scale,
+    q_batch_starts,
+    q_batch_ends,
+    k_batch_starts,
+    k_batch_ends,
+    q_batch_ids,
+    q_start_sids,
+
+    stride_qt, stride_qh, stride_qd,
+    stride_kb, stride_kh, stride_kd, stride_kt, stride_kx,
+    stride_vb, stride_vh, stride_vd, stride_vt,
+    stride_ot, stride_oh, stride_od, stride_os,
+    # stride_qk1, stride_qk2,
+    # stride_ko1, stride_ko2,
+
+    layout_crow_ptr,
+    layout_col_ptr,
+    layout_crow_stride_h, layout_crow_stride_m,
+    layout_col_stride_h, layout_col_stride_m,
+
+    q_k_ratio,
+    block_tables,
+    stride_btb, stride_btt,
+
+    kv_scale,
+    X: tl.constexpr,
+    IS_FP8: tl.constexpr,
+    PER_K_SPLIT: tl.constexpr,
+    D_HEAD: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_M_LOADING: tl.constexpr,
+    EVEN_D: tl.constexpr,
+):
+    '''
+    NOTATION:
+    pid: position id
+    sid: storage id
+    sbid: storage block id
+    pbid: position block id
+    offs_m, offs_n: storage offsets of m-dim(q, row) and n-dim(k, col)
+
+    q and blocks in KV needs to be contiguous
+
+    Arguments:
+    kv_seq_lens: for compute past_len
+    kv_storage_offsets: similar to block_tables in vllm, except it is dynamic.
+        TODO: fix this
+
+    TODO:
+    Optimize grouped-attn
+
+    CUDA graph support issue
+        1. grid is dynamic: vllm set up multiple cuda graph in decoding phase, with diff max token size (16, 32, ...)
+            since we mix prompt and decoing phase here, it can be more complex.
+            need to set up diff cuda-graph for diff (off_zm, off_z)
+
+            # indeed, q_batch_ids can be padded to maximum number of grid[0], i.e., assume all decoding
+            therefore, cu_seqlens_q, kv_seq_lens
+
+    '''
+    off_zm = tl.program_id(0)
+    off_h = tl.program_id(1)
+    k_split_id = tl.program_id(2)
+
+    off_h_for_kv = off_h // q_k_ratio
+    off_z = tl.load(q_batch_ids + off_zm).to(tl.int32)   # [0, 0, 0, 1]
+    q_start_sid = tl.load(q_start_sids + off_zm)
+    start_m = q_start_sid // BLOCK_M # q_sbid
+
+    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M_LOADING)
+    offs_n = tl.arange(0, BLOCK_N)
+    offs_d = tl.arange(0, D_HEAD)
+
+    q_cu_start = tl.load(q_batch_starts + off_z).to(tl.int32)
+    q_seqlen = tl.load(q_batch_ends + off_z).to(tl.int32) - q_cu_start
+
+    k_cu_start = tl.load(k_batch_starts + off_z).to(tl.int32)
+    k_seqlen = tl.load(k_batch_ends + off_z).to(tl.int32) - k_cu_start
+
+    past_len = k_seqlen - q_seqlen
+    Q += q_cu_start * stride_qt + off_h * stride_qh
+
+    Out += q_cu_start * stride_ot + off_h * stride_oh  + k_split_id * stride_os
+    q_pbid = (past_len + q_start_sid) // BLOCK_M
+
+    if EVEN_D:
+        q = tl.load(Q + offs_m[:, None] * stride_qt + offs_d[None, :] * stride_qd,
+                    mask=offs_m[:, None] < q_seqlen)
+    else:
+        q = tl.load(Q + offs_m[:, None] * stride_qt + offs_d[None, :] * stride_qd,
+                    mask=(offs_m[:, None] < q_seqlen) & (offs_d[None, :] < D_HEAD),
+                    other=0)
+
+    # tl.device_print('> past_len, q_seqlen, k_seqlen, q_pbid:',  past_len, q_seqlen, k_seqlen, q_pbid)
+    sparse_crow_ptr = layout_crow_ptr + off_h * layout_crow_stride_h + q_pbid * layout_crow_stride_m
+
+    # TODO: load at once, supported in new Triton
+    k_block_start = tl.load(sparse_crow_ptr).to(tl.int32)
+    k_block_end = tl.load(sparse_crow_ptr + 1).to(tl.int32)
+
+    m_i = tl.zeros([BLOCK_M_LOADING], dtype=tl.float32) - float('inf')
+    l_i = tl.zeros([BLOCK_M_LOADING], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_M_LOADING, D_HEAD], dtype=tl.float32)
+
+    K += off_h_for_kv * stride_kh 
+    V += off_h_for_kv * stride_vh
+
+    # TABLE_BLOCK_SIZE = BLOCK_N
+    start = k_block_start + k_split_id * PER_K_SPLIT
+    end = start + PER_K_SPLIT
+
+    if end > k_block_end:
+        end = k_block_end
+
+    if start < k_block_end:
+        # for k_block_col_idx in range(k_block_start, k_block_end - 1):
+        for k_block_col_idx in range(start, end -1):
+            k_block_id = tl.load(layout_col_ptr +  off_h * layout_col_stride_h + k_block_col_idx * layout_col_stride_m).to(tl.int32)
+
+            k, v = _load_kv(
+                k_block_id,
+                K, V, Q,
+                block_tables,
+                stride_kb, stride_kd, stride_kt, stride_kx,
+                stride_vb, stride_vd, stride_vt,
+                stride_btb, stride_btt,
+                off_z, 
+                kv_scale,  # kv_scale
+                BLOCK_N,
+                D_HEAD,
+                X, # X = 16/ #bytes of k dtype
+                IS_FP8, # IS_FP8,
+                BLOCK_D,
+                EVEN_D
+                )
+            
+            acc, l_i, m_i = _fwd_kernel_inner_with_blocktable(
+                    acc, l_i, m_i,
+                    q, k, v, Q,
+                    k_block_id,
+                    offs_m, offs_n,
+                    sm_scale,
+                    past_len,
+                    False,
+                    BLOCK_M_LOADING,
+                    BLOCK_N)
+
+
+        k_block_id = tl.load(layout_col_ptr +  off_h * layout_col_stride_h + (k_block_end - 1) * layout_col_stride_m).to(tl.int32)
+        k, v = _load_kv(
+            k_block_id,
+            K, V, Q,
+            block_tables,
+            stride_kb, stride_kd, stride_kt, stride_kx,
+            stride_vb, stride_vd, stride_vt,
+            stride_btb, stride_btt,
+            off_z, 
+            kv_scale,  # kv_scale
+            BLOCK_N,
+            D_HEAD,
+            X, # X = 16/ #bytes of k dtype
+            IS_FP8, # IS_FP8
+            BLOCK_D,
+            EVEN_D
+            )
+
+        acc, l_i, m_i = _fwd_kernel_inner_with_blocktable(
+                acc, l_i, m_i,
+                q, k, v, Q,
+                k_block_id,
+                offs_m, offs_n,
+                sm_scale,
+                past_len,
+                True,
+                BLOCK_M_LOADING,
+                BLOCK_N)
         
+
+        # write output
+        if EVEN_D:
+            tl.store(Out + offs_m[:, None] * stride_ot + offs_d[None, :] * stride_od, acc,
+                    mask=offs_m[:, None] < q_seqlen)
+        else:
+            tl.store(Out + offs_m[:, None] * stride_ot + offs_d[None, :] * stride_od, acc,
+                    mask=(offs_m[:, None] < q_seqlen) & (offs_d[None, :] < D_HEAD))
+ 
+
 
 class LocalStridedBlockSparseAttnInferenceBT(torch.nn.Module):
     '''
@@ -412,7 +632,7 @@ class LocalStridedBlockSparseAttnInferenceBT(torch.nn.Module):
             assert isinstance(active_head_range, tuple)
             assert len(active_head_range) == 2, '"active_head_range" should be a tuple of start/end index of the heads.'
             h_start, h_end = active_head_range
-            sparse_layout = sparse_layout[h_start:h_end]
+            sparse_layout = tuple(x[h_start:h_end] for x in sparse_layout)
             sparse_pattern = sparse_pattern[h_start:h_end]
     
         self.sparse_layout = sparse_layout
