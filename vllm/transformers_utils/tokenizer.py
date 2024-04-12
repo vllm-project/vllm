@@ -28,7 +28,7 @@ def get_cached_tokenizer(
     tokenizer_all_special_tokens = set(tokenizer.all_special_tokens)
     tokenizer_len = len(tokenizer)
 
-    class CachedTokenizer(PreTrainedTokenizerBase):
+    class CachedTokenizer(tokenizer.__class__):  # type: ignore
 
         @property
         def all_special_ids(self):

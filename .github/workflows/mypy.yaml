@@ -25,10 +25,22 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install ruff==0.1.5 codespell==2.2.6 tomli==2.0.1 isort==5.13.2 mypy==1.9.0
+        pip install mypy==1.9.0
     - name: Mypy
       run: |
-        ls
-        chmod u+x run_mypy.sh
-        ./run_mypy.sh
+        mypy vllm/attention/*.py --follow-imports=skip --config-file pyproject.toml
+        mypy vllm/core/*.py --follow-imports=skip --config-file pyproject.toml
+        mypy vllm/distributed/*.py --follow-imports=skip --config-file pyproject.toml
+        mypy vllm/entrypoints/*.py --follow-imports=skip --config-file pyproject.toml
+        mypy vllm/executor/*.py --follow-imports=skip --config-file pyproject.toml
+        mypy vllm/usage/*.py --follow-imports=skip --config-file pyproject.toml
+        mypy vllm/*.py --follow-imports=skip --config-file pyproject.toml
+        mypy vllm/transformers_utils/*.py --follow-imports=skip --config-file pyproject.toml
+
+        # TODO(sang): Follow up
+        # mypy vllm/engine/*.py --follow-imports=skip --config-file pyproject.toml
+        # mypy vllm/worker/*.py --follow-imports=skip --config-file pyproject.toml
+        # mypy vllm/spec_decoding/*.py --follow-imports=skip --config-file pyproject.toml
+        # mypy vllm/model_executor/*.py --follow-imports=skip --config-file pyproject.toml
+        # mypy vllm/lora/*.py --follow-imports=skip --config-file pyproject.toml
 

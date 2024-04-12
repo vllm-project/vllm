@@ -678,8 +678,9 @@ class SpeculativeConfig:
                 "Expected both speculative_model and "
                 "num_speculative_tokens to be provided, but found "
                 f"{speculative_model=} and {num_speculative_tokens=}.")
-        assert speculative_model is not None
-        assert num_speculative_tokens is not None
+
+        assert (speculative_model is not None
+                and num_speculative_tokens is not None)
 
         # TODO: The user should be able to specify revision/quantization/max
         # model len for the draft model. It is not currently supported.
