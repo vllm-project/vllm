@@ -236,7 +236,7 @@ class TensorizerAgent:
         if tensorizer_load_fail:
             raise ImportError(
                 "Tensorizer is not installed. Please install tensorizer "
-                "to use this feature.")
+                "to use this feature with `pip install vllm[tensorizer]`.")
 
     def _init_model(self):
         model_args = self.tensorizer_config.hf_config

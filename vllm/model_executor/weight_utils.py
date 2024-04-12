@@ -21,9 +21,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
 from vllm.model_executor.layers.quantization.schema import QuantParamSchema
-from vllm.model_executor.tensorizer_loader import (PerformanceWarning,
-                                                   TensorDeserializer,
-                                                   open_stream)
 
 logger = init_logger(__name__)
 
@@ -288,6 +285,9 @@ def hf_model_weights_iterator(
                 param = np.load(f)
             yield name, torch.from_numpy(param)
     elif load_format == "tensorizer":
+        from vllm.model_executor.tensorizer_loader import (PerformanceWarning,
+                                                           TensorDeserializer,
+                                                           open_stream)
         tensorizer_args = load_format.params
         warnings.warn(
             "Deserializing HuggingFace models is not optimized for "
