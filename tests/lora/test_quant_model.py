@@ -147,7 +147,7 @@ def test_quant_model_lora(tinyllama_lora_files, model, tp_size):
 
 
 @pytest.mark.parametrize("model", MODELS)
-# @pytest.mark.skip("Requires multiple GPUs")
+@pytest.mark.skip("Requires multiple GPUs")
 def test_quant_model_tp_equality(tinyllama_lora_files, model):
     # Cannot use as it will initialize torch.cuda too early...
     # if torch.cuda.device_count() < 2:
