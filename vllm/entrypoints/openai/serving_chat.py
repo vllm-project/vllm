@@ -16,7 +16,8 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse,
     UsageInfo)
-from vllm.entrypoints.openai.serving_engine import LoRA, OpenAIServing
+from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
+                                                    OpenAIServing)
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
@@ -71,7 +72,7 @@ class OpenAIServingChat(OpenAIServing):
                  engine: AsyncLLMEngine,
                  served_model: str,
                  response_role: str,
-                 lora_modules: Optional[List[LoRA]] = None,
+                 lora_modules: Optional[List[LoRAModulePath]] = None,
                  chat_template=None):
         super().__init__(engine=engine,
                          served_model=served_model,
@@ -185,9 +186,6 @@ class OpenAIServingChat(OpenAIServing):
 
         request_id = f"cmpl-{random_uuid()}"
         try:
-            # Tokenize/detokenize depending on prompt format (string/token list)
-            prompt_ids, prompt_text = self._validate_prompt_and_tokenize(
-                request, prompt=prompt)
             sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
             guided_decode_logits_processor = (
@@ -198,17 +196,24 @@ class OpenAIServingChat(OpenAIServing):
                     sampling_params.logits_processors = []
                 sampling_params.logits_processors.append(
                     guided_decode_logits_processor)
-        except ValueError as e:
-            return self.create_error_response(str(e))
 
-        result_generator = self.engine.generate(
-            prompt_text,
-            sampling_params,
-            request_id,
-            prompt_ids,
-            lora_request=lora_request,
-            multi_modal_data=multi_modal_data,
-        )
+            prompt_ids, prompt_text = self._tokenize_input_text(
+                request,
+                prompt,
+                truncate_prompt_tokens=sampling_params.truncate_prompt_tokens,
+            )
+
+            result_generator = self.engine.generate(
+                prompt_text,
+                sampling_params,
+                request_id,
+                prompt_ids,
+                lora_request=lora_request,
+                multi_modal_data=multi_modal_data,
+            )
+        except ValueError as e:
+            # TODO: Use a vllm-specific Validation Error
+            return self.create_error_response(str(e))
 
         # Streaming response
         if request.stream:
@@ -257,7 +262,6 @@ class OpenAIServingChat(OpenAIServing):
 
         try:
             async for res in result_generator:
-                res: RequestOutput
                 # We need to do it here, because if there are exceptions in
                 # the result_generator, it needs to be sent as the FIRST
                 # response (by the try...catch).
@@ -453,7 +457,7 @@ class OpenAIServingChat(OpenAIServing):
 
         return response
 
-    def _load_chat_template(self, chat_template):
+    def _load_chat_template(self, chat_template: str):
         tokenizer = self.tokenizer
         assert tokenizer is not None
 

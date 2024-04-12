@@ -11,7 +11,8 @@ from vllm.entrypoints.openai.protocol import (CompletionRequest,
                                               CompletionResponseStreamChoice,
                                               CompletionStreamResponse,
                                               LogProbs, UsageInfo)
-from vllm.entrypoints.openai.serving_engine import LoRA, OpenAIServing
+from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
+                                                    OpenAIServing)
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
@@ -26,35 +27,12 @@ TypeCreateLogProbsFn = Callable[
     [TypeTokenIDs, TypeTopLogProbs, Optional[int], int], LogProbs]
 
 
-def parse_prompt_format(prompt) -> Tuple[bool, list]:
-    # get the prompt, openai supports the following
-    # "a string, array of strings, array of tokens, or array of token arrays."
-    prompt_is_tokens = False
-    prompts = [prompt]  # case 1: a string
-    if isinstance(prompt, list):
-        if len(prompt) == 0:
-            raise ValueError("please provide at least one prompt")
-        elif isinstance(prompt[0], str):
-            prompt_is_tokens = False
-            prompts = prompt  # case 2: array of strings
-        elif isinstance(prompt[0], int):
-            prompt_is_tokens = True
-            prompts = [prompt]  # case 3: array of tokens
-        elif isinstance(prompt[0], list) and isinstance(prompt[0][0], int):
-            prompt_is_tokens = True
-            prompts = prompt  # case 4: array of token arrays
-        else:
-            raise ValueError("prompt must be a string, array of strings, "
-                             "array of tokens, or array of token arrays")
-    return prompt_is_tokens, prompts
-
-
 class OpenAIServingCompletion(OpenAIServing):
 
     def __init__(self,
                  engine: AsyncLLMEngine,
                  served_model: str,
-                 lora_modules: Optional[List[LoRA]] = None):
+                 lora_modules: Optional[List[LoRAModulePath]] = None):
         super().__init__(engine=engine,
                          served_model=served_model,
                          lora_modules=lora_modules)
@@ -84,7 +62,7 @@ class OpenAIServingCompletion(OpenAIServing):
         created_time = int(time.time())
 
         # Schedule the request and get the result generator.
-        generators = []
+        generators: List[AsyncIterator[RequestOutput]] = []
         try:
             sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
@@ -96,23 +74,16 @@ class OpenAIServingCompletion(OpenAIServing):
                     sampling_params.logits_processors = []
                 sampling_params.logits_processors.append(
                     guided_decode_logit_processor)
-            prompt_is_tokens, prompts = parse_prompt_format(request.prompt)
 
-            for i, prompt in enumerate(prompts):
-                if prompt_is_tokens:
-                    prompt_formats = self._validate_prompt_and_tokenize(
-                        request,
-                        prompt_ids=prompt,
-                        truncate_prompt_tokens=sampling_params.
-                        truncate_prompt_tokens)
-                else:
-                    prompt_formats = self._validate_prompt_and_tokenize(
-                        request,
-                        prompt=prompt,
-                        truncate_prompt_tokens=sampling_params.
-                        truncate_prompt_tokens)
-                prompt_ids, prompt_text = prompt_formats
+            prompts = list(
+                self._tokenize_input_text_or_texts(
+                    request,
+                    request.prompt,
+                    truncate_prompt_tokens=sampling_params.
+                    truncate_prompt_tokens,
+                ))
 
+            for i, (prompt_ids, prompt_text) in enumerate(prompts):
                 generators.append(
                     self.engine.generate(prompt_text,
                                          sampling_params,
@@ -152,8 +123,19 @@ class OpenAIServingCompletion(OpenAIServing):
                     await self.engine.abort(f"{request_id}-{i}")
                     return self.create_error_response("Client disconnected")
                 final_res_batch[i] = res
+
+            final_res_batch_checked: List[RequestOutput] = []
+            for final_res in final_res_batch:
+                assert final_res is not None
+                final_res_batch_checked.append(final_res)
+
             response = self.request_output_to_completion_response(
-                final_res_batch, request, request_id, created_time, model_name)
+                final_res_batch_checked,
+                request,
+                request_id,
+                created_time,
+                model_name,
+            )
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
@@ -276,11 +258,11 @@ class OpenAIServingCompletion(OpenAIServing):
         created_time: int,
         model_name: str,
     ) -> CompletionResponse:
-        choices = []
+        choices: List[CompletionResponseChoice] = []
         num_prompt_tokens = 0
         num_generated_tokens = 0
+
         for final_res in final_res_batch:
-            assert final_res is not None
             prompt_token_ids = final_res.prompt_token_ids
             prompt_logprobs = final_res.prompt_logprobs
             prompt_text = final_res.prompt
