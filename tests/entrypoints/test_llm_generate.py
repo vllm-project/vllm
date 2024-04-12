@@ -1,5 +1,6 @@
-from vllm import LLM, SamplingParams
 import pytest
+
+from vllm import LLM, SamplingParams
 
 
 def test_multiple_sampling_params():
