@@ -289,6 +289,17 @@ class Sequence:
 
     def splice_tokens(self, backtrack: int, token_ids: List[int]):
         assert self.backtrack == 0
+
+        if not token_ids:
+            # we need at least one token in forward step,
+            # so we pretend we're backtracking one token more
+            backtrack += 1
+            assert backtrack <= self.get_output_len(), \
+                "can't backtrack into prompt yet"
+            # and repeat the token that was there
+            token_ids = [self.data.output_token_ids[-backtrack]]
+            # otherwise, the _num_comptued_tokens gets out of sync
+
         self.backtrack = backtrack
         if backtrack > 0:
             assert backtrack <= self.get_output_len(), \
@@ -310,7 +321,7 @@ class Sequence:
                 last_block.num_tokens = last_num_tokens
         for t in token_ids:
             self.append_token_id(t, {t: Logprob(logprob=0.0)})
-        if self.data.get_num_uncomputed_tokens() > 0:
+        if self.data.get_num_uncomputed_tokens() > 1:
             self.data._stage = SequenceStage.PREFILL
 
     def get_len(self) -> int:

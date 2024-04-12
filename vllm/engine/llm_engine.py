@@ -645,7 +645,7 @@ class LLMEngine:
                 self.scheduler.free_seq(seq)
 
     def _process_model_outputs(
-            self, output: SamplerOutput,
+            self, output: List[SequenceGroupOutput],
             scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
         now = time.time()
         # Update the scheduled sequence groups with the model outputs.
