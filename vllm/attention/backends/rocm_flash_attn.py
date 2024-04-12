@@ -162,7 +162,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             # AMD Radeon 7900 series (gfx1100) currently does not support
             # xFormers nor FlashAttention. As a temporary workaround, we use
             # naive PyTorch implementation of attention.
-            self.attn_fuc = _naive_attention()
+            self.attn_fuc = _naive_attention
             logger.debug("Using naive attention in ROCmBackend")
         elif self.use_triton_flash_attn:
             from vllm.attention.ops.triton_flash_attention import (  # noqa: F401
@@ -334,26 +334,21 @@ def _naive_attention(
     prompt_lens: List[int],
     scale: float,
 ) -> torch.Tensor:
-    num_tokens = query.shape[0]
     output = torch.empty_like(query)
     start = 0
     for _, prompt_len in enumerate(prompt_lens):
         end = start + prompt_len
         out = _naive_masked_attention(
-            query[None, start:end],
-            key[None, start:end],
-            value[None, start:end],
+            query[start:end],
+            key[start:end],
+            value[start:end],
             scale,
         )
         # TODO(woosuk): Unnecessary copy. Optimize.
         output[start:end].copy_(out)
         start += prompt_len
 
-    # Using view got RuntimeError: view size is not compatible
-    # with input tensor's size and stride (at least one
-    # dimension spans across two contiguous subspaces).
-    # Use reshape instead.
-    return output.reshape(num_tokens, -1)
+    return output
 
 
 def _naive_masked_attention(
@@ -362,14 +357,13 @@ def _naive_masked_attention(
     value: torch.Tensor,
     scale: float,
 ) -> torch.Tensor:
-    seq_len, _, _ = query.shape
+    seq_len, head_size, head_dim = query.shape
     attn_mask = torch.triu(torch.ones(seq_len,
                                       seq_len,
                                       dtype=query.dtype,
                                       device=query.device),
                            diagonal=1)
     attn_mask = attn_mask * torch.finfo(query.dtype).min
-
     attn_weights = scale * torch.einsum("qhd,khd->hqk", query, key).float()
     attn_weights = attn_weights + attn_mask.float()
     attn_weights = torch.softmax(attn_weights, dim=-1).to(value.dtype)
