@@ -83,23 +83,8 @@ class RayGPUExecutor(ExecutorBase):
         # The remaining workers are the actual ray actors.
         self.workers: List[RayWorkerVllm] = []
 
-        model_config = copy.deepcopy(self.model_config)
-        parallel_config = copy.deepcopy(self.parallel_config)
-        scheduler_config = copy.deepcopy(self.scheduler_config)
-        device_config = copy.deepcopy(self.device_config)
-        lora_config = copy.deepcopy(self.lora_config)
-        cache_config = copy.deepcopy(self.cache_config)
-        vision_language_config = copy.deepcopy(self.vision_language_config)
-
         # Create the workers.
         driver_ip = get_ip()
-        distributed_init_method = get_distributed_init_method(
-            driver_ip, get_open_port())
-
-        rank = 1
-        local_rank_dict = defaultdict(int)
-        local_rank_dict[driver_ip] = 1
-        local_rank = -1  # placeholder
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
             if not bundle.get("GPU", 0):
                 continue
@@ -113,21 +98,7 @@ class RayGPUExecutor(ExecutorBase):
                 num_gpus=num_gpus,
                 scheduling_strategy=scheduling_strategy,
                 **ray_remote_kwargs,
-            )(RayWorkerVllm).remote(
-                init_cached_hf_modules=self.model_config.trust_remote_code,
-                worker_module="vllm.worker.worker",
-                worker_class_name="Worker",
-                model_config=model_config,
-                parallel_config=parallel_config,
-                scheduler_config=scheduler_config,
-                device_config=device_config,
-                cache_config=cache_config,
-                local_rank=local_rank,
-                rank=rank,
-                distributed_init_method=distributed_init_method,
-                lora_config=lora_config,
-                vision_language_config=vision_language_config,
-            )
+            )(RayWorkerVllm).remote(self.model_config.trust_remote_code)
 
             worker_ip = ray.get(worker.get_node_ip.remote())
             if worker_ip == driver_ip and self.driver_dummy_worker is None:
@@ -137,12 +108,6 @@ class RayGPUExecutor(ExecutorBase):
             else:
                 # Else, added to the list of workers.
                 self.workers.append(worker)
-                # don't update local_rank for the dummy worker
-                rank += 1
-                ray.get(
-                    worker.update_kwargs.remote(
-                        local_rank=local_rank_dict[worker_ip]))
-                local_rank_dict[worker_ip] += 1
 
         if self.driver_dummy_worker is None:
             raise ValueError(
@@ -176,14 +141,47 @@ class RayGPUExecutor(ExecutorBase):
                 "CUDA_VISIBLE_DEVICES":
                 ",".join(map(str, node_gpus[node_id]))
             }])
+        self._run_workers("update_environment_variables",
+                          all_args=all_args_to_update_environment_variables)
+        # self._run_workers("init_worker") # TODO, fix args
+        distributed_init_method = get_distributed_init_method(
+            driver_ip, get_open_port())
 
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
         from vllm.worker.worker import Worker
 
+        model_config = copy.deepcopy(self.model_config)
+        parallel_config = copy.deepcopy(self.parallel_config)
+        scheduler_config = copy.deepcopy(self.scheduler_config)
+        device_config = copy.deepcopy(self.device_config)
+        lora_config = copy.deepcopy(self.lora_config)
+        cache_config = copy.deepcopy(self.cache_config)
+        vision_language_config = copy.deepcopy(self.vision_language_config)
+
+        # Initialize the actual workers with the Worker class.
+        for rank, (worker, (node_id, _)) in enumerate(
+                zip(self.workers, worker_node_and_gpu_ids),
+                start=1,
+        ):
+            local_rank = node_workers[node_id].index(rank)
+            worker.init_worker.remote(
+                lambda rank=rank, local_rank=local_rank: Worker(
+                    model_config=model_config,
+                    parallel_config=parallel_config,
+                    scheduler_config=scheduler_config,
+                    device_config=device_config,
+                    cache_config=cache_config,
+                    local_rank=local_rank,
+                    rank=rank,
+                    distributed_init_method=distributed_init_method,
+                    lora_config=lora_config,
+                    vision_language_config=vision_language_config,
+                ))
+
         # Initialize the driver worker with the Worker class.
         driver_rank = 0
-        driver_local_rank = 0
+        driver_local_rank = node_workers[driver_node_id].index(driver_rank)
         self.driver_worker = Worker(
             model_config=self.model_config,
             parallel_config=self.parallel_config,
@@ -198,9 +196,6 @@ class RayGPUExecutor(ExecutorBase):
             is_driver_worker=True,
         )
 
-        self._run_workers("update_environment_variables",
-                          all_args=all_args_to_update_environment_variables)
-        self._run_workers("init_worker")
         self._run_workers("init_device")
         self._run_workers(
             "load_model",
@@ -291,6 +286,7 @@ class RayGPUExecutor(ExecutorBase):
         driver_kwargs: Optional[Dict[str, Any]] = None,
         all_args: Optional[List[List[Any]]] = None,
         all_kwargs: Optional[List[Dict[str, Any]]] = None,
+        use_dummy_driver: bool = False,
         max_concurrent_workers: Optional[int] = None,
         use_ray_compiled_dag: bool = False,
         **kwargs,
@@ -326,10 +322,20 @@ class RayGPUExecutor(ExecutorBase):
                      ) in zip(self.workers, all_args[1:], all_kwargs[1:])
             ]
 
-        # Start the driver worker after all the ray workers.
-        driver_worker_output = getattr(self.driver_worker,
-                                       method)(*all_args[0], **all_kwargs[0])
+        if driver_args is None:
+            driver_args = args
+        if driver_kwargs is None:
+            driver_kwargs = kwargs
 
+        # Start the driver worker after all the ray workers.
+        if not use_dummy_driver:
+            driver_worker_output = getattr(self.driver_worker,
+                                           method)(*all_args[0],
+                                                   **all_kwargs[0])
+        else:
+            driver_worker_output = ray.get(
+                self.driver_dummy_worker.execute_method.remote(
+                    method, *all_args[0], **all_kwargs[0]))
         # Get the results of the ray workers.
         if self.workers:
             if use_ray_compiled_dag:
