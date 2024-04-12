@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          VisionLanguageConfig)
-from vllm.engine.ray_utils import RayWorkerVllm, ray
+from vllm.engine.ray_utils import RayWorkerWrapper, ray
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -78,9 +78,9 @@ class RayGPUExecutor(ExecutorBase):
 
         # The driver dummy worker does not actually use any resources.
         # It holds the resource for the driver worker.
-        self.driver_dummy_worker: RayWorkerVllm = None
+        self.driver_dummy_worker: RayWorkerWrapper = None
         # The remaining workers are the actual ray actors.
-        self.workers: List[RayWorkerVllm] = []
+        self.workers: List[RayWorkerWrapper] = []
 
         # Create the workers.
         driver_ip = get_ip()
@@ -97,7 +97,7 @@ class RayGPUExecutor(ExecutorBase):
                 num_gpus=num_gpus,
                 scheduling_strategy=scheduling_strategy,
                 **ray_remote_kwargs,
-            )(RayWorkerVllm).remote(
+            )(RayWorkerWrapper).remote(
                 init_cached_hf_modules=self.model_config.trust_remote_code,
                 worker_module_name="vllm.worker.worker",
                 worker_class_name="Worker",
@@ -108,7 +108,7 @@ class RayGPUExecutor(ExecutorBase):
                 # If the worker is on the same node as the driver, we use it
                 # as the resource holder for the driver process.
                 self.driver_dummy_worker = worker
-                self.driver_worker = RayWorkerVllm(
+                self.driver_worker = RayWorkerWrapper(
                     init_cached_hf_modules=self.model_config.trust_remote_code,
                     worker_module_name="vllm.worker.worker",
                     worker_class_name="Worker",

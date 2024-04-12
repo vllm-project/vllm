@@ -11,7 +11,7 @@ logger = init_logger(__name__)
 try:
     import ray
 
-    class RayWorkerVllm(WorkerWrapperBase):
+    class RayWorkerWrapper(WorkerWrapperBase):
         """Ray wrapper for vllm.worker.Worker, allowing Worker to be
         lazliy initialized after Ray sets CUDA_VISIBLE_DEVICES."""
 
@@ -47,7 +47,7 @@ except ImportError as e:
                    "For distributed inference, please install Ray with "
                    "`pip install ray`.")
     ray = None
-    RayWorkerVllm = None
+    RayWorkerWrapper = None
 
 
 def initialize_ray_cluster(
