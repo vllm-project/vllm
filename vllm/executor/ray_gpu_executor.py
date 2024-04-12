@@ -14,7 +14,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
-                        make_async, set_cuda_visible_devices)
+                        make_async, update_environment_variables)
 
 if ray is not None:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -134,9 +134,16 @@ class RayGPUExecutor(ExecutorBase):
             node_gpus[node_id] = sorted(gpu_ids)
 
         # Set CUDA_VISIBLE_DEVICES for the driver and workers.
-        set_cuda_visible_devices(node_gpus[driver_node_id])
+        # ",".join(map(str, device_ids))
+        update_environment_variables({
+            "CUDA_VISIBLE_DEVICES":
+            ",".join(map(str, node_gpus[driver_node_id]))
+        })
         for worker, (node_id, _) in zip(self.workers, worker_node_and_gpu_ids):
-            worker.set_cuda_visible_devices.remote(node_gpus[node_id])
+            worker.update_environment_variables.remote({
+                "CUDA_VISIBLE_DEVICES":
+                ",".join(map(str, node_gpus[node_id]))
+            })
 
         distributed_init_method = get_distributed_init_method(
             driver_ip, get_open_port())

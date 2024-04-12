@@ -232,8 +232,9 @@ def get_open_port() -> int:
             return s.getsockname()[1]
 
 
-def set_cuda_visible_devices(device_ids: List[int]) -> None:
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, device_ids))
+def update_environment_variables(envs: Dict[str, str]):
+    import os
+    os.environ.update(envs)
 
 
 def chunk_list(lst, chunk_size):

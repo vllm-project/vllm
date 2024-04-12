@@ -1,9 +1,9 @@
 import pickle
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import get_ip, is_hip, set_cuda_visible_devices
+from vllm.utils import get_ip, is_hip, update_environment_variables
 
 logger = init_logger(__name__)
 
@@ -52,8 +52,8 @@ try:
             gpu_ids = ray.get_gpu_ids()
             return node_id, gpu_ids
 
-        def set_cuda_visible_devices(self, device_ids) -> None:
-            set_cuda_visible_devices(device_ids)
+        def update_environment_variables(self, envs: Dict[str, str]) -> None:
+            update_environment_variables(envs)
 
         def execute_model_compiled_dag_remote(self, ignored):
             """Used only when compiled DAG is enabled."""

@@ -6,6 +6,7 @@ import torch
 
 from vllm.distributed.device_communicators.pynccl import (NCCLCommunicator,
                                                           ncclGetUniqueId)
+from vllm.utils import update_environment_variables
 
 
 def distributed_run(fn, world_size):
@@ -32,8 +33,7 @@ def update_env(fn):
     # so we need to pass the environment variables as arguments
     # and update the environment variables in the function
     def wrapper(env):
-        import os
-        os.environ.update(env)
+        update_environment_variables(env)
         fn()
 
     return wrapper
