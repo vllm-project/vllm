@@ -1,68 +1,27 @@
-import importlib
 import pickle
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 from vllm.utils import get_ip, is_hip
-from vllm.worker.worker_base import WorkerBase
+from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
 try:
     import ray
 
-    class RayWorkerVllm:
+    class RayWorkerVllm(WorkerWrapperBase):
         """Ray wrapper for vllm.worker.Worker, allowing Worker to be
         lazliy initialized after Ray sets CUDA_VISIBLE_DEVICES."""
 
-        def __init__(self,
-                     init_cached_hf_modules=False,
-                     worker_module=None,
-                     worker_class_name=None,
-                     **kwargs) -> None:
-            self.worker_module = worker_module
-            self.worker_class_name = worker_class_name
-            self.kwargs = kwargs
-            self.init_cached_hf_modules = init_cached_hf_modules
-            self.worker = None
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
             # Since the compiled DAG runs a main execution
             # in a different thread that calls cuda.set_device.
             # The flag indicates is set_device is called on
             # that thread.
             self.compiled_dag_cuda_device_set = False
-
-        @staticmethod
-        def update_environment_variables(envs: Dict[str, str]) -> None:
-            WorkerBase.update_environment_variables(envs)
-
-        def init_worker(self):
-            if self.init_cached_hf_modules:
-                from transformers.dynamic_module_utils import init_hf_modules
-                init_hf_modules()
-            mod = importlib.import_module(self.worker_module)
-            worker_class = getattr(mod, self.worker_class_name)
-            self.worker = worker_class(**self.kwargs)
-            self.worker.init_worker()
-
-        def update_kwargs(self, **kwargs):
-            self.kwargs.update(kwargs)
-
-        def execute_method(self, method, *args, **kwargs):
-            try:
-                if hasattr(self, method):
-                    executor = getattr(self, method)
-                else:
-                    executor = getattr(self.worker, method)
-                return executor(*args, **kwargs)
-            except Exception as e:
-                # exceptions in ray worker may cause deadlock
-                # see https://github.com/vllm-project/vllm/issues/3455
-                # print the error and inform the user to solve the error
-                msg = (f"Error executing method {method}. "
-                       "This might cause deadlock in distributed execution.")
-                logger.exception(msg)
-                raise e
 
         def get_node_ip(self) -> str:
             return get_ip()
