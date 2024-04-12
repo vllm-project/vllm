@@ -6,6 +6,7 @@ from typing import (Dict, Iterable, Iterator, List, Literal, Optional, Tuple,
                     TypedDict, Union)
 
 from pydantic import conint
+from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -20,13 +21,13 @@ from vllm.transformers_utils.tokenizer import get_tokenizer
 logger = init_logger(__name__)
 
 
-class InputStrings(TypedDict):
-    input_text: str
+class InputString(TypedDict):
+    text: str
     is_tokens: Literal[False]
 
 
 class InputTokens(TypedDict):
-    input_text: List[int]
+    text: List[int]
     is_tokens: Literal[True]
 
 
@@ -181,32 +182,48 @@ class OpenAIServing:
         # if _check_model has been called earlier, this will be unreachable
         raise ValueError("The model `{request.model}` does not exist.")
 
-    def _validate_prompt_and_tokenize(
+    def _normalize_prompt_text_to_input(
         self,
         request: Union[ChatCompletionRequest, CompletionRequest],
-        prompt: Optional[str] = None,
-        prompt_ids: Optional[List[int]] = None,
+        prompt: str,
+        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
         truncate_prompt_tokens: Optional[conint(ge=1)] = None
     ) -> Tuple[List[int], str]:
-        if not (prompt or prompt_ids):
-            raise ValueError("Either prompt or prompt_ids should be provided.")
-        if (prompt and prompt_ids):
-            raise ValueError(
-                "Only one of prompt or prompt_ids should be provided.")
-
-        if prompt_ids is None:
-            tokenizer_kwargs = {} if truncate_prompt_tokens is None else {
-                "truncation": True,
-                "max_length": truncate_prompt_tokens,
-            }
-            input_ids = self.tokenizer(prompt, **tokenizer_kwargs).input_ids
-        elif truncate_prompt_tokens is not None:
-            input_ids = prompt_ids[-truncate_prompt_tokens:]
+        if truncate_prompt_tokens is None:
+            encoded = tokenizer(prompt)
         else:
-            input_ids = prompt_ids
+            encoded = tokenizer(prompt,
+                                truncation=True,
+                                max_length=truncate_prompt_tokens)
 
-        input_text = prompt if prompt is not None else self.tokenizer.decode(
-            prompt_ids)
+        input_ids = encoded.input_ids
+
+        input_text = prompt
+
+        return self._validate_input(request, input_ids, input_text)
+
+    def _normalize_prompt_tokens_to_input(
+        self,
+        request: Union[ChatCompletionRequest, CompletionRequest],
+        prompt_ids: List[int],
+        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+        truncate_prompt_tokens: Optional[conint(ge=1)] = None
+    ) -> Tuple[List[int], str]:
+        if truncate_prompt_tokens is None:
+            input_ids = prompt_ids
+        else:
+            input_ids = prompt_ids[-truncate_prompt_tokens:]
+
+        input_text = tokenizer.decode(prompt_ids)
+
+        return self._validate_input(request, input_ids, input_text)
+
+    def _validate_input(
+        self,
+        request: Union[ChatCompletionRequest, CompletionRequest],
+        input_ids: List[int],
+        input_text: str,
+    ) -> Tuple[List[int], str]:
         token_num = len(input_ids)
 
         if request.max_tokens is None:
@@ -220,80 +237,85 @@ class OpenAIServing:
                 f"({token_num} in the messages, "
                 f"{request.max_tokens} in the completion). "
                 f"Please reduce the length of the messages or completion.", )
-        else:
-            return input_ids, input_text
 
-    def _tokenize_input_text(
+        return input_ids, input_text
+
+    def _tokenize_prompt_input(
         self,
         request: Union[ChatCompletionRequest, CompletionRequest],
-        input_text: Union[str, List[int]],
+        prompt_input: Union[str, List[int]],
         truncate_prompt_tokens: Optional[conint(ge=1)] = None,
     ) -> Tuple[List[int], str]:
         """A simpler implementation of
-        :meth:`~vllm.entrypoints.openai.serving_engine.OpenAIServing._tokenize_input_text_or_texts`
+        :meth:`~vllm.entrypoints.openai.serving_engine.OpenAIServing._tokenize_prompt_input_or_inputs`
         that assumes single input."""
         return next(
-            self._tokenize_input_texts(
+            self._tokenize_prompt_inputs(
                 request,
-                [input_text],
+                [prompt_input],
                 truncate_prompt_tokens=truncate_prompt_tokens,
             ))
 
-    def _tokenize_input_texts(
+    def _tokenize_prompt_inputs(
         self,
         request: Union[ChatCompletionRequest, CompletionRequest],
-        input_texts: Iterable[Union[str, List[int]]],
+        prompt_inputs: Iterable[Union[str, List[int]]],
         truncate_prompt_tokens: Optional[conint(ge=1)] = None,
     ) -> Iterator[Tuple[List[int], str]]:
         """A simpler implementation of
-        :meth:`~vllm.entrypoints.openai.serving_engine.OpenAIServing._tokenize_input_text_or_texts`
-        that assumes multiple input."""
-        for input_text in input_texts:
-            if isinstance(input_text, str):
-                yield self._validate_prompt_and_tokenize(
+        :meth:`~vllm.entrypoints.openai.serving_engine.OpenAIServing._tokenize_prompt_input_or_inputs`
+        that assumes multiple inputs."""
+        tokenizer = self.tokenizer
+        assert tokenizer is not None
+
+        for text in prompt_inputs:
+            if isinstance(text, str):
+                yield self._normalize_prompt_text_to_input(
                     request,
-                    prompt=input_text,
+                    prompt=text,
+                    tokenizer=tokenizer,
                     truncate_prompt_tokens=truncate_prompt_tokens,
                 )
             else:
-                yield self._validate_prompt_and_tokenize(
+                yield self._normalize_prompt_tokens_to_input(
                     request,
-                    prompt_ids=input_text,
+                    prompt_ids=text,
+                    tokenizer=tokenizer,
                     truncate_prompt_tokens=truncate_prompt_tokens,
                 )
 
-    def _parse_input_element(
+    def _parse_prompt_element(
         self,
         elem: Union[str, int, List[int]],
-    ) -> Union[InputStrings, InputTokens]:
+    ) -> Union[InputString, InputTokens]:
         if isinstance(elem, str):
             # case 2: array of strings
-            return InputStrings(prompt=elem, is_tokens=False)
+            return InputString(text=elem, is_tokens=False)
         if isinstance(elem, int):
             # case 3: array of tokens
-            return InputTokens(prompt=[elem], is_tokens=True)
+            return InputTokens(text=[elem], is_tokens=True)
         if isinstance(elem, list):
             # case 4: array of token arrays
-            return InputTokens(prompt=elem, is_tokens=True)
+            return InputTokens(text=elem, is_tokens=True)
 
-    def _parse_input_text_or_texts(
+    def _parse_prompt_input_or_inputs(
         self,
-        input_text_or_texts: Union[str, List[str], List[int], List[List[int]]],
-    ) -> List[Union[InputStrings, InputTokens]]:
-        if isinstance(input_text_or_texts, str):
+        input_or_inputs: Union[str, List[str], List[int], List[List[int]]],
+    ) -> List[Union[InputString, InputTokens]]:
+        if isinstance(input_or_inputs, str):
             # case 1: a string
-            return [self._parse_input_element(input_text_or_texts)]
+            return [self._parse_prompt_element(input_or_inputs)]
 
-        if isinstance(input_text_or_texts, list):
-            return [self._parse_input_element(e) for e in input_text_or_texts]
+        if isinstance(input_or_inputs, list):
+            return [self._parse_prompt_element(e) for e in input_or_inputs]
 
         raise ValueError("prompt must be a string, array of strings, "
                          "array of tokens, or array of token arrays")
 
-    def _tokenize_input_text_or_texts(
+    def _tokenize_prompt_input_or_inputs(
         self,
         request: Union[ChatCompletionRequest, CompletionRequest],
-        input_text_or_texts: Union[str, List[str], List[int], List[List[int]]],
+        input_or_inputs: Union[str, List[str], List[int], List[List[int]]],
         truncate_prompt_tokens: Optional[conint(ge=1)] = None,
     ) -> Iterator[Tuple[List[int], str]]:
         """Tokenize/detokenize depending on the input format.
@@ -302,20 +324,26 @@ class OpenAIServing:
         , each input can be a string or array of tokens. Note that each request
         can pass one or more inputs.
         """
-        for input_ in self._parse_input_text_or_texts(input_text_or_texts):
+        tokenizer = self.tokenizer
+        assert tokenizer is not None
+
+        for prompt_input in self._parse_prompt_input_or_inputs(
+                input_or_inputs):
             # Although our type checking is based on mypy,
             # VSCode Pyright extension should still work properly
             # "is True" is required for Pyright to perform type narrowing
             # See: https://github.com/microsoft/pyright/issues/7672
-            if input_["is_tokens"] is True:
-                yield self._validate_prompt_and_tokenize(
+            if prompt_input["is_tokens"] is False:
+                yield self._normalize_prompt_text_to_input(
                     request,
-                    prompt_ids=input_["input_text"],
+                    prompt=prompt_input["text"],
+                    tokenizer=tokenizer,
                     truncate_prompt_tokens=truncate_prompt_tokens,
                 )
             else:
-                yield self._validate_prompt_and_tokenize(
+                yield self._normalize_prompt_tokens_to_input(
                     request,
-                    prompt=input_["input_text"],
+                    prompt_ids=prompt_input["text"],
+                    tokenizer=tokenizer,
                     truncate_prompt_tokens=truncate_prompt_tokens,
                 )
