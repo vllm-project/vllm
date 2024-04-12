@@ -89,33 +89,6 @@ class NaiveBlockAllocator(BlockAllocator):
             allocator=self,
         )
 
-    def mock_mutable(
-        self,
-        prev_block: Optional[Block],
-        token_ids: List[int],
-    ) -> Block:
-        """Mock a new mutable block, linked to the previous block, to help with
-        content hash calculation.
-
-        Args:
-            prev_block (Optional[Block]): The previous block in the sequence. If
-                None, then the block to be allocated is the first block in the
-                sequence.
-
-        Returns:
-            Block: The newly allocated mutable block.
-        """
-
-        # NOTE: we use -1 as block_id for mock block
-        block_id = -1
-        return self._create_block(
-            prev_block=prev_block,
-            token_ids=token_ids,
-            block_id=block_id,
-            block_size=self._block_size,
-            allocator=self,
-        )
-
     def free(self, block: Block) -> None:
         self._free_block_id(block.block_id)
         block.block_id = None
