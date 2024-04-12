@@ -12,7 +12,7 @@ from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
 
-DBRX_PRETRAINED_CONFIG_ARCHIVE_MAP = {}
+DBRX_PRETRAINED_CONFIG_ARCHIVE_MAP = {} # type: ignore
 
 
 class DbrxAttentionConfig(PretrainedConfig):
