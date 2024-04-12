@@ -201,7 +201,7 @@ class BGEM3FlagForCausalLM:
 
         self.model.eval()
 
-
+    #loaded in init
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
