@@ -1,14 +1,24 @@
+import os
 from abc import ABC, abstractmethod
 from typing import Dict, List
 
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.utils import update_environment_variables
 
 
 class WorkerBase(ABC):
     """Worker interface that allows vLLM to cleanly separate implementations for
     different hardware.
     """
+
+    def update_environment_variables(self, envs: Dict[str, str]) -> None:
+        key = 'CUDA_VISIBLE_DEVICES'
+        if key in envs and key in os.environ:
+            # overwriting CUDA_VISIBLE_DEVICES is desired behavior
+            # suppress the warning in `update_environment_variables`
+            del os.environ[key]
+        update_environment_variables(envs)
 
     @abstractmethod
     def init_device(self) -> None:

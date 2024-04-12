@@ -14,7 +14,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
-                        make_async, update_environment_variables)
+                        make_async)
 
 if ray is not None:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -134,16 +134,13 @@ class RayGPUExecutor(ExecutorBase):
             node_gpus[node_id] = sorted(gpu_ids)
 
         # Set CUDA_VISIBLE_DEVICES for the driver and workers.
-        # ",".join(map(str, device_ids))
-        update_environment_variables({
-            "CUDA_VISIBLE_DEVICES":
-            ",".join(map(str, node_gpus[driver_node_id]))
-        })
-        for worker, (node_id, _) in zip(self.workers, worker_node_and_gpu_ids):
-            worker.update_environment_variables.remote({
+        all_args_to_update_environment_variables = []
+        for (node_id, _) in [(driver_node_id, driver_gpu_ids)
+                             ] + worker_node_and_gpu_ids:
+            all_args_to_update_environment_variables.append([{
                 "CUDA_VISIBLE_DEVICES":
                 ",".join(map(str, node_gpus[node_id]))
-            })
+            }])
 
         distributed_init_method = get_distributed_init_method(
             driver_ip, get_open_port())
@@ -197,6 +194,8 @@ class RayGPUExecutor(ExecutorBase):
             is_driver_worker=True,
         )
 
+        self._run_workers("update_environment_variables",
+                          all_args=all_args_to_update_environment_variables)
         self._run_workers("init_device")
         self._run_workers(
             "load_model",
@@ -285,11 +284,25 @@ class RayGPUExecutor(ExecutorBase):
         *args,
         driver_args: Optional[List[Any]] = None,
         driver_kwargs: Optional[Dict[str, Any]] = None,
+        all_args: Optional[List[List[Any]]] = None,
+        all_kwargs: Optional[List[Dict[str, Any]]] = None,
         max_concurrent_workers: Optional[int] = None,
         use_ray_compiled_dag: bool = False,
         **kwargs,
     ) -> Any:
-        """Runs the given method on all workers."""
+        """Runs the given method on all workers.
+        all_args and all_kwargs are used to pass heterogeneous arguments,
+        i.e. different arguments for each worker.
+        """
+        if driver_args is None:
+            driver_args = args
+        if driver_kwargs is None:
+            driver_kwargs = kwargs
+
+        if all_args is None:
+            all_args = [driver_args] + [args] * len(self.workers)
+        if all_kwargs is None:
+            all_kwargs = [driver_kwargs] + [kwargs] * len(self.workers)
 
         if max_concurrent_workers:
             raise NotImplementedError(
@@ -302,18 +315,15 @@ class RayGPUExecutor(ExecutorBase):
         else:
             # Start the ray workers first.
             ray_worker_outputs = [
-                worker.execute_method.remote(method, *args, **kwargs)
-                for worker in self.workers
+                worker.execute_method.remote(method, *worker_args,
+                                             **worker_kwargs)
+                for (worker, worker_args, worker_kwargs
+                     ) in zip(self.workers, all_args[1:], all_kwargs[1:])
             ]
-
-        if driver_args is None:
-            driver_args = args
-        if driver_kwargs is None:
-            driver_kwargs = kwargs
 
         # Start the driver worker after all the ray workers.
         driver_worker_output = getattr(self.driver_worker,
-                                       method)(*driver_args, **driver_kwargs)
+                                       method)(*all_args[0], **all_kwargs[0])
 
         # Get the results of the ray workers.
         if self.workers:
