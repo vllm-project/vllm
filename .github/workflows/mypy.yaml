@@ -27,6 +27,9 @@ jobs:
         python -m pip install --upgrade pip
         pip install mypy==1.9.0
         pip install types-setuptools
+        pip install types-PyYAML
+        pip install types-requests
+        pip install types-setuptools
     - name: Mypy
       run: |
         mypy vllm/attention/*.py --follow-imports=skip --config-file pyproject.toml
