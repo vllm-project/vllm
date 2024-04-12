@@ -226,39 +226,6 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         src_block_table = self.block_tables[parent_seq.seq_id]
         self.block_tables[child_seq.seq_id] = src_block_table.fork()
 
-    def swap_in(self, seq_group: SequenceGroup,
-                num_lookahead_slots: int) -> Dict[int, int]:
-        for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
-            block_table = self.block_tables[seq.seq_id]
-            new_block_table = block_table.swap(destination_device=Device.GPU)
-            self.block_tables[seq.seq_id] = new_block_table
-            self.append_slots(seq=seq, num_lookahead_slots=num_lookahead_slots)
-
-        # NOTE: since the memory operation in physical blocks need the
-        # relative position of CPU block to its starting address, here
-        # we need to shift the block id of cpu block back to its relative
-        # position within CPU cache.
-        mapping = self.block_allocator.get_and_reset_swaps()
-        block_number_mapping = {
-            cpu_block_id - self.num_total_gpu_blocks: gpu_block_id
-            for cpu_block_id, gpu_block_id in mapping.items()
-        }
-        return block_number_mapping
-
-    def swap_out(self, seq_group: SequenceGroup) -> Dict[int, int]:
-        mapping: Dict[Block, Block] = {}
-        for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-            block_table = self.block_tables[seq.seq_id]
-            new_block_table = block_table.swap(destination_device=Device.CPU)
-            self.block_tables[seq.seq_id] = new_block_table
-
-        mapping = self.block_allocator.get_and_reset_swaps()
-        block_number_mapping = {
-            gpu_block_id: cpu_block_id - self.num_total_gpu_blocks
-            for gpu_block_id, cpu_block_id in mapping.items()
-        }
-        return block_number_mapping
-
     def get_num_free_gpu_blocks(self) -> int:
         return self.block_allocator.get_num_free_blocks(Device.GPU)
 
@@ -273,6 +240,39 @@ class BlockSpaceManagerV2(BlockSpaceManager):
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
         return self._can_swap(seq_group, Device.CPU, SequenceStatus.RUNNING)
 
+    def swap_in(self,
+                sequence_group: SequenceGroup,
+                num_lookahead_slots: int = 0) -> Dict[int, int]:
+        blocks = self._get_blocks_for_swap(sequence_group,
+                                           SequenceStatus.SWAPPED,
+                                           num_lookahead_slots)
+        self.block_allocator.swap(blocks=blocks,
+                                  source_device=Device.CPU,
+                                  dest_device=Device.GPU)
+        # NOTE: Once the BlockManagerV1 implementation is deleted, we can
+        # move this get_and_reset_swaps call outside of swap_in/swap_out.
+        # Then the scheduler can make calls to get all swaps and all
+        # copy-on-writes for the batch.
+        mapping = self.block_allocator.get_and_reset_swaps()
+        block_number_mapping = {
+            cpu_block_id - self.num_total_gpu_blocks: gpu_block_id
+            for cpu_block_id, gpu_block_id in mapping.items()
+        }
+        return block_number_mapping
+
+    def swap_out(self, sequence_group: SequenceGroup) -> Dict[int, int]:
+        blocks = self._get_blocks_for_swap(sequence_group,
+                                           SequenceStatus.RUNNING)
+        self.block_allocator.swap(blocks=blocks,
+                                  source_device=Device.GPU,
+                                  dest_device=Device.CPU)
+        mapping = self.block_allocator.get_and_reset_swaps()
+        block_number_mapping = {
+            gpu_block_id: cpu_block_id - self.num_total_gpu_blocks
+            for gpu_block_id, cpu_block_id in mapping.items()
+        }
+        return block_number_mapping
+
     def _can_swap(self,
                   seq_group: SequenceGroup,
                   device: Device,
@@ -284,8 +284,10 @@ class BlockSpaceManagerV2(BlockSpaceManager):
                                              num_lookahead_slots,
                                              watermark_blocks)
 
-    def _get_blocks_for_swap(self, seq_group: SequenceGroup,
-                             status: SequenceStatus) -> List[Block]:
+    def _get_blocks_for_swap(self,
+                             seq_group: SequenceGroup,
+                             status: SequenceStatus,
+                             num_lookahead_slots: int = 0) -> List[Block]:
         blocks: Dict[int, List[Block]] = {}
         for seq in seq_group.get_seqs(status=status):
             block_table = self.block_tables[seq.seq_id]

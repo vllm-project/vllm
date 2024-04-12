@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from vllm.core.block.block_table import BlockTable
 from vllm.core.block.interfaces import (Block, BlockAllocator,
                                         DeviceAwareBlockAllocator)
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
@@ -144,16 +143,6 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         return self._allocators[device].allocate_immutable(
             prev_block, token_ids)
 
-    def reference(self, block_id: int) -> None:
-        """Notify the device aware allocator there is new sequence reference
-        the given block.
-
-        Args:
-            block (Block): The block to be referenced.
-        """
-        allocator = self._block_ids_to_allocator[block_id]
-        return allocator.reference(block_id)
-
     def free(self, block: Block) -> None:
         """Frees the memory occupied by the given block.
 
@@ -189,6 +178,17 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         """
         return self._allocators[device].get_num_free_blocks()
 
+    def swap(self, blocks: List[Block], source_device: Device,
+             dest_device: Device) -> None:
+        source_block_ids = [block.block_id for block in blocks]
+        self._allocators[source_device].swap_out(blocks)
+        self._allocators[dest_device].swap_in(blocks)
+        dest_block_ids = [block.block_id for block in blocks]
+        self._swap_mapping = {
+            src: dest
+            for src, dest in zip(source_block_ids, dest_block_ids)
+        }
+
     def can_swap(self,
                  blocks: List[Block],
                  device: Device,
@@ -223,18 +223,6 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
 
     def all_block_ids(self) -> frozenset[int]:
         return frozenset(self._block_ids_to_allocator.keys())
-
-    def update_seq_swap_out_block_mapping(self, block: Block,
-                                          block_table: BlockTable,
-                                          destination_device: Device) -> None:
-        if block.block_id in self._swap_mapping:
-            dest_block_id = self._swap_mapping[block.block_id]
-            self.reference(dest_block_id)
-        else:
-            dest_block = block_table.allocate(token_ids=block.token_ids,
-                                              device=destination_device,
-                                              by_block=True)
-            self._swap_mapping[block.block_id] = dest_block.block_id
 
     def get_and_reset_swaps(self) -> dict:
         mapping = self._swap_mapping.copy()

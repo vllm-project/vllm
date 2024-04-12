@@ -356,6 +356,20 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         return self.get_num_free_blocks(
         ) - num_touched_blocks >= watermark_blocks
 
+    def swap_out(self, blocks: List[Block]) -> None:
+        for block in blocks:
+            self.free(block)
+
+    def swap_in(self, blocks: List[Block]) -> None:
+        for block in blocks:
+            if block.is_full:
+                alloc = self.allocate_immutable(block.prev_block,
+                                                block.token_ids)
+            else:
+                alloc = self.allocate_mutable(block.prev_block)
+                alloc.append_token_ids(block.token_ids)
+            block.block_id = alloc.block_id
+
 
 class PrefixCachingBlock(Block):
     """A block implementation that supports prefix caching.
