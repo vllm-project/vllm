@@ -822,9 +822,12 @@ class LoRAConfig:
             self.lora_dtype = model_config.dtype
         elif isinstance(self.lora_dtype, str):
             self.lora_dtype = getattr(torch, self.lora_dtype)
-        if model_config.quantization is not None:
-            raise ValueError(
-                "LoRA is not supported with quantized models yet.")
+        if model_config.quantization and model_config.quantization not in [
+                "awq", "gptq"
+        ]:
+            # TODO support marlin and squeezellm
+            logger.warning(f"{model_config.quantization} quantization is not "
+                           "tested with LoRA yet.")
 
     def verify_with_scheduler_config(self, scheduler_config: SchedulerConfig):
         if scheduler_config.max_num_batched_tokens > 65528:
