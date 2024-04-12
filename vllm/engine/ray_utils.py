@@ -40,14 +40,12 @@ try:
             self.worker = worker_class(**self.kwargs)
             self.worker.init_worker()
 
-        def __getattr__(self, name):
-            if hasattr(self, name):
-                return getattr(self, name)
-            return getattr(self.worker, name)
-
         def execute_method(self, method, *args, **kwargs):
             try:
-                executor = getattr(self, method)
+                if hasattr(self, method):
+                    executor = getattr(self, method)
+                else:
+                    executor = getattr(self.worker, method)
                 return executor(*args, **kwargs)
             except Exception as e:
                 # exceptions in ray worker may cause deadlock
