@@ -173,8 +173,9 @@ class OpenAIServingChat(OpenAIServing):
 
         request_id = f"cmpl-{random_uuid()}"
         try:
-            token_ids = self._validate_prompt_and_tokenize(request,
-                                                           prompt=prompt)
+            # Tokenize/detokenize depending on prompt format (string/token list)
+            prompt_ids, prompt_text = self._validate_prompt_and_tokenize(
+                request, prompt=prompt)
             sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
             guided_decode_logits_processor = (
@@ -189,10 +190,10 @@ class OpenAIServingChat(OpenAIServing):
             return self.create_error_response(str(e))
 
         result_generator = self.engine.generate(
-            prompt,
+            prompt_text,
             sampling_params,
             request_id,
-            token_ids,
+            prompt_ids,
             lora_request=lora_request,
             multi_modal_data=multi_modal_data,
         )

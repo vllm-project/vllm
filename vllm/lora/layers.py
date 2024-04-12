@@ -368,7 +368,7 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
     def apply_weights(self, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.linear_method.apply_weights(
-            self.base_layer.linear_weights, x, bias)
+            self.base_layer, x, bias)
         _apply_lora(
             x,
             self.lora_a_stacked,
@@ -401,10 +401,6 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
         output_bias = (self.base_layer.bias
                        if self.base_layer.skip_bias_add else None)
         return output, output_bias
-
-    @property
-    def linear_weights(self):
-        return self.base_layer.linear_weights
 
     @classmethod
     def can_replace_layer(cls, source_layer: nn.Module,
@@ -505,7 +501,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     def apply_weights(self, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.linear_method.apply_weights(
-            self.base_layer.linear_weights, x, bias)
+            self.base_layer, x, bias)
         _apply_lora_packed_nslice(
             x,
             self.lora_a_stacked,
@@ -746,7 +742,7 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
     def apply_weights(self, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.linear_method.apply_weights(
-            self.base_layer.linear_weights, x, bias)
+            self.base_layer, x, bias)
         _apply_lora_packed_nslice(
             x,
             self.lora_a_stacked,
@@ -838,7 +834,7 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
 
     def apply_weights(self, x: torch.Tensor) -> torch.Tensor:
         output = self.base_layer.linear_method.apply_weights(
-            self.base_layer.linear_weights, x)
+            self.base_layer, x)
         _apply_lora(
             x,
             self.lora_a_stacked,
@@ -939,9 +935,9 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         model_config: Optional[PretrainedConfig] = None,
     ) -> None:
         # Keep this in sync with csrc/punica/bgmv/bgmv_config.h
-        if 32000 < self.base_layer.vocab_size > 33024:
+        if 32000 < self.base_layer.vocab_size > 128512:
             raise ValueError("When using LoRA, vocab size must be "
-                             "32000 >= vocab_size <= 33024")
+                             "32000 >= vocab_size <= 128512")
         self.lora_a_stacked = torch.zeros(
             (
                 max_loras,
