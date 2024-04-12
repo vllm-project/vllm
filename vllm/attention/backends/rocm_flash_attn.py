@@ -334,7 +334,6 @@ def _naive_attention(
     prompt_lens: List[int],
     scale: float,
 ) -> torch.Tensor:
-    num_tokens = query.shape[0]
     output = torch.empty_like(query)
     start = 0
     for _, prompt_len in enumerate(prompt_lens):
