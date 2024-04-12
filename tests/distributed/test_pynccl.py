@@ -1,5 +1,4 @@
 import multiprocessing
-import os
 
 import pytest
 import torch
