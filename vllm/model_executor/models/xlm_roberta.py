@@ -80,11 +80,10 @@ class XLMRobertaModel(torch.nn.Module):
     ) -> torch.Tensor:
         batch_size = 12
         tensor_list = []
-        print("input_ids", input_ids)
-        print("input_metadata", input_metadata)
         # FIXME: convert the vllm input format into the hf input format
         #   [ Handle batched and non-batched cases ]
         # see https://github.com/huggingface/transformers/blob/v4.39.1/src/transformers/models/xlm_roberta/modeling_xlm_roberta.py#L830C9-L850C90
+
         for start_index in tqdm(range(0, input_ids.shape[0], batch_size), desc="Inference Embeddings", disable=input_ids.shape[0] < 256):
             ids = input_ids[start_index:start_index+batch_size,:]
             attention_mask =(input_metadata.slot_mapping[start_index:start_index+batch_size,:] != -1).int()
@@ -98,10 +97,8 @@ class XLMRobertaModel(torch.nn.Module):
                 use_cache = False
 
             input_shape = ids.size()
-
             batch_size, seq_length = input_shape
             device = ids.device 
-
             past_key_values_length = 0
 
             if attention_mask is None:
@@ -141,7 +138,7 @@ class XLMRobertaModel(torch.nn.Module):
             sequence_output = encoder_outputs[0]
             pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
 
-            base = BaseModelOutputWithPoolingAndCrossAttentions(
+            output = BaseModelOutputWithPoolingAndCrossAttentions(
                 last_hidden_state=sequence_output,
                 pooler_output=pooled_output,
                 past_key_values=encoder_outputs.past_key_values,
@@ -149,9 +146,15 @@ class XLMRobertaModel(torch.nn.Module):
                 attentions=encoder_outputs.attentions,
                 cross_attentions=encoder_outputs.cross_attentions,
             )
-            tensor_list.append(base)
-            
-        return tensor_list
+
+            if self.config.name_or_path == "BAAI/bge-m3":
+                output = self.dense_embedding(output.last_hidden_state, attention_mask)
+                output = torch.nn.functional.normalize(output, dim=-1)
+                tensor_list.append(output)
+            else:
+                tensor_list.append(output)
+
+        return torch.cat(tensor_list, dim=0)
 
     def get_extended_attention_mask(
         self, attention_mask: torch.Tensor, input_shape: Tuple[int], device: torch.device = None, dtype: torch.float = None
@@ -177,11 +180,6 @@ class XLMRobertaModel(torch.nn.Module):
                 f"Wrong shape for input_ids (shape {input_shape}) or attention_mask (shape {attention_mask.shape})"
             )
 
-        # Since attention_mask is 1.0 for positions we want to attend and 0.0 for
-        # masked positions, this operation will create a tensor which is 0.0 for
-        # positions we want to attend and the dtype's smallest value for masked positions.
-        # Since we are adding it to the raw scores before the softmax, this is
-        # effectively the same as removing these entirely.
         dtype = torch.float16
         extended_attention_mask = extended_attention_mask.to(dtype=dtype)  # fp16 compatibility
         extended_attention_mask = (1.0 - extended_attention_mask) * torch.finfo(dtype).min
@@ -213,6 +211,10 @@ class XLMRobertaModel(torch.nn.Module):
             head_mask = [None] * num_hidden_layers
 
         return head_mask
+
+
+    def dense_embedding(self, hidden_state, mask):
+        return hidden_state[:, 0]
 
     def sample(
         self,

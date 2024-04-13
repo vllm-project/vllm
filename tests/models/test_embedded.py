@@ -22,14 +22,16 @@ for output1 in outputs1:
     lst1.append(np.array(generated_text))
 lst1 = np.array(lst1)
 # print("lst1", lst1)
-# outputs2 = llm.generate(sentences_2, embedding_params)
+outputs2 = llm.generate(sentences_2, embedding_params)
 
-# lst2 = []
-# for output2 in outputs2:
-#     prompt = output2.prompt
-#     generated_text = output2.embedding.cpu()
-#     lst2.append(np.array(generated_text))
-# lst2 = np.array(lst2)
-# result = lst1 @ lst2.T
+lst2 = []
+for output2 in outputs2:
+    prompt = output2.prompt
+    generated_text = output2.embedding.cpu()
+    lst2.append(np.array(generated_text))
+lst2 = np.array(lst2)
+result = lst1 @ lst2.T
 
+expected_result = np.array([[0.6265, 0.3477], [0.3499, 0.678 ]])
+assert(np.isclose(result, expected_result, atol=1e-2).all())
 print("Passed!")
