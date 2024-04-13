@@ -60,7 +60,7 @@ class LRUCache(Generic[T]):
     def __len__(self) -> int:
         return len(self.cache)
 
-    def __getitem__(self, key: Hashable) -> T:
+    def __getitem__(self, key: Hashable) -> Optional[T]:
         return self.get(key)
 
     def __setitem__(self, key: Hashable, value: T) -> None:
@@ -76,7 +76,7 @@ class LRUCache(Generic[T]):
             key: Hashable,
             default_value: Optional[T] = None) -> Optional[T]:
         if key in self.cache:
-            value = self.cache[key]
+            value: Optional[T] = self.cache[key]
             self.cache.move_to_end(key)
         else:
             value = default_value
@@ -87,7 +87,7 @@ class LRUCache(Generic[T]):
         self.cache.move_to_end(key)
         self._remove_old_if_needed()
 
-    def _on_remove(self, key: Hashable, value: T):
+    def _on_remove(self, key: Hashable, value: Optional[T]):
         pass
 
     def remove_oldest(self):
@@ -100,9 +100,11 @@ class LRUCache(Generic[T]):
         while len(self.cache) > self.capacity:
             self.remove_oldest()
 
-    def pop(self, key: Hashable, default_value: Optional[Any] = None) -> T:
+    def pop(self,
+            key: Hashable,
+            default_value: Optional[T] = None) -> Optional[T]:
         run_on_remove = key in self.cache
-        value = self.cache.pop(key, default_value)
+        value: Optional[T] = self.cache.pop(key, default_value)
         if run_on_remove:
             self._on_remove(key, value)
         return value

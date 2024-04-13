@@ -33,10 +33,6 @@ def test_models(
     enforce_eager: bool,
     tensor_parallel_size: int,
 ) -> None:
-    if (tensor_parallel_size == 2 and chunked_prefill_token_size != 16
-            and not enforce_eager):
-        pytest.skip(f"Skip {chunked_prefill_token_size=} and {enforce_eager=} "
-                    "for high TP to save testing time.")
     max_num_seqs = min(chunked_prefill_token_size, 256)
     enable_chunked_prefill = False
     max_num_batched_tokens = None

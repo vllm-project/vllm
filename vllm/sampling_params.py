@@ -5,7 +5,8 @@ from functools import cached_property
 from typing import Callable, List, Optional, Union
 
 import torch
-from pydantic import conint
+from pydantic import Field
+from typing_extensions import Annotated
 
 _SAMPLING_EPS = 1e-5
 
@@ -127,7 +128,7 @@ class SamplingParams:
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
         logits_processors: Optional[List[LogitsProcessor]] = None,
-        truncate_prompt_tokens: Optional[conint(ge=1)] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
     ) -> None:
         self.n = n
         self.best_of = best_of if best_of is not None else n

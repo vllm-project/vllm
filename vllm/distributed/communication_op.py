@@ -1,5 +1,5 @@
 from collections import namedtuple
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch.distributed import ProcessGroup
@@ -144,7 +144,7 @@ def broadcast_tensor_dict(
     tensor_dict: Optional[Dict[Any, Union[torch.Tensor, Any]]] = None,
     src: int = 0,
     group: Optional[ProcessGroup] = None,
-) -> Dict[Any, Union[torch.Tensor, Any]]:
+) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
     """Broadcast the input tensor dictionary."""
     group = group or torch.distributed.group.WORLD
     ranks = torch.distributed.get_process_group_ranks(group)
@@ -157,10 +157,10 @@ def broadcast_tensor_dict(
 
     rank = torch.distributed.get_rank()
     if rank == src:
+        metadata_list: List[Tuple[Any, Any]] = []
         assert isinstance(
             tensor_dict,
             dict), (f"Expecting a dictionary, got {type(tensor_dict)}")
-        metadata_list = []
         for key, value in tensor_dict.items():
             if isinstance(value, torch.Tensor):
                 assert value.is_cuda, (
@@ -190,10 +190,10 @@ def broadcast_tensor_dict(
         torch.distributed.broadcast_object_list(recv_metadata_list,
                                                 src=src,
                                                 group=group)
-        metadata_list = recv_metadata_list[0]
+        assert recv_metadata_list[0] is not None
         tensor_dict = {}
         async_handles = []
-        for key, value in metadata_list:
+        for key, value in recv_metadata_list[0]:
             if isinstance(value, TensorMetadata):
                 tensor = torch.empty(value.size,
                                      dtype=value.dtype,
