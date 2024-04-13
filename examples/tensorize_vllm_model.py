@@ -1,6 +1,6 @@
 import argparse
+import dataclasses
 import os
-import tempfile
 import time
 import uuid
 from functools import partial
@@ -11,10 +11,11 @@ import torch.nn as nn
 from tensorizer import (DecryptionParams, EncryptionParams, TensorDeserializer,
                         TensorSerializer, stream_io)
 from tensorizer.utils import convert_bytes, get_mem_usage, no_init_or_tensor
-from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig
+from transformers import AutoConfig, PretrainedConfig
 
-from vllm.config import _get_and_verify_dtype
 from vllm.distributed import initialize_model_parallel
+from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.llm_engine import LLMEngine
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.tensorizer_loader import TensorizerArgs
 
@@ -73,20 +74,7 @@ def parse_args():
         "extremely quickly. Tensor encryption and decryption is "
         "also supported, although libsodium must be installed to "
         "use it.")
-    parser = TensorizerArgs.add_cli_args(parser)
-    parser.add_argument(
-        "--model",
-        type=str,
-        required=True,
-        help="The model reference name to serialize or deserialize. "
-        "This should be a HuggingFace ID for the model, e.g. "
-        "EleutherAI/gpt-j-6B.")
-    parser.add_argument("--dtype",
-                        type=str,
-                        default="float16",
-                        required=False,
-                        help="The dtype to cast the tensors to. ")
-
+    parser = EngineArgs.add_cli_args(parser)
     subparsers = parser.add_subparsers(dest='command')
 
     serialize_parser = subparsers.add_parser(
@@ -163,18 +151,14 @@ def _get_vllm_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
 
 
 def serialize():
-    model = AutoModelForCausalLM.from_pretrained(model_ref)
-    config = AutoConfig.from_pretrained(model_ref)
-    make_model_contiguous(model)
-    to_dtype = _get_and_verify_dtype(config, dtype=dtype)
-    model = model.to(dtype=to_dtype)
-    with tempfile.TemporaryDirectory() as tmpdir:
-        DOWNLOAD_DIR = os.path.join(tmpdir, model_name)
-        model.save_pretrained(DOWNLOAD_DIR)
-        del model
-        model_class = _get_vllm_model_architecture(config)
-        model = model_class(config).to(dtype=to_dtype)
-        model.load_weights(model_ref, cache_dir=DOWNLOAD_DIR)
+
+    eng_args_dict = {f.name: getattr(args, f.name) for f in
+                     dataclasses.fields(EngineArgs)}
+    engine_args = EngineArgs.from_cli_args(argparse.Namespace(**eng_args_dict))
+    engine = LLMEngine.from_engine_args(engine_args)
+
+    model = (engine.model_executor.driver_worker.
+             model_runner.model)
 
     encryption_params = EncryptionParams.random() if keyfile else None
     if keyfile:
@@ -245,8 +229,6 @@ _read_stream, _write_stream = (partial(
     s3_endpoint=s3_endpoint,
 ) for mode in ("rb", "wb+"))
 
-dtype = args.dtype
-
 model_ref = args.model
 
 model_name = model_ref.split("/")[1]
@@ -264,8 +246,6 @@ if args.command == "serialize":
     suffix = args.suffix if args.suffix else uuid.uuid4().hex
     base_path = f"{input_dir}/vllm/{model_ref}/{suffix}"
     model_path = f"{base_path}/model.tensors"
-    args.tensorizer_uri = args.serialized_directory
-    tensorizer_args = TensorizerArgs.from_cli_args(args)
     serialize()
 elif args.command == "deserialize":
     tensorizer_args = TensorizerArgs.from_cli_args(args)

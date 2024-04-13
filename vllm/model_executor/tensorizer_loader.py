@@ -270,10 +270,7 @@ class TensorizerAgent:
                     " indicating that some tensors were not loaded properly."
                     " Please check that the parameters of the model being"
                     " specified match that of the serialized model, such as"
-                    " its quantization."
-                )
-
-
+                    " its quantization.")
 
     def deserialize(self):
         """

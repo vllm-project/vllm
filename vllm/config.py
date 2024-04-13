@@ -921,15 +921,6 @@ class TensorizerConfig:
                 " or use a non-vLLM-serialized model, such as a "
                 "serialized Hugging Face `PretrainedModel`.")
 
-    def verify_with_model_config(
-        self,
-        model_config: ModelConfig,
-    ) -> None:
-        if model_config.quantization is not None:
-            raise ValueError(
-                "Tensorizer currently does not support quantized datatypes."
-            )
-
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.float16,

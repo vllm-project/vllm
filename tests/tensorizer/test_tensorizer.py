@@ -7,7 +7,7 @@ import torch
 
 from tests.entrypoints.test_openai_server import ServerRunner
 from vllm import SamplingParams
-from vllm.config import ModelConfig, TensorizerConfig
+from vllm.config import TensorizerConfig
 from vllm.model_executor.tensorizer_loader import (
     EncryptionParams, TensorSerializer, is_vllm_serialized_tensorizer,
     load_with_tensorizer, open_stream)
@@ -22,24 +22,6 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95, seed=0)
 
 model_ref = "facebook/opt-125m"
-
-dtype = "bfloat16"
-
-
-@pytest.fixture(autouse=True)
-def model_config():
-    config = ModelConfig(
-        "Qwen/Qwen1.5-7B",
-        "Qwen/Qwen1.5-7B",
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        download_dir=None,
-        load_format="dummy",
-        seed=0,
-        dtype="float16",
-        revision=None,
-    )
-    return config
 
 
 @pytest.fixture(autouse=True)
@@ -80,7 +62,7 @@ def test_is_vllm_model_without_vllm_in_uri(tensorizer_config):
 
 
 def test_deserialized_vllm_model_has_same_outputs(vllm_runner, tmp_path):
-    vllm_model = vllm_runner(model_ref, dtype=dtype)
+    vllm_model = vllm_runner(model_ref)
     model_path = tmp_path / (model_ref + ".tensors")
     outputs = vllm_model.generate(prompts, sampling_params)
     model = (vllm_model.model.llm_engine.model_executor.driver_worker.
@@ -95,25 +77,26 @@ def test_deserialized_vllm_model_has_same_outputs(vllm_runner, tmp_path):
                                     load_format="tensorizer",
                                     tensorizer_uri=model_path,
                                     num_readers=1,
-                                    vllm_tensorized=True,
-                                    dtype=dtype)
+                                    vllm_tensorized=True)
     deserialized_outputs = loaded_vllm_model.generate(prompts, sampling_params)
 
     # Assumes SamplingParams being seeded ensures the outputs are deterministic
     assert outputs == deserialized_outputs
 
 
-def test_can_deserialize_s3(vllm_runner, tmp_path):
+def test_can_deserialize_s3(vllm_runner):
     model_ref = "EleutherAI/pythia-1.4b"
     tensorized_path = f"s3://tensorized/{model_ref}/fp16/model.tensors"
 
-    loaded_hf_model = vllm_runner(model_ref,
-                                  tensorizer_uri=tensorized_path,
-                                  load_format="tensorizer",
-                                  num_readers=1,
-                                  vllm_tensorized=False,
-                                  s3_endpoint="object.ord1.coreweave.com",
-                                  dtype=dtype)
+    loaded_hf_model = vllm_runner(
+        model_ref,
+        tensorizer_uri=tensorized_path,
+        load_format="tensorizer",
+        num_readers=1,
+        vllm_tensorized=False,
+        s3_endpoint="object.ord1.coreweave.com",
+    )
+
     deserialized_outputs = loaded_hf_model.generate(prompts, sampling_params)
 
     assert deserialized_outputs
@@ -121,7 +104,7 @@ def test_can_deserialize_s3(vllm_runner, tmp_path):
 
 def test_deserialized_encrypted_vllm_model_has_same_outputs(
         vllm_runner, tmp_path):
-    vllm_model = vllm_runner(model_ref, dtype=dtype)
+    vllm_model = vllm_runner(model_ref)
     model_path = tmp_path / (model_ref + ".tensors")
     key_path = tmp_path / (model_ref + ".key")
     outputs = vllm_model.generate(prompts, sampling_params)
@@ -142,8 +125,8 @@ def test_deserialized_encrypted_vllm_model_has_same_outputs(
                                     load_format="tensorizer",
                                     encryption_keyfile=key_path,
                                     num_readers=1,
-                                    vllm_tensorized=True,
-                                    dtype=dtype)
+                                    vllm_tensorized=True)
+
     deserialized_outputs = loaded_vllm_model.generate(prompts, sampling_params)
 
     # Assumes SamplingParams being seeded ensures the outputs are deterministic
@@ -152,7 +135,7 @@ def test_deserialized_encrypted_vllm_model_has_same_outputs(
 
 def test_deserialized_hf_model_has_same_outputs(hf_runner, vllm_runner,
                                                 tmp_path):
-    hf_model = hf_runner(model_ref, dtype=dtype)
+    hf_model = hf_runner(model_ref)
     model_path = tmp_path / (model_ref + ".tensors")
     max_tokens = 50
     outputs = hf_model.generate_greedy(prompts, max_tokens=max_tokens)
@@ -166,8 +149,8 @@ def test_deserialized_hf_model_has_same_outputs(hf_runner, vllm_runner,
                                   tensorizer_uri=model_path,
                                   load_format="tensorizer",
                                   num_readers=1,
-                                  vllm_tensorized=False,
-                                  dtype=dtype)
+                                  vllm_tensorized=False)
+
     deserialized_outputs = loaded_hf_model.generate_greedy(
         prompts, max_tokens=max_tokens)
 
@@ -185,10 +168,7 @@ def test_vllm_model_can_load_with_lora(vllm_runner, tmp_path):
     test_prompts = create_test_prompts(lora_path)
 
     # Serialize model before deserializing and binding LoRA adapters
-    vllm_model = vllm_runner(
-        model_ref,
-        dtype=dtype,
-    )
+    vllm_model = vllm_runner(model_ref, )
     model_path = tmp_path / (model_ref + ".tensors")
     model = (vllm_model.model.llm_engine.model_executor.driver_worker.
              model_runner.model)
@@ -198,18 +178,19 @@ def test_vllm_model_can_load_with_lora(vllm_runner, tmp_path):
     del vllm_model, model
     gc.collect()
     torch.cuda.empty_cache()
-    loaded_vllm_model = vllm_runner(model_ref,
-                                    tensorizer_uri=model_path,
-                                    load_format="tensorizer",
-                                    num_readers=1,
-                                    vllm_tensorized=True,
-                                    enable_lora=True,
-                                    max_loras=1,
-                                    max_lora_rank=8,
-                                    max_cpu_loras=2,
-                                    max_num_seqs=50,
-                                    max_model_len=1000,
-                                    dtype=dtype)
+    loaded_vllm_model = vllm_runner(
+        model_ref,
+        tensorizer_uri=model_path,
+        load_format="tensorizer",
+        num_readers=1,
+        vllm_tensorized=True,
+        enable_lora=True,
+        max_loras=1,
+        max_lora_rank=8,
+        max_cpu_loras=2,
+        max_num_seqs=50,
+        max_model_len=1000,
+    )
     process_requests(loaded_vllm_model.model.llm_engine, test_prompts)
 
     assert loaded_vllm_model
@@ -279,3 +260,47 @@ def test_raise_value_error_on_invalid_load_format(vllm_runner):
         vllm_runner(model_ref,
                     load_format="safetensors",
                     tensorizer_uri="test")
+
+
+def test_tensorizer_with_tp(vllm_runner):
+    with pytest.raises(ValueError):
+        model_ref = "EleutherAI/pythia-1.4b"
+        tensorized_path = f"s3://tensorized/{model_ref}/fp16/model.tensors"
+
+        vllm_runner(
+            model_ref,
+            tensorizer_uri=tensorized_path,
+            load_format="tensorizer",
+            num_readers=1,
+            vllm_tensorized=False,
+            s3_endpoint="object.ord1.coreweave.com",
+            tensor_parallel_size=2,
+        )
+
+
+def test_tensorizer_with_quantization(vllm_runner, tmp_path):
+    model_ref = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
+    serialize_args = [
+        "python3", "/vllm/examples/tensorize_vllm_model.py", "--model",
+        model_ref, "--quantization", "gptq", "serialize",
+        "--serialized-directory", tmp_path, "--suffix", "tests"
+    ]
+    result = subprocess.run(serialize_args, capture_output=True, text=True)
+    print(result.stdout)  # Print the output of the serialize command
+
+    assert result.returncode == 0, (f"Serialize command failed with output:"
+                                    f"\n{result.stdout}\n{result.stderr}")
+
+    path_to_tensors = f"{tmp_path}/vllm/{model_ref}/tests/model.tensors"
+
+    ## Start OpenAI API server
+    openai_args = [
+        "--model", model_ref, "--load-format", "tensorizer",
+        "--tensorizer-uri", path_to_tensors, "--vllm-tensorized", "--port",
+        "8000"
+    ]
+
+    server = ServerRunner.remote(openai_args)
+
+    print("Server ready.")
+    assert server.ready.remote()
