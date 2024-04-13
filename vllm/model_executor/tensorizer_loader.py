@@ -262,6 +262,19 @@ class TensorizerAgent:
                 new_weight[child.weight.shape[0]:].fill_(0)
                 child.weight.data = new_weight
 
+    def _check_tensors_on_meta_device(model):
+        for tensor in model.state_dict().values():
+            if tensor.device.type == 'meta':
+                raise ValueError(
+                    "The serialized model contains tensors on the meta device,"
+                    " indicating that some tensors were not loaded properly."
+                    " Please check that the parameters of the model being"
+                    " specified match that of the serialized model, such as"
+                    " its quantization."
+                )
+
+
+
     def deserialize(self):
         """
         Deserialize the model using the TensorDeserializer. This method is
@@ -300,5 +313,6 @@ class TensorizerAgent:
         logger.info(f"Memory usage before: {before_mem}")
         logger.info(f"Memory usage after: {after_mem}")
 
+        self._check_tensors_on_meta_device()
         self._resize_lora_embeddings()
         return self.model.eval()

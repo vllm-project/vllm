@@ -910,6 +910,26 @@ class TensorizerConfig:
         }
         return TensorizerArgs(**tensorizer_args)
 
+    def verify_with_parallel_config(
+        self,
+        parallel_config: "ParallelConfig",
+    ) -> None:
+        if parallel_config.tensor_parallel_size > 1:
+            raise ValueError(
+                "Loading to multiple GPUs is not currently supported with "
+                "vLLM-serialized models. Please set tensor_parallel_size=1."
+                " or use a non-vLLM-serialized model, such as a "
+                "serialized Hugging Face `PretrainedModel`.")
+
+    def verify_with_model_config(
+        self,
+        model_config: ModelConfig,
+    ) -> None:
+        if model_config.quantization is not None:
+            raise ValueError(
+                "Tensorizer currently does not support quantized datatypes."
+            )
+
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.float16,
@@ -1065,6 +1085,10 @@ class EngineConfig:
         """
         self.model_config.verify_with_parallel_config(self.parallel_config)
         self.cache_config.verify_with_parallel_config(self.parallel_config)
+
+        if self.tensorizer_config:
+            self.tensorizer_config.verify_with_parallel_config(
+                self.parallel_config)
 
         if self.lora_config:
             self.lora_config.verify_with_model_config(self.model_config)
