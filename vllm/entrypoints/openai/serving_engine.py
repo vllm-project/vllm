@@ -3,7 +3,7 @@ import json
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import (Dict, Iterable, Iterator, List, Literal, Optional, Tuple,
-                    TypedDict, Union)
+                    TypedDict, Union, cast)
 
 from pydantic import conint
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -284,30 +284,35 @@ class OpenAIServing:
                     truncate_prompt_tokens=truncate_prompt_tokens,
                 )
 
-    def _parse_prompt_element(
-        self,
-        elem: Union[str, int, List[int]],
-    ) -> Union[InputString, InputTokens]:
-        if isinstance(elem, str):
-            # case 2: array of strings
-            return InputString(text=elem, is_tokens=False)
-        if isinstance(elem, int):
-            # case 3: array of tokens
-            return InputTokens(text=[elem], is_tokens=True)
-        if isinstance(elem, list):
-            # case 4: array of token arrays
-            return InputTokens(text=elem, is_tokens=True)
-
     def _parse_prompt_input_or_inputs(
         self,
         input_or_inputs: Union[str, List[str], List[int], List[List[int]]],
     ) -> List[Union[InputString, InputTokens]]:
         if isinstance(input_or_inputs, str):
             # case 1: a string
-            return [self._parse_prompt_element(input_or_inputs)]
+            elem = input_or_inputs
+            return [InputString(text=elem, is_tokens=False)]
 
         if isinstance(input_or_inputs, list):
-            return [self._parse_prompt_element(e) for e in input_or_inputs]
+            if len(input_or_inputs) == 0:
+                raise ValueError("please provide at least one prompt")
+            if isinstance(input_or_inputs[0], str):
+                # case 2: array of strings
+                return [
+                    InputString(text=elem, is_tokens=False)
+                    for elem in cast(List[str], input_or_inputs)
+                ]
+            if isinstance(input_or_inputs[0], int):
+                # case 3: array of tokens
+                elem = cast(List[int], input_or_inputs)
+                return [InputTokens(text=elem, is_tokens=True)]
+            if isinstance(input_or_inputs[0], list) and isinstance(
+                    input_or_inputs[0][0], int):
+                # case 4: array of token arrays
+                return [
+                    InputTokens(text=elem, is_tokens=True)
+                    for elem in cast(List[List[int]], input_or_inputs)
+                ]
 
         raise ValueError("prompt must be a string, array of strings, "
                          "array of tokens, or array of token arrays")
